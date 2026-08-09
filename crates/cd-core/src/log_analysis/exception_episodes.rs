@@ -909,7 +909,7 @@ pub fn analyze_exception_episodes_with_cancel(
 /// Deliberately separate from [`is_exception_candidate`]: may over-identify and
 /// withhold certification, but must not share the message-parser blind spot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum StructuralTemplateRole {
+pub(crate) enum StructuralTemplateRole {
     StackFrame,
     CauseSuppressed,
     WrapperScaffold,
@@ -920,7 +920,9 @@ enum StructuralTemplateRole {
 /// Classify a persisted Drain template pattern as structural (template-only).
 ///
 /// Uses pattern text with `<*>` wildcards — never calls [`is_exception_candidate`].
-fn classify_structural_template_pattern(pattern: &str) -> Option<StructuralTemplateRole> {
+pub(crate) fn classify_structural_template_pattern(
+    pattern: &str,
+) -> Option<StructuralTemplateRole> {
     let pattern = pattern.trim();
     if pattern.is_empty() {
         return None;
@@ -1840,17 +1842,6 @@ use raw/rendering and unresolved/ambiguous counts only\n",
             famp.raw_records_per_occurrence.remainder,
             family.duplicate_rendering_occurrence_count
         ));
-        for occ in family.occurrences.iter().take(1) {
-            out.push_str(&format!(
-                "  retained_group raw={} app={} stderr={} renderings={} duplicate={} confidence={:?}\n",
-                occ.raw_record_count,
-                occ.application_record_count,
-                occ.stderr_record_count,
-                occ.rendering_count,
-                occ.duplicate_rendering,
-                occ.correlation_confidence
-            ));
-        }
     }
     out.push_str(
         "note: occurrenceCount and semanticOccurrences are legacy JSON names for retained correlation groups; \

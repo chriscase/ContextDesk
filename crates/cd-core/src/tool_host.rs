@@ -91,7 +91,7 @@ type LogSearchToolRunResult = (
 pub const BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES: usize = 32 * 1024;
 /// Maximum trusted event identities carried beside one broad-log brief.
 pub const BROAD_LOG_TRIAGE_IDENTITY_CAP: usize = 128;
-/// Maximum independent incident groups admitted to the experimental staged
+/// Maximum evidence/correlation groups admitted to the experimental staged
 /// broad-log synthesis path. This is intentionally lower than the brief's
 /// display caps: every group may require two provider attempts plus one final
 /// comparison, all under the ordinary whole-turn deadline.
@@ -181,25 +181,27 @@ pub struct BroadLogTriageBrief {
     pub deterministic_complete: bool,
     /// Host-neutral exception episode correlation (derived; raw events unchanged).
     pub exception_episodes: Option<crate::log_analysis::ExceptionEpisodeReport>,
-    /// Host-selected, disjoint incident candidates for the experimental
-    /// multi-stage path. Their evidence is the only citation channel allowed
-    /// during per-candidate synthesis; an empty list retains single-stage
-    /// behavior.
+    /// Host-selected, citation-disjoint evidence/correlation groups for the
+    /// experimental multi-stage path. Selection does not classify a group as
+    /// an incident. Their evidence is the only citation channel allowed during
+    /// per-candidate synthesis; an empty list retains single-stage behavior.
     pub candidate_groups: Vec<BroadLogTriageCandidate>,
 }
 
-/// One deterministic broad-triage incident candidate.
+/// One deterministic broad-triage evidence/correlation candidate.
 ///
 /// Candidates are structural groups: parser-true cross-source trace groups
-/// first, then ungrouped ERROR/FATAL template groups. They never include
-/// warning/noise-only templates, which prevents high-volume decoys from being
-/// promoted merely because they are frequent.
+/// first, then ungrouped ERROR/FATAL template groups whose persisted template
+/// structure is either a rendering lead or non-exception error evidence.
+/// Supporting/unknown exception structures remain in the deterministic brief
+/// and citation ledger but do not consume a candidate model round.
 #[derive(Debug, Clone)]
 pub struct BroadLogTriageCandidate {
     /// Stable host-owned group label (for example `trace:<id>` or
     /// `template:<id>`). It is not supplied by the model.
     pub group_id: String,
-    /// `trace` or `template`, retained for event/trail disclosure.
+    /// Structural selection basis, retained for event/trail disclosure. This
+    /// is not an incident classification.
     pub structural_kind: &'static str,
     /// Compact untrusted-data brief containing only this group's structure.
     pub model_text: String,
@@ -418,6 +420,111 @@ fn broad_triage_candidate_observation(
     format!(
         "- axis_value={} level={} source={} service={} template_id={} pattern={}\n",
         axis_value, level, source, service, template_id, pattern
+    )
+}
+
+/// Whether one ERROR/FATAL template may consume a candidate-scoped provider
+/// round. This is a structural admission decision, never an incident verdict.
+/// All templates remain visible in the deterministic brief and trusted global
+/// evidence channel regardless of this decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BroadTriageTemplateStageDisposition {
+    admitted: bool,
+    basis: &'static str,
+}
+
+fn broad_triage_template_stage_disposition(
+    pattern: Option<&str>,
+) -> BroadTriageTemplateStageDisposition {
+    use crate::log_analysis::StructuralTemplateRole as Role;
+
+    match pattern.map(crate::log_analysis::classify_structural_template_pattern) {
+        // A persisted structural lead is useful candidate-scoped evidence. It
+        // is still not a host-certified incident.
+        Some(Some(Role::ExceptionHeaderOrFullStack)) => BroadTriageTemplateStageDisposition {
+            admitted: true,
+            basis: "rendering_lead",
+        },
+        // Frames, causes, and wrappers support a rendering. Raw ERROR volume
+        // cannot promote them into a separate candidate model round.
+        Some(Some(Role::StackFrame | Role::CauseSuppressed | Role::WrapperScaffold)) => {
+            BroadTriageTemplateStageDisposition {
+                admitted: false,
+                basis: "supporting_structure",
+            }
+        }
+        // The independent structural inventory deliberately over-identifies
+        // suspicious shapes. Preserve them as evidence but withhold staged
+        // promotion until their role is known.
+        Some(Some(Role::UnknownSuspicious)) => BroadTriageTemplateStageDisposition {
+            admitted: false,
+            basis: "unknown_structure",
+        },
+        // A real persisted ERROR/FATAL template outside recognized exception
+        // structure remains useful evidence for model classification. This is
+        // the generic non-exception lead/control path.
+        Some(None) => BroadTriageTemplateStageDisposition {
+            admitted: true,
+            basis: "non_exception_error",
+        },
+        // Missing template metadata cannot be upgraded by event volume.
+        None => BroadTriageTemplateStageDisposition {
+            admitted: false,
+            basis: "metadata_unavailable",
+        },
+    }
+}
+
+/// Exact retained citations from every derived correlation group in which the
+/// requested template is observed as a rendering lead. The association is
+/// useful evidence, not proof of an incident or a complete semantic episode.
+fn broad_triage_correlated_lead_evidence(
+    report: &crate::log_analysis::ExceptionEpisodeReport,
+    lead_template_id: u64,
+) -> Vec<(
+    crate::log_analysis::SearchEvidenceIdentity,
+    crate::log_analysis::ExceptionCitationRole,
+)> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for family in &report.families {
+        for group in &family.occurrences {
+            let contains_lead = group.citations.iter().any(|citation| {
+                citation.template_id == lead_template_id
+                    && citation.role == crate::log_analysis::ExceptionCitationRole::RenderingLead
+            });
+            if !contains_lead {
+                continue;
+            }
+            for citation in &group.citations {
+                let identity = citation.as_search_identity();
+                if seen.insert(identity.clone()) {
+                    out.push((identity, citation.role));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn broad_triage_correlated_candidate_observation(
+    corpus: &crate::log_analysis::LogCorpus,
+    identity: &crate::log_analysis::SearchEvidenceIdentity,
+    role: crate::log_analysis::ExceptionCitationRole,
+) -> String {
+    let source = broad_triage_source_identity(&identity.source);
+    let pattern = corpus
+        .template_pattern(identity.template_id)
+        .unwrap_or_else(|| "<template metadata unavailable>".into());
+    let pattern = broad_triage_bounded_line(&pattern);
+    let pattern = serde_json::to_string(&pattern).unwrap_or_else(|_| "\"<invalid>\"".into());
+    let role = match role {
+        crate::log_analysis::ExceptionCitationRole::RenderingLead => "rendering_lead",
+        crate::log_analysis::ExceptionCitationRole::SupportingRecord => "supporting_record",
+    };
+    format!(
+        "- correlation_role={role} seq={} source={source} template_id={} pattern={pattern}\n",
+        identity.seq, identity.template_id
     )
 }
 
@@ -2340,6 +2447,10 @@ impl ToolHost {
         // the global brief identity cap. A group must retain its own complete
         // bounded citation set or it is not admitted to multi-stage synthesis.
         let mut candidate_groups = Vec::new();
+        // One governed event identity belongs to at most one staged group.
+        // Correlated wrapper/support rows attach to the first ranked lead group
+        // instead of becoming duplicated evidence across candidate ledgers.
+        let mut candidate_owned_evidence = std::collections::HashSet::new();
         let mut trace_candidate_template_ids = std::collections::HashSet::new();
         let trace_chains_available = crate::log_analysis::query_cross_source_trace_summaries(
             &corpus,
@@ -2446,7 +2557,9 @@ impl ToolHost {
                         citation_source: broad_triage_citation_source(&event.source),
                         template_id: event.template_id,
                     };
-                    if !candidate_evidence.contains(&identity) {
+                    if !candidate_owned_evidence.contains(&identity)
+                        && !candidate_evidence.contains(&identity)
+                    {
                         candidate_evidence.push(identity);
                         candidate_observations.push(broad_triage_candidate_observation(
                             &corpus,
@@ -2479,7 +2592,7 @@ impl ToolHost {
             {
                 let group_id = format!("trace_group:{}", chain_index.saturating_add(1));
                 let mut candidate_text = format!(
-                    "source_kind: deterministic_broad_log_candidate\nstructural_kind: unverified_trace_key_group\ngroup_id: {}\ntrace_key_value_withheld: true\ntrace_key_is_not_execution_proof: true\ntrace_event_count: {}\ntrace_source_count: {}\ntrace_error_or_fatal_count: {}\nanalysis_contract: patterns are host-derived observations; distinguish explicit failure text from hypotheses; do not invent causes absent from patterns\nbounded_observations:\n",
+                    "source_kind: deterministic_broad_log_candidate\nstructural_kind: unverified_trace_key_correlation_group\ngroup_id: {}\nincident_status: unclassified\ntrace_key_value_withheld: true\ntrace_key_is_not_execution_proof: true\ntrace_event_count: {}\ntrace_source_count: {}\ntrace_error_or_fatal_count: {}\nanalysis_contract: this is correlation evidence selected for classification, not a host-certified incident; patterns are host-derived observations; distinguish explicit failure text from hypotheses; do not invent causes absent from patterns\nbounded_observations:\n",
                     group_id,
                     chain.event_count,
                     chain.source_count,
@@ -2504,10 +2617,11 @@ impl ToolHost {
                 }
                 candidate_groups.push(BroadLogTriageCandidate {
                     group_id,
-                    structural_kind: "unverified_trace_key_group",
+                    structural_kind: "unverified_trace_key_correlation_group",
                     model_text: candidate_text,
-                    evidence: candidate_evidence,
+                    evidence: candidate_evidence.clone(),
                 });
+                candidate_owned_evidence.extend(candidate_evidence);
             }
         }
 
@@ -2523,8 +2637,7 @@ impl ToolHost {
              selected_error_templates: {}\n\
              impact_slots: {}\n\
              rare_candidate_reserve: {BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE}\n\
-             exemplars_per_template_cap: {BROAD_LOG_TRIAGE_ERROR_EXEMPLAR_CAP}\n\
-             ranking_note: prefer certified semantic episode counts when exposed; otherwise use strongly supported derived episodes plus raw/rendering and unresolved counts\n",
+             exemplars_per_template_cap: {BROAD_LOG_TRIAGE_ERROR_EXEMPLAR_CAP}\n",
             selected_errors.len(),
             BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP.saturating_sub(BROAD_LOG_TRIAGE_RARE_ERROR_RESERVE)
         ));
@@ -2551,10 +2664,12 @@ impl ToolHost {
             }
         }
         for hit in &selected_errors {
-            let pattern = corpus
-                .template_pattern(hit.template_id)
-                .unwrap_or_else(|| "<template metadata unavailable>".into());
-            let pattern = broad_triage_bounded_line(&pattern);
+            let raw_pattern = corpus.template_pattern(hit.template_id);
+            let stage_disposition = broad_triage_template_stage_disposition(raw_pattern.as_deref());
+            let pattern = raw_pattern
+                .as_deref()
+                .unwrap_or("<template metadata unavailable>");
+            let pattern = broad_triage_bounded_line(pattern);
             let pattern =
                 serde_json::to_string(&pattern).unwrap_or_else(|_| "\"<invalid>\"".into());
             let span = broad_triage_occurrence_span(
@@ -2572,6 +2687,14 @@ impl ToolHost {
             })?;
             let first_source = broad_triage_source_identity(&first_span.source);
             let last_source = broad_triage_source_identity(&last_span.source);
+            // Avoid repeating a potentially long exact source on the second
+            // span endpoint. The first endpoint remains exact and both trusted
+            // identities still travel in the separate citation channel.
+            let last_span_source = if last_source == first_source {
+                "\"<same as first_occurrence>\""
+            } else {
+                last_source.as_str()
+            };
             let projection = exception_report
                 .as_ref()
                 .map(|r| crate::log_analysis::project_template_onto_episodes(r, hit.template_id));
@@ -2605,7 +2728,7 @@ impl ToolHost {
             body.push_str(&format!(
                 "- template_id={} severity={} error_event_count={} episode_adjusted_count={} supporting_stack_or_wrapper={} pattern={pattern}\n\
                    first_occurrence seq={} source={first_source} axis_value={}\n\
-                   last_occurrence seq={} source={last_source} axis_value={}\n",
+                   last_occurrence seq={} source={last_span_source} axis_value={}\n",
                 hit.template_id,
                 hit.severity,
                 hit.error_event_count,
@@ -2671,9 +2794,12 @@ impl ToolHost {
                 }
             }
             // A template already represented by a parser-true cross-source
-            // trace remains in that trace group. Do not make the final model
-            // collapse the same incident into a duplicate template candidate.
+            // trace remains in that correlation group. Supporting/unknown
+            // structural templates stay in the brief and global citation
+            // channel but never consume a candidate provider round merely due
+            // to raw ERROR volume.
             if !trace_candidate_template_ids.contains(&hit.template_id)
+                && stage_disposition.admitted
                 && candidate_groups.len() < BROAD_LOG_TRIAGE_CANDIDATE_CAP
             {
                 let mut candidate_evidence = Vec::new();
@@ -2685,7 +2811,9 @@ impl ToolHost {
                         citation_source: broad_triage_citation_source(&event.source),
                         template_id: event.template_id,
                     };
-                    if !candidate_evidence.contains(&identity) {
+                    if !candidate_owned_evidence.contains(&identity)
+                        && !candidate_evidence.contains(&identity)
+                    {
                         candidate_evidence.push(identity);
                         candidate_observations.push(broad_triage_candidate_observation(
                             &corpus,
@@ -2708,7 +2836,9 @@ impl ToolHost {
                         citation_source: broad_triage_citation_source(&event.source),
                         template_id: event.template_id,
                     };
-                    if !candidate_evidence.contains(&identity) {
+                    if !candidate_owned_evidence.contains(&identity)
+                        && !candidate_evidence.contains(&identity)
+                    {
                         candidate_evidence.push(identity);
                         candidate_observations.push(broad_triage_candidate_observation(
                             &corpus,
@@ -2721,10 +2851,36 @@ impl ToolHost {
                         ));
                     }
                 }
+                if let Some(report) = exception_report.as_ref() {
+                    for (identity, role) in
+                        broad_triage_correlated_lead_evidence(report, hit.template_id)
+                    {
+                        if candidate_evidence.len() >= BROAD_LOG_TRIAGE_CANDIDATE_IDENTITY_CAP {
+                            break;
+                        }
+                        let identity = crate::log_analysis::SearchEvidenceIdentity {
+                            citation_source: broad_triage_citation_source(&identity.source),
+                            ..identity
+                        };
+                        if candidate_owned_evidence.contains(&identity)
+                            || candidate_evidence.contains(&identity)
+                        {
+                            continue;
+                        }
+                        candidate_observations.push(broad_triage_correlated_candidate_observation(
+                            &corpus, &identity, role,
+                        ));
+                        candidate_evidence.push(identity);
+                    }
+                }
                 if !candidate_evidence.is_empty() {
                     let mut candidate_text = format!(
-                        "source_kind: deterministic_broad_log_candidate\nstructural_kind: template\ngroup_id: template:{}\ntemplate_id: {}\nseverity: {}\nerror_event_count: {}\nanalysis_contract: patterns are host-derived observations; distinguish explicit failure text from hypotheses; do not invent causes absent from patterns\nbounded_observations:\n",
-                        hit.template_id, hit.template_id, hit.severity, hit.error_event_count
+                        "source_kind: deterministic_broad_log_candidate\nstructural_kind: error_template_evidence_group\ngroup_id: template:{}\ntemplate_id: {}\nstaged_candidate_basis: {}\nincident_status: unclassified\nseverity: {}\nerror_event_count: {}\nanalysis_contract: this is evidence selected for classification, not a host-certified incident; patterns are host-derived observations; distinguish explicit failure text from hypotheses; do not invent causes absent from patterns\nbounded_observations:\n",
+                        hit.template_id,
+                        hit.template_id,
+                        stage_disposition.basis,
+                        hit.severity,
+                        hit.error_event_count
                     );
                     for observation in &candidate_observations {
                         candidate_text.push_str(observation);
@@ -2745,10 +2901,11 @@ impl ToolHost {
                     }
                     candidate_groups.push(BroadLogTriageCandidate {
                         group_id: format!("template:{}", hit.template_id),
-                        structural_kind: "template",
+                        structural_kind: "error_template_evidence_group",
                         model_text: candidate_text,
-                        evidence: candidate_evidence,
+                        evidence: candidate_evidence.clone(),
                     });
+                    candidate_owned_evidence.extend(candidate_evidence);
                 }
             }
         }
@@ -9353,7 +9510,7 @@ mod tests {
         assert!(brief
             .candidate_groups
             .iter()
-            .all(|candidate| candidate.structural_kind == "template"));
+            .all(|candidate| candidate.structural_kind == "error_template_evidence_group"));
         assert!(brief
             .candidate_groups
             .windows(2)
@@ -9371,6 +9528,197 @@ mod tests {
             assert!(candidate.model_text.contains("level=ERROR"));
             assert!(candidate.model_text.contains("pattern="));
             assert!(candidate.model_text.contains("trusted_citations_only:"));
+        }
+    }
+
+    #[test]
+    fn broad_triage_stages_lead_with_correlated_support_but_not_support_or_unknown_groups() {
+        // Opaque structural adversary: raw ERROR volume ranks the unknown and
+        // frame templates ahead of the rendering lead. Admission must depend
+        // on structure, not those counts or any domain vocabulary.
+        const UNKNOWN: u64 = 610;
+        const SUPPORT: u64 = 620;
+        const LEAD: u64 = 630;
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = Arc::new(
+            crate::log_analysis::LogCorpus::create(&cache, "opaque structural candidates").unwrap(),
+        );
+        let base = 1_700_100_000_i64;
+        let templates = [
+            (
+                UNKNOWN,
+                "[stderr] opaque fail state token <*> without a structural role",
+                50_u64,
+            ),
+            (
+                SUPPORT,
+                "[stderr] (lane-7) at opaque.unit.Frame.call(Frame.java:7)",
+                20_u64,
+            ),
+            (
+                LEAD,
+                "[stderr] (lane-7) opaque.runtime.Q7Exception: token <*>",
+                2_u64,
+            ),
+        ];
+        assert_eq!(
+            broad_triage_template_stage_disposition(Some(templates[0].1)),
+            BroadTriageTemplateStageDisposition {
+                admitted: false,
+                basis: "unknown_structure"
+            }
+        );
+        assert_eq!(
+            broad_triage_template_stage_disposition(Some(templates[1].1)),
+            BroadTriageTemplateStageDisposition {
+                admitted: false,
+                basis: "supporting_structure"
+            }
+        );
+        assert_eq!(
+            broad_triage_template_stage_disposition(Some(templates[2].1)),
+            BroadTriageTemplateStageDisposition {
+                admitted: true,
+                basis: "rendering_lead"
+            }
+        );
+        corpus
+            .upsert_templates(templates.iter().map(|(id, pattern, count)| {
+                crate::log_analysis::TemplateRow {
+                    info: crate::log_analysis::TemplateInfo {
+                        template_id: *id,
+                        pattern: (*pattern).into(),
+                        token_count: pattern.split_whitespace().count(),
+                        count: *count,
+                        first_seen: base,
+                        last_seen: base + 20,
+                        severity: 4,
+                        example: (*pattern).into(),
+                    },
+                    content_hash: format!("opaque-{id}"),
+                    vector: None,
+                }
+            }))
+            .unwrap();
+
+        let event = |seq: u64, ts: i64, template_id: u64, message: String, source: &str| {
+            crate::log_analysis::LogEvent {
+                seq,
+                ts,
+                timestamp_provenance: crate::log_analysis::TimestampProvenance::ExplicitWallClock,
+                active_timestamp_basis: crate::log_analysis::ActiveTimestampBasis::ExplicitWall,
+                unresolved_local_timestamp: None,
+                level: "ERROR".into(),
+                service: Some("opaque-service".into()),
+                host: Some("opaque-host".into()),
+                template_id,
+                params: vec![],
+                trace_id: None,
+                message,
+                source: source.into(),
+            }
+        };
+        let mut events = (1..=50)
+            .map(|seq| {
+                event(
+                    seq,
+                    base + seq as i64,
+                    UNKNOWN,
+                    format!("[stderr] opaque fail state token {seq} without a structural role"),
+                    "opaque-unknown.log",
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut seq = 51_u64;
+        for occurrence in 0..2_i64 {
+            let ts = base + 100 + occurrence * 10;
+            events.push(event(
+                seq,
+                ts,
+                LEAD,
+                format!("[stderr] (lane-7) opaque.runtime.Q7Exception: token {occurrence}"),
+                "opaque-stderr.log",
+            ));
+            seq += 1;
+            for _ in 0..10 {
+                events.push(event(
+                    seq,
+                    ts,
+                    SUPPORT,
+                    "[stderr] (lane-7) at opaque.unit.Frame.call(Frame.java:7)".into(),
+                    "opaque-stderr.log",
+                ));
+                seq += 1;
+            }
+        }
+        corpus.push_events(&events).unwrap();
+        corpus.flush().unwrap();
+
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut host = ToolHost::new(
+            Workspace::new("opaque-candidate-audit", vec![workspace]),
+            KeywordIndex::new(),
+            None,
+        );
+        host.set_log_analysis(true, Some(cache));
+        let corpus_id = corpus.id().to_string();
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        host.set_active_log_corpus(Some(corpus_id.clone()));
+        host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
+            .unwrap();
+        host.pin_log_suppression_lens(&corpus_id).unwrap();
+
+        let brief = host.build_broad_log_triage_brief().unwrap();
+        assert_eq!(
+            brief
+                .candidate_groups
+                .iter()
+                .map(|candidate| candidate.group_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["template:630"],
+            "support/unknown volume must not create provider-round groups"
+        );
+        let lead = &brief.candidate_groups[0];
+        assert!(lead.model_text.contains("incident_status: unclassified"));
+        assert!(lead
+            .model_text
+            .contains("correlation_role=supporting_record"));
+        assert!(lead
+            .evidence
+            .iter()
+            .any(|identity| identity.template_id == LEAD));
+        assert!(lead
+            .evidence
+            .iter()
+            .any(|identity| identity.template_id == SUPPORT));
+        assert!(!lead
+            .evidence
+            .iter()
+            .any(|identity| identity.template_id == UNKNOWN));
+        // With only one admitted group, both staged pipelines decline before
+        // sending provider rounds; the ordinary whole-brief path retains all
+        // three exact evidence classes.
+        assert_eq!(brief.candidate_groups.len(), 1);
+        for template_id in [UNKNOWN, SUPPORT, LEAD] {
+            assert!(
+                brief
+                    .evidence
+                    .iter()
+                    .any(|identity| identity.template_id == template_id),
+                "global trusted evidence lost template {template_id}"
+            );
+        }
+        for disclosure in [
+            "template_id=610 severity=4 error_event_count=50",
+            "template_id=620 severity=4 error_event_count=20",
+            "template_id=630 severity=4 error_event_count=2",
+        ] {
+            assert!(
+                brief.model_text.contains(disclosure),
+                "missing {disclosure}"
+            );
         }
     }
 
@@ -10618,8 +10966,12 @@ mod tests {
         let second = host.build_broad_log_triage_brief().unwrap();
         assert_eq!(first.model_text, second.model_text);
         assert_eq!(first.evidence, second.evidence);
-        assert!(first.model_text.contains("first_occurrence seq=1"));
-        assert!(first.model_text.contains("last_occurrence seq=40"));
+        assert!(first
+            .model_text
+            .contains("first_occurrence seq=1 source=\"only.log\""));
+        assert!(first
+            .model_text
+            .contains("last_occurrence seq=40 source=\"<same as first_occurrence>\""));
         assert!(first.model_text_bytes <= BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES);
         assert!(first.evidence.iter().all(|id| id.template_id == 9));
         assert!(
@@ -10782,8 +11134,13 @@ mod tests {
             "missing service facet must not invent a label:\n{}",
             brief.model_text
         );
-        assert!(brief.model_text.contains("first_occurrence seq=1"));
-        assert!(brief.model_text.contains("last_occurrence seq=2"));
+        assert!(brief
+            .model_text
+            .contains("first_occurrence seq=1 source=\"a.log\""));
+        assert!(brief
+            .model_text
+            .contains("last_occurrence seq=2 source=\"b.log\""));
+        assert!(!brief.model_text.contains("<same as first_occurrence>"));
         assert!(brief.deterministic_complete);
         assert!(brief.model_text_bytes <= BROAD_LOG_TRIAGE_BRIEF_MAX_BYTES);
     }
