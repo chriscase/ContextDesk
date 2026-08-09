@@ -170,7 +170,10 @@ impl GatewayClient {
                     .header("ai-reranking-model-specification-version", "4")
                     .header("ai-model-id", model)
                     .json(&RerankRequest {
-                        documents,
+                        documents: RerankDocuments {
+                            document_type: "text",
+                            values: documents,
+                        },
                         query,
                         top_n,
                     }),
@@ -275,9 +278,16 @@ struct EmbedOutput {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RerankRequest<'a> {
-    documents: &'a [String],
+    documents: RerankDocuments<'a>,
     query: &'a str,
     top_n: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RerankDocuments<'a> {
+    #[serde(rename = "type")]
+    document_type: &'static str,
+    values: &'a [String],
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -1021,6 +1031,31 @@ mod tests {
             }],
         )
         .is_err());
+    }
+
+    #[test]
+    fn reranking_request_matches_gateway_v4_document_envelope() {
+        let values = vec!["cause".to_string(), "noise".to_string()];
+        let request = RerankRequest {
+            documents: RerankDocuments {
+                document_type: "text",
+                values: &values,
+            },
+            query: "Which record explains the failure?",
+            top_n: 2,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "documents": {
+                    "type": "text",
+                    "values": ["cause", "noise"]
+                },
+                "query": "Which record explains the failure?",
+                "topN": 2
+            })
+        );
     }
 
     #[test]

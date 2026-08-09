@@ -216,11 +216,18 @@ Official model-page evidence:
   aborted before emitting quality aggregates, so it is not yet an embedding
   quality result.
 - The first Voyage Lite reranking request returned HTTP 400. The lab correctly
-  withheld the provider body. The source request matches the inspected SDK
-  envelope (`documents`, `query`, camel-case `topN`, v4 specification header,
-  and model-id header), so the remaining candidates are provider-specific
-  validation, a request-size/limit issue, or an undocumented gateway rule.
-  This is a request-contract finding, not a reranker-quality failure.
+  withheld the provider body. A follow-up inspection of the official SDK's
+  request-body test found the cause without another live request: v4 requires
+  `documents: {"type":"text","values":[...]}`, while the first lab version
+  sent a bare string array in `documents`. The endpoint, model id, version
+  header, query, and camel-case `topN` were otherwise correct. This was a lab
+  request-contract failure, not a reranker-quality failure.
+- The isolated source now emits the official nested document envelope. Its
+  five focused tests, including a hermetic serialization regression, pass and
+  strict binary-target clippy remains clean. These checks did not launch the
+  lab, read Keychain, contact Vercel, or change the preserved stable launch
+  executable. A stable direct-request authentication path remains a
+  prerequisite for live confirmation.
 - A two-document isolation probe was prepared, but repeated macOS Keychain
   dialogs made further executable launches a worse diagnostic path than the
   contract question warranted. The orphaned lab and SecurityAgent processes
@@ -408,7 +415,7 @@ terms. Reports include per-shape mean relevant recall, must-include recall,
 non-relevant share, bounded top rankings, dimensions, usage, warnings, and
 latency.
 
-The probe's unit tests (4/4) and strict binary-target clippy pass. The live
+The probe's unit tests (5/5) and strict binary-target clippy pass. The live
 catalog completed and a Qwen3 0.6B embedding response passed validation. The
 first Voyage Lite reranking request returned HTTP 400 as recorded above. No
 additional Keychain-reading lab executable should be launched during this
@@ -473,9 +480,10 @@ activation, or consent for production cloud egress.
 1. Do not launch another Keychain-reading development executable. Choose an
    owner-approved stable direct-request authentication loop, preferably a
    short-lived Vercel OIDC token from a linked development project.
-2. Use that stable loop to isolate the Voyage HTTP 400 with a two-document
-   request, then vary only document count, `topN`, and reranker model. Compare
-   Cohere Rerank 4 Fast only after the common request shape is proven.
+2. Use that stable loop to confirm the corrected Voyage v4 envelope with a
+   two-document request. Only if it still fails should document count, `topN`,
+   and reranker model vary. Compare Cohere Rerank 4 Fast only after the common
+   request shape is proven.
 3. Run the direct seven-query synthetic benchmark with
    `alibaba/qwen3-embedding-0.6b` plus the first proven economical reranker.
    Record model identity, vector dimensions, response indices, scores,
