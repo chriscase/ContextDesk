@@ -36,7 +36,7 @@ use crate::investigation_answer::{
     HostEvidenceEntry, HostEvidenceLedger, SCHEMA_V1 as INVESTIGATION_ANSWER_SCHEMA_V1,
 };
 use crate::router::TurnDeadlinePlan;
-use crate::tool_host::BroadLogTriageCandidate;
+use crate::tool_host::{BroadLogTriageCandidate, BroadLogTriageComparisonContext};
 
 /// The role backends this pipeline needs. Investigator and synthesizer are the
 /// same model by default (the host may pass the same reference); the reviewer
@@ -101,6 +101,9 @@ pub enum MultiModelOutcome {
 pub struct ReviewPipelineInputs<'a> {
     pub user_text: &'a str,
     pub candidates: &'a [BroadLogTriageCandidate],
+    /// Optional host-selected global chronology for the final comparison. It
+    /// has its own evidence scope and consumes no investigator/reviewer call.
+    pub comparison_context: Option<&'a BroadLogTriageComparisonContext>,
     pub binding: AnswerBindingV1,
     pub budget: MultiModelBudget,
     pub role_ids: MultiModelRoleIds,
@@ -149,6 +152,30 @@ fn candidate_entries(
     entries
 }
 
+fn comparison_context_entries(
+    context: &BroadLogTriageComparisonContext,
+    binding: &AnswerBindingV1,
+) -> Vec<HostEvidenceEntry> {
+    context
+        .evidence
+        .iter()
+        .map(|row| HostEvidenceEntry {
+            evidence_id: format!("e:{}:{}", context.candidate_id, row.identity.seq),
+            candidate_id: context.candidate_id.clone(),
+            source_label: row
+                .identity
+                .citation_source
+                .clone()
+                .unwrap_or_else(|| row.identity.source.clone()),
+            locator: format!("seq={}", row.identity.seq),
+            corpus_id: binding.corpus_id.clone(),
+            revision: binding.revision,
+            role: EvidenceRole::Neutral,
+            content: row.content.clone(),
+        })
+        .collect()
+}
+
 /// A ledger over exactly one candidate's identities.
 fn candidate_ledger(
     candidate: &BroadLogTriageCandidate,
@@ -168,11 +195,15 @@ fn candidate_ledger(
 /// A ledger over exactly the accepted candidates' identities.
 fn union_ledger(
     accepted: &[&BroadLogTriageCandidate],
+    comparison_context: Option<&BroadLogTriageComparisonContext>,
     binding: &AnswerBindingV1,
 ) -> Result<HostEvidenceLedger, ()> {
     let mut entries = Vec::new();
     for candidate in accepted {
         entries.extend(candidate_entries(candidate, binding));
+    }
+    if let Some(context) = comparison_context {
+        entries.extend(comparison_context_entries(context, binding));
     }
     if entries.is_empty() {
         return Err(());
@@ -479,7 +510,8 @@ fn synthesizer_messages(
              \"text\":string, \"evidence_ids\":[string]}}. Include EVERY allowed candidate id, keep \
              candidates separate, cite ONLY ids from the ALLOWED EVIDENCE IDS list for the owning \
              candidate, and do not add any host-owned field (no citations, status, corpus, \
-             revision, or session). The host, not you, decides whether a root cause is \
+             revision, or session). `global_timeline_context` is non-incident chronology; order is not causal. \
+             The host, not you, decides whether a root cause is \
              established.{correction_note}"
         )),
         user(format!(
@@ -1022,7 +1054,7 @@ pub async fn run_review_pipeline(
         });
     }
 
-    let Ok(ledger) = union_ledger(&accepted, &inputs.binding) else {
+    let Ok(ledger) = union_ledger(&accepted, inputs.comparison_context, &inputs.binding) else {
         return Ok(MultiModelOutcome::FailedClosed {
             reason: "host evidence ledger was invalid",
             telemetry: Box::new(finalize_telemetry(
@@ -1035,7 +1067,7 @@ pub async fn run_review_pipeline(
             )),
         });
     };
-    let candidate_ids: Vec<String> = accepted.iter().map(|c| c.group_id.clone()).collect();
+    let candidate_ids: Vec<String> = ledger.candidate_ids().into_iter().collect();
 
     // ---- Stage 3: reviewer (optional; degrades) ----
     let mut executed = ExecutedMode::Review;

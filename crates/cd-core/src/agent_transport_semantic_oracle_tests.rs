@@ -132,17 +132,20 @@ async fn run_two_candidate_triage(
         "triage this broad corpus",
         opts,
         &clock,
-        &candidates,
-        crate::investigation_answer::AnswerBindingV1 {
-            session_id: "s".into(),
-            turn_id: "t".into(),
-            corpus_id: "c".into(),
-            revision: crate::investigation_answer::LogSnapshotRevisionV1 {
-                event_revision: 1,
-                template_analysis_revision: 2,
-                suppression_revision: 3,
+        MultiStageTriageEvidence {
+            candidates: &candidates,
+            comparison_context: None,
+            binding: crate::investigation_answer::AnswerBindingV1 {
+                session_id: "s".into(),
+                turn_id: "t".into(),
+                corpus_id: "c".into(),
+                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                    event_revision: 1,
+                    template_analysis_revision: 2,
+                    suppression_revision: 3,
+                },
+                ledger_digest: String::new(),
             },
-            ledger_digest: String::new(),
         },
         &mut |telemetry| contexts.push(telemetry),
     )

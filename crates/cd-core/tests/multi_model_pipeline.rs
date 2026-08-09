@@ -173,6 +173,7 @@ fn run_with_backends(
     let inputs = ReviewPipelineInputs {
         user_text: "q",
         candidates,
+        comparison_context: None,
         binding: binding(),
         budget,
         role_ids: role_ids(),
@@ -1101,6 +1102,7 @@ fn run_with_user_text(
     let inputs = ReviewPipelineInputs {
         user_text,
         candidates,
+        comparison_context: None,
         binding: binding(),
         budget,
         role_ids: role_ids(),
@@ -1249,6 +1251,7 @@ fn a_reviewer_deadline_under_the_whole_turn_clock_is_terminal() {
     let inputs = ReviewPipelineInputs {
         user_text: "q",
         candidates: &cands,
+        comparison_context: None,
         binding: binding(),
         budget: MultiModelBudget::default(),
         role_ids: role_ids(),
@@ -1323,6 +1326,7 @@ fn cancellation_is_classified_from_the_signal_not_the_provider_error_text() {
     let inputs = ReviewPipelineInputs {
         user_text: "q",
         candidates: &cands,
+        comparison_context: None,
         binding: binding(),
         budget: MultiModelBudget::default(),
         role_ids: role_ids(),

@@ -10,9 +10,11 @@ continues unchanged.
 flowchart TD
     H["Host: pin corpus + suppression revision"] --> B["Host: bounded broad brief"]
     B --> C["Host: <=4 structural candidates"]
+    B --> T["Host: separately scoped global chronology\n(no provider call)"]
     C --> S["LLM: candidate-only synthesis\n(1 attempt each)"]
     S --> V["Host: validate citations against that candidate only"]
     V -->|"valid groups >=2"| F["LLM: strict investigation_answer.v1 proposal"]
+    T --> F
     V -->|"no groups / insufficient starting budget"| L["Existing single-stage path"]
     F --> G["Host: validate proposal against the immutable evidence ledger"]
     G --> E["Host: typed AnswerEnvelopeV1 (authority)"]
@@ -34,6 +36,18 @@ trusted identity ledger (`seq`, `source`, `template_id`). A candidate response
 must cite an identity from its own ledger. Each candidate receives one attempt;
 an invalid response is withheld. This avoids a global evidence set incorrectly
 validating a decoy's citation from another incident.
+
+The host also prepares a separately scoped `global_timeline_context` for the
+final comparison. It is explicitly a corpus chronology, not an incident or a
+correlation verdict, and consumes no candidate/provider round. When the pinned
+unsuppressed corpus has at most 32 events, it retains every non-candidate row.
+For larger corpora it discloses partial selection and retains stable sequence
+endpoints plus fairly interleaved sequence neighbors around admitted candidate
+anchors. Candidate-owned identities are excluded, the active suppression lens
+is applied, rows remain bound to the same corpus revisions, and the true tail
+uses the signed database sequence ceiling. The model-facing block says that
+overlapping unrelated processes may be present and that order or adjacency is
+not causal evidence.
 
 Persisted structural support (`Caused by:`, `Suppressed:`, stack frames, and
 wrappers) stays in the deterministic brief and trusted global evidence channel
@@ -75,6 +89,17 @@ and the validator remains the authority. The manifest and scaffold are included
 in the same context estimate and hard packing gate as every other
 final-comparison message. This improves provider interoperability without
 weakening parsing, schema, unknown-id, cross-candidate, or host-authority checks.
+
+If global chronology exists, its stable candidate id and permitted evidence ids
+enter that same immutable ledger and manifest under their own scope. Redacted,
+single-line bounded excerpts enter the ledger's canonical citation content and
+the final prompt inside the nonce-bound untrusted-data wrapper. They can never
+be cited by an ERROR/template candidate, and candidate evidence can never be
+cited by the global context. The wrapper is minted once before the initial
+comparison and the exact bytes are replayed on semantic correction; a retry
+adds no evidence or newly shaped data boundary. Every global row has
+`EvidenceRole::Neutral`: configuration, repair, recovery, or explicit mechanism
+wording is model-interpreted content, never host causal authority.
 
 What a person reads is a **separate, deterministic host projection**:
 `render_answer_markdown` renders the validated envelope as Markdown and that
@@ -157,6 +182,11 @@ implementation has an in-flight concurrency cap of one (conservative while
 preserving one ordered provider trace); it is designed so a future bounded
 parallel executor can raise that cap without changing the evidence contract.
 
+The global chronology consumes context budget but no provider round. Its
+manifest, excerpts, untrusted-data wrapper, and output scaffold are included in
+the same preflight packing check as candidate drafts; an oversized comparison
+falls back before the final provider request.
+
 Cancellation and the whole-turn deadline use the existing shared agent clock.
 Every provider request still passes through the normal backend/trace observer,
 so CLI and Tauri project the same events and provider telemetry. No provider is
@@ -181,14 +211,20 @@ Candidate grouping is intentionally structural, not a root-cause verdict.
 Cross-source trace identity is only parser-populated `trace_id`; no request,
 span, or message token is promoted to a trace key. A no-trace corpus uses the
 ERROR/FATAL template fallback and may not capture multi-template incidents.
-The final typed ledger currently contains candidate-owned ERROR/FATAL evidence,
-not the full deterministic timeline. Global WARN/INFO state transitions such as
-deployment, rollback, restoration, and recovery can therefore appear in the
-broad brief yet remain unavailable to final comparison. V1 also has no
-host-validated cross-candidate causal-chain section. Embedding or reranking does
-not repair this handoff: this broad brief is deterministic and already found
-those records. Cross-candidate evidence synthesis needs a separately reviewed
-typed contract rather than citation transfer between existing candidates.
+The final typed ledger now preserves a bounded separately scoped global
+chronology, so small-corpus WARN/INFO state transitions such as deployment,
+rollback, restoration, and recovery can reach final comparison with canonical
+citations. It does not certify that global rows belong to any candidate
+incident. V1 still has no host-validated cross-candidate causal-chain section,
+and every production row on this path remains `Neutral`, so an initiating-cause
+proposal is withheld and `root_cause_established` remains false. Live raw-prompt
+experiments showed why prompt pressure is not a substitute: a model can transfer
+a fact into claim text while citing an in-scope row that does not entail it, and
+the V1 validator checks identity/scope rather than semantic entailment.
+Cross-candidate causal synthesis therefore needs a later typed comparison
+contract or semantic claim-evidence validator, not citation transfer between
+existing candidates. Embedding or reranking can improve which evidence reaches
+a bounded context, but cannot itself grant causal authority.
 The bounded sequential executor favors predictable cancellation, cost, and
 telemetry over latency; live-provider quality and safe parallelism remain
 separate acceptance work.

@@ -4,7 +4,8 @@ Status: active experiment journal; not a release claim
 Last updated: 2026-08-09
 Experiment branch: `fix/vercel-basics-refinement-v1`
 Branch base: exact RC `37905a3788f02b5069767a2bf70b946e0f33f945`
-Current branch head before this journal: `7e10ba95cc4bc0baf26d3718bceee22908dc9c41`
+Current committed branch head: `b6f5fefd` (later global-timeline refinement is
+still uncommitted and under validation)
 
 This file preserves live-gateway findings across task compaction. It records
 observations, not qualification claims. No API key, authorization header, raw
@@ -65,6 +66,115 @@ timeline and global change/recovery evidence.
 
 Embeddings or reranking cannot repair evidence that the final synthesis stage
 is structurally forbidden to receive.
+
+## Direct Grok Build capability and evaluator results
+
+ContextDesk's direct `xai_grok_build` provider is operational independently of
+Vercel and ContextDesk Keychain items. It reuses the user's opted-in Grok Build
+session, keeps the API host pinned, and was exercised through the shared Rust
+provider/agent path. A direct provider doctor on configured alias `grok-4`
+passed model listing, native tool call, grounded cited answer, tracing, session
+continuity, and cleanup in 23.9 seconds. Live responses identified themselves
+as `grok-4.3`.
+
+Grok was also used as a blind qualitative judge for eight anonymized preserved
+Vercel answers. Mapping was revealed only after scoring:
+
+- DeepSeek V4 Flash runs A/E/G: 22/22 each, no penalty;
+- Qwen 3.6 27B run D: 22/22, no penalty;
+- Ministral runs B/F: 19/22, H: 18/22, chiefly weaker citations and activation
+  contradiction handling;
+- GPT-OSS run C: 15/22 before a five-point unsupported-inference penalty and
+  failed because it invented a telemetry backlog explanation and contradicted
+  its own telemetry classification.
+
+This judgment is not truth authority; the committed event key remains the
+oracle. It supports the existing interpretation that DeepSeek is the current
+economical Vercel synthesis leader, Ministral is a useful faster pass, and
+GPT-OSS should not be the default final synthesizer for this incident shape.
+
+## Matched direct-Grok app diagnosis and refinement
+
+The complete 31-record incident was imported into the normal ContextDesk data
+store as corpus `019fe731-d67a-7143-943e-ca6588a5cf45`. Before the handoff fix,
+the app's five-call Grok multi-stage run retrieved 17 evidence identities but
+produced `root_cause_established=false`, omitted rollback/recovery, and treated
+the boundary violation as only a competing explanation. A one-call Grok control
+given 15 compact decisive rows correctly returned the invalid r17 250 ms lease
+window, lease expiry, worker/API propagation, r16 4000 ms restoration and
+recovery, persistent independent telemetry, and the unresolved invalid-r17
+activation. Model capability was therefore not the bottleneck.
+
+Source audit found the exact loss: `run_multi_stage_broad_triage` created final
+drafts and `HostEvidenceLedger` solely from admitted ERROR/correlation
+candidates. The final manifest had no identity path for ordinary configuration,
+rollback, or observed-recovery rows. Every ledger row was also `Neutral`, so an
+established root-cause boolean was impossible by design.
+
+The current uncommitted refinement adds a separately scoped
+`global_timeline_context` without an extra provider request:
+
+- at most 32 unsuppressed, non-candidate redacted rows;
+- complete for small corpora, including the 31-record incident;
+- for larger corpora, honest partial selection using stable sequence endpoints
+  plus fairly interleaved neighbors around candidate anchors;
+- exact corpus/revision/digest binding, canonical source/seq/content citations,
+  active suppression, a reserved scope id, and candidate-disjoint evidence;
+- a nonce-bound untrusted-data wrapper minted once and replayed byte-for-byte on
+  semantic correction;
+- all new evidence remains `Neutral`; order, adjacency, repair, and recovery
+  wording grant no host causal authority;
+- the same context enters single-model and optional review-mode ledgers, while
+  consuming no investigator/reviewer/synthesizer round.
+
+One source test caught and fixed a real cursor defect during refinement:
+`u64::MAX` wrapped to `-1` when bound to DuckDB's signed sequence column and
+would omit the true tail. The sampler now uses the signed maximum and a large
+fixture asserts both sequence endpoints.
+
+Live post-fix acceptance through direct Grok completed in the same five
+provider calls (43.1 seconds, about 13K context characters). The typed answer
+now cited r17 start/activation, the boundary violation, rollback request, r16
+4000 ms restoration, worker recovery, API recovery, and telemetry persistence
+as a competing explanation. It honestly retained `Root cause established: no`.
+The qualitative Grok judge scored configuration/mechanism 3/4, propagated chain
+2/4, rollback/recovery 4/4, telemetry separation 4/4, contradiction 3/4,
+citations 3/4, and readability/actionability 2/4.
+
+The remaining weakness is not missing retrieval: the permitted global ledger
+contained all three `LeaseWindowExpired` rows, but final synthesis did not cite
+them or render a compact cross-scope chain. Three raw one-call prompt variants
+showed that stronger narrative pressure is unsafe under V1. Grok transferred a
+`LeaseWindowExpired` fact into a template-5 claim whose cited rows contained
+only `LeaseEpochMismatch`, and another variant described the boundary violation
+while citing a stack-frame row. The current validator correctly confines ids to
+candidate scopes but does not prove semantic entailment between claim text and
+excerpt. Do not solve this with a more aggressive prompt. A later typed
+cross-candidate comparison contract or semantic claim-evidence validator is
+required.
+
+## Grok-assisted embedding/reranking refinement loop
+
+Use Grok as a cheap qualitative judge after deterministic retrieval scoring,
+not as the retrieval oracle. For each frozen query and answer key:
+
+1. produce evidence packets with structured/keyword baseline, local embedding,
+   Vercel embedding, reranking, and combined modes when their security gates are
+   satisfied;
+2. enforce host-side must-include and must-exclude IDs, stable ID mapping,
+   shortlist caps, dimension/model binding, and deterministic degradation;
+3. score recall, initiating/repair/recovery coverage, foreign-incident leakage,
+   shortlist precision, latency, calls, and cost before any model judgment;
+4. give anonymized packets to direct Grok to explain what answer each packet
+   supports and what decisive evidence is missing;
+5. optionally synthesize from each packet with the same fixed model, then have a
+   separate Grok session grade correctness against the host truth key;
+6. convert every discovered omission, foreign-ID admission, or response-shape
+   defect into a hermetic regression fixture.
+
+Grok judgment never overrides must-include/must-exclude truth or turns a
+plausible answer into a retrieval pass. This loop is specifically intended to
+prevent lexical-overlap and full-corpus rerank false greens.
 
 ## Prompt experiments and current winning request shape
 
@@ -478,21 +588,28 @@ activation, or consent for production cloud egress.
 
 ## Next actions
 
-1. Do not launch another Keychain-reading development executable. Choose an
+1. Finish source gates and adversarial review for the uncommitted global
+   timeline-context refinement. Preserve the live acceptance output and do not
+   merge, push, or release it automatically.
+2. Turn the opaque incident into a committed semantic retrieval ablation with
+   must-include lease/configuration/rollback/recovery IDs and must-exclude
+   independent/foreign IDs. Use direct Grok only as the qualitative packet and
+   answer judge after deterministic host scoring.
+3. Do not launch another Keychain-reading development executable. Choose an
    owner-approved stable direct-request authentication loop, preferably a
    short-lived Vercel OIDC token from a linked development project.
-2. Use that stable loop to confirm the corrected Voyage v4 envelope with a
+4. Use that stable loop to confirm the corrected Voyage v4 envelope with a
    two-document request. Only if it still fails should document count, `topN`,
    and reranker model vary. Compare Cohere Rerank 4 Fast only after the common
    request shape is proven.
-3. Run the direct seven-query synthetic benchmark with
+5. Run the direct seven-query synthetic benchmark with
    `alibaba/qwen3-embedding-0.6b` plus the first proven economical reranker.
    Record model identity, vector dimensions, response indices, scores,
    latency, calls, usage, and bounded quality aggregates without recording
    vectors, request text, credentials, or provider error bodies.
-4. Use those results to select query/document shape and shortlist size, then
+6. Use those results to select query/document shape and shortlist size, then
    run the identical four-mode product ablation on the corrected engine.
-5. Add an explicit query-time content-leaves-machine gate before any remote
+7. Add an explicit query-time content-leaves-machine gate before any remote
    embedding or reranking adapter can be activated outside the isolated lab.
-6. Run focused and full repository gates and hand off the isolated branch for
+8. Run focused and full repository gates and hand off the isolated branch for
    owner review; do not merge or release automatically.

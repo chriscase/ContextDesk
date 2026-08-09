@@ -140,6 +140,43 @@ fn build_brief(cache: &Path, corpus_id: &str) -> cd_core::tool_host::BroadLogTri
         .expect("broad triage brief")
 }
 
+#[test]
+fn global_timeline_context_preserves_small_corpus_prelude_without_merging_candidates() {
+    let (cache, corpus_id, _corpus) = ingest_case("multi-hop-chain");
+    let brief = build_brief(cache.path(), &corpus_id);
+    let context = brief
+        .comparison_context
+        .as_ref()
+        .expect("small corpus has non-candidate chronology");
+    assert!(context.complete);
+    assert_eq!(context.candidate_id, "global_timeline_context");
+    assert!(context
+        .model_text
+        .contains("global_corpus_chronology_not_an_incident"));
+    assert!(context
+        .model_text
+        .contains("adjacency and order do not establish"));
+    assert!(context
+        .evidence
+        .iter()
+        .any(|row| row.content.contains("routing table reload complete")));
+
+    let candidate_rows = brief
+        .candidate_groups
+        .iter()
+        .flat_map(|candidate| candidate.evidence.iter())
+        .map(|row| (row.seq, row.source.as_str(), row.template_id))
+        .collect::<BTreeSet<_>>();
+    assert!(context
+        .evidence
+        .iter()
+        .all(|row| !candidate_rows.contains(&(
+            row.identity.seq,
+            row.identity.source.as_str(),
+            row.identity.template_id,
+        ))));
+}
+
 /// Scripted backend for the multi-stage path.
 ///
 /// Candidate rounds stay prose — that stage's contract is candidate-scoped
@@ -175,7 +212,7 @@ fn scripted_multi_stage_completions(
         })
         .collect::<Vec<_>>();
     completions.push(ChatCompletion {
-        content: scripted_v1_comparison_json(&candidates),
+        content: scripted_v1_comparison_json(&candidates, brief.comparison_context.as_ref()),
         tool_calls: vec![],
         finish_reason: "stop".into(),
         telemetry: Default::default(),
@@ -191,8 +228,9 @@ fn scripted_evidence_id(group_id: &str, seq: u64) -> String {
 /// One strict V1 proposal covering exactly the accepted candidate set.
 fn scripted_v1_comparison_json(
     candidates: &[&cd_core::tool_host::BroadLogTriageCandidate],
+    comparison_context: Option<&cd_core::tool_host::BroadLogTriageComparisonContext>,
 ) -> String {
-    let candidates_json = candidates
+    let mut candidates_json = candidates
         .iter()
         .map(|candidate| {
             let mut seqs = candidate
@@ -228,6 +266,22 @@ fn scripted_v1_comparison_json(
             })
         })
         .collect::<Vec<_>>();
+    if let Some(context) = comparison_context {
+        let evidence_ids = context
+            .evidence
+            .iter()
+            .map(|row| scripted_evidence_id(&context.candidate_id, row.identity.seq))
+            .collect::<Vec<_>>();
+        assert!(!evidence_ids.is_empty());
+        candidates_json.push(serde_json::json!({
+            "candidate_id": context.candidate_id,
+            "observations": [{
+                "claim_id": "obs-global-timeline-context",
+                "text": "bounded global chronology; incident membership is unverified",
+                "evidence_ids": evidence_ids,
+            }],
+        }));
+    }
     serde_json::json!({
         "schema": cd_core::investigation_answer::SCHEMA_V1,
         "candidates": candidates_json,
@@ -295,6 +349,7 @@ fn assert_multi_stage_v1_projection(
     session_id: &str,
     corpus_id: &str,
     visible_evidence: &[cd_core::log_analysis::SearchEvidenceIdentity],
+    comparison_context: Option<&cd_core::tool_host::BroadLogTriageComparisonContext>,
 ) {
     use cd_core::investigation_answer::{ClaimKind, ClaimStatus};
 
@@ -333,10 +388,13 @@ fn assert_multi_stage_v1_projection(
     assert!(!envelope.answer.candidates.is_empty());
 
     // Every canonical citation is a host identity the brief actually exposed.
-    let visible = visible_evidence
+    let mut visible = visible_evidence
         .iter()
         .map(|identity| identity.seq)
         .collect::<std::collections::BTreeSet<_>>();
+    if let Some(context) = comparison_context {
+        visible.extend(context.evidence.iter().map(|row| row.identity.seq));
+    }
     for citation in &envelope.answer.canonical_citations {
         assert_eq!(citation.corpus_id, envelope.binding.corpus_id);
         assert_eq!(citation.revision, envelope.binding.revision);
@@ -1289,7 +1347,13 @@ fn scripted_broad_triage_turn_exposes_brief_and_accepts_typed_v1_answer() {
         !terminal_text(&events).trim().is_empty(),
         "no terminal answer emitted: {events:?}"
     );
-    assert_multi_stage_v1_projection(&events, "triage-lab", &corpus_id, &visible_brief.evidence);
+    assert_multi_stage_v1_projection(
+        &events,
+        "triage-lab",
+        &corpus_id,
+        &visible_brief.evidence,
+        visible_brief.comparison_context.as_ref(),
+    );
 }
 
 /// The legacy structured-triage contract still governs the single-stage

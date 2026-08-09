@@ -98,6 +98,10 @@ pub const BROAD_LOG_TRIAGE_IDENTITY_CAP: usize = 128;
 pub const BROAD_LOG_TRIAGE_CANDIDATE_CAP: usize = 4;
 /// Maximum representative citations passed to one candidate-only synthesis.
 pub const BROAD_LOG_TRIAGE_CANDIDATE_IDENTITY_CAP: usize = 12;
+/// Maximum non-candidate chronology rows carried into the final comparison.
+/// This is deliberately independent of candidate ledgers: the rows describe
+/// global corpus order and are never presented as belonging to an incident.
+pub const BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_IDENTITY_CAP: usize = 32;
 
 const BROAD_LOG_TRIAGE_DISTRIBUTION_CAP: usize = 12;
 const BROAD_LOG_TRIAGE_ERROR_DISPLAY_CAP: usize = 16;
@@ -120,6 +124,8 @@ const BROAD_LOG_TRIAGE_TRACE_CHAIN_TEMPLATE_CAP: usize = 12;
 const BROAD_LOG_TRIAGE_TRACE_CHAIN_DISPLAY_CAP: usize = 6;
 const BROAD_LOG_TRIAGE_NOISE_SUGGESTION_CAP: usize = 6;
 const BROAD_LOG_TRIAGE_LINE_MAX_BYTES: usize = 192;
+const BROAD_LOG_TRIAGE_COMPARISON_ENDPOINT_CAP: usize = 6;
+const BROAD_LOG_TRIAGE_COMPARISON_NEIGHBOR_RADIUS: u64 = 2;
 
 /// Documented ranking formulas locked by tests. Every score/rank in the brief
 /// must stay explainable and deterministic (stable ties).
@@ -186,6 +192,10 @@ pub struct BroadLogTriageBrief {
     /// an incident. Their evidence is the only citation channel allowed during
     /// per-candidate synthesis; an empty list retains single-stage behavior.
     pub candidate_groups: Vec<BroadLogTriageCandidate>,
+    /// Separately scoped global chronology supplied only to the final
+    /// comparison. It is not an incident candidate and consumes no provider
+    /// round. Every row remains neutral host evidence.
+    pub comparison_context: Option<BroadLogTriageComparisonContext>,
 }
 
 /// One deterministic broad-triage evidence/correlation candidate.
@@ -207,6 +217,32 @@ pub struct BroadLogTriageCandidate {
     pub model_text: String,
     /// Trusted identities belonging only to this group.
     pub evidence: Vec<crate::log_analysis::SearchEvidenceIdentity>,
+}
+
+/// One redacted, bounded global chronology row retained for final comparison.
+#[derive(Debug, Clone)]
+pub struct BroadLogTriageComparisonEvidence {
+    /// Trusted event identity. The host never reconstructs this from text.
+    pub identity: crate::log_analysis::SearchEvidenceIdentity,
+    /// Redacted, single-line bounded event message used by canonical citation
+    /// renderers and by the final comparison's untrusted data block.
+    pub content: String,
+}
+
+/// Bounded non-candidate chronology for the final comparison.
+///
+/// Membership means only that a row was selected by the disclosed sampling
+/// policy. It does not assert incident membership, correlation, or causality.
+#[derive(Debug, Clone)]
+pub struct BroadLogTriageComparisonContext {
+    /// Stable host-owned scope id used by the immutable evidence ledger.
+    pub candidate_id: String,
+    /// Complete model-facing untrusted-data block for this context.
+    pub model_text: String,
+    /// Trusted identities and redacted excerpts under this separate scope.
+    pub evidence: Vec<BroadLogTriageComparisonEvidence>,
+    /// True only when every unsuppressed non-candidate event fit in the cap.
+    pub complete: bool,
 }
 
 /// Cooperative abort handle for one deterministic broad-log triage worker.
@@ -421,6 +457,207 @@ fn broad_triage_candidate_observation(
         "- axis_value={} level={} source={} service={} template_id={} pattern={}\n",
         axis_value, level, source, service, template_id, pattern
     )
+}
+
+const BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_ID: &str = "global_timeline_context";
+
+/// Select a bounded global chronology without claiming that adjacent rows
+/// belong to the same incident. Small corpora are complete. Large corpora
+/// retain both endpoints plus stable sequence neighbors around each admitted
+/// candidate; the model-facing disclosure says that the sample is partial.
+fn broad_triage_comparison_context(
+    corpus: &crate::log_analysis::LogCorpus,
+    suppression: &PinnedLogSuppressionLens,
+    unsuppressed_event_count: u64,
+    candidates: &[BroadLogTriageCandidate],
+) -> CoreResult<Option<BroadLogTriageComparisonContext>> {
+    use crate::log_analysis::{EventQuery, ExplorerEvent};
+
+    let candidate_owned = candidates
+        .iter()
+        .flat_map(|candidate| candidate.evidence.iter().cloned())
+        .collect::<std::collections::HashSet<_>>();
+    if candidates
+        .iter()
+        .any(|candidate| candidate.group_id == BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_ID)
+    {
+        return Err(CoreError::Message(
+            "broad triage candidate used the reserved global timeline context id".into(),
+        ));
+    }
+    let identity_for = |event: &ExplorerEvent| crate::log_analysis::SearchEvidenceIdentity {
+        seq: event.seq,
+        source: event.source.clone(),
+        citation_source: broad_triage_citation_source(&event.source),
+        template_id: event.template_id,
+    };
+
+    // (selection class, per-candidate neighbor rank, candidate rank, seq)
+    // gives endpoint rows first and then round-robins neighbor capacity across
+    // ranked candidates before stable sequence ordering is restored.
+    let mut ranked: Vec<((u8, usize, usize, u64), ExplorerEvent)> = Vec::new();
+    let complete = unsuppressed_event_count
+        <= u64::try_from(BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_IDENTITY_CAP).unwrap_or(u64::MAX);
+    if complete {
+        let page = crate::log_analysis::query_event_rows(
+            corpus,
+            &EventQuery {
+                excluded_template_ids: suppression.excluded_template_ids.clone(),
+                limit: BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_IDENTITY_CAP,
+                sort_by_time: false,
+                ..Default::default()
+            },
+        )?;
+        for event in page.events {
+            ranked.push(((0, 0, 0, event.seq), event));
+        }
+    } else {
+        let first = crate::log_analysis::query_event_rows(
+            corpus,
+            &EventQuery {
+                excluded_template_ids: suppression.excluded_template_ids.clone(),
+                limit: BROAD_LOG_TRIAGE_COMPARISON_ENDPOINT_CAP,
+                sort_by_time: false,
+                ..Default::default()
+            },
+        )?;
+        for event in first.events {
+            ranked.push(((0, 0, 0, event.seq), event));
+        }
+        let last = crate::log_analysis::query_event_rows(
+            corpus,
+            &EventQuery {
+                excluded_template_ids: suppression.excluded_template_ids.clone(),
+                // DuckDB stores `seq` as signed BIGINT. Using `u64::MAX`
+                // would wrap to -1 in the query binder and return no tail.
+                before_seq: Some(i64::MAX as u64),
+                limit: BROAD_LOG_TRIAGE_COMPARISON_ENDPOINT_CAP,
+                sort_by_time: false,
+                ..Default::default()
+            },
+        )?;
+        for event in last.events {
+            ranked.push(((0, 0, 0, event.seq), event));
+        }
+        for (candidate_rank, candidate) in candidates.iter().enumerate() {
+            let Some(first_seq) = candidate.evidence.iter().map(|row| row.seq).min() else {
+                continue;
+            };
+            let last_seq = candidate
+                .evidence
+                .iter()
+                .map(|row| row.seq)
+                .max()
+                .unwrap_or(first_seq);
+            let mut candidate_neighbors = Vec::new();
+            for anchor in [first_seq, last_seq] {
+                let page = crate::log_analysis::query_event_rows(
+                    corpus,
+                    &EventQuery {
+                        seq_from: Some(
+                            anchor.saturating_sub(BROAD_LOG_TRIAGE_COMPARISON_NEIGHBOR_RADIUS),
+                        ),
+                        seq_to: Some(
+                            anchor.saturating_add(BROAD_LOG_TRIAGE_COMPARISON_NEIGHBOR_RADIUS),
+                        ),
+                        excluded_template_ids: suppression.excluded_template_ids.clone(),
+                        limit: usize::try_from(
+                            BROAD_LOG_TRIAGE_COMPARISON_NEIGHBOR_RADIUS
+                                .saturating_mul(2)
+                                .saturating_add(1),
+                        )
+                        .unwrap_or(5),
+                        sort_by_time: false,
+                        ..Default::default()
+                    },
+                )?;
+                candidate_neighbors.extend(page.events);
+            }
+            candidate_neighbors.retain(|event| !candidate_owned.contains(&identity_for(event)));
+            candidate_neighbors.sort_by_key(|event| {
+                (
+                    event
+                        .seq
+                        .abs_diff(first_seq)
+                        .min(event.seq.abs_diff(last_seq)),
+                    event.seq,
+                )
+            });
+            let mut candidate_seen = std::collections::HashSet::new();
+            for (neighbor_rank, event) in candidate_neighbors
+                .into_iter()
+                .filter(|event| candidate_seen.insert(event.seq))
+                .enumerate()
+            {
+                ranked.push(((1, neighbor_rank, candidate_rank, event.seq), event));
+            }
+        }
+    }
+
+    ranked.sort_by_key(|(rank, _)| *rank);
+    let mut seen = std::collections::HashSet::new();
+    let mut selected = Vec::new();
+    for (_, event) in ranked {
+        let identity = identity_for(&event);
+        if candidate_owned.contains(&identity) || !seen.insert(identity.clone()) {
+            continue;
+        }
+        selected.push(BroadLogTriageComparisonEvidence {
+            identity,
+            content: broad_triage_bounded_line(&event.message),
+        });
+        if selected.len() >= BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_IDENTITY_CAP {
+            break;
+        }
+    }
+    selected.sort_by_key(|row| row.identity.seq);
+    if selected.is_empty() {
+        return Ok(None);
+    }
+
+    let selection = if complete {
+        "complete_all_unsuppressed_non_candidate_rows"
+    } else {
+        "partial_endpoints_and_candidate_sequence_neighbors"
+    };
+    let mut model_text = format!(
+        "source_kind: deterministic_global_timeline_context\n\
+         candidate_id: {BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_ID}\n\
+         scope: global_corpus_chronology_not_an_incident\n\
+         selection: {selection}\n\
+         complete: {complete}\n\
+         identity_cap: {BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_IDENTITY_CAP}\n\
+         ordering: stable_event_sequence\n\
+         interpretation_contract: rows may belong to overlapping unrelated processes; adjacency and order do not establish correlation or causality; keep evidence in this scope; use it to report bounded prelude, repair, and observed recovery only when the event text itself supports that description\n\
+         bounded_observations:\n"
+    );
+    for row in &selected {
+        let source = broad_triage_source_identity(
+            row.identity
+                .citation_source
+                .as_deref()
+                .unwrap_or(&row.identity.source),
+        );
+        let content = serde_json::to_string(&row.content)
+            .unwrap_or_else(|_| "\"<invalid redacted event>\"".into());
+        model_text.push_str(&format!(
+            "- evidence_id={} seq={} source={} template_id={} content={}\n",
+            format_args!(
+                "e:{}:{}",
+                BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_ID, row.identity.seq
+            ),
+            row.identity.seq,
+            source,
+            row.identity.template_id,
+            content,
+        ));
+    }
+    Ok(Some(BroadLogTriageComparisonContext {
+        candidate_id: BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_ID.into(),
+        model_text,
+        evidence: selected,
+        complete,
+    }))
 }
 
 /// Whether one ERROR/FATAL template may consume a candidate-scoped provider
@@ -3389,6 +3626,18 @@ impl ToolHost {
             ));
         }
 
+        // The final comparison needs citable chronology that candidate-only
+        // ERROR/correlation groups intentionally omit. Keep it in a distinct
+        // global scope: selection never asserts that adjacent rows belong to
+        // one incident, and it consumes no additional provider round.
+        let comparison_context = broad_triage_comparison_context(
+            &corpus,
+            &suppression,
+            unsuppressed_event_count,
+            &candidate_groups,
+        )?;
+        checkpoint("comparison_context")?;
+
         if corpus.event_revision() != event_revision {
             return Err(CoreError::Message(
                 "log corpus changed while deterministic broad triage was being prepared; retry"
@@ -3422,6 +3671,7 @@ impl ToolHost {
             deterministic_complete: true,
             exception_episodes: exception_report,
             candidate_groups,
+            comparison_context,
         })
     }
 
@@ -9586,6 +9836,32 @@ mod tests {
             assert!(candidate.model_text.contains("pattern="));
             assert!(candidate.model_text.contains("trusted_citations_only:"));
         }
+        let context = brief
+            .comparison_context
+            .as_ref()
+            .expect("large fixture retains sampled non-candidate chronology");
+        assert!(!context.complete);
+        assert!(context.evidence.len() <= BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_IDENTITY_CAP);
+        assert!(context
+            .model_text
+            .contains("partial_endpoints_and_candidate_sequence_neighbors"));
+        assert_eq!(
+            context.evidence.first().map(|row| row.identity.seq),
+            Some(1)
+        );
+        assert_eq!(
+            context.evidence.last().map(|row| row.identity.seq),
+            Some(39)
+        );
+        let candidate_owned = brief
+            .candidate_groups
+            .iter()
+            .flat_map(|candidate| candidate.evidence.iter())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(context
+            .evidence
+            .iter()
+            .all(|row| !candidate_owned.contains(&row.identity)));
     }
 
     #[test]

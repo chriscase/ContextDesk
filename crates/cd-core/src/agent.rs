@@ -831,6 +831,12 @@ enum MultiStageTriageOutcome {
     ProviderFailed(Box<CoreError>),
 }
 
+struct MultiStageTriageEvidence<'a> {
+    candidates: &'a [crate::tool_host::BroadLogTriageCandidate],
+    comparison_context: Option<&'a crate::tool_host::BroadLogTriageComparisonContext>,
+    binding: crate::investigation_answer::AnswerBindingV1,
+}
+
 /// Classify a provider error raised inside the multi-stage loops.
 ///
 /// A transport that observes cancellation first reports it as an ordinary
@@ -1061,7 +1067,12 @@ fn final_comparison_system_contract() -> String {
         "missing_evidence must cite at least one permitted evidence id belonging to that candidate; do ",
         "not repeat an evidence id within one claim. Use initiating_causes only for direct initiating ",
         "evidence, symptoms for propagated impact, and competing_explanations for likely unrelated ",
-        "failures. Do not include host-owned canonical_citations, status, ",
+        "failures. A manifest may also include `global_timeline_context`, a separately scoped ",
+        "global chronology rather than an incident. Its rows may describe overlapping unrelated ",
+        "processes: report only what their text and order show, never treat adjacency as correlation ",
+        "or causality, never transfer their evidence into another candidate, and when its data says ",
+        "`complete: false`, never describe it as the complete chronology. Do not include ",
+        "host-owned canonical_citations, status, ",
         "confidence, corpus, revision, session, binding, digest, or prose outside JSON."
     )
     .into()
@@ -1112,6 +1123,22 @@ fn final_comparison_drafts_block(drafts: &[CandidateSynthesisDraft]) -> String {
     format!("CANDIDATE-SCOPED DRAFTS (untrusted; not new evidence):\n{drafts}")
 }
 
+/// Separately scoped host-selected chronology. The content remains untrusted
+/// log data, while candidate/evidence identifiers are host-minted and later
+/// enforced by the immutable ledger. Replaying this exact block during a
+/// semantic correction introduces no new evidence.
+fn final_comparison_context_block(
+    context: Option<&crate::tool_host::BroadLogTriageComparisonContext>,
+) -> String {
+    let Some(context) = context else {
+        return String::new();
+    };
+    format!(
+        "\nHOST-SELECTED GLOBAL TIMELINE CONTEXT (untrusted data; separately scoped; not an incident):\n{}",
+        wrap_untrusted("global_timeline_context", &context.model_text)
+    )
+}
+
 /// Final comparison prompt. A semantic correction repeats every authorized
 /// input from the initial request (contract, question, drafts, and manifest),
 /// plus only the stable validation category. It never receives the rejected
@@ -1119,6 +1146,7 @@ fn final_comparison_drafts_block(drafts: &[CandidateSynthesisDraft]) -> String {
 fn multi_stage_comparison_messages(
     user_text: &str,
     drafts: &[CandidateSynthesisDraft],
+    comparison_context_block: &str,
     manifest: &crate::investigation_answer::FinalAnswerManifestV1,
     correction_category: Option<&str>,
 ) -> Vec<ChatMessage> {
@@ -1141,8 +1169,9 @@ fn multi_stage_comparison_messages(
         ChatMessage {
             role: Role::User,
             content: format!(
-                "{correction}{manifest}\n{}\nHOST-AUTHORED OUTPUT SCAFFOLD (copy this exact outer shape; replace empty arrays with grounded claim objects using only permitted evidence ids):\n{scaffold}\nReturn only the completed JSON object.",
+                "{correction}{manifest}\n{}{}\nHOST-AUTHORED OUTPUT SCAFFOLD (copy this exact outer shape; replace empty arrays with grounded claim objects using only permitted evidence ids):\n{scaffold}\nReturn only the completed JSON object.",
                 final_comparison_drafts_block(drafts),
+                comparison_context_block,
             ),
             tool_call_id: None,
             tool_calls: None,
@@ -1152,6 +1181,7 @@ fn multi_stage_comparison_messages(
 
 fn multi_stage_ledger(
     drafts: &[CandidateSynthesisDraft],
+    comparison_context: Option<&crate::tool_host::BroadLogTriageComparisonContext>,
     binding: crate::investigation_answer::AnswerBindingV1,
 ) -> Result<
     crate::investigation_answer::HostEvidenceLedger,
@@ -1179,6 +1209,26 @@ fn multi_stage_ledger(
                 // already prints would be noise in the rendered answer, not
                 // evidence. A future ledger that carries real text fills this.
                 content: String::new(),
+            });
+        }
+    }
+    if let Some(context) = comparison_context {
+        for row in &context.evidence {
+            let identity = &row.identity;
+            evidence.push(HostEvidenceEntry {
+                evidence_id: format!("e:{}:{}", context.candidate_id, identity.seq),
+                candidate_id: context.candidate_id.clone(),
+                source_label: identity
+                    .citation_source
+                    .clone()
+                    .unwrap_or_else(|| identity.source.clone()),
+                locator: format!("seq={}", identity.seq),
+                corpus_id: binding.corpus_id.clone(),
+                revision: binding.revision,
+                // Global chronology is descriptive. Order alone never grants
+                // causal, support, or symptom authority.
+                role: EvidenceRole::Neutral,
+                content: row.content.clone(),
             });
         }
     }
@@ -1234,10 +1284,14 @@ async fn run_multi_stage_broad_triage(
     user_text: &str,
     opts: &AgentOptions,
     clock: &TurnClock,
-    candidates: &[crate::tool_host::BroadLogTriageCandidate],
-    binding: crate::investigation_answer::AnswerBindingV1,
+    evidence: MultiStageTriageEvidence<'_>,
     on_context: &mut (dyn FnMut(crate::context_budgeting::ContextBudgetTelemetry) + Send),
 ) -> CoreResult<MultiStageTriageOutcome> {
+    let MultiStageTriageEvidence {
+        candidates,
+        comparison_context,
+        binding,
+    } = evidence;
     let candidates = candidates
         .iter()
         .take(MULTI_STAGE_CANDIDATE_CAP.min(opts.max_rounds.saturating_sub(1)))
@@ -1352,7 +1406,7 @@ async fn run_multi_stage_broad_triage(
             provider_rounds: used_rounds,
         });
     }
-    let ledger = match multi_stage_ledger(&drafts, binding) {
+    let ledger = match multi_stage_ledger(&drafts, comparison_context, binding) {
         Ok(ledger) => ledger,
         Err(_) => {
             return Ok(MultiStageTriageOutcome::FailedClosed {
@@ -1368,8 +1422,16 @@ async fn run_multi_stage_broad_triage(
     // comparison budget gate: its identifiers are real prompt content and must
     // count against the same hard packing ceiling as every other message.
     let manifest = ledger.final_answer_manifest();
+    // The wrapper uses a fresh nonce. Mint it once and replay these exact
+    // authorized bytes during the bounded semantic correction; a retry never
+    // rewraps or introduces a newly shaped evidence block.
+    let comparison_context_block = final_comparison_context_block(comparison_context);
     if estimate_context_chars(&multi_stage_comparison_messages(
-        user_text, &drafts, &manifest, None,
+        user_text,
+        &drafts,
+        &comparison_context_block,
+        &manifest,
+        None,
     )) > crate::context_budgeting::synthesis_packing_budget(hard_budget)
     {
         return Ok(MultiStageTriageOutcome::Fallback(
@@ -1383,8 +1445,13 @@ async fn run_multi_stage_broad_triage(
         if used_rounds >= opts.max_rounds {
             break;
         }
-        let messages =
-            multi_stage_comparison_messages(user_text, &drafts, &manifest, correction_category);
+        let messages = multi_stage_comparison_messages(
+            user_text,
+            &drafts,
+            &comparison_context_block,
+            &manifest,
+            correction_category,
+        );
         // Both initial and correction prompts are bounded. This is normally
         // redundant after the initial check, but keeps the invariant true if a
         // future correction envelope grows independently.
@@ -4012,6 +4079,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             let inputs = crate::multi_model::ReviewPipelineInputs {
                                 user_text,
                                 candidates: &brief.candidate_groups,
+                                comparison_context: brief.comparison_context.as_ref(),
                                 binding: multi_stage_binding.clone(),
                                 budget: runtime.budget,
                                 role_ids: runtime.role_ids.clone(),
@@ -4175,8 +4243,11 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                         user_text,
                         opts,
                         &clock,
-                        &brief.candidate_groups,
-                        multi_stage_binding,
+                        MultiStageTriageEvidence {
+                            candidates: &brief.candidate_groups,
+                            comparison_context: brief.comparison_context.as_ref(),
+                            binding: multi_stage_binding,
+                        },
                         &mut publish_multi_stage_context,
                     )
                     .await?
@@ -13254,8 +13325,23 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             text: "likely noise".into(),
             evidence: candidate.evidence.into_iter().collect(),
         };
+        let comparison_context = crate::tool_host::BroadLogTriageComparisonContext {
+            candidate_id: "global_timeline_context".into(),
+            model_text: "GLOBAL_CONTEXT_SENTINEL evidence_id=e:global_timeline_context:8".into(),
+            evidence: vec![crate::tool_host::BroadLogTriageComparisonEvidence {
+                identity: crate::log_analysis::SearchEvidenceIdentity {
+                    seq: 8,
+                    source: "audit.log".into(),
+                    citation_source: None,
+                    template_id: 8,
+                },
+                content: "bounded chronology row".into(),
+            }],
+            complete: true,
+        };
         let manifest = multi_stage_ledger(
             std::slice::from_ref(&draft),
+            Some(&comparison_context),
             crate::investigation_answer::AnswerBindingV1 {
                 session_id: "s".into(),
                 turn_id: "t".into(),
@@ -13270,10 +13356,16 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         )
         .unwrap()
         .final_answer_manifest();
-        let comparison_prompt =
-            multi_stage_comparison_messages("triage", &[draft], &manifest, None)[0]
-                .content
-                .clone();
+        let comparison_context_block = final_comparison_context_block(Some(&comparison_context));
+        let comparison_messages = multi_stage_comparison_messages(
+            "triage",
+            std::slice::from_ref(&draft),
+            &comparison_context_block,
+            &manifest,
+            None,
+        );
+        let comparison_prompt = comparison_messages[0].content.clone();
+        let comparison_data = &comparison_messages[2].content;
         assert!(comparison_prompt.contains("independence is unverified"));
         assert!(!comparison_prompt.contains("independent candidates"));
         assert!(comparison_prompt.contains("exactly one JSON object"));
@@ -13281,6 +13373,26 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         assert!(comparison_prompt.contains("every manifest candidate_id exactly once"));
         assert!(comparison_prompt.contains("globally unique across the entire object"));
         assert!(comparison_prompt.contains("competing_explanations for likely unrelated"));
+        assert!(comparison_prompt.contains("global chronology rather than an incident"));
+        assert!(comparison_data.contains("GLOBAL_CONTEXT_SENTINEL"));
+        assert!(comparison_data.contains("e:global_timeline_context:8"));
+        assert!(comparison_data.contains("global_timeline_context"));
+        assert!(comparison_data.contains("<<<UNTRUSTED_DATA:"));
+        let corrected = multi_stage_comparison_messages(
+            "triage",
+            std::slice::from_ref(&draft),
+            &comparison_context_block,
+            &manifest,
+            Some("wrong_scope"),
+        );
+        assert_eq!(
+            corrected[2].content,
+            format!(
+                "{}{}",
+                final_comparison_correction(Some("wrong_scope")),
+                comparison_data
+            )
+        );
         assert!(!comparison_prompt.contains("Markdown headings"));
         assert!(!comparison_prompt.contains('\\'));
         assert!(final_comparison_correction(Some("parse")).contains("extra closing delimiter"));
@@ -13339,6 +13451,20 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             multi_stage_candidate("trace:charlie", 33),
             multi_stage_candidate("template:decoy", 99),
         ];
+        let comparison_context = crate::tool_host::BroadLogTriageComparisonContext {
+            candidate_id: "global_timeline_context".into(),
+            model_text: "global chronology row evidence_id=e:global_timeline_context:100".into(),
+            evidence: vec![crate::tool_host::BroadLogTriageComparisonEvidence {
+                identity: crate::log_analysis::SearchEvidenceIdentity {
+                    seq: 100,
+                    source: "timeline.log".into(),
+                    citation_source: None,
+                    template_id: 100,
+                },
+                content: "observed state transition".into(),
+            }],
+            complete: true,
+        };
         // Every selected group reaches comparison with host-owned citations.
         // A possible decoy remains isolated so comparison can label it noise
         // rather than silently dropping it.
@@ -13348,7 +13474,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             multi_stage_completion("trace:charlie is an operational incident"),
             multi_stage_completion("template:decoy is likely repetitive noise"),
             multi_stage_completion(
-                r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]},{"candidate_id":"trace:charlie","observations":[{"claim_id":"c","text":"x","evidence_ids":["e:trace:charlie:33"]}]},{"candidate_id":"template:decoy","observations":[{"claim_id":"d","text":"x","evidence_ids":["e:template:decoy:99"]}]}]}"#,
+                r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]},{"candidate_id":"trace:charlie","observations":[{"claim_id":"c","text":"x","evidence_ids":["e:trace:charlie:33"]}]},{"candidate_id":"template:decoy","observations":[{"claim_id":"d","text":"x","evidence_ids":["e:template:decoy:99"]}]},{"candidate_id":"global_timeline_context","observations":[{"claim_id":"timeline","text":"observed state transition","evidence_ids":["e:global_timeline_context:100"]}]}]}"#,
             ),
         ]);
         let opts = AgentOptions {
@@ -13362,17 +13488,20 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             "triage this broad corpus",
             &opts,
             &clock,
-            &candidates,
-            crate::investigation_answer::AnswerBindingV1 {
-                session_id: "s".into(),
-                turn_id: "t".into(),
-                corpus_id: "c".into(),
-                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
-                    event_revision: 1,
-                    template_analysis_revision: 2,
-                    suppression_revision: 3,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: Some(&comparison_context),
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
                 },
-                ledger_digest: String::new(),
             },
             &mut |telemetry| contexts.push(telemetry),
         )
@@ -13399,6 +13528,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 assert!(content.contains("trace:alpha"));
                 assert!(content.contains("trace:bravo"));
                 assert!(content.contains("trace:charlie"));
+                assert!(content.contains("global_timeline_context"));
                 assert_eq!(
                     provider_rounds, 5,
                     "one scoped draft per candidate plus final comparison"
@@ -13462,17 +13592,20 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             "triage",
             &opts,
             &clock,
-            &candidates,
-            crate::investigation_answer::AnswerBindingV1 {
-                session_id: "s".into(),
-                turn_id: "t".into(),
-                corpus_id: "c".into(),
-                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
-                    event_revision: 1,
-                    template_analysis_revision: 2,
-                    suppression_revision: 3,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
                 },
-                ledger_digest: String::new(),
             },
             &mut |telemetry| contexts.push(telemetry),
         )
@@ -13512,17 +13645,20 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             "triage",
             &opts,
             &clock,
-            &candidates,
-            crate::investigation_answer::AnswerBindingV1 {
-                session_id: "s".into(),
-                turn_id: "t".into(),
-                corpus_id: "c".into(),
-                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
-                    event_revision: 1,
-                    template_analysis_revision: 2,
-                    suppression_revision: 3,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
                 },
-                ledger_digest: String::new(),
             },
             &mut |telemetry| contexts.push(telemetry),
         )
@@ -13565,17 +13701,20 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             "triage",
             &opts,
             &clock,
-            &candidates,
-            crate::investigation_answer::AnswerBindingV1 {
-                session_id: "s".into(),
-                turn_id: "t".into(),
-                corpus_id: "c".into(),
-                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
-                    event_revision: 1,
-                    template_analysis_revision: 2,
-                    suppression_revision: 3,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
                 },
-                ledger_digest: String::new(),
             },
             &mut |_| {},
         )
@@ -13648,17 +13787,20 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             "triage",
             &opts,
             &clock,
-            &candidates,
-            crate::investigation_answer::AnswerBindingV1 {
-                session_id: "s".into(),
-                turn_id: "t".into(),
-                corpus_id: "c".into(),
-                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
-                    event_revision: 1,
-                    template_analysis_revision: 2,
-                    suppression_revision: 3,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
                 },
-                ledger_digest: String::new(),
             },
             &mut |telemetry| contexts.push(telemetry),
         )
@@ -13758,17 +13900,20 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             "PRIVATE_USER_SENTINEL",
             &opts,
             &clock,
-            &candidates,
-            crate::investigation_answer::AnswerBindingV1 {
-                session_id: "PRIVATE_SESSION_SENTINEL".into(),
-                turn_id: "PRIVATE_TURN_SENTINEL".into(),
-                corpus_id: "PRIVATE_CORPUS_SENTINEL".into(),
-                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
-                    event_revision: 1,
-                    template_analysis_revision: 2,
-                    suppression_revision: 3,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "PRIVATE_SESSION_SENTINEL".into(),
+                    turn_id: "PRIVATE_TURN_SENTINEL".into(),
+                    corpus_id: "PRIVATE_CORPUS_SENTINEL".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
                 },
-                ledger_digest: String::new(),
             },
             &mut |_| {},
         )
