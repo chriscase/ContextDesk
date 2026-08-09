@@ -1,0 +1,7 @@
+{
+  "schema": "contextdesk.gateway_contract.chat_stream_fragments.v1",
+  "note": "Fragmented assistant content that reassembles to the synthetic marker. Not live SSE bytes.",
+  "fragments": ["QUAL", "IFY_", "OK_V1"],
+  "expected": "QUALIFY_OK_V1",
+  "clean_completion": true
+}

@@ -1,0 +1,8 @@
+{
+  "case": "explicit_backend_error",
+  "error": {
+    "message": "synthetic provider failure",
+    "type": "api_error",
+    "code": "model_unavailable"
+  }
+}

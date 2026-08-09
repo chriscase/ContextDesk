@@ -1,0 +1,4 @@
+{
+  "case": "truncated_missing_embeddings_key",
+  "data": [{ "embedding": [0.1, 0.2] }]
+}

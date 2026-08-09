@@ -91,6 +91,34 @@
       "confidence": "low",
       "source": "name_hint",
       "ordinary_chat_default": false
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash",
+      "role": "investigator",
+      "confidence": "medium",
+      "source": "name_hint",
+      "ordinary_chat_default": true
+    },
+    {
+      "id": "openai/gpt-oss-120b",
+      "role": "investigator",
+      "confidence": "medium",
+      "source": "name_hint",
+      "ordinary_chat_default": true
+    },
+    {
+      "id": "voyage/voyage-4",
+      "role": "embedding",
+      "confidence": "high",
+      "source": "name_hint",
+      "ordinary_chat_default": false
+    },
+    {
+      "id": "voyage/rerank-2.5",
+      "role": "reranker",
+      "confidence": "high",
+      "source": "name_hint",
+      "ordinary_chat_default": false
     }
   ]
 }

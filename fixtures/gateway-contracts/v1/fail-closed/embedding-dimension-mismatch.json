@@ -1,0 +1,4 @@
+{
+  "case": "dimension_mismatch",
+  "embeddings": [[0.1, 0.2], [0.3]]
+}

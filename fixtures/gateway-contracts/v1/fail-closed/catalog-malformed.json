@@ -1,0 +1,7 @@
+{
+  "case": "malformed_catalog_missing_ids",
+  "models": [
+    { "name": "No Id Model" },
+    { "id": 42 }
+  ]
+}

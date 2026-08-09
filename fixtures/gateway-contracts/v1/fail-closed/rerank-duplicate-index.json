@@ -1,0 +1,7 @@
+{
+  "case": "duplicate_index",
+  "ranking": [
+    { "index": 0, "relevanceScore": 0.9 },
+    { "index": 0, "relevanceScore": 0.1 }
+  ]
+}

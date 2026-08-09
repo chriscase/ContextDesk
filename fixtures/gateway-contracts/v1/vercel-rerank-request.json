@@ -1,0 +1,24 @@
+{
+  "schema": "contextdesk.gateway_contract.vercel_v4_rerank_request.v1",
+  "note": "Specialty reranking request envelope (document list, not chat messages).",
+  "headers": {
+    "ai-gateway-protocol-version": "0.0.1",
+    "ai-gateway-auth-method": "api-key",
+    "ai-reranking-model-specification-version": "4",
+    "ai-model-id": "voyage/rerank-2.5"
+  },
+  "path": "/v4/ai/reranking-model",
+  "body": {
+    "documents": {
+      "type": "text",
+      "values": [
+        "synthetic doc alpha",
+        "synthetic doc beta",
+        "synthetic doc gamma"
+      ]
+    },
+    "query": "ContextDesk synthetic rerank query QUALIFY_RERANK_V1",
+    "topN": 3
+  },
+  "must_not_contain_keys": ["messages", "tools", "stream", "temperature"]
+}

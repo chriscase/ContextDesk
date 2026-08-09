@@ -1,0 +1,4 @@
+{
+  "case": "non_finite_component",
+  "embeddings": [[0.1, "NaN", 0.2]]
+}

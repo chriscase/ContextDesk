@@ -1,0 +1,15 @@
+{
+  "schema": "contextdesk.gateway_contract.vercel_v4_embedding_request.v1",
+  "note": "Specialty embedding request envelope (not a chat completions body).",
+  "headers": {
+    "ai-gateway-protocol-version": "0.0.1",
+    "ai-gateway-auth-method": "api-key",
+    "ai-embedding-model-specification-version": "4",
+    "ai-model-id": "voyage/voyage-4"
+  },
+  "path": "/v4/ai/embedding-model",
+  "body": {
+    "values": ["ContextDesk synthetic embed token QUALIFY_EMBED_V1"]
+  },
+  "must_not_contain_keys": ["messages", "tools", "stream", "temperature"]
+}
