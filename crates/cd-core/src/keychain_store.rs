@@ -493,6 +493,23 @@ mod tests {
         assert!(err.contains("1..="), "{err}");
     }
 
+    /// Exact upper bound is inclusive (`1..=MAX`). A `>`→`>=` mutant on the
+    /// length check rejects a legal MAX-byte credential file.
+    #[cfg(unix)]
+    #[test]
+    fn protected_file_accepts_exactly_max_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("max.key");
+        let body = vec![b'x'; MAX_FILE_SECRET_BYTES as usize];
+        write_protected_file(&path, &body, 0o600);
+        let reference = file_secret_ref(&path).expect("MAX-byte file must be admitted");
+        let got = read_file_secret_ref(&reference)
+            .expect("read MAX-byte secret")
+            .expect("present");
+        assert_eq!(got.len(), MAX_FILE_SECRET_BYTES as usize);
+        assert!(got.chars().all(|c| c == 'x'));
+    }
+
     #[cfg(unix)]
     #[test]
     fn protected_file_accepts_unicode_path_and_hard_link_to_same_inode() {
