@@ -1,0 +1,168 @@
+{
+  "schema": "contextdesk.critical_contract_mutation_ledger.v1",
+  "generated_at": "2026-08-10",
+  "baseline_sha": "10435d114e7e1faa0ca6e5f8447d70d41ad91492",
+  "branch": "test/critical-contract-mutations-v1",
+  "worktree": "/Users/chriscase/Documents/GitHub/contextdesk-critical-mutations-v1",
+  "mutation_target_dir": "/Users/chriscase/Documents/GitHub/contextdesk-mutants-target-v1",
+  "tool": {
+    "name": "cargo-mutants",
+    "version": "27.1.0"
+  },
+  "execution": {
+    "jobs": 1,
+    "shared_cargo_target_dir": "/Users/chriscase/Documents/GitHub/contextdesk-mutants-target-v1/target",
+    "parallel_j2_abandoned_reason": "shared CARGO_TARGET_DIR contention caused false TIMEOUT outcomes",
+    "test_filter_pattern": "cargo test --lib <module>"
+  },
+  "disk": {
+    "free_gib_phase2_start": 131,
+    "free_gib_high_water_low": 94,
+    "mutants_target_dir_gib_end": 30,
+    "stop_floor_gib": 65,
+    "floor_breached": false
+  },
+  "selected_files": [
+    {
+      "path": "crates/cd-core/src/multi_stage_budget.rs",
+      "mutated": true,
+      "justification": "final-comparison reserve and admission gates"
+    },
+    {
+      "path": "crates/cd-core/src/investigation_answer.rs",
+      "mutated": true,
+      "justification": "opaque evidence IDs and fail-closed validation"
+    },
+    {
+      "path": "crates/cd-core/src/keychain_store.rs",
+      "mutated": true,
+      "justification": "protected-file credential fail-closed path",
+      "scope_note": "focused core; excluded pure Memory/Keychain body-replacement noise"
+    },
+    {
+      "path": "crates/cd-core/src/triage_quality.rs",
+      "mutated": false,
+      "reason": "product defect fixed on fix/triage-role-integrity-v1; do not duplicate"
+    },
+    {
+      "path": "crates/cd-core/src/capability_qualification.rs",
+      "mutated": false,
+      "reason": "deferred next batch — large surface, disk/time"
+    },
+    {
+      "path": "crates/cd-core/src/quality_eval/answer_score.rs",
+      "mutated": false,
+      "reason": "already hardened on acceptance e69327f1"
+    }
+  ],
+  "results": {
+    "multi_stage_budget": {
+      "initial": {
+        "total": 24,
+        "caught": 18,
+        "missed": 5,
+        "unviable": 1,
+        "timeout": 0
+      },
+      "after_tests": {
+        "total": 24,
+        "caught": 23,
+        "missed": 0,
+        "unviable": 1,
+        "timeout": 0,
+        "viable_kill_rate": 1.0
+      },
+      "initial_survivors": [
+        {
+          "mutant": "admit_candidate: > with >=",
+          "class": "missing_test",
+          "killed_by": "admit_when_needed_rounds_exactly_equal_max"
+        },
+        {
+          "mutant": "synthesis_operation_cap_ms body replacements",
+          "class": "missing_test",
+          "killed_by": "synthesis_operation_cap_uses_remaining_without_extra_reserve"
+        },
+        {
+          "mutant": "can_run_comparison: > with <",
+          "class": "missing_test",
+          "killed_by": "comparison_round_gate_is_strict_and_directional"
+        }
+      ]
+    },
+    "investigation_answer": {
+      "initial": {
+        "total": 33,
+        "caught": 21,
+        "missed": 6,
+        "unviable": 6,
+        "timeout": 0
+      },
+      "after_tests": {
+        "total": 33,
+        "caught": 26,
+        "missed": 1,
+        "unviable": 6,
+        "timeout": 0,
+        "viable_kill_rate": 0.963
+      },
+      "remaining_survivor": {
+        "mutant": "validate_model_answer L394: || with && on corpus/revision",
+        "class": "equivalent_unobservable",
+        "reason": "HostEvidenceLedger::new already fail-closes corpus/revision drift; private construction"
+      }
+    },
+    "keychain_store_core": {
+      "total": 55,
+      "caught": 11,
+      "missed": 4,
+      "unviable": 40,
+      "timeout": 0,
+      "viable_kill_rate_at_run": 0.733,
+      "survivors_at_run": [
+        {
+          "mutant": "64 * 1024 -> 64 + 1024",
+          "class": "missing_test",
+          "follow_up_test": "protected_file_accepts_exactly_max_bytes"
+        },
+        {
+          "mutant": "len > MAX -> len >= MAX",
+          "class": "missing_test",
+          "follow_up_test": "protected_file_accepts_exactly_max_bytes"
+        },
+        {
+          "mutant": "O_NOFOLLOW | O_CLOEXEC -> & or ^",
+          "class": "build_tool_limitation_or_defense_in_depth",
+          "reason": "symlink rejected via symlink_metadata before open; no TOCTOU harness"
+        }
+      ]
+    }
+  },
+  "tests_added": [
+    "multi_stage_budget::tests::admit_when_needed_rounds_exactly_equal_max",
+    "multi_stage_budget::tests::synthesis_operation_cap_uses_remaining_without_extra_reserve",
+    "multi_stage_budget::tests::comparison_round_gate_is_strict_and_directional",
+    "investigation_answer::tests::ledger_get_and_candidate_ids_expose_host_bound_rows",
+    "investigation_answer::tests::empty_evidence_ids_fail_except_for_missing_evidence_claims",
+    "investigation_answer::tests::validate_rejects_corpus_mismatch_even_when_revision_matches",
+    "keychain_store::tests::protected_file_accepts_exactly_max_bytes"
+  ],
+  "product_fixes": [],
+  "aggregate": {
+    "budget_plus_ia_viable_kill_rate_verified": 0.98,
+    "notes": "49/50 viable across budget+IA after tests; keychain expected improved after max-byte test without full re-run"
+  },
+  "next_batch": [
+    "integrate triage-role-integrity then mutate triage_quality",
+    "capability_qualification focused store/stale/fingerprint",
+    "agent.rs admission/validation slices",
+    "keychain TOCTOU for O_NOFOLLOW"
+  ],
+  "safety": {
+    "live_providers": false,
+    "keychain_os_access": false,
+    "acceptance_branch_touched": false,
+    "other_worktrees_cleaned": false,
+    "prs_opened": false
+  }
+}
