@@ -1365,26 +1365,33 @@ fn linked_triage_authority_summary(events: &[StreamEvent]) -> String {
                 ok,
                 detail,
                 ..
-            } if name == "broad_log_triage_multi_stage" => {
+            } if name == "broad_log_triage" || name == "broad_log_triage_multi_stage" => {
                 let mut label = format!("tool_{phase:?}_ok={ok:?}");
-                if let Some(detail) = detail.as_deref() {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(detail) {
-                        if value.get("multi_stage").and_then(serde_json::Value::as_str)
-                            == Some("not_entered")
-                        {
-                            let reason = value
-                                .get("reason")
-                                .and_then(serde_json::Value::as_str)
-                                .filter(|reason| {
-                                    matches!(
-                                        *reason,
-                                        "groups_absent"
-                                            | "round_budget_insufficient"
-                                            | "context_budget_insufficient"
-                                    )
-                                })
-                                .unwrap_or("unknown");
-                            label.push_str(&format!("_fallback={reason}"));
+                if name == "broad_log_triage_multi_stage" {
+                    label = format!("multi_stage_{label}");
+                } else {
+                    label = format!("brief_{label}");
+                }
+                if name == "broad_log_triage_multi_stage" {
+                    if let Some(detail) = detail.as_deref() {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(detail) {
+                            if value.get("multi_stage").and_then(serde_json::Value::as_str)
+                                == Some("not_entered")
+                            {
+                                let reason = value
+                                    .get("reason")
+                                    .and_then(serde_json::Value::as_str)
+                                    .filter(|reason| {
+                                        matches!(
+                                            *reason,
+                                            "groups_absent"
+                                                | "round_budget_insufficient"
+                                                | "context_budget_insufficient"
+                                        )
+                                    })
+                                    .unwrap_or("unknown");
+                                label.push_str(&format!("_fallback={reason}"));
+                            }
                         }
                     }
                 }
