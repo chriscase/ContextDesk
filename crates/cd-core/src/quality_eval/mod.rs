@@ -18,6 +18,7 @@
 
 pub mod answer_score;
 pub mod export;
+pub mod matrix;
 pub mod metrics;
 pub mod run;
 pub mod suite;
@@ -28,6 +29,11 @@ pub use export::{
     gate_export_text, normalize_for_stability, serialize_json, serialize_jsonl, write_export,
     ExportFormat,
 };
+pub use matrix::{
+    accounting_from_record, matrix_row_from_record, resolve_matrix_suite_path, run_suite_matrix,
+    suite_relative_label, SuiteMatrixAggregates, SuiteMatrixRow, SuiteMatrixSummary,
+    SUITE_MATRIX_SCHEMA_ID,
+};
 pub use metrics::{round6, score_retrieval, validate_ranking};
 pub use run::{
     hermetic_quality_unit, judge_is_not_scheduled_pass, quality_units_are_gateway_scoped,
@@ -37,6 +43,7 @@ pub use suite::{
     assert_suite_digest, default_suite_path_from_manifest_dir, expectation_accounting, hex_sha256,
     known_document_ids, list_bundled_suites, load_suite, resolve_suite_path, scan_privacy_text,
     scan_runtime_isolation, ExpectationAccounting, LoadedCase, LoadedSuite, SuiteCatalogEntry,
-    BUNDLED_OPEN_V1_RELATIVE, PRIVACY_FORBIDDEN_SUBSTRINGS, RUNTIME_FORBIDDEN_EVALUATOR_TOKENS,
+    BUNDLED_ADVERSARIAL_V1_RELATIVE, BUNDLED_OPEN_V1_RELATIVE, PRIVACY_FORBIDDEN_SUBSTRINGS,
+    RUNTIME_FORBIDDEN_EVALUATOR_TOKENS,
 };
 pub use types::*;
