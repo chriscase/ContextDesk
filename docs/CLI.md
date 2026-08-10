@@ -368,6 +368,16 @@ additionally writes an owner-only (`0600`/`0700` on Unix), local-only
 `private/capture.json` with bounded synthetic case detail — never
 credentials — that the share-safe bundle never references by content.
 
+All diagnostic failure text passes through one provider-neutral share-safe
+policy before text/JSONL rendering and again at artifact serialization. The
+policy scrubs credential shapes and auth-header variants, replaces arbitrary
+HTTP(S) endpoints, removes absolute local paths and exact selected
+profile/model identifiers, collapses nested/raw provider response bodies,
+and retains coarse categories such as HTTP status, authentication, rate
+limit, timeout, TLS, DNS, or connection failure where available. JSONL
+redacts the absolute artifact directory; the ordinary human/`--json`
+operational result retains it so the just-created bundle remains locatable.
+
 **Output.** Text prints a `[PASS]`/`[WARN]`/`[FAIL]`/`[SKIP]` line per case
 as it completes (colored when the terminal supports it and `NO_COLOR` is
 unset; the bracketed label is always present regardless of color, and
@@ -386,6 +396,11 @@ embedding profile's product lane reports an explicit `not_run` state
 rather than a fabricated result — a documented follow-up, not silent
 success. An offline inspect/replay seam for turning a captured sanitized
 envelope into a hermetic regression fixture is not yet implemented.
+Redaction is a containment boundary, not a general DLP classifier: short
+ordinary prose that is neither inside a recognized provider-body field nor
+shaped like a credential, URL, local path, or selected identifier can remain.
+The diagnostic therefore remains synthetic-data-only and does not capture raw
+live request/response bodies by default.
 
 ## Isolated profiles (`--data-dir` / `--profile-dir`)
 

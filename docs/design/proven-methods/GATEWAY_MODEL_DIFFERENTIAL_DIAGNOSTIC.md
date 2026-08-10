@@ -175,17 +175,25 @@ private path, or full model catalog.
 
 ## 10. Security and privacy
 
-Redaction happens at existing chokepoints (`redact_reason`,
-`fingerprint_endpoint`) already used elsewhere in the codebase, not a new
-parallel redaction path. The default artifact is share-safe by
-construction (pseudonymous identity, no raw URL); a private, unredacted
-capture requires an explicit `--raw --raw-i-understand` pair and is
-written with owner-only permissions, never referenced by the share-safe
-bundle. Prompt-injection risk: every synthetic corpus this method seeds is
+Every lane detail and cleanup failure passes through a centralized,
+provider-neutral share-safe policy before progressive rendering, then the
+policy is reapplied at artifact serialization. It covers secret and
+Authorization/API-key variants, arbitrary HTTP(S) endpoints, absolute local
+paths, exact selected profile/model identifiers, and nested/raw provider
+bodies while retaining coarse failure categories. JSONL also removes the
+absolute artifact directory. The default artifact remains share-safe by
+construction (pseudonymous identity, no raw URL); the optional private capture
+requires `--raw --raw-i-understand`, is written with owner-only permissions,
+and receives the same failure-detail sanitization.
+
+This is intentionally not a general DLP claim: short ordinary prose outside a
+recognized provider body can remain. The method therefore stays
+synthetic-data-only and never captures raw live request/response bodies by
+default. Prompt-injection risk: every synthetic corpus this method seeds is
 host-authored fixture content, never live user data, so there is no
 untrusted-corpus-content injection surface distinct from what `doctor`
-already accepts. No write side effects outside disposable, run-scoped
-state; no HardWrite/SoftWrite surface is touched.
+already accepts. No write side effects outside disposable, run-scoped state;
+no HardWrite/SoftWrite surface is touched.
 
 ## 11. UX and human factors
 
@@ -201,7 +209,7 @@ non-ANSI terminal all degrade to the same plain text.
 
 | Layer | Happy path | Boundary/adversarial path | Evidence |
 | --- | --- | --- | --- |
-| Contract/unit | Case classification, lane combination | — | Inline `#[cfg(test)]` in `gateway.rs` (follow-up: expand) |
+| Contract/unit | Case classification, lane combination | Nested errors, credentials/auth headers, endpoints, paths, selected ids, JSONL/report/manifest boundary | Inline `#[cfg(test)]` in `gateway.rs` |
 | Host/CLI e2e | Full run against a hermetic mock, artifact/checksum | No-`--yes` refusal, `--raw` ack enforcement, stalled-gateway deadline bound, pre-existing corpus untouched | `crates/cd-cli/tests/gateway_diagnose.rs` |
 
 ## 13. ContextDesk production anchors

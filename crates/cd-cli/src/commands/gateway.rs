@@ -60,7 +60,9 @@ use cd_core::triage_quality::{
     parse_structured_triage_answer, score_structured_triage_answer,
     triage_answer_contract_system_text, TriageHostFacts, TriageKnownAnswerKey,
 };
-use cd_core::turn_trace::{RecordingTurnTrace, TracedOutcome, TurnTraceSink};
+use cd_core::turn_trace::{
+    opaque_absolute_paths, RecordingTurnTrace, TracedOutcome, TurnTraceSink,
+};
 use cd_workflow::capability_qualification::{
     backend_for_provider, gate_for_model, LiveQualificationTransport,
 };
@@ -252,6 +254,286 @@ fn pseudonym(label: &str) -> String {
     format!("p-{}", &digest[..12.min(digest.len())])
 }
 
+/// Central share-safe policy for every gateway-diagnostic output surface.
+///
+/// Provider errors are untrusted: they may echo request headers, endpoint
+/// URLs, local paths, selected identifiers, or arbitrary response bodies.
+/// Every case and terminal report passes through this policy before text,
+/// JSON, JSONL, or an artifact can observe it; artifact writers apply it a
+/// second time as a serialization-boundary backstop.
+struct GatewayDiagnosticRedactionPolicy {
+    sensitive_literals: Vec<String>,
+}
+
+impl GatewayDiagnosticRedactionPolicy {
+    fn new(profile: &ProviderProfile, selected_model: &str) -> Self {
+        let mut sensitive_literals = vec![
+            profile.id.clone(),
+            profile.label.clone(),
+            profile.chat_model.clone(),
+            selected_model.to_string(),
+        ];
+        sensitive_literals.retain(|value| value.trim().len() >= 3);
+        sensitive_literals.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        sensitive_literals.dedup();
+        Self { sensitive_literals }
+    }
+
+    #[cfg(test)]
+    fn for_test(profile_id: &str, model_id: &str) -> Self {
+        Self {
+            sensitive_literals: vec![profile_id.to_string(), model_id.to_string()],
+        }
+    }
+
+    fn redact_text(&self, raw: &str) -> String {
+        let mut out = cd_core::redact::scrub_secrets(raw);
+        out = redact_auth_header_values(&out);
+        out = redact_http_urls(&out);
+        out = opaque_absolute_paths(&out);
+        for literal in &self.sensitive_literals {
+            out = replace_ascii_case_insensitive(&out, literal, "[selected-id]");
+        }
+        out = redact_provider_bodies(&out, raw);
+        truncate_chars(&mut out, 240);
+        out
+    }
+
+    fn sanitize_case(&self, report: &mut CaseReport) {
+        for lane in [
+            &mut report.direct,
+            &mut report.product,
+            &mut report.scorer,
+        ] {
+            lane.detail = self.redact_text(&lane.detail);
+        }
+    }
+
+    fn sanitize_report(&self, report: &mut GatewayDiagnosticReport) {
+        for case in &mut report.cases {
+            self.sanitize_case(case);
+        }
+        for failure in &mut report.cleanup.failures {
+            *failure = self.redact_text(failure);
+        }
+    }
+
+    fn sanitize_jsonl_report(&self, report: &GatewayDiagnosticReport) -> GatewayDiagnosticReport {
+        let mut safe = report.clone();
+        self.sanitize_report(&mut safe);
+        if let Some(path) = &mut safe.artifact_dir {
+            *path = self.redact_text(path);
+        }
+        safe
+    }
+}
+
+fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() {
+        return input.to_string();
+    }
+    let mut out = input.to_string();
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut search_from = 0usize;
+    loop {
+        let lower = out.to_ascii_lowercase();
+        let Some(relative) = lower[search_from..].find(&needle_lower) else {
+            break;
+        };
+        let start = search_from + relative;
+        let end = start + needle.len();
+        if !out.is_char_boundary(start) || !out.is_char_boundary(end) {
+            search_from = start.saturating_add(1);
+            continue;
+        }
+        let left_is_identifier = out[..start]
+            .chars()
+            .next_back()
+            .is_some_and(is_identifier_char);
+        let right_is_identifier = out[end..]
+            .chars()
+            .next()
+            .is_some_and(is_identifier_char);
+        if left_is_identifier || right_is_identifier {
+            search_from = end;
+            continue;
+        }
+        out.replace_range(start..end, replacement);
+        search_from = start + replacement.len();
+    }
+    out
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')
+}
+
+fn redact_http_urls(input: &str) -> String {
+    let mut out = input.to_string();
+    loop {
+        let lower = out.to_ascii_lowercase();
+        let start = [lower.find("https://"), lower.find("http://")]
+            .into_iter()
+            .flatten()
+            .min();
+        let Some(start) = start else {
+            break;
+        };
+        let end = out[start..]
+            .char_indices()
+            .find(|(_, ch)| {
+                ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>' | ',' | ')' | ']' | '}')
+            })
+            .map(|(offset, _)| start + offset)
+            .unwrap_or(out.len());
+        out.replace_range(start..end, "[endpoint]");
+    }
+    out
+}
+
+fn redact_auth_header_values(input: &str) -> String {
+    let mut out = input.to_string();
+    for label in [
+        "authorization",
+        "x-api-key",
+        "api-key",
+        "api_key",
+        "apikey",
+        "access-token",
+        "access_token",
+    ] {
+        let mut search_from = 0usize;
+        loop {
+            let lower = out.to_ascii_lowercase();
+            let Some(relative) = lower[search_from..].find(label) else {
+                break;
+            };
+            let label_start = search_from + relative;
+            let after_label = label_start + label.len();
+            let suffix = &out[after_label..];
+            let whitespace = suffix.len() - suffix.trim_start_matches([' ', '\t']).len();
+            let separator = after_label + whitespace;
+            if !matches!(out.as_bytes().get(separator), Some(b':') | Some(b'=')) {
+                search_from = after_label;
+                continue;
+            }
+            let value_start = separator + 1;
+            let leading = out[value_start..].len()
+                - out[value_start..].trim_start_matches([' ', '\t']).len();
+            let value_start = value_start + leading;
+            let value_end = out[value_start..]
+                .char_indices()
+                .find(|(_, ch)| matches!(ch, '\n' | '\r' | '"' | '\'' | ',' | ';' | '}'))
+                .map(|(offset, _)| value_start + offset)
+                .unwrap_or(out.len());
+            if value_end > value_start {
+                out.replace_range(value_start..value_end, "[redacted-auth]");
+                search_from = value_start + "[redacted-auth]".len();
+            } else {
+                search_from = value_start;
+            }
+        }
+    }
+
+    let mut search_from = 0usize;
+    loop {
+        let lower = out.to_ascii_lowercase();
+        let Some(relative) = lower[search_from..].find("bearer ") else {
+            break;
+        };
+        let start = search_from + relative + "bearer ".len();
+        if out[start..].starts_with("***") || out[start..].starts_with("[redacted-auth]") {
+            search_from = start.saturating_add(3);
+            continue;
+        }
+        let end = out[start..]
+            .char_indices()
+            .find(|(_, ch)| {
+                !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+            })
+            .map(|(offset, _)| start + offset)
+            .unwrap_or(out.len());
+        if end > start {
+            out.replace_range(start..end, "***");
+            search_from = start + 3;
+        } else {
+            search_from = start;
+        }
+    }
+    out
+}
+
+fn redact_provider_bodies(input: &str, original: &str) -> String {
+    let mut out = input.to_string();
+    let lower = out.to_ascii_lowercase();
+    for label in [
+        "response body",
+        "provider body",
+        "raw response",
+        "raw_error",
+        "body",
+    ] {
+        if let Some(label_start) = lower.find(label) {
+            let after = label_start + label.len();
+            let suffix = &out[after..];
+            let whitespace = suffix.len() - suffix.trim_start_matches([' ', '\t']).len();
+            let separator = after + whitespace;
+            if matches!(out.as_bytes().get(separator), Some(b':') | Some(b'=')) {
+                let payload_start = separator + 1;
+                out.replace_range(payload_start.., " [provider-body-redacted]");
+                return out;
+            }
+        }
+    }
+
+    let trimmed = original.trim_start();
+    let original_lower = trimmed.to_ascii_lowercase();
+    if (trimmed.starts_with('{') || trimmed.starts_with('['))
+        && (original_lower.contains("\"error\"") || original_lower.contains("provider"))
+    {
+        return format!("{}: [provider-body-redacted]", failure_category(original));
+    }
+    if lower.contains("provider") || lower.contains("gateway") || lower.contains("http ") {
+        if let Some((start, end)) = out
+            .find('{')
+            .zip(out.rfind('}'))
+            .filter(|(start, end)| end >= start)
+        {
+            out.replace_range(start..=end, "[provider-body-redacted]");
+        }
+    }
+    out
+}
+
+fn failure_category(raw: &str) -> &'static str {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("401") || lower.contains("403") || lower.contains("auth") {
+        "authentication"
+    } else if lower.contains("429") || lower.contains("rate limit") {
+        "rate_limit"
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "timeout"
+    } else if lower.contains("tls") || lower.contains("certificate") {
+        "tls"
+    } else if lower.contains("dns") || lower.contains("resolve") {
+        "dns"
+    } else if lower.contains("connect") {
+        "connection"
+    } else if lower.contains("status") || lower.contains("http") {
+        "provider_status"
+    } else {
+        "provider_error"
+    }
+}
+
+fn truncate_chars(value: &mut String, max_chars: usize) {
+    let Some((boundary, _)) = value.char_indices().nth(max_chars) else {
+        return;
+    };
+    value.truncate(boundary);
+    value.push('…');
+}
+
 /// Execute `contextdesk gateway diagnose`. Handles Text/Jsonl progressive
 /// rendering and the terminal Json envelope itself (mirrors `doctor::run`)
 /// — the caller only needs the returned report to compute an exit code.
@@ -280,6 +562,7 @@ pub async fn run(
     let model = model_override
         .map(str::to_string)
         .unwrap_or_else(|| profile.chat_model.clone());
+    let redaction = GatewayDiagnosticRedactionPolicy::new(&profile, &model);
     let role = classify_model_role(&model).role;
     let deadline_secs = args.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
@@ -327,7 +610,7 @@ pub async fn run(
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let case_budget = remaining.min(Duration::from_secs(PER_CASE_TIMEOUT_SECS));
-        let report = run_one_case(
+        let mut report = run_one_case(
             case_id,
             &profile,
             &model,
@@ -345,6 +628,7 @@ pub async fn run(
             &mut created_sessions,
         )
         .await;
+        redaction.sanitize_case(&mut report);
         requests_made += report.direct.requests_used + report.product.requests_used;
         print_case(format, color, &caps, &report);
         cases.push(report);
@@ -353,7 +637,10 @@ pub async fn run(
     let cancelled = cancel.load(Ordering::SeqCst);
     let deadline_exceeded = Instant::now() >= deadline;
 
-    let cleanup = cleanup_all(paths, sessions, &corpora, &created_sessions);
+    let mut cleanup = cleanup_all(paths, sessions, &corpora, &created_sessions);
+    for failure in &mut cleanup.failures {
+        *failure = redaction.redact_text(failure);
+    }
 
     let verdicts = compute_verdicts(&cases);
     let finished_at_unix_ms = now_unix_ms();
@@ -387,14 +674,33 @@ pub async fn run(
         private_capture_written: false,
     };
 
-    match write_artifact_bundle(args, paths, &run_id_for_dir(&report.run_id), &report) {
+    redaction.sanitize_report(&mut report);
+    match write_artifact_bundle(
+        args,
+        paths,
+        &run_id_for_dir(&report.run_id),
+        &report,
+        &redaction,
+    ) {
         Ok(dir) => report.artifact_dir = Some(dir.display().to_string()),
-        Err(e) => eprintln!("warning: failed to write diagnostic artifact bundle: {e}"),
+        Err(e) => eprintln!(
+            "warning: failed to write diagnostic artifact bundle: {}",
+            redaction.redact_text(&e)
+        ),
     }
     if args.raw && args.raw_i_understand {
-        match write_private_capture(args, paths, &run_id_for_dir(&report.run_id), &report) {
+        match write_private_capture(
+            args,
+            paths,
+            &run_id_for_dir(&report.run_id),
+            &report,
+            &redaction,
+        ) {
             Ok(()) => report.private_capture_written = true,
-            Err(e) => eprintln!("warning: failed to write private capture: {e}"),
+            Err(e) => eprintln!(
+                "warning: failed to write private capture: {}",
+                redaction.redact_text(&e)
+            ),
         }
     }
 
@@ -405,6 +711,7 @@ pub async fn run(
         &report,
         cancelled,
         &cleanup_note(&report.cleanup),
+        &redaction,
     );
 
     Ok(report)
@@ -764,6 +1071,7 @@ fn print_terminal(
     report: &GatewayDiagnosticReport,
     cancelled: bool,
     cleanup_note: &str,
+    redaction: &GatewayDiagnosticRedactionPolicy,
 ) {
     match format {
         OutputFormat::Text => {
@@ -803,9 +1111,10 @@ fn print_terminal(
                     .expect("cancelled line always serializable")
                 );
             } else {
+                let safe_report = redaction.sanitize_jsonl_report(report);
                 println!(
                     "{}",
-                    serde_json::to_string(&DiagnoseLine::Verdict(report))
+                    serde_json::to_string(&DiagnoseLine::Verdict(&safe_report))
                         .expect("GatewayDiagnosticReport is always serializable")
                 );
             }
@@ -2199,10 +2508,16 @@ fn write_artifact_bundle(
     paths: &Paths,
     run_dir: &str,
     report: &GatewayDiagnosticReport,
+    redaction: &GatewayDiagnosticRedactionPolicy,
 ) -> Result<PathBuf, String> {
     let dir = artifact_root(paths, &args.out, run_dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let body = serde_json::to_vec_pretty(report).map_err(|e| e.to_string())?;
+    let mut share_safe_report = report.clone();
+    redaction.sanitize_report(&mut share_safe_report);
+    if let Some(path) = &mut share_safe_report.artifact_dir {
+        *path = redaction.redact_text(path);
+    }
+    let body = serde_json::to_vec_pretty(&share_safe_report).map_err(|e| e.to_string())?;
     let report_path = dir.join("report.json");
     std::fs::write(&report_path, &body).map_err(|e| e.to_string())?;
     let checksum = sha256_hex(&body);
@@ -2231,15 +2546,18 @@ fn write_private_capture(
     paths: &Paths,
     run_dir: &str,
     report: &GatewayDiagnosticReport,
+    redaction: &GatewayDiagnosticRedactionPolicy,
 ) -> Result<(), String> {
     let dir = artifact_root(paths, &args.out, run_dir).join("private");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut local_report = report.clone();
+    redaction.sanitize_report(&mut local_report);
     let body = serde_json::json!({
         "schema_id": "contextdesk.gateway_diagnostic_private_capture.v1",
         "local_only": true,
         "note": "bounded synthetic lane detail only; never credentials, auth headers, or user corpora",
         "run_id": report.run_id,
-        "cases": report.cases,
+        "cases": local_report.cases,
     });
     let path = dir.join("capture.json");
     std::fs::write(
@@ -2485,5 +2803,199 @@ mod tests {
         assert_eq!(case.classification, CaseClassification::NotRun);
         assert!(!case.direct.executed);
         assert!(!case.product.executed);
+    }
+
+    const PRIVATE_PROFILE: &str = "corp-profile-exact";
+    const PRIVATE_MODEL: &str = "private-model-exact";
+    const PRIVATE_TOKEN: &str = "synthetic-token-abcdef1234567890";
+
+    fn adversarial_case() -> CaseReport {
+        CaseReport {
+            case_id: "ordinary_generation",
+            description: "adversarial hermetic redaction fixture",
+            direct: LaneResult {
+                detail: format!(
+                    "provider HTTP 401 response body: {{\"error\":{{\"message\":\"model={PRIVATE_MODEL} Authorization: Bearer {PRIVATE_TOKEN}\"}}}}"
+                ),
+                ..fail_lane()
+            },
+            product: LaneResult {
+                detail: format!(
+                    "POST https://private.gateway.invalid/v1/chat?api_key={PRIVATE_TOKEN} via http://fallback.invalid Authorization=Basic {PRIVATE_TOKEN}"
+                ),
+                ..fail_lane()
+            },
+            scorer: LaneResult {
+                detail: format!(
+                    "profile={PRIVATE_PROFILE} model={PRIVATE_MODEL} files=/private/tmp/contextdesk/failure.json /Users/alice/private/log.txt /home/alice/private/log.txt"
+                ),
+                ..fail_lane()
+            },
+            classification: CaseClassification::GatewayOrModelLikely,
+        }
+    }
+
+    fn adversarial_report() -> GatewayDiagnosticReport {
+        GatewayDiagnosticReport {
+            schema_id: GATEWAY_DIAGNOSTIC_SCHEMA_ID,
+            schema_version: GATEWAY_DIAGNOSTIC_SCHEMA_VERSION,
+            run_id: "gwdx-hermetic-redaction".to_string(),
+            build: BuildIdentity {
+                version: "test",
+                long_version: "test",
+            },
+            started_at_unix_ms: 1,
+            finished_at_unix_ms: 2,
+            level: "basic",
+            profile_pseudonym: "p-profile".to_string(),
+            model_pseudonym: "p-model".to_string(),
+            role_hint: "investigator",
+            endpoint_fingerprint: "fingerprint".to_string(),
+            credentials_read: false,
+            deadline_secs: 30,
+            requests_planned_max: 1,
+            requests_made: 1,
+            cases: vec![adversarial_case()],
+            verdicts: Verdicts {
+                gateway_model_compatible: false,
+                product_workflow_compatible: false,
+                answers_useful: false,
+            },
+            cleanup: CleanupReport {
+                corpora_created: 1,
+                corpora_removed: 0,
+                sessions_created: 0,
+                sessions_removed: 0,
+                failures: vec![format!(
+                    "cleanup failed at /private/tmp/contextdesk: X-API-Key: {PRIVATE_TOKEN} api_key={PRIVATE_TOKEN}"
+                )],
+            },
+            cancelled: false,
+            deadline_exceeded: false,
+            artifact_dir: Some("/private/tmp/contextdesk/gateway-diagnostics/run".to_string()),
+            private_capture_written: false,
+        }
+    }
+
+    fn assert_share_safe(rendered: &str) {
+        for forbidden in [
+            PRIVATE_PROFILE,
+            PRIVATE_MODEL,
+            PRIVATE_TOKEN,
+            "https://",
+            "http://",
+            "/private/tmp",
+            "/Users/",
+            "/home/",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "share-safe output retained {forbidden:?}: {rendered}"
+            );
+        }
+        let lower = rendered.to_ascii_lowercase();
+        assert!(!lower.contains("authorization: bearer"), "{rendered}");
+        assert!(!lower.contains("authorization=basic"), "{rendered}");
+        assert!(!lower.contains("x-api-key: synthetic"), "{rendered}");
+        assert!(!lower.contains("api_key=synthetic"), "{rendered}");
+    }
+
+    #[test]
+    fn centralized_policy_redacts_adversarial_provider_failures_but_keeps_categories() {
+        let policy = GatewayDiagnosticRedactionPolicy::for_test(PRIVATE_PROFILE, PRIVATE_MODEL);
+        let samples = [
+            format!(
+                "provider HTTP 401 response body: {{\"error\":{{\"nested\":{{\"message\":\"Bearer {PRIVATE_TOKEN}\"}}}}}}"
+            ),
+            format!(
+                "endpoints https://private.gateway.invalid/v1 and http://fallback.invalid/v1?api_key={PRIVATE_TOKEN}"
+            ),
+            "/private/tmp/contextdesk/a.json /Users/alice/private/b.json /home/alice/private/c.json"
+                .to_string(),
+            format!(
+                "Authorization: Bearer {PRIVATE_TOKEN}\nauthorization=Basic {PRIVATE_TOKEN}\nX-API-Key: {PRIVATE_TOKEN}\napi_key={PRIVATE_TOKEN}\nbearer {PRIVATE_TOKEN}"
+            ),
+            format!("profile={PRIVATE_PROFILE} model={PRIVATE_MODEL}"),
+        ];
+        let rendered = samples
+            .iter()
+            .map(|sample| policy.redact_text(sample))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_share_safe(&rendered);
+        assert!(
+            rendered.contains("HTTP 401"),
+            "useful status category lost: {rendered}"
+        );
+        assert!(
+            rendered.contains("[provider-body-redacted]"),
+            "raw nested provider body was not collapsed: {rendered}"
+        );
+
+        let raw_json = format!(
+            "{{\"error\":{{\"code\":401,\"message\":\"Authorization: Bearer {PRIVATE_TOKEN}\"}}}}"
+        );
+        assert_eq!(
+            policy.redact_text(&raw_json),
+            "authentication: [provider-body-redacted]"
+        );
+    }
+
+    #[test]
+    fn jsonl_report_and_manifest_outputs_are_share_safe_at_serialization_boundaries() {
+        let policy = GatewayDiagnosticRedactionPolicy::for_test(PRIVATE_PROFILE, PRIVATE_MODEL);
+
+        let mut case = adversarial_case();
+        policy.sanitize_case(&mut case);
+        let case_jsonl = serde_json::to_string(&DiagnoseLine::Case(&case)).unwrap();
+        assert_share_safe(&case_jsonl);
+
+        let report = adversarial_report();
+        let jsonl_report = policy.sanitize_jsonl_report(&report);
+        let verdict_jsonl = serde_json::to_string(&DiagnoseLine::Verdict(&jsonl_report)).unwrap();
+        assert_share_safe(&verdict_jsonl);
+        assert!(
+            verdict_jsonl.contains("[local-path]"),
+            "JSONL should disclose path removal: {verdict_jsonl}"
+        );
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(Some(data_dir.path()), None).unwrap();
+        let args = GatewayDiagnoseArgs {
+            level: DiagnoseLevel::Basic,
+            yes: true,
+            timeout: Some(30),
+            raw: false,
+            raw_i_understand: false,
+            out: Some(data_dir.path().join("artifacts")),
+        };
+        let artifact_dir = write_artifact_bundle(
+            &args,
+            &paths,
+            "gwdx-hermetic-redaction",
+            &report,
+            &policy,
+        )
+        .unwrap();
+        let report_json = std::fs::read_to_string(artifact_dir.join("report.json")).unwrap();
+        let manifest_json = std::fs::read_to_string(artifact_dir.join("manifest.json")).unwrap();
+        assert_share_safe(&report_json);
+        assert_share_safe(&manifest_json);
+        assert!(
+            report_json.contains("[provider-body-redacted]"),
+            "report should retain the useful redaction marker: {report_json}"
+        );
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_json).unwrap();
+        let report_bytes = std::fs::read(artifact_dir.join("report.json")).unwrap();
+        let expected_sha = sha256_hex(&report_bytes);
+        assert_eq!(
+            manifest["files"][0]["sha256"].as_str(),
+            Some(expected_sha.as_str())
+        );
+        assert_eq!(
+            manifest["files"][0]["bytes"].as_u64(),
+            Some(report_bytes.len() as u64)
+        );
     }
 }
