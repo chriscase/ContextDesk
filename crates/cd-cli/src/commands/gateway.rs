@@ -43,8 +43,7 @@ use crate::config::{ColorMode, OutputFormat};
 use crate::envelope::{CliError, CliResult, Envelope};
 use crate::render::TerminalCapabilities;
 use cd_core::capability_qualification::{
-    fingerprint_endpoint, redact_reason, run_qualification, CapabilityStatus,
-    ProfileCapabilityGate, QualificationKey,
+    fingerprint_endpoint, redact_reason, run_qualification, CapabilityStatus, QualificationKey,
 };
 use cd_core::config::AppConfig;
 use cd_core::events::StreamEvent;
@@ -59,7 +58,7 @@ use cd_core::rerank::HttpRerankBackend;
 use cd_core::sessions::SessionStore;
 use cd_core::triage_quality::{
     parse_structured_triage_answer, score_structured_triage_answer, triage_answer_contract_system_text,
-    StructuredTriageAnswer, TriageHostFacts, TriageKnownAnswerKey,
+    TriageHostFacts, TriageKnownAnswerKey,
 };
 use cd_core::turn_trace::{RecordingTurnTrace, TracedOutcome, TurnTraceSink};
 use cd_workflow::capability_qualification::{
@@ -300,6 +299,21 @@ pub async fn run(
     let mut requests_made: u32 = 0;
     let mut cases: Vec<CaseReport> = Vec::new();
 
+    // One shared direct-lane qualification pass, run once up front, covers
+    // `ordinary_generation`/`structured_response`/`tool_call_continuation`'s
+    // direct baseline for chat-role models — never a second, per-case
+    // qualification call (that would blow the stated request budget).
+    // `embedding_or_rerank_contract` runs its own single-kind probe inline
+    // since only one capability applies to that role.
+    let shared_qualification = if matches!(role, ModelRoleHint::Investigator | ModelRoleHint::Unknown)
+    {
+        let qual = run_shared_qualification(&profile, &model, &credentials, deadline).await;
+        requests_made += qual.requests_used;
+        Some(qual)
+    } else {
+        None
+    };
+
     for case_id in &plan.case_ids {
         if cancel.load(Ordering::SeqCst) {
             break;
@@ -317,6 +331,7 @@ pub async fn run(
             role,
             args.level,
             &credentials,
+            shared_qualification.as_ref(),
             paths,
             cfg,
             secrets,
@@ -762,6 +777,7 @@ fn print_terminal(
 // ---------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn run_one_case(
     case_id: &'static str,
     profile: &ProviderProfile,
@@ -769,6 +785,7 @@ async fn run_one_case(
     role: ModelRoleHint,
     level: DiagnoseLevel,
     credentials: &LiveCredentials,
+    qual: Option<&SharedQualification>,
     paths: &Paths,
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
@@ -781,30 +798,26 @@ async fn run_one_case(
     let deadline = Instant::now() + budget;
     match case_id {
         "ordinary_generation" => {
-            case_ordinary_generation(profile, model, paths, cfg, secrets, sessions, deadline, cancel)
-                .await
+            case_ordinary_generation(paths, cfg, secrets, sessions, qual, deadline, cancel).await
         }
         "structured_response" => {
-            case_structured_response(profile, model, paths, cfg, secrets, sessions, deadline, cancel)
-                .await
+            case_structured_response(paths, cfg, secrets, sessions, qual, deadline, cancel).await
         }
         "tool_call_continuation" => {
             case_tool_call_continuation(
-                profile, model, paths, cfg, secrets, sessions, deadline, cancel, corpora,
-                created_sessions,
+                paths, cfg, secrets, sessions, qual, deadline, cancel, corpora, created_sessions,
             )
             .await
         }
         "attachment_selected_context" => {
             case_attachment_selected_context(
-                profile, model, paths, cfg, secrets, sessions, deadline, cancel, created_sessions,
+                paths, cfg, secrets, sessions, deadline, cancel, created_sessions,
             )
             .await
         }
         "linked_log_triage" => {
             case_linked_log_triage(
-                profile, model, paths, cfg, secrets, sessions, deadline, cancel, level, corpora,
-                created_sessions,
+                paths, cfg, secrets, sessions, deadline, cancel, level, corpora, created_sessions,
             )
             .await
         }
@@ -815,15 +828,16 @@ async fn run_one_case(
     }
 }
 
-/// Run one direct-lane qualification pass covering `probes`, returning the
-/// (status, reason, elapsed_ms) for the requested capability kind only.
-async fn direct_probe(
+/// Run one shared direct-lane qualification pass. Called at most once per
+/// operation for a chat-role model (see `run`) so this run's own stated
+/// request bound holds regardless of how many cases want direct-lane
+/// evidence.
+async fn run_shared_qualification(
     profile: &ProviderProfile,
     model: &str,
     credentials: &LiveCredentials,
-    kind: cd_core::capability_qualification::CapabilityKind,
     deadline: Instant,
-) -> LaneResult {
+) -> SharedQualification {
     let profile = profile.clone();
     let model = model.to_string();
     let api_key = credentials.api_key.clone();
@@ -842,47 +856,87 @@ async fn direct_probe(
         let key = QualificationKey::new(&profile.id, &profile.base_url, &model);
         let gate = gate_for_model(&profile, true, &model);
         let cancel = Arc::new(AtomicBool::new(false));
-        let report = run_qualification(key, gate, &mut transport, &cancel);
-        report
+        run_qualification(key, gate, &mut transport, &cancel)
     });
-    let start = Instant::now();
-    let report = match tokio::time::timeout(budget.max(Duration::from_millis(1)), joined).await {
-        Ok(Ok(report)) => report,
-        Ok(Err(e)) => {
-            return LaneResult {
-                executed: true,
-                passed: false,
-                detail: format!("qualification task failed: {e}"),
-                elapsed_ms: start.elapsed().as_millis() as u64,
-                attempts: 1,
-                requests_used: 0,
+    match tokio::time::timeout(budget.max(Duration::from_millis(1)), joined).await {
+        Ok(Ok(report)) => {
+            let requests_used = report
+                .checks
+                .iter()
+                .filter(|c| c.status != CapabilityStatus::Untested)
+                .count() as u32;
+            SharedQualification {
+                report: Some(report),
+                requests_used,
+                failure_detail: None,
             }
         }
-        Err(_) => {
-            return LaneResult {
-                executed: true,
-                passed: false,
-                detail: "direct-lane qualification timed out".to_string(),
-                elapsed_ms: start.elapsed().as_millis() as u64,
-                attempts: 1,
-                requests_used: 0,
-            }
-        }
+        Ok(Err(e)) => SharedQualification {
+            report: None,
+            requests_used: 0,
+            failure_detail: Some(format!("qualification task failed: {e}")),
+        },
+        Err(_) => SharedQualification {
+            report: None,
+            requests_used: 0,
+            failure_detail: Some("direct-lane qualification timed out".to_string()),
+        },
+    }
+}
+
+struct SharedQualification {
+    report: Option<cd_core::capability_qualification::QualificationReport>,
+    requests_used: u32,
+    failure_detail: Option<String>,
+}
+
+/// Project this run's one shared qualification pass into a per-case direct
+/// -lane result for `kind`. `requests_used` is always 0 here — the shared
+/// pass's own request count is already folded into the operation total
+/// once, in `run`, so per-case totals never double-count it.
+/// Combine two direct-lane probes into one case's direct-lane verdict: both
+/// must pass for the combined lane to pass, and both reasons are kept.
+fn combine_lanes(a: LaneResult, b: LaneResult) -> LaneResult {
+    LaneResult {
+        executed: a.executed || b.executed,
+        passed: a.passed && b.passed,
+        detail: format!("{} | {}", a.detail, b.detail),
+        elapsed_ms: a.elapsed_ms + b.elapsed_ms,
+        attempts: a.attempts.max(b.attempts),
+        requests_used: a.requests_used + b.requests_used,
+    }
+}
+
+fn lane_from_qualification(
+    qual: Option<&SharedQualification>,
+    kind: cd_core::capability_qualification::CapabilityKind,
+) -> LaneResult {
+    let Some(qual) = qual else {
+        return LaneResult::not_applicable(
+            "shared qualification pass does not apply to this model's role".to_string(),
+        );
     };
-    let requests_used = report
-        .checks
-        .iter()
-        .filter(|c| c.status != CapabilityStatus::Untested)
-        .count() as u32;
-    let check = report.checks.iter().find(|c| c.kind == kind);
-    match check {
+    let Some(report) = &qual.report else {
+        return LaneResult {
+            executed: true,
+            passed: false,
+            detail: qual
+                .failure_detail
+                .clone()
+                .unwrap_or_else(|| "shared qualification pass failed".to_string()),
+            elapsed_ms: 0,
+            attempts: 1,
+            requests_used: 0,
+        };
+    };
+    match report.checks.iter().find(|c| c.kind == kind) {
         Some(c) => LaneResult {
             executed: true,
             passed: c.status == CapabilityStatus::Pass,
             detail: format!("{:?}: {}", c.status, c.reason),
             elapsed_ms: c.elapsed_ms,
             attempts: 1,
-            requests_used,
+            requests_used: 0,
         },
         None => LaneResult {
             executed: false,
@@ -890,7 +944,7 @@ async fn direct_probe(
             detail: "capability not offered for this role".to_string(),
             elapsed_ms: 0,
             attempts: 0,
-            requests_used,
+            requests_used: 0,
         },
     }
 }
@@ -986,19 +1040,17 @@ async fn one_turn(
 }
 
 async fn case_ordinary_generation(
-    profile: &ProviderProfile,
-    model: &str,
     paths: &Paths,
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
     sessions: &SessionStore,
+    qual: Option<&SharedQualification>,
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
 ) -> CaseReport {
-    let credentials_placeholder = None; // direct lane shares the qualification pass; see below
-    let _ = credentials_placeholder;
-    let direct = LaneResult::not_applicable(
-        "covered by this run's shared qualification pass (basic_generation)".to_string(),
+    let direct = lane_from_qualification(
+        qual,
+        cd_core::capability_qualification::CapabilityKind::BasicGeneration,
     );
     let question =
         format!("Reply with exactly this token and nothing else: {GENERATION_MARKER}");
@@ -1035,7 +1087,7 @@ async fn case_ordinary_generation(
     };
     let retried = calls.iter().any(|c| c.application_retry_reason.is_some());
     let scorer = LaneResult::not_applicable("no typed scorer for plain generation".to_string());
-    let classification = classify_direct_absent_from_shared_pass(&product, &scorer, retried);
+    let classification = classify(&direct, &product, &scorer, retried);
     CaseReport {
         case_id: "ordinary_generation",
         description: case_description("ordinary_generation"),
@@ -1046,40 +1098,18 @@ async fn case_ordinary_generation(
     }
 }
 
-/// Cases whose direct-lane evidence lives in the shared qualification pass
-/// (reported separately by the operator via the same run's other output)
-/// still classify honestly from the product lane alone: `Compatible` when
-/// it passed, `ProductIntegrationLikely` when it did not (no basis here to
-/// separate that from a gateway/model failure without re-running
-/// qualification per case, which would blow the request budget).
-fn classify_direct_absent_from_shared_pass(product: &LaneResult, scorer: &LaneResult, retried: bool) -> CaseClassification {
-    if !product.executed {
-        return CaseClassification::NotRun;
-    }
-    if !product.passed {
-        return CaseClassification::ProductIntegrationLikely;
-    }
-    if scorer.executed && !scorer.passed {
-        return CaseClassification::UsefulnessGap;
-    }
-    if retried {
-        return CaseClassification::RetryRequired;
-    }
-    CaseClassification::Compatible
-}
-
 async fn case_structured_response(
-    _profile: &ProviderProfile,
-    _model: &str,
     paths: &Paths,
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
     sessions: &SessionStore,
+    qual: Option<&SharedQualification>,
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
 ) -> CaseReport {
-    let direct = LaneResult::not_applicable(
-        "covered by this run's shared qualification pass (structured_output)".to_string(),
+    let direct = lane_from_qualification(
+        qual,
+        cd_core::capability_qualification::CapabilityKind::StructuredOutput,
     );
     let question = format!(
         "Reply with ONLY a single JSON object, no prose, no markdown fence, matching exactly: \
@@ -1130,7 +1160,7 @@ async fn case_structured_response(
     };
     let retried = calls.iter().any(|c| c.application_retry_reason.is_some());
     let scorer = LaneResult::not_applicable("no separate scorer beyond shape validation".to_string());
-    let classification = classify_direct_absent_from_shared_pass(&product, &scorer, retried);
+    let classification = classify(&direct, &product, &scorer, retried);
     CaseReport {
         case_id: "structured_response",
         description: case_description("structured_response"),
@@ -1204,20 +1234,22 @@ fn seed_marker_corpus(
 
 #[allow(clippy::too_many_arguments)]
 async fn case_tool_call_continuation(
-    _profile: &ProviderProfile,
-    _model: &str,
     paths: &Paths,
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
     sessions: &SessionStore,
+    qual: Option<&SharedQualification>,
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
     corpora: &mut Vec<String>,
     created_sessions: &mut Vec<String>,
 ) -> CaseReport {
-    let direct = LaneResult::not_applicable(
-        "covered by this run's shared qualification pass (native_tool_call + tool_result_continuation)"
-            .to_string(),
+    let direct = combine_lanes(
+        lane_from_qualification(qual, cd_core::capability_qualification::CapabilityKind::NativeToolCall),
+        lane_from_qualification(
+            qual,
+            cd_core::capability_qualification::CapabilityKind::ToolResultContinuation,
+        ),
     );
     let corpus_id = match seed_marker_corpus(
         &paths.cache_root,
@@ -1304,7 +1336,7 @@ async fn case_tool_call_continuation(
         || matches!(&calls.first().map(|c| &c.outcome), Some(TracedOutcome::Completed { tool_call_count, .. }) if *tool_call_count > 0)
             && calls.len() > 1;
     let scorer = LaneResult::not_applicable("grounding classification is the scorer for this case".to_string());
-    let classification = classify_direct_absent_from_shared_pass(&product, &scorer, retried);
+    let classification = classify(&direct, &product, &scorer, retried);
     CaseReport {
         case_id: "tool_call_continuation",
         description: case_description("tool_call_continuation"),
@@ -1316,8 +1348,6 @@ async fn case_tool_call_continuation(
 }
 
 async fn case_attachment_selected_context(
-    _profile: &ProviderProfile,
-    _model: &str,
     paths: &Paths,
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
@@ -1564,7 +1594,8 @@ fn seed_triage_corpus(cache_root: &std::path::Path) -> Result<(String, TriageKno
         .map(|e| SearchEvidenceIdentity {
             seq: e.seq,
             source: e.source.clone(),
-            model_ref: None,
+            citation_source: None,
+            template_id: e.template_id,
         })
         .collect();
     let messages_by_seq: Vec<(u64, String, String)> = events
@@ -1589,8 +1620,6 @@ fn seed_triage_corpus(cache_root: &std::path::Path) -> Result<(String, TriageKno
 
 #[allow(clippy::too_many_arguments)]
 async fn case_linked_log_triage(
-    _profile: &ProviderProfile,
-    _model: &str,
     paths: &Paths,
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
@@ -1763,7 +1792,10 @@ async fn case_embedding_or_rerank(
     } else {
         cd_core::capability_qualification::CapabilityKind::RerankerContract
     };
-    let direct = direct_probe(profile, model, credentials, kind, deadline).await;
+    let qual = run_shared_qualification(profile, model, credentials, deadline).await;
+    let requests_used = qual.requests_used;
+    let mut direct = lane_from_qualification(Some(&qual), kind);
+    direct.requests_used = requests_used;
 
     // Small, known-ranking case: three short synthetic documents with one
     // expected best match for the query. Real production adapters only
