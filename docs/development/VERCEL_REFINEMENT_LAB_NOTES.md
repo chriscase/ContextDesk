@@ -3,6 +3,9 @@
 The durable next-stage quality-evaluation design, including multiple gateways
 and multiple models per role, is captured in
 [`QUALITY_EVAL_HARNESS.md`](../benchmarks/QUALITY_EVAL_HARNESS.md).
+Public model research, source authority, and the ingestion checklist for the
+in-flight external research report are captured in
+[`MODEL_GATEWAY_RESEARCH_DOSSIER.md`](./MODEL_GATEWAY_RESEARCH_DOSSIER.md).
 
 Status: active experiment journal; not a release claim
 Last updated: 2026-08-09
