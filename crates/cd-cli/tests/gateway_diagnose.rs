@@ -12,7 +12,7 @@
 
 use cd_core::config::{save_config, AppConfig};
 use cd_core::providers::{ProviderCapabilities, ProviderConfig, ProviderKind, ProviderProfile};
-use cd_test_gateway::{Body, MockGateway, Response, Step};
+use cd_test_gateway::{MockGateway, Response, Step};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -207,9 +207,8 @@ async fn jsonl_stream_shows_the_plan_first_and_ends_in_exactly_one_terminal_line
         terminal_count, 1,
         "exactly one terminal line must be emitted: {lines:?}"
     );
-    assert_eq!(
+    assert!(
         lines.last().unwrap()["type"] != "case",
-        true,
         "the terminal line must be last: {lines:?}"
     );
 }

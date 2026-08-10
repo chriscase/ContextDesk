@@ -75,6 +75,7 @@ metacharacters literal. If a question begins with a command name such as
 | `logging-assessment [corpus-id]` (alias `assess`) | Deterministic logging-quality assessment with fixed finding-code improvement hints (no provider); defaults to the current corpus. |
 | `exception-episodes [corpus-id]` | Deterministic exception episode correlation (occurrence vs raw records; no provider). |
 | `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
+| `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
 
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
 to a live binary when `CONTEXTDESK_BIN` is set.
@@ -281,6 +282,110 @@ never touches the keychain (it only needs `resolve_provider_profile`, not
 probe and live turn each read is handed straight to the existing safe
 functions that already never log it — nothing in this command ever writes
 to `cli.toml` or the shared `AppConfig` either.
+
+## Gateway diagnostics (`contextdesk gateway diagnose`)
+
+A bounded, provider-neutral diagnostic and synthetic-workflow suite for
+**one explicitly selected model** (the existing global `--profile`/`--model`
+selection — this command never implicitly probes a whole catalog). It
+answers a narrower, more structural question than `doctor`: not "is
+everything ready for a demo," but "for this exact model, does a gap sit at
+the gateway/model layer, ContextDesk's own product-path integration, or
+answer usefulness?"
+
+```bash
+contextdesk --profile work --model my-model gateway diagnose
+contextdesk --profile work --model my-model gateway diagnose --yes --jsonl
+contextdesk --profile work --model my-model gateway diagnose --yes --raw --raw-i-understand
+```
+
+Every check reuses an existing production path — never a second HTTP
+client, a second agent loop, or a diagnostic-only imitation of triage:
+
+| Lane | Reuses |
+| --- | --- |
+| Direct (smallest known-valid request through the raw provider backend) | `cd_workflow::capability_qualification::LiveQualificationTransport` + `cd_core::capability_qualification::run_qualification` — the same machinery `models verify` uses |
+| Product (the equivalent case through the real ContextDesk workflow) | `cd_workflow::chat::run_chat_workflow`, `cd_core::turn_trace::RecordingTurnTrace`, the same disposable-corpus pattern `doctor` uses |
+| Triage scoring | `cd_core::triage_quality::score_structured_triage_answer` — the same rubric `eval`/`logging-assessment` use |
+
+**Basic-level cases** (default; `--level extended` re-attempts each
+product-path case once more to observe retry/correction stability, never
+expanding to more of the catalog): for a chat-role model,
+`ordinary_generation`, `structured_response`, `tool_call_continuation`,
+`attachment_selected_context`, and `linked_log_triage`. For a model whose
+name hints at an embedding or reranker role, only
+`embedding_or_rerank_contract` runs — chat-shaped requests are never sent
+to a model not qualified for that role, and specialty requests are never
+sent to a model not selected for that role.
+
+`linked_log_triage` seeds a disposable corpus containing an initiating
+trigger, a louder downstream symptom, an unrelated decoy incident, and a
+recovery event — the known-truth key (trigger/symptom tokens, whether root
+cause is establishable) lives only in the host-side scorer, never in
+model-visible input — then scores the model's structured answer for typed
+properties (citation identity, trigger-vs-symptom separation, recovery not
+promoted to cause, honest abstention) rather than exact wording.
+
+**Classification** (evidence, not infallible proof of a single cause) per
+case: both lanes failed (`gateway_or_model_likely`), the direct lane passed
+but the product lane failed (`product_integration_likely`), both executed
+but a typed scorer failed (`usefulness_gap`), a correction/retry was needed
+(`retry_required`), or `compatible`. Three verdicts stay separate in the
+final report — `gateway_model_compatible`, `product_workflow_compatible`,
+`answers_useful` — a quality gap never downgrades or upgrades either
+compatibility verdict.
+
+**Consent gate.** Before any network call, the planned case list, the
+maximum request bound, the active deadline (`--timeout`, default 180s), and
+the artifact classes this run will produce are shown; the operation then
+requires an interactive `y` or `--yes` (required for any non-interactive
+use, including `--json`/`--jsonl`).
+
+**Credentials.** The selected profile's credential is resolved once for
+the direct lane via the existing `SecretStore`/`ReferencedSecretStore`
+path (works with a protected-file reference — no Keychain required); the
+product lane resolves its own credential internally via
+`cd_workflow::provider`'s existing per-turn cache, the same reused
+mechanism every other live-turn command already uses, never a second
+implementation. A credential value is never printed, logged, or written to
+either artifact.
+
+**Cleanup** of every disposable corpus/session this run created is
+attempted on every exit path — success, a case failure, the overall
+deadline, or Ctrl-C — and its own outcome (`cleanup.failures`) is reported,
+not only a stderr warning. This command never mutates a pre-existing
+corpus, session, or provider default.
+
+**Artifacts.** A versioned, checksummed diagnostic directory
+(`report.json` + `manifest.json` with a SHA-256 per file) is always
+written, share-safe by default: no credentials, Authorization headers, raw
+environment values, absolute paths, raw endpoint URLs, or exact private
+profile/model ids — the profile and model identity are stable, run-local
+pseudonyms, and the endpoint is a fingerprint
+(`cd_core::capability_qualification::fingerprint_endpoint`), the same hash
+`models verify`'s own reports already use. `--raw --raw-i-understand`
+additionally writes an owner-only (`0600`/`0700` on Unix), local-only
+`private/capture.json` with bounded synthetic case detail — never
+credentials — that the share-safe bundle never references by content.
+
+**Output.** Text prints a `[PASS]`/`[WARN]`/`[FAIL]`/`[SKIP]` line per case
+as it completes (colored when the terminal supports it and `NO_COLOR` is
+unset; the bracketed label is always present regardless of color, and
+`--color never`/redirected output/`TERM=dumb` fall back to plain ASCII).
+`--jsonl` streams a `{"type":"plan",...}` line first, one
+`{"type":"case",...}` line per completed case, then exactly one terminal
+`{"type":"verdict",...}` line (or `{"type":"cancelled",...}` on Ctrl-C) —
+never any ANSI bytes. `--json` prints one envelope with the full report.
+Exit code: `0` when both compatibility verdicts hold, `8` (`not_ready`)
+when either does not, `130` (`cancelled`) on Ctrl-C.
+
+**Known limitations.** The embedding/reranker product-lane adapter is
+wired for Ollama-hosted embedding profiles and any generic HTTP reranker
+endpoint (`cd_core::rerank::HttpRerankBackend`); an OpenAI-compatible
+embedding profile's product lane reports an explicit `not_run` state
+rather than a fabricated result — a documented follow-up, not silent
+success. An offline inspect/replay seam for turning a captured sanitized
+envelope into a hermetic regression fixture is not yet implemented.
 
 ## Isolated profiles (`--data-dir` / `--profile-dir`)
 
