@@ -52,9 +52,9 @@ above validates that correction.
 Share-safe artifacts:
 
 ```text
-/private/tmp/contextdesk-vercel-deepseek-rolefix5-out/gwdx-1786403162139-92602/report.json
+local artifact `contextdesk-vercel-deepseek-rolefix5-out/gwdx-1786403162139-92602/report.json`
   SHA-256 44b47696d2ed636aefcaa9d5dc892be31cfed75340ff68e11771c130a1ba7b70
-/private/tmp/contextdesk-vercel-deepseek-rolefix5-out/gwdx-1786403162139-92602/manifest.json
+local artifact `contextdesk-vercel-deepseek-rolefix5-out/gwdx-1786403162139-92602/manifest.json`
   SHA-256 637357211268c57d582896467bb45c0d60d107004c476893a7d3a991478b7a79
 ```
 
@@ -107,4 +107,3 @@ OpenAI-compatible embedding role, and Voyage Rerank 2.5 Lite for the reranking
 role. It does **not** establish employer-gateway behavior, latency guarantees,
 or a universal model badge. Employer models still require the same explicit
 diagnostic on the employer profile, using its exact discovered ids.
-
