@@ -2,7 +2,7 @@
 
 **Branch:** `feat/openai-embed-rerank-production-v1`  
 **Base:** `2bdd4379b6062e4e121aa1721d9cfaee43b60a57`  
-**Suite tip:** see `git rev-parse HEAD` on this branch after docs stamp  
+**Suite tip:** `aa0112e4e92b954c9907397ddbfd491ea160acaf` (feature suite); branch tip advances with docs  
 **Production code changed:** **yes**
 
 ## Purpose
