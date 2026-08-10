@@ -288,6 +288,10 @@ async fn full_run_cleans_up_and_writes_a_checksummed_share_safe_artifact() {
 
     let manifest: Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).expect("manifest json");
+    assert_eq!(
+        manifest["schema_version"], 1,
+        "manifest must carry its versioned contract"
+    );
     let expected_sha = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();

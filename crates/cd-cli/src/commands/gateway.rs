@@ -2241,6 +2241,7 @@ fn write_artifact_bundle(
     let checksum = sha256_hex(&body);
     let manifest = serde_json::json!({
         "schema_id": "contextdesk.gateway_diagnostic_manifest.v1",
+        "schema_version": 1,
         "run_id": report.run_id,
         "files": [
             { "name": "report.json", "sha256": checksum, "bytes": body.len() }
