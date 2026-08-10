@@ -105,39 +105,45 @@ cross-model score fusion remain unsafe.
 - Corpus vectors are already checked for model and dimension compatibility.
 - The quality harness separates compatibility, retrieval, answer, and
   orchestration evidence and scores semantic facts instead of exact model prose.
-- Live DeepSeek V4 Flash triage now establishes the correct initiating cause,
-  symptom, independent error, rollback, and recovery after the host-side
-  causal-agreement fix.
+- Earlier refinement-lab notes record successful DeepSeek V4 Flash triage
+  attempts, including correct initiating-cause and recovery citations.  The
+  current release line's bounded Vercel diagnostic does **not** reproduce a
+  validated linked-triage answer: lower-level generation, structured output,
+  selected context, and direct tool continuation pass, while linked triage
+  still ends in an empty-terminal/response-contract failure.  The historical
+  successes therefore remain useful evidence, not current release acceptance.
 
 ## Product gaps revealed by the research and source audit
 
 ### Release-critical basics
 
-1. **Finish and commit optional protected-file credentials.** The CLI/core work
-   exists locally, but the desktop setup path and final integration proof remain
-   incomplete. An explicit file or environment source must never fall through
-   to Keychain.
-2. **Run the full release gate from one clean integration commit.** The recent
-   workspace run cleared core and many integration suites, but its terminal
-   exit was not retained. Run the documented Rust, Tauri, and desktop checks
-   after the credential work is coherent.
+1. **Complete acceptance of optional protected-file credentials.** CLI/core
+   and desktop setup support are now integrated, and hermetic workflow tests
+   prove a `file:` reference does not touch Keychain.  The remaining proof is
+   on the owner's machine and must preserve the same no-fallback behavior.
+2. **Keep the full release gate reproducible.** The current executable code
+   baseline has passed the retained workspace, CLI, workflow, native, and
+   frontend gates.  Re-run the documented checks after any additional
+   provider/triage changes and retain the terminal result with the exact SHA.
 3. **Complete packaged GUI and CLI acceptance.** Prove discovery, targeted
    verification, selection, ordinary chat, attachment-assisted chat, triage,
    cancellation, diagnostics, and restart persistence with the same build.
 4. **Repeat the no-Keychain live path.** Use the protected file explicitly and
    count credential-source reads; do not diagnose macOS dialog count as stage
    reloads.
-5. **Keep release claims narrow.** DeepSeek triage has live acceptance evidence.
-   Ordinary chat, attachments, employer-specific retrieval, and packaged-app
-   behavior need their own evidence.
+5. **Keep release claims narrow.** DeepSeek lower-level compatibility has live
+   Vercel evidence, but linked triage is still unproven on the current release
+   line.  Ordinary chat, attachments, employer-specific retrieval, and
+   packaged-app behavior need their own evidence.
 
 ### Retrieval integration immediately after the basics
 
-1. **Share specialty protocol adapters between qualification and production.**
-   Qualification already knows OpenAI-compatible and Vercel v4 embeddings, but
-   `cd-workflow` production retrieval currently constructs the older Ollama
-   embedding backend. Product and probe paths must not disagree about what a
-   configured role means.
+1. **Finish live validation of the shared specialty adapters.** Typed
+   OpenAI-compatible, TEI, and Vercel-v4 embedding/reranker adapters are now
+   shared by qualification and the production retrieval factories, with a
+   protected-file workflow seam proof.  Product and probe paths no longer
+   intentionally diverge, but employer route/dialect behavior and quality
+   remain deployment evidence rather than model-name assumptions.
 2. **Wire retrieval roles through desktop and CLI configuration.** The workflow
    module explicitly says desktop retrieval activation is not wired. Keep the
    feature off by default until the product path and status surface agree.
