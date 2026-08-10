@@ -24,6 +24,9 @@ use crate::render::{
     ChatOutcomeSummary, ChatStatusRenderer, TerminalCapabilities, TerminalTextSanitizer,
 };
 use cd_core::config::AppConfig;
+use cd_core::deadline_controls::{
+    apply_turn_override, format_deadline_ms, parse_deadline_duration,
+};
 use cd_core::events::StreamEvent;
 use cd_core::keychain_store::SecretStore;
 use cd_core::log_analysis::LogCorpus;
@@ -60,8 +63,21 @@ pub async fn run(
     profile_override: Option<&str>,
     model_override: Option<&str>,
     implicit_chat: bool,
+    // Global `--deadline` (never persisted). Parsed before any host I/O.
+    deadline_override: Option<&str>,
 ) -> CliResult<()> {
     validate_question(args, format)?;
+    // Parse the one-turn deadline before any secret-store, corpus, session,
+    // or provider work so an invalid value fails closed with zero side effects.
+    let deadline_override_ms = match deadline_override {
+        Some(raw) => match parse_deadline_duration(raw) {
+            Ok(ms) => Some(ms),
+            Err(error) => {
+                return fail_before_turn(format, CliError::user(error.to_string()));
+            }
+        },
+        None => None,
+    };
     let question = args.question.join(" ");
     // `full` exposes bounded, redacted conversation and tool-call content —
     // still never a secret or pre-redaction value, but real turn content
@@ -211,6 +227,48 @@ pub async fn run(
             return Err(error);
         }
     };
+
+    // Per-turn override: explicit for this host only. Never writes AppConfig;
+    // a later turn without --deadline reloads the saved policy.
+    if let Some(ms) = deadline_override_ms {
+        let mut budget = host.router_budget().clone();
+        if let Err(error) = apply_turn_override(&mut budget, ms) {
+            let err = CliError::user(error.to_string());
+            if jsonl {
+                print_jsonl_failure(&err, "", None);
+            } else if matches!(format, OutputFormat::Json) {
+                print_json_failure(&err, None);
+            }
+            if text {
+                chat_renderer.finish(ChatOutcomeSummary::Failed {
+                    message: &err.message,
+                });
+            }
+            return Err(err);
+        }
+        host.set_router_budget(budget);
+    }
+    if text && args.dry_run {
+        let budget = host.router_budget();
+        if deadline_override_ms.is_some() {
+            eprintln!(
+                "deadline: one-turn override {} ({} ms); not saved to config",
+                format_deadline_ms(budget.deadline_ms),
+                budget.deadline_ms
+            );
+        } else {
+            let policy = if budget.deadline_is_explicit {
+                "custom"
+            } else {
+                "auto"
+            };
+            eprintln!(
+                "deadline: saved policy={policy}, stored ceiling={} ({} ms); ContextDesk may finish sooner",
+                format_deadline_ms(budget.deadline_ms),
+                budget.deadline_ms
+            );
+        }
+    }
 
     // Shared capture path: same RecordingTurnTrace Tauri attaches.
     let want_capture = effective_trace.is_some() || args.activity.is_some();

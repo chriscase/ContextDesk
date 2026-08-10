@@ -100,6 +100,7 @@ async fn run(cli: Cli, invocation: InvocationMode) -> i32 {
         format,
         &mut cli_state,
         invocation,
+        cli.global.deadline.as_deref(),
     )
     .await;
 
@@ -169,6 +170,8 @@ async fn dispatch(
     format: OutputFormat,
     cli_state: &mut cd_workflow::session::CliState,
     invocation: InvocationMode,
+    // Global `--deadline` for chat only; other commands ignore it.
+    deadline_override: Option<&str>,
 ) -> i32 {
     match command {
         Command::Import(args) => {
@@ -232,6 +235,7 @@ async fn dispatch(
                 resolved.default_provider_profile.value.as_deref(),
                 resolved.default_chat_model.value.as_deref(),
                 invocation == InvocationMode::ImplicitChat,
+                deadline_override,
             )
             .await;
             match result {

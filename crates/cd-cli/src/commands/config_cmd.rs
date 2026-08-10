@@ -22,8 +22,8 @@
 //! run under `--json`/`--jsonl` still emits one clean, parseable envelope
 //! on stdout.
 
-use crate::adapters::{save_app_config, Paths};
-use crate::cli::{ConfigAction, ConfigInitArgs, ProviderKindArg};
+use crate::adapters::{load_app_config, save_app_config, Paths};
+use crate::cli::{ConfigAction, ConfigInitArgs, DeadlineAction, ProviderKindArg};
 use crate::config::{
     global_config_path, load_layer, project_config_path, save_layer, CliConfigFile, ImportSection,
     OutputSection, ResolvedConfig, WorkflowSection,
@@ -31,6 +31,10 @@ use crate::config::{
 use crate::envelope::{CliError, CliResult, Render};
 use crate::provider_probe;
 use cd_core::config::{is_valid_iana_timezone, AppConfig};
+use cd_core::deadline_controls::{
+    apply_auto_policy, apply_explicit_deadline_ms, deadline_status, format_deadline_ms,
+    parse_deadline_duration, DeadlineStatus,
+};
 use cd_core::keychain_store::{
     file_secret_ref, key_ref_for_profile, read_file_secret_ref, SecretStore,
 };
@@ -228,6 +232,95 @@ pub async fn run(
                 project: project.display().to_string(),
             }))
         }
+        ConfigAction::Deadline(action) => run_deadline(action, paths, app_cfg),
+    }
+}
+
+/// Read-only / mutating whole-turn deadline controls for AppConfig.router.
+fn run_deadline(
+    action: &DeadlineAction,
+    paths: &Paths,
+    app_cfg: &AppConfig,
+) -> CliResult<Box<dyn Render>> {
+    match action {
+        DeadlineAction::Show => {
+            let status = deadline_status(&app_cfg.router);
+            Ok(Box::new(DeadlineCommandOutput {
+                action: "show",
+                status,
+                changed: false,
+            }))
+        }
+        DeadlineAction::Auto => {
+            // Reload so concurrent GUI edits are not clobbered beyond the two
+            // deadline fields we intentionally touch.
+            let mut cfg = load_app_config(paths)?;
+            apply_auto_policy(&mut cfg.router);
+            save_app_config(paths, &cfg)?;
+            Ok(Box::new(DeadlineCommandOutput {
+                action: "auto",
+                status: deadline_status(&cfg.router),
+                changed: true,
+            }))
+        }
+        DeadlineAction::Set { duration } => {
+            let ms =
+                parse_deadline_duration(duration).map_err(|e| CliError::user(e.to_string()))?;
+            let mut cfg = load_app_config(paths)?;
+            apply_explicit_deadline_ms(&mut cfg.router, ms)
+                .map_err(|e| CliError::user(e.to_string()))?;
+            save_app_config(paths, &cfg)?;
+            Ok(Box::new(DeadlineCommandOutput {
+                action: "set",
+                status: deadline_status(&cfg.router),
+                changed: true,
+            }))
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DeadlineCommandOutput {
+    action: &'static str,
+    #[serde(flatten)]
+    status: DeadlineStatus,
+    changed: bool,
+}
+
+impl Render for DeadlineCommandOutput {
+    fn render_text(&self) -> String {
+        let policy = if self.status.deadline_is_explicit {
+            "custom (explicit whole-turn ceiling)"
+        } else {
+            "auto (adaptive by provider class)"
+        };
+        let mut lines = vec![
+            format!("deadline policy: {policy}"),
+            format!(
+                "stored ceiling: {} ({} ms)",
+                self.status.deadline_human, self.status.deadline_ms
+            ),
+        ];
+        if !self.status.deadline_is_explicit {
+            lines.push(
+                "effective total under auto: 3m for managed profiles, 5m for local/private \
+                 (ContextDesk may finish sooner)."
+                    .into(),
+            );
+        } else {
+            lines.push(format!(
+                "this is the maximum whole-turn time ({}); ContextDesk may finish sooner.",
+                format_deadline_ms(self.status.deadline_ms)
+            ));
+        }
+        if self.changed {
+            lines.push(format!("saved via config deadline {}", self.action));
+        }
+        lines.join("\n")
+    }
+
+    fn render_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("DeadlineCommandOutput is always serializable")
     }
 }
 

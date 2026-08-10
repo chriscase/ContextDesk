@@ -346,4 +346,29 @@ mod credential_tests {
         assert_eq!(host.router_budget().deadline_ms, 600_000);
         assert!(host.router_budget().deadline_is_explicit);
     }
+
+    #[test]
+    fn one_turn_deadline_override_reaches_host_budget_without_persisting() {
+        use cd_core::deadline_controls::{
+            apply_turn_override, parse_deadline_duration, PATIENT_DEADLINE_MS,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.router.deadline_ms = PATIENT_DEADLINE_MS;
+        cfg.router.deadline_is_explicit = false;
+        let mut host = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
+        assert!(!host.router_budget().deadline_is_explicit);
+
+        let ms = parse_deadline_duration("10m").unwrap();
+        let mut budget = host.router_budget().clone();
+        apply_turn_override(&mut budget, ms).unwrap();
+        host.set_router_budget(budget);
+        assert_eq!(host.router_budget().deadline_ms, 600_000);
+        assert!(host.router_budget().deadline_is_explicit);
+
+        // A fresh host from the same AppConfig returns to the saved adaptive policy.
+        let next = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
+        assert!(!next.router_budget().deadline_is_explicit);
+        assert_eq!(next.router_budget().deadline_ms, PATIENT_DEADLINE_MS);
+    }
 }

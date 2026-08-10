@@ -70,6 +70,12 @@ pub struct GlobalArgs {
     pub profile: Option<String>,
     #[arg(long, global = true, env = "CONTEXTDESK_CHAT_MODEL")]
     pub model: Option<String>,
+    /// Non-persistent whole-turn deadline for this chat turn only
+    /// (`90s`, `3m`, `10m`, `500ms`). Never writes AppConfig. Global so
+    /// direct-question form (`contextdesk --deadline 10m "…"`) works.
+    /// Precedence: this override > saved explicit policy > adaptive policy.
+    #[arg(long, global = true, value_name = "DURATION")]
+    pub deadline: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -630,6 +636,12 @@ where
         "--profile",
         "--model",
         "--mode",
+        "--deadline",
+        "--trace",
+        "--activity",
+        "--corpus",
+        "--session",
+        "--context-selection",
     ];
     let mut index = 1usize;
     while index < args.len() {
@@ -702,6 +714,23 @@ pub enum ConfigAction {
     /// Print the config file paths this build resolves, in precedence
     /// order.
     Path,
+    /// Whole-turn deadline policy (adaptive vs custom ceiling).
+    #[command(subcommand)]
+    Deadline(DeadlineAction),
+}
+
+/// `contextdesk config deadline` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum DeadlineAction {
+    /// Show the saved whole-turn deadline policy (read-only).
+    Show,
+    /// Use adaptive deadlines (keeps the stored numeric value as fallback).
+    Auto,
+    /// Set an explicit whole-turn ceiling (`90s`, `3m`, `10m`, `500ms`).
+    Set {
+        /// Friendly duration: integer + unit `ms`, `s`, or `m`.
+        duration: String,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -951,6 +980,65 @@ mod tests {
                 panic!("implicit question did not select chat");
             };
             assert!(chat.question.join(" ").contains("caused"));
+        }
+    }
+
+    #[test]
+    fn direct_question_with_deadline_normalizes_and_parses() {
+        // Global --deadline + free-text question (chat-only flags like
+        // --dry-run belong after `chat` or after the question).
+        let argv = vec!["contextdesk", "--deadline", "10m", "What", "caused", "it?"];
+        let (normalized, mode) = normalize_invocation_args(argv);
+        assert_eq!(mode, InvocationMode::ImplicitChat);
+        assert!(normalized.iter().any(|a| a == "chat"));
+        let parsed = Cli::try_parse_from(normalized).unwrap();
+        assert_eq!(parsed.global.deadline.as_deref(), Some("10m"));
+        let Command::Chat(chat) = parsed.command else {
+            panic!("expected chat");
+        };
+        assert!(chat.question.join(" ").contains("caused"));
+    }
+
+    #[test]
+    fn explicit_chat_accepts_deadline_flag() {
+        let parsed = Cli::try_parse_from([
+            "contextdesk",
+            "chat",
+            "--deadline",
+            "90s",
+            "--dry-run",
+            "what happened?",
+        ])
+        .unwrap();
+        assert_eq!(parsed.global.deadline.as_deref(), Some("90s"));
+        let Command::Chat(chat) = parsed.command else {
+            panic!("expected chat");
+        };
+        assert!(chat.dry_run);
+    }
+
+    #[test]
+    fn config_deadline_grammar_parses() {
+        let show = Cli::try_parse_from(["contextdesk", "config", "deadline", "show"]).unwrap();
+        assert!(matches!(
+            show.command,
+            Command::Config {
+                action: ConfigAction::Deadline(DeadlineAction::Show)
+            }
+        ));
+        let auto = Cli::try_parse_from(["contextdesk", "config", "deadline", "auto"]).unwrap();
+        assert!(matches!(
+            auto.command,
+            Command::Config {
+                action: ConfigAction::Deadline(DeadlineAction::Auto)
+            }
+        ));
+        let set = Cli::try_parse_from(["contextdesk", "config", "deadline", "set", "90s"]).unwrap();
+        match set.command {
+            Command::Config {
+                action: ConfigAction::Deadline(DeadlineAction::Set { duration }),
+            } => assert_eq!(duration, "90s"),
+            other => panic!("unexpected {other:?}"),
         }
     }
 
