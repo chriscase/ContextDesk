@@ -152,7 +152,8 @@ those become stable run-local pseudonyms/fingerprints instead.
 | Requests (basic, chat role) | ~20 | Stated in the plan before any call | Never exceeded; qualification runs once |
 | Requests (basic, embedding/reranker role) | ~4 | Stated in the plan | Same |
 | Whole-operation wall time | `--timeout` (default 180s) | `tokio::time::timeout` around the qualification pass and each turn | Remaining cases marked not-run past the deadline, not silently dropped |
-| Per-case wall time | min(remaining deadline, 45s) | Same | Same |
+| Per-case wall time, default run | min(remaining deadline, 45s) | Provider-neutral case-budget policy + existing turn deadline | Case reports timeout; later cases retain the remaining whole-run budget |
+| Per-case wall time, explicit `--timeout N` | remaining whole-run deadline | Same | A slow case may exceed 45s but never the operator's explicit operation deadline |
 
 ## 8. Failure and recovery
 
