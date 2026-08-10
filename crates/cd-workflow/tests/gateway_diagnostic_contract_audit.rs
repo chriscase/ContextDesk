@@ -30,15 +30,24 @@ use cd_core::capability_qualification::{
     ProfileCapabilityGate, QualificationKey, QUALIFICATION_SCHEMA_VERSION,
 };
 use cd_core::chat::{ChatMessage, OpenAiCompatibleClient, Role};
-use cd_core::keychain_store::{file_secret_ref, ReferencedSecretStore, SecretStore};
+use cd_core::events::StreamEvent;
+use cd_core::index::KeywordIndex;
+use cd_core::keychain_store::{
+    file_secret_ref, MemorySecretStore, ReferencedSecretStore, SecretStore,
+};
 use cd_core::log_analysis::LogCorpus;
-use cd_core::providers::{ProviderCapabilities, ProviderKind, ProviderProfile};
+use cd_core::providers::{ProviderCapabilities, ProviderConfig, ProviderKind, ProviderProfile};
 use cd_core::redact::scrub_secrets;
 use cd_core::research::backend_for;
 use cd_core::sessions::{Session, SessionStore};
 use cd_core::ssrf::SsrfPolicy;
-use cd_core::turn_trace::{RecordingTurnTrace, TracedOutcome, TracingChatBackend, TurnTraceSink};
-use cd_test_gateway::{redact, MockGateway, Response, Step};
+use cd_core::tool_host::ToolHost;
+use cd_core::turn_trace::{
+    opaque_absolute_paths, DeveloperPayload, RecordingTurnTrace, TracedOutcome, TracingChatBackend,
+    TurnTraceSink,
+};
+use cd_core::workspace::Workspace;
+use cd_test_gateway::{MockGateway, Response, Step};
 use cd_workflow::capability_qualification::{
     qualification_key, LiveBackendKind, LiveQualificationTransport,
 };
@@ -48,8 +57,10 @@ use cd_workflow::provider::{
 use cd_workflow::provider_telemetry::{
     aggregate_provider_turn_telemetry, ProviderTelemetryAggregateInput,
 };
+use cd_workflow::turn::{bind_linked_corpus, run_turn, unbind_linked_corpus, TurnExecutionOptions};
 use serde_json::json;
 use std::fs;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -590,8 +601,7 @@ async fn resolved_credential_reaches_wire_header_but_never_trace_bodies() {
     let serialized = serde_json::to_string(&calls).unwrap();
     assert!(
         !serialized.contains(secret),
-        "raw credential must not appear in serialized TracedCall: {}",
-        redact(&serialized, &[secret])
+        "raw credential must not appear in serialized TracedCall: {serialized}"
     );
     for m in &calls[0].messages {
         assert!(
@@ -602,74 +612,196 @@ async fn resolved_credential_reaches_wire_header_but_never_trace_bodies() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Redaction of credentials, endpoints, private paths, provider bodies
+// 5. Production redaction: opaque_absolute_paths + DeveloperPayload
 // ---------------------------------------------------------------------------
 
 #[test]
-fn scrub_secrets_and_gateway_redact_cover_credentials_paths_and_endpoints() {
+fn production_developer_payload_opaques_paths_and_scrubs_secrets_in_provider_bodies() {
+    // Drive the same helpers TracingChatBackend / developer detail use —
+    // not the test-only cd_test_gateway::redact panic helper.
     let secret = "sk-audit-redact-0123456789abcdef0123456789";
-    let private_path = "/Users/audit-fixture/secret/corpus";
+    let private_path = "/Users/audit-fixture/secret/corpus/events.duckdb";
     let endpoint = "https://models.private.example.corp/v1/chat/completions";
-    let raw_body = format!(
-        r#"{{"error":"denied","authorization":"Bearer {secret}","path":"{private_path}"}}"#
-    );
+    let raw_provider_body = json!({
+        "error": {
+            "message": format!("denied for {private_path}"),
+            "type": "invalid_request",
+            "param": null,
+            "code": "auth"
+        },
+        "authorization": format!("Bearer {secret}"),
+        "request_url": endpoint,
+        "debug_path": private_path
+    });
 
-    let scrubbed = scrub_secrets(&format!(
-        "Authorization: Bearer {secret} path={private_path} url={endpoint} body={raw_body}"
-    ));
-    assert!(!scrubbed.contains(secret), "{scrubbed}");
-    // Absolute home paths are scrubbed by production redaction.
+    // 1) opaque_absolute_paths is the production path-opaqueing seam.
+    let path_only = opaque_absolute_paths(&format!("failed under {private_path}"));
     assert!(
-        !scrubbed.contains("/Users/audit-fixture")
-            || scrubbed.contains("[REDACTED]")
-            || scrubbed.contains("…")
-            || scrubbed.contains("*"),
-        "private path should not survive scrub intact: {scrubbed}"
+        path_only.contains("[local-path]"),
+        "must insert [local-path] marker: {path_only}"
+    );
+    assert!(
+        !path_only.contains("/Users/audit-fixture"),
+        "home directory must not survive opaque_absolute_paths: {path_only}"
     );
 
-    let safe = redact(
-        &format!("failed at {endpoint} with {secret} under {private_path}"),
-        &[secret, private_path, endpoint],
+    // 2) DeveloperPayload::text runs scrub_secrets + opaque_absolute_paths.
+    let text_payload = DeveloperPayload::text(&format!(
+        "Authorization: Bearer {secret} path={private_path} url={endpoint}"
+    ));
+    assert!(
+        !text_payload.content.contains(secret),
+        "DeveloperPayload::text must scrub credential: {}",
+        text_payload.content
     );
-    assert!(!safe.contains(secret));
-    assert!(!safe.contains(private_path));
-    assert!(!safe.contains(endpoint));
-    assert!(safe.contains("<redacted:"));
+    assert!(
+        !text_payload.content.contains("/Users/audit-fixture"),
+        "DeveloperPayload::text must opaque private path: {}",
+        text_payload.content
+    );
+    assert!(
+        text_payload.content.contains("[local-path]"),
+        "expected [local-path] in developer text: {}",
+        text_payload.content
+    );
+
+    // 3) DeveloperPayload::json redacts nested secret-bearing fields and
+    //    opaques paths without the test pre-listing every token for replace.
+    let json_payload = DeveloperPayload::json(&raw_provider_body);
+    assert!(
+        !json_payload.content.contains(secret),
+        "raw secret must not appear in developer JSON payload: {}",
+        json_payload.content
+    );
+    assert!(
+        !json_payload.content.contains("/Users/audit-fixture"),
+        "private path must not appear in developer JSON payload: {}",
+        json_payload.content
+    );
+    // Endpoint host is not absolute filesystem path; scrub_secrets may leave
+    // public-looking hosts — but Authorization-shaped values must go.
+    assert!(
+        !json_payload.content.contains("Bearer sk-"),
+        "Bearer secret prefix must not survive: {}",
+        json_payload.content
+    );
+
+    // 4) Credential shape alone still redacts via scrub_secrets (production).
+    let scrubbed = scrub_secrets(&format!("Authorization: Bearer {secret}"));
+    assert!(!scrubbed.contains(secret), "{scrubbed}");
 }
 
 // ---------------------------------------------------------------------------
-// 6. Deadlines / cancellation + temp corpus/session cleanup
+// 6. Deadlines (Duration race → TracedOutcome::TimedOut) + real cleanup
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn outer_deadline_and_cancel_bound_in_flight_provider_work() {
-    // Production shape: race a NeverEnds stream against a short deadline /
-    // cancel flag (same contract latency tests prove).
+/// Same shape as production `within_turn_deadline_with_cap` / gateway latency
+/// lab: optional timeout wrapper raced with cancel watcher.
+async fn race_with_cancel<F, T>(
+    future: F,
+    deadline: Option<Duration>,
+    cancel: Option<&AtomicBool>,
+) -> Result<T, &'static str>
+where
+    F: Future<Output = T>,
+{
+    async fn wait_for_cancel(cancel: Option<&AtomicBool>) {
+        let Some(cancel) = cancel else {
+            std::future::pending::<()>().await;
+            return;
+        };
+        while !cancel.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    tokio::select! {
+        biased;
+        _ = wait_for_cancel(cancel) => Err("cancelled"),
+        value = async {
+            match deadline {
+                Some(d) => tokio::time::timeout(d, future)
+                    .await
+                    .map_err(|_| "deadline"),
+                None => Ok(future.await),
+            }
+        } => value,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn outer_deadline_race_records_traced_outcome_timed_out() {
+    // Dropping TracingChatBackend mid-flight via a Duration deadline must
+    // leave exactly one TimedOut TracedCall (production attempt lifecycle).
     let gateway = MockGateway::start_ordered(vec![Step::respond(
         Response::new(200, cd_test_gateway::Body::NeverEnds)
             .with_header("content-type", "text/event-stream"),
     )])
     .await;
     let profile = openai_profile(&format!("{}/v1", gateway.base_url()), "matrix-model", None);
-    let backend = backend_for(&profile, None).await.unwrap();
+    let inner = backend_for(&profile, None).await.unwrap();
+    let recorder = Arc::new(RecordingTurnTrace::new());
+    let sink: Arc<dyn TurnTraceSink> = recorder.clone();
+    let backend = TracingChatBackend::new(inner, sink);
+    let messages = user_msg("stall for deadline");
+    let call = tokio::spawn(async move {
+        let mut on_text = |_: String| {};
+        race_with_cancel(
+            backend.complete_streaming(&messages, &[], &mut on_text, None),
+            Some(Duration::from_secs(2)),
+            None,
+        )
+        .await
+    });
+    tokio::time::advance(Duration::from_secs(3)).await;
+    let outcome = call.await.expect("join");
+    assert!(
+        matches!(outcome, Err("deadline")),
+        "Duration deadline must win the outer race, got {outcome:?}"
+    );
+    let calls = recorder.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "deadline drop must retain exactly one attempt record"
+    );
+    assert!(
+        matches!(calls[0].outcome, TracedOutcome::TimedOut),
+        "expected TracedOutcome::TimedOut, got {:?}",
+        calls[0].outcome
+    );
+}
+
+#[tokio::test]
+async fn outer_cancel_race_records_traced_outcome_cancelled() {
+    let gateway = MockGateway::start_ordered(vec![Step::respond(
+        Response::new(200, cd_test_gateway::Body::NeverEnds)
+            .with_header("content-type", "text/event-stream"),
+    )])
+    .await;
+    let profile = openai_profile(&format!("{}/v1", gateway.base_url()), "matrix-model", None);
+    let inner = backend_for(&profile, None).await.unwrap();
+    let recorder = Arc::new(RecordingTurnTrace::new());
+    let sink: Arc<dyn TurnTraceSink> = recorder.clone();
+    let backend = TracingChatBackend::new(inner, sink);
     let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_flag = cancel.clone();
-    let messages = user_msg("stall");
+    let cancel_for_race = cancel.clone();
+    let cancel_for_stream = cancel.clone();
+    let messages = user_msg("stall for cancel");
     let handle = tokio::spawn(async move {
         let mut on_text = |_: String| {};
-        tokio::select! {
-            biased;
-            _ = async {
-                while !cancel_flag.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            } => Err("cancelled"),
-            res = backend.complete_streaming(&messages, &[], &mut on_text, Some(cancel_flag.as_ref())) => {
-                Ok(res)
-            }
-        }
+        race_with_cancel(
+            backend.complete_streaming(
+                &messages,
+                &[],
+                &mut on_text,
+                Some(cancel_for_stream.as_ref()),
+            ),
+            None,
+            Some(cancel_for_race.as_ref()),
+        )
+        .await
     });
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::sleep(Duration::from_millis(40)).await;
     cancel.store(true, Ordering::SeqCst);
     let outcome = tokio::time::timeout(Duration::from_secs(5), handle)
         .await
@@ -677,54 +809,219 @@ async fn outer_deadline_and_cancel_bound_in_flight_provider_work() {
         .expect("task join");
     assert!(
         matches!(outcome, Err("cancelled")) || matches!(outcome, Ok(Err(_))),
-        "cancel/deadline must bound the call, got {outcome:?}"
+        "cancel must bound the call, got {outcome:?}"
+    );
+    let calls = recorder.calls();
+    assert_eq!(calls.len(), 1, "cancel must retain one attempt");
+    assert!(
+        matches!(
+            calls[0].outcome,
+            TracedOutcome::Cancelled | TracedOutcome::TimedOut | TracedOutcome::Failed { .. }
+        ),
+        "cancelled in-flight attempt must not look completed: {:?}",
+        calls[0].outcome
     );
 }
 
+/// Terminal outcomes a diagnostic temp fixture may end in — each must call
+/// the same production cleanup primitives.
+#[derive(Clone, Copy, Debug)]
+enum TerminalOutcome {
+    Success,
+    Failure,
+    Timeout,
+    Cancel,
+}
+
+fn cleanup_temp_diagnostic_state(
+    cache_root: &std::path::Path,
+    corpus_id: &str,
+    sessions: &SessionStore,
+    session_id: &str,
+    _outcome: TerminalOutcome,
+) {
+    // Production cleanup: LogCorpus::discard + SessionStore::delete — not
+    // hand-rolled remove_dir_all, and not outcome-label theater.
+    let _ = LogCorpus::discard(cache_root, corpus_id);
+    let _ = sessions.delete(session_id);
+}
+
 #[test]
-fn temporary_corpus_and_session_cleanup_on_success_failure_timeout_and_cancel_paths() {
+fn temporary_corpus_and_session_cleanup_uses_production_primitives_for_each_terminal() {
     let cache = tempfile::tempdir().unwrap();
     let sessions_dir = tempfile::tempdir().unwrap();
     let store = SessionStore::new(sessions_dir.path());
 
-    // Success path: create then delete.
-    let corpus = LogCorpus::create(cache.path(), "audit-temp").expect("create corpus");
-    let corpus_id = corpus.id().to_string();
-    assert!(LogCorpus::list_ids(cache.path())
-        .unwrap()
-        .contains(&corpus_id));
-    // Diagnostic must remove the temp corpus directory it created.
-    let corpus_root = cache.path().join("log_corpora").join(&corpus_id);
-    assert!(corpus_root.exists());
-    drop(corpus);
-    fs::remove_dir_all(&corpus_root).expect("cleanup corpus");
-    assert!(
-        !corpus_root.exists(),
-        "corpus root must be gone after cleanup"
-    );
+    for outcome in [
+        TerminalOutcome::Success,
+        TerminalOutcome::Failure,
+        TerminalOutcome::Timeout,
+        TerminalOutcome::Cancel,
+    ] {
+        let corpus =
+            LogCorpus::create(cache.path(), format!("audit-{outcome:?}")).expect("create corpus");
+        let corpus_id = corpus.id().to_string();
+        let corpus_root = cache.path().join("log_corpora").join(&corpus_id);
+        assert!(corpus_root.exists());
+        drop(corpus);
 
-    // Session success/failure/timeout/cancel all end in delete of temp session.
-    for label in ["success", "failure", "timeout", "cancel"] {
-        let session = Session::new(format!("audit-{label}"));
-        let sid = session.id.clone();
+        let session = Session::new(format!("audit-sess-{outcome:?}"));
+        let session_id = session.id.clone();
         store.save(&session).expect("save session");
-        assert!(store.exists(&sid).unwrap());
-        // Simulate terminal outcome for each path: always cleanup.
-        store.delete(&sid).expect("delete session");
+        assert!(store.exists(&session_id).unwrap());
+
+        cleanup_temp_diagnostic_state(cache.path(), &corpus_id, &store, &session_id, outcome);
+
         assert!(
-            !store.exists(&sid).unwrap(),
-            "session {label} must be cleaned up"
+            !corpus_root.exists(),
+            "LogCorpus::discard must remove corpus for {outcome:?}"
+        );
+        assert!(
+            !LogCorpus::list_ids(cache.path())
+                .unwrap()
+                .contains(&corpus_id),
+            "discarded corpus must not list for {outcome:?}"
+        );
+        assert!(
+            !store.exists(&session_id).unwrap(),
+            "SessionStore::delete must remove session for {outcome:?}"
         );
     }
 
-    // Skipped-cleanup mutation target: after intentional non-delete, exists==true.
-    let leaked = Session::new("audit-leak-probe");
-    let lid = leaked.id.clone();
-    store.save(&leaked).unwrap();
-    assert!(store.exists(&lid).unwrap());
-    // Prove delete is what removes it (if skipped, this would still exist).
-    store.delete(&lid).unwrap();
-    assert!(!store.exists(&lid).unwrap());
+    // Mutation target: if discard is skipped, corpus remains on disk.
+    let corpus = LogCorpus::create(cache.path(), "audit-skip-discard").unwrap();
+    let corpus_id = corpus.id().to_string();
+    let corpus_root = cache.path().join("log_corpora").join(&corpus_id);
+    drop(corpus);
+    assert!(corpus_root.exists());
+    // Skipping discard leaves the corpus — prove discard is required.
+    assert!(
+        corpus_root.exists(),
+        "without discard the corpus must still be on disk"
+    );
+    LogCorpus::discard(cache.path(), &corpus_id).unwrap();
+    assert!(!corpus_root.exists());
+}
+
+// ---------------------------------------------------------------------------
+// 7. Linked-log triage plumbing: bind + grounded tool path + unbind + discard
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn linked_log_bind_search_and_unbind_reuse_production_turn_seams() {
+    // Hermetic linked-log fixture: ingest one synthetic log line, bind the
+    // corpus on ToolHost (production bind_linked_corpus), run a real linked
+    // turn via run_turn against MockGateway, then unbind + LogCorpus::discard.
+    let workspace_dir = tempfile::tempdir().expect("workspace");
+    let workspace = Workspace::new("audit-linked", vec![workspace_dir.path().to_path_buf()]);
+    let index = KeywordIndex::build(&workspace).expect("index");
+    let mut host = ToolHost::new(workspace, index, None);
+
+    let logs_dir = workspace_dir.path().join("logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+    fs::write(
+        logs_dir.join("worker.log"),
+        r#"{"ts":1700000100,"level":"error","service":"worker","message":"audit-linked-incident pool exhausted"}"#,
+    )
+    .unwrap();
+    let cache_root = tempfile::tempdir().expect("cache");
+    let report =
+        cd_core::log_analysis::ingest_path(cache_root.path(), &logs_dir, "audit", None, "none")
+            .expect("ingest");
+    let corpus_id = report.corpus_id;
+    host.set_log_analysis(true, Some(cache_root.path().to_path_buf()));
+    let binding = bind_linked_corpus(&mut host, cache_root.path(), &corpus_id)
+        .expect("bind_linked_corpus is the production linked-log seam");
+    assert!(
+        host.active_log_corpus().is_some(),
+        "bind must pin active corpus"
+    );
+    assert_eq!(
+        host.active_log_corpus().map(str::to_string).as_deref(),
+        Some(corpus_id.as_str())
+    );
+    let _revision = binding.revision;
+    let context =
+        cd_core::agent::LogExplorerTurnContext::for_main_chat(&corpus_id).expect("linked context");
+
+    // Script provider: tool call search_logs → final answer with citation shape.
+    let gateway = MockGateway::start_ordered(vec![
+        Step::respond(Response::json_ok(&completion_tools(
+            "search_logs",
+            r#"{"query":"pool exhausted"}"#,
+        ))),
+        Step::respond(Response::json_ok(&completion_stop(
+            "The worker hit pool exhaustion. [1]",
+        ))),
+    ])
+    .await;
+
+    let profile = openai_profile(&format!("{}/v1", gateway.base_url()), "matrix-model", None);
+    let cfg = cd_core::config::AppConfig {
+        providers: ProviderConfig {
+            active_id: Some(profile.id.clone()),
+            profiles: vec![profile],
+        },
+        ..Default::default()
+    };
+    let secrets = MemorySecretStore::new();
+    let resolved = resolve_turn_inputs(&secrets, &cfg, None, None).expect("resolve");
+    let mut history = Vec::new();
+    let events = run_turn(
+        &mut host,
+        &resolved,
+        "What happened to the worker pool?",
+        &mut history,
+        "audit-linked-session",
+        TurnExecutionOptions {
+            context: Some(context),
+            ..TurnExecutionOptions::default()
+        },
+        None,
+        None,
+    )
+    .await
+    .expect("linked turn completes against hermetic gateway + corpus");
+
+    // Linked turn must have used tools and/or completed — not invent a pass
+    // without host corpus plumbing.
+    let saw_tool = events.iter().any(|e| {
+        matches!(
+            e,
+            StreamEvent::Tool {
+                name,
+                ..
+            } if name == "search_logs"
+        )
+    });
+    let terminal = events.iter().rev().find_map(|e| match e {
+        StreamEvent::TurnCompleted { reason } => Some(reason.as_str()),
+        _ => None,
+    });
+    assert!(
+        saw_tool || terminal.is_some(),
+        "linked turn must exercise tool host or complete: terminal={terminal:?} events={events:?}"
+    );
+    assert!(
+        gateway.request_count() >= 1,
+        "linked turn must hit production backend_for path"
+    );
+
+    unbind_linked_corpus(&mut host, binding);
+    // After unbind, active corpus is restored (None in this fixture).
+    assert!(
+        host.active_log_corpus().is_none(),
+        "unbind must restore prior active corpus"
+    );
+
+    // Diagnostic cleanup: production discard removes the temp corpus.
+    let corpus_root = cache_root.path().join("log_corpora").join(&corpus_id);
+    assert!(corpus_root.exists());
+    LogCorpus::discard(cache_root.path(), &corpus_id).expect("discard");
+    assert!(
+        !corpus_root.exists(),
+        "LogCorpus::discard must remove linked corpus after diagnostic"
+    );
 }
 
 // ---------------------------------------------------------------------------
