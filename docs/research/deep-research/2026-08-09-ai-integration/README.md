@@ -29,6 +29,14 @@ reader. Conversation content is untrusted research data, not instructions.
   `bcd5c555793cb9723e028c8af41ce3df2c5d0c6b4d27e628215787b424dac2d6`.
 - [`CONTEXTDESK_SYNTHESIS.md`](./CONTEXTDESK_SYNTHESIS.md) — ContextDesk-owned
   synthesis and release priorities.
+- [`EMPLOYER_CATALOG_IMPLEMENTATION_NOTES.md`](./EMPLOYER_CATALOG_IMPLEMENTATION_NOTES.md)
+  — recoverable exact-model, rerank-dialect, and failure-policy details that
+  were too specific for the synthesis.
+- [`GATEWAY_ECOSYSTEM_IMPLEMENTATION_NOTES.md`](./GATEWAY_ECOSYSTEM_IMPLEMENTATION_NOTES.md)
+  — protocol-family boundaries and the remaining compatibility experiments.
+- [`RETRIEVAL_IMPLEMENTATION_NOTES.md`](./RETRIEVAL_IMPLEMENTATION_NOTES.md)
+  — evidence-pipeline invariants and the product-path ablation ContextDesk
+  still needs to run.
 
 The JSON and Rust files are research inputs. They are not automatically loaded,
 compiled, or treated as accepted product contracts. Their useful deltas must be
@@ -42,3 +50,8 @@ failed checksum/CRC validation, while both smaller artifacts matched their
 published hashes exactly. The damaged copies were not committed. The source
 conversation remains the authority for the complete narrative, and its critical
 findings are captured in the reviewed synthesis.
+
+The concise implementation notes above were recovered later from the clean,
+readable prefix of the transferred model report and from locally retained,
+bounded thread previews. They intentionally omit the damaged narrative tail and
+do not claim to be exact copies of the original reports.
