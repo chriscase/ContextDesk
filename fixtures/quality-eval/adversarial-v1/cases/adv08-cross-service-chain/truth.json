@@ -1,0 +1,84 @@
+{
+  "title": "Causal chain spanning gate, worker, and API services",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "How did the export stall propagate across services?",
+      "relevant_ids": [
+        "d01",
+        "d02",
+        "d03"
+      ],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 2,
+        "d03": 2
+      },
+      "must_include_ids": [
+        "d01",
+        "d02",
+        "d03"
+      ],
+      "must_exclude_ids": [
+        "d05"
+      ],
+      "foreign_incident_ids": [
+        "d05"
+      ],
+      "top_k": 4
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "feature flag",
+        "batch coordinator"
+      ],
+      "trigger_tokens": [
+        "feature flag flip",
+        "disabled batch"
+      ],
+      "symptom_tokens": [
+        "export stalled",
+        "coordinator unavailable"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [
+        "notification send timeout"
+      ],
+      "required_evidence_ids": [
+        "d01"
+      ],
+      "forbidden_evidence_ids": [
+        "d05"
+      ],
+      "requires_abstention": false,
+      "packet_overrides": {
+        "product_path": {
+          "root_cause_establishable": false,
+          "requires_abstention": true
+        }
+      },
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_downstream_as_trigger": "fail",
+    "mut_foreign_mail": "fail"
+  },
+  "incidents": {
+    "export-chain": [
+      "d01",
+      "d02",
+      "d03"
+    ],
+    "mail-foreign": [
+      "d05"
+    ]
+  },
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "adv08-cross-service-chain"
+}

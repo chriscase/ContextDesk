@@ -1,0 +1,87 @@
+{
+  "title": "Vocabulary similarity vs identity; paraphrase vs new incident",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What locked the production invoice ledger for billing-a?",
+      "relevant_ids": [
+        "d01",
+        "d02",
+        "d04"
+      ],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 2,
+        "d04": 2
+      },
+      "must_include_ids": [
+        "d01",
+        "d04"
+      ],
+      "must_exclude_ids": [
+        "d03",
+        "d05"
+      ],
+      "foreign_incident_ids": [
+        "d03",
+        "d05"
+      ],
+      "top_k": 4
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "migration",
+        "ledger"
+      ],
+      "trigger_tokens": [
+        "migration step",
+        "ledger shard locked"
+      ],
+      "symptom_tokens": [
+        "invoice finalize failed",
+        "statement close halted"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [
+        "staging sandbox"
+      ],
+      "required_evidence_ids": [
+        "d01"
+      ],
+      "forbidden_evidence_ids": [
+        "d03",
+        "d05"
+      ],
+      "requires_abstention": false,
+      "packet_overrides": {
+        "product_path": {
+          "root_cause_establishable": false,
+          "requires_abstention": true
+        }
+      },
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_same_vocab_wrong_identity": "fail",
+    "mut_miss_paraphrase_same_incident": "fail"
+  },
+  "incidents": {
+    "billing-a-prod": [
+      "d01",
+      "d02",
+      "d04"
+    ],
+    "billing-b-sandbox": [
+      "d03",
+      "d05"
+    ]
+  },
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "adv09-vocab-identity-traps"
+}

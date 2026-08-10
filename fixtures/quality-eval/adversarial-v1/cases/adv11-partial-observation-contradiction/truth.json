@@ -1,0 +1,54 @@
+{
+  "title": "Partial evidence justifies observation only; contradictions fail",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What configuration change initiated the search latency budget breach?",
+      "relevant_ids": [
+        "d01",
+        "d02"
+      ],
+      "graded_gains": {
+        "d01": 2,
+        "d02": 1
+      },
+      "must_include_ids": [],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 3
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": false,
+      "required_fact_tokens": [],
+      "trigger_tokens": [],
+      "symptom_tokens": [
+        "fanout latency",
+        "above budget"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": [],
+      "forbidden_evidence_ids": [],
+      "requires_abstention": true,
+      "forbidden_conclusion_tokens": [
+        "search coordinator was certainly misconfigured"
+      ]
+    }
+  ],
+  "candidate_expectations": {
+    "good_observation_only": "pass",
+    "mut_prose_contradicts_structured": "fail",
+    "mut_flag_false_but_certainty_prose": "fail"
+  },
+  "incidents": {
+    "search-latency": [
+      "d01",
+      "d02"
+    ]
+  },
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "adv11-partial-observation-contradiction"
+}

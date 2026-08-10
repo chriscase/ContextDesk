@@ -1,0 +1,85 @@
+{
+  "title": "Cross-source correlation and near-duplicate renderings",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "Which correlated records explain the orders framing mismatch?",
+      "relevant_ids": [
+        "d01",
+        "d02",
+        "d03"
+      ],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 2,
+        "d03": 2
+      },
+      "must_include_ids": [
+        "d01",
+        "d03"
+      ],
+      "must_exclude_ids": [
+        "d04",
+        "d05"
+      ],
+      "foreign_incident_ids": [
+        "d04"
+      ],
+      "top_k": 4
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "framing",
+        "orders"
+      ],
+      "trigger_tokens": [
+        "mismatched framing",
+        "topic orders"
+      ],
+      "symptom_tokens": [
+        "order batch rejected"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [
+        "topic catalog",
+        "corr-99z"
+      ],
+      "required_evidence_ids": [
+        "d01"
+      ],
+      "forbidden_evidence_ids": [
+        "d04",
+        "d05"
+      ],
+      "requires_abstention": false,
+      "packet_overrides": {
+        "product_path": {
+          "root_cause_establishable": false,
+          "requires_abstention": true
+        }
+      },
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_merge_foreign_corr": "fail",
+    "mut_treat_duplicate_as_new_incident": "fail"
+  },
+  "incidents": {
+    "orders-framing": [
+      "d01",
+      "d02",
+      "d03"
+    ],
+    "catalog-framing": [
+      "d04"
+    ]
+  },
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "adv13-cross-source-duplicates"
+}

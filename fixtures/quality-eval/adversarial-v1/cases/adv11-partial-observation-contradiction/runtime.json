@@ -1,0 +1,122 @@
+{
+  "documents": [
+    {
+      "id": "d01",
+      "text": "kind=application_error level=error service=search pattern=query fanout latency above budget"
+    },
+    {
+      "id": "d02",
+      "text": "kind=status_event level=info service=search pattern=partial shard responses accepted"
+    },
+    {
+      "id": "d03",
+      "text": "kind=status_event level=debug service=search pattern=cache hit ratio sample"
+    }
+  ],
+  "questions": {
+    "q1": "What configuration change initiated the search latency budget breach?"
+  },
+  "packets": [
+    {
+      "packet_id": "fixed",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=application_error level=error service=search pattern=query fanout latency above budget"
+        },
+        {
+          "id": "d02",
+          "text": "kind=status_event level=info service=search pattern=partial shard responses accepted"
+        }
+      ]
+    },
+    {
+      "packet_id": "oracle",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=application_error level=error service=search pattern=query fanout latency above budget"
+        }
+      ]
+    },
+    {
+      "packet_id": "product_path",
+      "documents": [
+        {
+          "id": "d02",
+          "text": "kind=status_event level=info service=search pattern=partial shard responses accepted"
+        },
+        {
+          "id": "d03",
+          "text": "kind=status_event level=debug service=search pattern=cache hit ratio sample"
+        }
+      ]
+    }
+  ],
+  "rankings": [
+    {
+      "query_id": "q1",
+      "ranked_ids": [
+        "d01",
+        "d02",
+        "d03"
+      ],
+      "k": 3
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "good_observation_only",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": false,
+      "claims": [
+        {
+          "text": "query fanout latency above budget",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "observation"
+        }
+      ],
+      "conclusion": "Query fanout latency above budget is established. The initiating configuration is not established from these records.",
+      "confidence": "low"
+    },
+    {
+      "candidate_id": "mut_prose_contradicts_structured",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "query fanout latency above budget",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        }
+      ],
+      "conclusion": "The initiating configuration is not established; evidence is inconclusive for any configuration change.",
+      "confidence": "high"
+    },
+    {
+      "candidate_id": "mut_flag_false_but_certainty_prose",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": false,
+      "claims": [
+        {
+          "text": "query fanout latency above budget",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "observation"
+        }
+      ],
+      "conclusion": "The search coordinator was certainly misconfigured; that caused fanout latency above budget.",
+      "confidence": "high"
+    }
+  ],
+  "schema_id": "contextdesk.quality_eval.runtime.v1",
+  "case_id": "adv11-partial-observation-contradiction"
+}

@@ -1,0 +1,78 @@
+{
+  "title": "Valid trigger must not absorb an independent incident",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "Explain amber-sync failures and the telemetry exporter state.",
+      "relevant_ids": [
+        "d01",
+        "d02",
+        "d03",
+        "d04"
+      ],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 2,
+        "d03": 2,
+        "d04": 3
+      },
+      "must_include_ids": [
+        "d01",
+        "d04"
+      ],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 4
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "lease",
+        "250"
+      ],
+      "trigger_tokens": [
+        "lease window",
+        "250"
+      ],
+      "symptom_tokens": [
+        "amber-sync aborted"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [
+        "TelemetrySinkTimeout"
+      ],
+      "required_evidence_ids": [
+        "d01"
+      ],
+      "forbidden_evidence_ids": [],
+      "requires_abstention": false,
+      "packet_overrides": {
+        "product_path": {
+          "root_cause_establishable": false,
+          "requires_abstention": true
+        }
+      },
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_absorb_independent": "fail",
+    "mut_foreign_identity": "fail"
+  },
+  "incidents": {
+    "amber-sync": [
+      "d01",
+      "d02"
+    ],
+    "telemetry": [
+      "d03",
+      "d04"
+    ]
+  },
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "adv05-independent-absorbed"
+}

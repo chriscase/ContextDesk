@@ -1,0 +1,176 @@
+{
+  "documents": [
+    {
+      "id": "d01",
+      "text": "kind=status_event level=info service=node-a pattern=operator note applied cache flush before alerts local time 09:14"
+    },
+    {
+      "id": "d02",
+      "text": "kind=application_error level=error service=node-b pattern=cache miss storm after flush local time 09:15 ambiguous zone"
+    },
+    {
+      "id": "d03",
+      "text": "kind=application_error level=error service=node-b pattern=cache miss storm after flush resolved_ts=2024-06-01T16:15:00Z"
+    },
+    {
+      "id": "d04",
+      "text": "kind=config_error level=error service=node-a pattern=cache ttl lowered to 2s during maintenance window"
+    },
+    {
+      "id": "d05",
+      "text": "kind=status_event level=info service=node-a pattern=unrelated deploy announcement without timing"
+    }
+  ],
+  "questions": {
+    "q1": "What sequence initiated the cache miss storm, and which timestamps are resolved?"
+  },
+  "packets": [
+    {
+      "packet_id": "fixed",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=status_event level=info service=node-a pattern=operator note applied cache flush before alerts local time 09:14"
+        },
+        {
+          "id": "d02",
+          "text": "kind=application_error level=error service=node-b pattern=cache miss storm after flush local time 09:15 ambiguous zone"
+        },
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=node-b pattern=cache miss storm after flush resolved_ts=2024-06-01T16:15:00Z"
+        },
+        {
+          "id": "d04",
+          "text": "kind=config_error level=error service=node-a pattern=cache ttl lowered to 2s during maintenance window"
+        }
+      ]
+    },
+    {
+      "packet_id": "oracle",
+      "documents": [
+        {
+          "id": "d04",
+          "text": "kind=config_error level=error service=node-a pattern=cache ttl lowered to 2s during maintenance window"
+        },
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=node-b pattern=cache miss storm after flush resolved_ts=2024-06-01T16:15:00Z"
+        }
+      ]
+    },
+    {
+      "packet_id": "product_path",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=status_event level=info service=node-a pattern=operator note applied cache flush before alerts local time 09:14"
+        },
+        {
+          "id": "d02",
+          "text": "kind=application_error level=error service=node-b pattern=cache miss storm after flush local time 09:15 ambiguous zone"
+        },
+        {
+          "id": "d05",
+          "text": "kind=status_event level=info service=node-a pattern=unrelated deploy announcement without timing"
+        }
+      ]
+    }
+  ],
+  "rankings": [
+    {
+      "query_id": "q1",
+      "ranked_ids": [
+        "d04",
+        "d01",
+        "d03",
+        "d02",
+        "d05"
+      ],
+      "k": 4
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "good_fixed",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "cache ttl lowered to 2s during maintenance window",
+          "evidence_ids": [
+            "d04"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "cache miss storm after flush resolved_ts=2024-06-01T16:15:00Z",
+          "evidence_ids": [
+            "d03"
+          ],
+          "role": "symptom"
+        },
+        {
+          "text": "cache miss storm after flush local time 09:15 ambiguous zone",
+          "evidence_ids": [
+            "d02"
+          ],
+          "role": "observation"
+        }
+      ],
+      "conclusion": "Lowering cache ttl to 2s initiated the miss storm. Local 09:15 is ambiguous; the resolved UTC timestamp on the later record is authoritative for correlation.",
+      "confidence": "medium"
+    },
+    {
+      "candidate_id": "mut_order_only_as_cause",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "operator note applied cache flush before alerts local time 09:14",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "cache miss storm after flush local time 09:15 ambiguous zone",
+          "evidence_ids": [
+            "d02"
+          ],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "Because the flush note appears before the miss storm in order-only logs, the flush note itself initiated the failure.",
+      "confidence": "high"
+    },
+    {
+      "candidate_id": "mut_treat_ambiguous_as_resolved",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "cache ttl lowered to 2s during maintenance window",
+          "evidence_ids": [
+            "d04"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "cache miss storm after flush local time 09:15 ambiguous zone",
+          "evidence_ids": [
+            "d02"
+          ],
+          "role": "trigger"
+        }
+      ],
+      "conclusion": "Ambiguous local 09:15 proves an exact initiating instant equal to the ttl change.",
+      "confidence": "high"
+    }
+  ],
+  "schema_id": "contextdesk.quality_eval.runtime.v1",
+  "case_id": "adv12-chronology-and-time"
+}

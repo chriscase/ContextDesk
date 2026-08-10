@@ -1,0 +1,163 @@
+{
+  "documents": [
+    {
+      "id": "d01",
+      "text": "kind=config_error level=error service=orders-db pattern=managed connection reservoir has no borrowable handles"
+    },
+    {
+      "id": "d02",
+      "text": "kind=config_error level=error service=payments-edge pattern=TLS certificate expired for payments host"
+    },
+    {
+      "id": "d03",
+      "text": "kind=application_error level=error service=checkout pattern=checkout write path unavailable after upstream reject"
+    },
+    {
+      "id": "d04",
+      "text": "kind=status_event level=info service=checkout pattern=cart view succeeded"
+    }
+  ],
+  "questions": {
+    "q1": "Why is checkout unavailable, and are there distinct upstream faults?"
+  },
+  "packets": [
+    {
+      "packet_id": "fixed",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=config_error level=error service=orders-db pattern=managed connection reservoir has no borrowable handles"
+        },
+        {
+          "id": "d02",
+          "text": "kind=config_error level=error service=payments-edge pattern=TLS certificate expired for payments host"
+        },
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=checkout pattern=checkout write path unavailable after upstream reject"
+        }
+      ]
+    },
+    {
+      "packet_id": "oracle",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=config_error level=error service=orders-db pattern=managed connection reservoir has no borrowable handles"
+        },
+        {
+          "id": "d02",
+          "text": "kind=config_error level=error service=payments-edge pattern=TLS certificate expired for payments host"
+        }
+      ]
+    },
+    {
+      "packet_id": "product_path",
+      "documents": [
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=checkout pattern=checkout write path unavailable after upstream reject"
+        },
+        {
+          "id": "d04",
+          "text": "kind=status_event level=info service=checkout pattern=cart view succeeded"
+        }
+      ]
+    }
+  ],
+  "rankings": [
+    {
+      "query_id": "q1",
+      "ranked_ids": [
+        "d03",
+        "d01",
+        "d02",
+        "d04"
+      ],
+      "k": 4
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "good_fixed",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "managed connection reservoir has no borrowable handles",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "TLS certificate expired for payments host",
+          "evidence_ids": [
+            "d02"
+          ],
+          "role": "independent"
+        },
+        {
+          "text": "checkout write path unavailable after upstream reject",
+          "evidence_ids": [
+            "d03"
+          ],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "Orders pool exhaustion initiated checkout unavailability. Payments TLS expiry is a separate upstream fault that can surface the same symptom.",
+      "confidence": "medium"
+    },
+    {
+      "candidate_id": "mut_single_cause_collapse",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "managed connection reservoir has no borrowable handles",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "TLS certificate expired is a symptom of pool pressure",
+          "evidence_ids": [
+            "d02"
+          ],
+          "role": "symptom"
+        },
+        {
+          "text": "checkout write path unavailable after upstream reject",
+          "evidence_ids": [
+            "d03"
+          ],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "Pool exhaustion alone caused checkout unavailability including the TLS certificate expired failures.",
+      "confidence": "high"
+    },
+    {
+      "candidate_id": "mut_symptom_as_sole_cause",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "checkout write path unavailable after upstream reject",
+          "evidence_ids": [
+            "d03"
+          ],
+          "role": "trigger"
+        }
+      ],
+      "conclusion": "Checkout write path unavailability is the initiating fault.",
+      "confidence": "high"
+    }
+  ],
+  "schema_id": "contextdesk.quality_eval.runtime.v1",
+  "case_id": "adv03-shared-symptom-separate-causes"
+}

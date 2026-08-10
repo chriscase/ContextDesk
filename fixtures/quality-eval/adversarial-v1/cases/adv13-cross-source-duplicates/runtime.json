@@ -1,0 +1,161 @@
+{
+  "documents": [
+    {
+      "id": "d01",
+      "text": "kind=config_error level=error service=ingest source=app.jsonl corr=corr-81a pattern=parser profile mismatched framing on topic orders"
+    },
+    {
+      "id": "d02",
+      "text": "kind=config_error level=error service=ingest source=edge.jsonl corr=corr-81a pattern=parser profile mismatched framing on topic orders"
+    },
+    {
+      "id": "d03",
+      "text": "kind=application_error level=error service=orders source=app.jsonl corr=corr-81a pattern=order batch rejected after ingest framing mismatch"
+    },
+    {
+      "id": "d04",
+      "text": "kind=config_error level=error service=ingest source=app.jsonl corr=corr-99z pattern=parser profile mismatched framing on topic catalog"
+    },
+    {
+      "id": "d05",
+      "text": "kind=status_event level=info service=ingest pattern=heartbeat ok"
+    }
+  ],
+  "questions": {
+    "q1": "Which correlated records explain the orders framing mismatch?"
+  },
+  "packets": [
+    {
+      "packet_id": "fixed",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=config_error level=error service=ingest source=app.jsonl corr=corr-81a pattern=parser profile mismatched framing on topic orders"
+        },
+        {
+          "id": "d02",
+          "text": "kind=config_error level=error service=ingest source=edge.jsonl corr=corr-81a pattern=parser profile mismatched framing on topic orders"
+        },
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=orders source=app.jsonl corr=corr-81a pattern=order batch rejected after ingest framing mismatch"
+        }
+      ]
+    },
+    {
+      "packet_id": "oracle",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=config_error level=error service=ingest source=app.jsonl corr=corr-81a pattern=parser profile mismatched framing on topic orders"
+        },
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=orders source=app.jsonl corr=corr-81a pattern=order batch rejected after ingest framing mismatch"
+        }
+      ]
+    },
+    {
+      "packet_id": "product_path",
+      "documents": [
+        {
+          "id": "d04",
+          "text": "kind=config_error level=error service=ingest source=app.jsonl corr=corr-99z pattern=parser profile mismatched framing on topic catalog"
+        },
+        {
+          "id": "d05",
+          "text": "kind=status_event level=info service=ingest pattern=heartbeat ok"
+        }
+      ]
+    }
+  ],
+  "rankings": [
+    {
+      "query_id": "q1",
+      "ranked_ids": [
+        "d01",
+        "d02",
+        "d03",
+        "d04",
+        "d05"
+      ],
+      "k": 4
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "good_fixed",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "parser profile mismatched framing on topic orders",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "order batch rejected after ingest framing mismatch",
+          "evidence_ids": [
+            "d03"
+          ],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "corr-81a links near-duplicate ingest renderings from app and edge sources to the same orders framing mismatch. A different correlation identity must stay out of this incident.",
+      "confidence": "medium"
+    },
+    {
+      "candidate_id": "mut_merge_foreign_corr",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "parser profile mismatched framing on topic orders",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "parser profile mismatched framing on topic catalog",
+          "evidence_ids": [
+            "d04"
+          ],
+          "role": "trigger"
+        }
+      ],
+      "conclusion": "Orders and catalog framing mismatches are one correlated incident.",
+      "confidence": "high"
+    },
+    {
+      "candidate_id": "mut_treat_duplicate_as_new_incident",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "parser profile mismatched framing on topic orders",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "parser profile mismatched framing on topic catalog",
+          "evidence_ids": [
+            "d04"
+          ],
+          "role": "independent"
+        }
+      ],
+      "conclusion": "App orders framing and catalog framing are unrelated, yet catalog evidence is still attached to the orders answer packet.",
+      "confidence": "high"
+    }
+  ],
+  "schema_id": "contextdesk.quality_eval.runtime.v1",
+  "case_id": "adv13-cross-source-duplicates"
+}

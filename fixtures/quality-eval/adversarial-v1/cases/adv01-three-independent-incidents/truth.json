@@ -1,0 +1,87 @@
+{
+  "title": "Three independent incidents must remain separated",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "Explain the amber-sync outage and any separate ongoing failures.",
+      "relevant_ids": [
+        "d01",
+        "d02",
+        "d03",
+        "d04"
+      ],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 2,
+        "d03": 2,
+        "d04": 2
+      },
+      "must_include_ids": [
+        "d01",
+        "d03",
+        "d04"
+      ],
+      "must_exclude_ids": [
+        "d05"
+      ],
+      "foreign_incident_ids": [],
+      "top_k": 5
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "lease",
+        "250"
+      ],
+      "trigger_tokens": [
+        "lease window",
+        "250"
+      ],
+      "symptom_tokens": [
+        "amber-sync aborted"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [
+        "TelemetrySinkTimeout",
+        "smtp relay"
+      ],
+      "required_evidence_ids": [
+        "d01"
+      ],
+      "forbidden_evidence_ids": [
+        "d05"
+      ],
+      "requires_abstention": false,
+      "packet_overrides": {
+        "product_path": {
+          "root_cause_establishable": false,
+          "requires_abstention": true
+        }
+      },
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_collapse_all": "fail",
+    "mut_absorb_mail_as_symptom": "fail",
+    "good_product_path_abstention": "pass"
+  },
+  "incidents": {
+    "amber-sync": [
+      "d01",
+      "d02"
+    ],
+    "telemetry": [
+      "d03"
+    ],
+    "mail-relay": [
+      "d04"
+    ]
+  },
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "adv01-three-independent-incidents"
+}

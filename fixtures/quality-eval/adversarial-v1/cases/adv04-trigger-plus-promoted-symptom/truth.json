@@ -1,0 +1,71 @@
+{
+  "title": "Valid trigger must not mask a promoted symptom",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What initiated customer job rejections?",
+      "relevant_ids": [
+        "d01",
+        "d02"
+      ],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 1
+      },
+      "must_include_ids": [
+        "d01"
+      ],
+      "must_exclude_ids": [
+        "d03"
+      ],
+      "foreign_incident_ids": [],
+      "top_k": 3
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "upper bound",
+        "configuration"
+      ],
+      "trigger_tokens": [
+        "invalid upper bound",
+        "configuration change"
+      ],
+      "symptom_tokens": [
+        "customer jobs were rejected"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": [
+        "d01"
+      ],
+      "forbidden_evidence_ids": [
+        "d03"
+      ],
+      "requires_abstention": false,
+      "packet_overrides": {
+        "product_path": {
+          "root_cause_establishable": false,
+          "requires_abstention": true
+        }
+      },
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_trigger_plus_promoted_symptom": "fail",
+    "mut_citation_sprinkle": "fail"
+  },
+  "incidents": {
+    "queue-bound": [
+      "d01",
+      "d02"
+    ]
+  },
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "adv04-trigger-plus-promoted-symptom"
+}

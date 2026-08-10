@@ -1,0 +1,168 @@
+{
+  "documents": [
+    {
+      "id": "d01",
+      "text": "kind=config_error level=error service=gate-a pattern=feature flag flip disabled batch coordinator"
+    },
+    {
+      "id": "d02",
+      "text": "kind=application_error level=error service=worker-b pattern=batch coordinator unavailable after gate reject"
+    },
+    {
+      "id": "d03",
+      "text": "kind=application_error level=error service=api-c pattern=customer export stalled waiting on worker-b"
+    },
+    {
+      "id": "d04",
+      "text": "kind=status_event level=info service=api-c pattern=health probe status ok"
+    },
+    {
+      "id": "d05",
+      "text": "kind=application_error level=error service=mail pattern=notification send timeout on secondary region"
+    }
+  ],
+  "questions": {
+    "q1": "How did the export stall propagate across services?"
+  },
+  "packets": [
+    {
+      "packet_id": "fixed",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=config_error level=error service=gate-a pattern=feature flag flip disabled batch coordinator"
+        },
+        {
+          "id": "d02",
+          "text": "kind=application_error level=error service=worker-b pattern=batch coordinator unavailable after gate reject"
+        },
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=api-c pattern=customer export stalled waiting on worker-b"
+        }
+      ]
+    },
+    {
+      "packet_id": "oracle",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=config_error level=error service=gate-a pattern=feature flag flip disabled batch coordinator"
+        },
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=api-c pattern=customer export stalled waiting on worker-b"
+        }
+      ]
+    },
+    {
+      "packet_id": "product_path",
+      "documents": [
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=api-c pattern=customer export stalled waiting on worker-b"
+        },
+        {
+          "id": "d04",
+          "text": "kind=status_event level=info service=api-c pattern=health probe status ok"
+        }
+      ]
+    }
+  ],
+  "rankings": [
+    {
+      "query_id": "q1",
+      "ranked_ids": [
+        "d01",
+        "d02",
+        "d03",
+        "d04",
+        "d05"
+      ],
+      "upstream_ranked_ids": [
+        "d03",
+        "d04",
+        "d02",
+        "d05",
+        "d01"
+      ],
+      "k": 4
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "good_fixed",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "feature flag flip disabled batch coordinator",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "batch coordinator unavailable after gate reject",
+          "evidence_ids": [
+            "d02"
+          ],
+          "role": "symptom"
+        },
+        {
+          "text": "customer export stalled waiting on worker-b",
+          "evidence_ids": [
+            "d03"
+          ],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "A feature flag flip at gate-a disabled the batch coordinator, which made worker-b unavailable and stalled api-c exports.",
+      "confidence": "medium"
+    },
+    {
+      "candidate_id": "mut_downstream_as_trigger",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "customer export stalled waiting on worker-b",
+          "evidence_ids": [
+            "d03"
+          ],
+          "role": "trigger"
+        }
+      ],
+      "conclusion": "Export stall at api-c initiated the multi-service failure.",
+      "confidence": "high"
+    },
+    {
+      "candidate_id": "mut_foreign_mail",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "feature flag flip disabled batch coordinator",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "notification send timeout on secondary region",
+          "evidence_ids": [
+            "d05"
+          ],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "Feature flag flip caused export stalls and notification timeouts as one chain.",
+      "confidence": "high"
+    }
+  ],
+  "schema_id": "contextdesk.quality_eval.runtime.v1",
+  "case_id": "adv08-cross-service-chain"
+}

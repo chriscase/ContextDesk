@@ -1,0 +1,82 @@
+{
+  "title": "Shared downstream symptom with separate upstream causes",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "Why is checkout unavailable, and are there distinct upstream faults?",
+      "relevant_ids": [
+        "d01",
+        "d02",
+        "d03"
+      ],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 3,
+        "d03": 1
+      },
+      "must_include_ids": [
+        "d01",
+        "d02"
+      ],
+      "must_exclude_ids": [
+        "d04"
+      ],
+      "foreign_incident_ids": [],
+      "top_k": 4
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "reservoir",
+        "certificate"
+      ],
+      "trigger_tokens": [
+        "borrowable handles"
+      ],
+      "symptom_tokens": [
+        "checkout write path unavailable"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [
+        "certificate expired",
+        "TLS"
+      ],
+      "required_evidence_ids": [
+        "d01",
+        "d02"
+      ],
+      "forbidden_evidence_ids": [
+        "d04"
+      ],
+      "requires_abstention": false,
+      "packet_overrides": {
+        "product_path": {
+          "root_cause_establishable": false,
+          "requires_abstention": true
+        }
+      },
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_single_cause_collapse": "fail",
+    "mut_symptom_as_sole_cause": "fail"
+  },
+  "incidents": {
+    "orders-pool": [
+      "d01"
+    ],
+    "payments-tls": [
+      "d02"
+    ],
+    "checkout-symptom": [
+      "d03"
+    ]
+  },
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "adv03-shared-symptom-separate-causes"
+}

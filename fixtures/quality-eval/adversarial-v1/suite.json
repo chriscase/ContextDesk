@@ -1,0 +1,22 @@
+{
+  "schema_id": "contextdesk.quality_eval.suite.v1",
+  "suite_id": "quality-eval-adversarial-v1",
+  "title": "Hermetic adversarial triage quality suite v1",
+  "schema_version": "contextdesk.quality_eval.v1",
+  "cases": [
+    "adv01-three-independent-incidents",
+    "adv02-multi-legitimate-triggers",
+    "adv03-shared-symptom-separate-causes",
+    "adv04-trigger-plus-promoted-symptom",
+    "adv05-independent-absorbed",
+    "adv06-loud-decoy-before-trigger",
+    "adv07-recovery-and-config-change",
+    "adv08-cross-service-chain",
+    "adv09-vocab-identity-traps",
+    "adv10-missing-initiating-abstention",
+    "adv11-partial-observation-contradiction",
+    "adv12-chronology-and-time",
+    "adv13-cross-source-duplicates",
+    "adv14-retrieval-packet-ablations"
+  ]
+}

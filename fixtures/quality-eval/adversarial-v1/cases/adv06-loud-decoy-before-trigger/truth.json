@@ -1,0 +1,91 @@
+{
+  "title": "Loud early decoy must not displace the true trigger",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What caused payment authorization failures?",
+      "relevant_ids": [
+        "d04",
+        "d05"
+      ],
+      "graded_gains": {
+        "d04": 3,
+        "d05": 2
+      },
+      "must_include_ids": [
+        "d04"
+      ],
+      "must_exclude_ids": [
+        "d01",
+        "d02",
+        "d03",
+        "d06"
+      ],
+      "foreign_incident_ids": [
+        "d01",
+        "d02",
+        "d03",
+        "d06"
+      ],
+      "top_k": 5
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "TLS",
+        "certificate",
+        "expired"
+      ],
+      "trigger_tokens": [
+        "certificate expired",
+        "TLS"
+      ],
+      "symptom_tokens": [
+        "payment authorization unavailable"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [
+        "eviction churn"
+      ],
+      "required_evidence_ids": [
+        "d04"
+      ],
+      "forbidden_evidence_ids": [
+        "d01",
+        "d02",
+        "d03",
+        "d06"
+      ],
+      "requires_abstention": false,
+      "packet_overrides": {
+        "product_path": {
+          "root_cause_establishable": false,
+          "requires_abstention": true
+        }
+      },
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_popularity_decoy": "fail",
+    "mut_decoy_before_trigger_selected": "fail"
+  },
+  "incidents": {
+    "payments": [
+      "d04",
+      "d05"
+    ],
+    "catalog-cache": [
+      "d01",
+      "d02",
+      "d03",
+      "d06"
+    ]
+  },
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "adv06-loud-decoy-before-trigger"
+}

@@ -1,0 +1,181 @@
+{
+  "documents": [
+    {
+      "id": "d01",
+      "text": "kind=application_error level=error service=catalog-cache pattern=cache eviction churn spike region west"
+    },
+    {
+      "id": "d02",
+      "text": "kind=application_error level=error service=catalog-cache pattern=cache eviction churn spike region west"
+    },
+    {
+      "id": "d03",
+      "text": "kind=application_error level=error service=catalog-cache pattern=cache eviction churn spike region west"
+    },
+    {
+      "id": "d04",
+      "text": "kind=config_error level=error service=payments-edge pattern=TLS certificate expired for payments host"
+    },
+    {
+      "id": "d05",
+      "text": "kind=application_error level=error service=payments pattern=payment authorization unavailable after edge reject"
+    },
+    {
+      "id": "d06",
+      "text": "kind=status_event level=info service=catalog-cache pattern=cache warm completed"
+    }
+  ],
+  "questions": {
+    "q1": "What caused payment authorization failures?"
+  },
+  "packets": [
+    {
+      "packet_id": "fixed",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=application_error level=error service=catalog-cache pattern=cache eviction churn spike region west"
+        },
+        {
+          "id": "d02",
+          "text": "kind=application_error level=error service=catalog-cache pattern=cache eviction churn spike region west"
+        },
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=catalog-cache pattern=cache eviction churn spike region west"
+        },
+        {
+          "id": "d04",
+          "text": "kind=config_error level=error service=payments-edge pattern=TLS certificate expired for payments host"
+        },
+        {
+          "id": "d05",
+          "text": "kind=application_error level=error service=payments pattern=payment authorization unavailable after edge reject"
+        }
+      ]
+    },
+    {
+      "packet_id": "oracle",
+      "documents": [
+        {
+          "id": "d04",
+          "text": "kind=config_error level=error service=payments-edge pattern=TLS certificate expired for payments host"
+        }
+      ]
+    },
+    {
+      "packet_id": "product_path",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=application_error level=error service=catalog-cache pattern=cache eviction churn spike region west"
+        },
+        {
+          "id": "d02",
+          "text": "kind=application_error level=error service=catalog-cache pattern=cache eviction churn spike region west"
+        },
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=catalog-cache pattern=cache eviction churn spike region west"
+        },
+        {
+          "id": "d05",
+          "text": "kind=application_error level=error service=payments pattern=payment authorization unavailable after edge reject"
+        }
+      ]
+    }
+  ],
+  "rankings": [
+    {
+      "query_id": "q1",
+      "ranked_ids": [
+        "d01",
+        "d02",
+        "d03",
+        "d05",
+        "d04",
+        "d06"
+      ],
+      "upstream_ranked_ids": [
+        "d01",
+        "d02",
+        "d03",
+        "d06",
+        "d05",
+        "d04"
+      ],
+      "k": 5
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "good_fixed",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "TLS certificate expired for payments host",
+          "evidence_ids": [
+            "d04"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "payment authorization unavailable after edge reject",
+          "evidence_ids": [
+            "d05"
+          ],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "Expired TLS certificate on the payments host initiated authorization failures. Concurrent cache eviction chatter is unrelated.",
+      "confidence": "medium"
+    },
+    {
+      "candidate_id": "mut_popularity_decoy",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "cache eviction churn spike region west",
+          "evidence_ids": [
+            "d01",
+            "d02",
+            "d03"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "payment authorization unavailable after edge reject",
+          "evidence_ids": [
+            "d05"
+          ],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "Cache eviction churn initiated the payment authorization failures.",
+      "confidence": "high"
+    },
+    {
+      "candidate_id": "mut_decoy_before_trigger_selected",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "cache eviction churn spike region west",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        }
+      ],
+      "conclusion": "Earlier cache eviction churn explains payment failures.",
+      "confidence": "high"
+    }
+  ],
+  "schema_id": "contextdesk.quality_eval.runtime.v1",
+  "case_id": "adv06-loud-decoy-before-trigger"
+}
