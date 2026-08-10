@@ -1503,6 +1503,100 @@ mod tests {
         }
     }
 
+    /// Two-candidate host ledger in the shape a broad triage builds: one
+    /// cause-role row for the trigger the candidate stage identified, three
+    /// symptom-role rows for the repeated downstream exception.
+    fn role_split_ledger() -> crate::investigation_answer::HostEvidenceLedger {
+        use crate::investigation_answer::{
+            AnswerBindingV1, EvidenceRole, HostEvidenceEntry, HostEvidenceLedger,
+            LogSnapshotRevisionV1,
+        };
+        let revision = LogSnapshotRevisionV1 {
+            event_revision: 1,
+            template_analysis_revision: 2,
+            suppression_revision: 3,
+        };
+        let mut evidence = vec![HostEvidenceEntry {
+            evidence_id: "e:template:1:2".into(),
+            candidate_id: "template:1".into(),
+            source_label: "app/worker.jsonl".into(),
+            locator: "seq=2".into(),
+            corpus_id: "c".into(),
+            revision,
+            role: EvidenceRole::Cause,
+            content: "host excerpt".into(),
+        }];
+        evidence.push(HostEvidenceEntry {
+            evidence_id: "e:template:3:3".into(),
+            candidate_id: "template:3".into(),
+            source_label: "app/worker.jsonl".into(),
+            locator: "seq=3".into(),
+            corpus_id: "c".into(),
+            revision,
+            role: EvidenceRole::Symptom,
+            content: "host excerpt".into(),
+        });
+        let binding = AnswerBindingV1 {
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            corpus_id: "c".into(),
+            revision,
+            ledger_digest: HostEvidenceLedger::digest(&evidence),
+        };
+        HostEvidenceLedger::new(binding, evidence).expect("role split ledger")
+    }
+
+    /// The observed live shape: the repeated symptom group is filed as the
+    /// causal candidate and the trigger is left as a bare observation, so the
+    /// typed rubric fails exactly the two dimensions the live run reported.
+    /// Host restoration must flip both, and must not flip a laundering
+    /// mutation that promotes a symptom to an established cause.
+    #[test]
+    fn host_role_restoration_repairs_the_two_typed_usefulness_dimensions_only_when_honest() {
+        use crate::investigation_answer::{restore_claim_roles, validate_model_answer, SCHEMA_V1};
+
+        let inverted = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[
+                {{"candidate_id":"template:1","observations":[{{"claim_id":"obs-1","text":"configuration row observed","evidence_ids":["e:template:1:2"]}}]}},
+                {{"candidate_id":"template:3","causal_candidates":[{{"claim_id":"cause-3","text":"repeated failure drove the incident","evidence_ids":["e:template:3:3"]}}]}}
+            ]}}"#
+        );
+        let mut envelope = validate_model_answer(&inverted, &role_split_ledger())
+            .expect("inverted answer is valid");
+        let before = score_validated_investigation_answer(&envelope, &sample_key(), &sample_host());
+        assert!(!before.passed);
+        assert_eq!(
+            before.failed_ids(),
+            vec!["typed_trigger_identification", "typed_symptom_separation"]
+        );
+
+        assert_eq!(restore_claim_roles(&mut envelope).len(), 2);
+        let after = score_validated_investigation_answer(&envelope, &sample_key(), &sample_host());
+        assert!(after.passed, "typed score failed: {:?}", after.failed_ids());
+        // The scorer was not weakened: root establishment is still withheld,
+        // and the answer says the host chose those sections.
+        assert!(!envelope.answer.root_cause_established);
+        assert_eq!(envelope.host_role_corrections.len(), 2);
+
+        // Laundering guard: a symptom presented as an established initiating
+        // cause stays failed after restoration.
+        let promoted = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[
+                {{"candidate_id":"template:1","causal_candidates":[{{"claim_id":"cause-1","text":"configuration row observed","evidence_ids":["e:template:1:2"]}}]}},
+                {{"candidate_id":"template:3","initiating_causes":[{{"claim_id":"root-3","text":"repeated failure was the initiating cause","evidence_ids":["e:template:3:3"]}}]}}
+            ]}}"#
+        );
+        let mut mutated =
+            validate_model_answer(&promoted, &role_split_ledger()).expect("mutation is valid");
+        assert!(restore_claim_roles(&mut mutated).is_empty());
+        let mutated_score =
+            score_validated_investigation_answer(&mutated, &sample_key(), &sample_host());
+        assert!(!mutated_score.passed);
+        assert!(mutated_score
+            .failed_ids()
+            .contains(&"typed_symptom_separation"));
+    }
+
     #[test]
     fn typed_investigation_answers_are_scored_without_rendered_markdown_reparse() {
         use crate::investigation_answer::{
@@ -1595,6 +1689,7 @@ mod tests {
                 root_cause_established: true,
             },
             semantic_attempts: 0,
+            host_role_corrections: Vec::new(),
         };
 
         let score = score_validated_investigation_answer(&envelope, &sample_key(), &sample_host());

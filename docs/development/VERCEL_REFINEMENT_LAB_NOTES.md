@@ -1061,3 +1061,31 @@ activation, or consent for production cloud egress.
    should weaken the existing whole-turn ceiling or candidate evidence rules.
 10. Run focused and full repository gates and hand off the isolated branch for
     owner review; do not merge or release automatically.
+
+## 2026-08-10 DeepSeek V4 Flash triage usefulness — host role reconciliation
+
+The exact-release DeepSeek V4 Flash run passed every protocol, product, and
+retrieval lane and failed only the typed scorer, on exactly
+`typed_trigger_identification` and `typed_symptom_separation`. Two prompt-side
+attempts (a role-consistency contract clause, then opaque candidate-stage role
+hints in the comparison prompt) did not move the live result, which is the
+lesson: the host already held the roles the answer contradicted, so the fix
+belonged at the ledger seam rather than in prompt pressure.
+
+The comparison stage now raises a `role_placement` validation category, spends
+its one existing bounded correction on it, and then deterministically re-files
+claims from the ledger alone — demotion of a wholly symptom-cited causal claim,
+and promotion of a wholly cause-cited observation only when no causal claim
+cites cause evidence at all. Nothing moves into `initiating_causes`, so
+abstention and `root_cause_established` are untouched. Every re-filing is
+visible in the projection, recorded on the envelope, and reported as
+`contextdesk.host_role_corrections.v1`; `gateway diagnose` treats a restored
+pass as `retry_required`, never `compatible`.
+
+This is proven hermetically only. The recorded failure is still consistent with
+the candidate stage itself having classified the repeated symptom group as the
+initiating cause, in which case the host must not overrule it and the typed
+scorer should keep failing. The new telemetry's
+`candidate_stage_classification` is what separates those two stories on the
+next live run. Method detail and the exact rerun command:
+[`docs/benchmarks/DEEPSEEK_TRIAGE_ROLE_RESTORATION_V1.md`](../benchmarks/DEEPSEEK_TRIAGE_ROLE_RESTORATION_V1.md).

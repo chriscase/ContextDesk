@@ -1369,6 +1369,262 @@ fn scripted_broad_triage_turn_exposes_brief_and_accepts_typed_v1_answer() {
     );
 }
 
+/// Deduplicated, ordered evidence sequences of one host candidate group.
+fn candidate_seqs(candidate: &cd_core::tool_host::BroadLogTriageCandidate) -> Vec<u64> {
+    let mut seqs = candidate
+        .evidence
+        .iter()
+        .map(|identity| identity.seq)
+        .collect::<Vec<_>>();
+    seqs.sort_unstable();
+    seqs.dedup();
+    seqs
+}
+
+/// Candidate-stage assessments that split roles: the first selected group is
+/// the initiating cause, every other selected group is a downstream symptom.
+/// Every supplied seq is classified, so the host ledger carries a definite role
+/// for each row rather than a neutral one.
+fn role_split_assessments(
+    candidates: &[&cd_core::tool_host::BroadLogTriageCandidate],
+) -> Vec<ChatCompletion> {
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| ChatCompletion {
+            content: serde_json::json!({
+                "schema": "contextdesk.candidate_assessment.v1",
+                "candidate_id": candidate.group_id,
+                "classification": if index == 0 { "initiating_cause" } else { "downstream_symptom" },
+                "analysis": "bounded candidate; the supplied patterns fix this role",
+                "evidence_seqs": candidate_seqs(candidate),
+            })
+            .to_string(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+            telemetry: Default::default(),
+        })
+        .collect()
+}
+
+/// A final comparison that inverts every candidate-stage role: the cause group
+/// is filed as a bare observation and each symptom group is presented as the
+/// causal candidate. Claim text stays deliberately opaque — this lab proves the
+/// host's role plumbing, never incident vocabulary.
+fn role_inverted_comparison_json(
+    candidates: &[&cd_core::tool_host::BroadLogTriageCandidate],
+    comparison_context: Option<&cd_core::tool_host::BroadLogTriageComparisonContext>,
+) -> String {
+    let mut candidates_json = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let evidence_ids = candidate_seqs(candidate)
+                .iter()
+                .map(|seq| scripted_evidence_id(&candidate.group_id, *seq))
+                .collect::<Vec<_>>();
+            let claim = serde_json::json!({
+                "claim_id": format!("claim-{}", candidate.group_id),
+                "text": "bounded candidate-scoped statement",
+                "evidence_ids": evidence_ids,
+            });
+            if index == 0 {
+                serde_json::json!({
+                    "candidate_id": candidate.group_id,
+                    "observations": [claim],
+                })
+            } else {
+                serde_json::json!({
+                    "candidate_id": candidate.group_id,
+                    "causal_candidates": [claim],
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    if let Some(context) = comparison_context {
+        candidates_json.push(serde_json::json!({
+            "candidate_id": context.candidate_id,
+            "observations": [{
+                "claim_id": "obs-global-timeline-context",
+                "text": "bounded global chronology; incident membership is unverified",
+                "evidence_ids": context
+                    .evidence
+                    .iter()
+                    .map(|row| scripted_evidence_id(&context.candidate_id, row.identity.seq))
+                    .collect::<Vec<_>>(),
+            }],
+        }));
+    }
+    serde_json::json!({
+        "schema": cd_core::investigation_answer::SCHEMA_V1,
+        "candidates": candidates_json,
+    })
+    .to_string()
+}
+
+/// End-to-end proof on the shipped turn: when the final comparison keeps
+/// contradicting the candidate-stage roles even after the one bounded
+/// correction, the host re-files the claims from its own ledger instead of
+/// failing the turn closed — and says so in the projection and telemetry.
+#[test]
+fn scripted_role_inverted_comparison_is_restored_from_the_host_ledger() {
+    use cd_core::investigation_answer::{ClaimKind, RoleCorrectionBasis};
+
+    let case = "decoy-before-trigger";
+    let (cache, corpus_id, _corpus) = ingest_case(case);
+    let visible_brief = build_brief(cache.path(), &corpus_id);
+
+    let mut tool_host = ToolHost::new(
+        Workspace::new("triage-lab-roles", vec![cache.path().to_path_buf()]),
+        KeywordIndex::new(),
+        None,
+    );
+    tool_host.set_log_analysis(true, Some(cache.path().to_path_buf()));
+    tool_host.set_log_corpus_scope(Some(corpus_id.clone()));
+    tool_host.set_active_log_corpus(Some(corpus_id.clone()));
+    let opened = Arc::new(LogCorpus::open(cache.path(), &corpus_id).unwrap());
+    tool_host
+        .seed_log_corpus_handle(&corpus_id, opened)
+        .unwrap();
+    tool_host.pin_log_suppression_lens(&corpus_id).unwrap();
+
+    // One round per candidate, plus the comparison and its single bounded
+    // correction — the same reservation the production budget makes.
+    let candidate_count = visible_brief
+        .candidate_groups
+        .len()
+        .min(cd_core::tool_host::BROAD_LOG_TRIAGE_CANDIDATE_CAP);
+    assert!(
+        candidate_count >= 2,
+        "fixture must exercise staged comparison"
+    );
+    let max_rounds = candidate_count + 2;
+    let selected = visible_brief
+        .candidate_groups
+        .iter()
+        .take(candidate_count)
+        .collect::<Vec<_>>();
+
+    let mut script = role_split_assessments(&selected);
+    // Both comparison attempts invert the roles, so the model never repairs
+    // itself and the host's deterministic restoration is what ships.
+    let inverted =
+        role_inverted_comparison_json(&selected, visible_brief.comparison_context.as_ref());
+    for _ in 0..2 {
+        script.push(ChatCompletion {
+            content: inverted.clone(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+            telemetry: Default::default(),
+        });
+    }
+    let backend = ScriptedBackend::new(script);
+
+    let mut history = Vec::new();
+    let opts = AgentOptions {
+        session_id: "triage-lab-roles".into(),
+        model: Some("scripted-lab".into()),
+        max_rounds,
+        context_char_budget: DEFAULT_CONTEXT_CHAR_BUDGET,
+        ambient_recall_enabled: false,
+        log_explorer_context: Some(
+            LogExplorerTurnContext::for_main_chat(&corpus_id).expect("main chat context"),
+        ),
+        ..Default::default()
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let events = rt
+        .block_on(run_agent_turn(
+            &backend,
+            &mut tool_host,
+            "Broad triage this corpus: earliest error vs likely cause?",
+            &mut history,
+            &opts,
+        ))
+        .expect("run_agent_turn");
+
+    let envelope = multi_stage_envelope(&events);
+    // One demotion per symptom group plus one promotion of the cause group.
+    assert_eq!(envelope.host_role_corrections.len(), candidate_count);
+    assert_eq!(
+        envelope
+            .host_role_corrections
+            .iter()
+            .filter(|correction| correction.basis
+                == RoleCorrectionBasis::CauseEvidenceMissingFromCausalClaims)
+            .count(),
+        1
+    );
+    assert_eq!(envelope.semantic_attempts, 1);
+
+    for (index, candidate) in selected.iter().enumerate() {
+        let claim_id = format!("claim-{}", candidate.group_id);
+        let claim = envelope
+            .answer
+            .candidates
+            .iter()
+            .flat_map(|entry| entry.claims.iter())
+            .find(|claim| claim.claim_id == claim_id)
+            .unwrap_or_else(|| panic!("claim {claim_id} is missing"));
+        let expected = if index == 0 {
+            ClaimKind::CausalCandidate
+        } else {
+            ClaimKind::Symptom
+        };
+        assert_eq!(claim.claim_kind, expected, "claim {claim_id}");
+        // Restoration moves a section, never scope or citations.
+        assert_eq!(claim.candidate_id, candidate.group_id);
+        assert_eq!(
+            claim.evidence_ids,
+            candidate_seqs(candidate)
+                .iter()
+                .map(|seq| scripted_evidence_id(&candidate.group_id, *seq))
+                .collect::<Vec<_>>()
+        );
+    }
+    // Host authority and abstention are untouched: nothing was moved into an
+    // initiating cause, so the answer still establishes no root cause.
+    assert!(!envelope.answer.root_cause_established);
+    assert!(envelope
+        .answer
+        .candidates
+        .iter()
+        .flat_map(|candidate| candidate.claims.iter())
+        .all(|claim| claim.claim_kind != ClaimKind::InitiatingCause));
+
+    // The reader and the trace both learn the host chose those sections.
+    assert!(terminal_text(&events).contains("host-refiled"));
+    let detail = events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Tool {
+                name,
+                detail: Some(detail),
+                ..
+            } if name == "broad_log_triage_multi_stage" && detail.contains("final_comparison") => {
+                Some(detail.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("multi-stage final comparison missing: {events:?}"));
+    let value: Value = serde_json::from_str(&detail).expect("multi-stage detail JSON");
+    assert_eq!(
+        value["host_role_corrections"].as_u64(),
+        Some(candidate_count as u64)
+    );
+
+    assert_multi_stage_v1_projection(
+        &events,
+        "triage-lab-roles",
+        &corpus_id,
+        &visible_brief.evidence,
+        visible_brief.comparison_context.as_ref(),
+    );
+}
+
 /// The legacy structured-triage contract still governs the single-stage
 /// synthesis path, so its end-to-end proof moves here rather than being lost:
 /// a real `run_agent_turn` whose terminal answer is parsed and scored by the

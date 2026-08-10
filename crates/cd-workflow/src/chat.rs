@@ -635,6 +635,7 @@ mod tests {
                     root_cause_established: false,
                 },
                 semantic_attempts: 0,
+                host_role_corrections: Vec::new(),
             },
         }
     }

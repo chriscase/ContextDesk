@@ -58,3 +58,12 @@ Run 2 (`/private/tmp/contextdesk-vercel-deepseek-77e520da-replay-out/`):
 
 No provider bodies, endpoint URLs, headers, credentials, or private paths are
 included in the share-safe bundles.
+
+## Follow-up
+
+The host-side seam this run exposed — a grounded final comparison filing
+evidence against the roles its own candidate stage established — is addressed
+by ledger-derived role reconciliation in
+[`DEEPSEEK_TRIAGE_ROLE_RESTORATION_V1.md`](DEEPSEEK_TRIAGE_ROLE_RESTORATION_V1.md).
+That change is proven hermetically only; this model's live triage usefulness
+result stands until the rerun recorded there is performed.

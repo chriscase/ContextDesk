@@ -163,6 +163,47 @@ pub struct AnswerBindingV1 {
     pub revision: LogSnapshotRevisionV1,
     pub ledger_digest: String,
 }
+
+/// Why the host re-filed one claim into a different section.
+///
+/// Both variants are decided only from [`HostEvidenceEntry::role`], which the
+/// host minted from the candidate-scoped stage that actually read the evidence.
+/// No log text, chronology, or provider metadata takes part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleCorrectionBasis {
+    /// A `causal_candidates` claim cited only evidence the ledger classified as
+    /// a downstream symptom.
+    SymptomEvidenceInCausalCandidate,
+    /// No causal claim anywhere in the answer cited evidence the ledger
+    /// classified as a cause, while an observation cited exactly that evidence.
+    CauseEvidenceMissingFromCausalClaims,
+}
+
+impl RoleCorrectionBasis {
+    /// Stable, content-free category suitable for host telemetry.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SymptomEvidenceInCausalCandidate => "symptom_evidence_in_causal_candidate",
+            Self::CauseEvidenceMissingFromCausalClaims => {
+                "cause_evidence_missing_from_causal_claims"
+            }
+        }
+    }
+}
+
+/// One host-applied claim-section restoration, recorded on the envelope so the
+/// projection, telemetry, and any later reader can see that the host — not the
+/// model — chose the final section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRoleCorrectionV1 {
+    pub claim_id: String,
+    pub candidate_id: String,
+    pub from_kind: ClaimKind,
+    pub to_kind: ClaimKind,
+    pub basis: RoleCorrectionBasis,
+}
+
 /// Persistable authoritative state for later host-only CLI/GUI/session lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnswerEnvelopeV1 {
@@ -170,6 +211,11 @@ pub struct AnswerEnvelopeV1 {
     pub evidence: Vec<HostEvidenceEntry>,
     pub answer: InvestigationAnswerV1,
     pub semantic_attempts: u8,
+    /// Host-applied role restorations, in application order.  Empty for every
+    /// answer whose sections already agreed with the ledger roles, and defaulted
+    /// on read so envelopes persisted before this field stay loadable.
+    #[serde(default)]
+    pub host_role_corrections: Vec<HostRoleCorrectionV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +231,12 @@ pub enum ValidationError {
     EmptyLedger,
     InvalidBinding,
     DigestMismatch,
+    /// A structurally valid proposal whose claim sections contradict the host
+    /// ledger's evidence roles.  [`validate_model_answer`] never returns this:
+    /// schema, scope, and citation authority all passed.  It is raised by the
+    /// separate role-consistency gate ([`plan_role_restorations`]) so a host can
+    /// spend its one bounded semantic correction on the placement itself.
+    RolePlacement,
 }
 
 impl ValidationError {
@@ -202,6 +254,7 @@ impl ValidationError {
             Self::EmptyLedger => "empty_ledger",
             Self::InvalidBinding => "invalid_binding",
             Self::DigestMismatch => "digest_mismatch",
+            Self::RolePlacement => "role_placement",
         }
     }
 }
@@ -453,7 +506,174 @@ pub fn validate_model_answer(
             root_cause_established: root,
         },
         semantic_attempts: 0,
+        host_role_corrections: Vec::new(),
     })
+}
+
+/// Whether `claim` cites at least one evidence id and every cited id is a
+/// ledger row carrying exactly `role`.
+///
+/// An id missing from `roles` can only appear on an envelope that did not come
+/// from [`validate_model_answer`]; it makes the claim ineligible rather than
+/// being treated as a match, so an unknown row never earns a role change.
+fn claim_cites_only(
+    claim: &InvestigationClaimV1,
+    roles: &BTreeMap<&str, EvidenceRole>,
+    role: EvidenceRole,
+) -> bool {
+    !claim.evidence_ids.is_empty()
+        && claim
+            .evidence_ids
+            .iter()
+            .all(|id| roles.get(id.as_str()) == Some(&role))
+}
+
+/// Whether `claim` cites any ledger row carrying `role`.
+fn claim_cites_any(
+    claim: &InvestigationClaimV1,
+    roles: &BTreeMap<&str, EvidenceRole>,
+    role: EvidenceRole,
+) -> bool {
+    claim
+        .evidence_ids
+        .iter()
+        .any(|id| roles.get(id.as_str()) == Some(&role))
+}
+
+/// Claim kinds that assert a causal reading of their cited evidence.
+fn is_causal_kind(kind: ClaimKind) -> bool {
+    matches!(
+        kind,
+        ClaimKind::CausalCandidate | ClaimKind::InitiatingCause
+    )
+}
+
+/// Plan the bounded, host-owned claim-section restorations for `envelope`.
+///
+/// The host already knows each evidence row's role: it minted
+/// [`HostEvidenceEntry::role`] from the candidate-scoped stage that read that
+/// exact evidence.  A later whole-answer stage sees only opaque identifiers, so
+/// it can file the same evidence under a section that contradicts that role.
+/// This plan is the host's deterministic reconciliation, and it is deliberately
+/// narrow:
+///
+/// * **Demote** a `causal_candidates` claim whose cited evidence is *entirely*
+///   symptom-role into `symptoms`.  This only ever reduces causal reach, so it
+///   is safe for a weak model and cannot manufacture a cause.
+/// * **Promote** an `observations` claim whose cited evidence is *entirely*
+///   cause-role into `causal_candidates`, and only when no causal claim in the
+///   whole answer cites any cause-role evidence — that is, only when the model
+///   dropped the causal role the candidate stage had already established.
+///   `causal_candidates` is the hypothesis section, so this grants no
+///   established-cause authority.
+///
+/// Deliberately *not* planned, so the host never launders a wrong answer:
+///
+/// * nothing is ever moved *into* `initiating_causes`, so
+///   [`InvestigationAnswerV1::root_cause_established`] and every
+///   [`ClaimStatus`] stay exactly as validation computed them — abstention is
+///   preserved;
+/// * an `initiating_causes` claim citing symptom-role evidence is left alone:
+///   validation already marks it [`ClaimStatus::Withheld`] and withholds root
+///   establishment, which is visible honesty rather than a silent repair;
+/// * `competing_explanations` and `missing_evidence` are never touched — the
+///   model's explicit "unrelated" or "absent" wording must not be re-filed into
+///   a causal or symptom section;
+/// * claims citing a mix of roles keep the model's section, because no single
+///   ledger role describes them.
+///
+/// Evidence ids, candidate scope, claim ids, claim text, citations, and
+/// chronology are never modified.  The plan is empty exactly when the answer's
+/// sections already agree with the ledger, which makes application idempotent.
+pub fn plan_role_restorations(envelope: &AnswerEnvelopeV1) -> Vec<HostRoleCorrectionV1> {
+    let roles: BTreeMap<&str, EvidenceRole> = envelope
+        .evidence
+        .iter()
+        .map(|entry| (entry.evidence_id.as_str(), entry.role))
+        .collect();
+    let claims = || {
+        envelope
+            .answer
+            .candidates
+            .iter()
+            .flat_map(|candidate| candidate.claims.iter())
+    };
+    let mut planned = Vec::new();
+    let mut demoted = BTreeSet::new();
+    for claim in claims() {
+        if claim.claim_kind == ClaimKind::CausalCandidate
+            && claim_cites_only(claim, &roles, EvidenceRole::Symptom)
+        {
+            demoted.insert(claim.claim_id.as_str());
+            planned.push(HostRoleCorrectionV1 {
+                claim_id: claim.claim_id.clone(),
+                candidate_id: claim.candidate_id.clone(),
+                from_kind: ClaimKind::CausalCandidate,
+                to_kind: ClaimKind::Symptom,
+                basis: RoleCorrectionBasis::SymptomEvidenceInCausalCandidate,
+            });
+        }
+    }
+    // Evaluated after the demotions above: a claim that is on its way out of the
+    // causal sections must not be what keeps the cause role "already cited".
+    let cause_cited_causally = claims().any(|claim| {
+        is_causal_kind(claim.claim_kind)
+            && !demoted.contains(claim.claim_id.as_str())
+            && claim_cites_any(claim, &roles, EvidenceRole::Cause)
+    });
+    if !cause_cited_causally {
+        for claim in claims() {
+            if claim.claim_kind == ClaimKind::Observation
+                && claim_cites_only(claim, &roles, EvidenceRole::Cause)
+            {
+                planned.push(HostRoleCorrectionV1 {
+                    claim_id: claim.claim_id.clone(),
+                    candidate_id: claim.candidate_id.clone(),
+                    from_kind: ClaimKind::Observation,
+                    to_kind: ClaimKind::CausalCandidate,
+                    basis: RoleCorrectionBasis::CauseEvidenceMissingFromCausalClaims,
+                });
+            }
+        }
+    }
+    planned
+}
+
+/// Whether this answer's sections contradict the host ledger's evidence roles.
+///
+/// A host uses this to decide whether spending its one bounded semantic
+/// correction on the placement is worthwhile before falling back to
+/// [`restore_claim_roles`].
+pub fn has_role_placement_gap(envelope: &AnswerEnvelopeV1) -> bool {
+    !plan_role_restorations(envelope).is_empty()
+}
+
+/// Apply [`plan_role_restorations`] to `envelope` and record what moved.
+///
+/// Returns the applied corrections, which are also appended to
+/// [`AnswerEnvelopeV1::host_role_corrections`] so the visible projection and any
+/// telemetry can say the host chose the section.  Re-running this on an already
+/// restored envelope plans nothing and therefore records nothing.
+pub fn restore_claim_roles(envelope: &mut AnswerEnvelopeV1) -> Vec<HostRoleCorrectionV1> {
+    let planned = plan_role_restorations(envelope);
+    if planned.is_empty() {
+        return planned;
+    }
+    let moves: BTreeMap<&str, ClaimKind> = planned
+        .iter()
+        .map(|correction| (correction.claim_id.as_str(), correction.to_kind))
+        .collect();
+    for candidate in &mut envelope.answer.candidates {
+        for claim in &mut candidate.claims {
+            if let Some(kind) = moves.get(claim.claim_id.as_str()) {
+                claim.claim_kind = *kind;
+            }
+        }
+    }
+    envelope
+        .host_role_corrections
+        .extend(planned.iter().cloned());
+    planned
 }
 
 pub fn authoritative_json(envelope: &AnswerEnvelopeV1) -> String {
@@ -595,6 +815,30 @@ const CLAIM_KIND_RENDER_ORDER: [ClaimKind; 6] = [
     ClaimKind::MissingEvidence,
 ];
 
+/// Stable snake_case token for one claim kind, matching the model-facing
+/// section names in the proposal contract.
+fn claim_kind_token(kind: ClaimKind) -> &'static str {
+    match kind {
+        ClaimKind::Observation => "observations",
+        ClaimKind::Symptom => "symptoms",
+        ClaimKind::CausalCandidate => "causal_candidates",
+        ClaimKind::InitiatingCause => "initiating_causes",
+        ClaimKind::CompetingExplanation => "competing_explanations",
+        ClaimKind::MissingEvidence => "missing_evidence",
+    }
+}
+
+/// Visible marker for a claim the host re-filed by evidence role.
+///
+/// Naming the model's original section keeps the projection honest: a reader
+/// can always tell that the host, not the model, chose where the claim landed.
+fn role_correction_marker(correction: &HostRoleCorrectionV1) -> String {
+    format!(
+        "**[host-refiled from {}]**",
+        claim_kind_token(correction.from_kind)
+    )
+}
+
 /// Explicit status marker for a claim the host did not accept as supported.
 ///
 /// `Supported` renders unmarked; every other status is named in the visible
@@ -639,6 +883,8 @@ fn excerpt_adds_information(content: &str, already_shown: &str) -> bool {
 /// * candidate and claim-kind separation is preserved — no claim is shown
 ///   outside its candidate, and no kind is merged into another;
 /// * a claim whose host status is not `Supported` carries a visible marker;
+/// * a claim the host re-filed by evidence role carries a visible marker naming
+///   the section the model originally chose;
 /// * root-cause establishment is printed from `root_cause_established` alone;
 /// * no confidence value is invented — V1 validates none, and the output says
 ///   so rather than leaving a reader to assume one;
@@ -652,6 +898,11 @@ pub fn render_answer_markdown(envelope: &AnswerEnvelopeV1) -> String {
         .canonical_citations
         .iter()
         .map(|citation| (citation.evidence_id.as_str(), citation))
+        .collect();
+    let role_corrections: BTreeMap<&str, &HostRoleCorrectionV1> = envelope
+        .host_role_corrections
+        .iter()
+        .map(|correction| (correction.claim_id.as_str(), correction))
         .collect();
 
     let mut out = String::from("# Investigation answer\n\n");
@@ -705,6 +956,10 @@ pub fn render_answer_markdown(envelope: &AnswerEnvelopeV1) -> String {
                 out.push_str("- ");
                 if let Some(marker) = claim_status_marker(claim.status) {
                     out.push_str(marker);
+                    out.push(' ');
+                }
+                if let Some(correction) = role_corrections.get(claim.claim_id.as_str()) {
+                    out.push_str(&role_correction_marker(correction));
                     out.push(' ');
                 }
                 out.push_str(&literal_span(&claim.text));
@@ -828,6 +1083,7 @@ mod tests {
             ValidationError::EmptyLedger,
             ValidationError::InvalidBinding,
             ValidationError::DigestMismatch,
+            ValidationError::RolePlacement,
         ]
         .map(|error| error.as_str());
         assert_eq!(
@@ -844,8 +1100,278 @@ mod tests {
                 "empty_ledger",
                 "invalid_binding",
                 "digest_mismatch",
+                "role_placement",
             ]
         );
+        assert_eq!(
+            [
+                RoleCorrectionBasis::SymptomEvidenceInCausalCandidate,
+                RoleCorrectionBasis::CauseEvidenceMissingFromCausalClaims,
+            ]
+            .map(|basis| basis.as_str()),
+            [
+                "symptom_evidence_in_causal_candidate",
+                "cause_evidence_missing_from_causal_claims",
+            ]
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Host role restoration.
+    //
+    // Two candidates whose ledger roles were minted by the candidate-scoped
+    // stage that actually read them: one cause row, three symptom rows. This
+    // is the shape a broad triage produces when one group is the configuration
+    // error and another is the repeated downstream exception, and it is the
+    // shape a whole-answer stage inverts when it sees only opaque ids.
+    // -----------------------------------------------------------------
+
+    fn role_lab_ledger() -> HostEvidenceLedger {
+        let mut evidence = vec![HostEvidenceEntry {
+            evidence_id: "e:cause:1".into(),
+            candidate_id: "cause".into(),
+            source_label: "one".into(),
+            locator: "seq=1".into(),
+            corpus_id: "c".into(),
+            revision: revision(),
+            role: EvidenceRole::Cause,
+            content: "host excerpt one".into(),
+        }];
+        evidence.extend((3..=5).map(|seq| HostEvidenceEntry {
+            evidence_id: format!("e:symptom:{seq}"),
+            candidate_id: "symptom".into(),
+            source_label: "two".into(),
+            locator: format!("seq={seq}"),
+            corpus_id: "c".into(),
+            revision: revision(),
+            role: EvidenceRole::Symptom,
+            content: format!("host excerpt {seq}"),
+        }));
+        let binding = AnswerBindingV1 {
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            corpus_id: "c".into(),
+            revision: revision(),
+            ledger_digest: HostEvidenceLedger::digest(&evidence),
+        };
+        HostEvidenceLedger::new(binding, evidence).expect("role lab ledger")
+    }
+
+    fn role_lab_envelope(cause_body: &str, symptom_body: &str) -> AnswerEnvelopeV1 {
+        let raw = proposal(&format!(
+            r#"{{"candidate_id":"cause",{cause_body}}},{{"candidate_id":"symptom",{symptom_body}}}"#
+        ));
+        validate_model_answer(&raw, &role_lab_ledger()).expect("role lab proposal validates")
+    }
+
+    fn claim_kind_of(envelope: &AnswerEnvelopeV1, claim_id: &str) -> ClaimKind {
+        envelope
+            .answer
+            .candidates
+            .iter()
+            .flat_map(|candidate| candidate.claims.iter())
+            .find(|claim| claim.claim_id == claim_id)
+            .map(|claim| claim.claim_kind)
+            .unwrap_or_else(|| panic!("claim {claim_id} is missing"))
+    }
+
+    #[test]
+    fn inverted_roles_are_restored_from_the_ledger_without_touching_authority() {
+        // Exactly the observed inversion: the repeated symptom group is filed
+        // as the causal candidate, and the cause row is demoted to a bare
+        // observation, so no causal claim cites the cause role at all.
+        let mut envelope = role_lab_envelope(
+            r#""observations":[{"claim_id":"obs-cause","text":"first opaque statement","evidence_ids":["e:cause:1"]}]"#,
+            r#""causal_candidates":[{"claim_id":"cause-symptom","text":"second opaque statement","evidence_ids":["e:symptom:3","e:symptom:4","e:symptom:5"]}]"#,
+        );
+        let before = envelope.clone();
+        assert!(has_role_placement_gap(&envelope));
+
+        let applied = restore_claim_roles(&mut envelope);
+        assert_eq!(
+            applied
+                .iter()
+                .map(|correction| (
+                    correction.candidate_id.as_str(),
+                    correction.from_kind,
+                    correction.to_kind,
+                    correction.basis
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "symptom",
+                    ClaimKind::CausalCandidate,
+                    ClaimKind::Symptom,
+                    RoleCorrectionBasis::SymptomEvidenceInCausalCandidate
+                ),
+                (
+                    "cause",
+                    ClaimKind::Observation,
+                    ClaimKind::CausalCandidate,
+                    RoleCorrectionBasis::CauseEvidenceMissingFromCausalClaims
+                ),
+            ]
+        );
+        assert_eq!(
+            claim_kind_of(&envelope, "cause-symptom"),
+            ClaimKind::Symptom
+        );
+        assert_eq!(
+            claim_kind_of(&envelope, "obs-cause"),
+            ClaimKind::CausalCandidate
+        );
+
+        // Nothing outside the section survives the move: ids, scope, text,
+        // citations, statuses, chronology, and the abstention boolean are the
+        // model's and the validator's, never the restorer's.
+        assert_eq!(envelope.binding, before.binding);
+        assert_eq!(envelope.evidence, before.evidence);
+        assert_eq!(
+            envelope.answer.canonical_citations,
+            before.answer.canonical_citations
+        );
+        assert!(!envelope.answer.root_cause_established);
+        assert_eq!(
+            envelope.answer.root_cause_established,
+            before.answer.root_cause_established
+        );
+        for (candidate, was) in envelope
+            .answer
+            .candidates
+            .iter()
+            .zip(before.answer.candidates.iter())
+        {
+            assert_eq!(candidate.candidate_id, was.candidate_id);
+            for (claim, was) in candidate.claims.iter().zip(was.claims.iter()) {
+                assert_eq!(claim.claim_id, was.claim_id);
+                assert_eq!(claim.candidate_id, was.candidate_id);
+                assert_eq!(claim.text, was.text);
+                assert_eq!(claim.evidence_ids, was.evidence_ids);
+                assert_eq!(claim.status, was.status);
+            }
+        }
+
+        // Idempotent: a restored answer plans nothing and records nothing more.
+        assert!(!has_role_placement_gap(&envelope));
+        assert!(restore_claim_roles(&mut envelope).is_empty());
+        assert_eq!(envelope.host_role_corrections.len(), 2);
+    }
+
+    #[test]
+    fn restoration_never_moves_a_claim_into_an_initiating_cause() {
+        // A symptom promoted to an established cause is a real answer defect.
+        // The host already withholds it visibly; silently re-filing it would
+        // launder the defect into a passing shape, so nothing is planned.
+        let mut envelope = role_lab_envelope(
+            r#""observations":[{"claim_id":"obs-cause","text":"first opaque statement","evidence_ids":["e:cause:1"]}]"#,
+            r#""initiating_causes":[{"claim_id":"root-symptom","text":"second opaque statement","evidence_ids":["e:symptom:3"]}]"#,
+        );
+        assert_eq!(
+            claim_kind_of(&envelope, "root-symptom"),
+            ClaimKind::InitiatingCause
+        );
+        assert!(!envelope.answer.root_cause_established);
+
+        // The cause role is still absent from every causal section, so the
+        // bounded promotion is the only thing that may happen.
+        let applied = restore_claim_roles(&mut envelope);
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].to_kind, ClaimKind::CausalCandidate);
+        assert_eq!(
+            claim_kind_of(&envelope, "root-symptom"),
+            ClaimKind::InitiatingCause
+        );
+        assert!(!envelope.answer.root_cause_established);
+        assert!(envelope
+            .answer
+            .candidates
+            .iter()
+            .flat_map(|candidate| candidate.claims.iter())
+            .all(|claim| claim.claim_kind != ClaimKind::InitiatingCause
+                || claim.claim_id == "root-symptom"));
+        assert_eq!(
+            envelope
+                .answer
+                .candidates
+                .iter()
+                .flat_map(|candidate| candidate.claims.iter())
+                .find(|claim| claim.claim_id == "root-symptom")
+                .map(|claim| claim.status),
+            Some(ClaimStatus::Withheld)
+        );
+    }
+
+    #[test]
+    fn mixed_evidence_and_explicit_non_causal_sections_are_left_to_the_model() {
+        // A causal candidate citing both roles is not describable by one ledger
+        // role; a competing explanation is the model's explicit "unrelated"
+        // verdict. Neither is the host's to rewrite.
+        let mut envelope = role_lab_envelope(
+            r#""causal_candidates":[{"claim_id":"mixed","text":"first opaque statement","evidence_ids":["e:cause:1"]}]"#,
+            r#""competing_explanations":[{"claim_id":"unrelated","text":"second opaque statement","evidence_ids":["e:symptom:3"]}],"missing_evidence":[{"claim_id":"absent","text":"third opaque statement","evidence_ids":[]}]"#,
+        );
+        assert!(!has_role_placement_gap(&envelope));
+        assert!(restore_claim_roles(&mut envelope).is_empty());
+        assert_eq!(
+            claim_kind_of(&envelope, "mixed"),
+            ClaimKind::CausalCandidate
+        );
+        assert_eq!(
+            claim_kind_of(&envelope, "unrelated"),
+            ClaimKind::CompetingExplanation
+        );
+        assert_eq!(
+            claim_kind_of(&envelope, "absent"),
+            ClaimKind::MissingEvidence
+        );
+    }
+
+    #[test]
+    fn promotion_only_fires_when_the_causal_role_is_wholly_absent() {
+        // The model already carries the cause role in a causal section, so the
+        // extra observation of the same evidence stays an observation.
+        let mut envelope = role_lab_envelope(
+            r#""observations":[{"claim_id":"obs-cause","text":"first opaque statement","evidence_ids":["e:cause:1"]}],"causal_candidates":[{"claim_id":"cause-cause","text":"second opaque statement","evidence_ids":["e:cause:1"]}]"#,
+            r#""symptoms":[{"claim_id":"sym","text":"third opaque statement","evidence_ids":["e:symptom:3"]}]"#,
+        );
+        assert!(!has_role_placement_gap(&envelope));
+        assert!(restore_claim_roles(&mut envelope).is_empty());
+        assert_eq!(
+            claim_kind_of(&envelope, "obs-cause"),
+            ClaimKind::Observation
+        );
+
+        // But a causal claim that is itself being demoted cannot be what keeps
+        // the cause role "already present".
+        let mut inverted = role_lab_envelope(
+            r#""observations":[{"claim_id":"obs-cause","text":"first opaque statement","evidence_ids":["e:cause:1"]}]"#,
+            r#""causal_candidates":[{"claim_id":"cause-symptom","text":"second opaque statement","evidence_ids":["e:symptom:3"]}]"#,
+        );
+        assert_eq!(restore_claim_roles(&mut inverted).len(), 2);
+        assert_eq!(
+            claim_kind_of(&inverted, "obs-cause"),
+            ClaimKind::CausalCandidate
+        );
+    }
+
+    #[test]
+    fn a_refiled_claim_says_so_in_the_visible_projection() {
+        let mut envelope = role_lab_envelope(
+            r#""observations":[{"claim_id":"obs-cause","text":"first opaque statement","evidence_ids":["e:cause:1"]}]"#,
+            r#""causal_candidates":[{"claim_id":"cause-symptom","text":"second opaque statement","evidence_ids":["e:symptom:3"]}]"#,
+        );
+        let untouched = render_answer_markdown(&envelope);
+        assert!(!untouched.contains("host-refiled"));
+
+        restore_claim_roles(&mut envelope);
+        let rendered = render_answer_markdown(&envelope);
+        assert!(rendered
+            .contains("**[host-refiled from causal_candidates]** `second opaque statement`"));
+        assert!(rendered.contains("**[host-refiled from observations]** `first opaque statement`"));
+        // The marker is a reader-facing note, not a new authority field: the
+        // root line still reads from the validated boolean alone.
+        assert!(rendered.contains("- Root cause established: no"));
     }
 
     #[test]

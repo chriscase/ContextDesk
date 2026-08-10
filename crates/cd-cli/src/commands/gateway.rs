@@ -2108,6 +2108,11 @@ async fn case_linked_log_triage(
     let mut total_requests = 0u32;
     let mut pass_seen = false;
     let mut fail_seen = false;
+    // A typed answer the host had to re-file by evidence role is a model-quality
+    // signal, not a plumbing one: the turn produced a usable answer, but the
+    // model's own final comparison contradicted the roles its candidate stage
+    // had already assigned. Never let that read as a clean triage pass.
+    let mut host_corrected_seen = false;
     let mut last_scorer_detail = String::new();
     let mut last_terminal_detail = String::new();
 
@@ -2136,11 +2141,15 @@ async fn case_linked_log_triage(
             last_terminal_detail = terminal_channel_summary(&o.events);
             if let Some(envelope) = typed_investigation_answer(&o.events) {
                 let score = score_validated_investigation_answer(envelope, &key, &host);
+                let host_role_corrections = envelope.host_role_corrections.len();
+                host_corrected_seen |= host_role_corrections > 0;
                 last_scorer_detail = format!(
-                    "attempt {}: typed_v1 passed={} failed_dimensions=[{}]",
+                    "attempt {}: typed_v1 passed={} failed_dimensions=[{}] host_role_corrections={} semantic_attempts={}",
                     attempt + 1,
                     score.passed,
-                    score.failed_ids().join(",")
+                    score.failed_ids().join(","),
+                    host_role_corrections,
+                    envelope.semantic_attempts,
                 );
                 if score.passed {
                     pass_seen = true;
@@ -2245,7 +2254,7 @@ async fn case_linked_log_triage(
         CaseClassification::ProductIntegrationLikely
     } else if scorer.executed && !scorer.passed && !retried {
         CaseClassification::UsefulnessGap
-    } else if retried {
+    } else if retried || host_corrected_seen {
         CaseClassification::RetryRequired
     } else if scorer.executed && scorer.passed {
         CaseClassification::Compatible

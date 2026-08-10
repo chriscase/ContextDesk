@@ -220,6 +220,64 @@ boundary: shipped outcomes must be invariant under unseen corpus renames, and
 production prompt/ranking sources must not contain fixture lexicon or alias
 tables. See [`docs/design/VOCAB_AGNOSTIC_KNOWN_ROOT.md`](../VOCAB_AGNOSTIC_KNOWN_ROOT.md).
 
+## Role placement is reconciled against the ledger, not re-argued
+
+The candidate stage reads one group's evidence and assigns that group a role;
+the host records it per row as `EvidenceRole` in the immutable ledger. The final
+comparison then sees only opaque identifiers, so it can file exactly that
+evidence under a section that contradicts the role the earlier stage already
+established — presenting a repeated downstream exception as the causal candidate
+while leaving the configuration row it followed as a bare observation. Prompt
+pressure alone did not fix this: a role-consistency contract clause and
+identifier-scoped candidate-stage role hints in the comparison prompt both
+preceded a live run that still inverted the roles.
+
+The host therefore reconciles placement itself, in two bounded steps that add no
+new authority:
+
+1. **One provider-neutral correction.** A structurally valid proposal whose
+   sections contradict the ledger raises the stable category `role_placement`
+   and spends the same single semantic correction the other categories use —
+   same contract, question, drafts, and unchanged manifest, plus one fixed
+   host-authored repair instruction. Nothing model-specific is involved, and the
+   rejected proposal is never replayed.
+2. **Deterministic restoration.** If the correction does not arrive or does not
+   comply, `restore_claim_roles` re-files claims from the ledger alone: a
+   `causal_candidates` claim citing *only* symptom-role evidence moves to
+   `symptoms`, and an `observations` claim citing *only* cause-role evidence
+   moves to `causal_candidates` — the latter only when no causal claim anywhere
+   in the answer cites cause-role evidence, i.e. only when the model dropped a
+   causal role its own candidate stage had established.
+
+The restorer never moves a claim *into* `initiating_causes`, so
+`root_cause_established`, every `ClaimStatus`, and therefore abstention stay
+exactly as `validate_model_answer` computed them. An initiating-cause claim on
+symptom evidence is deliberately left alone: validation already marks it
+`Withheld` and withholds root establishment, and silently re-filing it would
+launder a real answer defect into a passing shape. Mixed-role claims,
+`competing_explanations`, and `missing_evidence` are never touched. Evidence
+ids, candidate scope, claim ids, claim text, citations, and chronology are never
+modified — only the section, and only in the direction the ledger already
+supports. Application is idempotent because the plan is empty exactly when the
+sections already agree with the ledger.
+
+Because this is a host decision, it is stated rather than hidden. Each re-filed
+claim carries a visible `**[host-refiled from <section>]**` marker in the
+projection; the envelope persists `host_role_corrections`; and the comparison
+stage emits `contextdesk.host_role_corrections.v1` telemetry naming the
+candidate, the candidate-stage classification, the model's section, the host's
+section, and the basis — host-minted ids and fixed categories only, no
+model-authored text. A grounded answer that needed restoration is a
+model-quality signal, so `gateway diagnose` classifies that case
+`retry_required` (compatible but fragile) rather than a clean pass, and reports
+`host_role_corrections=<n>` in the scorer lane detail. The typed rubric itself
+is unchanged.
+
+The same seam also makes a validated proposal survivable: a correction attempt
+that comes back unparseable no longer discards the earlier valid answer, so
+spending the correction on placement can never downgrade a weaker model's turn
+into a failed-closed one.
+
 ## Bounds and failures
 
 `AgentOptions.max_rounds` is the hard provider-call cap for this path. It
@@ -278,9 +336,12 @@ The final typed ledger now preserves a bounded separately scoped global
 chronology, so small-corpus WARN/INFO state transitions such as deployment,
 rollback, restoration, and recovery can reach final comparison with canonical
 citations. It does not certify that global rows belong to any candidate
-incident. V1 still has no host-validated cross-candidate causal-chain section,
-and every production row on this path remains `Neutral`, so an initiating-cause
-proposal is withheld and `root_cause_established` remains false. Live raw-prompt
+incident. V1 still has no host-validated cross-candidate causal-chain section.
+Every *global chronology* row remains `Neutral`, so an initiating-cause proposal
+citing only global rows is withheld and `root_cause_established` stays false; a
+candidate row carries a non-neutral role only where the candidate-scoped stage
+classified that exact identity, and establishment still requires the final
+comparison to place an initiating cause on a `Cause` row independently. Live raw-prompt
 experiments showed why prompt pressure is not a substitute: a model can transfer
 a fact into claim text while citing an in-scope row that does not entail it, and
 the V1 validator checks identity/scope rather than semantic entailment.

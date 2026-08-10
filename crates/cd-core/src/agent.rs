@@ -1295,6 +1295,12 @@ fn final_comparison_correction(category: Option<&str>) -> String {
         "root_role" => {
             "Do not present an initiating cause as established unless the candidate's permitted evidence directly supports that role; use causal_candidates or missing_evidence otherwise."
         }
+        // Raised after a structurally valid proposal: schema, scope, and
+        // citations were accepted, but sections contradicted the roles the
+        // candidate stage already assigned to that exact evidence.
+        "role_placement" => {
+            "Keep every claim in the section that matches the candidate-stage role of the evidence it cites: evidence from a downstream_symptom candidate belongs in symptoms, and evidence from an initiating_cause candidate must appear in causal_candidates or initiating_causes. Do not move evidence between candidates, add evidence, or drop a candidate."
+        }
         _ => "Rebuild the proposal from the unchanged host manifest, drafts, and output scaffold.",
     };
     format!("HOST VALIDATION CATEGORY: {category}\nHOST-AUTHORED CORRECTION: {guidance}\n")
@@ -1861,6 +1867,16 @@ async fn run_multi_stage_broad_triage(
     let mut semantic_attempts = 0usize;
     let mut validation_errors = Vec::new();
     let mut correction_category: Option<&str> = None;
+    // Best structurally valid proposal seen so far. A proposal that passed
+    // schema, scope, and citation validation is never discarded by a later
+    // failed correction attempt: the host would rather deliver that answer with
+    // deterministic role restoration than fail an otherwise grounded turn
+    // closed.
+    let mut validated: Option<crate::investigation_answer::AnswerEnvelopeV1> = None;
+    // Comparison requests actually issued. Reported corrections come from this
+    // rather than the loop counter, so a correction the round budget or the
+    // deadline never allowed is not reported as one that ran.
+    let mut comparison_rounds = 0usize;
     on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
         stage: "comparison".into(),
         phase: "started".into(),
@@ -1925,6 +1941,7 @@ async fn run_multi_stage_broad_triage(
             phase_cap,
         );
         used_rounds = used_rounds.saturating_add(1);
+        comparison_rounds = comparison_rounds.saturating_add(1);
         let completion = match within_turn_deadline_with_cap(
             clock,
             cancel_ref,
@@ -1953,34 +1970,19 @@ async fn run_multi_stage_broad_triage(
         let validation_content =
             normalize_known_json_wrapper(&content).unwrap_or_else(|| content.clone());
         match crate::investigation_answer::validate_model_answer(&validation_content, &ledger) {
-            Ok(mut envelope) => {
-                envelope.semantic_attempts = u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
-                on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
-                    stage: "comparison".into(),
-                    phase: "finished".into(),
-                    status: Some("succeeded".into()),
-                    detail: serde_json::json!({
-                        "schema": "contextdesk.multi_stage_budget.v1",
-                        "policy_id": reserve.policy_id,
-                        "provider_rounds": used_rounds,
-                        "semantic_attempts": semantic_attempts,
-                    })
-                    .to_string(),
-                    candidate_id: None,
-                }));
-                return Ok(MultiStageTriageOutcome::Completed {
-                    // Visible text is the host's readable projection of the
-                    // validated envelope, not the authoritative JSON: the typed
-                    // event beside it stays the machine/persistence contract, and
-                    // a transcript that shows raw authority invites a caller to
-                    // read it back as authority. Both hosts consume this one
-                    // projection, so CLI and GUI cannot drift apart.
-                    content: crate::investigation_answer::render_answer_markdown(&envelope),
-                    envelope: Box::new(envelope),
-                    accepted_groups: drafts.into_iter().map(|draft| draft.group_id).collect(),
-                    rejected_groups,
-                    provider_rounds: used_rounds,
-                });
+            Ok(envelope) => {
+                // The proposal is grounded; what may still be wrong is which
+                // section each claim landed in. The host already knows the role
+                // of every cited row from the candidate stage that read it, so
+                // spend the one bounded correction on the placement before
+                // restoring it deterministically.
+                let role_gap = crate::investigation_answer::has_role_placement_gap(&envelope);
+                validated = Some(envelope);
+                if !role_gap {
+                    break;
+                }
+                correction_category = Some("role_placement");
+                validation_errors.push(crate::investigation_answer::ValidationError::RolePlacement);
             }
             Err(error) => {
                 correction_category = Some(error.as_str());
@@ -1991,6 +1993,42 @@ async fn run_multi_stage_broad_triage(
             break;
         }
         semantic_attempts += 1;
+    }
+    let semantic_attempts = comparison_rounds.saturating_sub(1);
+    if let Some(mut envelope) = validated {
+        envelope.semantic_attempts = u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
+        let corrections = crate::investigation_answer::restore_claim_roles(&mut envelope);
+        on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
+            stage: "comparison".into(),
+            phase: "finished".into(),
+            status: Some("succeeded".into()),
+            detail: serde_json::json!({
+                "schema": "contextdesk.multi_stage_budget.v1",
+                "policy_id": reserve.policy_id,
+                "provider_rounds": used_rounds,
+                "semantic_attempts": semantic_attempts,
+                // Model-quality signal, deliberately separate from transport and
+                // budget fields: a nonzero count means the final comparison
+                // filed grounded claims against the roles its own candidate
+                // stage had already assigned, and the host re-filed them.
+                "role_corrections": multi_stage_role_correction_telemetry(&corrections, &drafts),
+            })
+            .to_string(),
+            candidate_id: None,
+        }));
+        return Ok(MultiStageTriageOutcome::Completed {
+            // Visible text is the host's readable projection of the
+            // validated envelope, not the authoritative JSON: the typed
+            // event beside it stays the machine/persistence contract, and
+            // a transcript that shows raw authority invites a caller to
+            // read it back as authority. Both hosts consume this one
+            // projection, so CLI and GUI cannot drift apart.
+            content: crate::investigation_answer::render_answer_markdown(&envelope),
+            envelope: Box::new(envelope),
+            accepted_groups: drafts.into_iter().map(|draft| draft.group_id).collect(),
+            rejected_groups,
+            provider_rounds: used_rounds,
+        });
     }
     on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
         stage: "comparison".into(),
@@ -2010,6 +2048,39 @@ async fn run_multi_stage_broad_triage(
         validation_errors,
         semantic_attempts,
         provider_rounds: used_rounds,
+    })
+}
+
+/// Content-free telemetry for host-applied claim-role restorations.
+///
+/// This answers the one question a live run cannot otherwise separate from
+/// plumbing: did the final comparison file grounded claims against the roles
+/// the candidate stage had already assigned to that exact evidence, and in
+/// which direction. Model-authored strings — claim ids and claim text — are
+/// deliberately excluded; only host-minted candidate ids and fixed host
+/// categories appear, so this stays safe for a share-safe bundle.
+fn multi_stage_role_correction_telemetry(
+    corrections: &[crate::investigation_answer::HostRoleCorrectionV1],
+    drafts: &[CandidateSynthesisDraft],
+) -> serde_json::Value {
+    let stage_classification = drafts
+        .iter()
+        .map(|draft| (draft.group_id.as_str(), draft.classification))
+        .collect::<std::collections::HashMap<_, _>>();
+    serde_json::json!({
+        "schema": "contextdesk.host_role_corrections.v1",
+        "count": corrections.len(),
+        "corrections": corrections
+            .iter()
+            .map(|correction| serde_json::json!({
+                "candidate_id": correction.candidate_id,
+                "candidate_stage_classification": stage_classification
+                    .get(correction.candidate_id.as_str()),
+                "model_section": correction.from_kind,
+                "host_section": correction.to_kind,
+                "basis": correction.basis.as_str(),
+            }))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -4955,6 +5026,10 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                         "visible_projection": "host_rendered_markdown",
                                         "answer_binding": envelope.binding,
                                         "semantic_attempts": envelope.semantic_attempts,
+                                        // Nonzero only when the host had to
+                                        // re-file a grounded claim into the
+                                        // section its evidence role demanded.
+                                        "host_role_corrections": envelope.host_role_corrections.len(),
                                     })
                                     .to_string(),
                                 ),
@@ -13992,6 +14067,15 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         assert!(comparison_data.contains("global_timeline_context"));
         assert!(comparison_data.contains("candidate_stage_role_hints.v1"));
         assert!(comparison_data.contains("classified_evidence_ids"));
+        // The bounded role-placement correction is host-authored, stable, and
+        // says nothing about the rejected proposal.
+        let role_correction = final_comparison_correction(Some("role_placement"));
+        assert!(role_correction.contains("HOST VALIDATION CATEGORY: role_placement"));
+        assert!(role_correction.contains("downstream_symptom candidate belongs in symptoms"));
+        assert!(
+            role_correction.contains("initiating_cause candidate must appear in causal_candidates")
+        );
+        assert!(role_correction.contains("Do not move evidence between candidates"));
         assert!(comparison_data.contains("<<<UNTRUSTED_DATA:"));
         let corrected = multi_stage_comparison_messages(
             "triage",
@@ -14153,6 +14237,242 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                     "missing_evidence": [],
                 }],
             })
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Final-comparison role placement.
+    //
+    // The candidate stage reads one group's evidence and assigns its role; the
+    // final comparison sees only opaque ids and can file the same evidence
+    // under a contradicting section. These cases pin the bounded host
+    // response: one provider-neutral correction, then deterministic ledger
+    // restoration rather than a failed-closed turn.
+    // -----------------------------------------------------------------
+
+    /// Two role-split candidates: an initiating-cause group and a downstream
+    /// symptom group, exactly as a broad triage stages them.
+    fn role_split_candidates() -> Vec<crate::tool_host::BroadLogTriageCandidate> {
+        vec![
+            multi_stage_candidate("template:cause", 1),
+            multi_stage_candidate("template:symptom", 3),
+        ]
+    }
+
+    fn role_split_assessments() -> Vec<ChatCompletion> {
+        vec![
+            multi_stage_assessment(
+                "template:cause",
+                CandidateClassificationV1::InitiatingCause,
+                1,
+                "supplied pattern states the configured window is below the supported minimum",
+            ),
+            multi_stage_assessment(
+                "template:symptom",
+                CandidateClassificationV1::DownstreamSymptom,
+                3,
+                "repeated failures follow the configured window and do not explain themselves",
+            ),
+        ]
+    }
+
+    /// Cause evidence parked in observations, symptom evidence presented as the
+    /// causal candidate — the inversion a whole-answer stage produces.
+    const ROLE_INVERTED_COMPARISON: &str = r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"template:cause","observations":[{"claim_id":"obs-cause","text":"configured window row is present","evidence_ids":["e:template:cause:1"]}]},{"candidate_id":"template:symptom","causal_candidates":[{"claim_id":"cause-symptom","text":"repeated failures drove the incident","evidence_ids":["e:template:symptom:3"]}]}]}"#;
+
+    /// The same claims filed by role.
+    const ROLE_CONSISTENT_COMPARISON: &str = r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"template:cause","causal_candidates":[{"claim_id":"cause-cause","text":"configured window row is the candidate trigger","evidence_ids":["e:template:cause:1"]}]},{"candidate_id":"template:symptom","symptoms":[{"claim_id":"sym-symptom","text":"repeated failures followed","evidence_ids":["e:template:symptom:3"]}]}]}"#;
+
+    async fn run_role_split_comparison(
+        comparisons: &[&str],
+    ) -> (MultiStageTriageOutcome, Vec<StreamEvent>) {
+        let candidates = role_split_candidates();
+        let mut script = role_split_assessments();
+        script.extend(comparisons.iter().map(|body| multi_stage_completion(body)));
+        let backend = ScriptedBackend::new(script);
+        let opts = AgentOptions {
+            max_rounds: 6,
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let mut events = Vec::new();
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
+                },
+            },
+            &mut |signal| {
+                if let MultiStageHostSignal::Event(event) = signal {
+                    events.push(event);
+                }
+            },
+        )
+        .await
+        .unwrap();
+        (outcome, events)
+    }
+
+    fn claim_kind_for(
+        envelope: &crate::investigation_answer::AnswerEnvelopeV1,
+        claim_id: &str,
+    ) -> crate::investigation_answer::ClaimKind {
+        envelope
+            .answer
+            .candidates
+            .iter()
+            .flat_map(|candidate| candidate.claims.iter())
+            .find(|claim| claim.claim_id == claim_id)
+            .map(|claim| claim.claim_kind)
+            .unwrap_or_else(|| panic!("claim {claim_id} is missing from {envelope:?}"))
+    }
+
+    fn comparison_success_detail(events: &[StreamEvent]) -> serde_json::Value {
+        let detail = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::MultiModelStage {
+                    stage,
+                    phase,
+                    status,
+                    detail,
+                    ..
+                } if stage == "comparison"
+                    && phase == "finished"
+                    && status.as_deref() == Some("succeeded") =>
+                {
+                    Some(detail.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no successful comparison stage in {events:?}"));
+        serde_json::from_str(&detail).expect("stage detail is JSON")
+    }
+
+    #[tokio::test]
+    async fn a_role_inverted_comparison_gets_exactly_one_bounded_model_repair() {
+        let (outcome, events) =
+            run_role_split_comparison(&[ROLE_INVERTED_COMPARISON, ROLE_CONSISTENT_COMPARISON])
+                .await;
+        let MultiStageTriageOutcome::Completed {
+            envelope,
+            provider_rounds,
+            ..
+        } = outcome
+        else {
+            panic!("expected a completed comparison, got {outcome:?}");
+        };
+        assert_eq!(
+            provider_rounds, 4,
+            "two candidate drafts plus one comparison and one bounded correction"
+        );
+        assert_eq!(envelope.semantic_attempts, 1);
+        // The model fixed its own placement, so the host changed nothing.
+        assert!(envelope.host_role_corrections.is_empty());
+        assert_eq!(
+            claim_kind_for(&envelope, "cause-cause"),
+            crate::investigation_answer::ClaimKind::CausalCandidate
+        );
+        assert_eq!(
+            claim_kind_for(&envelope, "sym-symptom"),
+            crate::investigation_answer::ClaimKind::Symptom
+        );
+        assert_eq!(
+            comparison_success_detail(&events)["role_corrections"]["count"],
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persistent_role_inversion_is_restored_by_the_host_with_honest_telemetry() {
+        let (outcome, events) =
+            run_role_split_comparison(&[ROLE_INVERTED_COMPARISON, ROLE_INVERTED_COMPARISON]).await;
+        let MultiStageTriageOutcome::Completed {
+            content,
+            envelope,
+            provider_rounds,
+            ..
+        } = outcome
+        else {
+            panic!("expected a completed comparison, got {outcome:?}");
+        };
+        assert_eq!(provider_rounds, 4);
+        assert_eq!(envelope.semantic_attempts, 1);
+        assert_eq!(
+            claim_kind_for(&envelope, "cause-symptom"),
+            crate::investigation_answer::ClaimKind::Symptom
+        );
+        assert_eq!(
+            claim_kind_for(&envelope, "obs-cause"),
+            crate::investigation_answer::ClaimKind::CausalCandidate
+        );
+        // Abstention is untouched: nothing was moved into initiating causes.
+        assert!(!envelope.answer.root_cause_established);
+        assert!(content.contains("host-refiled"));
+
+        // Telemetry separates model quality from plumbing: it names the stage
+        // that disagreed and carries no model-authored text.
+        let detail = comparison_success_detail(&events);
+        let corrections = &detail["role_corrections"];
+        assert_eq!(
+            corrections["schema"],
+            "contextdesk.host_role_corrections.v1"
+        );
+        assert_eq!(corrections["count"], 2);
+        assert_eq!(
+            corrections["corrections"][0]["candidate_stage_classification"],
+            "downstream_symptom"
+        );
+        assert_eq!(
+            corrections["corrections"][0]["model_section"],
+            "causal_candidate"
+        );
+        assert_eq!(corrections["corrections"][0]["host_section"], "symptom");
+        assert_eq!(
+            corrections["corrections"][1]["candidate_stage_classification"],
+            "initiating_cause"
+        );
+        let rendered = serde_json::to_string(&detail).unwrap();
+        for model_text in [
+            "repeated failures drove the incident",
+            "configured window row is present",
+            "obs-cause",
+            "cause-symptom",
+        ] {
+            assert!(
+                !rendered.contains(model_text),
+                "stage telemetry leaked model-authored text: {rendered}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_validated_answer_is_not_lost_when_the_bounded_correction_fails() {
+        // Weak-model safety: spending the correction on role placement must
+        // never turn a grounded answer into a failed-closed turn.
+        let (outcome, _events) =
+            run_role_split_comparison(&[ROLE_INVERTED_COMPARISON, "not json at all"]).await;
+        let MultiStageTriageOutcome::Completed { envelope, .. } = outcome else {
+            panic!("expected the first validated answer to survive, got {outcome:?}");
+        };
+        assert_eq!(envelope.host_role_corrections.len(), 2);
+        assert_eq!(
+            claim_kind_for(&envelope, "cause-symptom"),
+            crate::investigation_answer::ClaimKind::Symptom
         );
     }
 
