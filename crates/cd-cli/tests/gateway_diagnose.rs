@@ -647,8 +647,7 @@ async fn hard_gateway_errors_still_cleanup_and_do_not_claim_compatible() {
     let data = &value["data"];
 
     assert_eq!(
-        data["cleanup"]["corpora_created"],
-        data["cleanup"]["corpora_removed"],
+        data["cleanup"]["corpora_created"], data["cleanup"]["corpora_removed"],
         "cleanup must balance on the failure terminal: {}",
         data["cleanup"]
     );
@@ -888,8 +887,7 @@ async fn share_safe_report_redacts_identity_endpoint_paths_and_bodies() {
     let output = run_blocking(cmd).await;
     let value: Value = serde_json::from_slice(&output.stdout).expect("json");
     let artifact_dir = value["data"]["artifact_dir"].as_str().unwrap();
-    let report_text =
-        std::fs::read_to_string(Path::new(artifact_dir).join("report.json")).unwrap();
+    let report_text = std::fs::read_to_string(Path::new(artifact_dir).join("report.json")).unwrap();
 
     for forbidden in [
         secret,
