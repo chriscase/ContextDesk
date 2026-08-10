@@ -280,6 +280,19 @@ allowing it to evict deterministic safety evidence.
 - `doctor --skip-live-turn` passed configuration, writable-state, and live
   Vercel catalog connectivity. Its overall `ready=false` verdict is expected
   because the turn/grounding/tracing/continuity checks were explicitly skipped.
+- The first full live doctor run passed native tools, grounding, tracing, and
+  connectivity but exposed a contradictory continuation prompt: it asked the
+  linked second turn to use only prior results even though every linked turn
+  must perform a fresh bounded log read. The next run proved the continuity
+  fix but DeepSeek then used mismatched citation identities in turn one, which
+  the host correctly withheld. Commit
+  `8009e0dc5284cdabb4b4962b57cd5b3bf9963e4f` now explicitly requests a fresh
+  second-turn log search and the exact `seq=N` plus `source="..."` citation
+  form. Seven focused prompt/continuity unit tests, all 16 doctor acceptance
+  tests, and strict CLI Clippy pass. The source-built live rerun then passed
+  all eight doctor checks in 17.4 seconds: configuration, writable state,
+  native tool use, grounded evidence, tracing, persisted session continuity,
+  cleanup, and Vercel connectivity.
 - Passive `models` status reported `offline=true` and
   `credentials_read=false`; explicit discovery and verification reported the
   credential read honestly.
