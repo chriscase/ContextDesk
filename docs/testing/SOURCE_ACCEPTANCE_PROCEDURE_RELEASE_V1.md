@@ -4,9 +4,9 @@ Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
 - branch: `integrate/acceptance-release-v1`
-- exact release SHA: `626bd2f67955586fa1584b0bb2bb4e5dcc4fc8c3`
+- exact tested source/build SHA: `ab14ec497471559487084e21d0d1cd82cfbb8914`
 
-The exact release SHA above is the identity that must be fetched, built, and
+The exact tested source/build SHA above is the identity that must be fetched, built, and
 verified. Do not substitute an older baseline, a moving branch tip, or an
 unrelated local checkout.
 
@@ -53,7 +53,9 @@ contextdesk --profile <profile> --model <exact-id-from-discovery> --json models 
 ```
 
 Start with the exact catalog ID returned for DeepSeek V4 Flash. Do not shorten
-or infer the ID. Do not verify the whole catalog initially.
+or infer the ID. Do not verify the whole catalog initially. A Vercel diagnostic
+on this release also passed `deepseek/deepseek-v4-flash`, but that evidence is
+scoped to Vercel and must not be reused as an employer-gateway verdict.
 
 ## 5. Run one bounded product triage
 
@@ -74,6 +76,8 @@ product/usefulness failure rather than guessing at a provider cause.
 
 The release includes explicit inconclusive verdicts, exact model/profile
 binding, protected-file credentials, adaptive deadlines, production-path
-embedding/reranking adapters, and bounded reasoning-channel telemetry. Live
-employer compatibility and answer usefulness still require this machine's
-own gateway and corpus evidence.
+embedding/reranking adapters, and bounded reasoning-channel telemetry. The
+release's Vercel evidence additionally passes Qwen3 Embedding 0.6B and Voyage
+Rerank 2.5 Lite through those production adapters. Live employer compatibility,
+answer usefulness, and any employer retrieval-role verdict still require this
+machine's own gateway and corpus evidence.

@@ -1,7 +1,7 @@
 # Gateway diagnostic product-skeptic coverage on the release line
 
 **Release line:** `integrate/acceptance-release-v1`
-**Code candidate:** `626bd2f67955586fa1584b0bb2bb4e5dcc4fc8c3`
+**Code candidate:** `64edb0a25161a5d493f067ff9f5f197de24f6c7e`
 **Coverage commit:** `a43bb37a` (17 binary hermetic tests)
 
 This audit ports the adversarial product-skeptic coverage to the current
@@ -42,7 +42,10 @@ reported as an all-green compatibility/usefulness result.
   model/role before a readiness claim.
 - Native structured-output transport semantics remain distinct from the
   host-validated JSON proposal contract.
-- The current release candidate still needs a live DeepSeek triage usefulness
-  rerun after the role-preserving synthesis work is reviewed.
+- The live Vercel rerun on the current release line now passes DeepSeek V4 Flash
+  triage usefulness; see
+  [`VERCEL_GATEWAY_DIAGNOSTIC_AB14EC49.md`](../benchmarks/VERCEL_GATEWAY_DIAGNOSTIC_AB14EC49.md).
+- Employer-gateway behavior remains unverified and requires the source-based
+  acceptance procedure on the company machine.
 
 No release readiness claim is made by this audit alone.
