@@ -22,3 +22,4 @@ libc = "0.2"
 tempfile = "3"
 wiremock = "0.6"
 zip = "2"
+cd-test-gateway = { path = "../cd-test-gateway" }

@@ -33,6 +33,7 @@ wiremock = "0.6"
 assert_cmd = "2"
 predicates = "3"
 zip = "2"
+cd-test-gateway = { path = "../cd-test-gateway" }
 # Real-pty coverage only (crates/cd-cli/tests/pty_interactive_chat.rs) — the
 # in-place-redraw code path is unobservable through assert_cmd's piped,
 # non-tty subprocess, since IsTerminal is always false there.
