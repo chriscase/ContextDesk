@@ -689,7 +689,7 @@ pub enum ConfluenceAction {
 #[derive(Debug, Subcommand)]
 pub enum ConfigAction {
     /// Create or update a config file.
-    Init(ConfigInitArgs),
+    Init(Box<ConfigInitArgs>),
     /// Parse and validate a config file without applying it.
     Validate {
         /// Defaults to the project config path (`--config` / discovered
