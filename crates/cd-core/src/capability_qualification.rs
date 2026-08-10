@@ -99,27 +99,41 @@ impl CapabilityKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityContract {
-    /// A plain model-generated answer.
+    /// Host-grounded model-generated text. Qualification proves only the
+    /// generation envelope; grounding remains host-owned at execution time.
+    #[serde(rename = "host_grounded_generation")]
     Generation,
     /// A host-validated JSON proposal, used by typed triage/review stages.
+    #[serde(rename = "validated_structured_proposal")]
     JsonProposal,
     /// A complete native tool call followed by tool-result continuation.
     NativeToolLoop,
 }
 
 /// Whether an execution contract is currently supported by measured evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContractVerdict {
     /// Every required probe is current and passed.
     Qualified,
     /// Current evidence measured a required probe that did not pass.
     Unqualified,
-    /// Evidence is absent, stale, cancelled, or incomplete.
-    Unverified,
+    /// Evidence is absent, stale, cancelled, or incomplete (including a
+    /// report in which every required probe is `Untested`).
+    #[default]
+    Inconclusive,
 }
 
 impl CapabilityContract {
+    /// Stable wire/display id for the execution mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generation => "host_grounded_generation",
+            Self::JsonProposal => "validated_structured_proposal",
+            Self::NativeToolLoop => "native_tool_loop",
+        }
+    }
+
     fn required(self) -> &'static [CapabilityKind] {
         match self {
             Self::Generation => &[CapabilityKind::BasicGeneration],
@@ -138,7 +152,7 @@ impl CapabilityContract {
 
 /// Project one exact report into a routing-safe capability contract verdict.
 ///
-/// This function deliberately returns `Unverified` for missing, stale,
+/// This function deliberately returns `Inconclusive` for missing, stale,
 /// cancelled, or untested evidence. It never uses a model name hint, an
 /// aggregate readiness state, or a profile's tool setting as proof that the
 /// remote model supports a contract.
@@ -147,10 +161,10 @@ pub fn capability_contract_verdict(
     contract: CapabilityContract,
 ) -> ContractVerdict {
     let Some(report) = report else {
-        return ContractVerdict::Unverified;
+        return ContractVerdict::Inconclusive;
     };
     if report.stale || report.cancelled {
-        return ContractVerdict::Unverified;
+        return ContractVerdict::Inconclusive;
     }
     let mut saw_untested = false;
     for kind in contract.required() {
@@ -163,10 +177,64 @@ pub fn capability_contract_verdict(
         }
     }
     if saw_untested {
-        ContractVerdict::Unverified
+        ContractVerdict::Inconclusive
     } else {
         ContractVerdict::Qualified
     }
+}
+
+/// Shared, role-scoped execution projection consumed by CLI and desktop.
+///
+/// The projection is deliberately separate from [`ModelReadiness`]. A model
+/// can be qualified for validated structured proposals while remaining
+/// unqualified for native tools, and callers must not infer one contract from
+/// another. `Inconclusive` is returned whenever evidence is absent, stale,
+/// cancelled, or all required probes were skipped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityContractProjection {
+    /// Host-grounded generation contract.
+    pub host_grounded_generation: ContractVerdict,
+    /// Host-validated structured proposal contract.
+    pub validated_structured_proposal: ContractVerdict,
+    /// Native tool call + tool-result continuation contract.
+    pub native_tool_loop: ContractVerdict,
+}
+
+impl CapabilityContractProjection {
+    /// Read one contract from the projection by its shared enum identity.
+    pub fn verdict(self, contract: CapabilityContract) -> ContractVerdict {
+        match contract {
+            CapabilityContract::Generation => self.host_grounded_generation,
+            CapabilityContract::JsonProposal => self.validated_structured_proposal,
+            CapabilityContract::NativeToolLoop => self.native_tool_loop,
+        }
+    }
+}
+
+/// Project all execution contracts for one exact qualification report.
+///
+/// An explicit tools-off gate never becomes a tool-capable claim. If tools are
+/// disabled by profile configuration, the native-tool projection is
+/// `Inconclusive` even when an old report happened to contain tool passes.
+pub fn capability_contract_projection(
+    report: Option<&QualificationReport>,
+    gate: Option<&ProfileCapabilityGate>,
+) -> CapabilityContractProjection {
+    let mut projection = CapabilityContractProjection {
+        host_grounded_generation: capability_contract_verdict(
+            report,
+            CapabilityContract::Generation,
+        ),
+        validated_structured_proposal: capability_contract_verdict(
+            report,
+            CapabilityContract::JsonProposal,
+        ),
+        native_tool_loop: capability_contract_verdict(report, CapabilityContract::NativeToolLoop),
+    };
+    if gate.is_some_and(|gate| !gate.tools_enabled) {
+        projection.native_tool_loop = ContractVerdict::Inconclusive;
+    }
+    projection
 }
 
 /// Outcome of one capability check.
@@ -1885,11 +1953,11 @@ mod tests {
     }
 
     #[test]
-    fn capability_contracts_treat_absent_stale_cancelled_and_untested_as_unverified() {
+    fn capability_contracts_treat_absent_stale_cancelled_and_untested_as_inconclusive() {
         let key = key("deepseek-v4-flash");
         assert_eq!(
             capability_contract_verdict(None, CapabilityContract::Generation),
-            ContractVerdict::Unverified
+            ContractVerdict::Inconclusive
         );
 
         let mut stale = readiness_report(
@@ -1900,7 +1968,7 @@ mod tests {
         stale.stale = true;
         assert_eq!(
             capability_contract_verdict(Some(&stale), CapabilityContract::Generation),
-            ContractVerdict::Unverified
+            ContractVerdict::Inconclusive
         );
 
         let mut cancelled = stale.clone();
@@ -1908,7 +1976,7 @@ mod tests {
         cancelled.cancelled = true;
         assert_eq!(
             capability_contract_verdict(Some(&cancelled), CapabilityContract::Generation),
-            ContractVerdict::Unverified
+            ContractVerdict::Inconclusive
         );
 
         let incomplete = readiness_report(
@@ -1918,7 +1986,84 @@ mod tests {
         );
         assert_eq!(
             capability_contract_verdict(Some(&incomplete), CapabilityContract::JsonProposal),
-            ContractVerdict::Unverified
+            ContractVerdict::Inconclusive
+        );
+    }
+
+    #[test]
+    fn capability_projection_is_scoped_and_respects_tools_off() {
+        let report = readiness_report(
+            key("deepseek-v4-flash"),
+            "chat",
+            &[
+                (CapabilityKind::BasicGeneration, CapabilityStatus::Pass),
+                (CapabilityKind::StructuredOutput, CapabilityStatus::Pass),
+                (CapabilityKind::NativeToolCall, CapabilityStatus::Pass),
+                (
+                    CapabilityKind::ToolResultContinuation,
+                    CapabilityStatus::Pass,
+                ),
+            ],
+        );
+        let tools_on = ProfileCapabilityGate {
+            tools_enabled: true,
+            ..ProfileCapabilityGate::default()
+        };
+        let tools_off = ProfileCapabilityGate::default();
+        let on = capability_contract_projection(Some(&report), Some(&tools_on));
+        assert_eq!(
+            on.verdict(CapabilityContract::Generation),
+            ContractVerdict::Qualified
+        );
+        assert_eq!(
+            on.verdict(CapabilityContract::JsonProposal),
+            ContractVerdict::Qualified
+        );
+        assert_eq!(
+            on.verdict(CapabilityContract::NativeToolLoop),
+            ContractVerdict::Qualified
+        );
+
+        let off = capability_contract_projection(Some(&report), Some(&tools_off));
+        assert_eq!(
+            off.verdict(CapabilityContract::Generation),
+            ContractVerdict::Qualified
+        );
+        assert_eq!(
+            off.verdict(CapabilityContract::JsonProposal),
+            ContractVerdict::Qualified
+        );
+        assert_eq!(
+            off.verdict(CapabilityContract::NativeToolLoop),
+            ContractVerdict::Inconclusive
+        );
+    }
+
+    #[test]
+    fn capability_projection_all_not_run_is_inconclusive_for_every_contract() {
+        let report = readiness_report(key("deepseek-v4-flash"), "chat", &[]);
+        let projection = capability_contract_projection(Some(&report), None);
+        assert_eq!(
+            projection.host_grounded_generation,
+            ContractVerdict::Inconclusive
+        );
+        assert_eq!(
+            projection.validated_structured_proposal,
+            ContractVerdict::Inconclusive
+        );
+        assert_eq!(projection.native_tool_loop, ContractVerdict::Inconclusive);
+
+        let mut stale = report.clone();
+        stale.stale = true;
+        assert_eq!(
+            capability_contract_projection(Some(&stale), None),
+            CapabilityContractProjection::default()
+        );
+        let mut cancelled = report;
+        cancelled.cancelled = true;
+        assert_eq!(
+            capability_contract_projection(Some(&cancelled), None),
+            CapabilityContractProjection::default()
         );
     }
 

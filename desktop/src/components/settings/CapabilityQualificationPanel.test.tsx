@@ -50,6 +50,11 @@ function sampleReport(
       tested_at: 1,
       detail: "Basic chat works, but tool use did not pass.",
     },
+    contracts: {
+      host_grounded_generation: "qualified",
+      validated_structured_proposal: "qualified",
+      native_tool_loop: "unqualified",
+    },
     checks: [
       {
         kind: "basic_generation",

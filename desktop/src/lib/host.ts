@@ -1323,6 +1323,19 @@ export type CapabilityCheckDto = {
   reason: string;
 };
 
+export type ContractVerdict =
+  | "qualified"
+  | "unqualified"
+  | "inconclusive"
+  | string;
+
+/** Shared provider-neutral execution projection from the Rust host. */
+export type CapabilityContractProjection = {
+  host_grounded_generation: ContractVerdict;
+  validated_structured_proposal: ContractVerdict;
+  native_tool_loop: ContractVerdict;
+};
+
 export type QualificationReportDto = {
   profile_id: string;
   endpoint_fingerprint: string;
@@ -1333,6 +1346,7 @@ export type QualificationReportDto = {
   stale: boolean;
   finished_at: number;
   readiness: ModelReadiness;
+  contracts: CapabilityContractProjection;
   checks: CapabilityCheckDto[];
 };
 

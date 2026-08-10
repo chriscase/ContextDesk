@@ -7321,12 +7321,17 @@ fn get_capability_qualification(
     let (profile, model) = resolve_qualification_identity_target(&state, &req)?;
     let key =
         capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
+    let cfg = state.config.lock().expect("config").clone();
+    let tools_for_model = model_tools_enabled(&cfg, &profile, &model);
+    let gate = capability_qualification_host::gate_for_model(&profile, tools_for_model, &model);
     let mut store = state
         .qualification_store
         .lock()
         .expect("qualification_store");
-    Ok(capability_qualification_host::get_cached_report(
-        &mut store, &key,
+    Ok(capability_qualification_host::get_cached_report_with_gate(
+        &mut store,
+        &key,
+        Some(&gate),
     ))
 }
 
@@ -7378,6 +7383,7 @@ async fn start_capability_qualification(
         Vec::new()
     };
 
+    let run_gate = gate;
     let report = tokio::task::spawn_blocking(move || {
         let mut transport = capability_qualification_host::LiveQualificationTransport::new(
             backend, base_url, api_key, local_only,
@@ -7385,7 +7391,7 @@ async fn start_capability_qualification(
         .with_extra_headers(extra_headers);
         cd_core::capability_qualification::run_qualification(
             key.clone(),
-            gate,
+            run_gate,
             &mut transport,
             &cancel,
         )
@@ -7403,7 +7409,7 @@ async fn start_capability_qualification(
         .qualification_store
         .lock()
         .expect("qualification_store");
-    let dto = capability_qualification_host::put_report(&mut store, report);
+    let dto = capability_qualification_host::put_report_with_gate(&mut store, report, &gate);
     cd_core::capability_qualification::save_qualification_store(
         &state.qualification_store_path,
         &store,

@@ -52,33 +52,48 @@ pub struct QualificationReportDto {
     pub stale: bool,
     pub finished_at: i64,
     pub readiness: cd_core::capability_qualification::ModelReadiness,
+    /// Scoped execution contracts shared by CLI and desktop. Each value is
+    /// `qualified`, `unqualified`, or `inconclusive`; no contract is inferred
+    /// from another contract or from a model-name hint.
+    pub contracts: cd_core::capability_qualification::CapabilityContractProjection,
     pub checks: Vec<CapabilityCheckDto>,
 }
 
 impl From<&QualificationReport> for QualificationReportDto {
     fn from(r: &QualificationReport) -> Self {
-        Self {
-            profile_id: r.key.profile_id.clone(),
-            endpoint_fingerprint: r.key.endpoint_fingerprint.clone(),
-            model_id: r.key.model_id.clone(),
-            schema_version: r.key.schema_version.clone(),
-            role_hint: r.role_hint.clone(),
-            cancelled: r.cancelled,
-            stale: r.stale,
-            finished_at: r.finished_at,
-            readiness: cd_core::capability_qualification::model_readiness_for_report(r),
-            checks: r
-                .checks
-                .iter()
-                .map(|c| CapabilityCheckDto {
-                    kind: c.kind.as_str().to_string(),
-                    status: status_wire(c.status).to_string(),
-                    elapsed_ms: c.elapsed_ms,
-                    tested_at: c.tested_at,
-                    reason: c.reason.clone(),
-                })
-                .collect(),
-        }
+        qualification_report_dto(r, None)
+    }
+}
+
+/// Build the shared report DTO while honoring the profile's explicit gates.
+/// The optional gate is supplied by live hosts; cached/offline callers can
+/// omit it and still receive fail-closed report evidence.
+pub fn qualification_report_dto(
+    r: &QualificationReport,
+    gate: Option<&cd_core::capability_qualification::ProfileCapabilityGate>,
+) -> QualificationReportDto {
+    QualificationReportDto {
+        profile_id: r.key.profile_id.clone(),
+        endpoint_fingerprint: r.key.endpoint_fingerprint.clone(),
+        model_id: r.key.model_id.clone(),
+        schema_version: r.key.schema_version.clone(),
+        role_hint: r.role_hint.clone(),
+        cancelled: r.cancelled,
+        stale: r.stale,
+        finished_at: r.finished_at,
+        readiness: cd_core::capability_qualification::model_readiness_for_report(r),
+        contracts: cd_core::capability_qualification::capability_contract_projection(Some(r), gate),
+        checks: r
+            .checks
+            .iter()
+            .map(|c| CapabilityCheckDto {
+                kind: c.kind.as_str().to_string(),
+                status: status_wire(c.status).to_string(),
+                elapsed_ms: c.elapsed_ms,
+                tested_at: c.tested_at,
+                reason: c.reason.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -136,9 +151,18 @@ pub fn get_cached_report(
     store: &mut QualificationStore,
     current: &QualificationKey,
 ) -> Option<QualificationReportDto> {
+    get_cached_report_with_gate(store, current, None)
+}
+
+/// Cached report projection with the host's explicit capability gate.
+pub fn get_cached_report_with_gate(
+    store: &mut QualificationStore,
+    current: &QualificationKey,
+    gate: Option<&cd_core::capability_qualification::ProfileCapabilityGate>,
+) -> Option<QualificationReportDto> {
     store
         .get_for_selection(current)
-        .map(QualificationReportDto::from)
+        .map(|report| qualification_report_dto(report, gate))
 }
 
 /// Store a finished report (sibling keys untouched).
@@ -147,6 +171,19 @@ pub fn put_report(
     report: QualificationReport,
 ) -> QualificationReportDto {
     let dto = QualificationReportDto::from(&report);
+    store.put(report);
+    dto
+}
+
+/// Store a finished report and project it with the exact host gates used for
+/// the run. This keeps an explicit tools-off configuration from becoming a
+/// stale native-tool capability claim in either client.
+pub fn put_report_with_gate(
+    store: &mut QualificationStore,
+    report: QualificationReport,
+    gate: &cd_core::capability_qualification::ProfileCapabilityGate,
+) -> QualificationReportDto {
+    let dto = qualification_report_dto(&report, Some(gate));
     store.put(report);
     dto
 }
@@ -166,7 +203,7 @@ fn run_and_store(
     cancel: &Arc<AtomicBool>,
 ) -> QualificationReportDto {
     let report = run_qualification(key, gate, transport, cancel);
-    put_report(store, report)
+    put_report_with_gate(store, report, &gate)
 }
 
 // ---------------------------------------------------------------------------
@@ -861,7 +898,8 @@ pub fn preflight_inert_and_export_guard(sample: Option<&QualificationReportDto>)
 mod tests {
     use super::*;
     use cd_core::capability_qualification::{
-        ScriptedQualificationTransport, SyntheticChatResponse, SYNTH_GENERATION_MARKER,
+        ContractVerdict, ScriptedQualificationTransport, SyntheticChatResponse,
+        SYNTH_GENERATION_MARKER,
     };
     use cd_core::providers::{ProviderCapabilities, ProviderDeadlinePreference, ProviderKind};
 
@@ -1022,6 +1060,7 @@ mod tests {
             stale: false,
             finished_at: 0,
             readiness: cd_core::capability_qualification::ModelReadiness::unverified("m"),
+            contracts: cd_core::capability_qualification::CapabilityContractProjection::default(),
             checks: vec![CapabilityCheckDto {
                 kind: "basic_generation".into(),
                 status: "pass".into(),
@@ -1051,6 +1090,18 @@ mod tests {
         );
         assert!(dto.cancelled);
         assert!(dto.checks.iter().all(|c| c.status == "untested"));
+        assert_eq!(
+            dto.contracts.host_grounded_generation,
+            ContractVerdict::Inconclusive
+        );
+        assert_eq!(
+            dto.contracts.validated_structured_proposal,
+            ContractVerdict::Inconclusive
+        );
+        assert_eq!(
+            dto.contracts.native_tool_loop,
+            ContractVerdict::Inconclusive
+        );
     }
 
     #[test]
