@@ -175,6 +175,120 @@ agreement/disagreement, and fail-closed mutations rather than DeepSeek's exact
 wording. The key was read into the child process environment from the protected
 owner-only file; this acceptance run did not access Keychain.
 
+### 2026-08-09 exact clean integration acceptance (`c9097cf0`)
+
+The integrated protected-file, model-readiness, causal-agreement, retrieval-lab,
+and quality-evaluation lineage was rebuilt and tested from exact clean commit
+`c9097cf01434b1c8738a76681fdc59bbf08e85b9`. A fresh isolated profile referenced
+the existing owner-only mode-600 Vercel key file directly. ContextDesk saved
+only the `file:` reference, made no Keychain import, and the initial safe
+connection check returned the authenticated Vercel v4 catalog with 321 models.
+The test corpus and every direct retrieval request were synthetic.
+
+#### Exact-model qualification
+
+The normal CLI qualification path retained the complete catalog but returned
+only the selected rows. Each run resolved the protected-file credential once
+for the process.
+
+| Exact Vercel model | Observed readiness | Important detail |
+| --- | --- | --- |
+| `deepseek/deepseek-v4-flash` | verified chat | generation, native tool call, tool-result continuation, structured JSON, streaming, and cancellation all passed |
+| `openai/gpt-oss-120b` | verified chat | all six chat checks passed, including structured JSON and native tool continuation |
+| `alibaba/qwen3.6-27b` | verified chat | all six checks passed; tool-result continuation took about 39.4 seconds, making operational latency a separate concern |
+| `mistral/ministral-14b` | limited chat | generation, tools, continuation, streaming, and cancellation passed; structured output returned a non-object and failed |
+| `alibaba/qwen3-embedding-0.6b` | verified embedding | v4 contract returned one valid 1,024-dimensional vector in about 753 ms |
+| `voyage/rerank-2.5-lite` | verified reranker | v4 contract returned a complete permutation of the synthetic documents in about 687 ms |
+
+These are compatibility results for Vercel's exact routes, not claims about an
+employer deployment with the same or similar catalog names.
+
+#### Ordinary and selected-context chat
+
+DeepSeek answered an ordinary diagnostic question in one provider round and
+about 4.1 seconds for approximately `$0.000272`. It separated a leading
+connection-pool hypothesis, supporting evidence, an alternative, and the next
+measurement without claiming CPU was evidence against waiting.
+
+A selected-context-only synthetic incident completed in two rounds and about
+12.7 seconds for approximately `$0.000853`. The answer preserved the exact
+`5000 -> 300`, supported-minimum `1000`, rollback `5000`, and recovery times;
+correctly separated the persistent metrics warning; and disclosed uncertainty.
+It also unnecessarily called the empty `search_kb` tool before finishing. This
+is a usefulness/efficiency observation, not a protocol failure.
+
+#### Repeated full product triage
+
+The same 31-record opaque incident and identical causal question were run
+through the normal corpus-linked multi-stage product path.
+
+| Model / attempt | Result | Latency / cost | Quality observation |
+| --- | --- | --- | --- |
+| DeepSeek attempt A | no validated answer persisted | observer did not retain the typed terminal | session contains only system and user messages; later retries prove the profile, credential, and corpus were sound, but this attempt's terminal cause is not recoverable and must not be guessed |
+| DeepSeek attempt B | `root_cause_established=true` | 103.9 s, 17,662 tokens, about `$0.005883` | correct 250 ms versus 1,000 ms initiating cause, exact citations, rollback and recovery; downstream worker and telemetry findings remained neutral observations rather than explicit symptom/independent roles |
+| DeepSeek attempt C | `root_cause_established=true` | 89.0 s, 15,389 tokens, about `$0.004988` | correct cause, exact citations, worker abort explicitly classified as symptom, rollback and recovery retained; telemetry remained a neutral observation rather than explicitly independent |
+| GPT-OSS 120B | `root_cause_established=true` | 20.6 s, 9,291 tokens, about `$0.002302` | correct configuration cause was present, but epoch mismatch and worker-unavailable abort were incorrectly promoted to additional initiating causes and the persistent telemetry timeout was incorrectly called a symptom |
+
+The current verdict is therefore more precise than a single verified badge:
+DeepSeek is the preferred Vercel triage model and repeatedly establishes the
+correct root, but it remains slow and its secondary-role labeling varies.
+GPT-OSS is protocol-compatible and much faster, but this live answer is not
+acceptable as an evidence-disciplined incident explanation.
+
+The GPT-OSS response shape was translated into a hermetic evaluator mutation:
+one correct initiating cause plus a symptom promoted to cause plus an
+independent incident demoted to symptom. The current scorer falsely passed that
+combined answer even though its existing isolated mutations catch the two
+mistake classes separately. The temporary red test was removed from the clean
+integration worktree and handed to an isolated Grok implementation lane with
+an exact reproducer. Until that general scorer fix is reviewed, compatibility
+qualification must not be presented as answer-quality verification.
+
+#### Live embedding and reranking quality
+
+The corrected v4 document envelope completed the public-safe seven-query
+benchmark twice with no warnings. Aggregate values were stable across the two
+runs; the retained aggregate-only run observed:
+
+| Lane | Shape | Relevant recall at K | Must-include recall at K | Must-exclude share at K | Latency |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Qwen embedding | plain | 0.5881 | 0.5595 | 0.0408 | 1.72 s total |
+| Qwen embedding | evidence terms | 0.5988 | 0.5238 | 0.0571 | same batch |
+| Qwen embedding | structural | 0.5881 | 0.5595 | 0.0000 | same batch |
+| Voyage reranker over the full candidate set | plain | 0.7286 | 0.5952 | 0.0490 | 1.96 s total |
+| Qwen shortlist plus Voyage rerank | plain | 0.6988 | 0.5595 | 0.0408 | 1.72 s embed + 6.09 s rerank |
+| Qwen shortlist plus Voyage rerank | evidence terms | 0.6988 | 0.6667 | 0.0490 | same run |
+| Qwen shortlist plus Voyage rerank | structural | **0.7464** | **0.6667** | 0.0490 | same run |
+
+Qwen returned 1,024-dimensional vectors with 1,896 usage tokens. The neutral
+structural prefix outperformed the answer-adjacent evidence-terms prefix, which
+is useful evidence against relying on fixture-shaped instruction leakage.
+However, at least one opaque independent-error query had zero relevant and
+must-include recall in the plain combined path, and concurrent-incident cases
+admitted must-exclude items. The result supports further hybrid experiments;
+it does not justify unconditionally enabling remote semantic retrieval or
+allowing it to evict deterministic safety evidence.
+
+#### Failure and credential boundaries
+
+- A symlink passed as `--api-key-file-ref` failed before provider contact with
+  `protected credential file must not be a symbolic link`; no provider config
+  was written.
+- An intentionally nonexistent model failed with typed CLI exit 6 and a
+  scrubbed provider error. No provider response body, authorization data, or
+  credential appeared.
+- `doctor --skip-live-turn` passed configuration, writable-state, and live
+  Vercel catalog connectivity. Its overall `ready=false` verdict is expected
+  because the turn/grounding/tracing/continuity checks were explicitly skipped.
+- Passive `models` status reported `offline=true` and
+  `credentials_read=false`; explicit discovery and verification reported the
+  credential read honestly.
+
+The durable record deliberately retains exact synthetic prompts, safe semantic
+claims, role outcomes, model identifiers, dimensions, ranking aggregates,
+latency, token, cost, and typed failures. It excludes the key, authorization
+headers, vectors, provider error bodies, and temporary raw response dumps.
+
 ### Discovery and CLI output lesson
 
 Vercel discovery returned the full account catalog successfully. An exact
