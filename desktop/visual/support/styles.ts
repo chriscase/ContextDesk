@@ -17,6 +17,7 @@ import "../../src/styles/themes/light.css";
 import "../../src/styles/themes/slate.css";
 import "../../src/styles/themes/sand.css";
 import "../../src/styles/themes/forest.css";
+import "../../src/styles/themes/grokptah.css";
 import "../../src/styles/layout.css";
 import "../../src/styles/components/composer.css";
 import "../../src/styles/components/tools.css";

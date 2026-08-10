@@ -15,6 +15,7 @@ Parent epic: **#300**. Registry issue: **#54**.
 | `slate` | Slate | dark | `desktop/src/styles/themes/slate.css` |
 | `sand` | Sand | light | `desktop/src/styles/themes/sand.css` |
 | `forest` | Forest | dark | `desktop/src/styles/themes/forest.css` |
+| `grokptah` | GrokPtah | dark | `desktop/src/styles/themes/grokptah.css` — see `docs/design/GROKPTAH_SKIN.md` for QA steps |
 
 Structure (radii, type scale, space) lives in `desktop/src/styles/tokens.css` and
 is shared by every skin.

@@ -88,7 +88,14 @@ describe("design token resolution", () => {
     expect(missing).toEqual([]);
   });
 
-  it.each(["dark.css", "light.css", "slate.css", "sand.css", "forest.css"])(
+  it.each([
+    "dark.css",
+    "light.css",
+    "slate.css",
+    "sand.css",
+    "forest.css",
+    "grokptah.css",
+  ])(
     "resolves the display and elevation tokens in %s",
     (theme) => {
       for (const token of ["--text-xl", "--shadow-lg", "--surface-raised"]) {

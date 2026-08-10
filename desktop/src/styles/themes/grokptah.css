@@ -1,0 +1,53 @@
+/**
+ * GrokPtah — dark coding-workbench skin: graphite chrome, warm gold accent.
+ * Token contract: docs/SKINS.md. AA math: grokptahContrast.test.ts.
+ */
+html[data-theme="grokptah"] {
+  color-scheme: dark;
+  --bg-app: #0b0c0e;
+  --bg-panel: #12141a;
+  --bg-elevated: #181b22;
+  --bg-input: #0e0f13;
+  --bg-hover: #1f232c;
+  --border: #2b2f3a;
+  --border-soft: #1e222b;
+  --border-strong: #3a3f4c;
+  --text: #eceef1;
+  --text-muted: #9aa0ab;
+  /* ≥4.5:1 on --bg-app/#0b0c0e and --bg-panel/#12141a (grokptahContrast.test.ts) */
+  --text-faint: #8b8f9a;
+  --accent: #f0b429;
+  /* Accent used as small text on --bg-elevated; must clear WCAG AA there. */
+  --accent-text: #f0b429;
+  --accent-strong: #d99a1f;
+  --accent-soft: rgb(240 180 41 / 0.16);
+  --accent-on: #1a1306;
+  /* Body links: same hue as accent; already ≥4.5:1 on app/panel */
+  --link: #f0b429;
+  --success: #7fd99a;
+  /* Warm-orange, deliberately hue-separated from --accent's gold so status and
+     interactive/brand color never read as the same signal (~18° hue gap). */
+  --warning: #ff8a3d;
+  --danger: #ff6b6b;
+  --tool-bg: #14161d;
+  /* Subtle warm-gold-tinted panel wash for user turns, echoing the accent. */
+  --chat-user-bg: #1d1a12;
+  --chat-assistant-bg: transparent;
+  --surface-deep: #050506;
+  --surface-chrome: #14161c;
+  --surface-chip: #171a21;
+  --status-bar-bg: #08090b;
+  --overlay-scrim: rgb(0 0 0 / 0.62);
+  --overlay-soft: rgb(0 0 0 / 0.22);
+  --overlay-faint: rgb(255 255 255 / 0.04);
+  --focus-ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--accent);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.18);
+  --shadow-md: 0 12px 36px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 20px 52px rgb(0 0 0 / 0.5);
+  --shadow-inset: 0 1px 0 rgb(255 255 255 / 0.04) inset;
+  --composer-shadow: var(--shadow-inset), 0 10px 28px rgb(0 0 0 / 0.22);
+  --composer-shadow-focus:
+    0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent),
+    0 12px 32px rgb(0 0 0 / 0.28);
+  --btn-inset: 0 1px 0 rgb(255 255 255 / 0.16) inset;
+}
