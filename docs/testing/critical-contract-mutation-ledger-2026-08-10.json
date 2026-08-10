@@ -3,15 +3,15 @@
   "generated_at": "2026-08-10",
   "baseline_sha": "10435d114e7e1faa0ca6e5f8447d70d41ad91492",
   "branch": "test/critical-contract-mutations-v1",
-  "worktree": "/Users/chriscase/Documents/GitHub/contextdesk-critical-mutations-v1",
-  "mutation_target_dir": "/Users/chriscase/Documents/GitHub/contextdesk-mutants-target-v1",
+  "worktree": "isolated:test/critical-contract-mutations-v1",
+  "mutation_target_dir": "task_owned_local:contextdesk-mutants-target-v1",
   "tool": {
     "name": "cargo-mutants",
     "version": "27.1.0"
   },
   "execution": {
     "jobs": 1,
-    "shared_cargo_target_dir": "/Users/chriscase/Documents/GitHub/contextdesk-mutants-target-v1/target",
+    "shared_cargo_target_dir": "task_owned_local:contextdesk-mutants-target-v1/target",
     "parallel_j2_abandoned_reason": "shared CARGO_TARGET_DIR contention caused false TIMEOUT outcomes",
     "test_filter_pattern": "cargo test --lib <module>"
   },

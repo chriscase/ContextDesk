@@ -1,11 +1,11 @@
 # Critical-contract mutation report — 2026-08-10
 
-**Branch:** `test/critical-contract-mutations-v1`  
-**Worktree:** `/Users/chriscase/Documents/GitHub/contextdesk-critical-mutations-v1`  
-**Baseline SHA:** `10435d114e7e1faa0ca6e5f8447d70d41ad91492`  
-**Mutation target dir (owned only by this task):** `/Users/chriscase/Documents/GitHub/contextdesk-mutants-target-v1`  
-**Tool:** `cargo-mutants 27.1.0`  
-**Package under test:** `cd-core`  
+- **Branch:** `test/critical-contract-mutations-v1`
+- **Worktree:** isolated `test/critical-contract-mutations-v1` worktree
+- **Baseline SHA:** `10435d114e7e1faa0ca6e5f8447d70d41ad91492`
+- **Mutation target dir (owned only by this task):** local `contextdesk-mutants-target-v1` build-artifact directory
+- **Tool:** `cargo-mutants 27.1.0`
+- **Package under test:** `cd-core`
 **Execution mode:** sequential (`-j 1`) with shared `CARGO_TARGET_DIR` under the dedicated mutants directory; filtered lib tests per file (`cargo test --lib <module>`). Parallel `-j 2` against a shared target dir produced false timeouts and was abandoned.
 
 Companion ledger: [`critical-contract-mutation-ledger-2026-08-10.json`](./critical-contract-mutation-ledger-2026-08-10.json).
@@ -32,7 +32,7 @@ Chosen from Phase 1 mutation priorities (highest-risk trust boundaries on the ac
 Commands (from mutation worktree):
 
 ```bash
-export CARGO_TARGET_DIR=/Users/chriscase/Documents/GitHub/contextdesk-mutants-target-v1/target
+export CARGO_TARGET_DIR="${MUTATION_TARGET_DIR:?set a task-owned mutation target}/target"
 cargo test -p cd-core --lib multi_stage_budget
 cargo test -p cd-core --lib investigation_answer
 cargo test -p cd-core --lib triage_quality
@@ -65,7 +65,7 @@ cargo mutants \
 | Initial | 24 | 18 | 5 | 1 | 0 |
 | After new tests (verify) | 24 | **23** | **0** | 1 | 0 |
 
-**Viable kill rate (final):** 23/23 = **100%**  
+**Viable kill rate (final):** 23/23 = **100%**
 **Unviable:** `synthesis_reserve -> Default::default()` (type not Default).
 
 **Initial survivors (all killed by added tests):**
@@ -122,7 +122,7 @@ High unviable count: cargo-mutants body-replacing `CoreResult`/`File` constructo
 
 ### 3.4 Files deliberately not mutated this night
 
-- **`triage_quality.rs`:** product hole documented in Phase 1 (`INT-001`); correct fix lives on `fix/triage-role-integrity-v1` @ `3c50f0f4` / `7f4ebb98`. Duplicating would risk dual-branch conflict.  
+- **`triage_quality.rs`:** product hole documented in Phase 1 (`INT-001`); correct fix lives on `fix/triage-role-integrity-v1` @ `3c50f0f4` / `7f4ebb98`. Duplicating would risk dual-branch conflict.
 - **`capability_qualification.rs` / `quality_eval/answer_score.rs`:** deferred (size, disk, diminishing return after budget/IA).
 
 ---
@@ -151,11 +151,11 @@ None in product code. Remaining product defect **INT-001** (production `symptom_
 
 ## 6. Remaining mutation gaps
 
-1. Re-run keychain core after max-byte test to confirm 2/4 survivors dead (expected).  
-2. TOCTOU race harness for `O_NOFOLLOW` (needs controlled path swap under open).  
-3. Full `triage_quality` campaign **after** integrating `fix/triage-role-integrity-v1`.  
-4. `capability_qualification` store/stale/fingerprint operators.  
-5. `agent.rs` final-comparison orchestration (large; needs slice by function).  
+1. Re-run keychain core after max-byte test to confirm 2/4 survivors dead (expected).
+2. TOCTOU race harness for `O_NOFOLLOW` (needs controlled path swap under open).
+3. Full `triage_quality` campaign **after** integrating `fix/triage-role-integrity-v1`.
+4. `capability_qualification` store/stale/fingerprint operators.
+5. `agent.rs` final-comparison orchestration (large; needs slice by function).
 6. Defense-in-depth `||` in `validate_model_answer` remains equivalent under private ledger construction.
 
 ---
@@ -176,10 +176,10 @@ No cleanup of other worktrees or protected RC `…/contextdesk-evidence-final-rc
 
 ## 8. Recommended next mutation batch
 
-1. Integrate triage role-integrity first, then mutate `triage_quality.rs` symptom/cause gates.  
-2. `capability_qualification.rs` with scripted-transport unit filter only.  
-3. `agent.rs` slices: admission loop + validate_model_answer call sites.  
-4. Keychain: TOCTOU + `O_NOFOLLOW` custom flag contract under unix cfg.  
+1. Integrate triage role-integrity first, then mutate `triage_quality.rs` symptom/cause gates.
+2. `capability_qualification.rs` with scripted-transport unit filter only.
+3. `agent.rs` slices: admission loop + validate_model_answer call sites.
+4. Keychain: TOCTOU + `O_NOFOLLOW` custom flag contract under unix cfg.
 5. Optional: re-score keychain after max-byte test for ledger completeness.
 
 ---
@@ -198,7 +198,7 @@ No cleanup of other worktrees or protected RC `…/contextdesk-evidence-final-rc
 
 ## 10. Safety
 
-- No live providers, Keychain OS access for mutation runs (file-backed temp only).  
-- No acceptance branch disturbance.  
-- No PRs opened.  
+- No live providers, Keychain OS access for mutation runs (file-backed temp only).
+- No acceptance branch disturbance.
+- No PRs opened.
 - Push only `test/critical-contract-mutations-v1`.
