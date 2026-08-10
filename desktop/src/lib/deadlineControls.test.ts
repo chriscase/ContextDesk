@@ -10,30 +10,95 @@ import {
   STANDARD_DEADLINE_MS,
 } from "./deadlineControls";
 
-describe("deadlineControls", () => {
-  it("accepts each unit and boundaries", () => {
-    expect(parseDeadlineDuration("500ms")).toEqual({ ok: true, ms: 500 });
-    expect(parseDeadlineDuration("600000ms")).toEqual({
-      ok: true,
-      ms: 600_000,
-    });
-    expect(parseDeadlineDuration("90s")).toEqual({ ok: true, ms: 90_000 });
-    expect(parseDeadlineDuration("3m")).toEqual({ ok: true, ms: 180_000 });
-    expect(parseDeadlineDuration("10m")).toEqual({ ok: true, ms: 600_000 });
-    expect(parseDeadlineDuration(" 2M ")).toEqual({ ok: true, ms: 120_000 });
+/** Accept matrix mirrored from cd_core::deadline_controls adversarial tests. */
+const ACCEPT: Array<[string, number]> = [
+  ["500ms", 500],
+  ["600000ms", 600_000],
+  ["1s", 1_000],
+  ["90s", 90_000],
+  ["3m", 180_000],
+  ["10m", 600_000],
+  ["  2M  ", 120_000],
+  ["10S", 10_000],
+  ["\t90s\n", 90_000],
+  ["500MS", 500],
+  ["  10m  ", 600_000],
+];
+
+const REJECT: string[] = [
+  "",
+  "   ",
+  "\t\n",
+  "-3m",
+  "+3m",
+  "1.5m",
+  "1,5m",
+  "0s",
+  "0ms",
+  "0m",
+  "3",
+  "3min",
+  "1m30s",
+  "90 s",
+  "90  s",
+  "90s30ms",
+  "ms",
+  "s",
+  "m",
+  "abc",
+  "90sec",
+  "90seconds",
+  "٩٠s",
+  "90ｓ",
+  "90s!",
+  "😊3m",
+  "3m😊",
+  "1e3s",
+  "0x10s",
+  "499ms",
+  "11m",
+  "100ms",
+  "15m",
+  "601s",
+  // Unsafe / oversized magnitudes (TS Number path)
+  "9007199254740992ms", // Number.MAX_SAFE_INTEGER + 1
+  "99999999999999999999ms",
+];
+
+describe("deadlineControls adversarial parse parity", () => {
+  it("accepts each unit, outer whitespace, case, and bounds", () => {
+    for (const [input, want] of ACCEPT) {
+      const got = parseDeadlineDuration(input);
+      expect(got, `accept ${JSON.stringify(input)}`).toEqual({
+        ok: true,
+        ms: want,
+      });
+    }
   });
 
-  it("rejects malformed, negative, decimal, and out-of-range", () => {
-    expect(parseDeadlineDuration("").ok).toBe(false);
-    expect(parseDeadlineDuration("-3m").ok).toBe(false);
-    expect(parseDeadlineDuration("1.5m").ok).toBe(false);
-    expect(parseDeadlineDuration("3").ok).toBe(false);
-    expect(parseDeadlineDuration("1m30s").ok).toBe(false);
-    expect(parseDeadlineDuration("499ms").ok).toBe(false);
-    expect(parseDeadlineDuration("11m").ok).toBe(false);
+  it("rejects signs, decimals, zero, junk, mixed units, overflow, and range", () => {
+    for (const input of REJECT) {
+      const got = parseDeadlineDuration(input);
+      expect(got.ok, `reject ${JSON.stringify(input)}`).toBe(false);
+    }
+  });
+
+  it("never silently clamps out-of-range custom input", () => {
     const low = parseDeadlineDuration("100ms");
     expect(low.ok).toBe(false);
     if (!low.ok) expect(low.error).toMatch(/500ms|10m/);
+    const high = parseDeadlineDuration("15m");
+    expect(high.ok).toBe(false);
+    expect(parseDeadlineDuration("499ms").ok).toBe(false);
+    expect(parseDeadlineDuration("600001ms").ok).toBe(false);
+    expect(parseDeadlineDuration("500ms")).toEqual({
+      ok: true,
+      ms: MIN_DEADLINE_MS,
+    });
+    expect(parseDeadlineDuration("600000ms")).toEqual({
+      ok: true,
+      ms: MAX_DEADLINE_MS,
+    });
   });
 
   it("formats human durations without inventing fractions", () => {
@@ -88,20 +153,44 @@ describe("deadlineControls", () => {
     expect(p.deadline_ms).toBe(PATIENT_DEADLINE_MS);
   });
 
-  it("desktop/CLI parity for the same duration strings", () => {
-    for (const sample of ["500ms", "90s", "3m", "10m"] as const) {
+  it("invalid custom draft does not change last valid via applyPreset without customMs", () => {
+    const last = { deadline_ms: 180_000, deadline_is_explicit: true };
+    // When customMs is omitted or invalid-range, applyPreset keeps last value.
+    const kept = applyPreset(last, "custom");
+    expect(kept.deadline_ms).toBe(180_000);
+    expect(kept.deadline_is_explicit).toBe(true);
+    const invalidParsed = parseDeadlineDuration("11m");
+    expect(invalidParsed.ok).toBe(false);
+    // Product path only calls applyPreset with customMs when parse succeeds.
+    const still = applyPreset(last, "custom", undefined);
+    expect(still.deadline_ms).toBe(180_000);
+  });
+
+  it("applyPreset with out-of-range customMs keeps last valid and never invents a clamped value", () => {
+    const last = { deadline_ms: 180_000, deadline_is_explicit: true };
+    // GUI only passes customMs after parse succeeds; if a caller passes OOR,
+    // we must not silently clamp to 500ms (that would look like a successful save).
+    const low = applyPreset(last, "custom", 100);
+    expect(low.deadline_ms).toBe(180_000);
+    const high = applyPreset(last, "custom", 900_000);
+    expect(high.deadline_ms).toBe(180_000);
+  });
+
+  it("desktop/CLI numeric parity for the shared accept matrix", () => {
+    for (const [sample, want] of ACCEPT) {
       const gui = parseDeadlineDuration(sample);
       expect(gui.ok).toBe(true);
-      if (gui.ok) {
-        // Same formulas as cd_core::deadline_controls
-        if (sample.endsWith("ms")) {
-          expect(gui.ms).toBe(Number(sample.replace("ms", "")));
-        } else if (sample.endsWith("s") && !sample.endsWith("ms")) {
-          expect(gui.ms).toBe(Number(sample.replace("s", "")) * 1_000);
-        } else {
-          expect(gui.ms).toBe(Number(sample.replace("m", "")) * 60_000);
-        }
-      }
+      if (gui.ok) expect(gui.ms).toBe(want);
     }
+  });
+
+  it("saved-policy style precedence helpers: override clone does not mutate base", () => {
+    const saved = { deadline_ms: 90_000, deadline_is_explicit: true };
+    const turn = applyPreset(saved, "custom", 600_000);
+    expect(turn.deadline_ms).toBe(600_000);
+    expect(saved.deadline_ms).toBe(90_000);
+    const auto = applyPreset(saved, "auto");
+    expect(auto.deadline_is_explicit).toBe(false);
+    expect(auto.deadline_ms).toBe(90_000);
   });
 });

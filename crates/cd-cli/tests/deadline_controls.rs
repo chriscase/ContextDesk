@@ -225,3 +225,177 @@ fn direct_question_normalization_accepts_deadline() {
     );
     assert_eq!(before, fs::read(app_config_path(&data)).unwrap());
 }
+
+#[test]
+fn config_deadline_invalid_inputs_leave_bytes_unchanged() {
+    let (_tmp, data) = isolated_home();
+    write_minimal_app_config(&data);
+    // Seed a distinctive payload so byte-identity is meaningful.
+    let mut cfg: serde_json::Value =
+        serde_json::from_slice(&fs::read(app_config_path(&data)).unwrap()).unwrap();
+    cfg["router"]["max_sources"] = serde_json::json!(7);
+    cfg["default_timezone"] = serde_json::json!("America/Chicago");
+    cfg["theme"] = serde_json::json!("slate");
+    fs::write(
+        app_config_path(&data),
+        serde_json::to_vec_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
+    let before = fs::read(app_config_path(&data)).unwrap();
+
+    for bad in [
+        "11m", "100ms", "1.5m", "-3m", "90 s", "nope", "0s", "1m30s", "",
+    ] {
+        let out = if bad.is_empty() {
+            // clap may reject missing arg before our parser; either way, no write.
+            run_in(&data, &["config", "deadline", "set"])
+        } else {
+            run_in(&data, &["config", "deadline", "set", bad])
+        };
+        assert!(
+            !out.status.success(),
+            "expected failure for {bad:?}, stdout={}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let after = fs::read(app_config_path(&data)).unwrap();
+        assert_eq!(
+            before, after,
+            "invalid set {bad:?} must not rewrite config bytes"
+        );
+    }
+}
+
+#[test]
+fn config_deadline_show_json_contains_no_secrets_paths_or_endpoints() {
+    let (_tmp, data) = isolated_home();
+    write_minimal_app_config(&data);
+    // Plant decoy secret/path/endpoint material in AppConfig that must never
+    // appear in deadline show output (which is a bounded DeadlineStatus only).
+    let mut cfg: serde_json::Value =
+        serde_json::from_slice(&fs::read(app_config_path(&data)).unwrap()).unwrap();
+    cfg["default_timezone"] = serde_json::json!("America/Chicago");
+    cfg["theme"] = serde_json::json!("slate");
+    cfg["providers"] = serde_json::json!({
+        "active_id": "prod-profile",
+        "profiles": [{
+            "id": "prod-profile",
+            "label": "prod",
+            "kind": "open_ai_compatible",
+            "base_url": "https://models.example.com/v1",
+            "api_key_ref": "provider/prod/api_key",
+            "chat_model": "demo-model",
+            "embedding_model": null,
+            "embedding_base_url": null,
+            "capabilities": {"tools": false, "stream": true, "embeddings": false},
+            "local_only": false,
+            "deadline_preference": "auto"
+        }]
+    });
+    fs::write(
+        app_config_path(&data),
+        serde_json::to_vec_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
+
+    let out = run_in(&data, &["--format", "json", "config", "deadline", "show"]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("contextdesk.deadline.v1"), "{s}");
+    for forbidden in [
+        "sk-",
+        "api_key",
+        "api_key_ref",
+        "models.example.com",
+        "https://",
+        "http://",
+        "prod-profile",
+        "demo-model",
+        "/Users/",
+        "Bearer ",
+        "password",
+        "America/Chicago",
+    ] {
+        assert!(
+            !s.contains(forbidden),
+            "deadline show JSON must not leak {forbidden}: {s}"
+        );
+    }
+}
+
+#[test]
+fn legacy_config_missing_deadline_is_explicit_loads_and_show_reports_custom() {
+    let (_tmp, data) = isolated_home();
+    // No deadline_is_explicit field — serde migrates as explicit.
+    let cfg = serde_json::json!({
+        "providers": { "active_id": null, "profiles": [] },
+        "router": {
+            "max_sources": 3,
+            "max_tool_rounds": 12,
+            "max_results_per_source": 8,
+            "deadline_ms": 90000,
+            "order": ["memory", "files", "mcp", "sql", "wiki"]
+        }
+    });
+    fs::write(
+        app_config_path(&data),
+        serde_json::to_vec_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
+
+    let out = run_in(&data, &["--format", "json", "config", "deadline", "show"]);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("\"deadline_ms\":90000") || s.contains("90000"),
+        "{s}"
+    );
+    assert!(
+        s.contains("\"deadline_is_explicit\":true") || s.contains("explicit"),
+        "legacy missing field must surface as explicit: {s}"
+    );
+}
+
+#[test]
+fn config_deadline_set_then_auto_preserves_unrelated_json_keys() {
+    let (_tmp, data) = isolated_home();
+    write_minimal_app_config(&data);
+    let mut cfg: serde_json::Value =
+        serde_json::from_slice(&fs::read(app_config_path(&data)).unwrap()).unwrap();
+    cfg["router"]["max_sources"] = serde_json::json!(7);
+    cfg["router"]["max_tool_rounds"] = serde_json::json!(9);
+    cfg["router"]["max_results_per_source"] = serde_json::json!(4);
+    cfg["default_timezone"] = serde_json::json!("America/Chicago");
+    cfg["theme"] = serde_json::json!("slate");
+    cfg["setup_completed"] = serde_json::json!(true);
+    fs::write(
+        app_config_path(&data),
+        serde_json::to_vec_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
+
+    assert!(run_in(&data, &["config", "deadline", "set", "90s"])
+        .status
+        .success());
+    assert!(run_in(&data, &["config", "deadline", "auto"])
+        .status
+        .success());
+
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(app_config_path(&data)).unwrap()).unwrap();
+    assert_eq!(saved["router"]["deadline_ms"], 90_000);
+    assert_eq!(saved["router"]["deadline_is_explicit"], false);
+    assert_eq!(saved["router"]["max_sources"], 7);
+    assert_eq!(saved["router"]["max_tool_rounds"], 9);
+    assert_eq!(saved["router"]["max_results_per_source"], 4);
+    assert_eq!(saved["default_timezone"], "America/Chicago");
+    assert_eq!(saved["theme"], "slate");
+    assert_eq!(saved["setup_completed"], true);
+}

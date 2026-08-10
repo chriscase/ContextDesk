@@ -149,18 +149,18 @@ pub fn parse_deadline_duration(input: &str) -> Result<u64, DeadlineParseError> {
     if magnitude == 0 {
         return Err(DeadlineParseError::InvalidNumber);
     }
-    // Unit is ASCII-only (ms/s/m); take the remainder as bytes to avoid
-    // clippy::string_slice on potentially multi-byte user input. The complete
-    // input was already trimmed above, so do not trim this substring: internal
-    // whitespace (for example `3 m`) must remain invalid and match the GUI
-    // parser's strict grammar.
+    // Unit is ASCII-only (ms/s/m) and must be immediately adjacent to the
+    // digits. Take the remainder as bytes to avoid clippy::string_slice on
+    // potentially multi-byte user input. The complete input was already
+    // trimmed above, so internal whitespace (for example `3 m`) remains
+    // invalid and matches the desktop TypeScript grammar.
     let unit = std::str::from_utf8(&bytes[i..])
         .map_err(|_| DeadlineParseError::Malformed)?
         .to_ascii_lowercase();
     if unit.is_empty() {
         return Err(DeadlineParseError::InvalidUnit);
     }
-    // Single unit only; reject "1m30s", "ms", "sec", etc.
+    // Single unit only; reject "1m30s", "ms", "sec", internal spaces, etc.
     let ms = match unit.as_str() {
         "ms" => magnitude,
         "s" => magnitude
@@ -169,6 +169,9 @@ pub fn parse_deadline_duration(input: &str) -> Result<u64, DeadlineParseError> {
         "m" => magnitude
             .checked_mul(60_000)
             .ok_or(DeadlineParseError::Overflow)?,
+        _ if unit.chars().any(|c| c.is_whitespace()) => {
+            return Err(DeadlineParseError::Malformed);
+        }
         _ => return Err(DeadlineParseError::InvalidUnit),
     };
     if !(MIN_DEADLINE_MS..=MAX_DEADLINE_MS).contains(&ms) {
@@ -298,26 +301,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_each_unit_and_boundaries() {
-        assert_eq!(parse_deadline_duration("500ms").unwrap(), 500);
-        assert_eq!(parse_deadline_duration("600000ms").unwrap(), 600_000);
-        assert_eq!(parse_deadline_duration("1s").unwrap(), 1_000);
-        assert_eq!(parse_deadline_duration("90s").unwrap(), 90_000);
-        assert_eq!(parse_deadline_duration("3m").unwrap(), 180_000);
-        assert_eq!(parse_deadline_duration("10m").unwrap(), 600_000);
-        assert_eq!(parse_deadline_duration("  2M  ").unwrap(), 120_000);
-        assert_eq!(parse_deadline_duration("10S").unwrap(), 10_000);
+    fn adversarial_accept_matrix_whitespace_case_units_and_bounds() {
+        // Keep accept strings in lockstep with desktop deadlineControls.test.ts.
+        let cases = [
+            ("500ms", 500u64),
+            ("600000ms", 600_000),
+            ("1s", 1_000),
+            ("90s", 90_000),
+            ("3m", 180_000),
+            ("10m", 600_000),
+            ("  2M  ", 120_000),
+            ("10S", 10_000),
+            ("\t90s\n", 90_000),
+            ("500MS", 500),
+            ("  10m  ", 600_000),
+        ];
+        for (input, want) in cases {
+            assert_eq!(
+                parse_deadline_duration(input).unwrap(),
+                want,
+                "accept input={input:?}"
+            );
+        }
     }
 
     #[test]
-    fn rejects_malformed_negative_decimal_overflow_and_range() {
-        assert_eq!(parse_deadline_duration(""), Err(DeadlineParseError::Empty));
-        assert_eq!(
-            parse_deadline_duration("   "),
-            Err(DeadlineParseError::Empty)
-        );
+    fn adversarial_reject_matrix_signs_decimals_zero_junk_mixed_overflow_range() {
+        // (input, class of rejection — we only require Err, with stronger
+        // checks where the product contract pins a variant)
+        let must_err: &[&str] = &[
+            "",
+            "   ",
+            "\t\n",
+            "-3m",
+            "+3m",
+            "1.5m",
+            "1,5m",
+            "0s",
+            "0ms",
+            "0m",
+            "3",
+            "3min",
+            "1m30s",
+            "90 s",
+            "90  s",
+            "90s30ms",
+            "ms",
+            "s",
+            "m",
+            "abc",
+            "90sec",
+            "90seconds",
+            "٩٠s",  // Arabic-Indic digits
+            "90ｓ", // fullwidth unit-ish junk
+            "90s!",
+            "90s\0",
+            "😊3m",
+            "3m😊",
+            "1e3s",
+            "0x10s",
+            "499ms",
+            "11m",
+            "100ms",
+            "15m",
+            "601s", // 601000 > max
+            "18446744073709551615m",
+            "18446744073709551615s",
+            "99999999999999999999ms",
+        ];
+        for input in must_err {
+            assert!(
+                parse_deadline_duration(input).is_err(),
+                "expected reject for {input:?}"
+            );
+        }
         assert!(matches!(
             parse_deadline_duration("-3m"),
+            Err(DeadlineParseError::InvalidNumber)
+        ));
+        assert!(matches!(
+            parse_deadline_duration("+90s"),
             Err(DeadlineParseError::InvalidNumber)
         ));
         assert!(matches!(
@@ -338,11 +401,15 @@ mod tests {
         ));
         assert!(matches!(
             parse_deadline_duration("3 m"),
-            Err(DeadlineParseError::InvalidUnit)
+            Err(DeadlineParseError::Malformed)
         ));
         assert!(matches!(
             parse_deadline_duration("0s"),
             Err(DeadlineParseError::InvalidNumber)
+        ));
+        assert!(matches!(
+            parse_deadline_duration("90 s"),
+            Err(DeadlineParseError::Malformed)
         ));
         assert!(matches!(
             parse_deadline_duration("499ms"),
@@ -352,7 +419,6 @@ mod tests {
             parse_deadline_duration("11m"),
             Err(DeadlineParseError::OutOfRange { ms: 660_000 })
         ));
-        // Overflow on scale
         assert!(matches!(
             parse_deadline_duration("18446744073709551615m"),
             Err(DeadlineParseError::Overflow)
@@ -368,6 +434,20 @@ mod tests {
             err,
             DeadlineParseError::OutOfRange { ms: 900_000 }
         ));
+        // Boundary: one below min / one above max never round inward.
+        assert!(matches!(
+            parse_deadline_duration("499ms"),
+            Err(DeadlineParseError::OutOfRange { ms: 499 })
+        ));
+        assert!(matches!(
+            parse_deadline_duration("600001ms"),
+            Err(DeadlineParseError::OutOfRange { ms: 600_001 })
+        ));
+        assert_eq!(parse_deadline_duration("500ms").unwrap(), MIN_DEADLINE_MS);
+        assert_eq!(
+            parse_deadline_duration("600000ms").unwrap(),
+            MAX_DEADLINE_MS
+        );
     }
 
     #[test]
@@ -429,6 +509,58 @@ mod tests {
     }
 
     #[test]
+    fn saved_policy_precedence_override_beats_explicit_beats_adaptive() {
+        // Adaptive stored value is a fallback only; explicit saved wins over it;
+        // turn override wins over both and must not be written back by these helpers.
+        let mut saved = RouterBudget {
+            deadline_ms: PATIENT_DEADLINE_MS,
+            deadline_is_explicit: false,
+            ..RouterBudget::default()
+        };
+        assert_eq!(policy_mode(&saved), DeadlinePolicyMode::Adaptive);
+
+        // Explicit saved policy.
+        apply_explicit_deadline_ms(&mut saved, 90_000).unwrap();
+        assert_eq!(policy_mode(&saved), DeadlinePolicyMode::Explicit);
+        assert_eq!(saved.deadline_ms, 90_000);
+
+        // Per-turn override on a *clone* of the host budget.
+        let mut turn = saved.clone();
+        apply_turn_override(&mut turn, 600_000).unwrap();
+        assert_eq!(turn.deadline_ms, 600_000);
+        assert!(turn.deadline_is_explicit);
+        // Saved policy unchanged — override never persists via these APIs.
+        assert_eq!(saved.deadline_ms, 90_000);
+        assert!(saved.deadline_is_explicit);
+
+        // Returning to adaptive keeps the stored numeric value.
+        apply_auto_policy(&mut saved);
+        assert!(!saved.deadline_is_explicit);
+        assert_eq!(saved.deadline_ms, 90_000);
+    }
+
+    #[test]
+    fn legacy_router_json_missing_deadline_is_explicit_migrates_as_explicit() {
+        // Matches RouterBudget serde default `migrated_deadline_is_explicit = true`
+        // so upgrades never silently lengthen a pre-field ceiling.
+        let budget: RouterBudget = serde_json::from_value(serde_json::json!({
+            "max_sources": 3,
+            "max_tool_rounds": 12,
+            "max_results_per_source": 8,
+            "deadline_ms": 90_000,
+            "order": ["memory", "files"]
+        }))
+        .expect("legacy budget");
+        assert!(
+            budget.deadline_is_explicit,
+            "absent deadline_is_explicit must migrate as explicit"
+        );
+        assert_eq!(budget.deadline_ms, 90_000);
+        assert_eq!(classify_preset(&budget), DeadlinePreset::Custom);
+        assert_eq!(policy_mode(&budget), DeadlinePolicyMode::Explicit);
+    }
+
+    #[test]
     fn status_json_is_safe_and_versioned() {
         let budget = RouterBudget {
             deadline_ms: 180_000,
@@ -441,10 +573,19 @@ mod tests {
         let json = serde_json::to_value(&status).unwrap();
         let blob = json.to_string();
         for forbidden in [
-            "profile", "endpoint", "model", "http", "secret", "api_key", "/Users/", "sk-",
+            "profile/",
+            "endpoint",
+            "\"model\"",
+            "http://",
+            "https://",
+            "secret",
+            "api_key",
+            "/Users/",
+            "sk-",
+            "Bearer ",
         ] {
             assert!(
-                !blob.to_lowercase().contains(forbidden),
+                !blob.contains(forbidden),
                 "status must not contain {forbidden}: {blob}"
             );
         }

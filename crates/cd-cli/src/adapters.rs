@@ -371,4 +371,33 @@ mod credential_tests {
         assert!(!next.router_budget().deadline_is_explicit);
         assert_eq!(next.router_budget().deadline_ms, PATIENT_DEADLINE_MS);
     }
+
+    #[test]
+    fn turn_override_beats_saved_explicit_and_does_not_leak_to_next_host() {
+        use cd_core::deadline_controls::{apply_turn_override, parse_deadline_duration};
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        // Saved explicit custom ceiling (90s).
+        cfg.router.deadline_ms = 90_000;
+        cfg.router.deadline_is_explicit = true;
+        let mut host = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
+        assert_eq!(host.router_budget().deadline_ms, 90_000);
+        assert!(host.router_budget().deadline_is_explicit);
+
+        // Per-turn override wins for this host only.
+        let ms = parse_deadline_duration("3m").unwrap();
+        let mut budget = host.router_budget().clone();
+        apply_turn_override(&mut budget, ms).unwrap();
+        host.set_router_budget(budget);
+        assert_eq!(host.router_budget().deadline_ms, 180_000);
+
+        // AppConfig object (source of truth for persistence) unchanged.
+        assert_eq!(cfg.router.deadline_ms, 90_000);
+        assert!(cfg.router.deadline_is_explicit);
+
+        // Next turn / next host rebuild from saved policy — no leak.
+        let later = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
+        assert_eq!(later.router_budget().deadline_ms, 90_000);
+        assert!(later.router_budget().deadline_is_explicit);
+    }
 }

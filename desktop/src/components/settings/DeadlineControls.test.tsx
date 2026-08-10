@@ -109,4 +109,55 @@ describe("DeadlineControls", () => {
     expect(described.includes("error") || alert.textContent).toBeTruthy();
     expect(alert.textContent?.length ?? 0).toBeGreaterThan(0);
   });
+
+  it("Auto does not convert stored ms into an explicit ceiling", () => {
+    function Watch({ initial }: { initial: RouterBudgetDto }) {
+      const [routerBudget, setRouterBudget] = useState(initial);
+      return (
+        <>
+          <DeadlineControls
+            baseId="watch"
+            routerBudget={routerBudget}
+            setRouterBudget={setRouterBudget}
+          />
+          <output data-testid="explicit">
+            {String(routerBudget.deadline_is_explicit)}
+          </output>
+          <output data-testid="ms">{routerBudget.deadline_ms}</output>
+        </>
+      );
+    }
+    render(
+      <Watch
+        initial={{
+          ...baseBudget,
+          deadline_ms: 90_000,
+          deadline_is_explicit: true,
+        }}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(/whole-turn time limit/i), {
+      target: { value: "auto" },
+    });
+    expect(screen.getByTestId("explicit").textContent).toBe("false");
+    expect(screen.getByTestId("ms").textContent).toBe("90000");
+  });
+
+  it("adversarial custom junk leaves last valid budget in the summary", () => {
+    render(
+      <Harness
+        initial={{
+          ...baseBudget,
+          deadline_ms: 90_000,
+          deadline_is_explicit: true,
+        }}
+      />,
+    );
+    const custom = screen.getByLabelText(/custom duration/i);
+    for (const junk of ["-3m", "1.5m", "90 s", "11m", "0s", "😊3m"]) {
+      fireEvent.change(custom, { target: { value: junk } });
+      expect(screen.getByRole("alert")).toBeTruthy();
+      expect(screen.getByText(/Saved ceiling: 90s/i)).toBeTruthy();
+    }
+  });
 });
