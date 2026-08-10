@@ -429,6 +429,10 @@ fn per_case_budget(remaining: Duration, timeout_is_explicit: bool) -> Duration {
     }
 }
 
+/// Keep the deadline outside the real workflow future: on timeout, dropping
+/// the future preserves the tracing backend's RAII `TimedOut` record; on
+/// cancellation, the existing cooperative token still produces its normal
+/// cancellation outcome and trace before this outer budget expires.
 async fn within_case_budget<F>(
     budget: Duration,
     future: F,
