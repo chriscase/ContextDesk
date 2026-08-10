@@ -92,6 +92,83 @@ impl CapabilityKind {
     }
 }
 
+/// Product execution contracts derived from measured capability checks. These
+/// are intentionally narrower than the aggregate model-readiness label: a
+/// model can support structured proposals while failing native tools, or the
+/// reverse, and those cases need different routing decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityContract {
+    /// A plain model-generated answer.
+    Generation,
+    /// A host-validated JSON proposal, used by typed triage/review stages.
+    JsonProposal,
+    /// A complete native tool call followed by tool-result continuation.
+    NativeToolLoop,
+}
+
+/// Whether an execution contract is currently supported by measured evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractVerdict {
+    /// Every required probe is current and passed.
+    Qualified,
+    /// Current evidence measured a required probe that did not pass.
+    Unqualified,
+    /// Evidence is absent, stale, cancelled, or incomplete.
+    Unverified,
+}
+
+impl CapabilityContract {
+    fn required(self) -> &'static [CapabilityKind] {
+        match self {
+            Self::Generation => &[CapabilityKind::BasicGeneration],
+            Self::JsonProposal => &[
+                CapabilityKind::BasicGeneration,
+                CapabilityKind::StructuredOutput,
+            ],
+            Self::NativeToolLoop => &[
+                CapabilityKind::BasicGeneration,
+                CapabilityKind::NativeToolCall,
+                CapabilityKind::ToolResultContinuation,
+            ],
+        }
+    }
+}
+
+/// Project one exact report into a routing-safe capability contract verdict.
+///
+/// This function deliberately returns `Unverified` for missing, stale,
+/// cancelled, or untested evidence. It never uses a model name hint, an
+/// aggregate readiness state, or a profile's tool setting as proof that the
+/// remote model supports a contract.
+pub fn capability_contract_verdict(
+    report: Option<&QualificationReport>,
+    contract: CapabilityContract,
+) -> ContractVerdict {
+    let Some(report) = report else {
+        return ContractVerdict::Unverified;
+    };
+    if report.stale || report.cancelled {
+        return ContractVerdict::Unverified;
+    }
+    let mut saw_untested = false;
+    for kind in contract.required() {
+        match report.status_of(*kind) {
+            CapabilityStatus::Pass => {}
+            CapabilityStatus::Untested => saw_untested = true,
+            CapabilityStatus::Degraded | CapabilityStatus::Fail => {
+                return ContractVerdict::Unqualified;
+            }
+        }
+    }
+    if saw_untested {
+        ContractVerdict::Unverified
+    } else {
+        ContractVerdict::Qualified
+    }
+}
+
 /// Outcome of one capability check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1776,6 +1853,73 @@ mod tests {
             stale: false,
             finished_at: 100,
         }
+    }
+
+    #[test]
+    fn capability_contracts_distinguish_structured_output_from_native_tools() {
+        let report = readiness_report(
+            key("deepseek-v4-flash"),
+            "chat",
+            &[
+                (CapabilityKind::BasicGeneration, CapabilityStatus::Pass),
+                (CapabilityKind::StructuredOutput, CapabilityStatus::Pass),
+                (CapabilityKind::NativeToolCall, CapabilityStatus::Fail),
+                (
+                    CapabilityKind::ToolResultContinuation,
+                    CapabilityStatus::Fail,
+                ),
+            ],
+        );
+        assert_eq!(
+            capability_contract_verdict(Some(&report), CapabilityContract::Generation),
+            ContractVerdict::Qualified
+        );
+        assert_eq!(
+            capability_contract_verdict(Some(&report), CapabilityContract::JsonProposal),
+            ContractVerdict::Qualified
+        );
+        assert_eq!(
+            capability_contract_verdict(Some(&report), CapabilityContract::NativeToolLoop),
+            ContractVerdict::Unqualified
+        );
+    }
+
+    #[test]
+    fn capability_contracts_treat_absent_stale_cancelled_and_untested_as_unverified() {
+        let key = key("deepseek-v4-flash");
+        assert_eq!(
+            capability_contract_verdict(None, CapabilityContract::Generation),
+            ContractVerdict::Unverified
+        );
+
+        let mut stale = readiness_report(
+            key.clone(),
+            "chat",
+            &[(CapabilityKind::BasicGeneration, CapabilityStatus::Pass)],
+        );
+        stale.stale = true;
+        assert_eq!(
+            capability_contract_verdict(Some(&stale), CapabilityContract::Generation),
+            ContractVerdict::Unverified
+        );
+
+        let mut cancelled = stale.clone();
+        cancelled.stale = false;
+        cancelled.cancelled = true;
+        assert_eq!(
+            capability_contract_verdict(Some(&cancelled), CapabilityContract::Generation),
+            ContractVerdict::Unverified
+        );
+
+        let incomplete = readiness_report(
+            key,
+            "chat",
+            &[(CapabilityKind::BasicGeneration, CapabilityStatus::Pass)],
+        );
+        assert_eq!(
+            capability_contract_verdict(Some(&incomplete), CapabilityContract::JsonProposal),
+            ContractVerdict::Unverified
+        );
     }
 
     #[test]
