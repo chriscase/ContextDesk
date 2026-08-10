@@ -222,6 +222,10 @@ pub struct StreamAccumulator {
     /// index -> (id, name, arguments buffer)
     tool_parts: std::collections::BTreeMap<usize, (String, String, String)>,
     finish_reason: Option<String>,
+    /// True once a `data: [DONE]` sentinel has been observed. Tracked
+    /// separately from `finish_reason` because a stream may signal
+    /// completion via `[DONE]` alone (see `into_completion`).
+    saw_done: bool,
     telemetry: crate::provider_telemetry::ProviderTransportTelemetry,
 }
 
@@ -265,7 +269,9 @@ impl StreamAccumulator {
             StreamDelta::Finish(r) => {
                 self.finish_reason = Some(r);
             }
-            StreamDelta::Done => {}
+            StreamDelta::Done => {
+                self.saw_done = true;
+            }
         }
     }
 
@@ -278,7 +284,20 @@ impl StreamAccumulator {
     }
 
     /// Finish into a completion (same shape as non-stream parse).
-    pub fn into_completion(self) -> ChatCompletion {
+    ///
+    /// Fails closed when the stream ended without ever observing a finish
+    /// signal (`finish_reason` on a delta, or `data: [DONE]`). A connection
+    /// that closes cleanly mid-answer is a real, observed provider/gateway
+    /// failure mode (a crash or timeout on the far side, not a transport
+    /// error on this one) and must not be reported as a completed, validated
+    /// response with a fabricated finish reason — see
+    /// docs/testing/gateway-wire-survivors-and-gaps.md.
+    pub fn into_completion(self) -> CoreResult<ChatCompletion> {
+        if self.finish_reason.is_none() && !self.saw_done {
+            return Err(CoreError::Message(
+                "stream ended before a finish_reason or [DONE] was ever received".into(),
+            ));
+        }
         let mut tool_calls = Vec::new();
         for (_idx, (id, name, arguments)) in self.tool_parts {
             if name.is_empty() && arguments.is_empty() {
@@ -308,12 +327,12 @@ impl StreamAccumulator {
                 "tool_calls".into()
             }
         });
-        ChatCompletion {
+        Ok(ChatCompletion {
             content: self.content,
             tool_calls,
             finish_reason,
             telemetry: self.telemetry,
-        }
+        })
     }
 }
 
@@ -526,7 +545,7 @@ pub fn accumulate_openai_sse(body: &str) -> CoreResult<ChatCompletion> {
             acc.push(d);
         }
     }
-    Ok(acc.into_completion())
+    acc.into_completion()
 }
 
 /// Convert tool specs to OpenAI tools array.
@@ -924,7 +943,7 @@ impl OpenAiCompatibleClient {
                 }
             }
         }
-        Ok(acc.into_completion())
+        acc.into_completion()
     }
 
     /// List models via GET …/models (tries several path shapes like TriageTool).
@@ -2294,7 +2313,7 @@ data: [DONE]
                 }
             }
         }
-        let c = acc.into_completion();
+        let c = acc.into_completion().unwrap();
         let buffered = accumulate_openai_sse(SSE_TEXT_FIXTURE).unwrap();
         assert_eq!(c.content, buffered.content);
         assert_eq!(c.tool_calls.len(), buffered.tool_calls.len());
@@ -2328,7 +2347,7 @@ data: [DONE]
                 }
             }
         }
-        assert_eq!(acc.into_completion().content, "café 🎉 done");
+        assert_eq!(acc.into_completion().unwrap().content, "café 🎉 done");
     }
 
     /// The non-SSE "gateway ignored `stream=true`" fallback's exact
