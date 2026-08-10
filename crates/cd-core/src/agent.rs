@@ -1975,39 +1975,41 @@ async fn run_multi_stage_broad_triage(
                             correction_category = Some("role_coverage");
                             validation_errors
                                 .push(crate::investigation_answer::ValidationError::RoleCoverage);
-                            continue;
-                        }
-                        envelope.semantic_attempts =
-                            u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
-                        let diagnostic_category = if semantic_attempts > 0 {
-                            "successful_bounded_correction"
                         } else {
-                            "compatible_success"
-                        };
-                        on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
-                            stage: "comparison".into(),
-                            phase: "finished".into(),
-                            status: Some("succeeded".into()),
-                            detail: serde_json::json!({
-                                "schema": "contextdesk.multi_stage_budget.v1",
-                                "policy_id": reserve.policy_id,
-                                "provider_rounds": used_rounds,
-                                "semantic_attempts": semantic_attempts,
-                                "diagnostic_category": diagnostic_category,
-                            })
-                            .to_string(),
-                            candidate_id: None,
-                        }));
-                        return Ok(MultiStageTriageOutcome::Completed {
-                            content: crate::investigation_answer::render_answer_markdown(&envelope),
-                            envelope: Box::new(envelope),
-                            accepted_groups: drafts
-                                .into_iter()
-                                .map(|draft| draft.group_id)
-                                .collect(),
-                            rejected_groups,
-                            provider_rounds: used_rounds,
-                        });
+                            envelope.semantic_attempts =
+                                u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
+                            let diagnostic_category = if semantic_attempts > 0 {
+                                "successful_bounded_correction"
+                            } else {
+                                "compatible_success"
+                            };
+                            on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
+                                stage: "comparison".into(),
+                                phase: "finished".into(),
+                                status: Some("succeeded".into()),
+                                detail: serde_json::json!({
+                                    "schema": "contextdesk.multi_stage_budget.v1",
+                                    "policy_id": reserve.policy_id,
+                                    "provider_rounds": used_rounds,
+                                    "semantic_attempts": semantic_attempts,
+                                    "diagnostic_category": diagnostic_category,
+                                })
+                                .to_string(),
+                                candidate_id: None,
+                            }));
+                            return Ok(MultiStageTriageOutcome::Completed {
+                                content: crate::investigation_answer::render_answer_markdown(
+                                    &envelope,
+                                ),
+                                envelope: Box::new(envelope),
+                                accepted_groups: drafts
+                                    .into_iter()
+                                    .map(|draft| draft.group_id)
+                                    .collect(),
+                                rejected_groups,
+                                provider_rounds: used_rounds,
+                            });
+                        }
                     }
                     Err(error) => {
                         correction_category = Some(error.as_str());
@@ -14129,6 +14131,89 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         let covered =
             crate::investigation_answer::validate_model_answer(&covered, &ledger).unwrap();
         assert!(!multi_stage_missing_symptom_role_coverage(&covered));
+    }
+
+    #[tokio::test]
+    async fn multi_stage_role_coverage_is_repaired_by_the_bounded_correction() {
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+        ];
+        let first = serde_json::json!({
+            "schema": crate::investigation_answer::SCHEMA_V1,
+            "candidates": [
+                {"candidate_id":"trace:alpha","initiating_causes":[{"claim_id":"alpha-root","text":"initiating mechanism","evidence_ids":["e:trace:alpha:11"]}]},
+                {"candidate_id":"trace:bravo","observations":[{"claim_id":"bravo-observation","text":"downstream impact","evidence_ids":["e:trace:bravo:22"]}]}
+            ]
+        });
+        let corrected = serde_json::json!({
+            "schema": crate::investigation_answer::SCHEMA_V1,
+            "candidates": [
+                {"candidate_id":"trace:alpha","initiating_causes":[{"claim_id":"alpha-root","text":"initiating mechanism","evidence_ids":["e:trace:alpha:11"]}]},
+                {"candidate_id":"trace:bravo","symptoms":[{"claim_id":"bravo-symptom","text":"downstream impact","evidence_ids":["e:trace:bravo:22"]}]}
+            ]
+        });
+        let backend = ScriptedBackend::new(vec![
+            multi_stage_assessment(
+                "trace:alpha",
+                CandidateClassificationV1::InitiatingCause,
+                11,
+                "initiating evidence",
+            ),
+            multi_stage_assessment(
+                "trace:bravo",
+                CandidateClassificationV1::DownstreamSymptom,
+                22,
+                "downstream evidence",
+            ),
+            multi_stage_completion(&first.to_string()),
+            multi_stage_completion(&corrected.to_string()),
+        ]);
+        let opts = AgentOptions {
+            max_rounds: 4,
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
+                },
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let MultiStageTriageOutcome::Completed {
+            envelope,
+            provider_rounds,
+            ..
+        } = outcome
+        else {
+            panic!("role coverage correction should complete: {outcome:?}");
+        };
+        assert_eq!(provider_rounds, 4);
+        assert_eq!(envelope.semantic_attempts, 1);
+        assert!(envelope.answer.candidates.iter().any(|candidate| {
+            candidate.candidate_id == "trace:bravo"
+                && candidate.claims.iter().any(|claim| {
+                    claim.claim_kind == crate::investigation_answer::ClaimKind::Symptom
+                })
+        }));
     }
 
     #[test]
