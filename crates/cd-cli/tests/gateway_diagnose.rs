@@ -112,7 +112,10 @@ fn parse_jsonl(stdout: &[u8]) -> Vec<Value> {
 async fn refuses_without_yes_in_a_noninteractive_context_and_makes_no_request() {
     let gateway = permissive_gateway().await;
     let data_dir = tempfile::tempdir().unwrap();
-    write_config(data_dir.path(), openai_profile_with_ref(gateway.base_url(), None));
+    write_config(
+        data_dir.path(),
+        openai_profile_with_ref(gateway.base_url(), None),
+    );
 
     let mut cmd = cli(data_dir.path());
     cmd.args(["--jsonl", "gateway", "diagnose"]);
@@ -169,14 +172,7 @@ async fn jsonl_stream_shows_the_plan_first_and_ends_in_exactly_one_terminal_line
     );
 
     let mut cmd = cli(data_dir.path());
-    cmd.args([
-        "--jsonl",
-        "gateway",
-        "diagnose",
-        "--yes",
-        "--timeout",
-        "30",
-    ]);
+    cmd.args(["--jsonl", "gateway", "diagnose", "--yes", "--timeout", "30"]);
     let output = run_blocking(cmd).await;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
@@ -190,8 +186,15 @@ async fn jsonl_stream_shows_the_plan_first_and_ends_in_exactly_one_terminal_line
     );
 
     let lines = parse_jsonl(output.stdout.as_slice());
-    assert!(!lines.is_empty(), "expected at least a plan and a terminal line");
-    assert_eq!(lines.first().unwrap()["type"], "plan", "plan line must come first: {lines:?}");
+    assert!(
+        !lines.is_empty(),
+        "expected at least a plan and a terminal line"
+    );
+    assert_eq!(
+        lines.first().unwrap()["type"],
+        "plan",
+        "plan line must come first: {lines:?}"
+    );
     let plan = &lines[0];
     assert!(
         plan["max_requests"].as_u64().unwrap_or(0) > 0,
@@ -259,8 +262,14 @@ async fn full_run_cleans_up_and_writes_a_checksummed_share_safe_artifact() {
         .expect("artifact_dir must be reported");
     let report_path = Path::new(artifact_dir).join("report.json");
     let manifest_path = Path::new(artifact_dir).join("manifest.json");
-    assert!(report_path.exists(), "report.json must exist at {artifact_dir}");
-    assert!(manifest_path.exists(), "manifest.json must exist at {artifact_dir}");
+    assert!(
+        report_path.exists(),
+        "report.json must exist at {artifact_dir}"
+    );
+    assert!(
+        manifest_path.exists(),
+        "manifest.json must exist at {artifact_dir}"
+    );
 
     let report_bytes = std::fs::read(&report_path).expect("read report.json");
     let report_text = String::from_utf8_lossy(&report_bytes);
@@ -283,7 +292,11 @@ async fn full_run_cleans_up_and_writes_a_checksummed_share_safe_artifact() {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(&report_bytes);
-        hasher.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     };
     let manifest_sha = manifest["files"][0]["sha256"].as_str().unwrap();
     assert_eq!(
@@ -325,8 +338,7 @@ async fn raw_capture_is_owner_only_and_separate_from_the_share_safe_bundle() {
         "30",
     ]);
     let output = run_blocking(cmd).await;
-    let value: Value =
-        serde_json::from_slice(&output.stdout).expect("stdout is one JSON envelope");
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout is one JSON envelope");
     assert_eq!(value["data"]["private_capture_written"], true);
 
     let artifact_dir = value["data"]["artifact_dir"].as_str().unwrap();
@@ -349,8 +361,7 @@ async fn raw_capture_is_owner_only_and_separate_from_the_share_safe_bundle() {
 
     // Never silently included in the share-safe report: the private file's
     // path/content is not referenced from report.json.
-    let report_text =
-        std::fs::read_to_string(Path::new(artifact_dir).join("report.json")).unwrap();
+    let report_text = std::fs::read_to_string(Path::new(artifact_dir).join("report.json")).unwrap();
     assert!(
         !report_text.contains("private/capture.json"),
         "share-safe report must not reference the private capture file"
@@ -382,8 +393,7 @@ async fn a_permanently_stalled_gateway_is_still_bounded_by_the_overall_deadline(
         "a permanently stalled gateway must not hang the whole operation \
          past the stated deadline (waited {elapsed:?})"
     );
-    let value: Value =
-        serde_json::from_slice(&output.stdout).expect("stdout is one JSON envelope");
+    let value: Value = serde_json::from_slice(&output.stdout).expect("stdout is one JSON envelope");
     // Whatever the exact case outcomes, cleanup must still have run and
     // balanced, and the report must still be a complete, valid document.
     let cleanup = &value["data"]["cleanup"];

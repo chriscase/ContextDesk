@@ -57,8 +57,8 @@ use cd_core::providers::{ProviderKind, ProviderProfile};
 use cd_core::rerank::HttpRerankBackend;
 use cd_core::sessions::SessionStore;
 use cd_core::triage_quality::{
-    parse_structured_triage_answer, score_structured_triage_answer, triage_answer_contract_system_text,
-    TriageHostFacts, TriageKnownAnswerKey,
+    parse_structured_triage_answer, score_structured_triage_answer,
+    triage_answer_contract_system_text, TriageHostFacts, TriageKnownAnswerKey,
 };
 use cd_core::turn_trace::{RecordingTurnTrace, TracedOutcome, TurnTraceSink};
 use cd_workflow::capability_qualification::{
@@ -305,21 +305,24 @@ pub async fn run(
     // qualification call (that would blow the stated request budget).
     // `embedding_or_rerank_contract` runs its own single-kind probe inline
     // since only one capability applies to that role.
-    let shared_qualification = if matches!(role, ModelRoleHint::Investigator | ModelRoleHint::Unknown)
-    {
-        let qual = run_shared_qualification(&profile, &model, &credentials, deadline).await;
-        requests_made += qual.requests_used;
-        Some(qual)
-    } else {
-        None
-    };
+    let shared_qualification =
+        if matches!(role, ModelRoleHint::Investigator | ModelRoleHint::Unknown) {
+            let qual = run_shared_qualification(&profile, &model, &credentials, deadline).await;
+            requests_made += qual.requests_used;
+            Some(qual)
+        } else {
+            None
+        };
 
     for case_id in &plan.case_ids {
         if cancel.load(Ordering::SeqCst) {
             break;
         }
         if Instant::now() >= deadline {
-            cases.push(skipped_case(case_id, "overall deadline exceeded before this case ran"));
+            cases.push(skipped_case(
+                case_id,
+                "overall deadline exceeded before this case ran",
+            ));
             continue;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -395,7 +398,14 @@ pub async fn run(
         }
     }
 
-    print_terminal(format, color, &caps, &report, cancelled, &cleanup_note(&report.cleanup));
+    print_terminal(
+        format,
+        color,
+        &caps,
+        &report,
+        cancelled,
+        &cleanup_note(&report.cleanup),
+    );
 
     Ok(report)
 }
@@ -403,7 +413,13 @@ pub async fn run(
 fn run_id_for_dir(run_id: &str) -> String {
     run_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -437,7 +453,12 @@ fn role_str(role: ModelRoleHint) -> &'static str {
 /// Every case id this command can plan, gated on role so a specialty
 /// request is never sent to a model not qualified for that role and vice
 /// versa.
-fn build_plan(level: DiagnoseLevel, role: ModelRoleHint, deadline_secs: u64, raw: bool) -> PlannedRun {
+fn build_plan(
+    level: DiagnoseLevel,
+    role: ModelRoleHint,
+    deadline_secs: u64,
+    raw: bool,
+) -> PlannedRun {
     let case_ids: Vec<&'static str> = match role {
         ModelRoleHint::Embedding | ModelRoleHint::Reranker => vec!["embedding_or_rerank_contract"],
         ModelRoleHint::Investigator | ModelRoleHint::Unknown => vec![
@@ -448,7 +469,11 @@ fn build_plan(level: DiagnoseLevel, role: ModelRoleHint, deadline_secs: u64, raw
             "linked_log_triage",
         ],
     };
-    let attempts_per_case: u32 = if level == DiagnoseLevel::Extended { 2 } else { 1 };
+    let attempts_per_case: u32 = if level == DiagnoseLevel::Extended {
+        2
+    } else {
+        1
+    };
     // Conservative per-case upper bound: qualification's chat-role probe
     // set is 6 requests, embedding/reranker roles are 1; the product lane
     // is bounded at 3 provider rounds per attempt (tool loop headroom).
@@ -598,16 +623,23 @@ fn confirm_or_error(yes: bool, format: OutputFormat) -> CliResult<()> {
         ));
     }
     let mut stderr = io::stderr();
-    write!(stderr, "Proceed with these bounded provider requests? [y/N] ")
+    write!(
+        stderr,
+        "Proceed with these bounded provider requests? [y/N] "
+    )
+    .map_err(|e| CliError::internal(e.to_string()))?;
+    stderr
+        .flush()
         .map_err(|e| CliError::internal(e.to_string()))?;
-    stderr.flush().map_err(|e| CliError::internal(e.to_string()))?;
     let mut answer = String::new();
     io::stdin()
         .read_line(&mut answer)
         .map_err(|e| CliError::internal(e.to_string()))?;
     match answer.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Ok(()),
-        _ => Err(CliError::cancelled("gateway diagnose cancelled by operator")),
+        _ => Err(CliError::cancelled(
+            "gateway diagnose cancelled by operator",
+        )),
     }
 }
 
@@ -618,16 +650,16 @@ fn confirm_or_error(yes: bool, format: OutputFormat) -> CliResult<()> {
 fn print_plan(format: OutputFormat, _color: ColorMode, plan: &PlannedRun) {
     match format {
         OutputFormat::Text => {
-            eprintln!("contextdesk gateway diagnose — planned checks ({})", plan.level);
+            eprintln!(
+                "contextdesk gateway diagnose — planned checks ({})",
+                plan.level
+            );
             for id in &plan.case_ids {
                 eprintln!("  - {id}: {}", case_description(id));
             }
             eprintln!("  max requests:   up to {}", plan.max_requests);
             eprintln!("  deadline:       {}s", plan.deadline_secs);
-            eprintln!(
-                "  artifact:       {}",
-                plan.artifact_classes.join(", ")
-            );
+            eprintln!("  artifact:       {}", plan.artifact_classes.join(", "));
             eprintln!("  no live provider credential is printed or written to the artifact.");
         }
         OutputFormat::Jsonl => {
@@ -669,7 +701,12 @@ fn colorize(caps: &TerminalCapabilities, tag: &str) -> String {
     }
 }
 
-fn print_case(format: OutputFormat, _color: ColorMode, caps: &TerminalCapabilities, report: &CaseReport) {
+fn print_case(
+    format: OutputFormat,
+    _color: ColorMode,
+    caps: &TerminalCapabilities,
+    report: &CaseReport,
+) {
     match format {
         OutputFormat::Text => {
             let tag = status_tag(report.classification);
@@ -681,7 +718,9 @@ fn print_case(format: OutputFormat, _color: ColorMode, caps: &TerminalCapabiliti
             );
             print_lane("direct", &report.direct);
             print_lane("product", &report.product);
-            if report.scorer.executed || matches!(report.classification, CaseClassification::UsefulnessGap) {
+            if report.scorer.executed
+                || matches!(report.classification, CaseClassification::UsefulnessGap)
+            {
                 print_lane("scorer", &report.scorer);
             }
         }
@@ -703,7 +742,11 @@ fn print_lane(name: &str, lane: &LaneResult) {
     println!(
         "  |-- {name}: {} ({}ms, {} attempt(s), {} request(s)) {}",
         if lane.executed {
-            if lane.passed { "pass" } else { "fail" }
+            if lane.passed {
+                "pass"
+            } else {
+                "fail"
+            }
         } else {
             "n/a"
         },
@@ -736,7 +779,10 @@ fn print_terminal(
                     "product-path compatible:     {}",
                     report.verdicts.product_workflow_compatible
                 );
-                println!("answers useful (quality):    {}", report.verdicts.answers_useful);
+                println!(
+                    "answers useful (quality):    {}",
+                    report.verdicts.answers_useful
+                );
                 println!("{cleanup_note}");
                 if let Some(dir) = &report.artifact_dir {
                     println!("artifact bundle: {dir}");
@@ -745,7 +791,9 @@ fn print_terminal(
         }
         OutputFormat::Jsonl => {
             if cancelled {
-                let elapsed_ms = report.finished_at_unix_ms.saturating_sub(report.started_at_unix_ms);
+                let elapsed_ms = report
+                    .finished_at_unix_ms
+                    .saturating_sub(report.started_at_unix_ms);
                 println!(
                     "{}",
                     serde_json::to_string(&DiagnoseLine::Cancelled {
@@ -804,19 +852,41 @@ async fn run_one_case(
         }
         "tool_call_continuation" => {
             case_tool_call_continuation(
-                paths, cfg, secrets, sessions, qual, deadline, cancel, corpora, created_sessions,
+                paths,
+                cfg,
+                secrets,
+                sessions,
+                qual,
+                deadline,
+                cancel,
+                corpora,
+                created_sessions,
             )
             .await
         }
         "attachment_selected_context" => {
             case_attachment_selected_context(
-                paths, cfg, secrets, sessions, deadline, cancel, created_sessions,
+                paths,
+                cfg,
+                secrets,
+                sessions,
+                deadline,
+                cancel,
+                created_sessions,
             )
             .await
         }
         "linked_log_triage" => {
             case_linked_log_triage(
-                paths, cfg, secrets, sessions, deadline, cancel, level, corpora, created_sessions,
+                paths,
+                cfg,
+                secrets,
+                sessions,
+                deadline,
+                cancel,
+                level,
+                corpora,
+                created_sessions,
             )
             .await
         }
@@ -844,14 +914,15 @@ async fn run_shared_qualification(
     let budget = deadline.saturating_duration_since(Instant::now());
     let joined = tokio::task::spawn_blocking(move || {
         let backend = backend_for_provider(profile.kind);
-        let base_url = if profile.kind == ProviderKind::XaiGrokBuild && profile.base_url.trim().is_empty()
-        {
-            "https://api.x.ai/v1".to_string()
-        } else {
-            profile.base_url.clone()
-        };
-        let mut transport = LiveQualificationTransport::new(backend, base_url, api_key, profile.local_only)
-            .with_extra_headers(extra_headers);
+        let base_url =
+            if profile.kind == ProviderKind::XaiGrokBuild && profile.base_url.trim().is_empty() {
+                "https://api.x.ai/v1".to_string()
+            } else {
+                profile.base_url.clone()
+            };
+        let mut transport =
+            LiveQualificationTransport::new(backend, base_url, api_key, profile.local_only)
+                .with_extra_headers(extra_headers);
         let key = QualificationKey::new(&profile.id, &profile.base_url, &model);
         let gate = gate_for_model(&profile, true, &model);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -948,7 +1019,12 @@ fn lane_from_qualification(
     }
 }
 
-fn classify(direct: &LaneResult, product: &LaneResult, scorer: &LaneResult, retried: bool) -> CaseClassification {
+fn classify(
+    direct: &LaneResult,
+    product: &LaneResult,
+    scorer: &LaneResult,
+    retried: bool,
+) -> CaseClassification {
     if !product.executed {
         return CaseClassification::NotRun;
     }
@@ -978,7 +1054,8 @@ fn build_host(
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
 ) -> Result<cd_core::tool_host::ToolHost, String> {
-    crate::adapters::tool_host_with_app_config(&paths.cache_root, cfg, secrets).map_err(|e| e.to_string())
+    crate::adapters::tool_host_with_app_config(&paths.cache_root, cfg, secrets)
+        .map_err(|e| e.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1001,7 +1078,13 @@ async fn one_turn(
     let trace_sink: Arc<dyn TurnTraceSink> = recorder.clone();
     let mut host = match build_host(paths, cfg, secrets) {
         Ok(host) => host,
-        Err(e) => return (Err(format!("could not build tool host: {e}")), Vec::new(), Duration::ZERO),
+        Err(e) => {
+            return (
+                Err(format!("could not build tool host: {e}")),
+                Vec::new(),
+                Duration::ZERO,
+            )
+        }
     };
     let started = Instant::now();
     let budget = deadline.saturating_duration_since(Instant::now());
@@ -1024,7 +1107,9 @@ async fn one_turn(
         },
         Some(cancel.clone()),
         None,
-        |_tool_name, _target, _reason, _preview, _risk| cd_core::permissions::PermissionDecision::AllowOnce,
+        |_tool_name, _target, _reason, _preview, _risk| {
+            cd_core::permissions::PermissionDecision::AllowOnce
+        },
     ));
     let raced = tokio::select! {
         result = tokio::time::timeout(budget.max(Duration::from_millis(1)), turn.as_mut()) => result,
@@ -1051,10 +1136,11 @@ async fn case_ordinary_generation(
         qual,
         cd_core::capability_qualification::CapabilityKind::BasicGeneration,
     );
-    let question =
-        format!("Reply with exactly this token and nothing else: {GENERATION_MARKER}");
-    let (outcome, calls, elapsed) =
-        one_turn(paths, cfg, secrets, sessions, &question, None, None, deadline, cancel).await;
+    let question = format!("Reply with exactly this token and nothing else: {GENERATION_MARKER}");
+    let (outcome, calls, elapsed) = one_turn(
+        paths, cfg, secrets, sessions, &question, None, None, deadline, cancel,
+    )
+    .await;
     let product = match outcome {
         Ok(o) if o.final_text.contains(GENERATION_MARKER) => LaneResult {
             executed: true,
@@ -1114,8 +1200,10 @@ async fn case_structured_response(
         "Reply with ONLY a single JSON object, no prose, no markdown fence, matching exactly: \
          {{\"ok\": true, \"marker\": \"{GENERATION_MARKER}\"}}"
     );
-    let (outcome, calls, elapsed) =
-        one_turn(paths, cfg, secrets, sessions, &question, None, None, deadline, cancel).await;
+    let (outcome, calls, elapsed) = one_turn(
+        paths, cfg, secrets, sessions, &question, None, None, deadline, cancel,
+    )
+    .await;
     let product = match outcome {
         Ok(o) => {
             let parsed: Result<serde_json::Value, _> = serde_json::from_str(o.final_text.trim());
@@ -1124,7 +1212,8 @@ async fn case_structured_response(
                     LaneResult {
                         executed: true,
                         passed: true,
-                        detail: "product-path answer parsed as the exact requested JSON shape".to_string(),
+                        detail: "product-path answer parsed as the exact requested JSON shape"
+                            .to_string(),
                         elapsed_ms: elapsed.as_millis() as u64,
                         attempts: 1,
                         requests_used: calls.len().max(1) as u32,
@@ -1133,7 +1222,8 @@ async fn case_structured_response(
                 Ok(_) => LaneResult {
                     executed: true,
                     passed: false,
-                    detail: "answer parsed as JSON but did not match the requested shape".to_string(),
+                    detail: "answer parsed as JSON but did not match the requested shape"
+                        .to_string(),
                     elapsed_ms: elapsed.as_millis() as u64,
                     attempts: 1,
                     requests_used: calls.len().max(1) as u32,
@@ -1158,7 +1248,8 @@ async fn case_structured_response(
         },
     };
     let retried = calls.iter().any(|c| c.application_retry_reason.is_some());
-    let scorer = LaneResult::not_applicable("no separate scorer beyond shape validation".to_string());
+    let scorer =
+        LaneResult::not_applicable("no separate scorer beyond shape validation".to_string());
     let classification = classify(&direct, &product, &scorer, retried);
     CaseReport {
         case_id: "structured_response",
@@ -1244,7 +1335,10 @@ async fn case_tool_call_continuation(
     created_sessions: &mut Vec<String>,
 ) -> CaseReport {
     let direct = combine_lanes(
-        lane_from_qualification(qual, cd_core::capability_qualification::CapabilityKind::NativeToolCall),
+        lane_from_qualification(
+            qual,
+            cd_core::capability_qualification::CapabilityKind::NativeToolCall,
+        ),
         lane_from_qualification(
             qual,
             cd_core::capability_qualification::CapabilityKind::ToolResultContinuation,
@@ -1334,7 +1428,9 @@ async fn case_tool_call_continuation(
     let retried = calls.iter().any(|c| c.application_retry_reason.is_some())
         || matches!(&calls.first().map(|c| &c.outcome), Some(TracedOutcome::Completed { tool_call_count, .. }) if *tool_call_count > 0)
             && calls.len() > 1;
-    let scorer = LaneResult::not_applicable("grounding classification is the scorer for this case".to_string());
+    let scorer = LaneResult::not_applicable(
+        "grounding classification is the scorer for this case".to_string(),
+    );
     let classification = classify(&direct, &product, &scorer, retried);
     CaseReport {
         case_id: "tool_call_continuation",
@@ -1387,7 +1483,9 @@ async fn case_attachment_selected_context(
             LaneResult {
                 executed: true,
                 passed: has_fact && avoids_decoy,
-                detail: format!("cites_current_fact={has_fact} avoids_superseded_decoy={avoids_decoy}"),
+                detail: format!(
+                    "cites_current_fact={has_fact} avoids_superseded_decoy={avoids_decoy}"
+                ),
                 elapsed_ms: 0,
                 attempts: 1,
                 requests_used: 0,
@@ -1429,16 +1527,21 @@ async fn case_attachment_selected_context(
 /// recovery event — truth never enters model-visible input; it lives only
 /// in the [`TriageKnownAnswerKey`] built alongside the corpus, used solely
 /// at scoring time.
-fn seed_triage_corpus(cache_root: &std::path::Path) -> Result<(String, TriageKnownAnswerKey, TriageHostFacts), String> {
+fn seed_triage_corpus(
+    cache_root: &std::path::Path,
+) -> Result<(String, TriageKnownAnswerKey, TriageHostFacts), String> {
     let corpus = LogCorpus::create(cache_root, "contextdesk-gateway-diagnose-triage")
         .map_err(|e| e.to_string())?;
     let corpus_id = corpus.id().to_string();
     let base_ts: i64 = 1_800_100_000;
     let source = "synthetic/gateway-diagnose-triage.log".to_string();
     let trigger_msg = "kind=config_error level=error service=control lease window 250ms below supported minimum 1000ms";
-    let symptom_msg_1 = "kind=exception level=error service=worker LeaseWindowExpired during acquisition";
-    let symptom_msg_2 = "kind=exception level=error service=worker LeaseWindowExpired retry exhausted";
-    let symptom_msg_3 = "kind=exception level=error service=worker LeaseWindowExpired retry exhausted again";
+    let symptom_msg_1 =
+        "kind=exception level=error service=worker LeaseWindowExpired during acquisition";
+    let symptom_msg_2 =
+        "kind=exception level=error service=worker LeaseWindowExpired retry exhausted";
+    let symptom_msg_3 =
+        "kind=exception level=error service=worker LeaseWindowExpired retry exhausted again";
     let decoy_msg = "kind=alert level=warn service=billing-metrics unrelated disk usage alert cleared automatically";
     let recovery_msg = "kind=config_event level=info service=control restored revision r16 lease window 4000ms lease acquisition recovered";
 
@@ -1542,20 +1645,24 @@ fn seed_triage_corpus(cache_root: &std::path::Path) -> Result<(String, TriageKno
         (4u64, "restored lease window", 1u8),
     ];
     corpus
-        .upsert_templates(templates.iter().map(|(template_id, pattern, severity)| TemplateRow {
-            info: TemplateInfo {
-                template_id: *template_id,
-                pattern: (*pattern).into(),
-                token_count: pattern.split_whitespace().count(),
-                count: 1,
-                first_seen: base_ts,
-                last_seen: base_ts + 5,
-                severity: *severity,
-                example: (*pattern).into(),
-            },
-            content_hash: format!("gateway-diagnose-triage-hash-{template_id}"),
-            vector: None,
-        }))
+        .upsert_templates(
+            templates
+                .iter()
+                .map(|(template_id, pattern, severity)| TemplateRow {
+                    info: TemplateInfo {
+                        template_id: *template_id,
+                        pattern: (*pattern).into(),
+                        token_count: pattern.split_whitespace().count(),
+                        count: 1,
+                        first_seen: base_ts,
+                        last_seen: base_ts + 5,
+                        severity: *severity,
+                        example: (*pattern).into(),
+                    },
+                    content_hash: format!("gateway-diagnose-triage-hash-{template_id}"),
+                    vector: None,
+                }),
+        )
         .map_err(|e| e.to_string())?;
     corpus
         .write_ingest_summary(
@@ -1662,7 +1769,11 @@ async fn case_linked_log_triage(
         triage_answer_contract_system_text()
     );
 
-    let attempts = if level == DiagnoseLevel::Extended { 2 } else { 1 };
+    let attempts = if level == DiagnoseLevel::Extended {
+        2
+    } else {
+        1
+    };
     let mut last_outcome = None;
     let mut last_calls = Vec::new();
     let mut total_elapsed = Duration::ZERO;
@@ -1709,12 +1820,14 @@ async fn case_linked_log_triage(
                 }
                 Err(e) => {
                     fail_seen = true;
-                    last_scorer_detail = format!("attempt {}: contract parse failed: {e}", attempt + 1);
+                    last_scorer_detail =
+                        format!("attempt {}: contract parse failed: {e}", attempt + 1);
                 }
             }
         } else if let Err(e) = &outcome {
             fail_seen = true;
-            last_scorer_detail = format!("attempt {}: turn failed: {}", attempt + 1, redact_reason(e));
+            last_scorer_detail =
+                format!("attempt {}: turn failed: {}", attempt + 1, redact_reason(e));
         }
         last_outcome = Some(outcome);
         last_calls = calls;
@@ -1814,7 +1927,9 @@ async fn case_embedding_or_rerank(
             Ok(backend) => {
                 use cd_core::rerank::RerankBackend;
                 match tokio::time::timeout(
-                    deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)),
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .max(Duration::from_millis(1)),
                     backend.rerank(&query, &docs),
                 )
                 .await
@@ -1869,7 +1984,9 @@ async fn case_embedding_or_rerank(
                 let mut all = vec![query.clone()];
                 all.extend(docs.clone());
                 match tokio::time::timeout(
-                    deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)),
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .max(Duration::from_millis(1)),
                     backend.embed(&all),
                 )
                 .await
@@ -1936,7 +2053,8 @@ async fn case_embedding_or_rerank(
         )
     };
 
-    let scorer = LaneResult::not_applicable("ranking-order match is the scorer for this case".to_string());
+    let scorer =
+        LaneResult::not_applicable("ranking-order match is the scorer for this case".to_string());
     let classification = classify(&direct, &product, &scorer, false);
     CaseReport {
         case_id: "embedding_or_rerank_contract",
@@ -2014,7 +2132,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn write_artifact_bundle(
@@ -2065,8 +2187,11 @@ fn write_private_capture(
         "cases": report.cases,
     });
     let path = dir.join("capture.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&body).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&body).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2172,7 +2297,10 @@ mod tests {
     #[test]
     fn combine_lanes_requires_both_to_pass() {
         let combined = combine_lanes(pass_lane(), fail_lane());
-        assert!(!combined.passed, "one failing probe must fail the combined lane");
+        assert!(
+            !combined.passed,
+            "one failing probe must fail the combined lane"
+        );
         assert!(combined.detail.contains("ok"));
         assert!(combined.detail.contains("no"));
         assert_eq!(combined.requests_used, 2);
@@ -2205,7 +2333,10 @@ mod tests {
             Some(&qual),
             cd_core::capability_qualification::CapabilityKind::BasicGeneration,
         );
-        assert!(lane.executed, "a failed shared pass must still be reported, not swallowed");
+        assert!(
+            lane.executed,
+            "a failed shared pass must still be reported, not swallowed"
+        );
         assert!(!lane.passed);
         assert!(lane.detail.contains("simulated failure"));
     }
@@ -2220,15 +2351,30 @@ mod tests {
 
     #[test]
     fn build_plan_chat_role_never_sends_specialty_cases() {
-        let plan = build_plan(DiagnoseLevel::Basic, ModelRoleHint::Investigator, 180, false);
+        let plan = build_plan(
+            DiagnoseLevel::Basic,
+            ModelRoleHint::Investigator,
+            180,
+            false,
+        );
         assert!(!plan.case_ids.contains(&"embedding_or_rerank_contract"));
         assert_eq!(plan.case_ids.len(), 5);
     }
 
     #[test]
     fn build_plan_extended_level_states_a_larger_request_bound_than_basic() {
-        let basic = build_plan(DiagnoseLevel::Basic, ModelRoleHint::Investigator, 180, false);
-        let extended = build_plan(DiagnoseLevel::Extended, ModelRoleHint::Investigator, 180, false);
+        let basic = build_plan(
+            DiagnoseLevel::Basic,
+            ModelRoleHint::Investigator,
+            180,
+            false,
+        );
+        let extended = build_plan(
+            DiagnoseLevel::Extended,
+            ModelRoleHint::Investigator,
+            180,
+            false,
+        );
         assert!(
             extended.max_requests > basic.max_requests,
             "extended must state a larger bound, never a silently identical one"
@@ -2237,7 +2383,12 @@ mod tests {
 
     #[test]
     fn build_plan_raw_adds_the_private_artifact_class_only_when_requested() {
-        let without_raw = build_plan(DiagnoseLevel::Basic, ModelRoleHint::Investigator, 180, false);
+        let without_raw = build_plan(
+            DiagnoseLevel::Basic,
+            ModelRoleHint::Investigator,
+            180,
+            false,
+        );
         assert_eq!(without_raw.artifact_classes, vec!["share_safe_bundle"]);
         let with_raw = build_plan(DiagnoseLevel::Basic, ModelRoleHint::Investigator, 180, true);
         assert_eq!(
@@ -2250,7 +2401,10 @@ mod tests {
     fn pseudonym_is_stable_for_the_same_input_and_never_echoes_it_verbatim() {
         let a = pseudonym("profile:my-private-profile-id");
         let b = pseudonym("profile:my-private-profile-id");
-        assert_eq!(a, b, "the same input must pseudonymize the same way within a process");
+        assert_eq!(
+            a, b,
+            "the same input must pseudonymize the same way within a process"
+        );
         assert!(!a.contains("my-private-profile-id"));
     }
 
