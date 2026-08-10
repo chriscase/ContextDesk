@@ -68,3 +68,9 @@ the observed `no visible terminal answer` shape as
 `empty_terminal_answer`; it still strips provider bodies and transcript text.
 This improves the next diagnostic's explanation without changing the recorded
 run, its verdict, or the conclusion that linked triage remains unproven.
+
+The current release line also records only the bounded character count of
+known reasoning/analysis channels (`reasoning_content_chars`) in transport
+telemetry. Reasoning text is never retained, rendered as the answer, or
+included in share-safe artifacts. This makes a DeepSeek-style separated
+reasoning channel diagnosable while keeping the visible-answer contract strict.

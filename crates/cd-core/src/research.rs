@@ -2196,6 +2196,7 @@ mod tests {
                     prompt_tokens: None,
                     completion_tokens: None,
                     reasoning_tokens: None,
+                    reasoning_content_chars: None,
                     cached_tokens: None,
                     total_tokens: None,
                     cost: None,

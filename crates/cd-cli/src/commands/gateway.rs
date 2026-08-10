@@ -1325,17 +1325,19 @@ fn terminal_channel_summary(events: &[StreamEvent]) -> String {
         StreamEvent::ProviderTelemetry { telemetry } => Some(telemetry.as_ref()),
         _ => None,
     });
-    let (provider_rounds, empty_visible_answer, finish_reason) = provider_telemetry
-        .map(|telemetry| {
-            (
-                telemetry.provider_round_count,
-                telemetry.empty_visible_answer,
-                telemetry.finish_reason.as_deref().unwrap_or("unknown"),
-            )
-        })
-        .unwrap_or((0, false, "unknown"));
+    let (provider_rounds, empty_visible_answer, reasoning_content_chars, finish_reason) =
+        provider_telemetry
+            .map(|telemetry| {
+                (
+                    telemetry.provider_round_count,
+                    telemetry.empty_visible_answer,
+                    telemetry.reasoning_content_chars.unwrap_or(0),
+                    telemetry.finish_reason.as_deref().unwrap_or("unknown"),
+                )
+            })
+            .unwrap_or((0, false, 0, "unknown"));
     format!(
-        "terminal_text_chars={text_delta_chars}, text_delta_count={text_delta_count}, provider_rounds={provider_rounds}, empty_visible_answer={empty_visible_answer}, finish_reason={finish_reason}, turn_terminal={}",
+        "terminal_text_chars={text_delta_chars}, text_delta_count={text_delta_count}, provider_rounds={provider_rounds}, reasoning_content_chars={reasoning_content_chars}, empty_visible_answer={empty_visible_answer}, finish_reason={finish_reason}, turn_terminal={}",
         turn_terminal.unwrap_or("unknown")
     )
 }
