@@ -59,8 +59,7 @@ use cd_core::rerank::HttpRerankBackend;
 use cd_core::sessions::SessionStore;
 use cd_core::triage_quality::{
     parse_structured_triage_answer, score_structured_triage_answer,
-    score_validated_investigation_answer, triage_answer_contract_system_text, TriageHostFacts,
-    TriageKnownAnswerKey,
+    score_validated_investigation_answer, TriageHostFacts, TriageKnownAnswerKey,
 };
 use cd_core::turn_trace::{RecordingTurnTrace, TracedOutcome, TurnTraceSink};
 use cd_workflow::capability_qualification::{
@@ -2092,12 +2091,11 @@ async fn case_linked_log_triage(
     };
     corpora.push(corpus_id.clone());
 
-    let question = format!(
-        "Run a bounded linked-log triage for this incident. What was the initiating trigger, what \
-         downstream symptoms followed, which events are unrelated noise, and what shows recovery? \
-         {}",
-        triage_answer_contract_system_text()
-    );
+    // Keep the synthetic user request free of evaluator IDs and JSON examples.
+    // The shared linked-triage path supplies its own host contract; embedding
+    // the scorer contract here would make the classifier mistake its example
+    // sequence numbers for a user-provided focused anchor.
+    let question = "Run a bounded linked-log triage for this incident. What was the initiating trigger, what downstream symptoms followed, which events are unrelated noise, and what shows recovery?".to_string();
 
     let attempts = if level == DiagnoseLevel::Extended {
         2
