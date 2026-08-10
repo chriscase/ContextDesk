@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use cd_core::capability_qualification::QualificationKey;
 use cd_core::config::{AppConfig, RetrievalRoleModel};
-use cd_core::embed::{EmbedBackend, OllamaEmbedBackend};
+use cd_core::embed::{EmbedBackend, HttpEmbedBackend, OllamaEmbedBackend};
 use cd_core::error::CoreResult;
 use cd_core::keychain_store::SecretStore;
 use cd_core::log_analysis::{
@@ -140,19 +140,51 @@ fn bearer_for(role: &RetrievalRoleModel, secrets: Option<&dyn SecretStore>) -> O
     secrets.and_then(|store| store.get(reference).ok().flatten())
 }
 
-/// Build the configured embedding backend (Ollama `/api/embeddings` wire —
-/// the embedding contract this repository speaks today). The model id comes
-/// from configuration; nothing is hard-coded.
-pub fn build_embedding_backend(role: &RetrievalRoleModel) -> CoreResult<Arc<dyn EmbedBackend>> {
-    let client = cd_core::chat::OllamaClient::new(&role.base_url, &role.model)?;
-    Ok(Arc::new(OllamaEmbedBackend::new(client)))
+/// Build the configured embedding backend through an explicit wire dialect.
+/// Legacy roles without a dialect retain the local Ollama default only for
+/// the conventional Ollama port; every other endpoint uses the generic
+/// OpenAI `/v1/embeddings` contract. Model names never select behavior.
+pub fn build_embedding_backend(
+    role: &RetrievalRoleModel,
+    secrets: Option<&dyn SecretStore>,
+) -> CoreResult<Arc<dyn EmbedBackend>> {
+    let dialect = role.dialect.as_deref().unwrap_or_else(|| {
+        if role.base_url.contains(":11434") {
+            "ollama_embeddings"
+        } else {
+            "openai_embeddings"
+        }
+    });
+    match dialect {
+        "ollama_embeddings" => {
+            let client = cd_core::chat::OllamaClient::new(&role.base_url, &role.model)?;
+            Ok(Arc::new(OllamaEmbedBackend::new(client)))
+        }
+        "openai_embeddings" => Ok(Arc::new(HttpEmbedBackend::new(
+            &role.base_url,
+            role.model.clone(),
+            bearer_for(role, secrets),
+        )?)),
+        unsupported => Err(cd_core::error::CoreError::Config(format!(
+            "unsupported embedding dialect '{unsupported}'; use ollama_embeddings or openai_embeddings"
+        ))),
+    }
 }
 
-/// Build the configured rerank backend (TEI/Cohere-compatible `/rerank`).
+/// Build the configured rerank backend through the explicit TEI-style v1
+/// `/rerank` contract. Other dialects must gain a typed adapter before they
+/// can be selected; a URL or model name never changes the parser.
 pub fn build_rerank_backend(
     role: &RetrievalRoleModel,
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn RerankBackend>> {
+    if let Some(dialect) = role.dialect.as_deref() {
+        if dialect != "tei_rerank_v1" {
+            return Err(cd_core::error::CoreError::Config(format!(
+                "unsupported reranker dialect '{dialect}'; use tei_rerank_v1"
+            )));
+        }
+    }
     let bearer = bearer_for(role, secrets);
     Ok(Arc::new(HttpRerankBackend::new(
         &role.base_url,
@@ -164,6 +196,7 @@ pub fn build_rerank_backend(
 fn embedding_role_status(
     role: Option<&RetrievalRoleModel>,
     probe: bool,
+    secrets: Option<&dyn SecretStore>,
 ) -> (RetrievalRoleStatus, Option<u32>) {
     let status = match role {
         None => RetrievalRoleStatus {
@@ -193,7 +226,7 @@ fn embedding_role_status(
                     None,
                 );
             }
-            let (state, detail, probed_dims) = match build_embedding_backend(role) {
+            let (state, detail, probed_dims) = match build_embedding_backend(role, secrets) {
                 Err(_) => (
                     RetrievalRoleState::Unavailable,
                     "backend construction failed; check the configured endpoint".into(),
@@ -324,7 +357,7 @@ pub fn retrieval_status(
         }
     };
     let (mut embedding_role, probed_embedding_dims) =
-        embedding_role_status(config.retrieval.embedding.as_ref(), options.probe);
+        embedding_role_status(config.retrieval.embedding.as_ref(), options.probe, secrets);
     if let (Some(role), Some((corpus, _))) = (
         config
             .retrieval
@@ -411,7 +444,7 @@ pub fn hybrid_search(
         .filter(|role| role.enabled)
     {
         None => (None, false),
-        Some(role) => match build_embedding_backend(role) {
+        Some(role) => match build_embedding_backend(role, secrets) {
             Ok(backend) => (Some(backend), false),
             Err(_) => (None, true),
         },
@@ -460,12 +493,15 @@ pub fn hybrid_search(
 mod tests {
     use super::*;
     use cd_core::keychain_store::{MemorySecretStore, SecretStore};
+    use cd_test_gateway::{MockGateway, Response, Step};
+    use serde_json::json;
 
     fn reranker_role(api_key_ref: Option<&str>) -> RetrievalRoleModel {
         RetrievalRoleModel {
             enabled: true,
             base_url: "http://127.0.0.1:8080".into(),
             model: "test-reranker".into(),
+            dialect: Some("tei_rerank_v1".into()),
             api_key_ref: api_key_ref.map(str::to_string),
         }
     }
@@ -481,6 +517,58 @@ mod tests {
             bearer_for(&role, Some(&secrets)).as_deref(),
             Some("not-printed")
         );
+    }
+
+    #[tokio::test]
+    async fn openai_embedding_role_uses_shared_backend_and_protected_credential() {
+        let gateway = MockGateway::start_ordered(vec![Step::respond(Response::json_ok(&json!({
+            "data": [{"index": 0, "embedding": [0.25, 0.75]}]
+        })))])
+        .await;
+        let secrets = MemorySecretStore::new();
+        secrets
+            .set("retrieval/embed/api_key", "secret-value")
+            .unwrap();
+        let role = RetrievalRoleModel {
+            enabled: true,
+            base_url: gateway.base_url().to_string(),
+            model: "bge-m3".into(),
+            dialect: Some("openai_embeddings".into()),
+            api_key_ref: Some("retrieval/embed/api_key".into()),
+        };
+        let backend = build_embedding_backend(&role, Some(&secrets)).unwrap();
+        let vectors = backend.embed(&["synthetic query".into()]).await.unwrap();
+        assert_eq!(vectors, vec![vec![0.25, 0.75]]);
+        let request = gateway.requests().pop().expect("embedding request");
+        assert_eq!(request.path, "/v1/embeddings");
+        assert_eq!(request.header("authorization"), Some("Bearer secret-value"));
+    }
+
+    #[test]
+    fn unsupported_retrieval_dialects_fail_before_provider_access() {
+        let role = RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:8080".into(),
+            model: "bge-m3".into(),
+            dialect: Some("invented".into()),
+            api_key_ref: None,
+        };
+        let error = build_embedding_backend(&role, None)
+            .err()
+            .expect("unknown dialect must fail");
+        assert!(error.to_string().contains("unsupported embedding dialect"));
+
+        let reranker = RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:8080".into(),
+            model: "qwen3-reranker-0.6b".into(),
+            dialect: Some("vercel_v4".into()),
+            api_key_ref: None,
+        };
+        let error = build_rerank_backend(&reranker, None)
+            .err()
+            .expect("unsupported reranker dialect must fail");
+        assert!(error.to_string().contains("unsupported reranker dialect"));
     }
 
     #[test]
@@ -527,6 +615,7 @@ mod tests {
             enabled: true,
             base_url: "http://127.0.0.1:11434".into(),
             model: "different-vector-space".into(),
+            dialect: Some("ollama_embeddings".into()),
             api_key_ref: None,
         });
         let report = retrieval_status(

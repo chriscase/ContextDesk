@@ -17,7 +17,9 @@ use cd_core::capability_qualification::{
 use cd_core::chat::{
     ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role as ChatRole, ToolCallMsg,
 };
+use cd_core::embed::{EmbedBackend, HttpEmbedBackend};
 use cd_core::providers::{ProviderKind, ProviderProfile};
+use cd_core::rerank::RerankBackend;
 use cd_core::ssrf::{build_pinned_client_for_url, SsrfPolicy, SystemResolver};
 use cd_core::tools::{ToolSideEffect, ToolSpec};
 use serde::{Deserialize, Serialize};
@@ -676,64 +678,21 @@ async fn openai_embed(
     if is_vercel_ai_gateway(base_url) {
         return vercel_v4_embed(api_key, extra_headers, model_id, text).await;
     }
-    let (url, http) = build_pinned_client_for_url(
+    let backend = HttpEmbedBackend::new_with_policy(
         base_url,
+        model_id.to_string(),
+        api_key.map(str::to_string),
         policy,
-        &SystemResolver,
-        std::time::Duration::from_secs(60),
     )
-    .map_err(|e| redact_host_err(&e.to_string()))?;
-    let base = url.as_str().trim_end_matches('/');
-    let embed_url = if base.ends_with("/v1") {
-        format!("{base}/embeddings")
-    } else if base.contains("/v1/") {
-        format!("{}/embeddings", base.trim_end_matches('/'))
-    } else {
-        format!("{base}/v1/embeddings")
-    };
-    let body = serde_json::json!({
-        "model": model_id,
-        "input": text,
-    });
-    let mut req = http.post(embed_url).json(&body);
-    for (k, v) in extra_headers {
-        req = req.header(k, v);
-    }
-    if let Some(k) = api_key {
-        if !extra_headers
-            .iter()
-            .any(|(h, _)| h.eq_ignore_ascii_case("Authorization"))
-        {
-            req = req.bearer_auth(k);
-        }
-    }
-    let resp = req
-        .send()
+    .map_err(|error| redact_host_err(&error.to_string()))?
+    .with_extra_headers(extra_headers.to_vec());
+    backend
+        .embed(&[text.to_string()])
         .await
-        .map_err(|e| redact_host_err(&e.to_string()))?;
-    let status = resp.status();
-    let text_body = resp
-        .text()
-        .await
-        .map_err(|e| redact_host_err(&e.to_string()))?;
-    if !status.is_success() {
-        return Err(redact_host_err(&format!(
-            "embed HTTP {status}: {}",
-            text_body.chars().take(160).collect::<String>()
-        )));
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(&text_body).map_err(|e| redact_host_err(&e.to_string()))?;
-    let arr = v
-        .pointer("/data/0/embedding")
-        .and_then(|e| e.as_array())
-        .ok_or_else(|| "embed_missing_vector".to_string())?;
-    let mut out = Vec::with_capacity(arr.len());
-    for x in arr {
-        let f = x.as_f64().ok_or_else(|| "embed_non_float".to_string())?;
-        out.push(f as f32);
-    }
-    Ok(out)
+        .map_err(|error| redact_host_err(&error.to_string()))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "embed_missing_vector".to_string())
 }
 
 fn is_vercel_ai_gateway(base_url: &str) -> bool {
@@ -853,47 +812,26 @@ async fn generic_rerank(
     query: &str,
     documents: &[String],
 ) -> Result<Vec<usize>, String> {
-    let (mut endpoint, client) = build_pinned_client_for_url(
+    let backend = cd_core::rerank::HttpRerankBackend::new_with_policy(
         base_url,
+        model_id.to_string(),
+        api_key.map(str::to_string),
         policy,
-        &SystemResolver,
-        std::time::Duration::from_secs(60),
     )
-    .map_err(|error| redact_host_err(&error.to_string()))?;
-    let path = endpoint.path().trim_end_matches('/');
-    let rerank_path = if path.is_empty() {
-        "/rerank".to_string()
-    } else {
-        format!("{path}/rerank")
-    };
-    endpoint.set_path(&rerank_path);
-    endpoint.set_query(None);
-    endpoint.set_fragment(None);
-    let mut request = client.post(endpoint).json(&serde_json::json!({
-        "model": model_id,
-        "query": query,
-        "documents": documents,
-        "top_n": documents.len(),
-    }));
-    for (name, value) in extra_headers {
-        request = request.header(name, value);
-    }
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
-    let response = request
-        .send()
+    .map_err(|error| redact_host_err(&error.to_string()))?
+    .with_extra_headers(extra_headers.to_vec());
+    let scores = backend
+        .rerank(query, documents)
         .await
         .map_err(|error| redact_host_err(&error.to_string()))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("reranking endpoint returned HTTP {status}"));
-    }
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|error| redact_host_err(&error.to_string()))?;
-    parse_ranking_indices(&body, documents.len(), "/results")
+    let mut indices: Vec<usize> = (0..scores.len()).collect();
+    indices.sort_by(|left, right| {
+        scores[*right]
+            .partial_cmp(&scores[*left])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.cmp(right))
+    });
+    Ok(indices)
 }
 
 fn parse_ranking_indices(

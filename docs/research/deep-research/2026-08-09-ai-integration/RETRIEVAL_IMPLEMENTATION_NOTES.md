@@ -1,6 +1,20 @@
 # Retrieval implementation notes
 
-Status: recovered bounded research detail; experiment design, not a quality claim
+Status: recovered bounded research detail plus the first production adapter
+slice; no live employer quality claim
+
+Current implementation slice (release line):
+
+- `openai_embeddings` is a shared, batched `/v1/embeddings` adapter used by
+  qualification and production retrieval. It requires indexed, finite,
+  homogeneous vectors and a protected bearer reference when configured.
+- `tei_rerank_v1` is a shared `/rerank` adapter used by qualification and
+  production retrieval. It preserves request-relative indices and rejects
+  malformed or ambiguous results; failed reranking retains the pre-rerank
+  order.
+- Legacy roles without a dialect retain the local Ollama embedding default
+  on the conventional Ollama port and the TEI-style rerank default. Vercel's
+  native v4 retrieval envelopes remain explicitly unverified for production.
 
 Source conversation: `6a791c7e-4bb8-83ea-b176-35e66f103cd9`
 

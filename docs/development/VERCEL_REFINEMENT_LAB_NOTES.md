@@ -677,15 +677,21 @@ model and must not be represented as the employer build.
   network retrieval.
 - `retrieval-status` and a host-neutral `hybrid_search` entry exist, but desktop
   activation is not wired.
-- The cloud embedding role currently constructs an Ollama-specific backend and
-  speaks one request per text to `{base_url}/api/embeddings`, expecting an
-  Ollama `embedding` array. It has no bearer-key path. This is incompatible with
-  Vercel's OpenAI-compatible `/v1/embeddings` contract.
-- The reranker backend speaks `POST {base_url}/rerank` with
+- The production embedding role now has an explicit `openai_embeddings`
+  dialect backed by a shared, batched `/v1/embeddings` adapter with protected
+  bearer-file support, indexed ordering, finite-vector checks, and homogeneous
+  dimensions. Legacy roles without a dialect retain Ollama behavior only for
+  the conventional local Ollama port; other endpoints must opt into the
+  OpenAI-compatible dialect. Vercel's v4 embedding route remains a separate
+  qualification/dev-lab dialect and is not silently inferred.
+- The production reranker backend speaks the explicit `tei_rerank_v1` dialect:
+  `POST {base_url}/rerank` with
   `{model, query, documents}` and expects
   `{results:[{index,relevance_score}]}`. It supports an optional Keychain bearer
-  reference, caps documents at 100 and each document at 512 characters, and
-  degrades to the pre-rerank order on failure or timeout.
+  reference, caps documents at 100 and each document at 512 characters, rejects
+  ambiguous dialects, and degrades to the pre-rerank order on failure or
+  timeout. Vercel's v4 reranking route remains qualification/dev-lab-only until
+  a score-preserving production adapter is added.
 - The benchmark's real BGE-M3/Qwen reranker lanes remain honestly marked
   `FUTURE_CAPABILITY_UNAVAILABLE`. Synthetic synonym and reranker adapters are
   test fixtures, not proof of real semantic capability.

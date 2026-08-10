@@ -356,6 +356,12 @@ pub struct RetrievalRoleModel {
     pub base_url: String,
     /// Model identity requested from the endpoint.
     pub model: String,
+    /// Explicit wire dialect for this role. Supported values are
+    /// `ollama_embeddings`, `openai_embeddings`, and
+    /// `tei_rerank_v1`; an omitted value preserves legacy endpoint defaults.
+    /// The value is a parser selector only — it never makes a model verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialect: Option<String>,
     /// Optional credential REFERENCE for a bearer credential — either an
     /// explicit Keychain id or a protected `file:` path, never the secret
     /// itself (`refuse_raw_secret_refs` enforces this on load/save).
@@ -858,6 +864,7 @@ mod tests {
             enabled: false,
             base_url: "http://127.0.0.1:8080".into(),
             model: "qwen3-reranker-0.6b".into(),
+            dialect: None,
             api_key_ref: None,
         });
         save_config(&path, &cfg).unwrap();
@@ -937,6 +944,7 @@ mod tests {
             enabled: true,
             base_url: "http://127.0.0.1:11434".into(),
             model: "bge-m3".into(),
+            dialect: None,
             api_key_ref: Some("sk-proj-not-a-reference".into()),
         });
         assert!(save_config(&path, &cfg).is_err());

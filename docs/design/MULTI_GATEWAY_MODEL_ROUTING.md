@@ -15,7 +15,9 @@ Tracked follow-ups:
 - [#865](https://github.com/chriscase/ContextDesk/issues/865) — shared auth
   resolution and one-read-per-operation credential caching, including Grok
 - [#866](https://github.com/chriscase/ContextDesk/issues/866) — product
-  embedding and reranking protocol adapters
+  embedding and reranking protocol adapters (OpenAI embeddings and explicit
+  TEI-style reranking are now the first typed production slice; Vercel v4
+  score-preserving retrieval remains follow-up)
 - [#867](https://github.com/chriscase/ContextDesk/issues/867) — hermetic model
   and retrieval quality evaluation
 

@@ -129,6 +129,7 @@ pub struct HttpRerankBackend {
     endpoint: reqwest::Url,
     model: String,
     bearer: Option<String>,
+    extra_headers: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for HttpRerankBackend {
@@ -152,11 +153,22 @@ impl HttpRerankBackend {
         model: impl Into<String>,
         bearer: Option<String>,
     ) -> CoreResult<Self> {
-        let policy = crate::ssrf::SsrfPolicy::default();
+        Self::new_with_policy(base_url, model, bearer, &crate::ssrf::SsrfPolicy::default())
+    }
+
+    /// Build the adapter using a caller-supplied SSRF policy. Qualification
+    /// and product hosts use this to share the same parser and request
+    /// contract while retaining their own egress policy.
+    pub fn new_with_policy(
+        base_url: &str,
+        model: impl Into<String>,
+        bearer: Option<String>,
+        policy: &crate::ssrf::SsrfPolicy,
+    ) -> CoreResult<Self> {
         let resolver = crate::ssrf::SystemResolver;
         let (url, client) = crate::ssrf::build_pinned_client_for_url(
             base_url,
-            &policy,
+            policy,
             &resolver,
             std::time::Duration::from_millis(RERANK_DEFAULT_TIMEOUT_MS),
         )?;
@@ -179,7 +191,22 @@ impl HttpRerankBackend {
             endpoint,
             model: model.into(),
             bearer,
+            extra_headers: Vec::new(),
         })
+    }
+
+    /// Add provider-specific headers without exposing them through identity
+    /// or serialization. An explicit Authorization header takes precedence
+    /// over the bearer argument.
+    pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        if headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        {
+            self.bearer = None;
+        }
+        self.extra_headers = headers;
+        self
     }
 }
 
@@ -188,6 +215,7 @@ struct RerankRequest<'a> {
     model: &'a str,
     query: &'a str,
     documents: &'a [String],
+    top_n: usize,
 }
 
 #[derive(serde::Deserialize)]
@@ -217,8 +245,12 @@ impl RerankBackend for HttpRerankBackend {
             model: &self.model,
             query,
             documents: &capped,
+            top_n: documents.len(),
         };
         let mut request = self.client.post(self.endpoint.clone()).json(&body);
+        for (name, value) in &self.extra_headers {
+            request = request.header(name, value);
+        }
         if let Some(bearer) = &self.bearer {
             request = request.bearer_auth(bearer);
         }

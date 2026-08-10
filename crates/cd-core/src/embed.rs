@@ -12,12 +12,21 @@
 //! `w_kw=0.55`, `w_sem=0.35`, `w_rec=0.10`. When no embed backend is present,
 //! semantic is 0 and weights are renormalized onto keyword+recency only.
 
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
+use crate::ssrf::{build_pinned_client_for_url, SsrfPolicy, SystemResolver};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Maximum number of inputs in one OpenAI-compatible embedding request.
+pub const HTTP_EMBED_MAX_BATCH: usize = 64;
+/// Maximum characters in one input sent to a remote embedding endpoint.
+pub const HTTP_EMBED_INPUT_CHAR_CAP: usize = 16_384;
+/// Bounded timeout for one remote embedding request.
+pub const HTTP_EMBED_TIMEOUT_MS: u64 = 60_000;
 
 /// Async embedding provider (mirrors the chat backend pattern).
 #[async_trait]
@@ -35,6 +44,222 @@ pub trait EmbedBackend: Send + Sync {
     /// capability. Stored template vectors are only comparable to query
     /// vectors produced under the same identity and dimension count.
     fn identity(&self) -> String;
+}
+
+/// Production OpenAI-compatible embedding adapter.
+///
+/// This is deliberately a narrow wire contract: `POST /v1/embeddings` with
+/// an array-valued `input`, followed by indexed, finite, homogeneous vectors.
+/// It is shared by qualification and retrieval callers; model names never
+/// select a parser, and malformed responses are withheld in full.
+pub struct HttpEmbedBackend {
+    client: reqwest::Client,
+    endpoint: reqwest::Url,
+    model: String,
+    bearer: Option<String>,
+    extra_headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for HttpEmbedBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpEmbedBackend")
+            .field("endpoint", &self.endpoint.as_str())
+            .field("model", &self.model)
+            .field("bearer", &self.bearer.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+impl HttpEmbedBackend {
+    /// Build the adapter against a base URL with an optional bearer token.
+    /// The URL is SSRF-vetted and pinned using the same policy as chat and
+    /// reranking clients.
+    pub fn new(
+        base_url: &str,
+        model: impl Into<String>,
+        bearer: Option<String>,
+    ) -> CoreResult<Self> {
+        Self::new_with_policy(base_url, model, bearer, &SsrfPolicy::default())
+    }
+
+    /// Build the adapter using a caller-supplied SSRF policy. Qualification
+    /// and product hosts use this to share the exact wire adapter while
+    /// retaining their own egress policy.
+    pub fn new_with_policy(
+        base_url: &str,
+        model: impl Into<String>,
+        bearer: Option<String>,
+        policy: &SsrfPolicy,
+    ) -> CoreResult<Self> {
+        let (mut endpoint, client) = build_pinned_client_for_url(
+            base_url,
+            policy,
+            &SystemResolver,
+            std::time::Duration::from_millis(HTTP_EMBED_TIMEOUT_MS),
+        )?;
+        let base_path = endpoint.path().trim_end_matches('/');
+        let embedding_path = if base_path.is_empty() {
+            "/v1/embeddings".to_string()
+        } else if base_path.ends_with("/v1") || base_path.contains("/v1/") {
+            format!("{base_path}/embeddings")
+        } else {
+            format!("{base_path}/v1/embeddings")
+        };
+        endpoint.set_path(&embedding_path);
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
+        Ok(Self {
+            client,
+            endpoint,
+            model: model.into(),
+            bearer,
+            extra_headers: Vec::new(),
+        })
+    }
+
+    /// Add provider-specific headers without exposing them through identity
+    /// or serialization. An explicit Authorization header takes precedence
+    /// over the bearer argument.
+    pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        if headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        {
+            self.bearer = None;
+        }
+        self.extra_headers = headers;
+        self
+    }
+
+    fn apply_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (name, value) in &self.extra_headers {
+            request = request.header(name, value);
+        }
+        if let Some(token) = &self.bearer {
+            request = request.bearer_auth(token);
+        }
+        request
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct HttpEmbeddingResponse {
+    data: Vec<HttpEmbeddingRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HttpEmbeddingRow {
+    index: usize,
+    embedding: Vec<f64>,
+}
+
+fn validate_http_embedding_rows(
+    rows: Vec<HttpEmbeddingRow>,
+    expected: usize,
+) -> CoreResult<Vec<Vec<f32>>> {
+    if rows.len() != expected {
+        return Err(CoreError::Message(format!(
+            "embedding response contract: expected {expected} vectors, received {}",
+            rows.len()
+        )));
+    }
+    let mut ordered: Vec<Option<Vec<f32>>> = vec![None; expected];
+    let mut dimensions = None;
+    for row in rows {
+        if row.index >= expected {
+            return Err(CoreError::Message(format!(
+                "embedding response contract: index {} out of range for {expected} inputs",
+                row.index
+            )));
+        }
+        if ordered[row.index].is_some() {
+            return Err(CoreError::Message(format!(
+                "embedding response contract: duplicate index {}",
+                row.index
+            )));
+        }
+        if row.embedding.is_empty() {
+            return Err(CoreError::Message(
+                "embedding response contract: empty vector".into(),
+            ));
+        }
+        if let Some(expected_dimensions) = dimensions {
+            if expected_dimensions != row.embedding.len() {
+                return Err(CoreError::Message(
+                    "embedding response contract: heterogeneous dimensions".into(),
+                ));
+            }
+        } else {
+            dimensions = Some(row.embedding.len());
+        }
+        let vector: Vec<f32> = row
+            .embedding
+            .into_iter()
+            .map(|value| value as f32)
+            .collect();
+        if vector.iter().any(|value| !value.is_finite()) {
+            return Err(CoreError::Message(
+                "embedding response contract: every component must be finite".into(),
+            ));
+        }
+        ordered[row.index] = Some(vector);
+    }
+    ordered
+        .into_iter()
+        .enumerate()
+        .map(|(index, vector)| {
+            vector.ok_or_else(|| {
+                CoreError::Message(format!(
+                    "embedding response contract: missing index {index}"
+                ))
+            })
+        })
+        .collect()
+}
+
+#[async_trait]
+impl EmbedBackend for HttpEmbedBackend {
+    async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        if texts.len() > HTTP_EMBED_MAX_BATCH {
+            return Err(CoreError::Config(format!(
+                "embedding request exceeds the {HTTP_EMBED_MAX_BATCH}-input batch bound"
+            )));
+        }
+        if texts
+            .iter()
+            .any(|text| text.chars().count() > HTTP_EMBED_INPUT_CHAR_CAP)
+        {
+            return Err(CoreError::Config(format!(
+                "embedding input exceeds the {HTTP_EMBED_INPUT_CHAR_CAP}-character bound"
+            )));
+        }
+        let response = self
+            .apply_headers(self.client.post(self.endpoint.clone()).json(&json!({
+                "model": self.model,
+                "input": texts,
+            })))
+            .send()
+            .await
+            .map_err(|error| CoreError::Message(format!("embedding transport: {error}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(CoreError::Message(format!(
+                "embedding endpoint returned HTTP {status}"
+            )));
+        }
+        let body = response
+            .json::<HttpEmbeddingResponse>()
+            .await
+            .map_err(|error| CoreError::Message(format!("embedding response contract: {error}")))?;
+        validate_http_embedding_rows(body.data, texts.len())
+    }
+
+    fn identity(&self) -> String {
+        self.model.clone()
+    }
 }
 
 /// Weights for hybrid ranking.
@@ -433,6 +658,87 @@ pub fn chunk_content_key(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cd_test_gateway::{MockGateway, Response, Step};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn http_backend_batches_and_restores_index_order() {
+        let gateway = MockGateway::start_ordered(vec![Step::respond(Response::json_ok(&json!({
+            "data": [
+                {"index": 1, "embedding": [0.0, 1.0]},
+                {"index": 0, "embedding": [1.0, 0.0]}
+            ]
+        })))])
+        .await;
+        let backend = HttpEmbedBackend::new(gateway.base_url(), "bge-m3", None).unwrap();
+        let vectors = backend
+            .embed(&["first".into(), "second".into()])
+            .await
+            .unwrap();
+        assert_eq!(vectors, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        let request = gateway.requests().pop().expect("request");
+        assert_eq!(request.path, "/v1/embeddings");
+        let body = request.json_body().unwrap();
+        assert_eq!(body["model"], "bge-m3");
+        assert_eq!(body["input"], json!(["first", "second"]));
+    }
+
+    #[tokio::test]
+    async fn http_backend_rejects_duplicate_missing_and_heterogeneous_rows() {
+        let cases = [
+            json!({
+                "data": [
+                    {"index": 0, "embedding": [0.0, 1.0]},
+                    {"index": 0, "embedding": [1.0, 0.0]}
+                ]
+            }),
+            json!({"data": [{"index": 1, "embedding": [0.0, 1.0]}, {"index": 2, "embedding": [1.0, 0.0]}]}),
+            json!({
+                "data": [
+                    {"index": 0, "embedding": [0.0, 1.0]},
+                    {"index": 1, "embedding": [1.0]}
+                ]
+            }),
+        ];
+        for body in cases {
+            let gateway =
+                MockGateway::start_ordered(vec![Step::respond(Response::json_ok(&body))]).await;
+            let backend = HttpEmbedBackend::new(gateway.base_url(), "bge-m3", None).unwrap();
+            let error = backend
+                .embed(&["first".into(), "second".into()])
+                .await
+                .expect_err("malformed embedding response must fail closed");
+            assert!(error.to_string().contains("embedding response contract"));
+        }
+    }
+
+    #[tokio::test]
+    async fn http_backend_rejects_non_finite_after_float_conversion_and_bounds_batch() {
+        let gateway = MockGateway::start_ordered(vec![Step::respond(Response::json_ok(
+            &json!({"data": [{"index": 0, "embedding": [1.0e100]}]}),
+        ))])
+        .await;
+        let backend = HttpEmbedBackend::new(gateway.base_url(), "bge-m3", None).unwrap();
+        let error = backend
+            .embed(&["one".into()])
+            .await
+            .expect_err("f32 overflow must fail closed");
+        assert!(error.to_string().contains("finite"));
+
+        let too_many = vec!["x".to_string(); HTTP_EMBED_MAX_BATCH + 1];
+        let error = backend.embed(&too_many).await.expect_err("batch bound");
+        assert!(error.to_string().contains("batch bound"));
+        assert_eq!(gateway.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn http_backend_empty_batch_does_not_touch_the_gateway() {
+        let gateway =
+            MockGateway::start_ordered(vec![Step::respond(Response::status_only(500))]).await;
+        let backend = HttpEmbedBackend::new(gateway.base_url(), "bge-m3", None).unwrap();
+        assert!(backend.embed(&[]).await.unwrap().is_empty());
+        assert_eq!(gateway.request_count(), 0);
+    }
 
     #[test]
     fn default_log_embed_backend_respects_feature_flag() {
