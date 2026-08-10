@@ -129,6 +129,75 @@ fn agent_turn_calls_cd_workflow_turn_kernel_not_research_turn_directly() {
     );
 }
 
+/// Gateway wire conformance lab, Phase 11 (CLI/desktop-host parity):
+/// desktop's discovery command must delegate to the exact same
+/// `cd_core::ai_probe::probe_ai_gateway` that `gateway_wire_discovery.rs`
+/// drives hermetically against a loopback `MockGateway` — not a
+/// Tauri-local reimplementation of catalog probing.
+#[test]
+fn probe_ai_gateway_cmd_delegates_to_cd_core_ai_probe() {
+    let source = tauri_lib_source();
+    let body = function_body(&source, "probe_ai_gateway_cmd");
+    assert!(
+        body.contains("cd_core::ai_probe::probe_ai_gateway("),
+        "desktop/src-tauri's probe_ai_gateway_cmd must delegate to \
+         cd_core::ai_probe::probe_ai_gateway — the same function \
+         gateway_wire_discovery.rs exercises against a hermetic mock — \
+         found body:\n{body}"
+    );
+}
+
+/// Companion to the qualification delegation test below: the desktop-local
+/// `capability_qualification_host` module (declared `mod
+/// capability_qualification_host;` in `lib.rs`) must be a pure re-export of
+/// `cd_workflow::capability_qualification`, not a parallel module carrying
+/// its own qualification types or logic.
+#[test]
+fn capability_qualification_host_module_is_a_pure_reexport_not_a_reimplementation() {
+    let path: PathBuf = [
+        env!("CARGO_MANIFEST_DIR"),
+        "..",
+        "..",
+        "desktop",
+        "src-tauri",
+        "src",
+        "capability_qualification_host.rs",
+    ]
+    .iter()
+    .collect();
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {}: {e} (has the module moved?)", path.display()));
+    let code_lines: Vec<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("//"))
+        .collect();
+    assert_eq!(
+        code_lines,
+        vec!["pub use cd_workflow::capability_qualification::*;"],
+        "capability_qualification_host.rs must stay a single-line re-export of \
+         cd_workflow::capability_qualification — found:\n{source}"
+    );
+}
+
+/// `start_capability_qualification` (the live, running-a-real-turn path,
+/// distinct from the cached-report read above it) must call
+/// `cd_core::capability_qualification::run_qualification` — the exact
+/// function `gateway_wire_qualification.rs` drives against a hermetic
+/// `MockGateway` via `LiveQualificationTransport` — rather than a
+/// Tauri-local qualification loop.
+#[test]
+fn start_capability_qualification_delegates_to_cd_core_run_qualification() {
+    let source = tauri_lib_source();
+    let body = function_body(&source, "start_capability_qualification");
+    assert!(
+        body.contains("cd_core::capability_qualification::run_qualification("),
+        "desktop/src-tauri's start_capability_qualification must call \
+         cd_core::capability_qualification::run_qualification directly — \
+         found body:\n{body}"
+    );
+}
+
 /// The nested Tauri workspace must actually depend on this crate — a
 /// delegating function body with no matching `Cargo.toml` dependency would
 /// not compile, but this pins the intent explicitly so a dependency
