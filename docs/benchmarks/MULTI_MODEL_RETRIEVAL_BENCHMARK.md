@@ -4,8 +4,8 @@ A permanent, versioned, deterministic hidden-truth benchmark that measures the
 **incremental value** of:
 
 1. structured + keyword retrieval (current production baseline);
-2. keyword + semantic embeddings (future BGE-M3 lane);
-3. keyword + embeddings + reranking (future Qwen reranker lane);
+2. keyword + semantic embeddings (the BGE-M3 measurement lane);
+3. keyword + embeddings + reranking (the Qwen reranker measurement lane);
 4. complete bounded multi-stage LLM investigation.
 
 The suite never assumes a capability is beneficial. Until a lane is
@@ -176,7 +176,15 @@ Violations force RED. Baseline gates encode **observed** small-tier reality as
 regression floors (`baseline_expectation` in each truth manifest) — never
 hoped-for future capability. No LLM judge exists anywhere in the pipeline.
 
-## Committed small-tier baseline (ContextDesk `7b8638f6`)
+## Committed small-tier baseline (historical snapshot, ContextDesk `7b8638f6`)
+
+The table below is intentionally the frozen pre-adapter baseline.  The current
+release line now contains production embedding/reranker factory wiring and a
+workflow-level protected-file credential seam proof (see
+`docs/benchmarks/FIXED_CORPUS_RETRIEVAL_ABLATION_V1.md`).  That plumbing does
+not by itself constitute a live BGE-M3/Qwen quality measurement, so these
+historical rows remain `FUTURE_CAPABILITY_UNAVAILABLE` until the identical
+frozen corpus is run against an explicitly identified live endpoint.
 
 From `reports/baseline/small-structured_keyword.report.md`:
 
