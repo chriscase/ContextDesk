@@ -1021,7 +1021,8 @@ fn parse_candidate_assessment(
     raw: &str,
     candidate: &crate::tool_host::BroadLogTriageCandidate,
 ) -> Option<(CandidateClassificationV1, String, HashSet<u64>)> {
-    let proposal: CandidateAssessmentProposalV1 = serde_json::from_str(raw).ok()?;
+    let normalized = normalize_known_json_wrapper(raw)?;
+    let proposal: CandidateAssessmentProposalV1 = serde_json::from_str(&normalized).ok()?;
     if proposal.schema != CANDIDATE_ASSESSMENT_SCHEMA_V1
         || proposal.candidate_id != candidate.group_id
         || proposal.analysis.trim().is_empty()
@@ -1071,6 +1072,54 @@ fn code_like_identifiers_are_confined<'a>(
         .flat_map(code_like_identifiers)
         .collect::<HashSet<_>>();
     code_like_identifiers(output).is_subset(&allowed)
+}
+
+/// Normalize only the small set of provider response wrappers that are known to carry
+/// a single JSON object without changing its authority. Some reasoning
+/// gateways leave a `<think>`/`<analysis>` block in visible content, and some
+/// OpenAI-compatible servers wrap JSON in a fenced block even when the prompt
+/// forbids it. The wrapper itself is discarded; the object still goes through
+/// the exact host-owned schema, evidence, and role validators below.
+///
+/// Deliberately do not search arbitrary prose for a brace pair. A prefix or
+/// suffix is accepted only when it is a complete known reasoning block or a
+/// complete Markdown JSON fence, so untrusted output cannot smuggle a second
+/// object or silently turn prose into an answer.
+#[allow(clippy::string_slice)] // all offsets come from ASCII delimiter matches
+fn normalize_known_json_wrapper(raw: &str) -> Option<String> {
+    let mut trimmed = raw.trim();
+    // A bounded number of nested wrappers is enough for real gateways and
+    // prevents a hostile response from turning normalization into recursion.
+    for _ in 0..4 {
+        let mut unwrapped_reasoning = false;
+        for tag in ["think", "analysis", "reasoning"] {
+            let open = format!("<{tag}>");
+            let close = format!("</{tag}>");
+            if let Some(body) = trimmed.strip_prefix(&open) {
+                let end = body.find(&close)?;
+                trimmed = body[end + close.len()..].trim();
+                unwrapped_reasoning = true;
+                break;
+            }
+        }
+        if !unwrapped_reasoning {
+            break;
+        }
+    }
+    if let Some(fence_body) = trimmed.strip_prefix("```") {
+        let newline = fence_body.find('\n')?;
+        let body = &fence_body[newline + 1..];
+        let close = body.rfind("```")?;
+        if !body[close + 3..].trim().is_empty() {
+            return None;
+        }
+        let object = body[..close].trim();
+        if object.starts_with('{') && object.ends_with('}') {
+            return Some(object.to_string());
+        }
+        return None;
+    }
+    (trimmed.starts_with('{') && trimmed.ends_with('}')).then(|| trimmed.to_string())
 }
 
 fn multi_stage_candidate_messages(
@@ -1849,7 +1898,14 @@ async fn run_multi_stage_broad_triage(
             MULTI_STAGE_COMPARISON_RESPONSE_CHAR_CAP,
         )
         .unwrap_or_default();
-        match crate::investigation_answer::validate_model_answer(&content, &ledger) {
+        // Keep the final answer authority strict while accommodating the
+        // bounded reasoning/fence wrappers seen on otherwise compatible
+        // OpenAI-compatible gateways. Only a complete known wrapper is
+        // removed; the same ledger validator still owns every field and
+        // candidate/evidence relationship.
+        let validation_content =
+            normalize_known_json_wrapper(&content).unwrap_or_else(|| content.clone());
+        match crate::investigation_answer::validate_model_answer(&validation_content, &ledger) {
             Ok(mut envelope) => {
                 envelope.semantic_attempts = u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
                 on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
@@ -13908,6 +13964,42 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
     }
 
     #[test]
+    fn known_reasoning_and_fence_wrappers_are_bounded_and_unwrapped() {
+        assert_eq!(
+            normalize_known_json_wrapper(
+                "<think>private reasoning</think>\n```json\n{\"ok\":true}\n```"
+            ),
+            Some("{\"ok\":true}".into())
+        );
+        assert_eq!(
+            normalize_known_json_wrapper("prefix prose {\"ok\":true}"),
+            None,
+            "arbitrary prose must not be treated as a JSON wrapper"
+        );
+        assert_eq!(
+            normalize_known_json_wrapper("```json\n{\"ok\":true}\n``` trailing"),
+            None,
+            "fenced JSON must not accept trailing output"
+        );
+    }
+
+    #[test]
+    fn candidate_assessment_accepts_a_known_reasoning_wrapper() {
+        let candidate = multi_stage_candidate("trace:wrapped", 41);
+        let raw = format!(
+            "<analysis>reasoning is not evidence</analysis>\n```json\n{}\n```",
+            serde_json::json!({
+                "schema": CANDIDATE_ASSESSMENT_SCHEMA_V1,
+                "candidate_id": "trace:wrapped",
+                "classification": CandidateClassificationV1::SupportingEvidence,
+                "analysis": "bounded evidence",
+                "evidence_seqs": [41],
+            })
+        );
+        assert!(parse_candidate_assessment(&raw, &candidate).is_some());
+    }
+
+    #[test]
     fn multi_stage_requires_candidate_and_comparison_agreement_to_establish_a_cause() {
         let candidate = multi_stage_candidate("template:2", 17);
         let assessment = multi_stage_assessment(
@@ -14501,7 +14593,10 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["forged"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]}]}"#,
             ),
             multi_stage_completion(
-                r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]}]}"#,
+                r#"<think>the final object is ready</think>
+```json
+{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"x","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:bravo","observations":[{"claim_id":"b","text":"x","evidence_ids":["e:trace:bravo:22"]}]}]}
+```"#,
             ),
         ]);
         let opts = AgentOptions {
