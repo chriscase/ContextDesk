@@ -18,6 +18,14 @@ marked synthetic and must never be presented as BGE-M3, Qwen, Vercel, or
 employer-gateway evidence. The test does not send corpus text or credentials
 over the network.
 
+The release worktree also carries a workflow-level seam proof at
+`crates/cd-workflow/tests/retrieval_production_path.rs`. It constructs the
+configured `bge-m3` embedding and `qwen3-reranker-0.6b` roles through the
+protected-file credential path, then runs the real `hybrid_search_events`
+workflow against a hermetic gateway. This verifies factory wiring and
+credential/header behavior; it is still not evidence that those employer
+models are live-compatible or useful.
+
 ## What is measured
 
 - mean retrieval recall at the top-25 prefix for answerable queries;
@@ -62,4 +70,3 @@ not predict how DeepSeek, BGE-M3, Qwen, or Vercel will behave.
    role integrity.
 4. Do not replace the current honest `FUTURE_CAPABILITY_UNAVAILABLE` rows for
    employer BGE-M3/Qwen until those live observations are captured and reviewed.
-
