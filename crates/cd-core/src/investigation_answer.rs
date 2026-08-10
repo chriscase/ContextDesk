@@ -185,6 +185,11 @@ pub enum ValidationError {
     /// A claim placed in a causal-candidate section cites host evidence that
     /// was explicitly classified as downstream symptom evidence.
     RoleMismatch,
+    /// A typed answer omitted the host-required downstream-symptom section for
+    /// a candidate with symptom-role evidence. Used by the bounded triage
+    /// synthesis correction; the generic validator remains permissive for
+    /// ordinary answer callers.
+    RoleCoverage,
     EmptyLedger,
     InvalidBinding,
     DigestMismatch,
@@ -203,6 +208,7 @@ impl ValidationError {
             Self::EmptyEvidence => "empty_evidence",
             Self::RootRole => "root_role",
             Self::RoleMismatch => "role_mismatch",
+            Self::RoleCoverage => "role_coverage",
             Self::EmptyLedger => "empty_ledger",
             Self::InvalidBinding => "invalid_binding",
             Self::DigestMismatch => "digest_mismatch",
@@ -838,6 +844,7 @@ mod tests {
             ValidationError::EmptyEvidence,
             ValidationError::RootRole,
             ValidationError::RoleMismatch,
+            ValidationError::RoleCoverage,
             ValidationError::EmptyLedger,
             ValidationError::InvalidBinding,
             ValidationError::DigestMismatch,
@@ -855,6 +862,7 @@ mod tests {
                 "empty_evidence",
                 "root_role",
                 "role_mismatch",
+                "role_coverage",
                 "empty_ledger",
                 "invalid_binding",
                 "digest_mismatch",

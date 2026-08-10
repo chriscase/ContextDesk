@@ -1252,6 +1252,9 @@ fn final_comparison_correction(category: Option<&str>) -> String {
         "role_mismatch" => {
             "A permitted evidence id is host-labeled as downstream symptom evidence. Do not cite it in causal_candidates or initiating_causes; place it in the candidate's symptoms section and keep direct initiating evidence in initiating_causes only when the host role permits it."
         }
+        "role_coverage" => {
+            "The host requires every candidate with downstream-symptom evidence to retain at least one of those permitted ids in its symptoms section. Add a grounded symptoms claim for that candidate; do not promote the symptom into causal_candidates or initiating_causes."
+        }
         _ => "Rebuild the proposal from the unchanged host manifest, drafts, and output scaffold.",
     };
     format!("HOST VALIDATION CATEGORY: {category}\nHOST-AUTHORED CORRECTION: {guidance}\n")
@@ -1439,6 +1442,45 @@ fn multi_stage_ledger(
         ..binding
     };
     HostEvidenceLedger::new(binding, evidence)
+}
+
+/// Require the final typed triage proposal to preserve a host-classified
+/// downstream symptom as a symptom claim. The generic answer validator stays
+/// intentionally permissive for ordinary callers; this stricter requirement
+/// belongs only to the multi-stage triage contract, where omission of a known
+/// symptom is a usefulness failure and can be repaired once.
+fn multi_stage_missing_symptom_role_coverage(
+    envelope: &crate::investigation_answer::AnswerEnvelopeV1,
+) -> bool {
+    use crate::investigation_answer::{ClaimKind, EvidenceRole};
+
+    let mut symptom_ids_by_candidate = std::collections::BTreeMap::<&str, HashSet<&str>>::new();
+    for entry in &envelope.evidence {
+        if entry.role == EvidenceRole::Symptom {
+            symptom_ids_by_candidate
+                .entry(entry.candidate_id.as_str())
+                .or_default()
+                .insert(entry.evidence_id.as_str());
+        }
+    }
+    symptom_ids_by_candidate
+        .into_iter()
+        .any(|(candidate_id, ids)| {
+            !envelope
+                .answer
+                .candidates
+                .iter()
+                .find(|candidate| candidate.candidate_id == candidate_id)
+                .is_some_and(|candidate| {
+                    candidate.claims.iter().any(|claim| {
+                        claim.claim_kind == ClaimKind::Symptom
+                            && claim
+                                .evidence_ids
+                                .iter()
+                                .any(|id| ids.contains(id.as_str()))
+                    })
+                })
+        })
 }
 
 fn multi_stage_context_telemetry(
@@ -1929,6 +1971,12 @@ async fn run_multi_stage_broad_triage(
                     &ledger,
                 ) {
                     Ok(mut envelope) => {
+                        if multi_stage_missing_symptom_role_coverage(&envelope) {
+                            correction_category = Some("role_coverage");
+                            validation_errors
+                                .push(crate::investigation_answer::ValidationError::RoleCoverage);
+                            continue;
+                        }
                         envelope.semantic_attempts =
                             u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
                         let diagnostic_category = if semantic_attempts > 0 {
@@ -1988,6 +2036,11 @@ async fn run_multi_stage_broad_triage(
             "semantic_attempts": semantic_attempts,
             "diagnostic_category": if last_attempt_empty_terminal && validation_errors.is_empty() {
                 "empty_terminal_answer"
+            } else if matches!(
+                validation_errors.last(),
+                Some(crate::investigation_answer::ValidationError::RoleCoverage)
+            ) {
+                "role_coverage_failure"
             } else {
                 "final_comparison_failure"
             },
@@ -14007,7 +14060,75 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         assert!(final_comparison_correction(Some("parse")).contains("extra closing delimiter"));
         assert!(final_comparison_correction(Some("duplicate_id")).contains("globally unique"));
         assert!(final_comparison_correction(Some("role_mismatch")).contains("downstream symptom"));
+        assert!(final_comparison_correction(Some("role_coverage")).contains("symptoms section"));
         assert!(!final_comparison_correction(Some("wrong_scope")).contains("rejected"));
+    }
+
+    #[test]
+    fn multi_stage_role_coverage_requires_a_symptom_claim_for_symptom_evidence() {
+        let ledger = {
+            let binding = crate::investigation_answer::AnswerBindingV1 {
+                session_id: "s".into(),
+                turn_id: "t".into(),
+                corpus_id: "c".into(),
+                revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                    event_revision: 1,
+                    template_analysis_revision: 2,
+                    suppression_revision: 3,
+                },
+                ledger_digest: String::new(),
+            };
+            let evidence = vec![
+                crate::investigation_answer::HostEvidenceEntry {
+                    evidence_id: "e-a".into(),
+                    candidate_id: "a".into(),
+                    source_label: "a.log".into(),
+                    locator: "seq=1".into(),
+                    corpus_id: "c".into(),
+                    revision: binding.revision,
+                    role: crate::investigation_answer::EvidenceRole::Cause,
+                    content: "cause".into(),
+                },
+                crate::investigation_answer::HostEvidenceEntry {
+                    evidence_id: "e-b".into(),
+                    candidate_id: "b".into(),
+                    source_label: "b.log".into(),
+                    locator: "seq=2".into(),
+                    corpus_id: "c".into(),
+                    revision: binding.revision,
+                    role: crate::investigation_answer::EvidenceRole::Symptom,
+                    content: "symptom".into(),
+                },
+            ];
+            let binding = crate::investigation_answer::AnswerBindingV1 {
+                ledger_digest: crate::investigation_answer::HostEvidenceLedger::digest(&evidence),
+                ..binding
+            };
+            crate::investigation_answer::HostEvidenceLedger::new(binding, evidence).unwrap()
+        };
+        let missing = serde_json::json!({
+            "schema": crate::investigation_answer::SCHEMA_V1,
+            "candidates": [
+                {"candidate_id":"a","observations":[{"claim_id":"a-observation","text":"cause","evidence_ids":["e-a"]}]},
+                {"candidate_id":"b","observations":[{"claim_id":"b-observation","text":"symptom","evidence_ids":["e-b"]}]}
+            ]
+        })
+        .to_string();
+        let missing =
+            crate::investigation_answer::validate_model_answer(&missing, &ledger).unwrap();
+        assert!(multi_stage_missing_symptom_role_coverage(&missing));
+
+        let covered = serde_json::json!({
+            "schema": crate::investigation_answer::SCHEMA_V1,
+            "candidates": [
+                {"candidate_id":"a","observations":[{"claim_id":"a-observation","text":"cause","evidence_ids":["e-a"]}]},
+                {"candidate_id":"b","symptoms":[{"claim_id":"b-symptom","text":"symptom","evidence_ids":["e-b"]}]}
+            ]
+        })
+        .to_string();
+        let covered =
+            crate::investigation_answer::validate_model_answer(&covered, &ledger).unwrap();
+        assert!(!multi_stage_missing_symptom_role_coverage(&covered));
     }
 
     #[test]
