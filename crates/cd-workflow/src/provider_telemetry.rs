@@ -80,6 +80,10 @@ fn round_from_call(call: &TracedCall) -> ProviderRoundTelemetry {
         TracedOutcome::Failed { message } => {
             ("failed".to_string(), None, None, Some(message.clone()))
         }
+        // Fixed terminal class strings only — never invent bodies from host
+        // cancel/deadline paths (those outcomes carry no message by design).
+        TracedOutcome::Cancelled => ("cancelled".to_string(), None, None, None),
+        TracedOutcome::TimedOut => ("timed_out".to_string(), None, None, None),
     };
     let truncated = finish_reason
         .as_deref()

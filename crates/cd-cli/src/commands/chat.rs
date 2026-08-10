@@ -1227,6 +1227,9 @@ fn build_trace_lines(
                     None,
                 ),
                 TracedOutcome::Failed { message } => ("failed", None, None, Some(message.clone())),
+                // Host cancel/deadline terminals: class only, no invented bodies.
+                TracedOutcome::Cancelled => ("cancelled", None, None, None),
+                TracedOutcome::TimedOut => ("timed_out", None, None, None),
             };
             let round_key = u32::try_from(call.seq).unwrap_or(u32::MAX);
             let context = TraceContextLine {

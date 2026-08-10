@@ -788,6 +788,18 @@ impl ActivityRecorder {
                 format!("Model request failed (round {})", round + 1),
                 Some("Provider request failed before completion".to_string()),
             ),
+            // Host cancel / deadline terminal outcomes: fixed metadata only —
+            // no error bodies, prompts, or provider text.
+            TracedOutcome::Cancelled => (
+                ActivityStatus::Cancelled,
+                format!("Model request cancelled (round {})", round + 1),
+                Some("Host cancelled the in-flight provider request".to_string()),
+            ),
+            TracedOutcome::TimedOut => (
+                ActivityStatus::Failed,
+                format!("Model request timed out (round {})", round + 1),
+                Some("Host deadline expired while waiting on the provider".to_string()),
+            ),
         };
         let context = ContextMetadata {
             round,
