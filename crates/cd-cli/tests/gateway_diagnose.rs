@@ -435,3 +435,130 @@ async fn a_preexisting_user_corpus_is_never_touched_by_the_diagnostic_run() {
         "gateway diagnose must never remove or corrupt a corpus it did not create itself"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: every request (direct qualification lane AND product-path
+// turns) must hit the exact --profile/--model selection, never the shared
+// AppConfig's active/default profile. Two distinct mock gateways stand in
+// for "the active/default profile's endpoint" and "the exact selected
+// profile's endpoint" — if a single byte of traffic reaches the decoy, a
+// case silently used the wrong provider/model and the differential result
+// is invalid.
+// ---------------------------------------------------------------------------
+
+fn two_profile_config(
+    active_base_url: &str,
+    active_model: &str,
+    selected_id: &str,
+    selected_base_url: &str,
+    selected_default_model: &str,
+) -> AppConfig {
+    let active = ProviderProfile {
+        id: "active-decoy".into(),
+        label: "active decoy profile".into(),
+        kind: ProviderKind::OpenAiCompatible,
+        base_url: active_base_url.into(),
+        api_key_ref: None,
+        chat_model: active_model.into(),
+        embedding_model: None,
+        embedding_base_url: None,
+        capabilities: ProviderCapabilities::chat_remote(),
+        local_only: false,
+        deadline_preference: Default::default(),
+    };
+    let selected = ProviderProfile {
+        id: selected_id.into(),
+        label: "selected exact profile".into(),
+        kind: ProviderKind::OpenAiCompatible,
+        base_url: selected_base_url.into(),
+        api_key_ref: None,
+        chat_model: selected_default_model.into(),
+        embedding_model: None,
+        embedding_base_url: None,
+        capabilities: ProviderCapabilities::chat_remote(),
+        local_only: false,
+        deadline_preference: Default::default(),
+    };
+    AppConfig {
+        providers: ProviderConfig {
+            // The active/default profile is deliberately NOT the one
+            // selected via --profile/--model below.
+            active_id: Some(active.id.clone()),
+            profiles: vec![active, selected],
+        },
+        ..AppConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn direct_and_product_lanes_use_the_exact_selected_profile_and_model_not_the_active_default()
+{
+    let decoy_gateway = MockGateway::start_routed(|_req| {
+        Step::respond(Response::json_ok(&openai_completion_body(
+            "decoy gateway must never be called",
+        )))
+    })
+    .await;
+    let selected_gateway = permissive_gateway().await;
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let cfg = two_profile_config(
+        &format!("{}/v1", decoy_gateway.base_url()),
+        "decoy-model",
+        "selected-real",
+        &format!("{}/v1", selected_gateway.base_url()),
+        "selected-profile-default-model",
+    );
+    save_config(&data_dir.path().join("config.json"), &cfg).expect("write config");
+
+    let mut cmd = cli(data_dir.path());
+    cmd.args([
+        "--json",
+        "--profile",
+        "selected-real",
+        "--model",
+        "selected-exact-model",
+        "gateway",
+        "diagnose",
+        "--yes",
+        "--timeout",
+        "30",
+    ]);
+    let output = run_blocking(cmd).await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        decoy_gateway.request_count(),
+        0,
+        "not one request may reach the active/default profile's endpoint when \
+         --profile/--model explicitly selected a different one: stdout={stdout}"
+    );
+    assert!(
+        selected_gateway.request_count() > 0,
+        "the exact selected profile's endpoint must receive this run's requests: stdout={stdout}"
+    );
+
+    // Every request that carries a "model" field in its JSON body — both the
+    // direct qualification lane and every product-lane chat-workflow call —
+    // must name the exact --model override, never the selected profile's own
+    // configured default model and never the decoy's model.
+    let mut model_carrying_requests = 0usize;
+    for request in selected_gateway.requests() {
+        let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+            continue;
+        };
+        let Some(model) = body.get("model").and_then(Value::as_str) else {
+            continue;
+        };
+        model_carrying_requests += 1;
+        assert_eq!(
+            model, "selected-exact-model",
+            "request carried the wrong model id (path={}): body={body}",
+            request.path
+        );
+    }
+    assert!(
+        model_carrying_requests > 0,
+        "expected at least one request (qualification or product-path) to carry a model field"
+    );
+}

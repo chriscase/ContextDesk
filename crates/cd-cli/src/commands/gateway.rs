@@ -845,10 +845,32 @@ async fn run_one_case(
     let deadline = Instant::now() + budget;
     match case_id {
         "ordinary_generation" => {
-            case_ordinary_generation(paths, cfg, secrets, sessions, qual, deadline, cancel).await
+            case_ordinary_generation(
+                paths,
+                cfg,
+                secrets,
+                sessions,
+                &profile.id,
+                model,
+                qual,
+                deadline,
+                cancel,
+            )
+            .await
         }
         "structured_response" => {
-            case_structured_response(paths, cfg, secrets, sessions, qual, deadline, cancel).await
+            case_structured_response(
+                paths,
+                cfg,
+                secrets,
+                sessions,
+                &profile.id,
+                model,
+                qual,
+                deadline,
+                cancel,
+            )
+            .await
         }
         "tool_call_continuation" => {
             case_tool_call_continuation(
@@ -856,6 +878,8 @@ async fn run_one_case(
                 cfg,
                 secrets,
                 sessions,
+                &profile.id,
+                model,
                 qual,
                 deadline,
                 cancel,
@@ -870,6 +894,8 @@ async fn run_one_case(
                 cfg,
                 secrets,
                 sessions,
+                &profile.id,
+                model,
                 deadline,
                 cancel,
                 created_sessions,
@@ -882,6 +908,8 @@ async fn run_one_case(
                 cfg,
                 secrets,
                 sessions,
+                &profile.id,
+                model,
                 deadline,
                 cancel,
                 level,
@@ -1064,6 +1092,8 @@ async fn one_turn(
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
     sessions: &SessionStore,
+    profile_id: &str,
+    model: &str,
     question: &str,
     corpus_id: Option<&str>,
     user_selection: Option<&str>,
@@ -1098,8 +1128,14 @@ async fn one_turn(
         question,
         ChatWorkflowRequest {
             corpus_id,
-            explicit_profile_id: None,
-            chat_model_override: None,
+            // The command's whole point is a differential against the exact
+            // selected profile/model — never the shared AppConfig's
+            // active/default profile, which may silently differ from what
+            // the operator passed via --profile/--model. Both fields are
+            // ChatWorkflowRequest-only per-turn overrides; nothing here
+            // reads or writes AppConfig itself.
+            explicit_profile_id: Some(profile_id),
+            chat_model_override: Some(model),
             dry_run: false,
             trace_sink: Some(trace_sink),
             user_selection,
@@ -1123,11 +1159,14 @@ async fn one_turn(
     (outcome, recorder.calls(), started.elapsed())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn case_ordinary_generation(
     paths: &Paths,
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
     sessions: &SessionStore,
+    profile_id: &str,
+    model: &str,
     qual: Option<&SharedQualification>,
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
@@ -1138,7 +1177,7 @@ async fn case_ordinary_generation(
     );
     let question = format!("Reply with exactly this token and nothing else: {GENERATION_MARKER}");
     let (outcome, calls, elapsed) = one_turn(
-        paths, cfg, secrets, sessions, &question, None, None, deadline, cancel,
+        paths, cfg, secrets, sessions, profile_id, model, &question, None, None, deadline, cancel,
     )
     .await;
     let product = match outcome {
@@ -1183,11 +1222,14 @@ async fn case_ordinary_generation(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn case_structured_response(
     paths: &Paths,
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
     sessions: &SessionStore,
+    profile_id: &str,
+    model: &str,
     qual: Option<&SharedQualification>,
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
@@ -1201,7 +1243,7 @@ async fn case_structured_response(
          {{\"ok\": true, \"marker\": \"{GENERATION_MARKER}\"}}"
     );
     let (outcome, calls, elapsed) = one_turn(
-        paths, cfg, secrets, sessions, &question, None, None, deadline, cancel,
+        paths, cfg, secrets, sessions, profile_id, model, &question, None, None, deadline, cancel,
     )
     .await;
     let product = match outcome {
@@ -1328,6 +1370,8 @@ async fn case_tool_call_continuation(
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
     sessions: &SessionStore,
+    profile_id: &str,
+    model: &str,
     qual: Option<&SharedQualification>,
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
@@ -1381,6 +1425,8 @@ async fn case_tool_call_continuation(
         cfg,
         secrets,
         sessions,
+        profile_id,
+        model,
         &question,
         Some(&corpus_id),
         None,
@@ -1442,11 +1488,14 @@ async fn case_tool_call_continuation(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn case_attachment_selected_context(
     paths: &Paths,
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
     sessions: &SessionStore,
+    profile_id: &str,
+    model: &str,
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
     created_sessions: &mut Vec<String>,
@@ -1465,6 +1514,8 @@ async fn case_attachment_selected_context(
         cfg,
         secrets,
         sessions,
+        profile_id,
+        model,
         question,
         None,
         Some(&selection),
@@ -1730,6 +1781,8 @@ async fn case_linked_log_triage(
     cfg: &AppConfig,
     secrets: &dyn SecretStore,
     sessions: &SessionStore,
+    profile_id: &str,
+    model: &str,
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
     level: DiagnoseLevel,
@@ -1791,6 +1844,8 @@ async fn case_linked_log_triage(
             cfg,
             secrets,
             sessions,
+            profile_id,
+            model,
             &question,
             Some(&corpus_id),
             None,
