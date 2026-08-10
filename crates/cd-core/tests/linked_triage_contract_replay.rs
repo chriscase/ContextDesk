@@ -14,9 +14,9 @@ use cd_core::investigation_answer::{
     HostEvidenceLedger, LogSnapshotRevisionV1, ValidationError, SCHEMA_V1,
 };
 use cd_core::linked_triage_contract::{
-    classify_candidate_stage_outcome, classify_final_comparison_outcome, is_empty_visible_terminal,
-    normalize_known_json_wrapper, preparation_for_host_validation,
-    visible_text_leaks_reasoning_markers, LinkedTriageDiagnosticCategory,
+    classify_final_comparison_outcome, is_empty_visible_terminal, normalize_known_json_wrapper,
+    preparation_for_host_validation, visible_text_leaks_reasoning_markers,
+    LinkedTriageDiagnosticCategory,
 };
 use serde_json::json;
 
@@ -268,38 +268,27 @@ fn wrong_candidate_evidence_scope_fails_closed() {
 }
 
 #[test]
-fn wrong_revision_fails_closed() {
-    let mut ledger = ledger_two_candidates();
-    // Build proposal against current ledger, then mutate a citation path via
-    // stale evidence in a second ledger.
-    let raw = valid_final_json();
-    validate_model_answer(&raw, &ledger).unwrap();
-
-    // Re-bind ledger with different event_revision while keeping same ids.
-    let mut evidence = ledger.entries();
-    for e in &mut evidence {
-        e.revision.event_revision = 99;
-    }
+fn wrong_revision_fails_closed_at_ledger_construction() {
+    // Production host ledger construction refuses entry/binding revision
+    // mismatch (WrongRevision). validate_model_answer's WrongRevision arm is
+    // defensive once a ledger is built — see investigation_answer unit tests.
+    let mut evidence = ledger_two_candidates().entries();
+    evidence[0].revision.event_revision = 99;
     let binding = AnswerBindingV1 {
         session_id: "s".into(),
         turn_id: "t".into(),
         corpus_id: "c".into(),
-        revision: LogSnapshotRevisionV1 {
-            event_revision: 99,
-            template_analysis_revision: 2,
-            suppression_revision: 3,
-        },
+        revision: revision(), // event_revision still 1
         ledger_digest: HostEvidenceLedger::digest(&evidence),
     };
-    // Proposal still cites original revision-bound ids from first ledger —
-    // using stale revision on entries with same ids: validation uses ledger
-    // binding revision vs entry revision match at construction.
-    ledger = HostEvidenceLedger::new(binding, evidence).unwrap();
-    // Proposal evidence_ids still valid for this ledger's ids; WrongRevision
-    // triggers when proposal cites entry whose revision != binding — forge via
-    // mismatched entry inside ledger construction is prevented. Use forged
-    // evidence id that exists but with wrong binding - covered by unit tests.
-    // Here prove unknown evidence still fail-closed (citation integrity).
+    assert_eq!(
+        HostEvidenceLedger::new(binding, evidence).unwrap_err(),
+        ValidationError::WrongRevision
+    );
+}
+
+#[test]
+fn unknown_evidence_citation_fails_closed() {
     let forged = json!({
         "schema": SCHEMA_V1,
         "candidates": [{
@@ -320,7 +309,7 @@ fn wrong_revision_fails_closed() {
     })
     .to_string();
     assert_eq!(
-        validate_model_answer(&forged, &ledger).unwrap_err(),
+        validate_model_answer(&forged, &ledger_two_candidates()).unwrap_err(),
         ValidationError::UnknownEvidence
     );
 }
@@ -331,8 +320,8 @@ fn wrong_revision_fails_closed() {
 
 #[test]
 fn valid_then_invalid_final_comparison_classified_distinctly() {
-    // Candidate stage would accept bare assessment JSON (simulated by
-    // successful normalize + schema-shaped object); final stage rejects.
+    // Candidate-shaped JSON normalizes (production unwrap path). Final
+    // comparison against host ledger fails closed with a real ValidationError.
     let candidate_like = json!({
         "schema": "contextdesk.candidate_assessment.v1",
         "candidate_id": "trace:alpha",
@@ -342,14 +331,11 @@ fn valid_then_invalid_final_comparison_classified_distinctly() {
     })
     .to_string();
     assert!(normalize_known_json_wrapper(&candidate_like).is_some());
-    assert_eq!(
-        classify_candidate_stage_outcome(false, true, false, false),
-        LinkedTriageDiagnosticCategory::CompatibleSuccess
-    );
 
     let bad_final = r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[]}"#;
     let err = validate_model_answer(bad_final, &ledger_two_candidates()).unwrap_err();
-    // Empty candidates still parse schema but fail ledger/claim rules.
+    // Production multi-stage maps non-empty validation failure → FinalComparisonFailure
+    // (see agent::tests::multi_stage_final_comparison_preserves_ordered_validation_categories).
     let cat = classify_final_comparison_outcome(false, Err(err), 0, false, false);
     assert_eq!(cat, LinkedTriageDiagnosticCategory::FinalComparisonFailure);
     assert_ne!(
@@ -357,32 +343,30 @@ fn valid_then_invalid_final_comparison_classified_distinctly() {
         LinkedTriageDiagnosticCategory::CandidateContractFailure.as_str(),
         "final comparison failure must not collapse into candidate_contract"
     );
-}
-
-// ---------------------------------------------------------------------------
-// Bounded semantic correction success / failure
-// ---------------------------------------------------------------------------
-
-#[test]
-fn successful_bounded_correction_category_requires_positive_attempts() {
-    assert_eq!(
-        classify_final_comparison_outcome(false, Ok(()), 1, false, false),
-        LinkedTriageDiagnosticCategory::SuccessfulBoundedCorrection
-    );
-    // First-try success is CompatibleSuccess, not correction.
-    assert_eq!(
-        classify_final_comparison_outcome(false, Ok(()), 0, false, false),
-        LinkedTriageDiagnosticCategory::CompatibleSuccess
+    assert_ne!(
+        cat.as_str(),
+        LinkedTriageDiagnosticCategory::EmptyTerminalAnswer.as_str()
     );
 }
 
+// ---------------------------------------------------------------------------
+// Empty vs parse fork (production preparation_for_host_validation)
+// Full multi-stage correction/timeout/transport mapping is in agent::tests.
+// ---------------------------------------------------------------------------
+
 #[test]
-fn correction_exhausted_still_final_comparison_failure() {
-    // After corrections, still parse error → final comparison failure, not timeout.
+fn preparation_path_distinguishes_empty_terminal_from_malformed_parse() {
     assert_eq!(
-        classify_final_comparison_outcome(false, Err(ValidationError::Parse), 2, false, false),
-        LinkedTriageDiagnosticCategory::FinalComparisonFailure
+        preparation_for_host_validation("<think>only thoughts</think>"),
+        Err(LinkedTriageDiagnosticCategory::EmptyTerminalAnswer)
     );
+    let malformed = preparation_for_host_validation("{not-json").unwrap();
+    assert_eq!(
+        validate_model_answer(&malformed, &ledger_two_candidates()).unwrap_err(),
+        ValidationError::Parse
+    );
+    assert!(is_empty_visible_terminal("<think>x</think>"));
+    assert!(!is_empty_visible_terminal("{not-json"));
 }
 
 // ---------------------------------------------------------------------------
@@ -418,19 +402,13 @@ fn final_answer_channel_is_json_object_not_tool_calls() {
 }
 
 // ---------------------------------------------------------------------------
-// Transport / timeout categories stay distinct
+// Category labels (stable wire strings) — production multi-stage mapping is
+// proven in agent::tests::multi_stage_*_empty_terminal_* and
+// multi_stage_outcome_classifier_maps_transport_and_timeout.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn transport_and_timeout_categories_are_distinct_from_contract_failures() {
-    assert_eq!(
-        classify_final_comparison_outcome(false, Ok(()), 0, true, false).as_str(),
-        "transport_failure"
-    );
-    assert_eq!(
-        classify_final_comparison_outcome(false, Ok(()), 0, false, true).as_str(),
-        "timeout"
-    );
+fn transport_and_timeout_labels_remain_distinct_from_contract_failures() {
     assert_ne!(
         LinkedTriageDiagnosticCategory::TransportFailure.as_str(),
         LinkedTriageDiagnosticCategory::FinalComparisonFailure.as_str()
@@ -438,6 +416,10 @@ fn transport_and_timeout_categories_are_distinct_from_contract_failures() {
     assert_ne!(
         LinkedTriageDiagnosticCategory::Timeout.as_str(),
         LinkedTriageDiagnosticCategory::CandidateContractFailure.as_str()
+    );
+    assert_ne!(
+        LinkedTriageDiagnosticCategory::EmptyTerminalAnswer.as_str(),
+        LinkedTriageDiagnosticCategory::FinalComparisonFailure.as_str()
     );
 }
 
