@@ -777,7 +777,6 @@ fn print_terminal(
 // ---------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 async fn run_one_case(
     case_id: &'static str,
     profile: &ProviderProfile,
