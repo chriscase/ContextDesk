@@ -331,22 +331,24 @@ async fn openai_embed_backend_and_http_rerank_share_registered_contracts() {
 
 #[test]
 fn appconfig_retrieval_roles_default_to_openai_compatible_wire() {
-    let mut cfg = AppConfig::default();
-    cfg.retrieval = RetrievalSettings {
-        embedding: Some(role(
-            "http://127.0.0.1:9/v1",
-            "bge-m3",
-            None,
-            EmbedWireKind::OpenAiCompatible,
-            RerankDialect::TeiCohere,
-        )),
-        reranker: Some(role(
-            "http://127.0.0.1:9",
-            "qwen3-reranker-0.6b",
-            None,
-            EmbedWireKind::OpenAiCompatible,
-            RerankDialect::TeiCohere,
-        )),
+    let cfg = AppConfig {
+        retrieval: RetrievalSettings {
+            embedding: Some(role(
+                "http://127.0.0.1:9/v1",
+                "bge-m3",
+                None,
+                EmbedWireKind::OpenAiCompatible,
+                RerankDialect::TeiCohere,
+            )),
+            reranker: Some(role(
+                "http://127.0.0.1:9",
+                "qwen3-reranker-0.6b",
+                None,
+                EmbedWireKind::OpenAiCompatible,
+                RerankDialect::TeiCohere,
+            )),
+        },
+        ..AppConfig::default()
     };
     let emb = cfg.retrieval.embedding.as_ref().unwrap();
     assert_eq!(emb.embed_wire, EmbedWireKind::OpenAiCompatible);
