@@ -1052,12 +1052,17 @@ pub fn parse_openai_completion(text: &str) -> CoreResult<ChatCompletion> {
         .to_string();
     let mut tool_calls = Vec::new();
     if let Some(arr) = message.get("tool_calls").and_then(|t| t.as_array()) {
-        for tc in arr {
+        for (idx, tc) in arr.iter().enumerate() {
+            // A position-unique fallback (matching StreamAccumulator's
+            // "call_{n}" convention) — a literal "call" for every id-less
+            // tool call in one response would collide whenever there is more
+            // than one, making a tool-result continuation unable to address
+            // them individually.
             let id = tc
                 .get("id")
                 .and_then(|x| x.as_str())
-                .unwrap_or("call")
-                .to_string();
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("call_{idx}"));
             let func = tc.get("function").cloned().unwrap_or(json!({}));
             let name = func
                 .get("name")
