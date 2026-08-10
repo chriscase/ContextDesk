@@ -5,7 +5,7 @@
 //! - `cli.toml` (this crate's own [`crate::config`] schema) — CLI-only
 //!   behavior preferences (output format, color, the CLI's profile pointer).
 //! - the shared `AppConfig` (`cd_core::config`, same file the desktop app
-//!   reads/writes) — provider profiles (keychain refs only, never a raw
+//!   reads/writes) — provider profiles (credential refs only, never a raw
 //!   secret) and the configured default timezone.
 //!
 //! Data-location configuration is report-only here: `--data-dir` /
@@ -15,10 +15,9 @@
 //! what was chosen, never choose it itself (there is nothing to read a
 //! saved choice from until a config file exists at that location).
 //!
-//! A configured credential is committed to the OS keychain as the single
-//! last fallible step of the whole command — after both config files are
-//! written, not before — so a failure anywhere in the run can never orphan
-//! a stored secret that nothing references (see `run_init`'s doc comment).
+//! A credential selected for Keychain import is committed as the single last
+//! fallible step of the whole command. A protected-file reference is validated
+//! and saved directly and is never copied into Keychain.
 //! Every wizard prompt writes to stderr, never stdout, so an interactive
 //! run under `--json`/`--jsonl` still emits one clean, parseable envelope
 //! on stdout.
@@ -32,7 +31,9 @@ use crate::config::{
 use crate::envelope::{CliError, CliResult, Render};
 use crate::provider_probe;
 use cd_core::config::{is_valid_iana_timezone, AppConfig};
-use cd_core::keychain_store::{key_ref_for_profile, SecretStore};
+use cd_core::keychain_store::{
+    file_secret_ref, key_ref_for_profile, read_file_secret_ref, SecretStore,
+};
 use cd_core::providers::{
     descriptor_for, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
 };
@@ -57,6 +58,8 @@ pub struct InitOutput {
     pub provider_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential_configured: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_timezone: Option<String>,
     /// Human-readable outcome of the optional connectivity check — never
@@ -95,7 +98,9 @@ impl Render for InitOutput {
             lines.push(format!(
                 "credential: {}",
                 if self.credential_configured.unwrap_or(false) {
-                    "configured (keychain reference only)"
+                    self.credential_source
+                        .as_deref()
+                        .unwrap_or("configured reference")
                 } else {
                     "not configured"
                 }
@@ -357,11 +362,13 @@ async fn run_init(
     // function's doc comment for why the credential is stored here and not
     // inside `configure_provider_profile`.
     if let Some(setup) = &provider_setup {
-        if let Some(secret) = &setup.secret {
-            let key_ref = key_ref_for_profile(&setup.profile_id);
-            secrets
-                .set(&key_ref, secret)
-                .map_err(|e| CliError::internal(format!("store credential: {e}")))?;
+        if setup.persist_secret {
+            if let Some(secret) = &setup.secret {
+                let key_ref = key_ref_for_profile(&setup.profile_id);
+                secrets
+                    .set(&key_ref, secret)
+                    .map_err(|e| CliError::internal(format!("store credential: {e}")))?;
+            }
         }
     }
 
@@ -373,6 +380,9 @@ async fn run_init(
         provider_profile_id: provider_setup.as_ref().map(|s| s.profile_id.clone()),
         provider_kind: provider_setup.as_ref().map(|s| s.kind_label.to_string()),
         credential_configured: provider_setup.as_ref().map(|s| s.credential_configured),
+        credential_source: provider_setup
+            .as_ref()
+            .map(|s| s.credential_source.to_string()),
         default_timezone: timezone_written,
         connectivity_check: provider_setup
             .as_ref()
@@ -491,6 +501,8 @@ struct ProviderSetupResult {
     kind_label: &'static str,
     credential_configured: bool,
     secret: Option<String>,
+    persist_secret: bool,
+    credential_source: &'static str,
     timezone: Option<String>,
     probe_summary: Option<String>,
     catalog_models: Vec<String>,
@@ -579,7 +591,17 @@ async fn configure_provider_profile(
     // file fails before anything else runs, but NOT stored anywhere yet —
     // see this module's `run_init` doc comment for why storing is deferred
     // to the very end of the whole command.
-    let secret = resolve_credential(args, descriptor.needs_api_key, interactive, stdin, stderr)?;
+    let direct_file_ref = args
+        .api_key_file_ref
+        .as_deref()
+        .map(file_secret_ref)
+        .transpose()
+        .map_err(|error| CliError::user(error.to_string()))?;
+    let secret = if let Some(reference) = direct_file_ref.as_deref() {
+        read_file_secret_ref(reference).map_err(|error| CliError::user(error.to_string()))?
+    } else {
+        resolve_credential(args, descriptor.needs_api_key, interactive, stdin, stderr)?
+    };
     let credential_configured = secret.is_some();
 
     let want_check = if args.check_connection {
@@ -595,10 +617,12 @@ async fn configure_provider_profile(
         false
     };
 
-    // The keychain ref this profile WILL be stored under — computed here,
-    // deterministically, from the profile id alone. Nothing is written to
-    // the keychain yet (see `run_init`).
-    let api_key_ref = secret.as_ref().map(|_| key_ref_for_profile(&profile_id));
+    // The profile holds a reference only. Direct protected files keep their
+    // exact `file:` reference; imported values use the deterministic Keychain
+    // reference and are written only at the end of `run_init`.
+    let api_key_ref = direct_file_ref
+        .clone()
+        .or_else(|| secret.as_ref().map(|_| key_ref_for_profile(&profile_id)));
     let provisional_model = requested_chat_model.clone().unwrap_or_else(|| {
         if matches!(kind, ProviderKind::Ollama) {
             "mistral".into()
@@ -675,6 +699,14 @@ async fn configure_provider_profile(
         kind_label: descriptor.default_label,
         credential_configured,
         secret,
+        persist_secret: direct_file_ref.is_none(),
+        credential_source: if direct_file_ref.is_some() {
+            "protected_file"
+        } else if credential_configured {
+            "keychain"
+        } else {
+            "none"
+        },
         timezone,
         probe_summary,
         catalog_models,
@@ -1008,6 +1040,7 @@ mod tests {
             profile_label: None,
             api_key_env: None,
             api_key_file: None,
+            api_key_file_ref: None,
             api_key_stdin: false,
             check_connection: false,
         }
@@ -1102,6 +1135,47 @@ mod tests {
         let app_config_text = std::fs::read_to_string(&paths.app_config_path).unwrap();
         assert!(!app_config_text.contains("sk-should-land-in-keychain"));
         assert!(app_config_text.contains(&key_ref));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_init_can_keep_a_protected_file_without_touching_keychain_store() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, paths) = isolated_paths();
+        let credential_path = dir.path().join("vercel.key");
+        std::fs::write(&credential_path, "synthetic-file-credential\n").unwrap();
+        std::fs::set_permissions(&credential_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut args = base_args();
+        args.provider_kind = Some(ProviderKindArg::OpenAiCompatible);
+        args.base_url = Some("http://127.0.0.1:1/v1".into());
+        args.chat_model = Some("test-model".into());
+        args.profile_id = Some("test-profile-file-ref".into());
+        args.api_key_file_ref = Some(credential_path.clone());
+
+        let secrets = MemorySecretStore::new();
+        let out = run_init(&args, &paths, dir.path(), &AppConfig::default(), &secrets)
+            .await
+            .expect("protected-file setup must succeed");
+
+        let key_ref = key_ref_for_profile("test-profile-file-ref");
+        assert_eq!(
+            secrets.get(&key_ref).unwrap(),
+            None,
+            "direct protected-file setup must not import into the secret store"
+        );
+        let cfg = cd_core::config::load_config(&paths.app_config_path).unwrap();
+        let profile = cfg.providers.active().unwrap();
+        let expected_reference = format!("file:{}", credential_path.display());
+        assert_eq!(
+            profile.api_key_ref.as_deref(),
+            Some(expected_reference.as_str())
+        );
+        let rendered = out.render_json();
+        assert_eq!(rendered["credential_source"], "protected_file");
+        let serialized = std::fs::read_to_string(&paths.app_config_path).unwrap();
+        assert!(!serialized.contains("synthetic-file-credential"));
     }
 
     /// A rejected value (invalid timezone) must abort `run_init` before

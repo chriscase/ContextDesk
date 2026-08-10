@@ -211,6 +211,7 @@ export function useSettingsController({
             baseUrl: active.base_url || d.baseUrl,
             chatModel: active.chat_model || d.chatModel,
             hasApiKey: active.has_key,
+            apiKeyFilePath: active.api_key_file_path ?? undefined,
             toolsEnabled: active.tools_enabled ?? true,
             localOnly: kind === "ollama",
             deadlinePreference: active.deadline_preference ?? "auto",
@@ -504,6 +505,10 @@ export function useSettingsController({
           source.providerKind === "xai_grok_build"
             ? undefined
             : keyDraft.trim() || undefined,
+        apiKeyFile:
+          source.providerKind === "xai_grok_build"
+            ? undefined
+            : source.apiKeyFilePath?.trim() || undefined,
         localOnly:
           source.providerKind === "xai_grok_build"
             ? false
@@ -515,6 +520,7 @@ export function useSettingsController({
       return {
         ...source,
         hasApiKey: saved.has_key,
+        apiKeyFilePath: saved.api_key_file_path ?? undefined,
         baseUrl: saved.base_url,
         chatModel: saved.chat_model,
         providerLabel: saved.label,
@@ -535,7 +541,7 @@ export function useSettingsController({
     }
   };
 
-  /** Wizard one-shot: merge payload, write host profile + keychain, close dirty. */
+  /** Wizard one-shot: merge payload, persist the selected credential source, close dirty. */
   const applyAndSaveAi = async (payload: WizardApplyPayload) => {
     const key = payload.apiKey ?? apiKeyDraft;
     let next: AppSetupState = { ...draft, ...payload.setup };
@@ -554,7 +560,7 @@ export function useSettingsController({
   const save = async () => {
     let next: AppSetupState = { ...draft };
 
-    // Persist AI provider + optional API key (keychain only; never in setup JSON).
+    // Persist AI provider + optional Keychain or protected-file credential source.
     if (draft.providerKind !== "none") {
       const savedAi = await persistAiProvider(draft, apiKeyDraft);
       if (!savedAi) return;

@@ -392,6 +392,7 @@ export function useShellState() {
         baseUrl: p.base_url || s.baseUrl,
         chatModel: p.chat_model || s.chatModel,
         hasApiKey: p.has_key,
+        apiKeyFilePath: p.api_key_file_path ?? undefined,
         toolsEnabled: p.tools_enabled ?? true,
         localOnly: kind === "ollama",
       }));

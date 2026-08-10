@@ -102,6 +102,7 @@ export function AiSection({
         kind,
         baseUrl: draft.baseUrl,
         apiKey: apiKeyDraft.trim() || null,
+        apiKeyFile: draft.apiKeyFilePath?.trim() || null,
         localOnly: draft.localOnly ?? kind === "ollama",
         chatModel: null,
       }).then((list) => {
@@ -138,6 +139,7 @@ export function AiSection({
     draft.providerKind,
     draft.baseUrl,
     draft.localOnly,
+    draft.apiKeyFilePath,
     apiKeyDraft,
     draft.hasApiKey,
     modelsTick,
@@ -201,7 +203,7 @@ export function AiSection({
   <div className="ai-wizard__mode-row">
     <p className="section-lead" style={{ margin: 0, flex: 1 }}>
       Advanced AI settings. Paste a base URL (or pick Ollama / Grok Build)
-      and we list models when reachable. Keys go to the OS keychain.
+      and we list models when reachable. Choose Keychain or a protected file.
     </p>
     <button
       type="button"
@@ -428,8 +430,8 @@ export function AiSection({
             <>
               <p>
                 {draft.providerKind === "anthropic"
-                  ? "Required for Anthropic Messages API. ContextDesk stores the key in the OS keychain — never in local config files or chat history."
-                  : "Required for most OpenAI-compatible gateways. ContextDesk stores the key in the OS keychain — never in local config files or chat history."}
+                  ? "Required for Anthropic Messages API. Paste it for OS Keychain storage, or name a protected file below."
+                  : "Required for most OpenAI-compatible gateways. Paste it for OS Keychain storage, or name a protected file below."}
               </p>
               <ol>
                 <li>
@@ -451,15 +453,17 @@ export function AiSection({
         }}
         value={apiKeyDraft}
         error={
-          !draft.hasApiKey && !apiKeyDraft.trim()
+          !draft.hasApiKey &&
+          !apiKeyDraft.trim() &&
+          !draft.apiKeyFilePath?.trim()
             ? draft.providerKind === "anthropic"
               ? "Required for Anthropic."
               : "Required for remote gateways."
             : null
         }
         ok={
-          draft.hasApiKey && !apiKeyDraft
-            ? "Key in OS keychain (enter a new value to replace)"
+          draft.hasApiKey && !apiKeyDraft && !draft.apiKeyFilePath?.trim()
+            ? "Saved credential will be kept (enter a new value to replace)"
             : apiKeyDraft.trim()
               ? "Will store in OS keychain on Save"
               : null
@@ -468,6 +472,9 @@ export function AiSection({
           setApiKeyDraft(e.target.value);
           setDraft((d) => ({
             ...d,
+            apiKeyFilePath: e.target.value.trim()
+              ? undefined
+              : d.apiKeyFilePath,
             remoteReachable: null,
           }));
         }}
@@ -476,6 +483,33 @@ export function AiSection({
             ? "•••••••• (stored securely)"
             : "Paste key — stored in keychain on Save"
         }
+        autoComplete="off"
+      />
+      <TextField
+        id={`${baseId}-key-file`}
+        label="Protected key file (optional)"
+        hint="Alternative to Keychain: absolute path to a regular file owned by you with mode 600. ContextDesk stores only the path and reads the key when needed."
+        value={draft.apiKeyFilePath ?? ""}
+        error={
+          apiKeyDraft.trim() && draft.apiKeyFilePath?.trim()
+            ? "Choose either a pasted key or a protected file."
+            : null
+        }
+        ok={
+          draft.apiKeyFilePath?.trim() && !apiKeyDraft.trim()
+            ? "Will read this protected file directly; Keychain will not be used"
+            : null
+        }
+        onChange={(e) => {
+          const value = e.target.value;
+          if (value.trim()) setApiKeyDraft("");
+          setDraft((d) => ({
+            ...d,
+            apiKeyFilePath: value,
+            remoteReachable: null,
+          }));
+        }}
+        placeholder="/absolute/path/to/provider.key"
         autoComplete="off"
       />
     </>

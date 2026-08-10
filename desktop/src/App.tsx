@@ -626,6 +626,10 @@ export function App() {
             next.providerKind === "xai_grok_build"
               ? undefined
               : key.trim() || undefined,
+          apiKeyFile:
+            next.providerKind === "xai_grok_build"
+              ? undefined
+              : next.apiKeyFilePath?.trim() || undefined,
           localOnly:
             next.providerKind === "xai_grok_build"
               ? false
@@ -636,6 +640,7 @@ export function App() {
           next = {
             ...next,
             hasApiKey: saved.has_key,
+            apiKeyFilePath: saved.api_key_file_path ?? undefined,
             baseUrl: saved.base_url,
             chatModel: saved.chat_model,
             providerLabel: saved.label,

@@ -59,9 +59,10 @@
 //! What this module still gets for free from `cd_core`/other modules in this
 //! crate: [`cd_core::sessions::SessionStore`] is the SAME durable transcript
 //! store the desktop app already uses, so a session started in the GUI can
-//! continue from the CLI and vice versa; [`cd_core::keychain_store::KeychainSecretStore`]
-//! is the SAME OS keychain access, so a provider configured in the GUI works
-//! immediately from the CLI with no separate credential setup.
+//! continue from the CLI and vice versa; the shared explicit credential
+//! reference resolves through the same Keychain or protected-file source, so a
+//! provider configured in the GUI works immediately from the CLI with no
+//! separate credential setup.
 
 use crate::provider::{
     resolve_turn_inputs_with_credential_cache, ResolvedTurnInputs, TurnProviderCredentialCache,

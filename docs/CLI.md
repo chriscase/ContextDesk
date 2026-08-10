@@ -1,9 +1,10 @@
 # ContextDesk CLI
 
 For ephemeral automation or CI, set `CONTEXTDESK_PROVIDER_API_KEY` for the
-current process. It overrides provider keychain lookup only; ContextDesk does
+current process. It overrides provider credential lookup only; ContextDesk does
 not persist or print the value, and connector credentials remain isolated.
-Interactive desktop/CLI use continues to share the OS keychain by default.
+Provider profiles may also select a protected `file:` reference. Keychain
+remains available for profiles that explicitly use a Keychain reference.
 
 `cd-cli` (binary: `contextdesk`) is a thin adapter over `cd_workflow`, which
 packages host-neutral operations around the production `cd_core` engine. The
@@ -294,10 +295,12 @@ and CLI state (`<data-dir>/{config.json,cli.toml,cache,sessions,cli}`) —
 under exactly the directory given, created if absent. Omit it to keep the
 default: state shared with the desktop app under `~/.contextdesk`.
 
-This is a filesystem-only boundary — credentials never live on disk at all,
-they stay in the OS keychain (see [Configuration](#configuration)) — so a
-provider credential is always a keychain entry scoped by *profile id*, not
-by `--data-dir`. `config init` accounts for that: an isolated profile's
+By default, imported credentials stay in the OS keychain (see
+[Configuration](#configuration)), so those entries are scoped by *profile id*,
+not by `--data-dir`. A profile configured with `--api-key-file-ref` instead
+holds only an absolute reference to the selected owner-only file; no Keychain
+entry is read or written for that profile. For Keychain-backed profiles,
+`config init` accounts for isolation: an isolated profile's
 *default* id (no explicit `--profile-id`) is itself derived from the data
 dir, so the single most common invocation (no `--profile-id`) can never
 silently read or overwrite the desktop-shared profile's keychain entry for
@@ -340,9 +343,10 @@ The same root also holds the durable **reviewed-format** store when used by impo
 
 The CLI has its own, separate, versioned TOML configuration for CLI-only
 preferences (output format, color, a preferred provider profile/model). It
-never holds credentials or provider secrets: those live exclusively in the
-OS keychain, referenced (never embedded) from the shared `config.json` by a
-path-like id such as `provider/<profile-id>/api_key`
+never holds credentials or provider secrets. The shared `config.json` stores
+only an explicit reference: either a Keychain id such as
+`provider/<profile-id>/api_key` or an absolute protected-file reference such as
+`file:/Users/you/.contextdesk/credentials/vercel.key`
 (`cd_core::keychain_store::looks_like_raw_secret` refuses to save a config
 that embeds anything else). See `crates/cd-cli/src/config.rs` for the CLI's
 own TOML schema.
@@ -405,12 +409,14 @@ contextdesk config init --non-interactive \
 - **Credential**: never accepted as a literal flag value (that would leak
   via shell history / `ps`). Pick exactly one of `--api-key-env <VAR>`
   (read the named environment variable's current value, trimmed),
-  `--api-key-file <path>` (read and trim the file's contents), or
+  `--api-key-file <path>` (read once and import into Keychain),
+  `--api-key-file-ref <path>` (validate and use that owner-only mode-600 file
+  directly without Keychain), or
   `--api-key-stdin` (read and trim one line from stdin) — read once, held
-  in memory, then committed to the OS keychain only as the single last
+  in memory. Imported sources are committed to the OS keychain only as the single last
   fallible step of the whole command, strictly after both config files
   (`cli.toml` and the shared `AppConfig`) have already been written
-  successfully. Omit all three to leave the profile without a credential
+  successfully. Omit all four to leave the profile without a credential
   (configurable later). This ordering means a rejected value anywhere in
   the run (a bad URL, an invalid timezone, a mistyped interactive y/n)
   never orphans a stored secret that nothing references; the only residual
@@ -560,7 +566,7 @@ contextdesk config init [--project] [--interactive|--non-interactive] [--force]
                         [--skip-provider] [--provider-kind <kind>] [--base-url <url>]
                         [--chat-model <id>] [--default-timezone <iana-id>]
                         [--profile-id <id>] [--profile-label <label>]
-                        [--api-key-env <var>|--api-key-file <path>|--api-key-stdin]
+                        [--api-key-env <var>|--api-key-file <path>|--api-key-file-ref <path>|--api-key-stdin]
                         [--check-connection]
 contextdesk config validate|show|path
 contextdesk capabilities
@@ -1043,9 +1049,10 @@ closed as a `conflict` rather than partially applying.
   last, so rejected configuration never stores an orphaned credential. If
   the keychain write itself fails after both config files land, re-run
   `config init --force` with the same profile id to repair the reference.
-- `--data-dir` isolates filesystem state only. Provider credentials always
-  live in the OS keychain. The generated profile id is scoped by data dir,
-  but an explicit `--profile-id` opts out by design; `xai-grok-build` uses a
+- `--data-dir` isolates ContextDesk-managed filesystem state. Provider
+  credentials use the profile's explicit Keychain or protected-file reference.
+  The generated Keychain profile id is scoped by data dir, but an explicit
+  `--profile-id` opts out by design; `xai-grok-build` uses a
   machine-wide session that cannot be isolated and is therefore refused by
   `--check-connection` under an isolated data directory.
 - The desktop Tauri `agent_turn` command does not yet call

@@ -139,7 +139,7 @@ impl ConfluenceSettings {
 /// On-disk application configuration (no raw API keys / PATs).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
-    /// Provider profiles (keychain refs only).
+    /// Provider profiles (credential references only; never inline secrets).
     pub providers: ProviderConfig,
     /// Last workspace metadata (roots as strings).
     pub workspace: Option<WorkspaceConfig>,
@@ -254,7 +254,7 @@ pub struct AppConfig {
 /// Multi-model investigation configuration. Additive; the default is the
 /// single-model floor. A reviewer references an existing provider **profile
 /// id** — never a provider kind and never a raw secret — so credentials stay
-/// keychain-only through the profile's own `api_key_ref`.
+/// behind the profile's own explicit `api_key_ref`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiModelSettings {
     /// Default mode for new investigation turns. `single` unless the user
@@ -356,8 +356,9 @@ pub struct RetrievalRoleModel {
     pub base_url: String,
     /// Model identity requested from the endpoint.
     pub model: String,
-    /// Optional keychain REFERENCE for a bearer credential — never the
-    /// secret itself (`refuse_raw_secret_refs` enforces this on load/save).
+    /// Optional credential REFERENCE for a bearer credential — either an
+    /// explicit Keychain id or a protected `file:` path, never the secret
+    /// itself (`refuse_raw_secret_refs` enforces this on load/save).
     #[serde(default)]
     pub api_key_ref: Option<String>,
 }

@@ -15,7 +15,7 @@ use cd_core::capability_qualification::{
 };
 use cd_core::config::AppConfig;
 use cd_core::discovery::{ProbeOutcome, ProviderCatalogProbe};
-use cd_core::keychain_store::{key_ref_for_profile, SecretStore};
+use cd_core::keychain_store::SecretStore;
 use cd_core::providers::{descriptor_for, ProviderKind, ProviderProfile};
 use cd_core::ssrf::SsrfPolicy;
 use cd_workflow::capability_qualification::{
@@ -272,13 +272,16 @@ fn resolve_credentials(
         });
     }
 
-    let reference = profile
+    let api_key = profile
         .api_key_ref
-        .clone()
-        .unwrap_or_else(|| key_ref_for_profile(&profile.id));
-    let api_key = secrets
-        .get(&reference)
-        .map_err(|error| CliError::provider(format!("read provider credential: {error}")))?;
+        .as_deref()
+        .map(|reference| {
+            secrets
+                .get(reference)
+                .map_err(|error| CliError::provider(format!("read provider credential: {error}")))
+        })
+        .transpose()?
+        .flatten();
     if descriptor_for(profile.kind).needs_api_key && api_key.is_none() {
         return Err(CliError::provider(format!(
             "no credential is configured for provider profile {}",
@@ -288,7 +291,7 @@ fn resolve_credentials(
     Ok(LiveCredentials {
         api_key,
         extra_headers: Vec::new(),
-        credentials_read: true,
+        credentials_read: profile.api_key_ref.is_some(),
     })
 }
 
@@ -765,6 +768,23 @@ mod tests {
         assert!(credentials.credentials_read);
         assert_eq!(credentials.api_key.as_deref(), Some("test-key"));
         assert_eq!(secrets.reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn missing_reference_never_probes_an_implicit_keychain_entry() {
+        let secrets = CountingSecrets {
+            reads: AtomicUsize::new(0),
+        };
+        let mut profile = remote_profile();
+        profile.api_key_ref = None;
+
+        let error = match resolve_credentials(&profile, &secrets) {
+            Ok(_) => panic!("missing credential reference must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("no credential is configured"));
+        assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
     }
 
     #[test]

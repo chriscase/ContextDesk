@@ -106,7 +106,7 @@ On Linux, install keyring + WebKit deps before host check (see CI `tauri-host` j
 - SQL: read-only roles, timeouts, row limits
 - MCP: opt-in, allowlisted, first-use approve
 - Grok Build session reuse: explicit user opt-in; credentials stay in Rust
-- Secrets: OS keychain only (`{slug}-secrets` service); webview never receives raw keys (see `docs/DEV.md`)
+- Secrets: OS Keychain by default (`{slug}-secrets` service). A provider may instead carry an explicit owner-only absolute `file:` reference; never guess a Keychain entry when no reference is configured. Secret contents never return to the webview (see `docs/DEV.md`).
 - CI: gitleaks on every PR — false-positive process in `docs/DEV.md` (do not disable the job)
 
 ## Tauri capability review checklist

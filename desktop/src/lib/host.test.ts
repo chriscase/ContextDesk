@@ -16,6 +16,7 @@ import {
   hostLogSourceCatalog,
   hostPrepareLogDiagnosticReport,
   hostReleaseLogDiagnosticReport,
+  hostSaveActiveProvider,
   hostSaveLogDiagnosticReport,
   hostStartCapabilityQualification,
   modelSelectionKey,
@@ -86,6 +87,26 @@ describe("capability qualification credential boundary", () => {
         },
       ],
     ]);
+  });
+});
+
+describe("provider credential source boundary", () => {
+  it("sends a protected file path without manufacturing a pasted key", async () => {
+    invokeMock.mockResolvedValueOnce({ has_key: true });
+
+    await hostSaveActiveProvider({
+      kind: "openai_compatible",
+      baseUrl: "https://gateway.example.test/v1",
+      chatModel: "deepseek-v4-flash",
+      apiKeyFile: "/private/tmp/provider.key",
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("save_active_provider", {
+      req: expect.objectContaining({
+        api_key: null,
+        api_key_file: "/private/tmp/provider.key",
+      }),
+    });
   });
 });
 

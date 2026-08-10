@@ -11,9 +11,8 @@ import { AiSection } from "./AiSection";
 const listModels = vi.fn();
 
 vi.mock("../../lib/host", async () => {
-  const actual = await vi.importActual<typeof import("../../lib/host")>(
-    "../../lib/host",
-  );
+  const actual =
+    await vi.importActual<typeof import("../../lib/host")>("../../lib/host");
   return {
     ...actual,
     hostListModelsForDraft: (...args: unknown[]) => listModels(...args),
@@ -69,9 +68,7 @@ describe("AiSection role-hint defaults (#723)", () => {
   it("does not overwrite a non-empty chatModel on rediscover", async () => {
     listModels.mockResolvedValue(["grok-3", "bge-m3", "mistral"]);
     render(
-      <Harness
-        initial={baseDraft({ chatModel: "user-chosen-private-id" })}
-      />,
+      <Harness initial={baseDraft({ chatModel: "user-chosen-private-id" })} />,
     );
     await act(async () => {
       await vi.advanceTimersByTimeAsync(500);
@@ -80,6 +77,44 @@ describe("AiSection role-hint defaults (#723)", () => {
     expect(screen.getByTestId("chat-model-value").textContent).toBe(
       "user-chosen-private-id",
     );
+  });
+
+  it("uses and displays a protected credential file without a draft key", async () => {
+    listModels.mockResolvedValue(["deepseek-v4-flash"]);
+    render(
+      <Harness
+        initial={baseDraft({
+          providerKind: "openai_compatible",
+          providerLabel: "Work gateway",
+          baseUrl: "https://gateway.example.test/v1",
+          chatModel: "deepseek-v4-flash",
+          apiKeyFilePath: "/private/tmp/provider.key",
+          hasApiKey: true,
+          localOnly: false,
+        })}
+      />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    expect(listModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiKey: null,
+        apiKeyFile: "/private/tmp/provider.key",
+      }),
+    );
+    await act(async () => {
+      screen.getByRole("button", { name: "Advanced form" }).click();
+    });
+    expect(
+      (
+        screen.getByLabelText(
+          "Protected key file (optional)",
+        ) as HTMLInputElement
+      ).value,
+    ).toBe("/private/tmp/provider.key");
+    expect(screen.getByText(/Keychain will not be used/i)).toBeTruthy();
   });
 
   it("auto-fills only ordinary chat defaults, never specialty-only inventory", async () => {
@@ -111,9 +146,7 @@ describe("AiSection role-hint defaults (#723)", () => {
 
   it("shows Suggested-for hint for the current chat model", async () => {
     listModels.mockResolvedValue(["grok-3", "bge-m3"]);
-    render(
-      <Harness initial={baseDraft({ chatModel: "bge-m3" })} />,
-    );
+    render(<Harness initial={baseDraft({ chatModel: "bge-m3" })} />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(500);
     });

@@ -921,6 +921,7 @@ export type ProviderDto = {
   chat_model: string;
   label: string;
   api_key_ref: string | null;
+  api_key_file_path?: string | null;
   has_key: boolean;
   /** Native tool calling; false after gateway rejection (#327). */
   tools_enabled?: boolean;
@@ -928,7 +929,7 @@ export type ProviderDto = {
   deadline_preference?: "auto" | "patient" | "standard";
 };
 
-/** Persist active provider profile (refs only) + optional API key to OS keychain. */
+/** Persist an active provider plus an explicit Keychain or protected-file credential source. */
 export type SkillDto = {
   id: string;
   name: string;
@@ -995,6 +996,8 @@ export async function hostSaveActiveProvider(args: {
   label?: string;
   /** Raw key once; never stored in React setup / localStorage after save. */
   apiKey?: string;
+  /** Absolute mode-600 credential file path; the host reads it directly. */
+  apiKeyFile?: string;
   localOnly?: boolean;
   /** When set, updates native tools capability (#327). */
   toolsEnabled?: boolean;
@@ -1009,6 +1012,7 @@ export async function hostSaveActiveProvider(args: {
       chat_model: args.chatModel,
       label: args.label ?? null,
       api_key: args.apiKey ?? null,
+      api_key_file: args.apiKeyFile ?? null,
       local_only: args.localOnly ?? null,
       tools_enabled: args.toolsEnabled ?? null,
       deadline_preference: args.deadlinePreference ?? null,
@@ -1223,6 +1227,7 @@ export async function hostListModelsForDraft(args: {
   kind: string;
   baseUrl: string;
   apiKey?: string | null;
+  apiKeyFile?: string | null;
   localOnly?: boolean | null;
   chatModel?: string | null;
 }): Promise<string[]> {
@@ -1233,6 +1238,7 @@ export async function hostListModelsForDraft(args: {
         kind: args.kind,
         base_url: args.baseUrl,
         api_key: args.apiKey ?? null,
+        api_key_file: args.apiKeyFile ?? null,
         local_only: args.localOnly ?? null,
         chat_model: args.chatModel ?? null,
       },
@@ -1260,6 +1266,7 @@ export type AiProbeResultDto = {
 export async function hostProbeAiGateway(args: {
   baseUrl: string;
   apiKey?: string | null;
+  apiKeyFile?: string | null;
   /** Default true — also probe local Ollama. */
   probeLocal?: boolean;
 }): Promise<AiProbeResultDto | null> {
@@ -1269,6 +1276,7 @@ export async function hostProbeAiGateway(args: {
       req: {
         base_url: args.baseUrl,
         api_key: args.apiKey ?? null,
+        api_key_file: args.apiKeyFile ?? null,
         probe_local: args.probeLocal ?? true,
       },
     });

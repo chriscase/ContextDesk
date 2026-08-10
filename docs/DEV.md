@@ -539,9 +539,13 @@ Copy `.env.example` → `.env` for local experiments. Never commit `.env`.
 
 Grok Build session reuse (planned) reads `~/.grok/auth.json` only after explicit UI opt-in.
 
-### OS keychain (provider secrets)
+### Provider credential sources
 
-API keys and connector PATs are stored in the **OS keychain / secret service**, never in `config.json` or the webview after save.
+Connector PATs and pasted/imported provider keys are stored in the **OS
+Keychain / secret service**. A provider profile may instead select an absolute
+owner-only protected file (regular file, mode `600`, no symlink). In that mode
+`config.json` contains a `file:/absolute/path` reference, never the key bytes,
+and runtime resolution does not consult Keychain.
 
 | Item | Value |
 |------|--------|
@@ -549,7 +553,12 @@ API keys and connector PATs are stored in the **OS keychain / secret service**, 
 | Provider API key ref | `provider/{profile_id}/api_key` |
 | Confluence PAT ref | `confluence/default/pat` (constant `CONFLUENCE_PAT_REF`) |
 
-Profiles on disk only store the **ref id** (`api_key_ref` / `pat_ref`). The desktop host resolves secrets in Rust; IPC returns booleans/redacted DTOs (`provider_has_secret`), never the secret material.
+Profiles on disk only store the **ref id** (`api_key_ref` / `pat_ref`). An
+absent reference means no credential: hosts must never guess a conventional
+Keychain entry. An invalid protected-file reference fails without falling back
+to Keychain. The desktop host resolves secret contents in Rust; IPC returns
+booleans/redacted DTOs and may return the selected protected-file path for
+Settings editing, never the secret material.
 
 Rename product: change `slug` in `branding.toml` — keychain service name follows the slug; existing entries under the old service name will not migrate automatically.
 

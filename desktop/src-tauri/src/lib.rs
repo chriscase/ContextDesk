@@ -17,8 +17,8 @@ use cd_core::config::{
 use cd_core::discovery::{discover_local, ollama_reachable, LocalCandidate};
 use cd_core::help::{HelpIndex, HelpPage, HelpSearchHit, HelpSection};
 use cd_core::keychain_store::{
-    key_ref_confluence_pat, key_ref_for_profile, key_ref_x_api_key, looks_like_raw_secret,
-    KeychainSecretStore, SecretStore,
+    file_secret_ref, key_ref_confluence_pat, key_ref_for_profile, key_ref_x_api_key,
+    looks_like_raw_secret, read_file_secret_ref, ReferencedSecretStore, SecretStore,
 };
 use cd_core::memory_fs::{list_memory_files, read_workspace_file, write_memory_file, MemoryFile};
 use cd_core::model_curation::{
@@ -354,7 +354,7 @@ impl LogCorpusHandleCache {
 struct AppState {
     branding: Branding,
     config: Mutex<AppConfig>,
-    secrets: KeychainSecretStore,
+    secrets: ReferencedSecretStore,
     /// Shared hash-chain state for host/tool/backup audit writes.
     audit_log: Option<cd_core::audit::AuditLog>,
     /// Session id -> chat history
@@ -2437,8 +2437,22 @@ fn set_provider_secret(
 
 #[tauri::command]
 fn provider_has_secret(state: State<'_, AppState>, profile_id: String) -> Result<bool, String> {
-    let r = key_ref_for_profile(&profile_id);
-    state.secrets.has(&r).map_err(|e| e.to_string())
+    let cfg = state.config.lock().expect("config lock");
+    let Some(profile) = cfg
+        .providers
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+    else {
+        return Ok(false);
+    };
+    if profile.kind == ProviderKind::XaiGrokBuild {
+        return Ok(cd_core::grok_auth::detect_grok_session().is_some());
+    }
+    let Some(reference) = profile.api_key_ref.as_deref() else {
+        return Ok(false);
+    };
+    state.secrets.has(reference).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -2448,8 +2462,11 @@ struct SaveProviderReq {
     base_url: String,
     chat_model: String,
     label: Option<String>,
-    /// Optional new API key; empty/null keeps existing keychain entry.
+    /// Optional new API key; empty/null keeps the existing explicit reference.
     api_key: Option<String>,
+    /// Optional protected credential file. Mutually exclusive with `api_key`.
+    #[serde(default)]
+    api_key_file: Option<String>,
     /// When true, refuse non-loopback remote bases (local-only profile).
     #[serde(default)]
     local_only: Option<bool>,
@@ -2468,8 +2485,10 @@ struct ProviderDto {
     base_url: String,
     chat_model: String,
     label: String,
-    /// Keychain ref id only — never the secret.
+    /// Credential ref id only — never the secret.
     api_key_ref: Option<String>,
+    /// Protected credential path when that source was explicitly selected.
+    api_key_file_path: Option<String>,
     has_key: bool,
     /// Native tool calling enabled for this profile (#327).
     tools_enabled: bool,
@@ -2490,6 +2509,11 @@ fn provider_to_dto(p: &ProviderProfile, has_key: bool) -> ProviderDto {
         chat_model: p.chat_model.clone(),
         label: p.label.clone(),
         api_key_ref: p.api_key_ref.clone(),
+        api_key_file_path: p
+            .api_key_ref
+            .as_deref()
+            .and_then(|reference| reference.strip_prefix("file:"))
+            .map(str::to_string),
         has_key,
         tools_enabled: p.capabilities.tools,
         deadline_preference: match p.deadline_preference {
@@ -2501,7 +2525,139 @@ fn provider_to_dto(p: &ProviderProfile, has_key: bool) -> ProviderDto {
     }
 }
 
-/// Persist active provider profile (refs only) and optionally store API key in keychain.
+fn select_provider_credential_reference(
+    profile_id: &str,
+    kind: ProviderKind,
+    existing_reference: Option<String>,
+    api_key: Option<&str>,
+    api_key_file: Option<&str>,
+    secrets: &dyn SecretStore,
+) -> Result<Option<String>, String> {
+    let raw_key = api_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty() && !key.chars().all(|c| c == '•'));
+    let key_file = api_key_file.map(str::trim).filter(|path| !path.is_empty());
+    if raw_key.is_some() && key_file.is_some() {
+        return Err("choose either a pasted API key or a protected key file, not both".into());
+    }
+    if matches!(kind, ProviderKind::XaiGrokBuild) && (raw_key.is_some() || key_file.is_some()) {
+        return Err("Grok Build uses its CLI session; do not configure an API key here".into());
+    }
+
+    if let Some(path) = key_file {
+        let reference = file_secret_ref(&PathBuf::from(path)).map_err(|e| e.to_string())?;
+        // Validate the contents now so Save cannot appear successful with an
+        // unreadable or empty credential. This path never consults Keychain.
+        read_file_secret_ref(&reference).map_err(|e| e.to_string())?;
+        return Ok(Some(reference));
+    }
+    if let Some(key) = raw_key {
+        if !(looks_like_raw_secret(key) || key.len() >= 8) {
+            return Err("API key is too short".into());
+        }
+        let reference = key_ref_for_profile(profile_id);
+        secrets.set(&reference, key).map_err(|e| e.to_string())?;
+        return Ok(Some(reference));
+    }
+    if matches!(kind, ProviderKind::XaiGrokBuild) {
+        Ok(None)
+    } else {
+        Ok(existing_reference)
+    }
+}
+
+#[cfg(test)]
+mod provider_credential_source_tests {
+    use super::*;
+    use cd_core::error::CoreResult;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct CountingSecrets {
+        reads: AtomicUsize,
+        writes: AtomicUsize,
+    }
+
+    impl SecretStore for CountingSecrets {
+        fn get(&self, _reference: &str) -> CoreResult<Option<String>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        fn set(&self, _reference: &str, _secret: &str) -> CoreResult<()> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn delete(&self, _reference: &str) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_file_selection_never_touches_secret_store() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.key");
+        std::fs::write(&path, "synthetic-provider-key\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let secrets = CountingSecrets::default();
+
+        let selected = select_provider_credential_reference(
+            "work",
+            ProviderKind::OpenAiCompatible,
+            None,
+            None,
+            Some(path.to_str().unwrap()),
+            &secrets,
+        )
+        .unwrap();
+
+        assert_eq!(selected, Some(format!("file:{}", path.display())));
+        assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(secrets.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn absent_source_preserves_only_an_explicit_existing_reference() {
+        let secrets = CountingSecrets::default();
+        let selected = select_provider_credential_reference(
+            "work",
+            ProviderKind::OpenAiCompatible,
+            None,
+            None,
+            None,
+            &secrets,
+        )
+        .unwrap();
+
+        assert_eq!(selected, None);
+        assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(secrets.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn pasted_key_and_file_are_rejected_before_any_secret_store_access() {
+        let secrets = CountingSecrets::default();
+        let error = select_provider_credential_reference(
+            "work",
+            ProviderKind::OpenAiCompatible,
+            None,
+            Some("synthetic-provider-key"),
+            Some("/tmp/provider.key"),
+            &secrets,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("either a pasted API key or a protected key file"));
+        assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(secrets.writes.load(Ordering::SeqCst), 0);
+    }
+}
+
+/// Persist the active provider and its explicit Keychain or protected-file reference.
 #[tauri::command]
 fn save_active_provider(
     state: State<'_, AppState>,
@@ -2536,37 +2692,25 @@ fn save_active_provider(
         }
     }
 
-    let mut api_key_ref: Option<String> = None;
-    // Grok uses session file, not keychain paste; other needs_api_key kinds accept keychain.
-    if !matches!(kind, ProviderKind::XaiGrokBuild) {
-        if let Some(key) = req.api_key.as_ref() {
-            let key = key.trim();
-            if !key.is_empty()
-                && !key.chars().all(|c| c == '•')
-                && (looks_like_raw_secret(key) || key.len() >= 8)
-            {
-                let r = key_ref_for_profile(&id);
-                state.secrets.set(&r, key).map_err(|e| e.to_string())?;
-                api_key_ref = Some(r);
-            }
-        }
-    }
+    let existing_api_key_ref = state
+        .config
+        .lock()
+        .expect("config lock")
+        .providers
+        .profiles
+        .iter()
+        .find(|profile| profile.id == id)
+        .and_then(|profile| profile.api_key_ref.clone());
+    let api_key_ref = select_provider_credential_reference(
+        &id,
+        kind,
+        existing_api_key_ref,
+        req.api_key.as_deref(),
+        req.api_key_file.as_deref(),
+        &state.secrets,
+    )?;
 
     let mut cfg = state.config.lock().expect("config lock");
-    // Keep existing ref if no new key provided (non-Grok).
-    if api_key_ref.is_none() && !matches!(kind, ProviderKind::XaiGrokBuild) {
-        if let Some(existing) = cfg.providers.profiles.iter().find(|p| p.id == id) {
-            api_key_ref = existing.api_key_ref.clone();
-        }
-    }
-    // If still none but key exists under standard ref, record the ref.
-    let r = key_ref_for_profile(&id);
-    if api_key_ref.is_none()
-        && !matches!(kind, ProviderKind::XaiGrokBuild)
-        && state.secrets.has(&r).unwrap_or(false)
-    {
-        api_key_ref = Some(r.clone());
-    }
 
     let local_only = req.local_only.unwrap_or(desc.is_local);
     if local_only && !base_url.is_empty() {
@@ -2724,11 +2868,10 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
             });
             catalog_change = record_preflight_catalog(&state, p, &probe)?;
         } else if desc.needs_api_key {
-            let ref_id = p
+            let api_key = p
                 .api_key_ref
-                .clone()
-                .unwrap_or_else(|| key_ref_for_profile(&p.id));
-            let api_key = state.secrets.get(&ref_id).ok().flatten();
+                .as_deref()
+                .and_then(|reference| state.secrets.get(reference).ok().flatten());
             key_present = Some(api_key.is_some());
             // #126: live HTTP probe — same TriageTool-parity path as Discover (corp private OK).
             let probe = cd_core::discovery::probe_provider_catalog(p, api_key).await;
@@ -6220,7 +6363,7 @@ fn resolve_default_selection(cfg: &AppConfig) -> String {
 
 async fn models_for_profile(
     profile: &ProviderProfile,
-    secrets: &KeychainSecretStore,
+    secrets: &ReferencedSecretStore,
 ) -> ProfileModelInventory {
     let api_key = profile
         .api_key_ref
@@ -6249,40 +6392,54 @@ struct ListModelsDraftReq {
     #[serde(default)]
     api_key: Option<String>,
     #[serde(default)]
+    api_key_file: Option<String>,
+    #[serde(default)]
     local_only: Option<bool>,
     #[serde(default)]
     chat_model: Option<String>,
 }
 
-/// Resolve draft/keychain key for a provider kind (never logs).
+/// Resolve an explicit draft credential or the reference recorded on the
+/// matching saved profile. Absence never synthesizes a Keychain reference.
 fn resolve_draft_api_key(
     state: &AppState,
     kind: ProviderKind,
     draft_key: Option<&str>,
-) -> Option<String> {
+    draft_file: Option<&str>,
+) -> Result<Option<String>, String> {
     if matches!(kind, ProviderKind::XaiGrokBuild | ProviderKind::Ollama) {
-        return None;
+        return Ok(None);
     }
     let draft = draft_key
         .map(str::trim)
         .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '•'))
         .map(|s| s.to_string());
-    if draft.is_some() {
-        return draft;
+    let file = draft_file.map(str::trim).filter(|path| !path.is_empty());
+    if draft.is_some() && file.is_some() {
+        return Err("choose either a pasted API key or a protected key file, not both".into());
+    }
+    if let Some(draft) = draft {
+        return Ok(Some(draft));
+    }
+    if let Some(path) = file {
+        let reference = file_secret_ref(&PathBuf::from(path)).map_err(|e| e.to_string())?;
+        return read_file_secret_ref(&reference).map_err(|e| e.to_string());
     }
     let desc = cd_core::providers::descriptor_for(kind);
     let id = desc.profile_id_slug;
-    let r = key_ref_for_profile(id);
-    if let Ok(Some(k)) = state.secrets.get(&r) {
-        return Some(k);
-    }
-    let cfg = state.config.lock().expect("config");
-    cfg.providers
+    let reference = state
+        .config
+        .lock()
+        .expect("config")
+        .providers
         .profiles
         .iter()
-        .find(|p| p.id == id)
-        .and_then(|p| p.api_key_ref.as_ref())
-        .and_then(|r| state.secrets.get(r).ok().flatten())
+        .find(|profile| profile.id == id)
+        .and_then(|profile| profile.api_key_ref.clone());
+    let Some(reference) = reference else {
+        return Ok(None);
+    };
+    state.secrets.get(&reference).map_err(|e| e.to_string())
 }
 
 /// TriageTool-parity gateway probe (plain HTTP, multi-path, Bearer + x-api-key).
@@ -6291,6 +6448,8 @@ struct ProbeAiGatewayReq {
     base_url: String,
     #[serde(default)]
     api_key: Option<String>,
+    #[serde(default)]
+    api_key_file: Option<String>,
     /// When true (default), also probe local Ollama.
     #[serde(default)]
     probe_local: Option<bool>,
@@ -6301,18 +6460,17 @@ async fn probe_ai_gateway_cmd(
     state: State<'_, AppState>,
     req: ProbeAiGatewayReq,
 ) -> Result<cd_core::ai_probe::AiProbeResult, String> {
-    let draft = req
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '•'));
-    // Prefer draft key; else try keychain for either remote flavor.
-    let key = if let Some(k) = draft {
-        Some(k.to_string())
-    } else {
-        resolve_draft_api_key(&state, ProviderKind::OpenAiCompatible, None)
-            .or_else(|| resolve_draft_api_key(&state, ProviderKind::Anthropic, None))
-    };
+    // Prefer an explicit draft source; otherwise use only a reference already
+    // recorded on a remote profile. Never probe an implicit Keychain entry.
+    let mut key = resolve_draft_api_key(
+        &state,
+        ProviderKind::OpenAiCompatible,
+        req.api_key.as_deref(),
+        req.api_key_file.as_deref(),
+    )?;
+    if key.is_none() {
+        key = resolve_draft_api_key(&state, ProviderKind::Anthropic, None, None)?;
+    }
     let probe_local = req.probe_local.unwrap_or(true);
     let result =
         cd_core::ai_probe::probe_ai_gateway(&req.base_url, key.as_deref(), probe_local).await;
@@ -6357,7 +6515,12 @@ async fn list_models_for_draft(
         kind,
         ProviderKind::OpenAiCompatible | ProviderKind::Anthropic | ProviderKind::Ollama
     ) {
-        let key = resolve_draft_api_key(&state, kind, req.api_key.as_deref());
+        let key = resolve_draft_api_key(
+            &state,
+            kind,
+            req.api_key.as_deref(),
+            req.api_key_file.as_deref(),
+        )?;
         if kind == ProviderKind::OpenAiCompatible
             && cd_core::discovery::is_vercel_ai_gateway(&req.base_url)
         {
@@ -6439,7 +6602,12 @@ async fn list_models_for_draft(
         .filter(|s| !s.is_empty())
         .unwrap_or("grok-3")
         .to_string();
-    let api_key = resolve_draft_api_key(&state, kind, req.api_key.as_deref());
+    let api_key = resolve_draft_api_key(
+        &state,
+        kind,
+        req.api_key.as_deref(),
+        req.api_key_file.as_deref(),
+    )?;
     let profile = ProviderProfile {
         id: id.clone(),
         label: desc.default_label.to_string(),
@@ -6643,10 +6811,6 @@ fn get_active_provider(state: State<'_, AppState>) -> Option<ProviderDto> {
             .as_ref()
             .map(|r| state.secrets.has(r).unwrap_or(false))
             .unwrap_or(false)
-            || state
-                .secrets
-                .has(&key_ref_for_profile(&p.id))
-                .unwrap_or(false)
     };
     Some(provider_to_dto(p, has_key))
 }
@@ -6690,10 +6854,6 @@ fn set_provider_tools_enabled(
             .as_ref()
             .map(|r| state.secrets.has(r).unwrap_or(false))
             .unwrap_or(false)
-            || state
-                .secrets
-                .has(&key_ref_for_profile(&p.id))
-                .unwrap_or(false)
     };
     Ok(provider_to_dto(p, has_key))
 }
@@ -6771,7 +6931,7 @@ fn require_preview_state(cfg: &AppConfig, expected: Option<&str>) -> Result<(), 
 /// What a hypothetical curation change would do to the default selection.
 async fn curation_impact(
     cfg: &AppConfig,
-    secrets: &KeychainSecretStore,
+    secrets: &ReferencedSecretStore,
     next: &AppConfig,
 ) -> Result<CurationImpactDto, String> {
     let before = build_model_options(cfg, secrets, None).await;
@@ -7091,13 +7251,19 @@ fn resolve_qualification_target(
     let api_key = if matches!(profile.kind, ProviderKind::XaiGrokBuild) {
         None
     } else {
-        resolve_draft_api_key(state, profile.kind, req.api_key.as_deref()).or_else(|| {
-            let reference = profile
+        let draft = req
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty() && !key.chars().all(|c| c == '•'));
+        if let Some(draft) = draft {
+            Some(draft.to_string())
+        } else {
+            profile
                 .api_key_ref
-                .clone()
-                .unwrap_or_else(|| key_ref_for_profile(&profile.id));
-            state.secrets.get(&reference).ok().flatten()
-        })
+                .as_deref()
+                .and_then(|reference| state.secrets.get(reference).ok().flatten())
+        }
     };
     Ok((profile, model, api_key))
 }
@@ -7443,7 +7609,7 @@ fn retain_picker_visible(
 /// before confirming is byte-for-byte the one they end up with (#678).
 async fn build_model_options(
     cfg: &AppConfig,
-    secrets: &KeychainSecretStore,
+    secrets: &ReferencedSecretStore,
     qualification_store: Option<&Mutex<cd_core::capability_qualification::QualificationStore>>,
 ) -> Vec<ModelOptionDto> {
     let default_model = resolve_default_model(cfg);
@@ -13497,7 +13663,7 @@ pub fn run() {
     let state = AppState {
         branding,
         config: Mutex::new(config),
-        secrets: KeychainSecretStore::new(),
+        secrets: ReferencedSecretStore::new(),
         audit_log,
         histories: Mutex::new(HashMap::new()),
         host: Arc::new(Mutex::new(None)),

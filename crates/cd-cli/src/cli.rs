@@ -761,12 +761,27 @@ pub struct ConfigInitArgs {
     /// read once, stored as an OS keychain reference, never written to disk
     /// or echoed. Mutually exclusive with `--api-key-file` /
     /// `--api-key-stdin`.
-    #[arg(long, conflicts_with_all = ["api_key_file", "api_key_stdin"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["api_key_file", "api_key_file_ref", "api_key_stdin"]
+    )]
     pub api_key_env: Option<String>,
     /// Read the API key from this file's contents (trimmed) — read once,
     /// stored as an OS keychain reference, never written to disk or echoed.
-    #[arg(long, conflicts_with = "api_key_stdin")]
+    #[arg(
+        long,
+        conflicts_with_all = ["api_key_file_ref", "api_key_stdin"]
+    )]
     pub api_key_file: Option<PathBuf>,
+    /// Use this protected file directly on every provider operation. Saves
+    /// only an absolute `file:` reference; never imports the key into the OS
+    /// keychain. The file must be owned by the current user and mode 600 on
+    /// Unix/macOS.
+    #[arg(
+        long,
+        conflicts_with_all = ["api_key_env", "api_key_file", "api_key_stdin"]
+    )]
+    pub api_key_file_ref: Option<PathBuf>,
     /// Read the API key as one line from stdin — read once, stored as an OS
     /// keychain reference, never written to disk or echoed.
     #[arg(long)]

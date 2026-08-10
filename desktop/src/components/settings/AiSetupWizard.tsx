@@ -46,8 +46,9 @@ export type WizardApplyPayload = {
     | "ollamaReachable"
     | "remoteReachable"
     | "hasApiKey"
+    | "apiKeyFilePath"
   >;
-  /** New key to keychain on Save; omit to keep existing. */
+  /** New pasted key for Keychain on Save; omit to keep the selected source. */
   apiKey?: string;
 };
 
@@ -59,7 +60,7 @@ type Props = {
   setApiKeyDraft: (v: string) => void;
   candidates: LocalCandidateDto[];
   onApplied?: () => void;
-  /** Apply + persist host profile/keychain (TriageTool one-shot save). */
+  /** Apply + persist the host profile and selected credential source. */
   onApplyAndSave?: (payload: WizardApplyPayload) => void | Promise<void>;
   onOpenAdvanced?: () => void;
   /**
@@ -168,6 +169,9 @@ export function AiSetupWizard({
     initialProbeUrl(draft, initialPath),
   );
   const [probeKey, setProbeKey] = useState("");
+  const [probeKeyFile, setProbeKeyFile] = useState(
+    draft.apiKeyFilePath ?? "",
+  );
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
@@ -198,9 +202,18 @@ export function AiSetupWizard({
         }
         return cur;
       });
+      setProbeKeyFile((current) =>
+        current.trim() ? current : (draft.apiKeyFilePath ?? ""),
+      );
       if (step === "start") setStep("configure");
     }
-  }, [draft.providerKind, draft.baseUrl, draft.hasApiKey, step]);
+  }, [
+    draft.providerKind,
+    draft.baseUrl,
+    draft.hasApiKey,
+    draft.apiKeyFilePath,
+    step,
+  ]);
 
   const choosePath = (p: WizardPath) => {
     setPath(p);
@@ -214,6 +227,7 @@ export function AiSetupWizard({
           : (ollamaCandidate?.base_url ?? "http://127.0.0.1:11434"),
       );
       setProbeKey("");
+      setProbeKeyFile("");
     } else if (p === "grok") {
       setProbeUrl(
         draft.providerKind === "xai_grok_build" && draft.baseUrl
@@ -221,12 +235,14 @@ export function AiSetupWizard({
           : "https://api.x.ai/v1",
       );
       setProbeKey("");
+      setProbeKeyFile("");
     } else {
       setProbeUrl(
         resolveGatewayUrlPrefill(draft.baseUrl, draft.providerKind),
       );
-      // Key stays blank — host reuses keychain when field empty
+      // Pasted key stays blank; host reuses only the saved credential reference.
       setProbeKey("");
+      setProbeKeyFile(draft.apiKeyFilePath ?? "");
     }
     setStep("configure");
   };
@@ -309,7 +325,7 @@ export function AiSetupWizard({
         }
       } else {
         // Gateway: TriageTool-parity probe (multi-path + Bearer + x-api-key).
-        // Empty key → host reuses keychain for saved openai/anthropic profiles.
+        // Empty fields reuse only the credential reference recorded on the profile.
         const raw = probeUrl.trim();
         if (!raw) {
           errBuf.push(
@@ -319,13 +335,19 @@ export function AiSetupWizard({
           return;
         }
         const key = probeKey.trim() || null;
+        const keyFile = probeKeyFile.trim() || null;
+        if (key && keyFile) {
+          errBuf.push("Choose either a pasted key or a protected key file, not both.");
+          setErrors(errBuf);
+          return;
+        }
         if (!key && draft.hasApiKey) {
           noteBuf.push(
-            "Using API key already in the OS keychain (leave blank to reuse).",
+            "Using the saved credential source (leave both credential fields blank to reuse).",
           );
-        } else if (!key && !draft.hasApiKey) {
+        } else if (!key && !keyFile && !draft.hasApiKey) {
           noteBuf.push(
-            "No key in this field or keychain yet — many gateways need a key to list models.",
+            "No credential is configured yet — many gateways need one to list models.",
           );
         }
         // Remember URL as soft pref even before Save (never the key).
@@ -333,6 +355,7 @@ export function AiSetupWizard({
         const result = await hostProbeAiGateway({
           baseUrl: raw,
           apiKey: key,
+          apiKeyFile: keyFile,
           // Do not mix local Ollama models into a corporate gateway probe.
           probeLocal: false,
         });
@@ -422,7 +445,15 @@ export function AiSetupWizard({
     } finally {
       setBusy(false);
     }
-  }, [path, probeUrl, probeKey, grokCandidate, draft.hasApiKey, draft.chatModel]);
+  }, [
+    path,
+    probeUrl,
+    probeKey,
+    probeKeyFile,
+    grokCandidate,
+    draft.hasApiKey,
+    draft.chatModel,
+  ]);
 
   // Auto-discover when provider is already configured (pre-launch / returning users).
   useEffect(() => {
@@ -431,7 +462,7 @@ export function AiSetupWizard({
     const readyGateway =
       path === "gateway" &&
       Boolean(probeUrl.trim()) &&
-      (Boolean(probeKey.trim()) || draft.hasApiKey);
+      (Boolean(probeKey.trim()) || Boolean(probeKeyFile.trim()) || draft.hasApiKey);
     const readyOllama = path === "ollama" && Boolean(probeUrl.trim());
     const readyGrok =
       path === "grok" &&
@@ -446,6 +477,7 @@ export function AiSetupWizard({
     path,
     probeUrl,
     probeKey,
+    probeKeyFile,
     draft.hasApiKey,
     grokCandidate?.credentials_present,
     runDiscover,
@@ -484,7 +516,11 @@ export function AiSetupWizard({
             ? draft.hasApiKey || Boolean(grokCandidate?.credentials_present)
             : kind === "ollama"
               ? draft.hasApiKey
-              : draft.hasApiKey || Boolean(key),
+              : draft.hasApiKey || Boolean(key) || Boolean(probeKeyFile.trim()),
+        apiKeyFilePath:
+          kind === "openai_compatible" || kind === "anthropic"
+            ? probeKeyFile.trim() || undefined
+            : undefined,
       },
       apiKey: key,
     };
@@ -519,8 +555,8 @@ export function AiSetupWizard({
     <div className="ai-wizard">
       <p className="section-lead">
         {autoDiscover
-          ? "Configured providers are checked automatically. Adjust URL/key only if needed, then Apply & Save."
-          : "Same discovery as TriageTool (native multi-path probe). Gateway URL is remembered after Discover; the API key lives in the OS keychain after Apply & Save."}
+          ? "Configured providers are checked automatically. Adjust URL or credentials only if needed, then Apply & Save."
+          : "Gateway discovery supports a pasted key in the OS Keychain or a protected credential file. Only the selected reference is saved."}
       </p>
 
       <div className="ai-wizard__mode-row">
@@ -666,18 +702,39 @@ export function AiSetupWizard({
                 id={`${baseId}-wiz-gw-key`}
                 label="API key (if required)"
                 value={probeKey}
-                onChange={(e) => setProbeKey(e.target.value)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setProbeKey(value);
+                  if (value.trim()) setProbeKeyFile("");
+                }}
                 placeholder={
                   draft.hasApiKey
-                    ? "•••• keychain — leave blank to reuse"
+                    ? "•••• saved credential — leave blank to reuse"
                     : "Paste key for discovery"
                 }
                 ok={
                   draft.hasApiKey && !probeKey.trim()
-                    ? "Will reuse OS keychain key for Discover and chat"
+                    ? "Will reuse the saved credential for Discover and chat"
                     : null
                 }
-                hint="Leave blank if you already Saved a key — we load it from the keychain. New paste replaces on Settings Save."
+                hint="Paste to store in the OS Keychain. Leave blank to reuse a saved credential or use a protected file below."
+              />
+              <TextField
+                id={`${baseId}-wiz-gw-key-file`}
+                label="Protected key file (optional)"
+                value={probeKeyFile}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setProbeKeyFile(value);
+                  if (value.trim()) setProbeKey("");
+                }}
+                placeholder="/absolute/path/to/provider.key"
+                hint="Absolute regular file owned by you with mode 600. ContextDesk reads it directly and does not use Keychain."
+                ok={
+                  probeKeyFile.trim()
+                    ? "Protected file will be used for discovery and saved as the credential source"
+                    : null
+                }
               />
             </>
           ) : null}
@@ -827,8 +884,8 @@ export function AiSetupWizard({
             </button>
           </div>
           <p className="field__hint">
-            <strong>Apply &amp; Save</strong> writes the profile and keychain
-            (like TriageTool). Draft-only leaves the footer Save for later.
+            <strong>Apply &amp; Save</strong> writes the profile and selected
+            credential reference. Draft-only leaves the footer Save for later.
             URL is soft-remembered after Discover even before Save.
           </p>
         </div>

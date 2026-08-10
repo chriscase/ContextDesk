@@ -16,7 +16,7 @@ use cd_core::config::{config_path, ensure_config_dir, load_config};
 use cd_core::connectors::ConnectorConfig;
 use cd_core::events::StreamEvent;
 use cd_core::index::KeywordIndex;
-use cd_core::keychain_store::{looks_like_raw_secret, KeychainSecretStore, SecretStore};
+use cd_core::keychain_store::{looks_like_raw_secret, ReferencedSecretStore, SecretStore};
 use cd_core::memory::{
     MemoryDraft, MemoryRecord, MemoryStore, MemoryWriteOp, Scope, SqliteMemoryStore,
 };
@@ -153,7 +153,7 @@ fn load_server_provider(branding: &cd_core::Branding) -> Option<ServerProvider> 
     let cfg = load_config(&path).ok()?;
     let profile = cfg.providers.active()?.clone();
     let api_key = profile.api_key_ref.as_ref().and_then(|r| {
-        let store = KeychainSecretStore::new();
+        let store = ReferencedSecretStore::new();
         store.get(r).ok().flatten()
     });
     Some(ServerProvider { profile, api_key })
@@ -169,7 +169,7 @@ fn load_telegram_bridge(
     };
     telegram::validate_secret_ref("bot_token_ref", &config.bot_token_ref)?;
     telegram::validate_secret_ref("webhook_secret_ref", &config.webhook_secret_ref)?;
-    let store = KeychainSecretStore::new();
+    let store = ReferencedSecretStore::new();
     let bot_token = store
         .get(&config.bot_token_ref)
         .map_err(|_| {
@@ -3175,7 +3175,7 @@ async fn main() {
 
     // Normalize opted-in Atlassian Rovo MCP presets and resolve API tokens
     // directly from the OS keychain into child-only environment maps.
-    let secret_store = KeychainSecretStore::new();
+    let secret_store = ReferencedSecretStore::new();
     for workspace in &mut resolved {
         let prepared =
             match jira::prepare_connectors(&workspace.connectors, &secret_store, &SystemResolver) {

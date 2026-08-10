@@ -1,14 +1,14 @@
 //! Bounded Vercel AI Gateway retrieval laboratory.
 //!
 //! This is an explicit development tool, not a product capability claim. It
-//! reads one provider credential from ContextDesk's Keychain service, keeps it
+//! reads one explicitly referenced provider credential, keeps it
 //! in memory for the process, and emits only model metadata, vector dimensions,
 //! scores, stable fixture ids, latency, and usage. It never prints provider
 //! error bodies, request text, authorization headers, or embedding vectors.
 
 use anyhow::{bail, Context, Result};
 use cd_core::config::load_config;
-use cd_core::keychain_store::{looks_like_raw_secret, KeychainSecretStore, SecretStore};
+use cd_core::keychain_store::{looks_like_raw_secret, ReferencedSecretStore, SecretStore};
 use cd_core::providers::{ProviderKind, ProviderProfile};
 use cd_core::ssrf::{build_pinned_client_for_url, SsrfPolicy, SystemResolver};
 use futures_util::StreamExt;
@@ -39,8 +39,9 @@ Usage:
   cd-vercel-retrieval-lab --config <config.json> [--profile <id>] benchmark <embedding-models> <reranking-models> <dataset.json>
 
 Model lists are comma-separated. Input files must contain synthetic or already
-approved/redacted text. The credential is resolved from the profile's Keychain
-reference exactly once per process and is never accepted as an argument.
+approved/redacted text. The credential is resolved from the profile's explicit
+Keychain or protected-file reference exactly once per process and is never
+accepted as an argument.
 ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -635,18 +636,8 @@ fn build_gateway(profile: &ProviderProfile) -> Result<GatewayClient> {
         bail!("the lab only accepts the public HTTPS Vercel AI Gateway profile");
     }
 
-    let key_ref = profile
-        .api_key_ref
-        .as_deref()
-        .context("provider profile has no Keychain reference")?;
-    if looks_like_raw_secret(key_ref) || !key_ref.contains('/') {
-        bail!("provider credential reference is not a safe Keychain reference");
-    }
-    let credential = KeychainSecretStore::new()
-        .get(key_ref)
-        .context("read provider credential from Keychain")?
-        .filter(|value| !value.is_empty())
-        .context("provider credential is missing from Keychain")?;
+    let store = ReferencedSecretStore::new();
+    let credential = resolve_gateway_credential(profile, &store)?;
 
     let base = Url::parse("https://ai-gateway.vercel.sh/v4/ai/")?;
     let (_, client) = build_pinned_client_for_url(
@@ -660,6 +651,24 @@ fn build_gateway(profile: &ProviderProfile) -> Result<GatewayClient> {
         base,
         credential,
     })
+}
+
+fn resolve_gateway_credential(
+    profile: &ProviderProfile,
+    secrets: &dyn SecretStore,
+) -> Result<String> {
+    let reference = profile
+        .api_key_ref
+        .as_deref()
+        .context("provider profile has no credential reference")?;
+    if looks_like_raw_secret(reference) || !reference.contains('/') {
+        bail!("provider credential reference is not safe");
+    }
+    secrets
+        .get(reference)
+        .context("read explicitly referenced provider credential")?
+        .filter(|value| !value.is_empty())
+        .context("referenced provider credential is missing")
 }
 
 async fn bounded_json<T: DeserializeOwned>(response: Response, role: &str) -> Result<T> {
@@ -1223,6 +1232,36 @@ fn elapsed_ms(started: Instant) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_file_credential_is_usable_without_keychain() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vercel.key");
+        std::fs::write(&path, "synthetic-vercel-key\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let profile = ProviderProfile {
+            id: "vercel-test".into(),
+            label: "Vercel test".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://ai-gateway.vercel.sh/v1".into(),
+            api_key_ref: Some(format!("file:{}", path.display())),
+            chat_model: "test-model".into(),
+            embedding_model: None,
+            embedding_base_url: None,
+            capabilities: cd_core::providers::descriptor_for(ProviderKind::OpenAiCompatible)
+                .default_capabilities,
+            local_only: false,
+            deadline_preference: Default::default(),
+        };
+
+        let credential =
+            resolve_gateway_credential(&profile, &ReferencedSecretStore::new()).unwrap();
+
+        assert_eq!(credential, "synthetic-vercel-key");
+    }
 
     #[test]
     fn arguments_never_accept_a_credential() {

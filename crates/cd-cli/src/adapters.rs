@@ -8,7 +8,7 @@ use cd_core::branding::Branding;
 use cd_core::config::{config_path, ensure_config_dir, load_config, save_config, AppConfig};
 use cd_core::error::CoreResult;
 use cd_core::index::KeywordIndex;
-use cd_core::keychain_store::{KeychainSecretStore, SecretStore};
+use cd_core::keychain_store::{ReferencedSecretStore, SecretStore};
 use cd_core::sessions::SessionStore;
 use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
@@ -206,7 +206,7 @@ pub const PROVIDER_API_KEY_ENV: &str = "CONTEXTDESK_PROVIDER_API_KEY";
 /// provider credentials for the lifetime of this process. It is never
 /// persisted and never substitutes for connector secrets.
 pub struct CliSecretStore {
-    keychain: KeychainSecretStore,
+    referenced: ReferencedSecretStore,
     provider_override: Option<String>,
 }
 
@@ -217,7 +217,7 @@ impl CliSecretStore {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         Self {
-            keychain: KeychainSecretStore::new(),
+            referenced: ReferencedSecretStore::new(),
             provider_override,
         }
     }
@@ -235,15 +235,15 @@ impl SecretStore for CliSecretStore {
         if let Some(value) = self.provider_override(reference) {
             return Ok(Some(value));
         }
-        self.keychain.get(reference)
+        self.referenced.get(reference)
     }
 
     fn set(&self, reference: &str, value: &str) -> CoreResult<()> {
-        self.keychain.set(reference, value)
+        self.referenced.set(reference, value)
     }
 
     fn delete(&self, reference: &str) -> CoreResult<()> {
-        self.keychain.delete(reference)
+        self.referenced.delete(reference)
     }
 }
 
@@ -321,7 +321,7 @@ mod credential_tests {
     #[test]
     fn process_override_is_provider_only() {
         let store = CliSecretStore {
-            keychain: KeychainSecretStore::new(),
+            referenced: ReferencedSecretStore::new(),
             provider_override: Some("ephemeral-value".to_string()),
         };
 
