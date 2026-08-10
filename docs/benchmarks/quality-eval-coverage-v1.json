@@ -1,0 +1,519 @@
+{
+  "schema_id": "contextdesk.quality_eval.coverage_inventory.v1",
+  "schema_version": "contextdesk.quality_eval.v1",
+  "generated_for_branch": "test/triage-quality-benchmark-expansion-v1",
+  "base_sha": "10435d114e7e1faa0ca6e5f8447d70d41ad91492",
+  "evidence_boundaries": {
+    "live_providers": "forbidden",
+    "readiness_badges": "forbidden",
+    "compatibility_claims": "forbidden",
+    "truth_visibility": "host_only",
+    "scripted_candidates": "hermetic_only_not_model_usefulness"
+  },
+  "suites": {
+    "quality-eval-open-v1": {
+      "relative_path": "fixtures/quality-eval/open-v1",
+      "digest": "4e238cc226454c9fec554d5841f39a96ace41b046ead2088526a4f4f0db9d39a",
+      "status": "historical_baseline_unchanged",
+      "case_count": 8,
+      "what_it_proves": [
+        "basic establishable diagnosis with required citations",
+        "symptom-versus-trigger on a single chain",
+        "loud near-match / foreign decoy rejection",
+        "two-incident separation with role-confusion mutation",
+        "recovery-versus-trigger",
+        "insufficient-evidence abstention with observation basis",
+        "fabricated citation rejection",
+        "upstream-versus-final retrieval recall on one ranking",
+        "packet-specific establishability overrides"
+      ],
+      "known_weaknesses": [
+        "only one ranking ablation shape",
+        "limited multi-incident cardinality (two)",
+        "no shared-symptom separate-causes topology",
+        "no decoy-before-trigger chronology emphasis",
+        "no config-change-then-failure chronology",
+        "no cross-service multi-hop chain",
+        "no same-vocab / different-vocab identity traps",
+        "no order-only versus resolved-time case",
+        "no cross-source correlation / near-duplicate rendering case",
+        "no short/padded/permuted/dropped retrieval matrix",
+        "no hedged-structured abstention contradiction fixture",
+        "no unknown role/confidence fixture in suite candidates"
+      ]
+    },
+    "quality-eval-adversarial-v1": {
+      "relative_path": "fixtures/quality-eval/adversarial-v1",
+      "digest": "4c0793ff5a457be730a8a35b6acbfb3a9005c9d183112a33d093fbdc970eb612",
+      "status": "hermetic_executed",
+      "case_count": 14
+    }
+  },
+  "gap_checklist": {
+    "multiple_independent_incidents": {
+      "open_v1": "partial_qe04",
+      "adversarial_v1": "covered_adv01"
+    },
+    "multiple_legitimate_initiating_causes": {
+      "open_v1": "partial_qe04_multi_trigger_candidate",
+      "adversarial_v1": "covered_adv02"
+    },
+    "shared_downstream_symptom_separate_causes": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv03"
+    },
+    "symptom_promoted_to_initiating_cause": {
+      "open_v1": "partial_qe02_and_qe04_role_confusion",
+      "adversarial_v1": "covered_adv04"
+    },
+    "independent_incident_demoted_into_another_chain": {
+      "open_v1": "partial_qe04",
+      "adversarial_v1": "covered_adv05"
+    },
+    "loud_or_frequent_decoy_evidence": {
+      "open_v1": "partial_qe03",
+      "adversarial_v1": "covered_adv06"
+    },
+    "decoy_occurring_before_true_trigger": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv06"
+    },
+    "recovery_mistaken_for_cause": {
+      "open_v1": "partial_qe05",
+      "adversarial_v1": "covered_adv07"
+    },
+    "configuration_change_followed_by_failure": {
+      "open_v1": "partial_qe08_tokens",
+      "adversarial_v1": "covered_adv07"
+    },
+    "causal_chain_spanning_services": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv08"
+    },
+    "same_vocabulary_unrelated_identity": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv09"
+    },
+    "different_vocabulary_same_incident": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv09"
+    },
+    "missing_initiating_evidence_requiring_abstention": {
+      "open_v1": "partial_qe06",
+      "adversarial_v1": "covered_adv10"
+    },
+    "partial_evidence_observation_only": {
+      "open_v1": "partial_product_path_overrides",
+      "adversarial_v1": "covered_adv11"
+    },
+    "order_only_chronology": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv12"
+    },
+    "ambiguous_local_time_and_resolved_time": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv12"
+    },
+    "cross_source_correlation_identities": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv13"
+    },
+    "duplicate_or_near_duplicate_renderings": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv13"
+    },
+    "foreign_evidence_identity_injection": {
+      "open_v1": "partial_qe07",
+      "adversarial_v1": "covered_adv05_adv14"
+    },
+    "citation_sprinkling_without_factual_support": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv04"
+    },
+    "hedged_language_asserting_unsupported_causality": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv10_adv11"
+    },
+    "contradictory_structured_fields_and_prose": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv11"
+    },
+    "valid_trigger_plus_incorrectly_promoted_symptom": {
+      "open_v1": "partial_qe04_role_confusion",
+      "adversarial_v1": "covered_adv04"
+    },
+    "valid_trigger_plus_incorrectly_absorbed_independent": {
+      "open_v1": "partial_qe04",
+      "adversarial_v1": "covered_adv05"
+    },
+    "retrieval_lists_short_duplicated_permuted_or_padded": {
+      "open_v1": "missing",
+      "adversarial_v1": "covered_adv14"
+    },
+    "useful_evidence_removed_between_upstream_and_final": {
+      "open_v1": "partial_qe08",
+      "adversarial_v1": "covered_adv14"
+    }
+  },
+  "cases": [
+    {
+      "case_id": "adv01-three-independent-incidents",
+      "failure_class": "independent_incident_collapse",
+      "evidence_topology": "one_main_chain_plus_two_independent",
+      "chronology_type": "concurrent_unrelated",
+      "establishability": "establishable_on_fixed_abstain_on_product_path",
+      "required_causal_distinctions": [
+        "trigger_versus_symptom",
+        "independent_versus_main"
+      ],
+      "retrieval_lanes_represented": ["product_shaped_ranking"],
+      "answer_mutations_represented": [
+        "independent_incident_collapse",
+        "independent_absorbed_as_symptom"
+      ],
+      "test_names": [
+        "adversarial_hermetic_run_meets_all_host_expectations",
+        "adversarial_expected_fail_mutations_are_not_harness_failures"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "blinded_multi_incident_separation_with_live_models"
+    },
+    {
+      "case_id": "adv02-multi-legitimate-triggers",
+      "failure_class": "omitted_second_trigger_or_promoted_symptom",
+      "evidence_topology": "two_initiating_causes_one_symptom",
+      "chronology_type": "concurrent_initiators",
+      "establishability": "establishable_on_fixed",
+      "required_causal_distinctions": [
+        "retain_multiple_triggers",
+        "symptom_not_second_trigger"
+      ],
+      "retrieval_lanes_represented": ["fixed_oracle_product_packets"],
+      "answer_mutations_represented": [
+        "drop_second_trigger",
+        "promote_symptom_as_second_trigger"
+      ],
+      "test_names": [
+        "adversarial_hermetic_run_meets_all_host_expectations",
+        "adversarial_trigger_cannot_mask_promoted_symptom"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "live_model_multi_cause_recall"
+    },
+    {
+      "case_id": "adv03-shared-symptom-separate-causes",
+      "failure_class": "shared_symptom_collapse",
+      "evidence_topology": "two_upstream_causes_one_shared_symptom",
+      "chronology_type": "parallel_upstream",
+      "establishability": "establishable_on_fixed",
+      "required_causal_distinctions": [
+        "separate_upstream_identities",
+        "shared_symptom_not_sole_cause"
+      ],
+      "retrieval_lanes_represented": ["symptom_first_ranking"],
+      "answer_mutations_represented": [
+        "absorb_second_cause_as_symptom",
+        "symptom_as_sole_cause"
+      ],
+      "test_names": [
+        "adversarial_hermetic_run_meets_all_host_expectations"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "embedding_versus_hybrid_separation_of_parallel_causes"
+    },
+    {
+      "case_id": "adv04-trigger-plus-promoted-symptom",
+      "failure_class": "symptom_promoted_beside_valid_trigger",
+      "evidence_topology": "single_chain",
+      "chronology_type": "config_then_symptom",
+      "establishability": "establishable_on_fixed",
+      "required_causal_distinctions": [
+        "valid_trigger_cannot_mask_promoted_symptom"
+      ],
+      "retrieval_lanes_represented": ["symptom_ranked_above_trigger"],
+      "answer_mutations_represented": [
+        "trigger_plus_promoted_symptom",
+        "citation_sprinkle_without_decisive_facts"
+      ],
+      "test_names": [
+        "adversarial_trigger_cannot_mask_promoted_symptom",
+        "adversarial_citation_sprinkle_without_decisive_facts_fails",
+        "adversarial_candidate_names_carry_no_evaluator_authority"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "live_answer_role_labeling_under_noisy_ranking"
+    },
+    {
+      "case_id": "adv05-independent-absorbed",
+      "failure_class": "independent_absorbed_into_main",
+      "evidence_topology": "main_plus_persistent_independent",
+      "chronology_type": "independent_persists_after_recovery",
+      "establishability": "establishable_on_fixed",
+      "required_causal_distinctions": [
+        "independent_not_demoted_to_symptom"
+      ],
+      "retrieval_lanes_represented": ["fixed_oracle_product_packets"],
+      "answer_mutations_represented": [
+        "absorb_independent",
+        "foreign_identity_injection"
+      ],
+      "test_names": [
+        "adversarial_trigger_cannot_mask_absorbed_independent"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "live_model_independent_incident_retention"
+    },
+    {
+      "case_id": "adv06-loud-decoy-before-trigger",
+      "failure_class": "popularity_and_precedence_decoy",
+      "evidence_topology": "frequent_early_decoy_before_true_trigger",
+      "chronology_type": "decoy_before_trigger",
+      "establishability": "establishable_on_fixed_abstain_on_product_path",
+      "required_causal_distinctions": [
+        "ignore_frequency_decoy",
+        "ignore_earlier_unrelated_fault"
+      ],
+      "retrieval_lanes_represented": [
+        "decoy_first_ranking",
+        "upstream_versus_final"
+      ],
+      "answer_mutations_represented": [
+        "popularity_decoy",
+        "decoy_before_trigger_selected"
+      ],
+      "test_names": [
+        "adversarial_contradiction_and_certainty_mutations_fail"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "reranker_resistance_to_frequency_decoys"
+    },
+    {
+      "case_id": "adv07-recovery-and-config-change",
+      "failure_class": "recovery_as_cause_or_ignored_config_change",
+      "evidence_topology": "config_change_failure_recovery",
+      "chronology_type": "explicit_utc_sequence",
+      "establishability": "establishable_on_fixed",
+      "required_causal_distinctions": [
+        "config_change_is_initiating",
+        "recovery_not_trigger"
+      ],
+      "retrieval_lanes_represented": ["fixed_oracle_product_packets"],
+      "answer_mutations_represented": [
+        "recovery_as_cause",
+        "ignore_config_change"
+      ],
+      "test_names": [
+        "adversarial_contradiction_and_certainty_mutations_fail"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "live_chronology_reasoning_with_restored_limits"
+    },
+    {
+      "case_id": "adv08-cross-service-chain",
+      "failure_class": "downstream_as_trigger_or_foreign_absorption",
+      "evidence_topology": "gate_worker_api_chain",
+      "chronology_type": "multi_hop_propagation",
+      "establishability": "establishable_on_fixed",
+      "required_causal_distinctions": [
+        "upstream_gate_trigger",
+        "foreign_mail_exclusion"
+      ],
+      "retrieval_lanes_represented": [
+        "upstream_versus_final",
+        "downstream_biased_upstream_list"
+      ],
+      "answer_mutations_represented": [
+        "downstream_as_trigger",
+        "foreign_mail_absorption"
+      ],
+      "test_names": [
+        "adversarial_hermetic_run_meets_all_host_expectations"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "hybrid_retrieval_multi_hop_shortlist_quality"
+    },
+    {
+      "case_id": "adv09-vocab-identity-traps",
+      "failure_class": "vocab_identity_confusion",
+      "evidence_topology": "same_vocab_foreign_plus_paraphrase_same_incident",
+      "chronology_type": "concurrent_similar_wording",
+      "establishability": "establishable_on_fixed",
+      "required_causal_distinctions": [
+        "identity_over_vocabulary",
+        "paraphrase_same_incident"
+      ],
+      "retrieval_lanes_represented": ["foreign_vocab_ranked_first"],
+      "answer_mutations_represented": [
+        "same_vocab_wrong_identity",
+        "paraphrase_as_sole_trigger"
+      ],
+      "test_names": [
+        "adversarial_hermetic_run_meets_all_host_expectations"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "embedding_collision_and_paraphrase_robustness"
+    },
+    {
+      "case_id": "adv10-missing-initiating-abstention",
+      "failure_class": "unsupported_certainty_or_empty_abstention",
+      "evidence_topology": "symptoms_only",
+      "chronology_type": "no_initiating_record",
+      "establishability": "requires_abstention",
+      "required_causal_distinctions": [
+        "observation_backed_abstention",
+        "no_fabricated_initiator"
+      ],
+      "retrieval_lanes_represented": ["symptom_only_corpus"],
+      "answer_mutations_represented": [
+        "generic_abstention",
+        "hedged_but_asserts_causality",
+        "unsupported_certainty"
+      ],
+      "test_names": [
+        "adversarial_hedged_structured_causality_fails_abstention",
+        "adversarial_generic_abstention_without_observation_fails"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "blinded_judge_on_hedged_certainty_paraphrases"
+    },
+    {
+      "case_id": "adv11-partial-observation-contradiction",
+      "failure_class": "structured_prose_contradiction",
+      "evidence_topology": "partial_observation_only",
+      "chronology_type": "insufficient_initiator",
+      "establishability": "requires_abstention",
+      "required_causal_distinctions": [
+        "observation_only",
+        "no_contradictory_certainty"
+      ],
+      "retrieval_lanes_represented": ["observation_packets"],
+      "answer_mutations_represented": [
+        "prose_contradicts_structured",
+        "false_flag_with_certainty_prose"
+      ],
+      "test_names": [
+        "adversarial_contradiction_and_certainty_mutations_fail"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "semantic_entailment_judge_lane"
+    },
+    {
+      "case_id": "adv12-chronology-and-time",
+      "failure_class": "order_only_or_ambiguous_time_as_cause",
+      "evidence_topology": "ambiguous_local_plus_resolved_utc",
+      "chronology_type": "order_only_and_ambiguous_versus_resolved",
+      "establishability": "establishable_on_fixed",
+      "required_causal_distinctions": [
+        "config_ttl_trigger",
+        "ambiguous_time_not_exact_proof"
+      ],
+      "retrieval_lanes_represented": ["mixed_time_ranking"],
+      "answer_mutations_represented": [
+        "order_only_as_cause",
+        "ambiguous_as_resolved"
+      ],
+      "test_names": [
+        "adversarial_hermetic_run_meets_all_host_expectations"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "timezone_resolution_plus_live_reasoning"
+    },
+    {
+      "case_id": "adv13-cross-source-duplicates",
+      "failure_class": "correlation_identity_errors",
+      "evidence_topology": "cross_source_near_duplicates_plus_foreign_corr",
+      "chronology_type": "same_correlation_window",
+      "establishability": "establishable_on_fixed",
+      "required_causal_distinctions": [
+        "corr_identity_grouping",
+        "foreign_corr_exclusion"
+      ],
+      "retrieval_lanes_represented": ["near_duplicate_ranking"],
+      "answer_mutations_represented": [
+        "merge_foreign_corr",
+        "attach_foreign_corr_evidence"
+      ],
+      "test_names": [
+        "adversarial_hermetic_run_meets_all_host_expectations"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "duplicate_rendering_acceptance_with_live_retrieval"
+    },
+    {
+      "case_id": "adv14-retrieval-packet-ablations",
+      "failure_class": "retrieval_loss_versus_answer_failure",
+      "evidence_topology": "full_corpus_with_foreign_padding",
+      "chronology_type": "config_change_with_recovery",
+      "establishability": "establishable_on_fixed_oracle_abstain_on_incomplete_packets",
+      "required_causal_distinctions": [
+        "oracle_versus_product_path",
+        "upstream_versus_final_recall",
+        "dropped_decisive_evidence"
+      ],
+      "retrieval_lanes_represented": [
+        "oracle_packet",
+        "fixed_packet",
+        "product_shaped_packet",
+        "lexical_ranking",
+        "synthetic_semantic_ranking",
+        "synthetic_hybrid_ranking",
+        "reranked_shortlist",
+        "shortlist_after_decisive_dropped",
+        "short_list",
+        "decoy_padded_list"
+      ],
+      "answer_mutations_represented": [
+        "dropped_packet_asserts",
+        "foreign_identity_with_decisive_facts",
+        "unknown_role",
+        "unknown_confidence"
+      ],
+      "test_names": [
+        "adversarial_retrieval_ablations_expose_upstream_versus_final_loss",
+        "adversarial_decisive_facts_with_foreign_identity_fail",
+        "adversarial_unknown_role_and_confidence_fail_closed"
+      ],
+      "status": "hermetic_covered",
+      "remaining_live_experiment": "attach_real_embedding_hybrid_rerank_rankings_without_changing_digest_contract"
+    }
+  ],
+  "matrix": {
+    "command": "cargo run -p cd-core --bin cd-quality-eval-lab -- matrix --suite open-v1 --suite adversarial-v1",
+    "script": "scripts/quality-eval-suite-matrix.sh",
+    "latest_aggregates": {
+      "expected_good_met": 30,
+      "expected_fail_rejected": 41,
+      "unexpected_passes": 0,
+      "unexpected_failures": 0,
+      "retrieval_metric_rows": 29,
+      "answer_metric_rows": 71
+    }
+  },
+  "survivor_gaps_requiring_live_work": [
+    {
+      "gap": "Semantic entailment beyond lexical citation overlap",
+      "why_hermetic_insufficient": "Deterministic scorer cannot judge unforeseen paraphrases that still assert causality.",
+      "recommended_experiment": "Blinded judge lane on hedged-certainty paraphrases; judge may veto but never rescue deterministic failures."
+    },
+    {
+      "gap": "Real embedding / hybrid / rerank usefulness",
+      "why_hermetic_insufficient": "adv14 rankings are scripted ablation labels, not measured retrieval systems.",
+      "recommended_experiment": "Attach live RetrievalRanking records for each quality unit (model+gateway+retrieval mode) without rewriting suite digests."
+    },
+    {
+      "gap": "Production triage_quality rubric parity",
+      "why_hermetic_insufficient": "Quality-eval scorer fixes do not prove production rubric enforces trigger+promoted-symptom and independent-absorption invariants.",
+      "recommended_experiment": "Separate production-rubric hardening with multi-cause counterexamples (out of this lane)."
+    },
+    {
+      "gap": "Cross-model cheap-versus-expensive comparison",
+      "why_hermetic_insufficient": "No live DeepSeek/Grok/GPT-OSS/Mistral/Qwen answers were collected.",
+      "recommended_experiment": "Fixed-packet then product-path live runs per QualityUnit; keep readiness stores untouched."
+    },
+    {
+      "gap": "Timezone-resolved chronology under real parsers",
+      "why_hermetic_insufficient": "adv12 encodes resolved timestamps as fixture text, not parser output.",
+      "recommended_experiment": "Reuse timezone_resolution tests with adversarial chronology packets into live answer scoring."
+    }
+  ]
+}

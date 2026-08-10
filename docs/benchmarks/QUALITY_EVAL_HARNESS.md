@@ -126,12 +126,17 @@ that the production rubric already enforces these invariants.
 ## Fixture layout
 
 ```text
-fixtures/quality-eval/open-v1/
+fixtures/quality-eval/open-v1/            # historical baseline (do not silently mutate)
+fixtures/quality-eval/adversarial-v1/     # versioned causal-role / retrieval ablation stress
   suite.json
   cases/<case-id>/
     runtime.json   # model-visible documents, packets, rankings, scripted candidates
     truth.json     # host-only relevance, roles, required/forbidden ids and candidate expectations
 ```
+
+See [`TRIAGE_QUALITY_ADVERSARIAL_SUITE.md`](TRIAGE_QUALITY_ADVERSARIAL_SUITE.md) and
+[`quality-eval-coverage-v1.json`](quality-eval-coverage-v1.json) for the adversarial
+coverage inventory and safe multi-suite matrix commands.
 
 Isolation rules:
 
@@ -256,8 +261,11 @@ Still available for focused harness work:
 ```bash
 cargo run -p cd-core --bin cd-quality-eval-lab -- validate
 cargo run -p cd-core --bin cd-quality-eval-lab -- run
+cargo run -p cd-core --bin cd-quality-eval-lab -- matrix --suite open-v1 --suite adversarial-v1
+./scripts/quality-eval-suite-matrix.sh
 cargo test -p cd-core --lib quality_eval
 cargo test -p cd-core --test quality_eval_lab
+cargo test -p cd-core --test quality_eval_adversarial_lab
 cargo test -p cd-cli --test eval_cli
 ```
 
@@ -277,6 +285,8 @@ Environment:
 | Hermetic runner | `…/run.rs` |
 | Export | `…/export.rs` |
 | Lab binary | `crates/cd-core/src/bin/cd-quality-eval-lab.rs` |
+| Multi-suite matrix | `crates/cd-core/src/quality_eval/matrix.rs`, `scripts/quality-eval-suite-matrix.sh` |
 | Product CLI | `crates/cd-cli/src/commands/eval.rs` |
-| Integration tests | `crates/cd-core/tests/quality_eval_lab.rs`, `crates/cd-cli/tests/eval_cli.rs` |
+| Integration tests | `crates/cd-core/tests/quality_eval_lab.rs`, `crates/cd-core/tests/quality_eval_adversarial_lab.rs`, `crates/cd-cli/tests/eval_cli.rs` |
 | OPEN fixtures | `fixtures/quality-eval/open-v1/` |
+| Adversarial fixtures | `fixtures/quality-eval/adversarial-v1/` |
