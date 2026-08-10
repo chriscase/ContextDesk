@@ -1,0 +1,651 @@
+{
+  "schema": "contextdesk.overnight_integration_ledger.v1",
+  "generated_at": "2026-08-10",
+  "audit_branch": "audit/overnight-integration-readiness-v1",
+  "audit_worktree": "/Users/chriscase/Documents/GitHub/contextdesk-overnight-integration-audit-v1",
+  "acceptance_candidate_sha": "10435d114e7e1faa0ca6e5f8447d70d41ad91492",
+  "acceptance_branch": "integrate/model-readiness-quality-v1",
+  "acceptance_worktree": "/Users/chriscase/Documents/GitHub/contextdesk-model-readiness-quality-v1",
+  "main_sha_at_audit": "eee1e6d2b089a2f1857824861446ad4215e17c8e",
+  "main_commits_behind_acceptance": 108,
+  "disk_free_gib_at_audit_start": 131,
+  "method": [
+    "git worktree list --porcelain",
+    "git merge-base / rev-list / log / diff / diff --stat",
+    "git patch-id --stable",
+    "git merge-tree",
+    "direct source and test reading"
+  ],
+  "executive_verdict": {
+    "acceptance_absorbs_majority_of_parallel_lanes": true,
+    "post_acceptance_p0": "fix/triage-role-integrity-v1",
+    "do_not_reintegrate_superseded_worktrees": true,
+    "summary": "Acceptance tip consolidates model readiness, gateway fixtures, quality-eval, typed final manifest, budget V2, protected-file credentials, credential cache, and progress UX. Production triage scorer still has multi-candidate symptom-promotion hole fixed only on fix/triage-role-integrity-v1. Forensic trace and repo health are post-acceptance."
+  },
+  "worktrees": [
+    {
+      "path": "/Users/chriscase/Documents/GitHub/ContextDesk",
+      "branch": "main",
+      "head": "eee1e6d2b089a2f1857824861446ad4215e17c8e",
+      "clean": true,
+      "merge_base_with_acceptance": "eee1e6d2b089a2f1857824861446ad4215e17c8e",
+      "ahead": 0,
+      "behind": 108,
+      "classification": "ancestor_baseline",
+      "capability": "Published main; acceptance is 108 commits ahead",
+      "unique_commits_vs_acceptance": [],
+      "integration": "promote acceptance into main after independent acceptance completes"
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-model-readiness-quality-v1",
+      "branch": "integrate/model-readiness-quality-v1",
+      "head": "10435d114e7e1faa0ca6e5f8447d70d41ad91492",
+      "clean": true,
+      "ahead": 0,
+      "behind": 0,
+      "classification": "acceptance_candidate",
+      "capability": "Model readiness, quality-eval, multi-stage triage harden, gateway fixtures, credentials, budget V2",
+      "do_not_modify_during_audit": true
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-overnight-integration-audit-v1",
+      "branch": "audit/overnight-integration-readiness-v1",
+      "head": "10435d114e7e1faa0ca6e5f8447d70d41ad91492",
+      "clean": true,
+      "ahead": 0,
+      "behind": 0,
+      "classification": "audit_documentation_lane",
+      "capability": "This overnight audit deliverables only"
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-triage-role-integrity-v1",
+      "branch": "fix/triage-role-integrity-v1",
+      "head": "7f4ebb985c0ff569f67821a76459c2a992e58493",
+      "clean": true,
+      "ahead": 2,
+      "behind": 0,
+      "classification": "integrate_after_acceptance",
+      "capability": "Production triage_quality symptom_vs_cause: reject promoted symptoms even with coexisting valid trigger",
+      "unique_commits_vs_acceptance": [
+        {
+          "sha": "3c50f0f42aabfeecc57fb392c2a93287090d792d",
+          "subject": "fix(triage): reject promoted symptoms even when a valid trigger coexists"
+        },
+        {
+          "sha": "7f4ebb985c0ff569f67821a76459c2a992e58493",
+          "subject": "docs(triage): independent-incident truth is insufficient for a safe rule"
+        }
+      ],
+      "files_changed_vs_acceptance": [
+        "crates/cd-core/src/triage_quality.rs",
+        "docs/benchmarks/QUALITY_EVAL_HARNESS.md",
+        "docs/design/TRIAGE_INDEPENDENT_INCIDENT_TRUTH.md"
+      ],
+      "tests_prove_claim": "partial_hermetic_rubric_only",
+      "remote": "origin/fix/triage-role-integrity-v1"
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-forensic-trace-v1",
+      "branch": "feature/forensic-trace-v1",
+      "head": "ba428326387bead6b687be5f5c5b4e879af08da1",
+      "clean": true,
+      "ahead": 4,
+      "behind": 62,
+      "classification": "integrate_after_additional_work",
+      "capability": "DiagnosticTraceV1 forensic capture, CLI flags, desktop Activity panel",
+      "unique_commits_vs_acceptance": [
+        {
+          "sha": "2d0b8ec59e6e",
+          "subject": "feat(diagnostic): DiagnosticTraceV1 core, pipeline attempt observer, CLI capture flags"
+        },
+        {
+          "sha": "6ce4a5dca1f6",
+          "subject": "feat(desktop): forensic capture host session, paged IPC, Activity panel"
+        },
+        {
+          "sha": "b7b0c626a90b",
+          "subject": "test(diagnostic): contract gates, CLI end-to-end, disk-guard regressions; docs"
+        },
+        {
+          "sha": "ba428326387b",
+          "subject": "test(diagnostic): build synthetic secret fixtures from fragments at runtime"
+        }
+      ],
+      "merge_tree_vs_acceptance": "many_changed_in_both",
+      "absent_on_acceptance": [
+        "crates/cd-core/src/diagnostic/mod.rs"
+      ],
+      "remote": null
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-repository-health-metrics-v1",
+      "branch": "feature/repository-health-metrics-v1",
+      "head": "701c01eaae2da64bec0a7e2c0ad2ff68d3bcc9a5",
+      "clean": true,
+      "ahead": 2,
+      "behind": 108,
+      "classification": "documentation_research_only",
+      "capability": "Deterministic repository health metrics script and docs",
+      "unique_commits_vs_acceptance": [
+        {
+          "sha": "9e2b9a8abe1a",
+          "subject": "chore(repo): add deterministic health metrics snapshot"
+        },
+        {
+          "sha": "701c01eaae2d",
+          "subject": "fix(repo): harden health metrics portability"
+        }
+      ],
+      "based_on": "main",
+      "remote": "origin/feature/repository-health-metrics-v1"
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-audit-cred-file-refs-v1",
+      "branch": "audit/cred-file-refs-adversarial-v1",
+      "head": "ddaef08be9d5a5fb07b09dd0b9282008c229631b",
+      "clean": true,
+      "ahead": 1,
+      "behind": 7,
+      "classification": "superseded_or_duplicated",
+      "capability": "Adversarial protected-file credential audit",
+      "equivalence": {
+        "type": "tree_identical_for_touched_paths",
+        "acceptance_commit": "1ef05b15293ac2f917de122d813fdfaa0d0e5cef",
+        "patch_id_equal": false,
+        "note": "Same subject and identical trees for keychain_store.rs, cli.rs, provider.rs vs acceptance tip; patch-id differs due to commit context drift"
+      }
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-eval-cli-v1",
+      "branch": "feat/eval-cli-v1",
+      "head": "3fba441d56ce84bb020a72eff29b1cb037701d38",
+      "clean": true,
+      "ahead": 1,
+      "behind": 17,
+      "classification": "superseded_or_duplicated",
+      "equivalence": {
+        "type": "patch_id",
+        "lane_sha": "3fba441d56ce84bb020a72eff29b1cb037701d38",
+        "acceptance_sha": "44a8db228622"
+      }
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-gateway-contract-fixtures-v1",
+      "branch": "test/gateway-contract-fixtures-v1",
+      "head": "1878f898b80c8d9d65e7410f9abeb4f3d8c59ba0",
+      "clean": true,
+      "ahead": 2,
+      "behind": 24,
+      "classification": "superseded_or_duplicated",
+      "equivalence": {
+        "type": "patch_id",
+        "pairs": [
+          {
+            "lane": "9fe905f8420e",
+            "acceptance": "9a6a3aa3c61b"
+          },
+          {
+            "lane": "1878f898b80c",
+            "acceptance": "5877e0c42948"
+          }
+        ]
+      }
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-progress-ux-parity-v1",
+      "branch": "fix/progress-ux-parity-v1",
+      "head": "92ee61d7f2243bb257c9c9647e49b7e36b416b3d",
+      "clean": true,
+      "ahead": 1,
+      "behind": 38,
+      "classification": "superseded_or_duplicated",
+      "equivalence": {
+        "type": "patch_id",
+        "lane_sha": "92ee61d7f2243bb257c9c9647e49b7e36b416b3d",
+        "acceptance_sha": "37905a3788f02b5069767a2bf70b946e0f33f945",
+        "note": "Acceptance is slight superset (+9 lines events.rs vs progress tip)"
+      }
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-qe-role-confusion-v1",
+      "branch": "fix/qe-live-role-confusion-v1",
+      "head": "42319b4466e043c327c4e51294e58482d74c00c1",
+      "clean": true,
+      "ahead": 1,
+      "behind": 6,
+      "classification": "superseded_or_duplicated",
+      "capability": "Lab quality_eval answer_score role confusion fix only — does not fix production triage_quality",
+      "equivalence": {
+        "type": "patch_id",
+        "lane_sha": "42319b4466e043c327c4e51294e58482d74c00c1",
+        "acceptance_sha": "e69327f1afcd"
+      }
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-quality-eval-harness-v1",
+      "branch": "feat/quality-eval-harness-v1",
+      "head": "17b102ee55f0c6355ac0af6d88bbf789c00c242a",
+      "clean": true,
+      "ahead": 3,
+      "behind": 26,
+      "classification": "superseded_or_duplicated",
+      "equivalence": {
+        "type": "content_in_acceptance",
+        "acceptance_commits": [
+          "250260db",
+          "ff7d808e563a",
+          "ae82daa36881"
+        ]
+      }
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-turn-provider-credential-cache-v1",
+      "branch": "fix/turn-provider-credential-cache-v1",
+      "head": "c7dbd60761b9e26b11025d721a8a08adddb1ce10",
+      "clean": true,
+      "ahead": 1,
+      "behind": 38,
+      "classification": "superseded_or_duplicated",
+      "equivalence": {
+        "type": "patch_id",
+        "lane_sha": "c7dbd60761b9e26b11025d721a8a08adddb1ce10",
+        "acceptance_sha": "2348de04a599"
+      }
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-typed-final-manifest-v1",
+      "branch": "fix/typed-final-manifest-v1",
+      "head": "eac6880737b36fa7a3b7c392fc42ba34112fe919",
+      "clean": true,
+      "ahead": 1,
+      "behind": 39,
+      "classification": "superseded_or_duplicated",
+      "equivalence": {
+        "type": "patch_id",
+        "lane_sha": "eac6880737b36fa7a3b7c392fc42ba34112fe919",
+        "acceptance_sha": "15617c06c215"
+      }
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-multistage-budget-v1",
+      "branch": "fix/multistage-budget-reserve-v1",
+      "head": "0deac2805b4369544ee3befff42d1797924e7d5c",
+      "clean": true,
+      "ahead": 0,
+      "behind": 22,
+      "classification": "superseded_or_duplicated",
+      "capability": "Budget V1 ancestor; acceptance advanced to MULTI_STAGE_BUDGET_POLICY_V2 at 10435d11",
+      "warning": "Re-applying this tip would regress reserve policy"
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-vercel-basics-refinement-v1",
+      "branch": "fix/vercel-basics-refinement-v1",
+      "head": "d17a120d06b7788e742b641f7639ac2b890d2f0a",
+      "clean": true,
+      "ahead": 0,
+      "behind": 24,
+      "classification": "superseded_or_duplicated",
+      "capability": "Ancestor of acceptance (Vercel/model bounds)"
+    },
+    {
+      "path": "/Users/chriscase/Documents/GitHub/contextdesk-evidence-final-rc2",
+      "branch": "integrate/evidence-investigation-final-rc2",
+      "head": "37905a3788f02b5069767a2bf70b946e0f33f945",
+      "clean": true,
+      "ahead": 0,
+      "behind": 36,
+      "classification": "superseded_or_duplicated",
+      "capability": "Ancestor; protected target/ cache must not be cleaned",
+      "protected_paths": [
+        "/Users/chriscase/Documents/GitHub/contextdesk-evidence-final-rc2/target"
+      ]
+    }
+  ],
+  "integration_batches": [
+    {
+      "id": "A",
+      "name": "triage_role_integrity",
+      "when": "immediately_after_acceptance",
+      "ordered_commits": [
+        "3c50f0f42aabfeecc57fb392c2a93287090d792d",
+        "7f4ebb985c0ff569f67821a76459c2a992e58493"
+      ],
+      "base": "accepted_tip_of_integrate_model_readiness_quality_v1",
+      "gate": "cargo test -p cd-core --lib triage_quality; confirm no len()==1 symptom gate"
+    },
+    {
+      "id": "B",
+      "name": "forensic_trace",
+      "when": "after_batch_A_with_rebase",
+      "ordered_commits": [
+        "2d0b8ec59e6e",
+        "6ce4a5dca1f6",
+        "b7b0c626a90b",
+        "ba428326387b"
+      ],
+      "requires": "rebase_onto_A_resolve_cli_agent_workflow_conflicts_prefer_acceptance_behavior",
+      "gate": "cd-core diagnostic tests + cli chat_diagnostics; capability ACL review"
+    },
+    {
+      "id": "C",
+      "name": "repository_health",
+      "when": "optional_post_release",
+      "ordered_commits": [
+        "9e2b9a8abe1a",
+        "701c01eaae2d"
+      ],
+      "gate": "python scripts/tests/test_repository_health.py"
+    }
+  ],
+  "do_not_integrate": [
+    "feat/eval-cli-v1",
+    "test/gateway-contract-fixtures-v1",
+    "fix/progress-ux-parity-v1",
+    "fix/qe-live-role-confusion-v1",
+    "feat/quality-eval-harness-v1",
+    "fix/turn-provider-credential-cache-v1",
+    "fix/typed-final-manifest-v1",
+    "fix/multistage-budget-reserve-v1",
+    "fix/vercel-basics-refinement-v1",
+    "integrate/evidence-investigation-final-rc2",
+    "audit/cred-file-refs-adversarial-v1"
+  ],
+  "contracts": [
+    {
+      "id": "C1",
+      "name": "gateway_discovery_qualification_evidence_selection",
+      "owning_modules": [
+        "crates/cd-core/src/capability_qualification.rs",
+        "crates/cd-core/src/model_curation.rs"
+      ],
+      "current_tests": [
+        "capability_qualification module tests",
+        "crates/cd-core/tests/gateway_contract_fixtures.rs"
+      ],
+      "missing_negative_tests": [
+        "concurrent store writers",
+        "catalog change mid-qualification"
+      ],
+      "false_positive_risks": [
+        "scripted transport ≠ live SSE"
+      ],
+      "mutation_operators": [
+        "flip mark_stale_if_mismatch",
+        "treat Limited as Verified"
+      ],
+      "strongest_branch": "integrate/model-readiness-quality-v1@10435d11",
+      "status": "release_critical"
+    },
+    {
+      "id": "C2",
+      "name": "endpoint_profile_model_fingerprinting",
+      "owning_modules": [
+        "crates/cd-core/src/capability_qualification.rs"
+      ],
+      "status": "release_critical",
+      "strongest_branch": "integrate/model-readiness-quality-v1@10435d11"
+    },
+    {
+      "id": "C3",
+      "name": "protected_file_secret_resolution",
+      "owning_modules": [
+        "crates/cd-core/src/keychain_store.rs",
+        "crates/cd-workflow/src/provider.rs"
+      ],
+      "status": "release_critical",
+      "strongest_branch": "integrate/model-readiness-quality-v1@10435d11"
+    },
+    {
+      "id": "C4",
+      "name": "multi_stage_pipeline_to_validation",
+      "owning_modules": [
+        "crates/cd-core/src/agent.rs",
+        "crates/cd-core/src/tool_host.rs",
+        "crates/cd-core/src/investigation_answer.rs",
+        "crates/cd-core/src/multi_stage_budget.rs"
+      ],
+      "status": "release_critical",
+      "strongest_branch": "integrate/model-readiness-quality-v1@10435d11"
+    },
+    {
+      "id": "C5",
+      "name": "opaque_evidence_id_fail_closed",
+      "owning_modules": [
+        "crates/cd-core/src/investigation_answer.rs"
+      ],
+      "status": "release_critical",
+      "strongest_branch": "integrate/model-readiness-quality-v1@10435d11"
+    },
+    {
+      "id": "C6",
+      "name": "retry_correction",
+      "owning_modules": [
+        "crates/cd-core/src/agent.rs"
+      ],
+      "status": "release_critical",
+      "strongest_branch": "integrate/model-readiness-quality-v1@10435d11"
+    },
+    {
+      "id": "C7",
+      "name": "budget_deadline_reserve",
+      "owning_modules": [
+        "crates/cd-core/src/multi_stage_budget.rs"
+      ],
+      "status": "release_critical",
+      "policy_on_acceptance": "contextdesk.multi_stage_budget.v2",
+      "strongest_branch": "integrate/model-readiness-quality-v1@10435d11"
+    },
+    {
+      "id": "C8",
+      "name": "cli_gui_progress_parity",
+      "owning_modules": [
+        "crates/cd-core/src/activity.rs",
+        "crates/cd-core/src/events.rs",
+        "desktop/src/lib/turn.ts"
+      ],
+      "status": "mostly_on_acceptance_post_release_polish",
+      "strongest_branch": "integrate/model-readiness-quality-v1@10435d11"
+    },
+    {
+      "id": "C9",
+      "name": "offline_fixture_vs_live",
+      "owning_modules": [
+        "fixtures/gateway-contracts/v1",
+        "fixtures/quality-eval/open-v1"
+      ],
+      "status": "release_critical_offline_gate",
+      "strongest_branch": "integrate/model-readiness-quality-v1@10435d11"
+    },
+    {
+      "id": "C10",
+      "name": "chat_vs_triage",
+      "owning_modules": [
+        "crates/cd-core/src/agent.rs",
+        "crates/cd-core/src/triage_quality.rs"
+      ],
+      "status": "release_critical",
+      "strongest_branch": "integrate/model-readiness-quality-v1@10435d11"
+    },
+    {
+      "id": "C11",
+      "name": "embedding_rerank_role_separation",
+      "owning_modules": [
+        "crates/cd-core/src/capability_qualification.rs",
+        "crates/cd-core/tests/gateway_contract_fixtures.rs"
+      ],
+      "status": "release_critical",
+      "strongest_branch": "integrate/model-readiness-quality-v1@10435d11"
+    },
+    {
+      "id": "C12",
+      "name": "scorer_role_integrity",
+      "owning_modules": [
+        "crates/cd-core/src/triage_quality.rs",
+        "crates/cd-core/src/quality_eval/answer_score.rs"
+      ],
+      "status": "release_critical",
+      "acceptance_gap": "triage_quality still uses causal_candidates.len()==1 at 10435d11",
+      "strongest_branch": "fix/triage-role-integrity-v1@7f4ebb98"
+    }
+  ],
+  "mutation_priorities": [
+    {
+      "rank": 1,
+      "file": "crates/cd-core/src/investigation_answer.rs",
+      "package": "cd-core"
+    },
+    {
+      "rank": 2,
+      "file": "crates/cd-core/src/multi_stage_budget.rs",
+      "package": "cd-core"
+    },
+    {
+      "rank": 3,
+      "file": "crates/cd-core/src/triage_quality.rs",
+      "package": "cd-core"
+    },
+    {
+      "rank": 4,
+      "file": "crates/cd-core/src/capability_qualification.rs",
+      "package": "cd-core"
+    },
+    {
+      "rank": 5,
+      "file": "crates/cd-core/src/keychain_store.rs",
+      "package": "cd-core"
+    },
+    {
+      "rank": 6,
+      "file": "crates/cd-core/src/quality_eval/answer_score.rs",
+      "package": "cd-core"
+    }
+  ],
+  "issue_backlog": [
+    {
+      "id": "INT-001",
+      "severity": "P0",
+      "title": "Production triage scorer masks promoted symptom when valid trigger coexists",
+      "evidence": "10435d11 triage_quality.rs len()==1; fixed in 3c50f0f4",
+      "affected_files": [
+        "crates/cd-core/src/triage_quality.rs"
+      ],
+      "acceptance_criteria": "Tests from 3c50f0f4 pass; gate removed",
+      "recommended_lane": "fix/triage-role-integrity-v1"
+    },
+    {
+      "id": "INT-002",
+      "severity": "P1",
+      "title": "Dual scorer drift lab vs production",
+      "evidence": "answer_score fixed e69327f1; triage_quality lagging on acceptance",
+      "affected_files": [
+        "crates/cd-core/src/quality_eval/answer_score.rs",
+        "crates/cd-core/src/triage_quality.rs"
+      ],
+      "acceptance_criteria": "Paired regression for promotion shapes in both scorers",
+      "recommended_lane": "post_acceptance_chore"
+    },
+    {
+      "id": "INT-003",
+      "severity": "P2",
+      "title": "Forensic DiagnosticTraceV1 not on acceptance",
+      "evidence": "diagnostic module absent at 10435d11; ba428326 unique",
+      "affected_files": [
+        "crates/cd-core/src/diagnostic/*",
+        "desktop forensic panels"
+      ],
+      "acceptance_criteria": "Rebased green tests; ACL review",
+      "recommended_lane": "feature/forensic-trace-v1"
+    },
+    {
+      "id": "INT-004",
+      "severity": "P3",
+      "title": "Repository health metrics off main",
+      "evidence": "701c01ea based on eee1e6d2",
+      "affected_files": [
+        "scripts/repository_health.py",
+        "docs/development/REPOSITORY_HEALTH.md"
+      ],
+      "acceptance_criteria": "Script tests pass on integrate tip or main",
+      "recommended_lane": "feature/repository-health-metrics-v1"
+    },
+    {
+      "id": "INT-005",
+      "severity": "P2",
+      "title": "Budget V2 vs char ceiling interaction under-tested",
+      "evidence": "93a75a5e and V2 reserve coexist without joint hermetic binding test",
+      "affected_files": [
+        "crates/cd-core/src/multi_stage_budget.rs"
+      ],
+      "acceptance_criteria": "Hermetic test where both bind",
+      "recommended_lane": "test/critical-contract-mutations-v1"
+    },
+    {
+      "id": "INT-006",
+      "severity": "P2",
+      "title": "Mutation gaps on opaque evidence validation",
+      "evidence": "Phase 1 risk ranking",
+      "affected_files": [
+        "crates/cd-core/src/investigation_answer.rs"
+      ],
+      "acceptance_criteria": "Phase 2 mutation report + tests",
+      "recommended_lane": "test/critical-contract-mutations-v1"
+    },
+    {
+      "id": "INT-007",
+      "severity": "P3",
+      "title": "Superseded worktree residue",
+      "evidence": "10+ clean superseded worktrees",
+      "affected_files": [],
+      "acceptance_criteria": "Human prune after promote; inventory documented",
+      "recommended_lane": "process"
+    },
+    {
+      "id": "INT-008",
+      "severity": "P2",
+      "title": "Live gateway drift after fixture freeze",
+      "evidence": "fixtures from live-derived commits; no live re-verify in this audit",
+      "affected_files": [
+        "fixtures/gateway-contracts/v1"
+      ],
+      "acceptance_criteria": "Live refresh protocol executed under human window",
+      "recommended_lane": "live_only"
+    },
+    {
+      "id": "INT-009",
+      "severity": "P1",
+      "title": "Independent-incident truth insufficient for safe automated rule",
+      "evidence": "7f4ebb98 design note",
+      "affected_files": [
+        "docs/design/TRIAGE_INDEPENDENT_INCIDENT_TRUTH.md"
+      ],
+      "acceptance_criteria": "Product decision before auto-fail rule",
+      "recommended_lane": "fix/triage-role-integrity-v1 docs follow-on"
+    },
+    {
+      "id": "INT-010",
+      "severity": "P3",
+      "title": "Progress event surface slight divergence",
+      "evidence": "events.rs +9 lines on acceptance vs progress tip",
+      "affected_files": [
+        "crates/cd-core/src/events.rs"
+      ],
+      "acceptance_criteria": "Desktop admits all CLI progress kinds",
+      "recommended_lane": "verify_on_acceptance"
+    }
+  ],
+  "unresolved_live_questions": [
+    "V2 half-turn reserve sufficiency for slowest compatibility-qualified model under real latency",
+    "Protected-file credentials on ACL/non-UNIX corporate filesystems",
+    "Live Vercel catalog vs fixtures/providers/model-role-hints.v1.json",
+    "Whether live multi-stage still emits dual causal candidates masked by INT-001",
+    "Credential cache latency benefit under multi-profile reviewer turns"
+  ],
+  "safety": {
+    "acceptance_branch_disturbed": false,
+    "existing_worktrees_modified": false,
+    "live_providers_called": false,
+    "keychain_accessed": false,
+    "prs_opened": false,
+    "protected_target_cache_touched": false
+  }
+}
