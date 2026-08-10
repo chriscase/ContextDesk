@@ -1689,12 +1689,12 @@
       "route": "POST .../chat/completions (stream:true)",
       "request_shape": "stream:true",
       "response_shape": "headers sent, body never arrives (Body::NeverEnds)",
-      "expected_classification": "an explicit 15s deadline cuts off the stall \u2014 and documents the real telemetry gap: no TracedCall is recorded for a round dropped by the outer deadline race",
+      "expected_classification": "an explicit 15s deadline cuts off the stall and retains exactly one metadata-only TimedOut TracedCall",
       "test_name": "permanently_stalled_provider_is_cut_off_by_an_explicit_user_deadline",
       "status": "pass",
       "owning_module": "crates/cd-core/src/chat.rs, crates/cd-core/src/multi_stage_budget.rs, crates/cd-core/src/agent.rs (within_turn_deadline_with_cap shape)",
       "test_file": "crates/cd-core/tests/gateway_wire_latency_cancellation.rs",
-      "remaining_gap": "TracingChatBackend::record() only runs after its inner future resolves, so a round dropped by the outer cancellation/deadline race (agent.rs's within_turn_deadline_with_cap pattern) leaves no TracedCall at all, even though used_rounds budget accounting still charges for the round. provider_round_count and used_rounds can diverge for exactly this reason. See gateway-wire-survivors-and-gaps.md \u2014 documented, not fixed (would require restructuring agent.rs's pub(crate) turn-budget/telemetry machinery)."
+      "remaining_gap": ""
     },
     {
       "capability": "latency_timeout_cancellation",
@@ -1821,8 +1821,8 @@
       "route": "POST .../chat/completions (stream:true)",
       "request_shape": "stream:true, pre-cancelled",
       "response_shape": "Body::NeverEnds",
-      "expected_classification": "still resolves and is recorded \u2014 contrast with the outer-race case",
-      "test_name": "attempt_counting_inner_cancellation_still_records_one_failed_call",
+      "expected_classification": "zero wire requests and zero TracedCalls because cancellation was set before the provider-attempt boundary",
+      "test_name": "attempt_counting_cancellation_before_request_start_records_zero_attempts",
       "status": "pass",
       "owning_module": "crates/cd-core/src/chat.rs, crates/cd-core/src/multi_stage_budget.rs, crates/cd-core/src/agent.rs (within_turn_deadline_with_cap shape)",
       "test_file": "crates/cd-core/tests/gateway_wire_latency_cancellation.rs",
@@ -1833,12 +1833,48 @@
       "route": "POST .../chat/completions (stream:true)",
       "request_shape": "stream:true",
       "response_shape": "Body::NeverEnds, 5s deadline",
-      "expected_classification": "zero TracedCalls recorded \u2014 the same documented gap as above",
-      "test_name": "attempt_counting_outer_race_timeout_records_zero_calls_documented_gap",
+      "expected_classification": "exactly one metadata-only TimedOut TracedCall",
+      "test_name": "attempt_counting_outer_race_timeout_records_one_timed_out_call",
       "status": "pass",
       "owning_module": "crates/cd-core/src/chat.rs, crates/cd-core/src/multi_stage_budget.rs, crates/cd-core/src/agent.rs (within_turn_deadline_with_cap shape)",
       "test_file": "crates/cd-core/tests/gateway_wire_latency_cancellation.rs",
-      "remaining_gap": "Same documented telemetry gap as permanently_stalled_provider_is_cut_off_by_an_explicit_user_deadline above \u2014 the outer-race timeout path never produces a TracedCall."
+      "remaining_gap": ""
+    },
+    {
+      "capability": "latency_timeout_cancellation",
+      "route": "POST .../chat/completions (stream:true)",
+      "request_shape": "stream:true",
+      "response_shape": "Body::NeverEnds, whole-turn deadline",
+      "expected_classification": "exactly one metadata-only TimedOut TracedCall",
+      "test_name": "whole_turn_timeout_records_one_timed_out_attempt",
+      "status": "pass",
+      "owning_module": "crates/cd-core/src/turn_trace.rs, crates/cd-core/src/agent.rs",
+      "test_file": "crates/cd-core/tests/gateway_wire_latency_cancellation.rs",
+      "remaining_gap": ""
+    },
+    {
+      "capability": "latency_timeout_cancellation",
+      "route": "POST .../chat/completions (stream:true)",
+      "request_shape": "stream:true with completion/cancel race",
+      "response_shape": "fast success while cancellation is armed",
+      "expected_classification": "exactly one terminal TracedCall; completion/drop boundary never double-counts",
+      "test_name": "boundary_race_never_double_counts_a_resolved_attempt",
+      "status": "pass",
+      "owning_module": "crates/cd-core/src/turn_trace.rs",
+      "test_file": "crates/cd-core/tests/gateway_wire_latency_cancellation.rs",
+      "remaining_gap": ""
+    },
+    {
+      "capability": "latency_timeout_cancellation",
+      "route": "POST .../chat/completions (stream:true)",
+      "request_shape": "stream:true, cancelled while waiting for headers",
+      "response_shape": "delayed provider response",
+      "expected_classification": "serialized interrupt telemetry is metadata-only and contains no prompt, response, URL, header, or secret",
+      "test_name": "interrupted_attempt_serialized_output_is_metadata_only",
+      "status": "pass",
+      "owning_module": "crates/cd-core/src/turn_trace.rs",
+      "test_file": "crates/cd-core/tests/gateway_wire_latency_cancellation.rs",
+      "remaining_gap": ""
     },
     {
       "capability": "latency_timeout_cancellation",

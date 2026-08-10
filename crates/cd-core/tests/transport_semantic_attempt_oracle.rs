@@ -284,9 +284,9 @@ fn oracle_profile(base_url: &str) -> ProviderProfile {
     }
 }
 
-/// The exact production stack `run_turn` drives: `backend_for` (OpenAI
-/// backend with its stream→non-stream fallback discipline) wrapped in
-/// `TracingChatBackend` recording one `TracedCall` per semantic attempt.
+/// The exact production stack `run_turn` drives: `backend_for` (one declared
+/// protocol request per operation) wrapped in `TracingChatBackend` recording
+/// one `TracedCall` per semantic attempt.
 async fn traced_backend(base_url: &str) -> (Box<dyn ChatBackend>, Arc<RecordingTurnTrace>) {
     let inner = backend_for(&oracle_profile(base_url), None)
         .await
@@ -683,33 +683,28 @@ async fn cancellation_during_backoff_exits_promptly_without_further_requests() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 4 — connection reset before any response bytes, then success:
-// a transport failure recovered INSIDE the same semantic attempt via the
-// production stream→non-stream fallback. One TracedCall, two connections.
+// Scenario 4 — connection reset before any response bytes is terminal for
+// this operation. A scripted second response proves that transport failure
+// never replays the prompt through a different protocol mode.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn connection_reset_before_headers_recovers_within_the_same_semantic_attempt() {
+async fn connection_reset_before_headers_is_terminal_without_protocol_replay() {
     let (base_url, accepted) =
         raw_fault_server(vec![RawConn::ResetBeforeHeaders, RawConn::Json(JSON_HELLO)]);
 
     let (backend, recorder) = traced_backend(&base_url).await;
-    let completion = complete_streaming_once(backend.as_ref(), None)
+    complete_streaming_once(backend.as_ref(), None)
         .await
-        .expect("reset then success recovers within the same semantic attempt");
+        .expect_err("the reset must remain the operation's terminal failure");
 
-    assert_eq!(completion.content, "hello");
     assert_eq!(
         accepted.load(Ordering::SeqCst),
-        2,
-        "the reset request plus exactly one non-stream fallback request"
+        1,
+        "the scripted non-stream success must remain unused"
     );
     let calls = recorder.calls();
-    assert_eq!(
-        calls.len(),
-        1,
-        "transport-level recovery must not mint a second semantic attempt"
-    );
-    assert!(matches!(&calls[0].outcome, TracedOutcome::Completed { .. }));
+    assert_eq!(calls.len(), 1);
+    assert!(matches!(&calls[0].outcome, TracedOutcome::Failed { .. }));
 }
 
 // ---------------------------------------------------------------------------
@@ -834,12 +829,11 @@ async fn length_truncation_is_a_completed_attempt_not_a_transport_failure() {
     ));
 }
 
-/// 8c: malformed tool-call/SSE stream — a PROVIDER-OUTPUT failure. The
-/// stream parse fails closed; the production fallback retries non-stream
-/// within the SAME semantic attempt. If the fallback yields a usable
-/// completion the attempt completes; the wire saw two requests.
+/// 8c: malformed tool-call/SSE stream — a PROVIDER-OUTPUT failure. A
+/// scripted non-stream success remains unused because parse failure never
+/// launches a second protocol request.
 #[tokio::test]
-async fn malformed_sse_stream_is_provider_output_failure_recovered_in_the_same_attempt() {
+async fn malformed_sse_stream_is_terminal_without_protocol_replay() {
     let server = MockServer::start().await;
     let wire_calls = mount_steps(
         &server,
@@ -847,39 +841,31 @@ async fn malformed_sse_stream_is_provider_output_failure_recovered_in_the_same_a
     )
     .await;
     let (backend, recorder) = traced_backend(&server.uri()).await;
-    let completion = complete_streaming_once(backend.as_ref(), None)
+    complete_streaming_once(backend.as_ref(), None)
         .await
-        .expect("non-stream fallback recovers the malformed stream");
-    assert_eq!(completion.content, "hello");
+        .expect_err("malformed SSE must fail this operation");
     assert_eq!(
         wire_calls.load(Ordering::SeqCst),
-        2,
-        "malformed stream + one non-stream fallback, still one semantic attempt"
+        1,
+        "the scripted non-stream success must remain unused"
     );
     let calls = recorder.calls();
     assert_eq!(calls.len(), 1);
-    assert!(matches!(&calls[0].outcome, TracedOutcome::Completed { .. }));
+    assert!(matches!(&calls[0].outcome, TracedOutcome::Failed { .. }));
 }
 
-/// 8c (terminal form): when the fallback is also malformed, the attempt is a
-/// FAILED provider-output attempt whose error names the parse failure — it
-/// is neither an HTTP-status provider failure nor analysis vocabulary.
+/// 8c (classification): malformed provider output is a FAILED attempt whose
+/// error names the parse failure. It is neither an HTTP-status provider
+/// failure nor analysis vocabulary, and it consumes one wire request.
 #[tokio::test]
 async fn persistently_malformed_provider_output_fails_the_attempt_with_parse_language() {
     let server = MockServer::start().await;
-    let wire_calls = mount_steps(
-        &server,
-        vec![
-            sse_ok(SSE_MALFORMED_DATA_LINE),
-            json_ok("{ this is not json either"),
-        ],
-    )
-    .await;
+    let wire_calls = mount_steps(&server, vec![sse_ok(SSE_MALFORMED_DATA_LINE)]).await;
     let (backend, recorder) = traced_backend(&server.uri()).await;
     let error = complete_streaming_once(backend.as_ref(), None)
         .await
-        .expect_err("malformed stream and malformed fallback fail the attempt");
-    assert_eq!(wire_calls.load(Ordering::SeqCst), 2);
+        .expect_err("malformed stream fails the attempt");
+    assert_eq!(wire_calls.load(Ordering::SeqCst), 1);
     let calls = recorder.calls();
     assert_eq!(calls.len(), 1);
     assert!(matches!(&calls[0].outcome, TracedOutcome::Failed { .. }));
