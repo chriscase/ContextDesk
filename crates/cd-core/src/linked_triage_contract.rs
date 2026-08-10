@@ -121,7 +121,7 @@ fn strip_complete_reasoning_blocks(raw: &str) -> String {
             let close = format!("</{tag}>");
             if let Some(body) = trimmed.strip_prefix(open.as_str()) {
                 if let Some(end) = body.find(close.as_str()) {
-                    trimmed = body[end + close.len()..].trim();
+                    trimmed = body.get(end + close.len()..).unwrap_or_default().trim();
                     unwrapped = true;
                     break;
                 }
