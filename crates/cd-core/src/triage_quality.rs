@@ -895,12 +895,18 @@ pub fn score_structured_triage_answer(
     });
 
     // 4) Symptom vs cause separation
-    let symptom_as_sole_cause = key.symptom_message_tokens.iter().any(|token| {
+    //
+    // Invariant: any causal candidate whose citation identity resolves (via
+    // host message text) to a host-authored `symptom_message_token` must carry
+    // an explicit safe role (`symptom` or `unknown`). A coexisting valid
+    // trigger must never mask a promoted symptom — candidate count is
+    // irrelevant. Decision inputs are host token→identity resolution and
+    // structured role placement only.
+    let symptom_promoted_as_cause = key.symptom_message_tokens.iter().any(|token| {
         find_token_seq(host, token).is_some_and(|(seq, source)| {
             answer.causal_candidates.iter().any(|c| {
                 c.seq == Some(seq)
                     && c.source.as_deref() == Some(source.as_str())
-                    && answer.causal_candidates.len() == 1
                     && !matches!(c.role.as_deref(), Some("symptom" | "unknown"))
             })
         })
@@ -914,12 +920,14 @@ pub fn score_structured_triage_answer(
                         && c.role.as_deref() == Some("trigger")
                 })
             }));
-    let separation_ok = !symptom_as_sole_cause && !earliest_as_root;
+    let separation_ok = !symptom_promoted_as_cause && !earliest_as_root;
     dimensions.push(RubricDimension {
         id: "symptom_vs_cause".into(),
         passed: separation_ok,
         reason: if separation_ok {
-            "symptoms not presented as sole proven cause; earliest≠root".into()
+            "symptoms not promoted as causal candidates; earliest≠root".into()
+        } else if symptom_promoted_as_cause {
+            "host-identified symptom cited as a non-symptom causal candidate".into()
         } else {
             "symptom/decoy treated as proven root cause".into()
         },
@@ -1581,6 +1589,243 @@ mod tests {
         assert_eq!(parsed.asserted_semantic_occurrence_count, Some(98_765));
         let score = score_structured_triage_answer(&parsed, &key, &host);
         assert!(score.failed_ids().contains(&"semantic_occurrence_count"));
+    }
+
+    /// Causal candidate citing the host-identified symptom with a non-safe role.
+    fn symptom_claim(role: Option<&str>) -> TriageClaim {
+        TriageClaim {
+            // Shares material tokens with the cited seq=3 symptom message
+            // without embedding frozen fixture answer vocabulary.
+            text: "task failed after the pool pressure wave".into(),
+            seq: Some(3),
+            source: Some("app/worker.jsonl".into()),
+            role: role.map(str::to_string),
+        }
+    }
+
+    fn with_extra_causal(
+        base: &StructuredTriageAnswer,
+        extra: TriageClaim,
+    ) -> StructuredTriageAnswer {
+        let mut answer = base.clone();
+        answer.causal_candidates.push(extra);
+        answer
+    }
+
+    fn dim_passed(score: &TriageRubricScore, id: &str) -> bool {
+        score
+            .dimensions
+            .iter()
+            .find(|d| d.id == id)
+            .is_some_and(|d| d.passed)
+    }
+
+    /// Reproduction: valid trigger + symptom promoted to `trigger` must fail
+    /// `symptom_vs_cause`. The pre-fix `len() == 1` gate greened this shape.
+    #[test]
+    fn valid_trigger_does_not_mask_symptom_promoted_to_trigger() {
+        let key = sample_key();
+        let host = sample_host();
+        let answer = with_extra_causal(&good_answer(), symptom_claim(Some("trigger")));
+        assert!(
+            answer.causal_candidates.len() > 1,
+            "masking defect requires coexisting candidates"
+        );
+        let score = score_structured_triage_answer(&answer, &key, &host);
+        assert!(
+            score.failed_ids().contains(&"symptom_vs_cause"),
+            "promoted symptom must fail symptom_vs_cause even with a valid trigger; failed={:?} dims={:?}",
+            score.failed_ids(),
+            score.dimensions
+        );
+        // Unrelated dimensions must not be the only failures for this shape.
+        assert!(
+            dim_passed(&score, "citation_validity"),
+            "citation must remain green: {:?}",
+            score.dimensions
+        );
+        assert!(
+            dim_passed(&score, "claim_evidence_correspondence"),
+            "evidence correspondence must remain green: {:?}",
+            score.dimensions
+        );
+        assert!(
+            dim_passed(&score, "trigger_identification"),
+            "valid trigger citation must still score: {:?}",
+            score.dimensions
+        );
+    }
+
+    #[test]
+    fn correct_trigger_alone_still_passes_symptom_vs_cause() {
+        let score = score_structured_triage_answer(&good_answer(), &sample_key(), &sample_host());
+        assert!(
+            dim_passed(&score, "symptom_vs_cause"),
+            "failed={:?}",
+            score.failed_ids()
+        );
+        assert!(score.passed, "failed={:?}", score.failed_ids());
+    }
+
+    #[test]
+    fn correct_trigger_plus_explicit_symptom_role_passes() {
+        let answer = with_extra_causal(&good_answer(), symptom_claim(Some("symptom")));
+        let score = score_structured_triage_answer(&answer, &sample_key(), &sample_host());
+        assert!(
+            dim_passed(&score, "symptom_vs_cause"),
+            "explicit symptom role must pass; failed={:?} dims={:?}",
+            score.failed_ids(),
+            score.dimensions
+        );
+        assert!(
+            dim_passed(&score, "citation_validity")
+                && dim_passed(&score, "claim_evidence_correspondence"),
+            "supporting dimensions must stay green: {:?}",
+            score.dimensions
+        );
+    }
+
+    #[test]
+    fn multiple_genuine_triggers_still_pass_symptom_vs_cause() {
+        let mut key = sample_key();
+        key.true_trigger_message_token = Some("lease refused".into());
+        key.competing_trigger_message_tokens =
+            vec!["lease refused".into(), "pool pressure wave".into()];
+        // Reuse the decoy row as a second genuine trigger for this counterexample
+        // by re-labeling host message text so host tokens resolve cleanly.
+        let mut host = sample_host();
+        host.messages_by_seq[0].2 = "second trigger pool pressure wave at boundary".into();
+        let mut answer = good_answer();
+        answer.causal_candidates = vec![
+            TriageClaim {
+                text: "lease request refused by the compute manager".into(),
+                seq: Some(2),
+                source: Some("app/worker.jsonl".into()),
+                role: Some("trigger".into()),
+            },
+            TriageClaim {
+                text: "pool pressure wave at the admission boundary".into(),
+                seq: Some(1),
+                source: Some("app/worker.jsonl".into()),
+                role: Some("trigger".into()),
+            },
+        ];
+        let score = score_structured_triage_answer(&answer, &key, &host);
+        assert!(
+            dim_passed(&score, "symptom_vs_cause"),
+            "multiple genuine triggers must not be rejected as symptoms; failed={:?} dims={:?}",
+            score.failed_ids(),
+            score.dimensions
+        );
+    }
+
+    #[test]
+    fn unrelated_second_candidate_is_not_rejected_for_multiplicity() {
+        // Second candidate cites the decoy identity (not a symptom token) with
+        // role `noise`. Multiplicity alone must not fail symptom_vs_cause.
+        let mut answer = good_answer();
+        answer.causal_candidates.push(TriageClaim {
+            text: "early decoy noise from the access edge".into(),
+            seq: Some(1),
+            source: Some("app/worker.jsonl".into()),
+            role: Some("noise".into()),
+        });
+        // Align claim text with the decoy host message for correspondence.
+        let mut host = sample_host();
+        host.messages_by_seq[0].2 = "decoy early noise from the access edge".into();
+        let score = score_structured_triage_answer(&answer, &sample_key(), &host);
+        assert!(
+            dim_passed(&score, "symptom_vs_cause"),
+            "non-symptom multi-candidate answers must pass; failed={:?} dims={:?}",
+            score.failed_ids(),
+            score.dimensions
+        );
+        assert!(
+            dim_passed(&score, "citation_validity")
+                && dim_passed(&score, "claim_evidence_correspondence"),
+            "citation/correspondence must remain green: {:?}",
+            score.dimensions
+        );
+    }
+
+    #[test]
+    fn correct_trigger_plus_symptom_without_safe_role_fails_closed() {
+        let answer = with_extra_causal(&good_answer(), symptom_claim(None));
+        let score = score_structured_triage_answer(&answer, &sample_key(), &sample_host());
+        assert!(
+            score.failed_ids().contains(&"symptom_vs_cause"),
+            "absent role must fail closed; failed={:?}",
+            score.failed_ids()
+        );
+    }
+
+    #[test]
+    fn sole_symptom_as_causal_candidate_still_rejected() {
+        let mut answer = good_answer();
+        answer.causal_candidates = vec![symptom_claim(Some("trigger"))];
+        let score = score_structured_triage_answer(&answer, &sample_key(), &sample_host());
+        assert!(
+            score.failed_ids().contains(&"symptom_vs_cause"),
+            "sole promoted symptom must still fail; failed={:?}",
+            score.failed_ids()
+        );
+    }
+
+    #[test]
+    fn earliest_error_root_mutation_still_rejected() {
+        let earliest = mutation_earliest_is_root_cause(&good_answer());
+        let score = score_structured_triage_answer(&earliest, &sample_key(), &sample_host());
+        assert!(!score.passed);
+        assert!(
+            score.failed_ids().contains(&"symptom_vs_cause")
+                || score.failed_ids().contains(&"unsupported_claims"),
+            "earliest-as-root mutation must still fail; failed={:?}",
+            score.failed_ids()
+        );
+    }
+
+    #[test]
+    fn citation_chronology_unsupported_and_correspondence_retain_behavior() {
+        let key = sample_key();
+        let host = sample_host();
+        let base = good_answer();
+
+        // Citation: unknown identity still fails citation_validity.
+        let mut bad_cite = base.clone();
+        bad_cite.causal_candidates[0].seq = Some(99);
+        let score = score_structured_triage_answer(&bad_cite, &key, &host);
+        assert!(score.failed_ids().contains(&"citation_validity"));
+        assert!(
+            dim_passed(&score, "symptom_vs_cause"),
+            "citation failure must not spill into symptom_vs_cause"
+        );
+
+        // Correspondence: claim text that better matches another row still fails.
+        let mut bad_corr = base.clone();
+        bad_corr.causal_candidates[0].text = "downstream symptom task failed".into();
+        // Keep citing the trigger identity while describing the symptom row.
+        bad_corr.causal_candidates[0].seq = Some(2);
+        let score = score_structured_triage_answer(&bad_corr, &key, &host);
+        assert!(score
+            .failed_ids()
+            .contains(&"claim_evidence_correspondence"));
+
+        // Chronology honesty under order-only still fails high confidence wall-clock.
+        let mut order_key = key.clone();
+        order_key.time_quality_expected = "order_only".into();
+        let mut order_host = host.clone();
+        order_host.time_quality = "order_only".into();
+        let mut high_clock = base.clone();
+        high_clock.confidence = "high".into();
+        high_clock.asserts_confident_wall_clock_order = true;
+        let score = score_structured_triage_answer(&high_clock, &order_key, &order_host);
+        assert!(score.failed_ids().contains(&"chronology_honesty"));
+
+        // Unsupported fabricated count still fails unsupported_claims.
+        let fab = mutation_fabricated_count(&base, 42);
+        let score = score_structured_triage_answer(&fab, &key, &host);
+        assert!(score.failed_ids().contains(&"unsupported_claims"));
+        assert!(dim_passed(&score, "symptom_vs_cause"));
     }
 
     #[test]
