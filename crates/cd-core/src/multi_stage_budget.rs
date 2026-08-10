@@ -310,4 +310,94 @@ mod tests {
             Err(AdmissionDenial::Deadline)
         );
     }
+
+    /// `needed == max_rounds` must still admit: the inequality is strict `>` so a
+    /// candidate that exactly fills the last non-synthesis slot is allowed.
+    /// A `>=` mutant refuses this legal boundary (mutation survivor).
+    #[test]
+    fn admit_when_needed_rounds_exactly_equal_max() {
+        let r = synthesis_reserve(&plan(120_000));
+        assert_eq!(r.round_reserve, 1);
+        // needed = used(6) + 1 + round_reserve(1) = 8 == max_rounds
+        let snap = AdmissionSnapshot {
+            remaining_total_ms: Some(r.time_reserve_ms.saturating_add(1)),
+            used_rounds: 6,
+            max_rounds: 8,
+            cancelled: false,
+        };
+        assert_eq!(
+            admit_candidate(snap, r),
+            Ok(()),
+            "exactly filling the last candidate slot must admit; strict > not >="
+        );
+    }
+
+    /// synthesis_operation_cap_ms is the uncapped remaining/phase min used for
+    /// final comparison — distinct from candidate_operation_cap_ms which
+    /// subtracts the reserve. Direct contract tests kill body-replacement mutants.
+    #[test]
+    fn synthesis_operation_cap_uses_remaining_without_extra_reserve() {
+        assert_eq!(
+            synthesis_operation_cap_ms(Some(50_000), 40_000),
+            Some(40_000),
+            "phase binds when remaining is larger"
+        );
+        assert_eq!(
+            synthesis_operation_cap_ms(Some(12_000), 40_000),
+            Some(12_000),
+            "remaining binds when phase is larger"
+        );
+        assert_eq!(
+            synthesis_operation_cap_ms(None, 40_000),
+            None,
+            "unlimited turn exposes no wall-clock cap"
+        );
+        assert_eq!(
+            synthesis_operation_cap_ms(Some(0), 40_000),
+            Some(0),
+            "deadline already elapsed yields a zero cap, not None"
+        );
+    }
+
+    /// can_run_comparison round gate uses strict `>` on used+1 vs max.
+    /// The equality case alone is invisible to a `>`→`<` invert mutant; probe
+    /// both sides of the boundary.
+    #[test]
+    fn comparison_round_gate_is_strict_and_directional() {
+        // used+1 == max → still allowed (one round remains for comparison)
+        let at_edge = AdmissionSnapshot {
+            remaining_total_ms: Some(10),
+            used_rounds: 2,
+            max_rounds: 3,
+            cancelled: false,
+        };
+        assert!(
+            can_run_comparison(2, at_edge),
+            "used+1 == max must allow comparison"
+        );
+
+        // used+1 > max → refuse
+        let over = AdmissionSnapshot {
+            remaining_total_ms: Some(10),
+            used_rounds: 3,
+            max_rounds: 3,
+            cancelled: false,
+        };
+        assert!(
+            !can_run_comparison(2, over),
+            "no remaining round must refuse comparison"
+        );
+
+        // used+1 < max → allow (also kills invert-to-< which would refuse here)
+        let headroom = AdmissionSnapshot {
+            remaining_total_ms: Some(10),
+            used_rounds: 0,
+            max_rounds: 3,
+            cancelled: false,
+        };
+        assert!(
+            can_run_comparison(2, headroom),
+            "headroom must allow comparison; inverted < gate would refuse"
+        );
+    }
 }
