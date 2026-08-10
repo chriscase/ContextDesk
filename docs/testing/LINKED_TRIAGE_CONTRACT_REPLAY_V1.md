@@ -2,7 +2,7 @@
 
 **Branch:** `test/deepseek-linked-contract-replay-v1`  
 **Base:** `7105dbef6907296c09c115d57aabf513a7288a7a`  
-**Suite tip:** (feature commit containing `linked_triage_contract` + hermetic tests)  
+**Suite tip:** `dc49a9187d12e1c21149b7f796164ea8122e4eef`  
 **Production code changed:** **yes** (shared normalizer + diagnostic categories; agent uses them)
 
 ## Purpose
