@@ -99,7 +99,7 @@ flowchart LR
 | Field/concept | Meaning | Bounded by | Provenance |
 | --- | --- | --- | --- |
 | Case report | Direct/product/scorer lane results + classification | Fixed case set per role | This run only |
-| Verdicts | Three independent booleans | — | Derived from case classifications, never from raw text |
+| Verdicts | Three independent dimensions with `pass` / `fail` / `inconclusive` status plus conservative Boolean projections | — | Derived from case classifications and measured execution, never from raw text; no executed applicable case is inconclusive |
 | Artifact bundle | Versioned, checksummed, share-safe by default | File size follows report size (no unbounded raw capture by default) | `report.json` + `manifest.json` |
 
 Never serialized: credentials, Authorization/cookie headers, raw

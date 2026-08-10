@@ -332,8 +332,10 @@ but the product lane failed (`product_integration_likely`), both executed
 but a typed scorer failed (`usefulness_gap`), a correction/retry was needed
 (`retry_required`), or `compatible`. Three verdicts stay separate in the
 final report — `gateway_model_compatible`, `product_workflow_compatible`,
-`answers_useful` — a quality gap never downgrades or upgrades either
-compatibility verdict.
+`answers_useful` — and each has an explicit `*_status` of `pass`, `fail`, or
+`inconclusive`. The legacy Boolean fields are true only for `pass`; a timeout
+or all-skipped run is therefore never reported as a compatibility success. A
+quality gap never downgrades or upgrades either compatibility verdict.
 
 **Consent gate.** Before any network call, the planned case list, the
 maximum request bound, the active deadline (`--timeout`, default 180s), and

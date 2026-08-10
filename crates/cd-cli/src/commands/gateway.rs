@@ -76,7 +76,7 @@ use std::time::{Duration, Instant};
 
 /// Stable schema id for the diagnostic bundle/report.
 pub const GATEWAY_DIAGNOSTIC_SCHEMA_ID: &str = "contextdesk.gateway_diagnostic.v1";
-pub const GATEWAY_DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
+pub const GATEWAY_DIAGNOSTIC_SCHEMA_VERSION: u32 = 2;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 180;
 /// Safety ceiling for each case when the operator did not choose a deadline.
@@ -156,15 +156,31 @@ pub struct CaseReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Verdicts {
-    /// No case showed evidence the gateway/model itself is incompatible.
+    /// Backward-compatible projection of `gateway_model_status`. This is true
+    /// only when enough direct evidence passed; inconclusive runs are false.
     pub gateway_model_compatible: bool,
-    /// No case showed evidence ContextDesk's own product-path integration
-    /// broke a model the direct lane proved otherwise reachable.
+    /// Backward-compatible projection of `product_workflow_status`.
     pub product_workflow_compatible: bool,
-    /// Every scorer-applicable case's typed-property scoring passed. A
-    /// quality signal only — this field alone never upgrades the two
-    /// compatibility verdicts above, and they never upgrade it.
+    /// Backward-compatible projection of `answers_useful_status`.
     pub answers_useful: bool,
+    /// Measured status for the direct gateway/model contract.
+    pub gateway_model_status: VerdictStatus,
+    /// Measured status for the product workflow contract.
+    pub product_workflow_status: VerdictStatus,
+    /// Measured status for scorer-applicable answer usefulness.
+    pub answers_useful_status: VerdictStatus,
+}
+
+/// A diagnostic dimension can pass, fail, or remain unmeasured. In
+/// particular, a deadline/cancellation that skips every applicable case is
+/// not evidence of compatibility. The legacy Boolean fields in `Verdicts`
+/// remain for consumers that have not adopted this explicit status yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerdictStatus {
+    Pass,
+    Fail,
+    Inconclusive,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -616,19 +632,54 @@ fn case_description(case_id: &str) -> &'static str {
 }
 
 fn compute_verdicts(cases: &[CaseReport]) -> Verdicts {
-    let gateway_model_compatible = !cases
-        .iter()
-        .any(|c| c.classification == CaseClassification::GatewayOrModelLikely);
-    let product_workflow_compatible = !cases
-        .iter()
-        .any(|c| c.classification == CaseClassification::ProductIntegrationLikely);
-    let answers_useful = !cases
-        .iter()
-        .any(|c| c.classification == CaseClassification::UsefulnessGap);
+    let direct_executed = cases.iter().any(|c| c.direct.executed);
+    let direct_failed = cases.iter().any(|c| c.direct.executed && !c.direct.passed);
+    let gateway_model_status = if !direct_executed {
+        VerdictStatus::Inconclusive
+    } else if direct_failed {
+        VerdictStatus::Fail
+    } else {
+        VerdictStatus::Pass
+    };
+
+    let product_executed = cases.iter().any(|c| c.product.executed);
+    let product_failed = cases.iter().any(|c| {
+        c.product.executed
+            && !c.product.passed
+            && c.classification == CaseClassification::ProductIntegrationLikely
+    });
+    let gateway_contaminated_product = cases.iter().any(|c| {
+        c.product.executed
+            && !c.product.passed
+            && c.classification == CaseClassification::GatewayOrModelLikely
+    });
+    let product_workflow_status = if !product_executed {
+        VerdictStatus::Inconclusive
+    } else if product_failed {
+        VerdictStatus::Fail
+    } else if gateway_contaminated_product {
+        VerdictStatus::Inconclusive
+    } else {
+        VerdictStatus::Pass
+    };
+
+    let scorer_executed = cases.iter().any(|c| c.scorer.executed);
+    let scorer_failed = cases.iter().any(|c| c.scorer.executed && !c.scorer.passed);
+    let answers_useful_status = if !scorer_executed {
+        VerdictStatus::Inconclusive
+    } else if scorer_failed {
+        VerdictStatus::Fail
+    } else {
+        VerdictStatus::Pass
+    };
+
     Verdicts {
-        gateway_model_compatible,
-        product_workflow_compatible,
-        answers_useful,
+        gateway_model_compatible: gateway_model_status == VerdictStatus::Pass,
+        product_workflow_compatible: product_workflow_status == VerdictStatus::Pass,
+        answers_useful: answers_useful_status == VerdictStatus::Pass,
+        gateway_model_status,
+        product_workflow_status,
+        answers_useful_status,
     }
 }
 
@@ -2436,6 +2487,78 @@ mod tests {
         );
     }
 
+    fn case_with_lanes(
+        direct: LaneResult,
+        product: LaneResult,
+        scorer: LaneResult,
+        classification: CaseClassification,
+    ) -> CaseReport {
+        CaseReport {
+            case_id: "test",
+            description: "test",
+            direct,
+            product,
+            scorer,
+            classification,
+        }
+    }
+
+    #[test]
+    fn verdicts_are_inconclusive_when_no_applicable_case_executed() {
+        let skipped = skipped_case("test", "deadline exceeded");
+        let verdicts = compute_verdicts(&[skipped]);
+        assert_eq!(verdicts.gateway_model_status, VerdictStatus::Inconclusive);
+        assert_eq!(
+            verdicts.product_workflow_status,
+            VerdictStatus::Inconclusive
+        );
+        assert_eq!(verdicts.answers_useful_status, VerdictStatus::Inconclusive);
+        assert!(!verdicts.gateway_model_compatible);
+        assert!(!verdicts.product_workflow_compatible);
+        assert!(!verdicts.answers_useful);
+    }
+
+    #[test]
+    fn verdicts_require_measured_passes_and_keep_dimensions_separate() {
+        let useful = compute_verdicts(&[case_with_lanes(
+            pass_lane(),
+            pass_lane(),
+            pass_lane(),
+            CaseClassification::Compatible,
+        )]);
+        assert_eq!(useful.gateway_model_status, VerdictStatus::Pass);
+        assert_eq!(useful.product_workflow_status, VerdictStatus::Pass);
+        assert_eq!(useful.answers_useful_status, VerdictStatus::Pass);
+
+        let gateway_failure = compute_verdicts(&[case_with_lanes(
+            fail_lane(),
+            fail_lane(),
+            LaneResult::not_applicable("n/a"),
+            CaseClassification::GatewayOrModelLikely,
+        )]);
+        assert_eq!(gateway_failure.gateway_model_status, VerdictStatus::Fail);
+        assert_eq!(
+            gateway_failure.product_workflow_status,
+            VerdictStatus::Inconclusive
+        );
+
+        let usefulness_failure = compute_verdicts(&[case_with_lanes(
+            pass_lane(),
+            pass_lane(),
+            fail_lane(),
+            CaseClassification::UsefulnessGap,
+        )]);
+        assert_eq!(usefulness_failure.gateway_model_status, VerdictStatus::Pass);
+        assert_eq!(
+            usefulness_failure.product_workflow_status,
+            VerdictStatus::Pass
+        );
+        assert_eq!(
+            usefulness_failure.answers_useful_status,
+            VerdictStatus::Fail
+        );
+    }
+
     #[test]
     fn classify_product_never_executed_is_not_run_regardless_of_direct() {
         let not_run_product = LaneResult {
@@ -2746,6 +2869,9 @@ mod tests {
                 gateway_model_compatible: false,
                 product_workflow_compatible: true,
                 answers_useful: true,
+                gateway_model_status: VerdictStatus::Fail,
+                product_workflow_status: VerdictStatus::Pass,
+                answers_useful_status: VerdictStatus::Pass,
             },
             cleanup: CleanupReport {
                 corpora_created: 1,
