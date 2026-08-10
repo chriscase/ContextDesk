@@ -287,13 +287,14 @@ pub struct AnswerTruth {
     /// Tokens that identify the true trigger when establishable.
     #[serde(default)]
     pub trigger_tokens: Vec<String>,
-    /// Tokens that identify symptoms (must not be sole cause).
+    /// Tokens that identify symptoms (must not be labeled as initiating trigger).
     #[serde(default)]
     pub symptom_tokens: Vec<String>,
     /// Tokens that identify recovery (must not be labeled as cause).
     #[serde(default)]
     pub recovery_tokens: Vec<String>,
-    /// Tokens for an independent incident that must stay separate.
+    /// Tokens for an independent incident that must stay separate (not demoted
+    /// into the main incident's trigger/symptom chain).
     #[serde(default)]
     pub independent_incident_tokens: Vec<String>,
     /// Evidence ids that must be cited when making causal claims.
@@ -628,10 +629,14 @@ pub mod failure_reason {
     pub const DECOY_SELECTED: &str = "decoy_selected";
     /// Independent incidents merged into one cause.
     pub const MERGED_INDEPENDENT_INCIDENTS: &str = "merged_independent_incidents";
+    /// Independent incident demoted into the main incident's trigger/symptom chain.
+    pub const INDEPENDENT_DEMOTED_INTO_MAIN: &str = "independent_demoted_into_main";
     /// Recovery labeled as cause.
     pub const RECOVERY_AS_CAUSE: &str = "recovery_as_cause";
-    /// Symptom treated as sole root cause.
+    /// Symptom treated as sole root cause (no coexisting true trigger).
     pub const SYMPTOM_AS_SOLE_CAUSE: &str = "symptom_as_sole_cause";
+    /// Symptom claim promoted to trigger role even when a true trigger is also present.
+    pub const SYMPTOM_PROMOTED_TO_TRIGGER: &str = "symptom_promoted_to_trigger";
     /// Unsupported certainty / failed abstention.
     pub const UNSUPPORTED_CERTAINTY: &str = "unsupported_certainty";
     /// An abstention did not identify and cite the observed condition.

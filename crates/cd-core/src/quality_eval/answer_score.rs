@@ -214,36 +214,39 @@ pub fn score_answer(
         },
     ));
 
-    // 8) Cause vs symptom: symptom not sole causal claim
-    let trigger_cited = truth.trigger_tokens.iter().any(|t| contains_ci(&blob, t))
-        || answer.claims.iter().any(|c| {
-            c.role.as_deref() == Some("trigger")
-                && truth.trigger_tokens.iter().any(|t| contains_ci(&c.text, t))
-        });
-    let symptom_as_sole = !truth.symptom_tokens.is_empty()
+    // 8) Cause vs symptom.
+    //
+    // Invariant: a valid trigger claim must not mask a coexisting claim that
+    // promotes a truth-labeled symptom into the initiating trigger role.
+    // Fail closed only when truth tokens establish the role conflict on a
+    // trigger-role claim that does not also carry trigger tokens.
+    let symptom_promoted_to_trigger = answer.asserts_root_cause_established
+        && !truth.symptom_tokens.is_empty()
         && answer.claims.iter().any(|c| {
             c.role.as_deref() == Some("trigger")
                 && truth.symptom_tokens.iter().any(|t| contains_ci(&c.text, t))
-        })
-        && !trigger_cited
-        && answer.asserts_root_cause_established;
-    // Also: sole claim is symptom token and asserted as cause.
-    let symptom_sole2 = answer.asserts_root_cause_established
+                && !truth.trigger_tokens.iter().any(|t| contains_ci(&c.text, t))
+        });
+    // Unstructured path: symptom tokens appear while no trigger tokens do.
+    let symptom_without_trigger = answer.asserts_root_cause_established
         && !truth.symptom_tokens.is_empty()
         && truth.symptom_tokens.iter().any(|t| contains_ci(&blob, t))
         && !truth.trigger_tokens.iter().any(|t| contains_ci(&blob, t));
-    let symptom_ok = !symptom_as_sole && !symptom_sole2;
-    dimensions.push(dim(
-        "cause_versus_symptom",
-        symptom_ok,
-        if symptom_ok {
-            "symptoms not presented as sole root cause"
-        } else {
-            failure_reason::SYMPTOM_AS_SOLE_CAUSE
-        },
-    ));
+    let symptom_ok = !symptom_promoted_to_trigger && !symptom_without_trigger;
+    let symptom_reason = if symptom_ok {
+        "symptoms not labeled as initiating trigger"
+    } else if symptom_promoted_to_trigger {
+        failure_reason::SYMPTOM_PROMOTED_TO_TRIGGER
+    } else {
+        failure_reason::SYMPTOM_AS_SOLE_CAUSE
+    };
+    dimensions.push(dim("cause_versus_symptom", symptom_ok, symptom_reason));
 
-    // 9) Independent incident separation
+    // 9) Independent incident separation.
+    //
+    // Invariant: a valid main-cause answer must not mask demoting an
+    // independent incident into the main chain via typed role (trigger or
+    // symptom). Fail closed only when truth tokens establish the conflict.
     let indep_merged = !truth.independent_incident_tokens.is_empty()
         && answer.asserts_root_cause_established
         && truth
@@ -271,15 +274,31 @@ pub fn score_answer(
             .claims
             .iter()
             .any(|c| c.role.as_deref() == Some("independent"));
-    let indep_ok = !indep_merged && !indep_merged2;
+    // Role demotion: independent tokens labeled as main-chain trigger/symptom
+    // while the main trigger is also present. A correct independent role does
+    // not collide with this check.
+    let indep_demoted = !truth.independent_incident_tokens.is_empty()
+        && answer.asserts_root_cause_established
+        && truth.trigger_tokens.iter().any(|t| contains_ci(&blob, t))
+        && answer.claims.iter().any(|c| {
+            let has_indep = truth
+                .independent_incident_tokens
+                .iter()
+                .any(|t| contains_ci(&c.text, t));
+            has_indep && matches!(c.role.as_deref(), Some("trigger") | Some("symptom"))
+        });
+    let indep_ok = !indep_merged && !indep_merged2 && !indep_demoted;
+    let indep_reason = if indep_ok {
+        "independent incidents not merged into main cause"
+    } else if indep_merged || indep_merged2 {
+        failure_reason::MERGED_INDEPENDENT_INCIDENTS
+    } else {
+        failure_reason::INDEPENDENT_DEMOTED_INTO_MAIN
+    };
     dimensions.push(dim(
         "independent_incident_separation",
         indep_ok,
-        if indep_ok {
-            "independent incidents not merged into main cause"
-        } else {
-            failure_reason::MERGED_INDEPENDENT_INCIDENTS
-        },
+        indep_reason,
     ));
 
     // 10) Trigger vs recovery
@@ -810,5 +829,158 @@ mod tests {
         assert!(!score.passed);
         let err = apply_judge_cannot_override(&score, true).unwrap_err();
         assert_eq!(err, failure_reason::JUDGE_OVERRIDE_REJECTED);
+    }
+
+    #[test]
+    fn valid_trigger_does_not_mask_symptom_promoted_to_trigger() {
+        let mut truth = base_truth();
+        truth.independent_incident_tokens = vec!["telemetry".into()];
+        let pkt = packet(&["e-trigger", "e-symptom", "e-indep"]);
+        let ans = CandidateAnswer {
+            candidate_id: "masked-symptom".into(),
+            task_id: "t1".into(),
+            packet_id: "fixed".into(),
+            asserts_root_cause_established: true,
+            claims: vec![
+                AnswerClaim {
+                    text: "boundary violation of lease window".into(),
+                    evidence_ids: vec!["e-trigger".into()],
+                    role: Some("trigger".into()),
+                },
+                AnswerClaim {
+                    text: "aborted requests from worker loss".into(),
+                    evidence_ids: vec!["e-symptom".into()],
+                    role: Some("trigger".into()),
+                },
+            ],
+            conclusion: "Lease boundary and aborted requests jointly caused the outage".into(),
+            confidence: "high".into(),
+        };
+
+        let score = score_answer(&ans, &truth, &pkt);
+
+        assert!(!score.passed);
+        assert!(score.failed_ids().contains(&"cause_versus_symptom"));
+        assert!(score.dimensions.iter().any(|d| {
+            d.id == "cause_versus_symptom"
+                && d.reason == failure_reason::SYMPTOM_PROMOTED_TO_TRIGGER
+        }));
+    }
+
+    #[test]
+    fn valid_trigger_does_not_mask_independent_demoted_to_symptom() {
+        let mut truth = base_truth();
+        truth.independent_incident_tokens = vec!["telemetry".into()];
+        let mut pkt = packet(&["e-trigger", "e-symptom", "e-indep"]);
+        pkt.documents[2].text = "record e-indep telemetry sink timeout after recovery".into();
+        let ans = CandidateAnswer {
+            candidate_id: "masked-independent".into(),
+            task_id: "t1".into(),
+            packet_id: "fixed".into(),
+            asserts_root_cause_established: true,
+            claims: vec![
+                AnswerClaim {
+                    text: "boundary violation of lease window".into(),
+                    evidence_ids: vec!["e-trigger".into()],
+                    role: Some("trigger".into()),
+                },
+                AnswerClaim {
+                    text: "telemetry sink timeout is a symptom of broader stress".into(),
+                    evidence_ids: vec!["e-indep".into()],
+                    role: Some("symptom".into()),
+                },
+            ],
+            conclusion: "Lease boundary drove the outage chain including sink stress".into(),
+            confidence: "high".into(),
+        };
+
+        let score = score_answer(&ans, &truth, &pkt);
+
+        assert!(!score.passed);
+        assert!(score
+            .failed_ids()
+            .contains(&"independent_incident_separation"));
+        assert!(score.dimensions.iter().any(|d| {
+            d.id == "independent_incident_separation"
+                && d.reason == failure_reason::INDEPENDENT_DEMOTED_INTO_MAIN
+        }));
+    }
+
+    #[test]
+    fn correct_trigger_symptom_and_independent_roles_still_pass() {
+        let mut truth = base_truth();
+        truth.independent_incident_tokens = vec!["telemetry".into()];
+        let mut pkt = packet(&["e-trigger", "e-symptom", "e-indep"]);
+        // Packet helper text already carries lease/boundary; enrich for roles.
+        pkt.documents[1].text = "record e-symptom aborted requests after pool pressure".into();
+        pkt.documents[2].text = "record e-indep telemetry sink timeout after recovery".into();
+        let ans = CandidateAnswer {
+            candidate_id: "good-roles".into(),
+            task_id: "t1".into(),
+            packet_id: "fixed".into(),
+            asserts_root_cause_established: true,
+            claims: vec![
+                AnswerClaim {
+                    text: "boundary violation of lease window".into(),
+                    evidence_ids: vec!["e-trigger".into()],
+                    role: Some("trigger".into()),
+                },
+                AnswerClaim {
+                    text: "aborted requests after pool pressure".into(),
+                    evidence_ids: vec!["e-symptom".into()],
+                    role: Some("symptom".into()),
+                },
+                AnswerClaim {
+                    text: "telemetry sink timeout is a separate ongoing fault".into(),
+                    evidence_ids: vec!["e-indep".into()],
+                    role: Some("independent".into()),
+                },
+            ],
+            conclusion: "Lease boundary caused aborts. Telemetry is independent.".into(),
+            confidence: "medium".into(),
+        };
+
+        let score = score_answer(&ans, &truth, &pkt);
+
+        assert!(score.passed, "failed: {:?}", score.failed_ids());
+    }
+
+    #[test]
+    fn multiple_genuine_triggers_are_not_rejected() {
+        let mut truth = base_truth();
+        truth.trigger_tokens = vec!["boundary".into(), "lease".into()];
+        truth.required_fact_tokens = vec!["lease".into(), "boundary".into()];
+        let mut pkt = packet(&["e-trigger", "e-symptom"]);
+        pkt.documents[1].text = "record e-symptom aborted requests followed the trigger".into();
+        let ans = CandidateAnswer {
+            candidate_id: "multi-trigger".into(),
+            task_id: "t1".into(),
+            packet_id: "fixed".into(),
+            asserts_root_cause_established: true,
+            claims: vec![
+                AnswerClaim {
+                    text: "boundary violation on the control path".into(),
+                    evidence_ids: vec!["e-trigger".into()],
+                    role: Some("trigger".into()),
+                },
+                AnswerClaim {
+                    text: "lease window misconfiguration is also an initiating cause".into(),
+                    evidence_ids: vec!["e-trigger".into()],
+                    role: Some("trigger".into()),
+                },
+                AnswerClaim {
+                    text: "aborted requests followed the trigger".into(),
+                    evidence_ids: vec!["e-symptom".into()],
+                    role: Some("symptom".into()),
+                },
+            ],
+            conclusion: "Both lease and boundary triggers jointly explain the failure".into(),
+            confidence: "medium".into(),
+        };
+
+        let score = score_answer(&ans, &truth, &pkt);
+
+        assert!(score.passed, "failed: {:?}", score.failed_ids());
+        assert!(!score.failed_ids().contains(&"cause_versus_symptom"));
     }
 }

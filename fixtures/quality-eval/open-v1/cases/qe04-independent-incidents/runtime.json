@@ -74,7 +74,12 @@
   "rankings": [
     {
       "query_id": "q1",
-      "ranked_ids": ["d01", "d02", "d03", "d04"],
+      "ranked_ids": [
+        "d01",
+        "d02",
+        "d03",
+        "d04"
+      ],
       "k": 4
     }
   ],
@@ -87,17 +92,23 @@
       "claims": [
         {
           "text": "lease window 250 below supported minimum 1000",
-          "evidence_ids": ["d01"],
+          "evidence_ids": [
+            "d01"
+          ],
           "role": "trigger"
         },
         {
           "text": "amber-sync aborted worker unavailable",
-          "evidence_ids": ["d02"],
+          "evidence_ids": [
+            "d02"
+          ],
           "role": "symptom"
         },
         {
           "text": "TelemetrySinkTimeout persists after api recovery",
-          "evidence_ids": ["d04"],
+          "evidence_ids": [
+            "d04"
+          ],
           "role": "independent"
         }
       ],
@@ -112,12 +123,117 @@
       "claims": [
         {
           "text": "lease window 250 and TelemetrySinkTimeout are one chain",
-          "evidence_ids": ["d01", "d03"],
+          "evidence_ids": [
+            "d01",
+            "d03"
+          ],
           "role": "trigger"
         }
       ],
       "conclusion": "TelemetrySinkTimeout was caused by the lease window fault as a single incident.",
       "confidence": "high"
+    },
+    {
+      "candidate_id": "mut_live_role_confusion",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "lease window 250 below supported minimum 1000",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "amber-sync aborted because the worker was unavailable",
+          "evidence_ids": [
+            "d02"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "TelemetrySinkTimeout is a symptom of broader system stress",
+          "evidence_ids": [
+            "d03",
+            "d04"
+          ],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "Lease window 250, worker unavailability that aborted amber-sync, and sink timeouts form one cascading outage chain.",
+      "confidence": "high"
+    },
+    {
+      "candidate_id": "good_trigger_symptom_independent",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "lease window 250 below supported minimum 1000",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "amber-sync aborted worker unavailable",
+          "evidence_ids": [
+            "d02"
+          ],
+          "role": "symptom"
+        },
+        {
+          "text": "TelemetrySinkTimeout persists after api recovery",
+          "evidence_ids": [
+            "d03",
+            "d04"
+          ],
+          "role": "independent"
+        }
+      ],
+      "conclusion": "Lease window misconfiguration drove amber-sync aborts. TelemetrySinkTimeout is a separate ongoing fault, not a symptom of the lease incident.",
+      "confidence": "medium"
+    },
+    {
+      "candidate_id": "good_multi_trigger",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "lease window 250 is below the supported minimum",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "lease window configuration violated the 250 floor relative to minimum 1000",
+          "evidence_ids": [
+            "d01"
+          ],
+          "role": "trigger"
+        },
+        {
+          "text": "amber-sync aborted worker unavailable",
+          "evidence_ids": [
+            "d02"
+          ],
+          "role": "symptom"
+        },
+        {
+          "text": "TelemetrySinkTimeout is an independent exporter fault",
+          "evidence_ids": [
+            "d04"
+          ],
+          "role": "independent"
+        }
+      ],
+      "conclusion": "Two corroborating lease-window trigger claims establish the amber-sync cause. TelemetrySinkTimeout remains independent.",
+      "confidence": "medium"
     }
   ]
 }

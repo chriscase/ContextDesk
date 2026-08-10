@@ -209,6 +209,67 @@ fn mutation_merged_incidents_has_typed_reason() {
 }
 
 #[test]
+fn mutation_live_role_confusion_fails_role_dimensions_with_typed_reasons() {
+    let suite = load_suite(&suite_root()).unwrap();
+    let record = run_hermetic_suite(&suite, &HermeticRunOptions::default());
+    let ans = record
+        .cases
+        .iter()
+        .flat_map(|c| c.answers.iter())
+        .find(|a| a.candidate_id == "mut_live_role_confusion")
+        .expect("mut_live_role_confusion");
+
+    assert!(!ans.passed, "live role-confusion mutation must fail");
+    assert_eq!(ans.expected_outcome, Some(CandidateExpectation::Fail));
+    assert_eq!(ans.expectation_met, Some(true));
+
+    let failed = ans.failed_ids();
+    assert!(
+        failed.contains(&"cause_versus_symptom"),
+        "must fail cause_versus_symptom; failed={failed:?}"
+    );
+    assert!(
+        failed.contains(&"independent_incident_separation"),
+        "must fail independent_incident_separation; failed={failed:?}"
+    );
+
+    assert!(
+        ans.dimensions.iter().any(|d| {
+            d.id == "cause_versus_symptom"
+                && !d.passed
+                && d.reason == failure_reason::SYMPTOM_PROMOTED_TO_TRIGGER
+        }),
+        "expected symptom_promoted_to_trigger; dims={:?}",
+        ans.dimensions
+    );
+    assert!(
+        ans.dimensions.iter().any(|d| {
+            d.id == "independent_incident_separation"
+                && !d.passed
+                && d.reason == failure_reason::INDEPENDENT_DEMOTED_INTO_MAIN
+        }),
+        "expected independent_demoted_into_main; dims={:?}",
+        ans.dimensions
+    );
+}
+
+#[test]
+fn good_multi_role_and_multi_trigger_counterexamples_pass() {
+    let suite = load_suite(&suite_root()).unwrap();
+    let record = run_hermetic_suite(&suite, &HermeticRunOptions::default());
+    for id in ["good_trigger_symptom_independent", "good_multi_trigger"] {
+        let ans = record
+            .cases
+            .iter()
+            .flat_map(|c| c.answers.iter())
+            .find(|a| a.candidate_id == id)
+            .unwrap_or_else(|| panic!("missing candidate {id}"));
+        assert!(ans.passed, "{id} must pass; failed={:?}", ans.failed_ids());
+        assert_eq!(ans.expectation_met, Some(true));
+    }
+}
+
+#[test]
 fn mutation_recovery_as_cause_has_typed_reason() {
     let suite = load_suite(&suite_root()).unwrap();
     let record = run_hermetic_suite(&suite, &HermeticRunOptions::default());
