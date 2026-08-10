@@ -1315,6 +1315,46 @@ fn final_comparison_drafts_block(drafts: &[CandidateSynthesisDraft]) -> String {
     format!("CANDIDATE-SCOPED DRAFTS (untrusted; not new evidence):\n{drafts}")
 }
 
+/// Carry the candidate-stage role decision into the final comparison without
+/// exposing raw excerpts or host-owned authority fields. The metadata is still
+/// model-authored and therefore untrusted; it is a consistency hint that keeps
+/// a downstream-symptom draft from silently becoming an initiating cause when
+/// the final model sees only an identifier-only manifest.
+fn final_comparison_role_hints(
+    drafts: &[CandidateSynthesisDraft],
+    manifest: &crate::investigation_answer::FinalAnswerManifestV1,
+) -> String {
+    let permitted = manifest
+        .candidates
+        .iter()
+        .flat_map(|candidate| candidate.evidence_ids.iter().map(|id| id.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let hints = drafts
+        .iter()
+        .map(|draft| {
+            let mut evidence_ids = draft
+                .classified_evidence_seqs
+                .iter()
+                .map(|seq| format!("e:{}:{}", draft.group_id, seq))
+                .filter(|id| permitted.contains(id.as_str()))
+                .collect::<Vec<_>>();
+            evidence_ids.sort();
+            serde_json::json!({
+                "candidate_id": draft.group_id,
+                "candidate_stage_classification": draft.classification,
+                "classified_evidence_ids": evidence_ids,
+            })
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "CANDIDATE-STAGE ROLE HINTS (untrusted consistency metadata; not new evidence):\n{}",
+        serde_json::json!({
+            "schema": "contextdesk.candidate_stage_role_hints.v1",
+            "hints": hints,
+        })
+    )
+}
+
 /// Separately scoped host-selected chronology. The content remains untrusted
 /// log data, while candidate/evidence identifiers are host-minted and later
 /// enforced by the immutable ledger. Replaying this exact block during a
@@ -1343,7 +1383,7 @@ fn multi_stage_comparison_messages(
     correction_category: Option<&str>,
 ) -> Vec<ChatMessage> {
     let scaffold = final_answer_scaffold_json(manifest);
-    let manifest = final_answer_manifest_block(manifest);
+    let manifest_block = final_answer_manifest_block(manifest);
     let correction = final_comparison_correction(correction_category);
     vec![
         ChatMessage {
@@ -1361,7 +1401,8 @@ fn multi_stage_comparison_messages(
         ChatMessage {
             role: Role::User,
             content: format!(
-                "{correction}{manifest}\n{}{}\nHOST-AUTHORED OUTPUT SCAFFOLD (copy this exact outer shape; replace empty arrays with grounded claim objects using only permitted evidence ids):\n{scaffold}\nReturn only the completed JSON object.",
+                "{correction}{manifest_block}\n{}\n{}\n{}\nHOST-AUTHORED OUTPUT SCAFFOLD (copy this exact outer shape; replace empty arrays with grounded claim objects using only permitted evidence ids):\n{scaffold}\nReturn only the completed JSON object.",
+                final_comparison_role_hints(drafts, manifest),
                 final_comparison_drafts_block(drafts),
                 comparison_context_block,
             ),
@@ -13949,6 +13990,8 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         assert!(comparison_data.contains("GLOBAL_CONTEXT_SENTINEL"));
         assert!(comparison_data.contains("e:global_timeline_context:8"));
         assert!(comparison_data.contains("global_timeline_context"));
+        assert!(comparison_data.contains("candidate_stage_role_hints.v1"));
+        assert!(comparison_data.contains("classified_evidence_ids"));
         assert!(comparison_data.contains("<<<UNTRUSTED_DATA:"));
         let corrected = multi_stage_comparison_messages(
             "triage",
