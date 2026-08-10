@@ -98,7 +98,10 @@ impl RouterBudget {
         self.max_sources = self.max_sources.clamp(1, 16);
         self.max_tool_rounds = self.max_tool_rounds.clamp(1, 32);
         self.max_results_per_source = self.max_results_per_source.clamp(1, 50);
-        self.deadline_ms = self.deadline_ms.clamp(500, 600_000);
+        self.deadline_ms = self.deadline_ms.clamp(
+            crate::deadline_controls::MIN_DEADLINE_MS,
+            crate::deadline_controls::MAX_DEADLINE_MS,
+        );
         if self.order.is_empty() {
             self.order = default_order();
         }

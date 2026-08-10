@@ -25,6 +25,8 @@ pub mod connectors;
 pub mod context_budgeting;
 /// Deterministic multi-source context plan for ordinary chat turns.
 pub mod context_plan;
+/// Friendly whole-turn deadline parse/format and policy conversion.
+pub mod deadline_controls;
 pub mod discovery;
 pub mod embed;
 pub mod error;
