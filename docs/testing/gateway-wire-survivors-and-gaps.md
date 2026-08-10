@@ -251,16 +251,18 @@ changed mid-run).
 failure mode for existing corpora), not a wire-conformance fix, and out of
 this lab's scope of "prove and fix what the wire already contracts for."
 
-### 5. Vercel v4 rerank dialect has no production backend
+### 5. Vercel v4 rerank dialect is now a typed production backend
 
-**What.** Vercel's v4 rerank response dialect is exercised only by a
-capability probe / dev tool; it is never wired into the production
-`RerankBackend` trait.
+**What.** `VercelV4RerankBackend` now implements the production
+`RerankBackend` trait behind the explicit `vercel_v4_rerank_v1` role dialect.
+It preserves the nested request envelope, selection headers, complete
+permutation, and request-relative score semantics. The paired
+`VercelV4EmbedBackend` covers the v4 embedding envelope.
 
-**Why not tested.** There is no production code path to test against — a
-scenario here would be testing a dev tool, not ContextDesk's product
-surface. Documented as a gap in `gateway-wire-coverage-v1.json`
-(`status: "not_applicable"`), not silently omitted.
+**Proof.** Hermetic specialty-envelope and malformed-permutation tests live
+with the shared production adapters in `cd-core/src/embed.rs` and
+`cd-core/src/rerank.rs`. These prove wire handling only; live model quality,
+privacy consent, and desktop activation remain separate acceptance work.
 
 ### 6. `probe_vercel_catalog` is architecturally unreachable by a loopback mock
 

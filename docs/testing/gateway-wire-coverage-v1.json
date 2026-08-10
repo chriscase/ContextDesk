@@ -475,8 +475,8 @@
     {
       "capability": "discovery",
       "route": "GET /v1/models | GET /api/tags | provider-specific candidates",
-      "request_shape": "n/a",
-      "response_shape": "n/a",
+      "request_shape": "nested documents, query, topN, v4 selection headers",
+      "response_shape": "complete indexed ranking with finite scores",
       "expected_classification": "KeyRejected before any request is ever sent \u2014 zero requests recorded",
       "test_name": "grok_build_kind_without_a_session_file_is_key_rejected_before_any_wire_call",
       "status": "pass",
@@ -1569,12 +1569,12 @@
       "route": "POST <Vercel v4 rerank dialect>",
       "request_shape": "n/a",
       "response_shape": "n/a",
-      "expected_classification": "Vercel's v4 rerank dialect is exercised only by a capability probe / dev tool, never wired into the production RerankBackend trait \u2014 no scenario in this lab exercises it because there is no production code path that would use it.",
-      "test_name": "vercel_v4_rerank_dialect_is_capability_probe_only",
-      "status": "not_applicable",
+      "expected_classification": "Vercel v4 response is converted to provider-neutral input-relative scores and malformed permutations fail closed",
+      "test_name": "vercel_v4_rerank_uses_specialty_envelope_and_restores_scores",
+      "status": "pass",
       "owning_module": "crates/cd-core/src/rerank.rs",
-      "test_file": "n/a",
-      "remaining_gap": "Documented dialect gap, not a test: the Vercel v4 rerank dialect has no production RerankBackend implementation to test against."
+      "test_file": "crates/cd-core/src/rerank.rs",
+      "remaining_gap": "Live model quality, privacy consent, and desktop activation remain separate acceptance work."
     },
     {
       "capability": "latency_timeout_cancellation",

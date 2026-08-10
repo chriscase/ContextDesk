@@ -357,8 +357,9 @@ pub struct RetrievalRoleModel {
     /// Model identity requested from the endpoint.
     pub model: String,
     /// Explicit wire dialect for this role. Supported values are
-    /// `ollama_embeddings`, `openai_embeddings`, and
-    /// `tei_rerank_v1`; an omitted value preserves legacy endpoint defaults.
+    /// `ollama_embeddings`, `openai_embeddings`, `vercel_v4_embeddings`, and
+    /// `tei_rerank_v1`/`vercel_v4_rerank_v1`; an omitted value preserves
+    /// legacy endpoint defaults.
     /// The value is a parser selector only — it never makes a model verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialect: Option<String>,

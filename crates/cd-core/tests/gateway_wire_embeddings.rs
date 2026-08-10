@@ -5,13 +5,10 @@
 //! single input per call — the trait's batch signature loops sequentially,
 //! never a single batched wire request).
 //!
-//! Two other embedding wire dialects exist in this codebase
-//! (`cd_workflow::capability_qualification`'s OpenAI-standard `/v1/embeddings`
-//! probe, and the standalone `cd-vercel-retrieval-lab` bin's batched Vercel
-//! v4 dialect) but neither is wired into the `EmbedBackend` trait real hybrid
-//! retrieval uses — the qualification probe is covered by the capability
-//! probe test below; the Vercel lab bin is an explicitly-labeled dev tool,
-//! out of scope for this lab. Batch-shaped concerns the task asks about
+//! Other embedding wire dialects (OpenAI `/v1/embeddings` and Vercel v4) are
+//! covered by the shared production adapters' unit tests. This file remains
+//! intentionally focused on Ollama's single-input wire shape. Batch-shaped
+//! concerns the task asks about
 //! (duplicate/missing result indexes, heterogeneous per-item dimensions
 //! within one response) do not apply to `OllamaEmbedBackend`'s wire shape at
 //! all — there is no index concept in a single-embedding response. Where a

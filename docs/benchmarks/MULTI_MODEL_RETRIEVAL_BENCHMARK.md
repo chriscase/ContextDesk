@@ -12,6 +12,12 @@ The suite never assumes a capability is beneficial. Until a lane is
 implemented, its rows display `FUTURE_CAPABILITY_UNAVAILABLE` — an unavailable
 mode is never substituted, never scored, and never counted as passing.
 
+The separate [fixed-corpus six-lane ablation](FIXED_CORPUS_RETRIEVAL_ABLATION_V1.md)
+executes all retrieval combinations with deterministic synthetic adapters
+through the production import/fusion seams. Those observations validate
+plumbing and retention metrics only; they do not change the real BGE-M3/Qwen
+capability rows or create model-quality claims.
+
 Everything is offline and deterministic: no network, credentials, providers,
 or model downloads in any default test.
 

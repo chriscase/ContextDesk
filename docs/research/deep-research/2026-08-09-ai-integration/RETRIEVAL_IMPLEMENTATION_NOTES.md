@@ -8,13 +8,15 @@ Current implementation slice (release line):
 - `openai_embeddings` is a shared, batched `/v1/embeddings` adapter used by
   qualification and production retrieval. It requires indexed, finite,
   homogeneous vectors and a protected bearer reference when configured.
-- `tei_rerank_v1` is a shared `/rerank` adapter used by qualification and
-  production retrieval. It preserves request-relative indices and rejects
-  malformed or ambiguous results; failed reranking retains the pre-rerank
-  order.
+- `tei_rerank_v1` and `vercel_v4_rerank_v1` are shared adapters used by
+  qualification and production retrieval. The Vercel adapter preserves the
+  specialty envelope and converts its complete ranked permutation to
+  request-relative scores; both reject malformed or ambiguous results and
+  retain the pre-rerank order on failure.
 - Legacy roles without a dialect retain the local Ollama embedding default
   on the conventional Ollama port and the TEI-style rerank default. Vercel's
-  native v4 retrieval envelopes remain explicitly unverified for production.
+  native v4 routes require the explicit dialect and host check; wire support is
+  not a quality verdict.
 
 Source conversation: `6a791c7e-4bb8-83ea-b176-35e66f103cd9`
 

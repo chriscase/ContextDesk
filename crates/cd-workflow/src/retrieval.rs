@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use cd_core::capability_qualification::QualificationKey;
 use cd_core::config::{AppConfig, RetrievalRoleModel};
-use cd_core::embed::{EmbedBackend, HttpEmbedBackend, OllamaEmbedBackend};
+use cd_core::embed::{EmbedBackend, HttpEmbedBackend, OllamaEmbedBackend, VercelV4EmbedBackend};
 use cd_core::error::CoreResult;
 use cd_core::keychain_store::SecretStore;
 use cd_core::log_analysis::{
@@ -165,32 +165,60 @@ pub fn build_embedding_backend(
             role.model.clone(),
             bearer_for(role, secrets),
         )?)),
+        "vercel_v4_embeddings" => {
+            if !cd_core::discovery::is_vercel_ai_gateway(&role.base_url) {
+                return Err(cd_core::error::CoreError::Config(
+                    "vercel_v4_embeddings requires the ai-gateway.vercel.sh host".into(),
+                ));
+            }
+            Ok(Arc::new(VercelV4EmbedBackend::new_with_policy(
+                &role.base_url,
+                role.model.clone(),
+                bearer_for(role, secrets),
+                &cd_core::ssrf::SsrfPolicy::default(),
+            )?))
+        }
         unsupported => Err(cd_core::error::CoreError::Config(format!(
-            "unsupported embedding dialect '{unsupported}'; use ollama_embeddings or openai_embeddings"
+            "unsupported embedding dialect '{unsupported}'; use ollama_embeddings, openai_embeddings, or vercel_v4_embeddings"
         ))),
     }
 }
 
-/// Build the configured rerank backend through the explicit TEI-style v1
-/// `/rerank` contract. Other dialects must gain a typed adapter before they
-/// can be selected; a URL or model name never changes the parser.
+/// Build the configured rerank backend through an explicit wire dialect. A
+/// URL or model name never changes the parser.
 pub fn build_rerank_backend(
     role: &RetrievalRoleModel,
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn RerankBackend>> {
     if let Some(dialect) = role.dialect.as_deref() {
-        if dialect != "tei_rerank_v1" {
+        if dialect != "tei_rerank_v1" && dialect != "vercel_v4_rerank_v1" {
             return Err(cd_core::error::CoreError::Config(format!(
-                "unsupported reranker dialect '{dialect}'; use tei_rerank_v1"
+                "unsupported reranker dialect '{dialect}'; use tei_rerank_v1 or vercel_v4_rerank_v1"
             )));
         }
     }
     let bearer = bearer_for(role, secrets);
-    Ok(Arc::new(HttpRerankBackend::new(
-        &role.base_url,
-        role.model.clone(),
-        bearer,
-    )?))
+    if role.dialect.as_deref() == Some("vercel_v4_rerank_v1") {
+        if !cd_core::discovery::is_vercel_ai_gateway(&role.base_url) {
+            return Err(cd_core::error::CoreError::Config(
+                "vercel_v4_rerank_v1 requires the ai-gateway.vercel.sh host".into(),
+            ));
+        }
+        Ok(Arc::new(
+            cd_core::rerank::VercelV4RerankBackend::new_with_policy(
+                &role.base_url,
+                role.model.clone(),
+                bearer,
+                &cd_core::ssrf::SsrfPolicy::default(),
+            )?,
+        ))
+    } else {
+        Ok(Arc::new(HttpRerankBackend::new(
+            &role.base_url,
+            role.model.clone(),
+            bearer,
+        )?))
+    }
 }
 
 fn embedding_role_status(

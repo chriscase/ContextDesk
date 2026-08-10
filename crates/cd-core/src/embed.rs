@@ -60,6 +60,101 @@ pub struct HttpEmbedBackend {
     extra_headers: Vec<(String, String)>,
 }
 
+/// Vercel AI Gateway v4 embedding adapter.
+///
+/// Vercel's specialty route is intentionally a separate dialect from
+/// OpenAI-compatible `/v1/embeddings`: it uses the `values` envelope and
+/// model-selection headers.  The caller must select this adapter explicitly;
+/// model names never activate it implicitly.
+pub struct VercelV4EmbedBackend {
+    client: reqwest::Client,
+    endpoint: reqwest::Url,
+    model: String,
+    bearer: Option<String>,
+    extra_headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for VercelV4EmbedBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VercelV4EmbedBackend")
+            .field("endpoint", &self.endpoint.as_str())
+            .field("model", &self.model)
+            .field("bearer", &self.bearer.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+impl VercelV4EmbedBackend {
+    /// Build against the configured Vercel base URL.  The URL is still
+    /// SSRF-vetted and pinned; the exact v4 route is selected explicitly.
+    pub fn new(
+        base_url: &str,
+        model: impl Into<String>,
+        bearer: Option<String>,
+    ) -> CoreResult<Self> {
+        Self::new_with_policy(base_url, model, bearer, &SsrfPolicy::default())
+    }
+
+    /// Build with an explicit SSRF policy while retaining the Vercel v4
+    /// envelope and timeout.
+    pub fn new_with_policy(
+        base_url: &str,
+        model: impl Into<String>,
+        bearer: Option<String>,
+        policy: &SsrfPolicy,
+    ) -> CoreResult<Self> {
+        let (mut endpoint, client) = build_pinned_client_for_url(
+            base_url,
+            policy,
+            &SystemResolver,
+            std::time::Duration::from_millis(HTTP_EMBED_TIMEOUT_MS),
+        )?;
+        endpoint.set_path("/v4/ai/embedding-model");
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
+        Ok(Self {
+            client,
+            endpoint,
+            model: model.into(),
+            bearer,
+            extra_headers: Vec::new(),
+        })
+    }
+
+    /// Add provider-specific headers; an explicit Authorization header wins
+    /// over the bearer argument.
+    pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        if headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        {
+            self.bearer = None;
+        }
+        self.extra_headers = headers;
+        self
+    }
+
+    fn apply_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        request = request
+            .header("ai-gateway-protocol-version", "0.0.1")
+            .header("ai-gateway-auth-method", "api-key")
+            .header("ai-embedding-model-specification-version", "4")
+            .header("ai-model-id", &self.model);
+        for (name, value) in &self.extra_headers {
+            request = request.header(name, value);
+        }
+        if let Some(token) = &self.bearer {
+            request = request.bearer_auth(token);
+        }
+        request
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct VercelV4EmbeddingResponse {
+    embeddings: Vec<Vec<f64>>,
+}
+
 impl std::fmt::Debug for HttpEmbedBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpEmbedBackend")
@@ -163,7 +258,7 @@ fn validate_http_embedding_rows(
             rows.len()
         )));
     }
-    let mut ordered: Vec<Option<Vec<f32>>> = vec![None; expected];
+    let mut ordered: Vec<Option<Vec<f64>>> = vec![None; expected];
     let mut dimensions = None;
     for row in rows {
         if row.index >= expected {
@@ -192,27 +287,24 @@ fn validate_http_embedding_rows(
         } else {
             dimensions = Some(row.embedding.len());
         }
-        let vector: Vec<f32> = row
-            .embedding
-            .into_iter()
-            .map(|value| value as f32)
-            .collect();
-        if vector.iter().any(|value| !value.is_finite()) {
-            return Err(CoreError::Message(
-                "embedding response contract: every component must be finite".into(),
-            ));
-        }
-        ordered[row.index] = Some(vector);
+        ordered[row.index] = Some(row.embedding);
     }
     ordered
         .into_iter()
         .enumerate()
         .map(|(index, vector)| {
-            vector.ok_or_else(|| {
+            let vector = vector.ok_or_else(|| {
                 CoreError::Message(format!(
                     "embedding response contract: missing index {index}"
                 ))
-            })
+            })?;
+            let vector: Vec<f32> = vector.into_iter().map(|value| value as f32).collect();
+            if vector.iter().any(|value| !value.is_finite()) {
+                return Err(CoreError::Message(
+                    "embedding response contract: every component must be finite".into(),
+                ));
+            }
+            Ok(vector)
         })
         .collect()
 }
@@ -255,6 +347,83 @@ impl EmbedBackend for HttpEmbedBackend {
             .await
             .map_err(|error| CoreError::Message(format!("embedding response contract: {error}")))?;
         validate_http_embedding_rows(body.data, texts.len())
+    }
+
+    fn identity(&self) -> String {
+        self.model.clone()
+    }
+}
+
+#[async_trait]
+impl EmbedBackend for VercelV4EmbedBackend {
+    async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        if texts.len() > HTTP_EMBED_MAX_BATCH {
+            return Err(CoreError::Config(format!(
+                "embedding request exceeds the {HTTP_EMBED_MAX_BATCH}-input batch bound"
+            )));
+        }
+        if texts
+            .iter()
+            .any(|text| text.chars().count() > HTTP_EMBED_INPUT_CHAR_CAP)
+        {
+            return Err(CoreError::Config(format!(
+                "embedding input exceeds the {HTTP_EMBED_INPUT_CHAR_CAP}-character bound"
+            )));
+        }
+        let response = self
+            .apply_headers(self.client.post(self.endpoint.clone()).json(&json!({
+                "values": texts,
+            })))
+            .send()
+            .await
+            .map_err(|error| CoreError::Message(format!("embedding transport: {error}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(CoreError::Message(format!(
+                "embedding endpoint returned HTTP {status}"
+            )));
+        }
+        let body = response
+            .json::<VercelV4EmbeddingResponse>()
+            .await
+            .map_err(|error| CoreError::Message(format!("embedding response contract: {error}")))?;
+        if body.embeddings.len() != texts.len() {
+            return Err(CoreError::Message(format!(
+                "embedding response contract: expected {} vectors, received {}",
+                texts.len(),
+                body.embeddings.len()
+            )));
+        }
+        let mut dimensions = None;
+        body.embeddings
+            .into_iter()
+            .map(|values| {
+                if values.is_empty() {
+                    return Err(CoreError::Message(
+                        "embedding response contract: empty vector".into(),
+                    ));
+                }
+                if let Some(expected) = dimensions {
+                    if expected != values.len() {
+                        return Err(CoreError::Message(
+                            "embedding response contract: heterogeneous dimensions".into(),
+                        ));
+                    }
+                } else {
+                    dimensions = Some(values.len());
+                }
+                let vector: Vec<f32> = values.into_iter().map(|value| value as f32).collect();
+                if vector.iter().any(|value| !value.is_finite()) {
+                    return Err(CoreError::Message(
+                        "embedding response contract: every component must be finite".into(),
+                    ));
+                }
+                Ok(vector)
+            })
+            .collect()
     }
 
     fn identity(&self) -> String {
@@ -738,6 +907,54 @@ mod tests {
         let backend = HttpEmbedBackend::new(gateway.base_url(), "bge-m3", None).unwrap();
         assert!(backend.embed(&[]).await.unwrap().is_empty());
         assert_eq!(gateway.request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn vercel_v4_backend_uses_specialty_envelope_and_headers() {
+        let gateway = MockGateway::start_ordered(vec![Step::respond(Response::json_ok(&json!({
+            "embeddings": [[0.25, 0.75], [0.5, 0.5]]
+        })))])
+        .await;
+        let backend = VercelV4EmbedBackend::new(
+            gateway.base_url(),
+            "voyage/voyage-4",
+            Some("secret-token".into()),
+        )
+        .unwrap();
+        let vectors = backend
+            .embed(&["first".into(), "second".into()])
+            .await
+            .unwrap();
+        assert_eq!(vectors, vec![vec![0.25, 0.75], vec![0.5, 0.5]]);
+        let request = gateway.requests().pop().expect("request");
+        assert_eq!(request.path, "/v4/ai/embedding-model");
+        assert_eq!(request.header("authorization"), Some("Bearer secret-token"));
+        assert_eq!(
+            request.header("ai-embedding-model-specification-version"),
+            Some("4")
+        );
+        assert_eq!(request.header("ai-model-id"), Some("voyage/voyage-4"));
+        let body = request.json_body().unwrap();
+        assert_eq!(body["values"], json!(["first", "second"]));
+        assert!(body.get("input").is_none());
+        assert!(!format!("{backend:?}").contains("secret-token"));
+    }
+
+    #[tokio::test]
+    async fn vercel_v4_backend_rejects_bad_cardinality_and_dimensions() {
+        for body in [
+            json!({"embeddings": [[0.1, 0.2]]}),
+            json!({"embeddings": [[0.1, 0.2], [0.3]]}),
+        ] {
+            let gateway =
+                MockGateway::start_ordered(vec![Step::respond(Response::json_ok(&body))]).await;
+            let backend = VercelV4EmbedBackend::new(gateway.base_url(), "m", None).unwrap();
+            let error = backend
+                .embed(&["a".into(), "b".into()])
+                .await
+                .expect_err("specialty response must fail closed");
+            assert!(error.to_string().contains("embedding response contract"));
+        }
     }
 
     #[test]

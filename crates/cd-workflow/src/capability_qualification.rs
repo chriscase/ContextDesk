@@ -17,10 +17,10 @@ use cd_core::capability_qualification::{
 use cd_core::chat::{
     ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role as ChatRole, ToolCallMsg,
 };
-use cd_core::embed::{EmbedBackend, HttpEmbedBackend};
+use cd_core::embed::{EmbedBackend, HttpEmbedBackend, VercelV4EmbedBackend};
 use cd_core::providers::{ProviderKind, ProviderProfile};
-use cd_core::rerank::RerankBackend;
-use cd_core::ssrf::{build_pinned_client_for_url, SsrfPolicy, SystemResolver};
+use cd_core::rerank::{RerankBackend, VercelV4RerankBackend};
+use cd_core::ssrf::SsrfPolicy;
 use cd_core::tools::{ToolSideEffect, ToolSpec};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -621,7 +621,7 @@ impl QualificationTransport for LiveQualificationTransport {
             .collect::<Vec<_>>();
         Self::block_on(async move {
             let result = if is_vercel_ai_gateway(&base) {
-                vercel_v4_rerank(&key, &headers, &model, &query, &documents).await
+                vercel_v4_rerank(&key, &headers, &policy, &model, &query, &documents).await
             } else {
                 generic_rerank(
                     &base,
@@ -676,7 +676,7 @@ async fn openai_embed(
     text: &str,
 ) -> Result<Vec<f32>, String> {
     if is_vercel_ai_gateway(base_url) {
-        return vercel_v4_embed(api_key, extra_headers, model_id, text).await;
+        return vercel_v4_embed(api_key, extra_headers, policy, model_id, text).await;
     }
     let backend = HttpEmbedBackend::new_with_policy(
         base_url,
@@ -705,102 +705,55 @@ fn is_vercel_ai_gateway(base_url: &str) -> bool {
 async fn vercel_v4_embed(
     api_key: Option<&str>,
     extra_headers: &[(String, String)],
+    policy: &SsrfPolicy,
     model_id: &str,
     text: &str,
 ) -> Result<Vec<f32>, String> {
-    let endpoint = "https://ai-gateway.vercel.sh/v4/ai/embedding-model";
-    let (_, client) = build_pinned_client_for_url(
-        endpoint,
-        &SsrfPolicy::default(),
-        &SystemResolver,
-        std::time::Duration::from_secs(60),
+    let backend = VercelV4EmbedBackend::new_with_policy(
+        "https://ai-gateway.vercel.sh/v4/ai",
+        model_id.to_string(),
+        api_key.map(str::to_string),
+        policy,
     )
-    .map_err(|error| redact_host_err(&error.to_string()))?;
-    let mut request = client
-        .post(endpoint)
-        .header("ai-gateway-protocol-version", "0.0.1")
-        .header("ai-gateway-auth-method", "api-key")
-        .header("ai-embedding-model-specification-version", "4")
-        .header("ai-model-id", model_id)
-        .json(&serde_json::json!({"values": [text]}));
-    for (name, value) in extra_headers {
-        request = request.header(name, value);
-    }
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
-    let response = request
-        .send()
+    .map_err(|error| redact_host_err(&error.to_string()))?
+    .with_extra_headers(extra_headers.to_vec());
+    backend
+        .embed(&[text.to_string()])
         .await
-        .map_err(|error| redact_host_err(&error.to_string()))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("Vercel embedding endpoint returned HTTP {status}"));
-    }
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|error| redact_host_err(&error.to_string()))?;
-    let vector = body
-        .pointer("/embeddings/0")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "Vercel embedding response missing vector".to_string())?;
-    vector
-        .iter()
-        .map(|value| {
-            value
-                .as_f64()
-                .map(|number| number as f32)
-                .ok_or_else(|| "Vercel embedding response contains a non-number".to_string())
-        })
-        .collect()
+        .map_err(|error| redact_host_err(&error.to_string()))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "embed_missing_vector".to_string())
 }
 
 async fn vercel_v4_rerank(
     api_key: &Option<String>,
     extra_headers: &[(String, String)],
+    policy: &SsrfPolicy,
     model_id: &str,
     query: &str,
     documents: &[String],
 ) -> Result<Vec<usize>, String> {
-    let endpoint = "https://ai-gateway.vercel.sh/v4/ai/reranking-model";
-    let (_, client) = build_pinned_client_for_url(
-        endpoint,
-        &SsrfPolicy::default(),
-        &SystemResolver,
-        std::time::Duration::from_secs(60),
+    let backend = VercelV4RerankBackend::new_with_policy(
+        "https://ai-gateway.vercel.sh/v4/ai",
+        model_id.to_string(),
+        api_key.clone(),
+        policy,
     )
-    .map_err(|error| redact_host_err(&error.to_string()))?;
-    let mut request = client
-        .post(endpoint)
-        .header("ai-gateway-protocol-version", "0.0.1")
-        .header("ai-gateway-auth-method", "api-key")
-        .header("ai-reranking-model-specification-version", "4")
-        .header("ai-model-id", model_id)
-        .json(&serde_json::json!({
-            "documents": {"type": "text", "values": documents},
-            "query": query,
-            "topN": documents.len(),
-        }));
-    for (name, value) in extra_headers {
-        request = request.header(name, value);
-    }
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
-    let response = request
-        .send()
+    .map_err(|error| redact_host_err(&error.to_string()))?
+    .with_extra_headers(extra_headers.to_vec());
+    let scores = backend
+        .rerank(query, documents)
         .await
         .map_err(|error| redact_host_err(&error.to_string()))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("Vercel reranking endpoint returned HTTP {status}"));
-    }
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|error| redact_host_err(&error.to_string()))?;
-    parse_ranking_indices(&body, documents.len(), "/ranking")
+    let mut indices: Vec<usize> = (0..scores.len()).collect();
+    indices.sort_by(|left, right| {
+        scores[*right]
+            .partial_cmp(&scores[*left])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.cmp(right))
+    });
+    Ok(indices)
 }
 
 async fn generic_rerank(
@@ -834,6 +787,7 @@ async fn generic_rerank(
     Ok(indices)
 }
 
+#[cfg(test)]
 fn parse_ranking_indices(
     body: &serde_json::Value,
     document_count: usize,

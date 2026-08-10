@@ -677,21 +677,21 @@ model and must not be represented as the employer build.
   network retrieval.
 - `retrieval-status` and a host-neutral `hybrid_search` entry exist, but desktop
   activation is not wired.
-- The production embedding role now has an explicit `openai_embeddings`
-  dialect backed by a shared, batched `/v1/embeddings` adapter with protected
-  bearer-file support, indexed ordering, finite-vector checks, and homogeneous
-  dimensions. Legacy roles without a dialect retain Ollama behavior only for
-  the conventional local Ollama port; other endpoints must opt into the
-  OpenAI-compatible dialect. Vercel's v4 embedding route remains a separate
-  qualification/dev-lab dialect and is not silently inferred.
-- The production reranker backend speaks the explicit `tei_rerank_v1` dialect:
-  `POST {base_url}/rerank` with
-  `{model, query, documents}` and expects
-  `{results:[{index,relevance_score}]}`. It supports an optional Keychain bearer
-  reference, caps documents at 100 and each document at 512 characters, rejects
-  ambiguous dialects, and degrades to the pre-rerank order on failure or
-  timeout. Vercel's v4 reranking route remains qualification/dev-lab-only until
-  a score-preserving production adapter is added.
+- The production embedding role now has explicit `openai_embeddings` and
+  `vercel_v4_embeddings` dialects backed by shared adapters. Both support
+  protected bearer-file references, bounded batches, finite-vector checks,
+  homogeneous dimensions, and fail-closed response validation. Vercel's v4
+  route is selected only by its explicit dialect and exact gateway host; it is
+  never inferred from a model name.
+- Legacy roles without a dialect retain Ollama behavior only for the
+  conventional local Ollama port; other endpoints must opt into the
+  OpenAI-compatible dialect.
+- The production reranker backend speaks explicit `tei_rerank_v1` and
+  `vercel_v4_rerank_v1` dialects. The latter uses Vercel's nested document
+  envelope, `topN`, selection headers, and complete ranked-row permutation,
+  converting scores back to input order without losing score semantics. Both
+  support protected credentials, bounded documents, malformed-response
+  rejection, and pre-rerank fallback on failure or timeout.
 - The benchmark's real BGE-M3/Qwen reranker lanes remain honestly marked
   `FUTURE_CAPABILITY_UNAVAILABLE`. Synthetic synonym and reranker adapters are
   test fixtures, not proof of real semantic capability.
@@ -830,46 +830,38 @@ requests, committing, or pushing.
 The following high-priority findings were subsequently checked directly in the
 worktree and confirmed:
 
-- **Stored/query vector compatibility is not enforced.** Corpus status stores a
-  `model_id`, but query-time retrieval does not compare it with the configured
-  embedding backend, and `EmbedBackend` has no identity method. A dimension
-  mismatch becomes zero cosine scores while a successful query call still sets
-  `semantic_ran`; same-dimension vectors from different models are an even more
-  silent mismatch. Production measurement needs an exact model-identity and
-  dimension binding plus an honest `embedding_model_mismatch` degradation
-  before a Vercel semantic lane can be trusted.
-- **Semantic score order is lost before RRF.** Template search ranks by semantic
-  score, but the selected templates are expanded back into events in `(ts,
-  seq)` order. `hybrid_retrieval` then assigns semantic lane ranks by that event
-  order. RRF therefore fuses a chronological keyword lane with an effectively
-  chronological semantic lane, structurally suppressing late rollback/recovery
-  evidence and hiding real embedding benefit. The harness manifest currently
-  overstates this as semantic-score-descending merge behavior.
-- **The current TEI reranker has a base-path join bug.** Joining `"rerank"` to a
-  base such as `/v1` without first normalizing a trailing slash drops `/v1`.
-  This is separate from the Vercel v4 adapter, but must be fixed for generic
-  path-prefixed gateways.
+- **Stored/query vector compatibility is now fail-closed.** `EmbedBackend`
+  carries a backend identity, corpus status binds identity and dimensions, and
+  a mismatch withholds semantic results and model credit. This is covered by
+  hermetic identity/dimension regressions and applies to the shared Vercel
+  adapter as well as OpenAI-compatible and local backends.
+- **Semantic score order is now preserved before RRF.** Template hits are
+  expanded under one total budget in semantic-score order, and the hybrid
+  engine retains per-lane ranks before fusion. The old chronological-expansion
+  confounder is covered by a regression test.
+- **The generic TEI reranker path-prefix bug is fixed.** `/v1` is preserved
+  with or without a trailing slash, and Vercel v4 now has its own explicit
+  score-preserving adapter rather than being parsed as TEI.
 - **Query-time cloud egress consent is missing.** Ingest cloud embedding has an
   explicit content-leaves-machine gate. Query embedding and reranking do not;
   they can send the question and redacted messages once a host wires the
   backend. Production remote retrieval must fail closed to keyword mode unless
   an equivalent explicit consent is present.
-- Additional honesty gaps confirmed: configured embedding/reranker ids are
-  reported as if measured; `retrieval-status` health does not check corpus
-  vector compatibility; and one search path invokes semantics for any present
-  query even when its `semantic` flag is false.
+- Remaining honesty boundary: configured role identity and endpoint health are
+  still not live quality evidence, and query-time remote retrieval still needs
+  explicit content-leaves-machine consent before it can be activated by a
+  product host.
 
-Claude's wire-contract proposal was based on the journal version it read before
-the official v4 SDK inspection. Its OpenAI-compatible `/embeddings` proposal is
-therefore an alternate adapter hypothesis, not the selected Vercel contract.
-The gateway-native v4 routes above are the current direct-lab target.
+The gateway-native v4 routes are now represented by shared production adapters
+and remain separately selectable from the OpenAI-compatible dialect. The
+standalone lab remains useful for direct wire/quality experiments, but its
+results must not be confused with product-path quality evidence.
 
 The direct probe/quality lab is intentionally independent of stored product
 vectors and the product fusion engine, so it can measure raw embedding and
-reranking behavior now. Production four-mode ablation must not proceed until
-the vector-binding and semantic-order defects are fixed and covered
-hermetically; otherwise a rigorous-looking null result or success claim could
-be false.
+reranking behavior. The six-lane hermetic ablation now executes through the
+corrected product seams with synthetic adapters; real BGE-M3/Qwen/Vercel
+quality remains pending live, consented runs and separate answer scoring.
 
 ## Data-shaping contract to test
 
@@ -1028,6 +1020,9 @@ aborted external-agent build had removed:
 - retrieval-status corpus incompatibility: pass;
 - retrieval-ablation semantic adapter contract with measured backend identity:
   pass.
+- Vercel v4 embedding and reranking specialty-envelope adapters, including
+  malformed-response rejection: pass.
+- fixed-corpus six-lane synthetic ablation (20 cases / 142 queries): pass.
 - strict `cd-core` + `cd-workflow` library clippy with warnings denied: pass;
 - full `cd-core` library suite: 1,824 passed, 0 failed, 5 intentionally
   ignored.

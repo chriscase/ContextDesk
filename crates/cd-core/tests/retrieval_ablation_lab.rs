@@ -14,15 +14,19 @@ use lab::{
     load_ra_suite, load_ra_truth, ra_case_import_root, ra_case_specs, ra_import_case,
     ra_observe_corpus, ra_semantic_truth_digest, ra_triage_key, run_mode_for_case, score_case_mode,
     unavailable_run_record, validate_conservation, validate_run_record, LabResult, RaCallCounts,
-    RaCaseInputs, RaEngineManifest, RaImportedCase, RaMode, RaModeStatus, RaPartition, RaQuerySet,
-    RaReport, RaRng, RaRunRecord, RaStructuredKeywordAdapter, RaTier, RaTruthManifest, RaViolation,
-    RA_DEFAULT_SEED, RA_K, RA_SUITE_REL_ROOT, V_COMPLETENESS_OVERCLAIM, V_DEGENERATE_STRATEGY,
-    V_DUPLICATE_TRIALS, V_IDENTITY_OMITTED, V_K_SUBSTITUTION, V_MODE_MISLABEL,
-    V_NON_PROGRESS_DIVERGENCE, V_PROVENANCE_OMITTED, V_TIER_SUBSTITUTION, V_UNAVAILABLE_AS_PASS,
+    RaCandidate, RaCaseInputs, RaEngineManifest, RaImportedCase, RaMode, RaModeStatus, RaPartition,
+    RaQuery, RaQuerySet, RaReport, RaRng, RaRole, RaRunRecord, RaStructuredKeywordAdapter, RaTier,
+    RaTruthManifest, RaViolation, RA_DEFAULT_SEED, RA_K, RA_SUITE_REL_ROOT,
+    V_COMPLETENESS_OVERCLAIM, V_DEGENERATE_STRATEGY, V_DUPLICATE_TRIALS, V_IDENTITY_OMITTED,
+    V_K_SUBSTITUTION, V_MODE_MISLABEL, V_NON_PROGRESS_DIVERGENCE, V_PROVENANCE_OMITTED,
+    V_TIER_SUBSTITUTION, V_UNAVAILABLE_AS_PASS,
 };
 
 use cd_core::embed::EmbedBackend;
-use cd_core::log_analysis::{query_event_count, query_event_rows, EventQuery, MAX_EVENT_PAGE};
+use cd_core::log_analysis::{
+    hybrid_search_events, query_event_count, query_event_rows, EventQuery, HybridOptions,
+    HybridOutcome, MAX_EVENT_PAGE,
+};
 use cd_core::triage_quality::{
     score_structured_triage_answer, StructuredTriageAnswer, TriageClaim, TriageHostFacts,
 };
@@ -1565,6 +1569,299 @@ fn hybrid_adapters_execute_hermetically_through_the_same_contract() {
             RaPartition::PassOnBase | RaPartition::BaselineLimitation
         ));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-corpus six-lane retrieval ablation (hermetic, synthetic adapters)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
+enum FixedAblationLane {
+    Exact,
+    Dense,
+    HybridRrf,
+    ExactRerank,
+    DenseRerank,
+    HybridRerank,
+}
+
+impl FixedAblationLane {
+    const ALL: [Self; 6] = [
+        Self::Exact,
+        Self::Dense,
+        Self::HybridRrf,
+        Self::ExactRerank,
+        Self::DenseRerank,
+        Self::HybridRerank,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact_keyword",
+            Self::Dense => "dense_only",
+            Self::HybridRrf => "hybrid_rrf",
+            Self::ExactRerank => "exact_reranked",
+            Self::DenseRerank => "dense_reranked",
+            Self::HybridRerank => "hybrid_rrf_reranked",
+        }
+    }
+
+    fn uses_semantic(self) -> bool {
+        !matches!(self, Self::Exact | Self::ExactRerank)
+    }
+
+    fn uses_rerank(self) -> bool {
+        matches!(
+            self,
+            Self::ExactRerank | Self::DenseRerank | Self::HybridRerank
+        )
+    }
+}
+
+#[derive(Debug, Default)]
+struct FixedAblationStats {
+    cases: u64,
+    queries: u64,
+    answerable_queries: u64,
+    recall_sum: f64,
+    mandatory_total: u64,
+    mandatory_retrieved: u64,
+    max_decoy_share_at_25: f64,
+    embedding_calls: u64,
+    rerank_calls: u64,
+}
+
+impl FixedAblationStats {
+    fn observe_case(&mut self) {
+        self.cases += 1;
+    }
+
+    fn observe_query(
+        &mut self,
+        truth: &RaTruthManifest,
+        query: &RaQuery,
+        candidates: &[RaCandidate],
+    ) {
+        self.queries += 1;
+        let Some(query_truth) = truth.per_query_relevance.get(&query.query_id) else {
+            return;
+        };
+        let top_25: Vec<&RaCandidate> = candidates.iter().filter(|c| c.rank <= 25).collect();
+        let relevant = &query_truth.relevant;
+        if query_truth.answerable {
+            self.answerable_queries += 1;
+            if !relevant.is_empty() {
+                let hits = relevant
+                    .iter()
+                    .filter(|expected| {
+                        truth
+                            .evidence_groups
+                            .iter()
+                            .find(|group| group.group_id == expected.group_id)
+                            .is_some_and(|group| {
+                                top_25
+                                    .iter()
+                                    .any(|candidate| candidate_matches_group(candidate, group))
+                            })
+                    })
+                    .count();
+                self.recall_sum += hits as f64 / relevant.len() as f64;
+            }
+        }
+
+        // Trigger and propagation groups are the causal anchors that must
+        // survive candidate generation. This is a retrieval metric only; it
+        // does not claim that an answer model used them correctly.
+        for group in truth.evidence_groups.iter().filter(|group| {
+            matches!(group.role, RaRole::Trigger | RaRole::Propagation)
+                && query_truth
+                    .relevant
+                    .iter()
+                    .any(|expected| expected.group_id == group.group_id)
+        }) {
+            self.mandatory_total += 1;
+            if top_25
+                .iter()
+                .any(|candidate| candidate_matches_group(candidate, group))
+            {
+                self.mandatory_retrieved += 1;
+            }
+        }
+
+        let decoys = top_25
+            .iter()
+            .filter(|candidate| {
+                query_truth.contaminating_groups.iter().any(|group_id| {
+                    truth
+                        .evidence_groups
+                        .iter()
+                        .find(|group| group.group_id == *group_id)
+                        .is_some_and(|group| candidate_matches_group(candidate, group))
+                })
+            })
+            .count();
+        if !top_25.is_empty() {
+            self.max_decoy_share_at_25 = self
+                .max_decoy_share_at_25
+                .max(decoys as f64 / top_25.len() as f64);
+        }
+    }
+
+    fn finish(self, lane: FixedAblationLane) -> serde_json::Value {
+        serde_json::json!({
+            "lane": lane.as_str(),
+            "cases": self.cases,
+            "queries": self.queries,
+            "answerable_queries": self.answerable_queries,
+            "mean_recall_at_25": if self.answerable_queries == 0 { 0.0 } else { self.recall_sum / self.answerable_queries as f64 },
+            "mandatory_anchor_recall_at_25": if self.mandatory_total == 0 { 0.0 } else { self.mandatory_retrieved as f64 / self.mandatory_total as f64 },
+            "max_decoy_share_at_25": self.max_decoy_share_at_25,
+            "embedding_calls": self.embedding_calls,
+            "rerank_calls": self.rerank_calls,
+            "quality_claim": "none — deterministic synthetic adapters validate product plumbing only"
+        })
+    }
+}
+
+fn fixed_ablation_options(lane: FixedAblationLane, query: &RaQuery) -> HybridOptions {
+    HybridOptions {
+        keyword_terms: if matches!(
+            lane,
+            FixedAblationLane::Dense | FixedAblationLane::DenseRerank
+        ) {
+            Vec::new()
+        } else {
+            query.keyword_plan.terms.clone()
+        },
+        semantic_query: lane.uses_semantic().then(|| query.question.clone()),
+        filter: EventQuery {
+            levels: query.keyword_plan.level.iter().cloned().collect(),
+            sources: query.keyword_plan.sources.clone(),
+            services: query.keyword_plan.services.clone(),
+            time_from: query.keyword_plan.time_from,
+            time_to: query.keyword_plan.time_to,
+            ..Default::default()
+        },
+        k: RA_K as usize,
+        rerank_top_n: RA_K as usize,
+        ..HybridOptions::default()
+    }
+}
+
+fn fixed_ablation_candidates(outcome: &HybridOutcome) -> Vec<RaCandidate> {
+    outcome
+        .candidates
+        .iter()
+        .map(|candidate| RaCandidate {
+            rank: candidate.final_rank,
+            seq: candidate.seq,
+            source: candidate.source.clone(),
+            ts: candidate.ts,
+            timestamp_provenance: candidate.timestamp_provenance.clone(),
+            level: Some(candidate.level.clone()),
+            template_id: Some(candidate.template_id),
+            score: Some(f64::from(
+                candidate.rerank_score.unwrap_or(candidate.pre_rerank_score),
+            )),
+            content: candidate.message.clone(),
+        })
+        .collect()
+}
+
+/// Runs all six retrieval lanes over the committed small tier through the
+/// production import and hybrid-search seams. The Concept and Scripted
+/// adapters are deliberately synthetic; the test measures retention and
+/// degradation behavior, never employer-model quality.
+#[test]
+fn fixed_corpus_six_lane_ablation_is_executed_and_separated_from_answer_quality() {
+    let root = require_suite_root();
+    let embed: Arc<dyn cd_core::embed::EmbedBackend> =
+        Arc::new(cd_core::embed::ConceptEmbedBackend::default());
+    let rerank: Arc<dyn cd_core::rerank::RerankBackend> =
+        Arc::new(cd_core::rerank::ScriptedRerankBackend);
+    let embed_identity = embed.identity();
+    let mut stats: BTreeMap<FixedAblationLane, FixedAblationStats> = FixedAblationLane::ALL
+        .into_iter()
+        .map(|lane| (lane, FixedAblationStats::default()))
+        .collect();
+
+    for case_id in all_case_ids() {
+        let truth = load_ra_truth(&root, case_id).expect("truth");
+        let queries = load_ra_queries(&root, case_id).expect("queries");
+        let imported = lab::ra_import_case_with_embedding(
+            case_id,
+            &ra_case_import_root(&root, case_id),
+            Some(embed.clone()),
+            &embed_identity,
+        )
+        .expect("embedded production import");
+        let observed = ra_observe_corpus(&truth, &imported).expect("observe");
+        assert!(
+            validate_conservation(&truth, &observed).is_empty(),
+            "{case_id}: embedded ablation import changed corpus truth"
+        );
+        let corpus = imported.open().expect("corpus");
+
+        for lane in FixedAblationLane::ALL {
+            stats.get_mut(&lane).expect("lane").observe_case();
+            for query in &queries.queries {
+                let options = fixed_ablation_options(lane, query);
+                let outcome = hybrid_search_events(
+                    &corpus,
+                    &options,
+                    Some(embed.as_ref()),
+                    lane.uses_rerank().then_some(rerank.as_ref()),
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{case_id}/{} failed: {error}", lane.as_str()));
+                assert!(
+                    !outcome
+                        .degradations
+                        .iter()
+                        .any(|degradation| degradation.code == "embedding_model_mismatch"),
+                    "{case_id}/{} must execute with matching synthetic vector identity",
+                    lane.as_str()
+                );
+                let candidates = fixed_ablation_candidates(&outcome);
+                let lane_stats = stats.get_mut(&lane).expect("lane");
+                lane_stats.observe_query(&truth, query, &candidates);
+                lane_stats.embedding_calls += outcome.telemetry.embedding_calls.unwrap_or(0);
+                lane_stats.rerank_calls += outcome.telemetry.rerank_calls.unwrap_or(0);
+            }
+        }
+    }
+
+    let summary: Vec<_> = FixedAblationLane::ALL
+        .into_iter()
+        .map(|lane| stats.remove(&lane).expect("lane").finish(lane))
+        .collect();
+    for row in &summary {
+        let lane = row["lane"].as_str().unwrap_or("unknown");
+        assert_eq!(
+            row["quality_claim"],
+            "none — deterministic synthetic adapters validate product plumbing only"
+        );
+        assert!(
+            row["queries"].as_u64().unwrap_or(0) > 0,
+            "{lane} ran no queries"
+        );
+    }
+    assert!(
+        summary
+            .iter()
+            .any(|row| row["embedding_calls"].as_u64().unwrap_or(0) > 0),
+        "at least one semantic lane must make measured embedding calls"
+    );
+    assert!(
+        summary
+            .iter()
+            .any(|row| row["rerank_calls"].as_u64().unwrap_or(0) > 0),
+        "at least one reranked lane must make measured rerank calls"
+    );
+    println!(
+        "FIXED_CORPUS_SIX_LANE_ABLATION_SYNTHETIC {}",
+        serde_json::to_string_pretty(&summary).expect("summary")
+    );
 }
 
 fn live_env(name: &str) -> Option<String> {

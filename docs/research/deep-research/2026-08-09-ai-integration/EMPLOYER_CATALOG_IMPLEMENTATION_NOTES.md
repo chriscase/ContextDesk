@@ -11,8 +11,11 @@ Production adapter status on the current release line:
 - Employer Qwen3-Reranker can use the explicit `tei_rerank_v1` dialect only
   when the gateway's envelope matches that contract. Score calibration and
   model-specific route behavior remain deployment evidence, not name hints.
-- Vercel v4 embedding/reranking remains a separate qualification/dev-lab
-  dialect until a score-preserving production adapter is added.
+- Vercel v4 embedding/reranking now has explicit score-preserving production
+  adapters (`vercel_v4_embeddings` and `vercel_v4_rerank_v1`). They are
+  selected only by explicit role dialect and the exact Vercel gateway host;
+  this adds wire support, not a live quality or employer-model equivalence
+  claim.
 
 Source conversation: `6a79155a-bb58-83ea-89e6-a03c0c41ff12`
 

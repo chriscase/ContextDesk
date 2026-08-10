@@ -259,15 +259,8 @@ async fn duplicate_index_fails_closed_even_when_the_body_arrives_fragmented() {
 
 // ---------------------------------------------------------------------------
 // Dialect documentation: Vercel AI Gateway v4 (`/reranking-model`) is a
-// SECOND, genuinely different rerank dialect implemented in this codebase,
-// but it is not part of the `RerankBackend` trait real hybrid retrieval
-// uses. It appears in `cd-workflow::capability_qualification::vercel_v4_rerank`
-// (capability-probe only) and the standalone, explicitly-labeled
-// `cd-vercel-retrieval-lab` dev-tool binary — both independently reimplement
-// the same fail-closed index/finiteness contract this file exercises for
-// the TEI/Cohere dialect. Not tested here: exercising a capability-probe-
-// only code path at the wire level belongs with the qualification matrix
-// (crates/cd-workflow/tests/gateway_wire_qualification.rs), and the lab
-// binary is documentation/dev-tooling, not a product code path. Recorded as
-// a documented gap in docs/testing/gateway-wire-survivors-and-gaps.md rather
-// than invented coverage.
+// genuinely different rerank dialect with a shared production
+// `VercelV4RerankBackend`. Its specialty-envelope tests live beside that
+// adapter in `cd-core/src/rerank.rs`; this integration file remains focused
+// on the TEI/Cohere-style `/rerank` contract. Both adapters enforce complete
+// request-relative score alignment and fail closed on malformed responses.
