@@ -120,8 +120,9 @@ any causal candidate citing a host `symptom_message_token` without an explicit
 `symptom`/`unknown` role fails, independent of candidate count. Multi-trigger
 and non-symptom multi-candidate counterexamples remain green. The production
 rubric still has no host-truth equivalent of quality-eval's
-`independent_incident_separation` dimension; that gap is tracked separately
-and must not be closed with lexical heuristics. Do not treat the
+`independent_incident_separation` dimension — see
+`docs/design/TRIAGE_INDEPENDENT_INCIDENT_TRUTH.md` for the minimum truth/schema
+addition required before that invariant can be enforced safely. Do not treat the
 quality-evaluation scorer fix as proof that the production rubric already
 covers independent-incident demotion.
 
