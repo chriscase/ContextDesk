@@ -936,8 +936,9 @@ fn build_linked_log_fallback_host(
         state.audit_log.clone(),
     );
     let cfg = state.config.lock().expect("config").clone();
-    host.set_router_budget(cfg.router);
-    host.set_model_context_budgets(cfg.model_context_budgets);
+    host.set_router_budget(cfg.router.clone());
+    host.set_model_context_budgets(cfg.model_context_budgets.clone());
+    apply_configured_retrieval_roles(&mut host, &cfg, &state.secrets);
     host.set_log_analysis(true, Some(cache));
     if let Ok(store) = investigation_store(state) {
         host.set_investigation_store_dir(Some(store.root().to_path_buf()));
@@ -1541,6 +1542,7 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
     } else {
         host.set_embed_backend(None);
     }
+    apply_configured_retrieval_roles(host, cfg, &state.secrets);
     if cfg.x.enabled {
         let bearer = state.secrets.get(&key_ref_x_api_key()).ok().flatten();
         host.set_x_search(true, bearer);
@@ -1581,6 +1583,44 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
                 if let Err(e) = host.attach_module(m, &grants, &resolve) {
                     tracing::warn!(module_id = %id, error = %e, "enabled module attach failed");
                 }
+            }
+        }
+    }
+}
+
+/// Attach explicitly enabled retrieval roles to the same production ToolHost
+/// used by ordinary and linked-log turns. The role factories own dialect and
+/// SSRF policy; this host only decides where the already-validated adapters
+/// are used. A failed optional role is logged and leaves the existing local
+/// or keyword fallback in place.
+fn apply_configured_retrieval_roles(
+    host: &mut ToolHost,
+    cfg: &AppConfig,
+    secrets: &ReferencedSecretStore,
+) {
+    if let Some(role) = cfg.retrieval.embedding.as_ref().filter(|role| role.enabled) {
+        match cd_workflow::retrieval::build_embedding_backend(role, Some(secrets)) {
+            Ok(backend) => {
+                host.set_embed_backend_with_model(Some(Arc::clone(&backend)), &role.model);
+                // Linked-log search and ingest use the same configured model
+                // identity, so existing vectors fail closed until re-analysis
+                // has established a matching corpus binding.
+                host.set_log_embed_backend(Some(backend), &role.model);
+                tracing::info!(model = %role.model, "configured retrieval embedding role attached");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "configured retrieval embedding role unavailable; keeping fallback");
+            }
+        }
+    }
+    if let Some(role) = cfg.retrieval.reranker.as_ref().filter(|role| role.enabled) {
+        match cd_workflow::retrieval::build_rerank_backend(role, Some(secrets)) {
+            Ok(backend) => {
+                host.set_log_rerank_backend(Some(backend));
+                tracing::info!(model = %role.model, "configured retrieval reranker role attached");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "configured retrieval reranker role unavailable; preserving pre-rerank order");
             }
         }
     }
@@ -19509,6 +19549,42 @@ mod chat_session_host_tests {
 #[cfg(test)]
 mod log_embedding_host_tests {
     use super::*;
+
+    #[test]
+    fn explicitly_enabled_retrieval_roles_attach_to_the_production_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = cd_core::workspace::Workspace::new("roles", vec![dir.path().to_path_buf()]);
+        let index = cd_core::index::KeywordIndex::new();
+        let mut host = ToolHost::new(workspace, index, None);
+        let mut cfg = AppConfig::default();
+        cfg.retrieval.embedding = Some(cd_core::config::RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:19001/v1".into(),
+            model: "bge-m3".into(),
+            dialect: Some("openai_embeddings".into()),
+            allow_remote: false,
+            api_key_ref: None,
+        });
+        cfg.retrieval.reranker = Some(cd_core::config::RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:19002".into(),
+            model: "qwen3-reranker-0.6b".into(),
+            dialect: Some("tei_rerank_v1".into()),
+            allow_remote: false,
+            api_key_ref: None,
+        });
+        let secrets = ReferencedSecretStore::new();
+
+        apply_configured_retrieval_roles(&mut host, &cfg, &secrets);
+
+        assert_eq!(
+            host.log_embed_backend()
+                .expect("embedding role attached")
+                .identity(),
+            "bge-m3"
+        );
+        assert!(host.log_rerank_backend().is_some(), "reranker role attached");
+    }
 
     #[test]
     fn desktop_ingest_plan_uses_dedicated_local_backend_and_bulk_threshold() {

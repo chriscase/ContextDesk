@@ -45,9 +45,9 @@ use crate::render::TerminalCapabilities;
 use cd_core::capability_qualification::{
     fingerprint_endpoint, redact_reason, run_qualification, CapabilityStatus, QualificationKey,
 };
-use cd_core::config::AppConfig;
+use cd_core::config::{AppConfig, RetrievalRoleModel};
 use cd_core::events::StreamEvent;
-use cd_core::keychain_store::SecretStore;
+use cd_core::keychain_store::{MemorySecretStore, SecretStore};
 use cd_core::log_analysis::{
     ActiveTimestampBasis, CorpusEmbeddingStatus, CorpusStats, LogCorpus, LogEvent,
     SearchEvidenceIdentity, TemplateInfo, TemplateRow, TimestampProvenance,
@@ -55,7 +55,6 @@ use cd_core::log_analysis::{
 use cd_core::model_role_hints::{classify_model_role, ModelRoleHint};
 use cd_core::providers::{ProviderKind, ProviderProfile};
 use cd_core::redact::ShareSafeRedactionPolicy;
-use cd_core::rerank::HttpRerankBackend;
 use cd_core::sessions::SessionStore;
 use cd_core::triage_quality::{
     parse_structured_triage_answer, score_structured_triage_answer,
@@ -67,6 +66,7 @@ use cd_workflow::capability_qualification::{
 };
 use cd_workflow::chat::{run_chat_workflow, ChatWorkflowRequest};
 use cd_workflow::provider::resolve_provider_profile;
+use cd_workflow::retrieval::{build_embedding_backend, build_rerank_backend};
 use serde::Serialize;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -2281,10 +2281,11 @@ async fn case_embedding_or_rerank(
     direct.requests_used = requests_used;
 
     // Small, known-ranking case: three short synthetic documents with one
-    // expected best match for the query. Real production adapters only
-    // (`cd_core::rerank::HttpRerankBackend`, generic HTTP reranking;
-    // `cd_core::embed::OllamaEmbedBackend` for Ollama-hosted embedding
-    // profiles) — never a bespoke second HTTP client.
+    // expected best match for the query. Construct the same production
+    // adapters used by configured retrieval roles, with the already-resolved
+    // credential held in a short-lived in-memory store. This avoids a second
+    // Keychain/file lookup while ensuring the diagnostic exercises the real
+    // wire dialect and parser rather than a qualification-only transport.
     let query = "database connection timeout".to_string();
     let docs = vec![
         "the database connection pool timed out after 30 seconds".to_string(),
@@ -2293,18 +2294,42 @@ async fn case_embedding_or_rerank(
     ];
     let expected_best = 0usize;
 
-    let product = if role == ModelRoleHint::Reranker {
-        match HttpRerankBackend::new(&profile.base_url, model, credentials.api_key.clone()) {
+    let is_vercel = cd_core::discovery::is_vercel_ai_gateway(&profile.base_url);
+    let dialect = match role {
+        ModelRoleHint::Embedding if is_vercel => "vercel_v4_embeddings",
+        ModelRoleHint::Embedding if profile.kind == ProviderKind::Ollama => "ollama_embeddings",
+        ModelRoleHint::Embedding => "openai_embeddings",
+        ModelRoleHint::Reranker if is_vercel => "vercel_v4_rerank_v1",
+        ModelRoleHint::Reranker => "tei_rerank_v1",
+        _ => "",
+    };
+    let secret_store = MemorySecretStore::new();
+    let credential_ref = "gateway-diagnose/resolved";
+    if let Some(api_key) = credentials.api_key.as_deref() {
+        let _ = secret_store.set(credential_ref, api_key);
+    }
+    let retrieval_role = RetrievalRoleModel {
+        enabled: true,
+        base_url: profile.base_url.clone(),
+        model: model.to_string(),
+        dialect: Some(dialect.to_string()),
+        allow_remote: true,
+        api_key_ref: credentials
+            .api_key
+            .as_ref()
+            .map(|_| credential_ref.to_string()),
+    };
+    let request_timeout = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(1));
+
+    let product_started = Instant::now();
+    let (mut product, scorer) = if role == ModelRoleHint::Reranker {
+        match build_rerank_backend(&retrieval_role, Some(&secret_store)) {
             Ok(backend) => {
-                use cd_core::rerank::RerankBackend;
-                match tokio::time::timeout(
-                    deadline
-                        .saturating_duration_since(Instant::now())
-                        .max(Duration::from_millis(1)),
-                    backend.rerank(&query, &docs),
-                )
-                .await
-                {
+                let result =
+                    tokio::time::timeout(request_timeout, backend.rerank(&query, &docs)).await;
+                let product = match result {
                     Ok(Ok(scores)) => {
                         let best = scores
                             .iter()
@@ -2336,96 +2361,116 @@ async fn case_embedding_or_rerank(
                         attempts: 1,
                         requests_used: 0,
                     },
-                }
+                };
+                (
+                    product,
+                    LaneResult::not_applicable("reranker order is checked by the production lane"),
+                )
             }
-            Err(e) => LaneResult {
-                executed: true,
-                passed: false,
-                detail: redact_reason(&e.to_string()),
-                elapsed_ms: 0,
-                attempts: 1,
-                requests_used: 0,
-            },
+            Err(e) => (
+                LaneResult {
+                    executed: true,
+                    passed: false,
+                    detail: redact_reason(&e.to_string()),
+                    elapsed_ms: 0,
+                    attempts: 1,
+                    requests_used: 0,
+                },
+                LaneResult::not_applicable("reranker adapter could not be constructed"),
+            ),
         }
-    } else if profile.kind == ProviderKind::Ollama {
-        use cd_core::embed::{EmbedBackend, OllamaEmbedBackend};
-        match cd_core::chat::OllamaClient::new(&profile.base_url, model) {
-            Ok(client) => {
-                let backend = OllamaEmbedBackend::new(client);
+    } else {
+        match build_embedding_backend(&retrieval_role, Some(&secret_store)) {
+            Ok(backend) => {
                 let mut all = vec![query.clone()];
                 all.extend(docs.clone());
-                match tokio::time::timeout(
-                    deadline
-                        .saturating_duration_since(Instant::now())
-                        .max(Duration::from_millis(1)),
-                    backend.embed(&all),
-                )
-                .await
-                {
+                let result = tokio::time::timeout(request_timeout, backend.embed(&all)).await;
+                match result {
                     Ok(Ok(vectors)) if vectors.len() == all.len() => {
-                        let query_vec = &vectors[0];
+                        let dims = vectors.first().map(Vec::len).unwrap_or(0);
+                        let valid_shape = dims > 0
+                            && vectors.iter().all(|vector| {
+                                vector.len() == dims && vector.iter().all(|value| value.is_finite())
+                            });
                         let mut sims: Vec<(usize, f32)> = vectors[1..]
                             .iter()
                             .enumerate()
-                            .map(|(i, v)| (i, cosine(query_vec, v)))
+                            .map(|(i, vector)| (i, cosine(&vectors[0], vector)))
                             .collect();
                         sims.sort_by(|a, b| b.1.total_cmp(&a.1));
                         let best = sims.first().map(|(i, _)| *i);
-                        LaneResult {
+                        let product = LaneResult {
                             executed: true,
-                            passed: best == Some(expected_best),
-                            detail: format!("production embedding backend ranked index {best:?} best (expected {expected_best})"),
+                            passed: valid_shape,
+                            detail: if valid_shape {
+                                format!("production embedding returned {} finite homogeneous vectors (dim={dims})", vectors.len())
+                            } else {
+                                "production embedding returned invalid vector shape".to_string()
+                            },
                             elapsed_ms: 0,
                             attempts: 1,
                             requests_used: 1,
-                        }
+                        };
+                        let scorer = LaneResult {
+                            executed: valid_shape,
+                            passed: valid_shape && best == Some(expected_best),
+                            detail: format!("synthetic semantic ranking selected index {best:?} (expected {expected_best})"),
+                            elapsed_ms: 0,
+                            attempts: 1,
+                            requests_used: 0,
+                        };
+                        (product, scorer)
                     }
-                    Ok(Ok(_)) => LaneResult {
-                        executed: true,
-                        passed: false,
-                        detail: "embedding backend returned an unexpected vector count".to_string(),
-                        elapsed_ms: 0,
-                        attempts: 1,
-                        requests_used: 1,
-                    },
-                    Ok(Err(e)) => LaneResult {
-                        executed: true,
-                        passed: false,
-                        detail: redact_reason(&e.to_string()),
-                        elapsed_ms: 0,
-                        attempts: 1,
-                        requests_used: 1,
-                    },
-                    Err(_) => LaneResult {
-                        executed: true,
-                        passed: false,
-                        detail: "production embedding call timed out".to_string(),
-                        elapsed_ms: 0,
-                        attempts: 1,
-                        requests_used: 0,
-                    },
+                    Ok(Ok(_)) => (
+                        LaneResult {
+                            executed: true,
+                            passed: false,
+                            detail: "embedding backend returned an unexpected vector count"
+                                .to_string(),
+                            elapsed_ms: 0,
+                            attempts: 1,
+                            requests_used: 1,
+                        },
+                        LaneResult::not_applicable("embedding response shape was invalid"),
+                    ),
+                    Ok(Err(e)) => (
+                        LaneResult {
+                            executed: true,
+                            passed: false,
+                            detail: redact_reason(&e.to_string()),
+                            elapsed_ms: 0,
+                            attempts: 1,
+                            requests_used: 1,
+                        },
+                        LaneResult::not_applicable("embedding request failed"),
+                    ),
+                    Err(_) => (
+                        LaneResult {
+                            executed: true,
+                            passed: false,
+                            detail: "production embedding call timed out".to_string(),
+                            elapsed_ms: 0,
+                            attempts: 1,
+                            requests_used: 0,
+                        },
+                        LaneResult::not_applicable("embedding request timed out"),
+                    ),
                 }
             }
-            Err(e) => LaneResult {
-                executed: true,
-                passed: false,
-                detail: redact_reason(&e.to_string()),
-                elapsed_ms: 0,
-                attempts: 1,
-                requests_used: 0,
-            },
+            Err(e) => (
+                LaneResult {
+                    executed: true,
+                    passed: false,
+                    detail: redact_reason(&e.to_string()),
+                    elapsed_ms: 0,
+                    attempts: 1,
+                    requests_used: 0,
+                },
+                LaneResult::not_applicable("embedding adapter could not be constructed"),
+            ),
         }
-    } else {
-        LaneResult::not_applicable(
-            "not_run: no production embedding backend is wired for this provider kind outside \
-             the qualification transport yet — follow-up: extend cd_core::embed with a generic \
-             OpenAI-compatible production backend"
-                .to_string(),
-        )
     };
-
-    let scorer =
-        LaneResult::not_applicable("ranking-order match is the scorer for this case".to_string());
+    product.elapsed_ms = product_started.elapsed().as_millis() as u64;
     let classification = classify(&direct, &product, &scorer, false);
     CaseReport {
         case_id: "embedding_or_rerank_contract",

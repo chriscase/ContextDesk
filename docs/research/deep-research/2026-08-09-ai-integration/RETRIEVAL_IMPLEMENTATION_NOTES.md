@@ -13,6 +13,12 @@ Current implementation slice (release line):
   specialty envelope and converts its complete ranked permutation to
   request-relative scores; both reject malformed or ambiguous results and
   retain the pre-rerank order on failure.
+- Explicitly enabled retrieval roles now attach through the desktop's existing
+  `ToolHost` seam. Linked-log search can use the configured embedding and
+  reranker backends, while preserving trusted event identities and the
+  keyword/pre-rerank fallback. Existing corpus vectors remain bound to their
+  original model and dimensions; a mismatch keeps semantic search off until
+  re-analysis establishes a compatible binding.
 - Legacy roles without a dialect retain the local Ollama embedding default
   on the conventional Ollama port and the TEI-style rerank default. Vercel's
   native v4 routes require the explicit dialect and host check; wire support is

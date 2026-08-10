@@ -1436,6 +1436,9 @@ pub struct ToolHost {
     /// Dedicated embed backend for log templates (#359 local ONNX default).
     /// Falls back to [`Self::embed_backend`] when unset.
     log_embed_backend: Option<std::sync::Arc<dyn crate::embed::EmbedBackend>>,
+    /// Optional configured reranker for log-template search. A failed or
+    /// invalid response leaves the pre-rerank order untouched.
+    log_rerank_backend: Option<std::sync::Arc<dyn crate::rerank::RerankBackend>>,
     /// Model id for log template vectors.
     log_embed_model: String,
     /// Hybrid weight knobs (documented in `embed` module).
@@ -1624,6 +1627,7 @@ impl ToolHost {
             help_index: None,
             embed_model: "default".into(),
             log_embed_backend: None,
+            log_rerank_backend: None,
             log_embed_model: crate::embed::LOCAL_LOG_EMBED_MODEL_ID.into(),
             hybrid_weights: crate::embed::HybridWeights::default(),
             durable_memory: None,
@@ -4078,6 +4082,21 @@ impl ToolHost {
         }
     }
 
+    /// Attach an optional provider-neutral reranker for log-template search.
+    /// The backend is host-owned; model-visible evidence remains the same
+    /// trusted event/template set regardless of whether reranking succeeds.
+    pub fn set_log_rerank_backend(
+        &mut self,
+        backend: Option<std::sync::Arc<dyn crate::rerank::RerankBackend>>,
+    ) {
+        self.log_rerank_backend = backend;
+    }
+
+    /// Borrow the configured log reranker, when one is attached.
+    pub fn log_rerank_backend(&self) -> Option<std::sync::Arc<dyn crate::rerank::RerankBackend>> {
+        self.log_rerank_backend.clone()
+    }
+
     /// Override hybrid weights (tests / advanced config).
     pub fn set_hybrid_weights(&mut self, weights: crate::embed::HybridWeights) {
         self.hybrid_weights = weights;
@@ -5539,11 +5558,14 @@ impl ToolHost {
             k: (args.get("k").and_then(|v| v.as_u64()).unwrap_or(8) as usize)
                 .min(self.max_results_per_source),
         };
-        let hits = crate::log_analysis::search::search_logs_with_excluded_templates(
+        let rerank_backend = self.log_rerank_backend();
+        let hits = crate::log_analysis::search::search_logs_with_excluded_templates_and_rerank(
             &corpus,
             &q,
             self.log_embed_backend().as_deref(),
             &suppression.excluded_template_ids,
+            rerank_backend.as_deref(),
+            crate::rerank::RERANK_DEFAULT_TIMEOUT_MS,
         )?;
         let evidence = hits
             .iter()
@@ -5551,10 +5573,24 @@ impl ToolHost {
             .collect::<Vec<_>>();
         let result_count = hits.len();
         let mut raw = String::new();
+        let rerank_applied = hits.iter().any(|hit| hit.rerank_score.is_some());
+        raw.push_str(&format!(
+            "retrieval_reranker_configured: {}\nretrieval_reranker_applied: {}\n",
+            rerank_backend.is_some(),
+            rerank_applied
+        ));
         for h in &hits {
             raw.push_str(&format!(
-                "- t{} score={:.3} sem={:.3} n={} sev={}: {}\n",
-                h.template_id, h.score, h.semantic_score, h.count, h.severity, h.pattern
+                "- t{} score={:.3} sem={:.3} rerank={} n={} sev={}: {}\n",
+                h.template_id,
+                h.score,
+                h.semantic_score,
+                h.rerank_score
+                    .map(|score| format!("{score:.3}"))
+                    .unwrap_or_else(|| "none".into()),
+                h.count,
+                h.severity,
+                h.pattern
             ));
             for e in &h.exemplars {
                 raw.push_str(&format!("    e.g. {e}\n"));
