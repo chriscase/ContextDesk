@@ -1,0 +1,463 @@
+{
+  "schema_version": "contextdesk.compatibility_probes.v2",
+  "generated_at": "2026-08-09",
+  "safety": {
+    "synthetic_only": true,
+    "forbid_workspace_data": true,
+    "forbid_secrets": true,
+    "max_parallel_route_probes": 1,
+    "stop_on_http_status": [401, 403, 429],
+    "continue_to_next_route_on_http_status": [404, 405],
+    "validation_statuses_may_try_next_dialect": [400, 415, 422]
+  },
+  "role_probe_order": {
+    "chat_hint": [
+      "chat_basic",
+      "json_object",
+      "json_schema_strict",
+      "tool_forced",
+      "tool_continuation",
+      "stream_basic"
+    ],
+    "embedding_hint": [
+      "openai_embeddings_batch",
+      "tei_embed_batch"
+    ],
+    "reranker_hint": [
+      "tei_rerank",
+      "jina_v1_rerank",
+      "cohere_v2_rerank",
+      "voyage_v1_rerank",
+      "vendor_v1_reranking",
+      "vllm_v1_score"
+    ],
+    "unknown_hint": [
+      "chat_basic",
+      "openai_embeddings_batch",
+      "tei_rerank",
+      "jina_v1_rerank"
+    ]
+  },
+  "probes": [
+    {
+      "id": "models_discovery",
+      "method": "GET",
+      "path": "/v1/models",
+      "body": null,
+      "pass": [
+        "HTTP 2xx",
+        "JSON response",
+        "Each displayed model has a non-empty stable string id"
+      ],
+      "record": [
+        "inventory_count",
+        "selected_model_metadata_hash",
+        "schema_fingerprint",
+        "request_id_headers",
+        "pagination_or_truncation_signals"
+      ]
+    },
+    {
+      "id": "chat_basic",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": {
+        "model": "${MODEL}",
+        "messages": [
+          {
+            "role": "user",
+            "content": "ContextDesk synthetic probe. Reply with exactly CD_OK."
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 8,
+        "stream": false
+      },
+      "pass": [
+        "HTTP 2xx JSON",
+        "At least one parseable choice",
+        "Trimmed assistant content equals CD_OK"
+      ],
+      "degraded": [
+        "Content contains CD_OK with extra framing",
+        "Optional request fields must be omitted",
+        "Usage or finish_reason omitted"
+      ]
+    },
+    {
+      "id": "json_object",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": {
+        "model": "${MODEL}",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Return exactly one JSON object with key ok and boolean value true. No markdown."
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 16,
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "pass": [
+        "HTTP 2xx",
+        "Assistant content parses as JSON object",
+        "Object equals {\"ok\":true}"
+      ],
+      "classification": "json_object"
+    },
+    {
+      "id": "json_schema_strict",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": {
+        "model": "${MODEL}",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Produce the requested object."
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 16,
+        "response_format": {
+          "type": "json_schema",
+          "json_schema": {
+            "name": "cd_probe",
+            "strict": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "ok": {
+                  "type": "boolean",
+                  "const": true
+                }
+              },
+              "required": ["ok"],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "pass": [
+        "Request field accepted",
+        "Output validates exactly against schema"
+      ],
+      "verified_repetitions": 3,
+      "classification": "json_schema_strict"
+    },
+    {
+      "id": "tool_forced",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": {
+        "model": "${MODEL}",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Call cd_qualify_echo with token cd-t0. Do not answer in prose."
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 64,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "cd_qualify_echo",
+              "description": "Return the supplied token. No side effects.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "const": "cd-t0"
+                  }
+                },
+                "required": ["token"],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "tool_choice": {
+          "type": "function",
+          "function": {
+            "name": "cd_qualify_echo"
+          }
+        },
+        "parallel_tool_calls": false
+      },
+      "pass": [
+        "Native tool call object returned",
+        "Function name equals cd_qualify_echo",
+        "Arguments parse as JSON after string-or-object normalization",
+        "token equals cd-t0"
+      ]
+    },
+    {
+      "id": "tool_continuation",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "depends_on": "tool_forced",
+      "body_template": {
+        "model": "${MODEL}",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Call cd_qualify_echo with token cd-t0, then after its result reply exactly CD_TOOL_OK."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": "${TOOL_CALLS_FROM_PRIOR_RESPONSE}"
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "${CALL_ID}",
+            "content": "{\"token\":\"cd-t0\"}"
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 16
+      },
+      "pass": [
+        "Assistant content trims to CD_TOOL_OK",
+        "Model does not repeat the same tool indefinitely"
+      ]
+    },
+    {
+      "id": "stream_basic",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": {
+        "model": "${MODEL}",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with exactly CD_OK."
+          }
+        ],
+        "temperature": 0,
+        "max_tokens": 8,
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        }
+      },
+      "pass": [
+        "Streaming content type accepted",
+        "At least one content or tool delta",
+        "Reconstructed content equals CD_OK",
+        "Terminal finish reason or terminator observed"
+      ],
+      "degraded": [
+        "No terminal usage",
+        "No [DONE] but clean transport close",
+        "Content/tool delta shares event with finish_reason"
+      ]
+    },
+    {
+      "id": "openai_embeddings_batch",
+      "method": "POST",
+      "path": "/v1/embeddings",
+      "body": {
+        "model": "${MODEL}",
+        "input": [
+          "cd-e0 alpha",
+          "cd-e1 beta",
+          "cd-e0 alpha"
+        ],
+        "encoding_format": "float"
+      },
+      "pass": [
+        "HTTP 2xx JSON",
+        "Exactly three embedding items",
+        "Indices, when present, are unique and equal {0,1,2}",
+        "All vectors have one non-zero common dimension",
+        "Every component is finite",
+        "Duplicate inputs are equal or nearly equal",
+        "Distinct inputs are not exactly identical"
+      ],
+      "record": [
+        "dimension",
+        "l2_norm_min_max_mean",
+        "duplicate_cosine_similarity",
+        "duplicate_max_absolute_difference",
+        "usage",
+        "index_and_order_behavior",
+        "model_field"
+      ]
+    },
+    {
+      "id": "tei_embed_batch",
+      "method": "POST",
+      "path": "/embed",
+      "body": {
+        "inputs": [
+          "cd-e0 alpha",
+          "cd-e1 beta",
+          "cd-e0 alpha"
+        ],
+        "normalize": true,
+        "truncate": false,
+        "truncation_direction": "right"
+      },
+      "pass": [
+        "HTTP 2xx JSON",
+        "Top-level array contains exactly three vectors",
+        "All vectors have one non-zero common dimension",
+        "Every component is finite",
+        "Output order is stable for duplicate-position test"
+      ],
+      "record": [
+        "dimension",
+        "l2_norm_min_max_mean",
+        "duplicate_stability",
+        "positional_order_preservation"
+      ]
+    },
+    {
+      "id": "tei_rerank",
+      "method": "POST",
+      "path": "/rerank",
+      "body": {
+        "query": "Which document says the incident was caused by an expired TLS certificate?",
+        "texts": [
+          "The database backup completed successfully.",
+          "Root cause: the TLS certificate expired.",
+          "The certificate was renewed after the incident."
+        ],
+        "truncate": false,
+        "raw_scores": false,
+        "return_text": false
+      },
+      "pass": [
+        "Finite scores",
+        "Unique indices map to input positions",
+        "Index 1 ranks first",
+        "Score direction can be recorded"
+      ]
+    },
+    {
+      "id": "jina_v1_rerank",
+      "method": "POST",
+      "path": "/v1/rerank",
+      "body": {
+        "model": "${MODEL}",
+        "query": "Which document says the incident was caused by an expired TLS certificate?",
+        "documents": [
+          "The database backup completed successfully.",
+          "Root cause: the TLS certificate expired.",
+          "The certificate was renewed after the incident."
+        ],
+        "top_n": 3,
+        "return_documents": false
+      },
+      "pass": [
+        "results array parseable",
+        "Finite relevance_score values",
+        "Unique input-relative indices",
+        "Index 1 ranks first"
+      ]
+    },
+    {
+      "id": "cohere_v2_rerank",
+      "method": "POST",
+      "path": "/v2/rerank",
+      "body": {
+        "model": "${MODEL}",
+        "query": "Which document says the incident was caused by an expired TLS certificate?",
+        "documents": [
+          "The database backup completed successfully.",
+          "Root cause: the TLS certificate expired.",
+          "The certificate was renewed after the incident."
+        ],
+        "top_n": 3
+      },
+      "pass": [
+        "results array parseable",
+        "Finite relevance_score values",
+        "Unique input-relative indices",
+        "Index 1 ranks first"
+      ]
+    },
+    {
+      "id": "voyage_v1_rerank",
+      "method": "POST",
+      "path": "/v1/rerank",
+      "body": {
+        "model": "${MODEL}",
+        "query": "Which document says the incident was caused by an expired TLS certificate?",
+        "documents": [
+          "The database backup completed successfully.",
+          "Root cause: the TLS certificate expired.",
+          "The certificate was renewed after the incident."
+        ],
+        "top_k": 3,
+        "return_documents": false,
+        "truncation": false
+      },
+      "pass": [
+        "data/results array parseable",
+        "Finite relevance_score values",
+        "Unique input-relative indices",
+        "Index 1 ranks first"
+      ]
+    },
+    {
+      "id": "vendor_v1_reranking",
+      "method": "POST",
+      "path": "/v1/reranking",
+      "body": {
+        "model": "${MODEL}",
+        "query": "Which document says the incident was caused by an expired TLS certificate?",
+        "documents": [
+          "The database backup completed successfully.",
+          "Root cause: the TLS certificate expired.",
+          "The certificate was renewed after the incident."
+        ]
+      },
+      "pass": [
+        "A registered vendor parser recognizes the response",
+        "Finite scores map unambiguously to original documents",
+        "Document 1 is most relevant"
+      ],
+      "warning": "The path does not determine the dialect. Never apply a generic parser without a registered response shape."
+    },
+    {
+      "id": "vllm_v1_score",
+      "method": "POST",
+      "path": "/v1/score",
+      "body_template": {
+        "model": "${MODEL}",
+        "text_1": "Which document says the incident was caused by an expired TLS certificate?",
+        "text_2": "Root cause: the TLS certificate expired."
+      },
+      "pass": [
+        "Registered vLLM score response parser succeeds",
+        "Finite score returned"
+      ],
+      "note": "Exact vLLM score request shape can vary by release/model mode; use versioned dialect definitions."
+    }
+  ],
+  "deep_input_limit_probe": {
+    "enabled_by_default": false,
+    "strategy": "exponential_growth_then_bounded_binary_search",
+    "synthetic_tail_sentinel": "CD_TAIL_OK",
+    "max_output_tokens": 4,
+    "distinguish": [
+      "http_413",
+      "context_validation_error",
+      "gateway_timeout",
+      "server_timeout",
+      "silent_truncation",
+      "instruction_following_failure",
+      "success"
+    ],
+    "result": "observed_lower_bound_with_uncertainty"
+  }
+}

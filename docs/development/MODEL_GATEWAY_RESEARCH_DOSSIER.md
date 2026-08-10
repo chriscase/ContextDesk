@@ -13,6 +13,9 @@ chat history.
 
 Related evidence:
 
+- [Deep research and ContextDesk synthesis](../research/deep-research/2026-08-09-ai-integration/README.md)
+  preserves the external research provenance, exact machine-readable artifacts,
+  and release-oriented conclusions.
 - [Vercel refinement lab notes](./VERCEL_REFINEMENT_LAB_NOTES.md) preserve
   sanitized live observations.
 - [Gateway contract fixture coverage](./GATEWAY_CONTRACT_FIXTURES_COVERAGE.md)
