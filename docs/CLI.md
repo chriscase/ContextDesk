@@ -44,6 +44,7 @@ metacharacters literal. If a question begins with a command name such as
 | `--json` | | Shorthand for `--format json` |
 | `--jsonl` | | Shorthand for `--format jsonl` |
 | `--color auto\|always\|never` | `CONTEXTDESK_COLOR` | Color on stderr progress |
+| `--no-color` | | Explicit shorthand for `--color never` |
 | `--config <path>` | `CONTEXTDESK_CONFIG` | Project CLI TOML (`.contextdesk.toml`) |
 | `--app-config <path>` | `CONTEXTDESK_APP_CONFIG` | Shared `AppConfig` JSON path |
 | `--data-dir <path>` | `CONTEXTDESK_DATA_DIR` | Isolate all process state (alias `--profile-dir`) |

@@ -74,7 +74,11 @@ async fn run(cli: Cli, invocation: InvocationMode) -> i32 {
     };
     let overrides = CliOverrides {
         output_format: format_override,
-        color: cli.global.color,
+        color: if cli.global.no_color {
+            Some(config::ColorMode::Never)
+        } else {
+            cli.global.color
+        },
         default_provider_profile: cli.global.profile.clone(),
         default_chat_model: cli.global.model.clone(),
         import_embed: None,
@@ -121,7 +125,11 @@ async fn run_state_free(cli: &Cli) -> Option<i32> {
     } else {
         cli.global.format.unwrap_or(OutputFormat::Text)
     };
-    let color = cli.global.color.unwrap_or(config::ColorMode::Auto);
+    let color = if cli.global.no_color {
+        config::ColorMode::Never
+    } else {
+        cli.global.color.unwrap_or(config::ColorMode::Auto)
+    };
     match &cli.command {
         Command::Normalize(args) => {
             let result = commands::normalize::run(args, format, color).await;

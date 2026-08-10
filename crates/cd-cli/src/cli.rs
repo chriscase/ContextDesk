@@ -39,6 +39,11 @@ pub struct GlobalArgs {
     pub jsonl: bool,
     #[arg(long, global = true, env = "CONTEXTDESK_COLOR")]
     pub color: Option<ColorMode>,
+    /// Disable ANSI color for this invocation (equivalent to `--color never`).
+    /// This explicit flag wins over ambient terminal detection and is useful
+    /// for CI/log capture without requiring an environment variable.
+    #[arg(long, global = true, conflicts_with = "color")]
+    pub no_color: bool,
     /// Project config path — takes the place of the auto-discovered
     /// `.contextdesk.toml` in the current directory (see `docs/CLI.md`
     /// precedence). Does not affect the shared `AppConfig` path; use
@@ -963,6 +968,24 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn explicit_no_color_flag_parses_and_conflicts_with_color_mode() {
+        let parsed = Cli::try_parse_from(["contextdesk", "--no-color", "gateway", "diagnose"])
+            .expect("--no-color should be accepted globally");
+        assert!(parsed.global.no_color);
+
+        let err = Cli::try_parse_from([
+            "contextdesk",
+            "--no-color",
+            "--color",
+            "always",
+            "gateway",
+            "diagnose",
+        ])
+        .expect_err("--no-color and --color must not be ambiguous");
+        assert!(err.to_string().contains("cannot be used with"));
     }
 
     #[test]
