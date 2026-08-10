@@ -1351,6 +1351,41 @@ fn typed_investigation_answer(
     })
 }
 
+/// Summarize only host-owned shape/role counts from a typed answer. This is
+/// intentionally content-free: it makes a usefulness failure diagnosable
+/// without retaining claims, evidence text, identifiers, or provider bodies.
+fn typed_answer_shape_summary(
+    envelope: &cd_core::investigation_answer::AnswerEnvelopeV1,
+) -> String {
+    use cd_core::investigation_answer::ClaimKind;
+
+    let mut observations = 0usize;
+    let mut symptoms = 0usize;
+    let mut causal_candidates = 0usize;
+    let mut initiating_causes = 0usize;
+    let mut competing = 0usize;
+    let mut missing = 0usize;
+    let mut claims = 0usize;
+    for candidate in &envelope.answer.candidates {
+        for claim in &candidate.claims {
+            claims += 1;
+            match claim.claim_kind {
+                ClaimKind::Observation => observations += 1,
+                ClaimKind::Symptom => symptoms += 1,
+                ClaimKind::CausalCandidate => causal_candidates += 1,
+                ClaimKind::InitiatingCause => initiating_causes += 1,
+                ClaimKind::CompetingExplanation => competing += 1,
+                ClaimKind::MissingEvidence => missing += 1,
+            }
+        }
+    }
+    format!(
+        "typed_candidates={}, typed_claims={claims}, typed_roles=observation:{observations},symptom:{symptoms},causal_candidate:{causal_candidates},initiating_cause:{initiating_causes},competing:{competing},missing:{missing}, semantic_attempts={}",
+        envelope.answer.candidates.len(),
+        envelope.semantic_attempts
+    )
+}
+
 /// Summarize the host-owned authority path without retaining model text or
 /// provider payloads. This makes a typed-answer absence diagnosable when the
 /// shared agent deliberately falls back before multi-stage synthesis.
@@ -1400,10 +1435,32 @@ fn linked_triage_authority_summary(events: &[StreamEvent]) -> String {
                 stage,
                 phase,
                 status,
+                detail,
                 ..
             } => stages.push(format!(
-                "stage_{stage}_{phase}_{}",
-                status.as_deref().unwrap_or("none")
+                "stage_{stage}_{phase}_{}{}",
+                status.as_deref().unwrap_or("none"),
+                serde_json::from_str::<serde_json::Value>(detail)
+                    .ok()
+                    .map(|value| {
+                        let category = value
+                            .get("diagnostic_category")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|value| format!(",category={value}"))
+                            .unwrap_or_default();
+                        let semantic_attempts = value
+                            .get("semantic_attempts")
+                            .and_then(serde_json::Value::as_u64)
+                            .map(|value| format!(",semantic_attempts={value}"))
+                            .unwrap_or_default();
+                        let provider_rounds = value
+                            .get("provider_rounds")
+                            .and_then(serde_json::Value::as_u64)
+                            .map(|value| format!(",provider_rounds={value}"))
+                            .unwrap_or_default();
+                        format!("{category}{semantic_attempts}{provider_rounds}")
+                    })
+                    .unwrap_or_default()
             )),
             _ => {}
         }
@@ -2137,10 +2194,12 @@ async fn case_linked_log_triage(
             if let Some(envelope) = typed_investigation_answer(&o.events) {
                 let score = score_validated_investigation_answer(envelope, &key, &host);
                 last_scorer_detail = format!(
-                    "attempt {}: typed_v1 passed={} failed_dimensions=[{}]",
+                    "attempt {}: typed_v1 passed={} failed_dimensions=[{}]; {}; {}",
                     attempt + 1,
                     score.passed,
-                    score.failed_ids().join(",")
+                    score.failed_ids().join(","),
+                    typed_answer_shape_summary(envelope),
+                    linked_triage_authority_summary(&o.events)
                 );
                 if score.passed {
                     pass_seen = true;
