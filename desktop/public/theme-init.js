@@ -5,7 +5,7 @@
  */
 (function () {
   // Allow-list must match SkinId in desktop/src/lib/skins.ts
-  var KNOWN = { dark: 1, light: 1, slate: 1, sand: 1, forest: 1 };
+  var KNOWN = { dark: 1, light: 1, slate: 1, sand: 1, forest: 1, grokptah: 1 };
   var LIGHT = { light: 1, sand: 1 };
   var t = "dark";
   try {

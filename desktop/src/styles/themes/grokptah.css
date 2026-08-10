@@ -1,0 +1,62 @@
+/**
+ * GrokPtah — graphite coding workbench with a warm gold accent (#300).
+ *
+ * Shares the default dark skin's graphite surface trio (#0b0c0e / #12141a /
+ * #181b22) so window chrome density reads identically, then swaps the cool blue
+ * accent for warm gold. Neutrals are nudged a few points warm so the gold reads
+ * as part of the palette rather than a sticker on a cold gray.
+ *
+ * Contrast: every token used as text clears WCAG AA (4.5:1) on --bg-app,
+ * --bg-panel *and* --bg-elevated — see grokptahSkin.test.ts. Status hues are
+ * held apart from the accent (warning sits at ~22° from gold and ~23° from
+ * danger) so a gold-accented UI does not collapse accent/warn/error into one
+ * warm smear.
+ */
+html[data-theme="grokptah"] {
+  color-scheme: dark;
+  --bg-app: #0b0c0e;
+  --bg-panel: #12141a;
+  --bg-elevated: #181b22;
+  --bg-input: #0e1013;
+  --bg-hover: #20232c;
+  --border: #2b2f3a;
+  --border-soft: #1d2027;
+  --border-strong: #3f4553;
+  --text: #eceef2;
+  --text-muted: #949aa6;
+  /* ≥4.5:1 on app/panel/elevated */
+  --text-faint: #7f8694;
+  --accent: #f0b429;
+  /* Accent used as small text on --bg-elevated; must clear WCAG AA there. */
+  --accent-text: #f0b429;
+  --accent-strong: #ffc64d;
+  --accent-soft: rgb(240 180 41 / 0.14);
+  /* Text/icons on solid gold buttons — 9.9:1 on --accent. */
+  --accent-on: #17130a;
+  /* Body links share the accent hue; 10.5:1 on app, 9.9:1 on panel. */
+  --link: #f0b429;
+  --success: #6fcf97;
+  /* Orange, not amber: keeps warn distinct from the gold accent. */
+  --warning: #fb8043;
+  --danger: #f07178;
+  --tool-bg: #14161d;
+  --chat-user-bg: #1a1d26;
+  --chat-assistant-bg: transparent;
+  --surface-deep: #060709;
+  --surface-chrome: #14161d;
+  --surface-chip: #171a22;
+  --status-bar-bg: #08090c;
+  --overlay-scrim: rgb(0 0 0 / 0.64);
+  --overlay-soft: rgb(0 0 0 / 0.24);
+  --overlay-faint: rgb(255 255 255 / 0.04);
+  --focus-ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--accent);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.22);
+  --shadow-md: 0 12px 36px rgb(0 0 0 / 0.44);
+  --shadow-lg: 0 20px 52px rgb(0 0 0 / 0.54);
+  --shadow-inset: 0 1px 0 rgb(255 255 255 / 0.04) inset;
+  --composer-shadow: var(--shadow-inset), 0 10px 28px rgb(0 0 0 / 0.26);
+  --composer-shadow-focus:
+    0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent),
+    0 12px 32px rgb(0 0 0 / 0.3);
+  --btn-inset: 0 1px 0 rgb(255 255 255 / 0.14) inset;
+}

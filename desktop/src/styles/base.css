@@ -80,7 +80,8 @@ select optgroup {
 /* Explicit color-scheme on the control (html alone is not always enough in WKWebView). */
 html[data-theme="dark"] select,
 html[data-theme="slate"] select,
-html[data-theme="forest"] select {
+html[data-theme="forest"] select,
+html[data-theme="grokptah"] select {
   color-scheme: dark;
 }
 
@@ -93,9 +94,11 @@ html[data-theme="sand"] select {
 html[data-theme="dark"] select option,
 html[data-theme="slate"] select option,
 html[data-theme="forest"] select option,
+html[data-theme="grokptah"] select option,
 html[data-theme="dark"] select optgroup,
 html[data-theme="slate"] select optgroup,
-html[data-theme="forest"] select optgroup {
+html[data-theme="forest"] select optgroup,
+html[data-theme="grokptah"] select optgroup {
   background-color: var(--bg-elevated);
   color: var(--text);
 }

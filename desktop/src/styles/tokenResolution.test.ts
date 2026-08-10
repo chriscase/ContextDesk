@@ -15,6 +15,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { skinIdList } from "../lib/skins";
 
 const stylesDir = dirname(fileURLToPath(import.meta.url));
 const srcDir = dirname(stylesDir);
@@ -88,7 +89,8 @@ describe("design token resolution", () => {
     expect(missing).toEqual([]);
   });
 
-  it.each(["dark.css", "light.css", "slate.css", "sand.css", "forest.css"])(
+  // Derived from the registry so a newly registered skin cannot skip this.
+  it.each(skinIdList().map((id) => `${id}.css`))(
     "resolves the display and elevation tokens in %s",
     (theme) => {
       for (const token of ["--text-xl", "--shadow-lg", "--surface-raised"]) {
