@@ -1252,6 +1252,12 @@ fn final_comparison_system_contract() -> String {
         "failures. The host manifest is intentionally identifier-only; that does not mean candidate ",
         "evidence was unavailable. Candidate-scoped drafts summarize evidence already evaluated. Do ",
         "not claim candidate content was omitted unless the corresponding draft explicitly says so. ",
+        "Treat each draft's candidate_stage_classification as a role-consistency constraint: retain ",
+        "evidence from a downstream_symptom candidate in symptoms, keep initiating_cause evidence ",
+        "in initiating_causes only when the draft classified that candidate as initiating_cause, and ",
+        "do not promote downstream symptoms or competing/noise candidates into initiating_causes. ",
+        "When a draft is unknown or supporting_evidence, prefer causal_candidates, observations, or ",
+        "missing_evidence over an established initiating cause. ",
         "A manifest may also include `global_timeline_context`, a separately scoped ",
         "global chronology rather than an incident. Its rows may describe overlapping unrelated ",
         "processes: report only what their text and order show, never treat adjacency as correlation ",
@@ -13936,6 +13942,9 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         assert!(comparison_prompt.contains("competing_explanations for likely unrelated"));
         assert!(comparison_prompt.contains("manifest is intentionally identifier-only"));
         assert!(comparison_prompt.contains("does not mean candidate evidence was unavailable"));
+        assert!(comparison_prompt.contains("role-consistency constraint"));
+        assert!(comparison_prompt.contains("downstream_symptom candidate in symptoms"));
+        assert!(comparison_prompt.contains("do not promote downstream symptoms"));
         assert!(comparison_prompt.contains("global chronology rather than an incident"));
         assert!(comparison_data.contains("GLOBAL_CONTEXT_SENTINEL"));
         assert!(comparison_data.contains("e:global_timeline_context:8"));
