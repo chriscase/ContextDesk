@@ -2,7 +2,7 @@
 
 **Branch:** `test/gateway-diagnostic-contract-audit-v1`  
 **Base:** `2339c38aeee31dcf5869c3d81bd373bf6974a30c`  
-**Tip:** `6efb55e16f46487f2666df1748c90279da812ff7`
+**Tip:** `6efb55e16f46487f2666df1748c90279da812ff7` (audit suite commit containing tests; branch tip may be a docs-only stamp)
 **Kind:** test/docs only — no production behavior change; no competing
 gateway-diagnostic command.
 
