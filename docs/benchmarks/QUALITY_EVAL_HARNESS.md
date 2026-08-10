@@ -114,14 +114,16 @@ that remove fail-closed checks, alter truth authority, shrink scoring windows,
 or weaken identity/privacy isolation rather than mutating the whole workspace.
 
 The live-role-confusion mutation also exposed a separate production-rubric
-follow-up in `triage_quality.rs`: its `symptom_vs_cause` check currently rejects
-a promoted symptom only when it is the sole causal candidate. A response can
-therefore include a valid trigger alongside a symptom assigned another causal
-role and mask the conflict; the production rubric also has no equivalent check
-for demoting an independent incident into the main chain. Harden these rules in
-a separate change with multi-cause counterexamples so legitimate multiple
-triggers remain valid. Do not treat the quality-evaluation scorer fix as proof
-that the production rubric already enforces these invariants.
+follow-up in `triage_quality.rs`. The `symptom_vs_cause` masking defect
+(promoted symptom greened whenever a valid trigger coexists) is hardened so
+any causal candidate citing a host `symptom_message_token` without an explicit
+`symptom`/`unknown` role fails, independent of candidate count. Multi-trigger
+and non-symptom multi-candidate counterexamples remain green. The production
+rubric still has no host-truth equivalent of quality-eval's
+`independent_incident_separation` dimension; that gap is tracked separately
+and must not be closed with lexical heuristics. Do not treat the
+quality-evaluation scorer fix as proof that the production rubric already
+covers independent-incident demotion.
 
 ## Fixture layout
 
