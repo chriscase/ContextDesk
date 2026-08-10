@@ -2086,7 +2086,7 @@ async fn case_linked_log_triage(
     corpora.push(corpus_id.clone());
 
     let question = format!(
-        "Investigate this incident using the linked logs. What was the initiating trigger, what \
+        "Run a bounded linked-log triage for this incident. What was the initiating trigger, what \
          downstream symptoms followed, which events are unrelated noise, and what shows recovery? \
          {}",
         triage_answer_contract_system_text()
