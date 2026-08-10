@@ -4,6 +4,8 @@
 use crate::branding::DEFAULT_SLUG;
 use crate::error::{CoreError, CoreResult};
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -21,15 +23,17 @@ fn file_secret_path(ref_id: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn validate_file_secret_path(path: &Path) -> CoreResult<std::fs::Metadata> {
-    if !path.is_absolute() {
-        return Err(CoreError::Config(
+fn require_absolute_file_secret_path(path: &Path) -> CoreResult<()> {
+    if path.is_absolute() {
+        Ok(())
+    } else {
+        Err(CoreError::Config(
             "file-backed credential path must be absolute".into(),
-        ));
+        ))
     }
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
-        CoreError::Config(format!("read protected credential file metadata: {error}"))
-    })?;
+}
+
+fn validate_file_secret_metadata(metadata: &std::fs::Metadata) -> CoreResult<()> {
     if metadata.file_type().is_symlink() {
         return Err(CoreError::Config(
             "protected credential file must not be a symbolic link".into(),
@@ -62,26 +66,41 @@ fn validate_file_secret_path(path: &Path) -> CoreResult<std::fs::Metadata> {
             ));
         }
     }
-    Ok(metadata)
+    Ok(())
 }
 
-/// Validate an existing protected file and return the reference persisted in
-/// a profile. The secret bytes are never included in the reference.
-pub fn file_secret_ref(path: &Path) -> CoreResult<String> {
-    validate_file_secret_path(path)?;
-    Ok(format!("{FILE_SECRET_REF_PREFIX}{}", path.display()))
-}
+/// Open a protected credential file without following a final-path symlink,
+/// then re-validate metadata on the open descriptor so a race cannot swap in
+/// a world-readable or linked target after the path check.
+fn open_protected_credential_file(path: &Path) -> CoreResult<File> {
+    require_absolute_file_secret_path(path)?;
+    // Fail closed on an already-linked final path before open (clearer error).
+    let before = std::fs::symlink_metadata(path).map_err(|error| {
+        CoreError::Config(format!("read protected credential file metadata: {error}"))
+    })?;
+    validate_file_secret_metadata(&before)?;
 
-/// Resolve one protected-file reference. Non-file references return `None`
-/// so a caller can route them to its explicitly selected secret backend.
-pub fn read_file_secret_ref(ref_id: &str) -> CoreResult<Option<String>> {
-    let Some(path) = file_secret_path(ref_id) else {
-        return Ok(None);
-    };
-    validate_file_secret_path(&path)?;
-    let raw = std::fs::read_to_string(&path)
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options
+        .open(path)
         .map_err(|error| CoreError::Config(format!("read protected credential file: {error}")))?;
-    let value = raw.trim();
+    let metadata = file.metadata().map_err(|error| {
+        CoreError::Config(format!("read protected credential file metadata: {error}"))
+    })?;
+    validate_file_secret_metadata(&metadata)?;
+    Ok(file)
+}
+
+fn credential_value_from_bytes(raw: &[u8]) -> CoreResult<String> {
+    let text = std::str::from_utf8(raw)
+        .map_err(|_| CoreError::Config("protected credential file must be valid UTF-8".into()))?;
+    let value = text.trim();
     if value.is_empty() {
         return Err(CoreError::Config(
             "protected credential file contains no credential".into(),
@@ -92,7 +111,42 @@ pub fn read_file_secret_ref(ref_id: &str) -> CoreResult<Option<String>> {
             "protected credential file contains an invalid NUL byte".into(),
         ));
     }
-    Ok(Some(value.to_string()))
+    Ok(value.to_string())
+}
+
+fn read_protected_credential_file(path: &Path) -> CoreResult<String> {
+    let mut file = open_protected_credential_file(path)?;
+    // Bound the read from the open fd so a post-open size change cannot force
+    // an unbounded allocation. One extra byte proves "too large".
+    let mut buf = Vec::new();
+    file.by_ref()
+        .take(MAX_FILE_SECRET_BYTES.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|error| CoreError::Config(format!("read protected credential file: {error}")))?;
+    if buf.len() as u64 > MAX_FILE_SECRET_BYTES {
+        return Err(CoreError::Config(format!(
+            "protected credential file must contain 1..={MAX_FILE_SECRET_BYTES} bytes"
+        )));
+    }
+    credential_value_from_bytes(&buf)
+}
+
+/// Validate an existing protected file and return the reference persisted in
+/// a profile. The secret bytes are never included in the reference.
+pub fn file_secret_ref(path: &Path) -> CoreResult<String> {
+    // Open + fstat so Save cannot succeed against a path that only looked safe
+    // at the first metadata snapshot.
+    let _ = open_protected_credential_file(path)?;
+    Ok(format!("{FILE_SECRET_REF_PREFIX}{}", path.display()))
+}
+
+/// Resolve one protected-file reference. Non-file references return `None`
+/// so a caller can route them to its explicitly selected secret backend.
+pub fn read_file_secret_ref(ref_id: &str) -> CoreResult<Option<String>> {
+    let Some(path) = file_secret_path(ref_id) else {
+        return Ok(None);
+    };
+    Ok(Some(read_protected_credential_file(&path)?))
 }
 
 /// Abstraction over secret storage (never exposed to webview).
@@ -344,7 +398,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn write_protected_file(path: &Path, body: &str, mode: u32) {
+    fn write_protected_file(path: &Path, body: impl AsRef<[u8]>, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(path, body).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -378,6 +432,10 @@ mod tests {
         let reference = format!("file:{}", path.display());
         let error = read_file_secret_ref(&reference).unwrap_err().to_string();
         assert!(error.contains("permissions"));
+        assert!(
+            !error.contains("synthetic-value"),
+            "error text must never echo the credential body"
+        );
     }
 
     #[cfg(unix)]
@@ -391,5 +449,196 @@ mod tests {
         symlink(&target, &link).unwrap();
         let error = file_secret_ref(&link).unwrap_err().to_string();
         assert!(error.contains("symbolic link"));
+        assert!(!error.contains("synthetic-value"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_file_rejects_relative_path_empty_nul_directory_and_oversized() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let relative = PathBuf::from("relative.key");
+        let err = file_secret_ref(&relative).unwrap_err().to_string();
+        assert!(err.contains("absolute"), "{err}");
+
+        let empty = dir.path().join("empty.key");
+        write_protected_file(&empty, "", 0o600);
+        let err = file_secret_ref(&empty).unwrap_err().to_string();
+        assert!(err.contains("1..="), "{err}");
+
+        let whitespace = dir.path().join("blank.key");
+        write_protected_file(&whitespace, "   \n\t  \n", 0o600);
+        let err = read_file_secret_ref(&format!("file:{}", whitespace.display()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no credential"), "{err}");
+
+        let nul = dir.path().join("nul.key");
+        write_protected_file(&nul, b"abc\0def", 0o600);
+        let err = read_file_secret_ref(&format!("file:{}", nul.display()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NUL"), "{err}");
+        assert!(!err.contains("abc"));
+        assert!(!err.contains("def"));
+
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let err = file_secret_ref(&nested).unwrap_err().to_string();
+        assert!(err.contains("regular file"), "{err}");
+
+        let huge = dir.path().join("huge.key");
+        write_protected_file(&huge, vec![b'a'; MAX_FILE_SECRET_BYTES as usize + 1], 0o600);
+        let err = file_secret_ref(&huge).unwrap_err().to_string();
+        assert!(err.contains("1..="), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_file_accepts_unicode_path_and_hard_link_to_same_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cred-密钥.key");
+        write_protected_file(&path, "unicode-path-secret\n", 0o600);
+        let reference = file_secret_ref(&path).unwrap();
+        assert_eq!(
+            read_file_secret_ref(&reference).unwrap().as_deref(),
+            Some("unicode-path-secret")
+        );
+
+        let hard = dir.path().join("hardlink.key");
+        std::fs::hard_link(&path, &hard).unwrap();
+        // Hard links share the inode and mode; they are regular files, not
+        // symlinks. Accepting them is intentional (still owned + mode 600).
+        assert_eq!(
+            read_file_secret_ref(&format!("file:{}", hard.display()))
+                .unwrap()
+                .as_deref(),
+            Some("unicode-path-secret")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_or_missing_file_ref_never_falls_back_to_keychain_branch() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingKeychain {
+            gets: AtomicUsize,
+        }
+
+        impl SecretStore for CountingKeychain {
+            fn get(&self, _ref_id: &str) -> CoreResult<Option<String>> {
+                self.gets.fetch_add(1, Ordering::SeqCst);
+                Ok(Some("must-never-be-used".into()))
+            }
+            fn set(&self, _ref_id: &str, _secret: &str) -> CoreResult<()> {
+                Ok(())
+            }
+            fn delete(&self, _ref_id: &str) -> CoreResult<()> {
+                Ok(())
+            }
+        }
+
+        // Production ReferencedSecretStore routes `file:` only through
+        // read_file_secret_ref. This local twin proves the same branch
+        // discipline: a failing file path must not consult the keychain
+        // half of the store.
+        struct FileFirstStore {
+            keychain: CountingKeychain,
+        }
+        impl SecretStore for FileFirstStore {
+            fn get(&self, ref_id: &str) -> CoreResult<Option<String>> {
+                if ref_id.starts_with(FILE_SECRET_REF_PREFIX) {
+                    return read_file_secret_ref(ref_id);
+                }
+                self.keychain.get(ref_id)
+            }
+            fn set(&self, ref_id: &str, secret: &str) -> CoreResult<()> {
+                if ref_id.starts_with(FILE_SECRET_REF_PREFIX) {
+                    return Err(CoreError::Config("read-only".into()));
+                }
+                self.keychain.set(ref_id, secret)
+            }
+            fn delete(&self, ref_id: &str) -> CoreResult<()> {
+                if ref_id.starts_with(FILE_SECRET_REF_PREFIX) {
+                    return Err(CoreError::Config("not deleted".into()));
+                }
+                self.keychain.delete(ref_id)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.key");
+        write_protected_file(&path, "synthetic-value", 0o644);
+        let store = FileFirstStore {
+            keychain: CountingKeychain {
+                gets: AtomicUsize::new(0),
+            },
+        };
+        let err = store
+            .get(&format!("file:{}", path.display()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("permissions"), "{err}");
+        assert_eq!(store.keychain.gets.load(Ordering::SeqCst), 0);
+
+        let missing = dir.path().join("gone.key");
+        let err = store
+            .get(&format!("file:{}", missing.display()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("metadata") || err.contains("read protected"),
+            "{err}"
+        );
+        assert_eq!(store.keychain.gets.load(Ordering::SeqCst), 0);
+        assert!(!err.contains("must-never-be-used"));
+        assert!(!err.contains("synthetic-value"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_readers_of_a_stable_protected_file_agree() {
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.key");
+        write_protected_file(&path, "shared-stable-secret\n", 0o600);
+        let reference = format!("file:{}", path.display());
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let reference = reference.clone();
+                thread::spawn(move || read_file_secret_ref(&reference).unwrap().expect("present"))
+            })
+            .collect();
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), "shared-stable-secret");
+        }
+    }
+
+    #[test]
+    fn looks_like_raw_secret_never_flags_file_or_keychain_refs() {
+        assert!(!looks_like_raw_secret(
+            "file:/Users/demo/.secrets/provider.key"
+        ));
+        assert!(!looks_like_raw_secret("provider/work/api_key"));
+        assert!(!looks_like_raw_secret(&key_ref_for_profile("demo")));
+        assert!(looks_like_raw_secret("sk-proj-definitely-a-raw-key-value"));
+    }
+
+    #[test]
+    fn non_file_refs_return_none_from_read_file_secret_ref() {
+        assert_eq!(read_file_secret_ref("provider/work/api_key").unwrap(), None);
+        assert_eq!(read_file_secret_ref("").unwrap(), None);
+    }
+
+    #[test]
+    fn referenced_store_refuses_set_and_delete_for_file_refs() {
+        let store = ReferencedSecretStore::new();
+        let reference = "file:/tmp/does-not-need-to-exist.key";
+        let set_err = store.set(reference, "x").unwrap_err().to_string();
+        assert!(set_err.contains("read-only"), "{set_err}");
+        let del_err = store.delete(reference).unwrap_err().to_string();
+        assert!(del_err.contains("not deleted"), "{del_err}");
     }
 }

@@ -814,6 +814,111 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn config_init_credential_flags_are_mutually_exclusive() {
+        // Import-into-Keychain paths must not combine with each other or with
+        // a protected-file reference. Clap enforces this before any secret I/O.
+        let conflicting = [
+            vec![
+                "contextdesk",
+                "config",
+                "init",
+                "--non-interactive",
+                "--api-key-env",
+                "X",
+                "--api-key-file",
+                "/tmp/a",
+            ],
+            vec![
+                "contextdesk",
+                "config",
+                "init",
+                "--non-interactive",
+                "--api-key-env",
+                "X",
+                "--api-key-file-ref",
+                "/tmp/a",
+            ],
+            vec![
+                "contextdesk",
+                "config",
+                "init",
+                "--non-interactive",
+                "--api-key-file",
+                "/tmp/a",
+                "--api-key-file-ref",
+                "/tmp/b",
+            ],
+            vec![
+                "contextdesk",
+                "config",
+                "init",
+                "--non-interactive",
+                "--api-key-stdin",
+                "--api-key-file-ref",
+                "/tmp/a",
+            ],
+            vec![
+                "contextdesk",
+                "config",
+                "init",
+                "--non-interactive",
+                "--api-key-env",
+                "X",
+                "--api-key-stdin",
+            ],
+        ];
+        for argv in conflicting {
+            let err = Cli::try_parse_from(&argv).unwrap_err();
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains("cannot be used with")
+                    || rendered.contains("conflict")
+                    || rendered.contains("Cannot be used with"),
+                "expected mutual exclusion for {argv:?}, got: {rendered}"
+            );
+        }
+
+        // Each exclusive source parses alone.
+        for argv in [
+            vec![
+                "contextdesk",
+                "config",
+                "init",
+                "--non-interactive",
+                "--api-key-env",
+                "CONTEXTDESK_TEST_KEY",
+            ],
+            vec![
+                "contextdesk",
+                "config",
+                "init",
+                "--non-interactive",
+                "--api-key-file",
+                "/tmp/import.key",
+            ],
+            vec![
+                "contextdesk",
+                "config",
+                "init",
+                "--non-interactive",
+                "--api-key-file-ref",
+                "/tmp/protected.key",
+            ],
+            vec![
+                "contextdesk",
+                "config",
+                "init",
+                "--non-interactive",
+                "--api-key-stdin",
+            ],
+        ] {
+            Cli::try_parse_from(&argv).unwrap_or_else(|e| {
+                panic!("solo credential flag must parse for {argv:?}: {e}");
+            });
+        }
+    }
+
+    #[test]
     fn friendly_command_aliases_parse_to_the_same_production_commands() {
         let ask = Cli::try_parse_from(["contextdesk", "ask", "what failed?"]).unwrap();
         assert!(matches!(ask.command, Command::Chat(_)));

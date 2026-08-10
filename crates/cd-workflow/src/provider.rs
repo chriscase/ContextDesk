@@ -263,11 +263,40 @@ mod tests {
         }
     }
 
+    /// Panic if the store is consulted at all — used to prove missing
+    /// `api_key_ref` never synthesizes a conventional Keychain lookup.
+    struct PanicOnAnySecretAccess;
+    impl SecretStore for PanicOnAnySecretAccess {
+        fn get(&self, reference: &str) -> cd_core::error::CoreResult<Option<String>> {
+            panic!("secret store must not be consulted without api_key_ref; got {reference}");
+        }
+        fn set(&self, _reference: &str, _value: &str) -> cd_core::error::CoreResult<()> {
+            panic!("secret store must not be written during turn resolution");
+        }
+        fn delete(&self, _reference: &str) -> cd_core::error::CoreResult<()> {
+            panic!("secret store must not be deleted during turn resolution");
+        }
+    }
+
     fn cfg_with_ollama() -> AppConfig {
         AppConfig {
             providers: ProviderConfig::with_local_ollama(),
             ..AppConfig::default()
         }
+    }
+
+    #[test]
+    fn missing_api_key_ref_never_consults_secret_store() {
+        let mut cfg = cfg_with_ollama();
+        cfg.providers.profiles[0].api_key_ref = None;
+        let resolved =
+            resolve_turn_inputs(&PanicOnAnySecretAccess, &cfg, None, None).expect("resolved");
+        assert!(resolved.api_key.is_none());
+
+        let credentials = TurnProviderCredentialCache::new(&PanicOnAnySecretAccess);
+        let cached = resolve_turn_inputs_with_credential_cache(&credentials, &cfg, None, None)
+            .expect("cached resolve");
+        assert!(cached.api_key.is_none());
     }
 
     #[test]
