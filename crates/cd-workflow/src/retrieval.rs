@@ -19,8 +19,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cd_core::capability_qualification::QualificationKey;
+use cd_core::config::EmbedWireKind;
 use cd_core::config::{AppConfig, RetrievalRoleModel};
-use cd_core::embed::{EmbedBackend, OllamaEmbedBackend};
+use cd_core::embed::{EmbedBackend, OllamaEmbedBackend, OpenAiCompatibleEmbedBackend};
 use cd_core::error::CoreResult;
 use cd_core::keychain_store::SecretStore;
 use cd_core::log_analysis::{
@@ -28,7 +29,10 @@ use cd_core::log_analysis::{
 };
 use cd_core::memory::embed_blocking;
 use cd_core::process_progress::CancelFlag;
-use cd_core::rerank::{rerank_blocking, validate_rerank_scores, HttpRerankBackend, RerankBackend};
+use cd_core::rerank::{
+    rerank_blocking, resolve_rerank_dialect, validate_rerank_scores, HttpRerankBackend,
+    RerankBackend, RerankDialect,
+};
 
 /// Wire schema identity for [`RetrievalStatusReport`].
 pub const RETRIEVAL_STATUS_SCHEMA_ID: &str = "contextdesk.retrieval_status.v1";
@@ -140,30 +144,67 @@ fn bearer_for(role: &RetrievalRoleModel, secrets: Option<&dyn SecretStore>) -> O
     secrets.and_then(|store| store.get(reference).ok().flatten())
 }
 
-/// Build the configured embedding backend (Ollama `/api/embeddings` wire —
-/// the embedding contract this repository speaks today). The model id comes
-/// from configuration; nothing is hard-coded.
-pub fn build_embedding_backend(role: &RetrievalRoleModel) -> CoreResult<Arc<dyn EmbedBackend>> {
-    let client = cd_core::chat::OllamaClient::new(&role.base_url, &role.model)?;
-    Ok(Arc::new(OllamaEmbedBackend::new(client)))
+/// Build the configured embedding backend for production hybrid retrieval.
+///
+/// Wire selection is **explicit** via [`RetrievalRoleModel::embed_wire`]
+/// (default [`EmbedWireKind::OpenAiCompatible`]) — never inferred from the
+/// URL host. Protected-file / Keychain credentials resolve through
+/// `secrets` for the OpenAI-compatible path only.
+pub fn build_embedding_backend(
+    role: &RetrievalRoleModel,
+    secrets: Option<&dyn SecretStore>,
+) -> CoreResult<Arc<dyn EmbedBackend>> {
+    match role.embed_wire {
+        EmbedWireKind::OpenAiCompatible => {
+            let bearer = bearer_for(role, secrets);
+            Ok(Arc::new(OpenAiCompatibleEmbedBackend::new(
+                &role.base_url,
+                role.model.clone(),
+                bearer,
+            )?))
+        }
+        EmbedWireKind::Ollama => {
+            let client = cd_core::chat::OllamaClient::new(&role.base_url, &role.model)?;
+            Ok(Arc::new(OllamaEmbedBackend::new(client)))
+        }
+    }
 }
 
-/// Build the configured rerank backend (TEI/Cohere-compatible `/rerank`).
+/// Build the configured embedding backend without secrets (Ollama / probe
+/// paths that never need a bearer). Prefer [`build_embedding_backend`] for
+/// production OpenAI-compatible roles.
+pub fn build_embedding_backend_unauthenticated(
+    role: &RetrievalRoleModel,
+) -> CoreResult<Arc<dyn EmbedBackend>> {
+    build_embedding_backend(role, None)
+}
+
+/// Build the configured rerank backend with an **explicit** dialect
+/// ([`RetrievalRoleModel::rerank_dialect`]; default TEI/Cohere). Dialect is
+/// never chosen from the base URL alone.
 pub fn build_rerank_backend(
     role: &RetrievalRoleModel,
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn RerankBackend>> {
     let bearer = bearer_for(role, secrets);
-    Ok(Arc::new(HttpRerankBackend::new(
+    let dialect = resolve_rerank_dialect(Some(role.rerank_dialect));
+    Ok(Arc::new(HttpRerankBackend::with_dialect(
         &role.base_url,
         role.model.clone(),
         bearer,
+        dialect,
     )?))
+}
+
+/// Dialect the production and qualification adapters share for a role.
+pub fn registered_rerank_dialect(role: &RetrievalRoleModel) -> RerankDialect {
+    resolve_rerank_dialect(Some(role.rerank_dialect))
 }
 
 fn embedding_role_status(
     role: Option<&RetrievalRoleModel>,
     probe: bool,
+    secrets: Option<&dyn SecretStore>,
 ) -> (RetrievalRoleStatus, Option<u32>) {
     let status = match role {
         None => RetrievalRoleStatus {
@@ -193,7 +234,7 @@ fn embedding_role_status(
                     None,
                 );
             }
-            let (state, detail, probed_dims) = match build_embedding_backend(role) {
+            let (state, detail, probed_dims) = match build_embedding_backend(role, secrets) {
                 Err(_) => (
                     RetrievalRoleState::Unavailable,
                     "backend construction failed; check the configured endpoint".into(),
@@ -324,7 +365,7 @@ pub fn retrieval_status(
         }
     };
     let (mut embedding_role, probed_embedding_dims) =
-        embedding_role_status(config.retrieval.embedding.as_ref(), options.probe);
+        embedding_role_status(config.retrieval.embedding.as_ref(), options.probe, secrets);
     if let (Some(role), Some((corpus, _))) = (
         config
             .retrieval
@@ -391,6 +432,108 @@ pub fn retrieval_status(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Share-safe retrieval report (ablation / diagnostics)
+// ---------------------------------------------------------------------------
+
+/// Wire schema for share-safe retrieval ablation / mode comparison reports.
+pub const RETRIEVAL_ABLATION_SCHEMA_ID: &str = "contextdesk.retrieval_ablation.v1";
+/// Schema version for [`ShareSafeRetrievalReport`].
+pub const RETRIEVAL_ABLATION_SCHEMA_VERSION: u32 = 1;
+
+/// One mode's ranking aggregates — never raw vectors, URLs, or secrets.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShareSafeModeAggregate {
+    /// Honest mode label (`structured_keyword`, `hybrid_embedding`, …).
+    pub mode: String,
+    /// Candidates returned after ranking.
+    pub candidate_count: u64,
+    /// Wall-clock ms for this mode, when measured.
+    pub latency_ms: Option<u64>,
+    /// Embedding call count, when the mode used embeddings.
+    pub embedding_calls: Option<u64>,
+    /// Rerank call count, when the mode used reranking.
+    pub rerank_calls: Option<u64>,
+    /// Failure / degradation category codes (empty = clean run).
+    pub failure_categories: Vec<String>,
+    /// Whether pinned evidence class markers were still present in results.
+    pub pinned_evidence_hits: u64,
+}
+
+/// Share-safe retrieval report: pseudonyms + fingerprints + aggregates only.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShareSafeRetrievalReport {
+    pub schema_id: String,
+    pub schema_version: u32,
+    /// Stable run-local profile pseudonym (never the private profile id).
+    pub profile_pseudonym: String,
+    /// Stable run-local model pseudonym (never the private catalog id).
+    pub model_pseudonym: String,
+    /// Endpoint fingerprint (never the raw URL).
+    pub endpoint_fingerprint: Option<String>,
+    /// Embedding dimensions when measured.
+    pub embedding_dimensions: Option<u32>,
+    /// Registered rerank dialect label when a reranker ran.
+    pub rerank_dialect: Option<String>,
+    /// Per-mode aggregates.
+    pub modes: Vec<ShareSafeModeAggregate>,
+    /// Total wall-clock for the whole comparison, when measured.
+    pub total_latency_ms: Option<u64>,
+}
+
+/// Build a share-safe report. `profile_label` / `model_label` are hashed into
+/// pseudonyms — never echoed. Callers must not pass secrets or vectors.
+pub fn share_safe_retrieval_report(
+    profile_label: &str,
+    model_label: &str,
+    endpoint_base_url: Option<&str>,
+    embedding_dimensions: Option<u32>,
+    rerank_dialect: Option<RerankDialect>,
+    modes: Vec<ShareSafeModeAggregate>,
+    total_latency_ms: Option<u64>,
+) -> ShareSafeRetrievalReport {
+    let profile_pseudonym = {
+        let fp = QualificationKey::new("retrieval-profile", profile_label, model_label)
+            .endpoint_fingerprint;
+        format!("p-{}", &fp[..12.min(fp.len())])
+    };
+    let model_pseudonym = {
+        let fp =
+            QualificationKey::new("retrieval-model", model_label, model_label).endpoint_fingerprint;
+        format!("p-{}", &fp[..12.min(fp.len())])
+    };
+    let endpoint_fingerprint = endpoint_base_url
+        .map(|url| QualificationKey::new("retrieval-ep", url, model_label).endpoint_fingerprint);
+    ShareSafeRetrievalReport {
+        schema_id: RETRIEVAL_ABLATION_SCHEMA_ID.into(),
+        schema_version: RETRIEVAL_ABLATION_SCHEMA_VERSION,
+        profile_pseudonym,
+        model_pseudonym,
+        endpoint_fingerprint,
+        embedding_dimensions,
+        rerank_dialect: rerank_dialect.map(|d| d.as_str().to_string()),
+        modes,
+        total_latency_ms,
+    }
+}
+
+/// Assert a serialized share-safe report contains none of the forbidden
+/// classes. Returns `Err` with the first hit for tests.
+pub fn assert_share_safe_json(report_json: &str, forbidden: &[&str]) -> Result<(), String> {
+    for f in forbidden {
+        if !f.is_empty() && report_json.contains(f) {
+            return Err(format!("share-safe report must not contain {f:?}"));
+        }
+    }
+    // Structural bans.
+    for needle in ["\"embedding\":[", "Bearer ", "sk-", "Authorization"] {
+        if report_json.contains(needle) {
+            return Err(format!("share-safe report must not contain {needle:?}"));
+        }
+    }
+    Ok(())
+}
+
 /// Shared hybrid-search entry: builds the configured optional backends and
 /// runs [`cd_core::log_analysis::hybrid_search_events`] over an imported
 /// corpus. Backend construction failures degrade to the baseline with a
@@ -411,7 +554,7 @@ pub fn hybrid_search(
         .filter(|role| role.enabled)
     {
         None => (None, false),
-        Some(role) => match build_embedding_backend(role) {
+        Some(role) => match build_embedding_backend(role, secrets) {
             Ok(backend) => (Some(backend), false),
             Err(_) => (None, true),
         },
@@ -467,6 +610,8 @@ mod tests {
             base_url: "http://127.0.0.1:8080".into(),
             model: "test-reranker".into(),
             api_key_ref: api_key_ref.map(str::to_string),
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         }
     }
 
@@ -528,6 +673,8 @@ mod tests {
             base_url: "http://127.0.0.1:11434".into(),
             model: "different-vector-space".into(),
             api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         });
         let report = retrieval_status(
             cache.path(),

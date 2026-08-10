@@ -17,6 +17,7 @@ use cd_core::capability_qualification::{
 use cd_core::chat::{
     ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role as ChatRole, ToolCallMsg,
 };
+use cd_core::embed::EmbedBackend;
 use cd_core::providers::{ProviderKind, ProviderProfile};
 use cd_core::ssrf::{build_pinned_client_for_url, SsrfPolicy, SystemResolver};
 use cd_core::tools::{ToolSideEffect, ToolSpec};
@@ -665,6 +666,9 @@ fn redact_host_err(raw: &str) -> String {
 }
 
 /// OpenAI-compatible `/embeddings` with the same SSRF pin as chat.
+///
+/// Uses the **production** [`cd_core::embed::parse_openai_embeddings_response`]
+/// contract so qualification cannot accept envelopes production would reject.
 async fn openai_embed(
     base_url: &str,
     api_key: Option<&str>,
@@ -676,64 +680,79 @@ async fn openai_embed(
     if is_vercel_ai_gateway(base_url) {
         return vercel_v4_embed(api_key, extra_headers, model_id, text).await;
     }
-    let (url, http) = build_pinned_client_for_url(
+    // Prefer the production EmbedBackend path (same request bounds + parser).
+    let backend = cd_core::embed::OpenAiCompatibleEmbedBackend::new(
         base_url,
-        policy,
-        &SystemResolver,
-        std::time::Duration::from_secs(60),
+        model_id,
+        api_key.map(str::to_string),
     )
     .map_err(|e| redact_host_err(&e.to_string()))?;
-    let base = url.as_str().trim_end_matches('/');
-    let embed_url = if base.ends_with("/v1") {
-        format!("{base}/embeddings")
-    } else if base.contains("/v1/") {
-        format!("{}/embeddings", base.trim_end_matches('/'))
-    } else {
-        format!("{base}/v1/embeddings")
-    };
-    let body = serde_json::json!({
-        "model": model_id,
-        "input": text,
-    });
-    let mut req = http.post(embed_url).json(&body);
-    for (k, v) in extra_headers {
-        req = req.header(k, v);
-    }
-    if let Some(k) = api_key {
-        if !extra_headers
-            .iter()
-            .any(|(h, _)| h.eq_ignore_ascii_case("Authorization"))
-        {
-            req = req.bearer_auth(k);
+    // Extra headers (e.g. OIDC) are not on OpenAiCompatibleEmbedBackend today;
+    // when present, fall back to a thin transport that still uses the shared
+    // response parser so contracts stay unified.
+    if !extra_headers.is_empty() {
+        let (url, http) = build_pinned_client_for_url(
+            base_url,
+            policy,
+            &SystemResolver,
+            std::time::Duration::from_secs(60),
+        )
+        .map_err(|e| redact_host_err(&e.to_string()))?;
+        let base = url.as_str().trim_end_matches('/');
+        let embed_url = if base.ends_with("/v1") {
+            format!("{base}/embeddings")
+        } else if base.contains("/v1/") {
+            format!("{}/embeddings", base.trim_end_matches('/'))
+        } else {
+            format!("{base}/v1/embeddings")
+        };
+        let body = serde_json::json!({
+            "model": model_id,
+            "input": [text],
+        });
+        let mut req = http.post(embed_url).json(&body);
+        for (k, v) in extra_headers {
+            req = req.header(k, v);
         }
+        if let Some(k) = api_key {
+            if !extra_headers
+                .iter()
+                .any(|(h, _)| h.eq_ignore_ascii_case("Authorization"))
+            {
+                req = req.bearer_auth(k);
+            }
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| redact_host_err(&e.to_string()))?;
+        let status = resp.status();
+        let text_body = resp
+            .text()
+            .await
+            .map_err(|e| redact_host_err(&e.to_string()))?;
+        if !status.is_success() {
+            return Err(redact_host_err(&format!(
+                "embed HTTP {status}: {}",
+                text_body.chars().take(160).collect::<String>()
+            )));
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&text_body).map_err(|e| redact_host_err(&e.to_string()))?;
+        let mut vectors = cd_core::embed::parse_openai_embeddings_response(&v, 1)
+            .map_err(|e| redact_host_err(&e.to_string()))?;
+        return vectors
+            .pop()
+            .ok_or_else(|| "embed_missing_vector".to_string());
     }
-    let resp = req
-        .send()
+    let _ = policy; // used on extra-headers path
+    let mut vectors = backend
+        .embed(&[text.to_string()])
         .await
         .map_err(|e| redact_host_err(&e.to_string()))?;
-    let status = resp.status();
-    let text_body = resp
-        .text()
-        .await
-        .map_err(|e| redact_host_err(&e.to_string()))?;
-    if !status.is_success() {
-        return Err(redact_host_err(&format!(
-            "embed HTTP {status}: {}",
-            text_body.chars().take(160).collect::<String>()
-        )));
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(&text_body).map_err(|e| redact_host_err(&e.to_string()))?;
-    let arr = v
-        .pointer("/data/0/embedding")
-        .and_then(|e| e.as_array())
-        .ok_or_else(|| "embed_missing_vector".to_string())?;
-    let mut out = Vec::with_capacity(arr.len());
-    for x in arr {
-        let f = x.as_f64().ok_or_else(|| "embed_non_float".to_string())?;
-        out.push(f as f32);
-    }
-    Ok(out)
+    vectors
+        .pop()
+        .ok_or_else(|| "embed_missing_vector".to_string())
 }
 
 fn is_vercel_ai_gateway(base_url: &str) -> bool {
@@ -893,7 +912,9 @@ async fn generic_rerank(
         .json()
         .await
         .map_err(|error| redact_host_err(&error.to_string()))?;
-    parse_ranking_indices(&body, documents.len(), "/results")
+    // Shared production TEI/Cohere dialect — never a qualification-only parser.
+    cd_core::rerank::parse_tei_cohere_ranking_indices(&body, documents.len())
+        .map_err(|e| redact_host_err(&e.to_string()))
 }
 
 fn parse_ranking_indices(
@@ -901,32 +922,17 @@ fn parse_ranking_indices(
     document_count: usize,
     pointer: &str,
 ) -> Result<Vec<usize>, String> {
-    let rows = body
-        .pointer(pointer)
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "reranking response missing ranking rows".to_string())?;
-    if rows.len() != document_count {
-        return Err("reranking response count did not match documents".into());
+    // Vercel v4 uses `/ranking` with the same index/score fields.
+    if pointer == "/results" {
+        return cd_core::rerank::parse_tei_cohere_ranking_indices(body, document_count)
+            .map_err(|e| redact_host_err(&e.to_string()));
     }
-    let mut seen = std::collections::BTreeSet::new();
-    let mut indices = Vec::with_capacity(rows.len());
-    for row in rows {
-        let index = row
-            .get("index")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|index| usize::try_from(index).ok())
-            .ok_or_else(|| "reranking response contains an invalid index".to_string())?;
-        let score = row
-            .get("relevanceScore")
-            .or_else(|| row.get("relevance_score"))
-            .and_then(serde_json::Value::as_f64)
-            .ok_or_else(|| "reranking response contains an invalid score".to_string())?;
-        if index >= document_count || !score.is_finite() || !seen.insert(index) {
-            return Err("reranking response contains an invalid row".into());
-        }
-        indices.push(index);
+    let mut wrapper = serde_json::json!({});
+    if let Some(rows) = body.pointer(pointer) {
+        wrapper["results"] = rows.clone();
     }
-    Ok(indices)
+    cd_core::rerank::parse_tei_cohere_ranking_indices(&wrapper, document_count)
+        .map_err(|e| redact_host_err(&e.to_string()))
 }
 
 /// Inert tools must not appear as writable host tools.

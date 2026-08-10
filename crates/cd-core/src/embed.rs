@@ -131,6 +131,283 @@ pub fn hybrid_score(
     w.keyword * kw + w.semantic * sem + w.recency * rec
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI-compatible production embeddings (`POST …/embeddings`)
+// ---------------------------------------------------------------------------
+
+/// Hard cap on texts per embeddings request (batch bound).
+pub const EMBED_MAX_BATCH: usize = 64;
+
+/// Default wall-clock budget for one embeddings HTTP call.
+pub const EMBED_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+/// Character soft-cap per input text (bounds request size).
+pub const EMBED_INPUT_CHAR_CAP: usize = 8_192;
+
+/// Validate a finished embedding batch at the consumer boundary: one vector
+/// per input, all finite, all the same non-zero dimension.
+pub fn validate_embedding_batch(vectors: &[Vec<f32>], expected: usize) -> CoreResult<()> {
+    use crate::error::CoreError;
+    if vectors.len() != expected {
+        return Err(CoreError::Message(format!(
+            "embed response contract: expected {expected} vectors, received {}",
+            vectors.len()
+        )));
+    }
+    if vectors.is_empty() {
+        return Ok(());
+    }
+    let dims = vectors[0].len();
+    if dims == 0 {
+        return Err(CoreError::Message(
+            "embed response contract: empty vector dimensions".into(),
+        ));
+    }
+    for (i, v) in vectors.iter().enumerate() {
+        if v.len() != dims {
+            return Err(CoreError::Message(format!(
+                "embed response contract: heterogeneous dimensions at index {i} ({} vs {dims})",
+                v.len()
+            )));
+        }
+        if v.iter().any(|x| !x.is_finite()) {
+            return Err(CoreError::Message(format!(
+                "embed response contract: non-finite component at index {i}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Parse an OpenAI-compatible embeddings JSON body into input-order vectors.
+///
+/// Accepts either of:
+/// - `{"data":[{"embedding":[…],"index":0},…]}` (indexed; reordered to input)
+/// - `{"data":[{"embedding":[…]},…]}` (positional; must match input order)
+///
+/// Rejects missing/duplicate/out-of-range indexes, non-finite values, empty
+/// vectors, and heterogeneous dimensions. Does not invent zero vectors.
+pub fn parse_openai_embeddings_response(
+    body: &serde_json::Value,
+    expected: usize,
+) -> CoreResult<Vec<Vec<f32>>> {
+    use crate::error::CoreError;
+    if expected == 0 {
+        return Ok(Vec::new());
+    }
+    let data = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| CoreError::Message("embed response contract: missing data array".into()))?;
+    if data.len() != expected {
+        return Err(CoreError::Message(format!(
+            "embed response contract: expected {expected} data rows, received {}",
+            data.len()
+        )));
+    }
+    let mut out: Vec<Option<Vec<f32>>> = vec![None; expected];
+    let mut any_index = false;
+    for (positional, row) in data.iter().enumerate() {
+        let embedding = row
+            .get("embedding")
+            .and_then(|e| e.as_array())
+            .ok_or_else(|| {
+                CoreError::Message("embed response contract: missing embedding array".into())
+            })?;
+        let mut vec = Vec::with_capacity(embedding.len());
+        for x in embedding {
+            let f = x.as_f64().ok_or_else(|| {
+                CoreError::Message("embed response contract: non-numeric component".into())
+            })?;
+            if !f.is_finite() {
+                return Err(CoreError::Message(
+                    "embed response contract: non-finite component".into(),
+                ));
+            }
+            vec.push(f as f32);
+        }
+        if vec.is_empty() {
+            return Err(CoreError::Message(
+                "embed response contract: empty embedding vector".into(),
+            ));
+        }
+        let slot = if let Some(idx_v) = row.get("index") {
+            any_index = true;
+            let idx = idx_v.as_u64().ok_or_else(|| {
+                CoreError::Message("embed response contract: non-integer index".into())
+            })? as usize;
+            if idx >= expected {
+                return Err(CoreError::Message(format!(
+                    "embed response contract: index {idx} out of range for {expected} inputs"
+                )));
+            }
+            idx
+        } else {
+            positional
+        };
+        if out[slot].is_some() {
+            return Err(CoreError::Message(format!(
+                "embed response contract: duplicate index {slot}"
+            )));
+        }
+        out[slot] = Some(vec);
+    }
+    // If any row carried an index, every row must have resolved uniquely —
+    // already enforced by duplicate/range checks above.
+    let _ = any_index;
+    let vectors: Vec<Vec<f32>> = out
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            v.ok_or_else(|| {
+                CoreError::Message(format!(
+                    "embed response contract: missing vector for index {i}"
+                ))
+            })
+        })
+        .collect::<CoreResult<_>>()?;
+    validate_embedding_batch(&vectors, expected)?;
+    Ok(vectors)
+}
+
+fn cap_embed_input(text: &str) -> String {
+    if text.chars().count() <= EMBED_INPUT_CHAR_CAP {
+        return text.to_string();
+    }
+    text.chars().take(EMBED_INPUT_CHAR_CAP).collect()
+}
+
+/// Production OpenAI-compatible embeddings backend (`POST {base}/embeddings`
+/// or `{base}/v1/embeddings`). Batches inputs in one request, preserves
+/// response order via index realignment, and fails closed on malformed
+/// envelopes. Bearer credentials stay in memory only — never in `identity()`
+/// or `Debug`.
+pub struct OpenAiCompatibleEmbedBackend {
+    client: reqwest::Client,
+    endpoint: reqwest::Url,
+    model: String,
+    bearer: Option<String>,
+}
+
+impl std::fmt::Debug for OpenAiCompatibleEmbedBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiCompatibleEmbedBackend")
+            .field("endpoint", &self.endpoint.as_str())
+            .field("model", &self.model)
+            .field("bearer", &self.bearer.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+impl OpenAiCompatibleEmbedBackend {
+    /// Build against `base_url` (scheme+host+port, optional `/v1` prefix).
+    /// The embeddings path is appended without dropping a trailing path
+    /// segment. URL is SSRF-vetted.
+    pub fn new(
+        base_url: &str,
+        model: impl Into<String>,
+        bearer: Option<String>,
+    ) -> CoreResult<Self> {
+        use crate::error::CoreError;
+        let policy = crate::ssrf::SsrfPolicy::default();
+        let resolver = crate::ssrf::SystemResolver;
+        let (url, client) = crate::ssrf::build_pinned_client_for_url(
+            base_url,
+            &policy,
+            &resolver,
+            std::time::Duration::from_millis(EMBED_DEFAULT_TIMEOUT_MS),
+        )
+        .map_err(|e| CoreError::Message(format!("embed endpoint SSRF: {e}")))?;
+        let mut endpoint = url;
+        let base_path = endpoint.path().trim_end_matches('/');
+        // Preserve `/v1` when present; otherwise append `/v1/embeddings`.
+        let embed_path = if base_path.ends_with("/v1") || base_path.ends_with("/embeddings") {
+            if base_path.ends_with("/embeddings") {
+                base_path.to_string()
+            } else {
+                format!("{base_path}/embeddings")
+            }
+        } else if base_path.is_empty() {
+            "/v1/embeddings".to_string()
+        } else {
+            format!("{base_path}/v1/embeddings")
+        };
+        endpoint.set_path(&embed_path);
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
+        Ok(Self {
+            client,
+            endpoint,
+            model: model.into(),
+            bearer,
+        })
+    }
+
+    /// Configured model id (same as [`EmbedBackend::identity`]).
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Endpoint URL string for tests (never secrets). Prefer fingerprints in
+    /// share-safe reports.
+    pub fn endpoint_url(&self) -> &str {
+        self.endpoint.as_str()
+    }
+}
+
+#[async_trait]
+impl EmbedBackend for OpenAiCompatibleEmbedBackend {
+    async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+        use crate::error::CoreError;
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        if texts.len() > EMBED_MAX_BATCH {
+            return Err(CoreError::Config(format!(
+                "embed request exceeds the {EMBED_MAX_BATCH}-input batch bound"
+            )));
+        }
+        let capped: Vec<String> = texts.iter().map(|t| cap_embed_input(t)).collect();
+        let body = serde_json::json!({
+            "model": self.model,
+            "input": capped,
+        });
+        let mut request = self.client.post(self.endpoint.clone()).json(&body);
+        if let Some(bearer) = &self.bearer {
+            request = request.bearer_auth(bearer);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| CoreError::Message(format!("embed transport: {e}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            // Do not echo body — may quote inputs or credentials.
+            return Err(CoreError::Message(format!(
+                "embed endpoint returned HTTP {status}"
+            )));
+        }
+        let parsed: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| CoreError::Message(format!("embed response contract: {e}")))?;
+        // Optional wire model echo: when present and non-empty, must match.
+        if let Some(echo) = parsed.get("model").and_then(|m| m.as_str()) {
+            if !echo.is_empty() && echo != self.model {
+                return Err(CoreError::Message(format!(
+                    "embed response contract: model identity mismatch (configured `{}`, wire `{echo}`)",
+                    self.model
+                )));
+            }
+        }
+        parse_openai_embeddings_response(&parsed, texts.len())
+    }
+
+    fn identity(&self) -> String {
+        self.model.clone()
+    }
+}
+
 /// Local Ollama embeddings backend (network; opt-in only).
 pub struct OllamaEmbedBackend {
     client: crate::chat::OllamaClient,
@@ -502,6 +779,63 @@ mod tests {
             cos_auth > cos_bill,
             "auth={cos_auth} bill={cos_bill} — mock should prefer semantic neighbor"
         );
+    }
+
+    #[test]
+    fn parse_openai_embeddings_preserves_batch_order_and_indexes() {
+        let body = serde_json::json!({
+            "model": "bge-m3",
+            "data": [
+                {"index": 2, "embedding": [0.0, 1.0]},
+                {"index": 0, "embedding": [1.0, 0.0]},
+                {"index": 1, "embedding": [0.5, 0.5]},
+            ]
+        });
+        let vectors = parse_openai_embeddings_response(&body, 3).unwrap();
+        assert_eq!(
+            vectors,
+            vec![vec![1.0, 0.0], vec![0.5, 0.5], vec![0.0, 1.0]]
+        );
+    }
+
+    #[test]
+    fn parse_openai_embeddings_rejects_malformed_envelopes() {
+        // duplicate index
+        assert!(parse_openai_embeddings_response(
+            &serde_json::json!({"data":[
+                {"index":0,"embedding":[1.0]},
+                {"index":0,"embedding":[2.0]},
+            ]}),
+            2
+        )
+        .is_err());
+        // missing index
+        assert!(parse_openai_embeddings_response(
+            &serde_json::json!({"data":[{"index":0,"embedding":[1.0]}]}),
+            2
+        )
+        .is_err());
+        // heterogeneous dims
+        assert!(parse_openai_embeddings_response(
+            &serde_json::json!({"data":[
+                {"embedding":[1.0, 0.0]},
+                {"embedding":[1.0]},
+            ]}),
+            2
+        )
+        .is_err());
+        // empty vector
+        assert!(parse_openai_embeddings_response(
+            &serde_json::json!({"data":[{"embedding":[]}]}),
+            1
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn validate_embedding_batch_rejects_non_finite() {
+        assert!(validate_embedding_batch(&[vec![1.0, f32::NAN]], 1).is_err());
+        assert!(validate_embedding_batch(&[vec![1.0, 0.0]], 1).is_ok());
     }
 
     #[tokio::test]

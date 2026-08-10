@@ -345,6 +345,20 @@ pub struct RetrievalSettings {
     pub reranker: Option<RetrievalRoleModel>,
 }
 
+/// Wire protocol for a retrieval embedding role.
+///
+/// Explicit configuration — never inferred from the URL host alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbedWireKind {
+    /// OpenAI-compatible `POST …/embeddings` with batched `input` (production
+    /// default for remote employer gateways).
+    #[default]
+    OpenAiCompatible,
+    /// Local Ollama `POST /api/embeddings` (single prompt per call).
+    Ollama,
+}
+
 /// One configured optional retrieval role.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetrievalRoleModel {
@@ -361,6 +375,15 @@ pub struct RetrievalRoleModel {
     /// itself (`refuse_raw_secret_refs` enforces this on load/save).
     #[serde(default)]
     pub api_key_ref: Option<String>,
+    /// Explicit embed wire for the embedding role. Default
+    /// [`EmbedWireKind::OpenAiCompatible`]. Ignored for the reranker role.
+    #[serde(default)]
+    pub embed_wire: EmbedWireKind,
+    /// Explicit rerank response dialect for the reranker role. Default
+    /// [`crate::rerank::RerankDialect::TeiCohere`]. Never inferred from URL.
+    /// Ignored for the embedding role.
+    #[serde(default)]
+    pub rerank_dialect: crate::rerank::RerankDialect,
 }
 
 /// What the Activity Inspector captures.
@@ -859,6 +882,8 @@ mod tests {
             base_url: "http://127.0.0.1:8080".into(),
             model: "qwen3-reranker-0.6b".into(),
             api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         });
         save_config(&path, &cfg).unwrap();
         let loaded = load_config(&path).unwrap();
@@ -938,6 +963,8 @@ mod tests {
             base_url: "http://127.0.0.1:11434".into(),
             model: "bge-m3".into(),
             api_key_ref: Some("sk-proj-not-a-reference".into()),
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         });
         assert!(save_config(&path, &cfg).is_err());
         cfg.retrieval.embedding.as_mut().unwrap().api_key_ref =
