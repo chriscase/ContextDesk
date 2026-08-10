@@ -2,6 +2,7 @@
 
 **Branch:** `test/gateway-diagnostic-contract-audit-v1`  
 **Base:** `2339c38aeee31dcf5869c3d81bd373bf6974a30c`  
+**Tip:** `aa62d700b21554c521bbbd41a0cdbb411b785c56`  
 **Kind:** test/docs only — no production behavior change; no competing
 gateway-diagnostic command.
 
