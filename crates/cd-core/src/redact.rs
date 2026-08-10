@@ -82,6 +82,13 @@ impl ShareSafeRedactionPolicy {
         if raw.starts_with("failure category: ") && raw.ends_with("; raw provider detail omitted") {
             return self.redact_text(raw);
         }
+        // Host-owned linked-triage authority summaries contain only fixed
+        // event labels and whitelisted fallback reasons. Preserve them so a
+        // share-safe diagnostic distinguishes an unentered typed path from a
+        // rejected typed answer; no provider text reaches this branch.
+        if raw.contains("typed_v1=absent; multi_stage_events=") {
+            return self.redact_text(raw);
+        }
         let lower = raw.to_ascii_lowercase();
         let category = if contains_any(&lower, &["cancelled", "canceled", "interrupted"]) {
             "cancelled"

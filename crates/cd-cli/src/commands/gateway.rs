@@ -2145,8 +2145,9 @@ async fn case_linked_log_triage(
             } else if o.final_text.trim().is_empty() {
                 fail_seen = true;
                 last_scorer_detail = format!(
-                    "attempt {}: no visible terminal answer; {}",
+                    "attempt {}: no visible terminal answer; {}; {}",
                     attempt + 1,
+                    linked_triage_authority_summary(&o.events),
                     last_terminal_detail
                 );
             } else {
@@ -2192,7 +2193,8 @@ async fn case_linked_log_triage(
             executed: true,
             passed: false,
             detail: format!(
-                "product-path turn completed without a visible terminal answer; {last_terminal_detail}"
+                "product-path turn completed without a visible terminal answer; {}; {last_terminal_detail}",
+                linked_triage_authority_summary(&o.events)
             ),
             elapsed_ms: total_elapsed.as_millis() as u64,
             attempts,
