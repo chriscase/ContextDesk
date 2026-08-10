@@ -1352,6 +1352,63 @@ fn typed_investigation_answer(
     })
 }
 
+/// Summarize the host-owned authority path without retaining model text or
+/// provider payloads. This makes a typed-answer absence diagnosable when the
+/// shared agent deliberately falls back before multi-stage synthesis.
+fn linked_triage_authority_summary(events: &[StreamEvent]) -> String {
+    let mut stages = Vec::new();
+    for event in events {
+        match event {
+            StreamEvent::Tool {
+                name,
+                phase,
+                ok,
+                detail,
+                ..
+            } if name == "broad_log_triage_multi_stage" => {
+                let mut label = format!("tool_{phase:?}_ok={ok:?}");
+                if let Some(detail) = detail.as_deref() {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(detail) {
+                        if value.get("multi_stage").and_then(serde_json::Value::as_str)
+                            == Some("not_entered")
+                        {
+                            let reason = value
+                                .get("reason")
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|reason| {
+                                    matches!(
+                                        *reason,
+                                        "groups_absent"
+                                            | "round_budget_insufficient"
+                                            | "context_budget_insufficient"
+                                    )
+                                })
+                                .unwrap_or("unknown");
+                            label.push_str(&format!("_fallback={reason}"));
+                        }
+                    }
+                }
+                stages.push(label);
+            }
+            StreamEvent::MultiModelStage {
+                stage,
+                phase,
+                status,
+                ..
+            } => stages.push(format!(
+                "stage_{stage}_{phase}_{}",
+                status.as_deref().unwrap_or("none")
+            )),
+            _ => {}
+        }
+    }
+    if stages.is_empty() {
+        "typed_v1=absent; multi_stage_events=none".to_string()
+    } else {
+        format!("typed_v1=absent; multi_stage_events={}", stages.join(","))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn case_ordinary_generation(
     paths: &Paths,
@@ -2098,10 +2155,11 @@ async fn case_linked_log_triage(
                     Ok(answer) => {
                         let score = score_structured_triage_answer(&answer, &key, &host);
                         last_scorer_detail = format!(
-                            "attempt {}: passed={} failed_dimensions=[{}]",
+                            "attempt {}: passed={} failed_dimensions=[{}]; {}",
                             attempt + 1,
                             score.passed,
-                            score.failed_ids().join(",")
+                            score.failed_ids().join(","),
+                            linked_triage_authority_summary(&o.events)
                         );
                         if score.passed {
                             pass_seen = true;
@@ -2112,8 +2170,9 @@ async fn case_linked_log_triage(
                     Err(e) => {
                         fail_seen = true;
                         last_scorer_detail = format!(
-                            "attempt {}: contract parse failed: {e}; {}",
+                            "attempt {}: contract parse failed: {e}; {}; {}",
                             attempt + 1,
+                            linked_triage_authority_summary(&o.events),
                             last_terminal_detail
                         );
                     }
