@@ -5,8 +5,8 @@ are live-verified, while employer-gateway quality is still unverified.
 
 ## What is wired
 
-The desktop host attaches explicitly enabled retrieval roles through the same
-`ToolHost` used by ordinary and linked-log turns:
+The desktop host and headless CLI attach explicitly enabled retrieval roles
+through the same `ToolHost` used by ordinary and linked-log turns:
 
 - `cd_workflow::retrieval::build_embedding_backend` selects the configured
   embedding dialect and protected-file credential reference.
@@ -23,6 +23,9 @@ The desktop host attaches explicitly enabled retrieval roles through the same
 - `contextdesk gateway diagnose` now builds these same production adapters for
   its specialty product lane, using the credential already resolved for the
   diagnostic run (no additional Keychain/file read).
+- CLI chat construction now attaches the configured roles through the same
+  factories; a configured role is no longer merely visible in status while
+  ordinary CLI triage silently uses only the fallback.
 
 ## What is deliberately not claimed
 
@@ -42,6 +45,8 @@ corpus is explicitly re-analyzed through the matching embedder.
   invalid-response fallback tests pass.
 - `cargo test -p cd-workflow --test retrieval_production_path` — configured
   protected-file embedding role reaches the production retrieval seam.
+- CLI host wiring test — explicitly enabled loopback embedding and reranker
+  roles attach without a provider request or credential read.
 - `cargo test --manifest-path desktop/src-tauri/Cargo.toml` — native host
   suite passes.
 

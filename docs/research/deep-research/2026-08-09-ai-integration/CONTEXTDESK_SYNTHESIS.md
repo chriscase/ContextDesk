@@ -102,9 +102,9 @@ cross-model score fusion remain unsafe.
   duplicate/missing rerank indices, role mismatch, and backend errors.
 - The log retrieval engine preserves a structured/keyword fallback and records
   degradation rather than manufacturing semantic success.
-- Explicitly enabled retrieval roles attach through the existing desktop
-  ToolHost path for linked-log search; failed or unacknowledged remote roles
-  leave the local/keyword baseline intact.
+- Explicitly enabled retrieval roles attach through the existing desktop and
+  CLI ToolHost paths for linked-log search; failed or unacknowledged remote
+  roles leave the local/keyword baseline intact.
 - Corpus vectors are already checked for model and dimension compatibility.
 - The quality harness separates compatibility, retrieval, answer, and
   orchestration evidence and scores semantic facts instead of exact model prose.
@@ -152,10 +152,10 @@ cross-model score fusion remain unsafe.
    protected-file workflow seam proof.  Product and probe paths no longer
    intentionally diverge, but employer route/dialect behavior and quality
    remain deployment evidence rather than model-name assumptions.
-2. **Keep retrieval roles explicit in the desktop product path.** Enabled
-   configured roles now attach through the shared ToolHost seam; remote egress
-   still requires explicit consent, and existing corpus vectors fail closed
-   until their model/dimension binding matches the configured embedder.
+2. **Keep retrieval roles explicit in both product hosts.** Enabled configured
+   roles now attach through the shared ToolHost seam in desktop and CLI; remote
+   egress still requires explicit consent, and existing corpus vectors fail
+   closed until their model/dimension binding matches the configured embedder.
 3. **Enrich embedding qualification.** Use the research suite's cheap
    three-input batch probe to record dimension, indices/order, finite values,
    norm statistics, duplicate stability, and truncation/instruction policy.

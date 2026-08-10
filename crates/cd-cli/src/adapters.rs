@@ -13,6 +13,7 @@ use cd_core::sessions::SessionStore;
 use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Every filesystem location this process needs, resolved once at startup.
 pub struct Paths {
@@ -283,6 +284,47 @@ pub fn apply_app_connectors(
     host.apply_confluence_from_settings(&app_cfg.confluence, secrets);
 }
 
+/// Attach explicitly enabled retrieval roles to the same production
+/// [`ToolHost`] used by CLI chat and linked-log turns. This mirrors the
+/// desktop host wiring but keeps the adapter/dialect/SSRF decisions in the
+/// shared workflow factory. Optional-role failures preserve the existing
+/// keyword/local fallback instead of making ordinary chat unusable.
+pub fn apply_configured_retrieval_roles(
+    host: &mut ToolHost,
+    app_cfg: &AppConfig,
+    secrets: &dyn cd_core::keychain_store::SecretStore,
+) {
+    if let Some(role) = app_cfg
+        .retrieval
+        .embedding
+        .as_ref()
+        .filter(|role| role.enabled)
+    {
+        match cd_workflow::retrieval::build_embedding_backend(role, Some(secrets)) {
+            Ok(backend) => {
+                host.set_embed_backend_with_model(Some(Arc::clone(&backend)), &role.model);
+                host.set_log_embed_backend(Some(backend), &role.model);
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "configured CLI embedding role unavailable; keeping fallback");
+            }
+        }
+    }
+    if let Some(role) = app_cfg
+        .retrieval
+        .reranker
+        .as_ref()
+        .filter(|role| role.enabled)
+    {
+        match cd_workflow::retrieval::build_rerank_backend(role, Some(secrets)) {
+            Ok(backend) => host.set_log_rerank_backend(Some(backend)),
+            Err(error) => {
+                tracing::warn!(error = %error, "configured CLI reranker role unavailable; preserving pre-rerank order");
+            }
+        }
+    }
+}
+
 /// ToolHost with log analysis + optional Confluence from shared AppConfig.
 pub fn tool_host_with_app_config(
     cache_root: &Path,
@@ -295,6 +337,7 @@ pub fn tool_host_with_app_config(
     // silently discard an explicit user deadline resolved by cd-workflow.
     host.set_router_budget(app_cfg.router.clone());
     apply_app_connectors(&mut host, app_cfg, secrets);
+    apply_configured_retrieval_roles(&mut host, app_cfg, secrets);
     Ok(host)
 }
 
@@ -399,5 +442,33 @@ mod credential_tests {
         let later = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
         assert_eq!(later.router_budget().deadline_ms, 90_000);
         assert!(later.router_budget().deadline_is_explicit);
+    }
+
+    #[test]
+    fn configured_loopback_retrieval_roles_attach_to_the_cli_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.retrieval.embedding = Some(cd_core::config::RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:1/v1".into(),
+            model: "synthetic-embed".into(),
+            dialect: Some("openai_embeddings".into()),
+            allow_remote: false,
+            api_key_ref: None,
+        });
+        cfg.retrieval.reranker = Some(cd_core::config::RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:1/v1".into(),
+            model: "synthetic-reranker".into(),
+            dialect: Some("tei_rerank_v1".into()),
+            allow_remote: false,
+            api_key_ref: None,
+        });
+
+        let host = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
+        assert_eq!(host.embed_model(), "synthetic-embed");
+        assert!(host.embed_backend().is_some());
+        assert!(host.log_embed_backend().is_some());
+        assert!(host.log_rerank_backend().is_some());
     }
 }
