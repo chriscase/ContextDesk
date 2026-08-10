@@ -84,6 +84,13 @@ complete_streaming:
            semantic attempt; its result decides the attempt's outcome.
 ```
 
+> **Integration update:** the catch-all fallback shown above is historical
+> base behavior and is removed by the acceptance-wire integration. Both
+> `complete` and `complete_streaming` now issue exactly one request in their
+> declared protocol mode. A verified profile with `capabilities.stream=false`
+> is routed directly to `complete`; timeout, reset, parse, and 5xx failures
+> never trigger a stream/non-stream replay.
+
 `CapabilityAwareBackend` (`research.rs:505`) wraps this; see gap G2 — its
 stream-rejection needle (`msg.contains("stream")`) also matches the transport
 operation label `"stream HTTP 429 …"`.
@@ -135,9 +142,9 @@ deadline observed by the turn wrapper ARE typed (`Cancelled` / `Deadline`).
 |---|---|---|
 | Valid HTTP + SSE, empty content, `finish_reason=stop` | **completed semantic attempt** | `TracedCall::Completed`, `empty_visible_answer=true`, `ProviderTurnTelemetry.empty_visible_answer=true`; zero retries of any kind |
 | `finish_reason=length` with text | **completed semantic attempt** | `Completed{finish_reason:"length"}`, `truncated_by_length=true` in turn telemetry; zero retries |
-| Malformed SSE `data:` line | **provider-output failure** | stream parse fails closed (`"sse json: …"`) → ONE non-stream fallback inside the SAME semantic attempt; fallback success ⇒ attempt completes (2 wire requests, 1 `TracedCall`); fallback also malformed ⇒ attempt `Failed` with parse language, never analysis vocabulary |
+| Malformed SSE `data:` line | **provider-output failure** | stream parse fails closed (`"sse json: …"`); exactly one wire request and one failed `TracedCall`; no protocol replay and no analysis vocabulary |
 | Partial UTF-8 / SSE fragments split across real TCP chunks | **no failure at all** | `SseLineDecoder` reassembles byte-exactly; 1 wire request, 1 completed attempt |
-| Connection reset / refused / read-timeout before headers | **transport failure** | `Err("chat|stream request: …")`, never an `HTTP {status}` string; recovered inside the same semantic attempt by the non-stream fallback when the next request succeeds |
+| Connection reset / refused / read-timeout before headers | **transport failure** | `Err("chat|stream request: …")`, never an `HTTP {status}` string; terminal for that operation with exactly one wire request and no protocol replay |
 | Analytically invalid completed answer | **completed semantic attempt** | consumes exactly one attempt; bounded correction attempt may begin; only here does `linked_invalid_grounded_answer` vocabulary appear |
 
 Caveat pinned by test: reqwest 0.12's top-level `Display` is
@@ -267,8 +274,10 @@ bounded correction) yields `retries == 2` vs typed `0` on the same capture.
    consumers are asserted by
    `genuine_application_retry_is_counted_once_by_both_projections`.
 
-None of the four fixes may change any green test in this oracle: that is the
-non-conflation guarantee.
+No future retry-policy change may reintroduce a transport-error-triggered
+stream/non-stream replay. Explicit application retries (for example a
+host-classified tools-unsupported retry) remain separate semantic attempts and
+must stay visible in typed telemetry.
 
 ## 5. Reproduction commands
 

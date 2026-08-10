@@ -24,7 +24,7 @@ use cd_core::multi_stage_budget::{
     candidate_operation_cap_ms, synthesis_operation_cap_ms, SynthesisReserve,
 };
 use cd_core::providers::{ProviderCapabilities, ProviderKind, ProviderProfile};
-use cd_core::research::backend_for;
+use cd_core::research::{backend_for, backend_for_with_timeout};
 use cd_core::turn_trace::{RecordingTurnTrace, TracedOutcome, TracingChatBackend, TurnTraceSink};
 use cd_test_gateway::{Body, Frame, MockGateway, Response, Step};
 use serde_json::json;
@@ -56,6 +56,12 @@ async fn traced_backend(base_url: &str) -> (Box<dyn ChatBackend>, Arc<RecordingT
     let recorder = Arc::new(RecordingTurnTrace::new());
     let sink: Arc<dyn TurnTraceSink> = recorder.clone();
     (Box::new(TracingChatBackend::new(inner, sink)), recorder)
+}
+
+async fn backend_with_timeout(base_url: &str, timeout: Duration) -> Box<dyn ChatBackend> {
+    backend_for_with_timeout(&profile(base_url), None, timeout)
+        .await
+        .expect("backend construction with host timeout")
 }
 
 fn user_message(text: &str) -> Vec<ChatMessage> {
@@ -98,6 +104,18 @@ fn text_event(text: &str) -> serde_json::Value {
 }
 fn finish_event() -> serde_json::Value {
     json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
+}
+
+fn json_completion(text: &str) -> Response {
+    Response::json(
+        200,
+        &json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop"
+            }]
+        }),
+    )
 }
 
 async fn wait_for_cancel(cancel: Option<&AtomicBool>) {
@@ -170,6 +188,91 @@ async fn slow_but_successful_provider_completes_within_a_patient_deadline() {
     )
     .await;
     assert_eq!(outcome.unwrap().unwrap().content, "slow but fine");
+}
+
+#[tokio::test]
+async fn turn_owned_transport_timeout_allows_a_patient_non_stream_operation() {
+    // Millisecond-scaled analogue of the live acceptance shape: the host
+    // authorizes a much longer turn than the legacy client default, and the
+    // provider responds after the shorter ceiling would have expired. The
+    // production path supplies 600_000ms through the same constructor.
+    let gateway = MockGateway::start_ordered(vec![Step::respond(
+        json_completion("patient success").with_header_delay(Duration::from_millis(100)),
+    )])
+    .await;
+    let backend = backend_with_timeout(gateway.base_url(), Duration::from_millis(400)).await;
+
+    let completion = backend
+        .complete(&user_message("patient comparison"), &[])
+        .await
+        .expect("host-owned transport timeout must allow the response");
+
+    assert_eq!(completion.content, "patient success");
+    assert_eq!(gateway.request_count(), 1);
+    assert_eq!(gateway.requests()[0].json_body().unwrap()["stream"], false);
+}
+
+#[tokio::test]
+async fn configured_transport_timeout_still_bounds_an_unresponsive_operation() {
+    let gateway = MockGateway::start_ordered(vec![Step::respond(
+        json_completion("too late").with_header_delay(Duration::from_millis(150)),
+    )])
+    .await;
+    let backend = backend_with_timeout(gateway.base_url(), Duration::from_millis(25)).await;
+
+    let _error = backend
+        .complete(&user_message("bounded comparison"), &[])
+        .await
+        .expect_err("the configured transport ceiling must remain effective");
+
+    assert_eq!(gateway.request_count(), 1);
+}
+
+#[tokio::test]
+async fn non_stream_completion_failure_is_not_replayed_through_streaming() {
+    let gateway = MockGateway::start_ordered(vec![
+        Step::respond(Response::json(
+            500,
+            &json!({"error": {"message": "upstream failed"}}),
+        )),
+        Step::respond(json_completion("must not be requested")),
+    ])
+    .await;
+    let (backend, _recorder) = traced_backend(gateway.base_url()).await;
+
+    let error = backend
+        .complete(&user_message("one comparison"), &[])
+        .await
+        .expect_err("the first provider failure must be terminal");
+
+    assert!(error.to_string().contains("HTTP 500"), "{error}");
+    assert_eq!(
+        gateway.request_count(),
+        1,
+        "a non-stream call is exactly one provider request"
+    );
+    assert_eq!(gateway.requests()[0].json_body().unwrap()["stream"], false);
+}
+
+#[tokio::test]
+async fn streaming_transport_failure_does_not_launch_a_non_stream_replay() {
+    let gateway = MockGateway::start_ordered(vec![
+        Step::CloseBeforeHeaders { reset: true },
+        Step::respond(json_completion("must not be requested")),
+    ])
+    .await;
+    let (backend, _recorder) = traced_backend(gateway.base_url()).await;
+
+    complete_streaming_once(backend.as_ref(), None)
+        .await
+        .expect_err("the streaming transport failure must be terminal");
+
+    assert_eq!(
+        gateway.request_count(),
+        1,
+        "transport failure must not replay the prompt through stream=false"
+    );
+    assert_eq!(gateway.requests()[0].json_body().unwrap()["stream"], true);
 }
 
 // ---------------------------------------------------------------------------

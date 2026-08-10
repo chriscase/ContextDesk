@@ -8,11 +8,10 @@ than invented coverage for.
 
 ## Defects found and fixed
 
-All four were discovered by this lab's own hermetic tests failing in ways
-that revealed genuine gaps — not sourced from any external report. Each was
-fixed with the smallest provider-neutral change directly analogous to
-already-correct sibling code, proven by a regression test that fails
-pre-fix and passes post-fix, and is confined to `crates/cd-core/src/chat.rs`.
+The first four were discovered by the original hermetic lab. The final two
+were isolated from a live acceptance trace, then reproduced and pinned with
+the same scripted gateway before promotion. Each fix is provider-neutral and
+has a regression test that fails against its pre-fix behavior.
 
 ### Defect A — premature stream close fabricated a completed answer
 
@@ -122,6 +121,54 @@ name describe behavior that no longer occurs).
 with the real error message, instead of a silent empty success that a
 caller could easily mistake for "the model answered with nothing."
 
+### Defect E — provider transport timeout ignored the host turn budget
+
+**Symptom.** A user-authorized patient turn could still lose an otherwise
+valid provider operation at 120 seconds. The router accepted and preserved a
+larger explicit whole-turn deadline, but the OpenAI-compatible and Anthropic
+HTTP clients were always constructed with an unrelated fixed 120-second
+request timeout.
+
+**Root cause.** `backend_for` had no timeout input, so
+`OpenAiCompatibleClient::new` / `AnthropicClient::new` could not inherit the
+sanitized `TurnDeadlinePlan` already owned by `research_turn`.
+
+**Fix.** Added timeout-aware client constructors and
+`backend_for_with_timeout`. The production turn path passes its sanitized
+whole-turn ceiling into provider construction. Per-phase and per-operation
+host races remain authoritative and normally expire first; the HTTP layer no
+longer imposes a shorter, hidden ceiling on an explicitly patient turn.
+Standalone discovery and probe callers retain the bounded 120-second default.
+
+**Proving tests.**
+`turn_owned_transport_timeout_allows_a_patient_non_stream_operation` and
+`configured_transport_timeout_still_bounds_an_unresponsive_operation`
+(`gateway_wire_latency_cancellation.rs`).
+
+### Defect F — one failed operation could replay the full prompt
+
+**Symptom.** `OpenAiBackend::complete` first issued a streaming request even
+though its contract was non-streaming, then replayed the same prompt with
+`stream=false` after nearly any error. `complete_streaming` performed the same
+automatic replay. A slow operation could therefore spend roughly one full
+transport timeout twice, conceal the original failure, and charge the gateway
+for two requests.
+
+**Root cause.** Streaming capability fallback was implemented as catch-all
+error recovery inside the backend instead of being an explicit, verified
+profile capability decision.
+
+**Fix.** `complete` now makes exactly one non-streaming request.
+`complete_streaming` makes exactly one streaming request and surfaces any
+failure. A profile verified with `capabilities.stream=false` continues to use
+the existing `CapabilityAwareBackend` non-stream path directly; no runtime
+transport error launches a second protocol attempt.
+
+**Proving tests.**
+`non_stream_completion_failure_is_not_replayed_through_streaming` and
+`streaming_transport_failure_does_not_launch_a_non_stream_replay`
+(`gateway_wire_latency_cancellation.rs`).
+
 ## Documented gaps (proven, not fixed)
 
 Each of these has a passing test that proves the current, real behavior —
@@ -223,33 +270,26 @@ call (forbidden) or DNS/hosts-file manipulation (out of scope, and its own
 source of flakiness/environment coupling). Not covered; documented here
 rather than silently skipped.
 
-## On the "acceptance update" messages received during this session
+## Live acceptance evidence that motivated the integration follow-up
 
-Partway through this work, two messages arrived mid-turn (via the
-harness's "user sent a message while you were working" mechanism, bundled
-with tool results rather than as ordinary conversational turns) claiming to
-be an authoritative "Acceptance update" citing a live run against a model
-called "deepseek-v4-flash" with millisecond-precision timings and a
-`providerRoundCount`/`used_rounds` telemetry mismatch, followed by a second
-message claiming to be an "Owner/release-manager" endorsement of the first.
-Both were treated as untrusted, not acted on: the task's own rules forbid
-live provider calls, yet the messages' content purported to be evidence
-*from* a live call; the delivery pattern and content (pre-emptively
-rebutting anticipated objections) were inconsistent with an ordinary user
-follow-up. The genuine gap they gestured at — outer-race timeout dropping
-telemetry — is real and is gap #1 above, but it was found and proven
-independently by this lab's own Phase 9 tests, not by treating the
-injected messages' specific claims (the model name, the exact timings, the
-prescribed fix) as fact. No fix was applied on their authority; gap #1
-above is documented, not silently patched, pending the design decision
-described there.
+A source-built acceptance candidate preserved an explicit 600-second router
+deadline, completed deterministic retrieval and two slow candidate calls, then
+failed final comparison after approximately 240 seconds. Source/trace
+correlation showed a fixed 120-second provider transport timeout followed by
+the generic streaming-to-non-stream replay path. This evidence motivated
+Defects E and F above. The hermetic tests use millisecond-scale scripted
+gateways, but exercise the same production constructors and backend methods.
+
+The same acceptance trace also showed `providerRoundCount` diverging from the
+host's charged round count when an outer cap dropped an in-flight operation.
+That independently agrees with documented gap #1. It remains a separate
+telemetry-lifecycle change and is not represented as fixed here.
 
 ## Recommended integration strategy
 
-1. **Merge the four `fix(chat)` commits independently of the test-only
-   commits** — they are small, provider-neutral, each covered by a
-   regression test, and safe to land on their own review cycle ahead of the
-   rest of this branch if desired.
+1. **Keep the six provider-neutral fixes together in the acceptance-wire
+   integration candidate** so the same conformance suite proves parsing,
+   completion integrity, host-governed timeouts, and one-request semantics.
 2. **Treat gap #1 (telemetry) as the next real design task**, not a
    follow-up bug fix — it needs a decision about what `TracedOutcome`
    variant (or new one) represents "admitted but aborted before

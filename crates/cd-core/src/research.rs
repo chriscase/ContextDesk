@@ -409,19 +409,11 @@ impl ChatBackend for OpenAiBackend {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> CoreResult<ChatCompletion> {
-        // Prefer live SSE callback path; fall back to non-stream.
-        match self
-            .0
-            .complete_stream_cb(messages, Some(tools), |_| {}, None)
-            .await
-        {
-            Ok(c) => Ok(c),
-            // `complete_stream_cb` already used its full bounded 429 budget.
-            // Do not immediately replay the same turn as non-streaming and
-            // multiply a provider free-tier throttle.
-            Err(e) if e.to_string().contains("HTTP 429") => Err(e),
-            Err(_) => self.0.complete(messages, Some(tools)).await,
-        }
+        // A non-streaming backend call is exactly one non-streaming provider
+        // request. Stream capability is selected explicitly by
+        // `complete_streaming`; transport failures must never replay the same
+        // expensive prompt through a second protocol path.
+        self.0.complete(messages, Some(tools)).await
     }
 
     async fn complete_streaming(
@@ -431,8 +423,7 @@ impl ChatBackend for OpenAiBackend {
         on_text: &mut (dyn FnMut(String) + Send),
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> CoreResult<ChatCompletion> {
-        match self
-            .0
+        self.0
             .complete_stream_cb(
                 messages,
                 Some(tools),
@@ -446,22 +437,6 @@ impl ChatBackend for OpenAiBackend {
                 cancel,
             )
             .await
-        {
-            Ok(c) => Ok(c),
-            Err(e) if e.to_string().contains("cancelled") => Err(e),
-            // Keep exhausted rate limits terminal for this turn. A caller may
-            // retry deliberately after the surfaced cooldown, but automatic
-            // SSE-to-non-stream fallback must not spend another 3 attempts.
-            Err(e) if e.to_string().contains("HTTP 429") => Err(e),
-            Err(_) => {
-                // Fall back to non-stream; emit once.
-                let c = self.0.complete(messages, Some(tools)).await?;
-                if !c.content.is_empty() && c.tool_calls.is_empty() {
-                    on_text(c.content.clone());
-                }
-                Ok(c)
-            }
-        }
     }
 }
 
@@ -474,14 +449,7 @@ impl ChatBackend for AnthropicBackend {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> CoreResult<ChatCompletion> {
-        match self
-            .0
-            .complete_stream_cb(messages, Some(tools), |_| {}, None)
-            .await
-        {
-            Ok(c) => Ok(c),
-            Err(_) => self.0.complete(messages, Some(tools)).await,
-        }
+        self.0.complete(messages, Some(tools)).await
     }
 
     async fn complete_streaming(
@@ -491,8 +459,7 @@ impl ChatBackend for AnthropicBackend {
         on_text: &mut (dyn FnMut(String) + Send),
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> CoreResult<ChatCompletion> {
-        match self
-            .0
+        self.0
             .complete_stream_cb(
                 messages,
                 Some(tools),
@@ -506,17 +473,6 @@ impl ChatBackend for AnthropicBackend {
                 cancel,
             )
             .await
-        {
-            Ok(c) => Ok(c),
-            Err(e) if e.to_string().contains("cancelled") => Err(e),
-            Err(_) => {
-                let c = self.0.complete(messages, Some(tools)).await?;
-                if !c.content.is_empty() && c.tool_calls.is_empty() {
-                    on_text(c.content.clone());
-                }
-                Ok(c)
-            }
-        }
     }
 }
 
@@ -668,6 +624,18 @@ pub async fn backend_for(
     profile: &ProviderProfile,
     api_key: Option<String>,
 ) -> CoreResult<Box<dyn ChatBackend>> {
+    backend_for_with_timeout(profile, api_key, std::time::Duration::from_secs(120)).await
+}
+
+/// Build a provider backend whose transport ceiling follows the host-owned
+/// turn budget. Per-phase/per-operation races remain the tighter authority;
+/// this ceiling only prevents the HTTP layer from expiring earlier than a
+/// patient, explicitly configured turn.
+pub async fn backend_for_with_timeout(
+    profile: &ProviderProfile,
+    api_key: Option<String>,
+    request_timeout: std::time::Duration,
+) -> CoreResult<Box<dyn ChatBackend>> {
     // Remote profiles may use corporate private DNS (TriageTool-style gateways).
     // SSRF still applies to model-driven tools; the user-configured base is trusted.
     let policy = if profile.local_only {
@@ -682,17 +650,23 @@ pub async fn backend_for(
             Ok(Box::new(OllamaBackend(client)))
         }
         ProviderKind::OpenAiCompatible => {
-            let client = OpenAiCompatibleClient::new(
+            let client = OpenAiCompatibleClient::new_with_timeout(
                 &profile.base_url,
                 api_key,
                 &profile.chat_model,
                 &policy,
+                request_timeout,
             )?;
             Ok(Box::new(OpenAiBackend(client)))
         }
         ProviderKind::Anthropic => {
-            let client =
-                AnthropicClient::new(&profile.base_url, api_key, &profile.chat_model, &policy)?;
+            let client = AnthropicClient::new_with_timeout(
+                &profile.base_url,
+                api_key,
+                &profile.chat_model,
+                &policy,
+                request_timeout,
+            )?;
             Ok(Box::new(AnthropicBackend(client)))
         }
         ProviderKind::XaiGrokBuild => {
@@ -738,11 +712,12 @@ pub async fn backend_for(
             })
             .await?;
             let headers = creds.request_headers();
-            let client = OpenAiCompatibleClient::new(
+            let client = OpenAiCompatibleClient::new_with_timeout(
                 base,
                 None,
                 &profile.chat_model,
                 &SsrfPolicy::default(),
+                request_timeout,
             )?
             .with_extra_headers(headers);
             Ok(Box::new(OpenAiBackend(client)))
@@ -1102,7 +1077,11 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
             turn_started_at,
             deadline_plan,
             cancel_ref,
-            backend_for(profile, api_key),
+            backend_for_with_timeout(
+                profile,
+                api_key,
+                Duration::from_millis(deadline_plan.total_ms.max(1)),
+            ),
         )
         .await
         {

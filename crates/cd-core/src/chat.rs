@@ -590,14 +590,36 @@ impl OpenAiCompatibleClient {
         model: impl Into<String>,
         policy: &SsrfPolicy,
     ) -> CoreResult<Self> {
+        Self::new_with_timeout(
+            base_url,
+            api_key,
+            model,
+            policy,
+            std::time::Duration::from_secs(120),
+        )
+    }
+
+    /// Create a client with a caller-owned whole-request timeout.
+    ///
+    /// Turn execution passes its sanitized host deadline here so a slow but
+    /// permitted provider is not cut off by the legacy 120-second default.
+    /// Standalone discovery/probe callers can continue to use [`Self::new`].
+    pub fn new_with_timeout(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        model: impl Into<String>,
+        policy: &SsrfPolicy,
+        request_timeout: std::time::Duration,
+    ) -> CoreResult<Self> {
+        if request_timeout.is_zero() {
+            return Err(CoreError::Config(
+                "provider request timeout must be greater than zero".into(),
+            ));
+        }
         let base_url = base_url.into();
         // #141: resolve+vet+pin; no redirects (anti-rebind / SSRF).
-        let (url, http) = build_pinned_client_for_url(
-            &base_url,
-            policy,
-            &SystemResolver,
-            std::time::Duration::from_secs(120),
-        )?;
+        let (url, http) =
+            build_pinned_client_for_url(&base_url, policy, &SystemResolver, request_timeout)?;
         Ok(Self {
             http,
             base_url: url.as_str().trim_end_matches('/').to_string(),
@@ -1762,6 +1784,28 @@ impl AnthropicClient {
         model: impl Into<String>,
         policy: &SsrfPolicy,
     ) -> CoreResult<Self> {
+        Self::new_with_timeout(
+            base_url,
+            api_key,
+            model,
+            policy,
+            std::time::Duration::from_secs(120),
+        )
+    }
+
+    /// Create an Anthropic client with a caller-owned whole-request timeout.
+    pub fn new_with_timeout(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        model: impl Into<String>,
+        policy: &SsrfPolicy,
+        request_timeout: std::time::Duration,
+    ) -> CoreResult<Self> {
+        if request_timeout.is_zero() {
+            return Err(CoreError::Config(
+                "provider request timeout must be greater than zero".into(),
+            ));
+        }
         let raw = base_url.into();
         let base = if raw.trim().is_empty() {
             "https://api.anthropic.com".to_string()
@@ -1772,12 +1816,8 @@ impl AnthropicClient {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| CoreError::Config("Anthropic API key required".into()))?;
-        let (url, http) = build_pinned_client_for_url(
-            &base,
-            policy,
-            &SystemResolver,
-            std::time::Duration::from_secs(120),
-        )?;
+        let (url, http) =
+            build_pinned_client_for_url(&base, policy, &SystemResolver, request_timeout)?;
         Ok(Self {
             http,
             base_url: url.as_str().trim_end_matches('/').to_string(),

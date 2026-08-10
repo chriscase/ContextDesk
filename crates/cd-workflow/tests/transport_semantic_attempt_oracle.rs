@@ -927,10 +927,9 @@ async fn qualification_retries_and_typed_retry_reasons_agree_on_attempt_counts()
 // re-sends without tools), BOTH counters report exactly one retry.
 //
 // The mock rejects EVERY request whose body offers tools, exactly like a
-// real vLLM without --enable-auto-tool-choice: the streaming attempt and the
-// OpenAI backend's internal non-stream fallback both fail (one semantic
-// attempt, two transport attempts), the kernel notes `tools_unsupported`,
-// and the tools-free retry round succeeds.
+// real vLLM without --enable-auto-tool-choice: the one streaming attempt
+// fails, the kernel notes `tools_unsupported`, and the explicit tools-free
+// application retry succeeds. Transport failures never add a protocol replay.
 #[tokio::test]
 async fn genuine_application_retry_is_counted_once_by_both_projections() {
     let server = MockServer::start().await;
@@ -991,8 +990,8 @@ async fn genuine_application_retry_is_counted_once_by_both_projections() {
 
     assert_eq!(
         wire_calls.load(Ordering::SeqCst),
-        3,
-        "rejected stream + rejected non-stream fallback (one semantic attempt) + tools-free retry"
+        2,
+        "one rejected tools request + one explicit tools-free application retry"
     );
     let telemetry = provider_turn_telemetry(&events);
     assert_eq!(telemetry.application_retry_reasons.len(), 1);
