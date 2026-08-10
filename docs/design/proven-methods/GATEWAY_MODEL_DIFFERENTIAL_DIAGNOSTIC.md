@@ -171,9 +171,11 @@ carries per-lane executed/passed/detail/elapsed/attempts/requests-used, so
 a reader can tell what was attempted, whether it passed, how long it took,
 and how many requests it spent, without re-deriving any of that from raw
 transcripts. The terminal event carries the three independent verdicts,
-cleanup outcome, and a run-relative artifact reference. Nothing here exposes a
-secret, private path, raw endpoint, exact selected identity, or full model
-catalog.
+cleanup outcome, and a local artifact reference. The persisted share-safe
+report omits the absolute host path; local terminal/JSONL output may include
+it for operator use and is not itself a shareable artifact. Nothing persisted
+here exposes a secret, private path, raw endpoint, exact selected identity, or
+full model catalog.
 
 ## 10. Security and privacy
 

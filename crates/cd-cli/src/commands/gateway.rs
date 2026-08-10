@@ -398,7 +398,7 @@ pub async fn run(
 
     let artifact_run_dir = run_id_for_dir(&report.run_id);
     match write_artifact_bundle(args, paths, &artifact_run_dir, &report, &redaction) {
-        Ok(_dir) => report.artifact_dir = Some(artifact_run_dir.clone()),
+        Ok(dir) => report.artifact_dir = Some(dir.display().to_string()),
         Err(e) => eprintln!("warning: failed to write diagnostic artifact bundle: {e}"),
     }
     if args.raw && args.raw_i_understand {

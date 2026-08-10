@@ -378,8 +378,9 @@ provider-neutral `ShareSafeRedactionPolicy` boundary before text/JSONL output
 and again before artifact serialization. Failed lanes retain a stable category
 (`authentication`, `rate_limited`, `timeout`, `transport`, `invalid_response`,
 `upstream`, `response_contract`, or a coarse fallback) but omit the raw
-provider body. Machine output reports only the run-relative artifact directory,
-never its absolute host path. `--raw --raw-i-understand`
+provider body. The persisted share-safe report omits the absolute host path;
+local text/JSONL output may include the absolute artifact location so the
+operator can open it, and should not be shared as an artifact. `--raw --raw-i-understand`
 additionally writes an owner-only (`0600`/`0700` on Unix), local-only
 `private/capture.json` with bounded synthetic case detail — never
 credentials — that the share-safe bundle never references by content.
