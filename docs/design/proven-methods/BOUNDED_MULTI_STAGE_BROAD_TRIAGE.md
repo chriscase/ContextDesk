@@ -6,16 +6,21 @@ groups and the ordinary turn's provider-round and context budgets can reserve a
 final comparison. Otherwise the established single-stage broad-log synthesis
 continues unchanged.
 
-### Multi-stage budget policy (`contextdesk.multi_stage_budget.v1`)
+### Multi-stage budget policy (`contextdesk.multi_stage_budget.v2`)
 
 Issue **#869**. The host admits each candidate investigation only when the
 **monotonic whole-turn deadline** and **provider-round ceiling** still leave a
 protected final-comparison reserve. Admission is provider-agnostic (no model
 names). Policy identity:
-`cd_core::multi_stage_budget::MULTI_STAGE_BUDGET_POLICY_V1`.
+`cd_core::multi_stage_budget::MULTI_STAGE_BUDGET_POLICY_V2`.
 
-- **Time reserve:** half the synthesizing-phase budget, floored by one quarter
-  of the whole turn, never more than half the turn (see `synthesis_reserve`).
+- **Time reserve:** half the whole turn (see `synthesis_reserve`). Under the
+  default 180-second managed-provider ceiling this protects 90 seconds for
+  final comparison.
+  This v2 floor follows live evidence that a compatibility-qualified model
+  needed 63 seconds for final comparison on a real 33,723-event corpus, making
+  v1's 30-second reserve and the former 120-second adaptive ceiling too small
+  for ordinary latency variance. Explicit user ceilings remain authoritative.
 - **Round reserve:** one provider round held for final comparison.
 - **Candidate operation cap:** `min(phase_cap, remaining_total − time_reserve)`
   so a slow or verbose candidate cannot spend the protected budget.
@@ -24,6 +29,11 @@ names). Policy identity:
   path emits a typed budget stop with an honest reason (not a validation error
   or silent success). A true whole-turn expiry remains a deadline and preserves
   the established synthesis-retry affordance.
+- **Candidate isolation:** a candidate response that fails its scoped contract
+  never enters the final ledger. The host records its group and a content-free
+  validation category, then compares the remaining validated drafts when at
+  least two remain. With fewer than two, synthesis fails closed. This preserves
+  useful partial results without widening citation authority.
 - **Compatibility:** an orchestration timeout or reserve stop does **not**
   clear measured model readiness. Compatibility probes and quality/orchestration
   evidence remain separate classes.
@@ -54,14 +64,22 @@ The host alone opens the corpus, pins revisions and suppression, constructs the
 bounded broad brief, and selects no more than four groups. Parser-true
 cross-source trace groups rank first; ungrouped ERROR/FATAL template groups
 fill remaining slots. Warning and non-error noise candidates never become
-incident groups. The LLM interprets a supplied group but cannot retrieve,
-create groups, or move citations between groups.
+incident groups. A template made entirely of generalized placeholders stays in
+deterministic evidence instead of consuming a staged call, even when retained
+correlation labels it as a rendering lead; under the global candidate cap it
+cannot crowd out an explicit failure pattern. The LLM interprets a supplied
+group but cannot retrieve, create groups, or move citations between groups.
 
 Each candidate has a stable `group_id`, a small structural brief, and its own
 trusted identity ledger (`seq`, `source`, `template_id`). A candidate response
 must cite an identity from its own ledger. Each candidate receives one attempt;
 an invalid response is withheld. This avoids a global evidence set incorrectly
-validating a decoy's citation from another incident.
+validating a decoy's citation from another incident. Each identity also carries
+the same redacted, single-line bounded template pattern the candidate model
+evaluated. That excerpt is bound into the immutable ledger and canonical
+display, so a valid answer never renders candidate citations as content-free
+IDs. It does not grant causal authority and does not expand the content-free
+final-answer manifest.
 
 The host also prepares a separately scoped `global_timeline_context` for the
 final comparison. It is explicitly a corpus chronology, not an incident or a
@@ -115,6 +133,10 @@ and the validator remains the authority. The manifest and scaffold are included
 in the same context estimate and hard packing gate as every other
 final-comparison message. This improves provider interoperability without
 weakening parsing, schema, unknown-id, cross-candidate, or host-authority checks.
+The comparison contract explicitly says the identifier-only manifest is not
+evidence absence: candidate drafts summarize evidence already evaluated, and a
+model must not invent a "content unavailable" limitation merely because raw
+candidate briefs are intentionally not replayed across scopes.
 
 If global chronology exists, its stable candidate id and permitted evidence ids
 enter that same immutable ledger and manifest under their own scope. Redacted,
@@ -239,8 +261,12 @@ candidate ids and scrubbed bounded detail stay behind expandable diagnostics.
 
 If groups are absent, the initial round budget is too small, or a candidate
 context cannot fit, the workflow falls back before any multi-stage provider
-request. Once an invalid candidate/comparison request has started, it fails
-closed rather than silently mixing it into a global single-stage answer.
+request. An invalid candidate is excluded from the immutable evidence ledger;
+comparison may continue only with at least two independently validated drafts,
+and typed diagnostics report the rejected group. Fewer than two validated
+drafts, or an invalid final comparison after its bounded semantic correction,
+fails closed rather than silently mixing unvalidated content into a global
+single-stage answer.
 
 ## Limitations
 

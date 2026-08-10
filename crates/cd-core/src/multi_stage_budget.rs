@@ -5,13 +5,13 @@
 //! models may still be slow or verbose; orchestration timeout is not a
 //! compatibility failure.
 //!
-//! Policy identity: [`MULTI_STAGE_BUDGET_POLICY_V1`].
+//! Policy identity: [`MULTI_STAGE_BUDGET_POLICY_V2`].
 
 use crate::router::TurnDeadlinePlan;
 use serde::{Deserialize, Serialize};
 
 /// Stable policy identity for diagnostics and quality-unit fingerprints.
-pub const MULTI_STAGE_BUDGET_POLICY_V1: &str = "contextdesk.multi_stage_budget.v1";
+pub const MULTI_STAGE_BUDGET_POLICY_V2: &str = "contextdesk.multi_stage_budget.v2";
 
 /// Why a candidate was not admitted, or why the loop stopped early.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,29 +83,30 @@ pub struct SynthesisReserve {
 ///
 /// Rules (provider-agnostic):
 /// - unlimited turns (`total_ms == 0`) reserve **0** time (round reserve still applies);
-/// - otherwise reserve half the synthesizing-phase budget, floored by one quarter
-///   of the whole turn, and never more than half the whole turn;
+/// - otherwise reserve one half of the whole turn;
+/// - the half-turn reserve is deliberate: live compatibility-qualified models
+///   have needed more than 30 seconds for final comparison under the default
+///   120-second ceiling, so the old quarter-turn floor did not protect
+///   synthesis from ordinary latency variance;
 /// - always leave at least 1 ms of the turn unreserved when `total_ms > 0` so a
 ///   short explicit deadline remains usable;
 /// - always reserve **1** provider round for final comparison.
 pub fn synthesis_reserve(plan: &TurnDeadlinePlan) -> SynthesisReserve {
     if plan.total_ms == 0 {
         return SynthesisReserve {
-            policy_id: MULTI_STAGE_BUDGET_POLICY_V1,
+            policy_id: MULTI_STAGE_BUDGET_POLICY_V2,
             time_reserve_ms: 0,
             round_reserve: 1,
         };
     }
-    let from_phase = plan.synthesizing_ms.saturating_div(2).max(1);
-    let from_total = plan.total_ms.saturating_div(4).max(1);
     let half_turn = plan.total_ms.saturating_div(2).max(1);
-    let mut time_reserve_ms = from_phase.min(half_turn).max(from_total.min(half_turn));
+    let mut time_reserve_ms = half_turn;
     // Never reserve the entire turn.
     if time_reserve_ms >= plan.total_ms {
         time_reserve_ms = plan.total_ms.saturating_sub(1);
     }
     SynthesisReserve {
-        policy_id: MULTI_STAGE_BUDGET_POLICY_V1,
+        policy_id: MULTI_STAGE_BUDGET_POLICY_V2,
         time_reserve_ms,
         round_reserve: 1,
     }
@@ -202,14 +203,13 @@ mod tests {
     #[test]
     fn policy_id_is_stable() {
         assert_eq!(
-            MULTI_STAGE_BUDGET_POLICY_V1,
-            "contextdesk.multi_stage_budget.v1"
+            MULTI_STAGE_BUDGET_POLICY_V2,
+            "contextdesk.multi_stage_budget.v2"
         );
         let r = synthesis_reserve(&plan(120_000));
-        assert_eq!(r.policy_id, MULTI_STAGE_BUDGET_POLICY_V1);
+        assert_eq!(r.policy_id, MULTI_STAGE_BUDGET_POLICY_V2);
         assert_eq!(r.round_reserve, 1);
-        assert!(r.time_reserve_ms > 0);
-        assert!(r.time_reserve_ms < 120_000);
+        assert_eq!(r.time_reserve_ms, 60_000);
     }
 
     #[test]
@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn candidate_cap_protects_reserve() {
         let r = SynthesisReserve {
-            policy_id: MULTI_STAGE_BUDGET_POLICY_V1,
+            policy_id: MULTI_STAGE_BUDGET_POLICY_V2,
             time_reserve_ms: 30_000,
             round_reserve: 1,
         };

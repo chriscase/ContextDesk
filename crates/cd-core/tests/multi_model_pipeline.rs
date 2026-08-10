@@ -40,11 +40,20 @@ fn identity(seq: u64, source: &str) -> SearchEvidenceIdentity {
 
 /// Candidate `group_id` with one identity per seq. `source` is host-owned.
 fn candidate(group_id: &str, seqs: &[u64]) -> BroadLogTriageCandidate {
+    let evidence = seqs
+        .iter()
+        .map(|s| identity(*s, "src/a.log"))
+        .collect::<Vec<_>>();
     BroadLogTriageCandidate {
         group_id: group_id.into(),
         structural_kind: "template",
         model_text: format!("bounded brief for {group_id}"),
-        evidence: seqs.iter().map(|s| identity(*s, "src/a.log")).collect(),
+        evidence_excerpts: evidence
+            .iter()
+            .cloned()
+            .map(|identity| (identity, format!("bounded evidence for {group_id}")))
+            .collect(),
+        evidence,
     }
 }
 

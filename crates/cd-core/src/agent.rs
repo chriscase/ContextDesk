@@ -974,7 +974,7 @@ fn multi_stage_discovery_detail(
         "schema": "contextdesk.multi_stage_triage.v1",
         "stage": "discovery",
         "selection_reason": "parser_true_trace_correlation_groups_then_structurally_admitted_error_fatal_evidence_groups",
-        "budget_policy_id": crate::multi_stage_budget::MULTI_STAGE_BUDGET_POLICY_V1,
+        "budget_policy_id": crate::multi_stage_budget::MULTI_STAGE_BUDGET_POLICY_V2,
         "candidate_cap": MULTI_STAGE_CANDIDATE_CAP,
         "provider_round_cap": max_rounds,
         "hard_context_char_budget": hard_budget,
@@ -1011,6 +1011,8 @@ struct CandidateSynthesisDraft {
     group_id: String,
     text: String,
     evidence: HashSet<crate::log_analysis::SearchEvidenceIdentity>,
+    evidence_excerpts:
+        std::collections::HashMap<crate::log_analysis::SearchEvidenceIdentity, String>,
     classification: CandidateClassificationV1,
     classified_evidence_seqs: HashSet<u64>,
 }
@@ -1198,7 +1200,10 @@ fn final_comparison_system_contract() -> String {
         "missing_evidence must cite at least one permitted evidence id belonging to that candidate; do ",
         "not repeat an evidence id within one claim. Use initiating_causes only for direct initiating ",
         "evidence, symptoms for propagated impact, and competing_explanations for likely unrelated ",
-        "failures. A manifest may also include `global_timeline_context`, a separately scoped ",
+        "failures. The host manifest is intentionally identifier-only; that does not mean candidate ",
+        "evidence was unavailable. Candidate-scoped drafts summarize evidence already evaluated. Do ",
+        "not claim candidate content was omitted unless the corresponding draft explicitly says so. ",
+        "A manifest may also include `global_timeline_context`, a separately scoped ",
         "global chronology rather than an incident. Its rows may describe overlapping unrelated ",
         "processes: report only what their text and order show, never treat adjacency as correlation ",
         "or causality, never transfer their evidence into another candidate, and when its data says ",
@@ -1348,12 +1353,11 @@ fn multi_stage_ledger(
                 } else {
                     EvidenceRole::Neutral
                 },
-                // `content` is the host's *excerpt* slot. A search evidence
-                // identity carries no message text, so this ledger has no
-                // excerpt to give; restating the source and seq the citation
-                // already prints would be noise in the rendered answer, not
-                // evidence. A future ledger that carries real text fills this.
-                content: String::new(),
+                content: draft
+                    .evidence_excerpts
+                    .get(identity)
+                    .cloned()
+                    .unwrap_or_default(),
             });
         }
     }
@@ -1535,6 +1539,7 @@ async fn run_multi_stage_broad_triage(
         // bounded attempt; the final comparison may use the optional semantic
         // correction only while the whole-turn round cap still permits it.
         let mut accepted = None;
+        let mut validation_category = "candidate_contract";
         for attempt in 0..MULTI_STAGE_CANDIDATE_ATTEMPT_CAP {
             if cancel_ref.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
                 return Ok(MultiStageTriageOutcome::Cancelled);
@@ -1603,15 +1608,18 @@ async fn run_multi_stage_broad_triage(
             .unwrap_or_default();
             let evidence = candidate.evidence.iter().cloned().collect::<HashSet<_>>();
             let assessment = parse_candidate_assessment(&content, candidate);
-            if let Some((classification, analysis, classified_evidence_seqs)) =
-                assessment.filter(|(_, analysis, _)| {
-                    !linked_answer_mistakes_wrapper_for_evidence(analysis)
-                        && code_like_identifiers_are_confined(
-                            analysis,
-                            std::iter::once(candidate.model_text.as_str()),
-                        )
-                })
-            {
+            if let Some((classification, analysis, classified_evidence_seqs)) = assessment {
+                if linked_answer_mistakes_wrapper_for_evidence(&analysis) {
+                    validation_category = "mistakes_wrapper";
+                    continue;
+                }
+                if !code_like_identifiers_are_confined(
+                    &analysis,
+                    std::iter::once(candidate.model_text.as_str()),
+                ) {
+                    validation_category = "identifier_scope";
+                    continue;
+                }
                 let host_scoped = format!(
                     "group_id: {}\ncandidate_stage_classification: {}\n{}",
                     candidate.group_id,
@@ -1629,15 +1637,16 @@ async fn run_multi_stage_broad_triage(
                         .take(MULTI_STAGE_CANDIDATE_DRAFT_CHAR_CAP)
                         .collect(),
                     evidence,
+                    evidence_excerpts: candidate.evidence_excerpts.clone(),
                     classification,
                     classified_evidence_seqs,
                 });
                 break;
             }
         }
-        // An invalid candidate never reaches the comparison. It is rejected
-        // fail-closed after its bounded correction rather than contaminating a
-        // global evidence set.
+        // An invalid candidate never reaches the comparison. It stays isolated
+        // from the immutable ledger; a comparison may still use independently
+        // validated drafts when at least two remain.
         if let Some(draft) = accepted {
             on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
                 stage: "candidate".into(),
@@ -1674,6 +1683,7 @@ async fn run_multi_stage_broad_triage(
                     "candidate_count": candidate_count,
                     "used_rounds": used_rounds,
                     "reason": budget_denial.map(crate::multi_stage_budget::AdmissionDenial::as_str),
+                    "validation_category": budget_denial.is_none().then_some(validation_category),
                 })
                 .to_string(),
                 candidate_id: Some(candidate.group_id.clone()),
@@ -1706,13 +1716,6 @@ async fn run_multi_stage_broad_triage(
             });
         }
         // Fall through to comparison with drafts collected so far.
-    } else if !rejected_groups.is_empty() {
-        return Ok(MultiStageTriageOutcome::FailedClosed {
-            reason: "one or more selected candidate syntheses failed validation".into(),
-            validation_errors: Vec::new(),
-            semantic_attempts: 0,
-            provider_rounds: used_rounds,
-        });
     }
     if drafts.len() < 2 {
         return Ok(MultiStageTriageOutcome::FailedClosed {
@@ -13747,18 +13750,24 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         seq: u64,
     ) -> crate::tool_host::BroadLogTriageCandidate {
         let source = format!("{group_id}.log");
+        let identity = crate::log_analysis::SearchEvidenceIdentity {
+            seq,
+            source,
+            citation_source: None,
+            template_id: seq,
+        };
         crate::tool_host::BroadLogTriageCandidate {
             group_id: group_id.into(),
             structural_kind: "trace",
             model_text: format!(
-                "source_kind: deterministic_broad_log_candidate\ngroup_id: {group_id}\n- seq={seq} source={source} template_id={seq}\n"
+                "source_kind: deterministic_broad_log_candidate\ngroup_id: {group_id}\n- seq={seq} source={} template_id={seq}\n",
+                identity.source
             ),
-            evidence: vec![crate::log_analysis::SearchEvidenceIdentity {
-                seq,
-                source,
-                citation_source: None,
-                template_id: seq,
-            }],
+            evidence: vec![identity.clone()],
+            evidence_excerpts: std::collections::HashMap::from([(
+                identity,
+                format!("bounded evidence for {group_id}"),
+            )]),
         }
     }
 
@@ -13816,6 +13825,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         let draft = CandidateSynthesisDraft {
             group_id: candidate.group_id.clone(),
             text: "likely noise".into(),
+            evidence_excerpts: candidate.evidence_excerpts.clone(),
             evidence: candidate.evidence.into_iter().collect(),
             classification: CandidateClassificationV1::CompetingOrNoise,
             classified_evidence_seqs: HashSet::from([7]),
@@ -13868,6 +13878,8 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         assert!(comparison_prompt.contains("every manifest candidate_id exactly once"));
         assert!(comparison_prompt.contains("globally unique across the entire object"));
         assert!(comparison_prompt.contains("competing_explanations for likely unrelated"));
+        assert!(comparison_prompt.contains("manifest is intentionally identifier-only"));
+        assert!(comparison_prompt.contains("does not mean candidate evidence was unavailable"));
         assert!(comparison_prompt.contains("global chronology rather than an incident"));
         assert!(comparison_data.contains("GLOBAL_CONTEXT_SENTINEL"));
         assert!(comparison_data.contains("e:global_timeline_context:8"));
@@ -13911,6 +13923,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             group_id: candidate.group_id.clone(),
             text: analysis,
             evidence: candidate.evidence.iter().cloned().collect(),
+            evidence_excerpts: candidate.evidence_excerpts.clone(),
             classification,
             classified_evidence_seqs,
         };
@@ -13927,6 +13940,13 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         };
         let ledger = multi_stage_ledger(std::slice::from_ref(&draft), None, binding.clone())
             .expect("host ledger");
+        assert_eq!(
+            ledger
+                .get("e:template:2:17")
+                .expect("candidate evidence")
+                .content,
+            "bounded evidence for template:2"
+        );
         let final_agreement = r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"template:2","initiating_causes":[{"claim_id":"root","text":"configuration change initiated the failure chain","evidence_ids":["e:template:2:17"]}]}]}"#;
         let accepted = crate::investigation_answer::validate_model_answer(final_agreement, &ledger)
             .expect("final comparison agrees with the candidate assessment");
@@ -14112,6 +14132,102 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             }
             other => panic!("expected bounded independent comparison, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn multi_stage_excludes_one_invalid_candidate_and_compares_two_valid_drafts() {
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+            multi_stage_candidate("trace:charlie", 33),
+        ];
+        let backend = ScriptedBackend::new(vec![
+            multi_stage_assessment(
+                "trace:alpha",
+                CandidateClassificationV1::SupportingEvidence,
+                11,
+                "validated alpha evidence",
+            ),
+            multi_stage_completion("{}"),
+            multi_stage_assessment(
+                "trace:charlie",
+                CandidateClassificationV1::SupportingEvidence,
+                33,
+                "validated charlie evidence",
+            ),
+            multi_stage_completion(
+                r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"trace:alpha","observations":[{"claim_id":"a","text":"alpha observation","evidence_ids":["e:trace:alpha:11"]}]},{"candidate_id":"trace:charlie","observations":[{"claim_id":"c","text":"charlie observation","evidence_ids":["e:trace:charlie:33"]}]}]}"#,
+            ),
+        ]);
+        let opts = AgentOptions {
+            max_rounds: 5,
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let mut events = Vec::new();
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
+                },
+            },
+            &mut |signal| {
+                if let MultiStageHostSignal::Event(event) = signal {
+                    events.push(event);
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            MultiStageTriageOutcome::Completed {
+                accepted_groups,
+                rejected_groups,
+                provider_rounds,
+                ..
+            } => {
+                assert_eq!(accepted_groups, vec!["trace:alpha", "trace:charlie"]);
+                assert_eq!(rejected_groups, vec!["trace:bravo"]);
+                assert_eq!(provider_rounds, 4);
+            }
+            other => panic!("expected partial validated comparison, got {other:?}"),
+        }
+
+        let rejected_detail = events.iter().find_map(|event| match event {
+            StreamEvent::MultiModelStage {
+                stage,
+                phase,
+                status,
+                detail,
+                candidate_id,
+            } if stage == "candidate"
+                && phase == "finished"
+                && status.as_deref() == Some("failed")
+                && candidate_id.as_deref() == Some("trace:bravo") =>
+            {
+                Some(detail)
+            }
+            _ => None,
+        });
+        let rejected_detail: serde_json::Value =
+            serde_json::from_str(rejected_detail.expect("typed rejected-candidate progress"))
+                .unwrap();
+        assert_eq!(rejected_detail["validation_category"], "candidate_contract");
     }
 
     #[tokio::test(start_paused = true)]
@@ -15010,6 +15126,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 group_id: candidate.group_id.clone(),
                 text: "x".repeat(MULTI_STAGE_CANDIDATE_DRAFT_CHAR_CAP),
                 evidence: candidate.evidence.iter().cloned().collect(),
+                evidence_excerpts: candidate.evidence_excerpts.clone(),
                 classification: CandidateClassificationV1::SupportingEvidence,
                 classified_evidence_seqs: candidate
                     .evidence

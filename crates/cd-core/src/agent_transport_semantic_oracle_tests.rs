@@ -91,18 +91,24 @@ async fn wire_backend(base_url: &str) -> Box<dyn ChatBackend> {
 
 fn oracle_candidate(group_id: &str, seq: u64) -> crate::tool_host::BroadLogTriageCandidate {
     let source = format!("{group_id}.log");
+    let identity = crate::log_analysis::SearchEvidenceIdentity {
+        seq,
+        source,
+        citation_source: None,
+        template_id: seq,
+    };
     crate::tool_host::BroadLogTriageCandidate {
         group_id: group_id.into(),
         structural_kind: "trace",
         model_text: format!(
-            "source_kind: deterministic_broad_log_candidate\ngroup_id: {group_id}\n- seq={seq} source={source} template_id={seq}\n"
+            "source_kind: deterministic_broad_log_candidate\ngroup_id: {group_id}\n- seq={seq} source={} template_id={seq}\n",
+            identity.source
         ),
-        evidence: vec![crate::log_analysis::SearchEvidenceIdentity {
-            seq,
-            source,
-            citation_source: None,
-            template_id: seq,
-        }],
+        evidence: vec![identity.clone()],
+        evidence_excerpts: std::collections::HashMap::from([(
+            identity,
+            format!("bounded evidence for {group_id}"),
+        )]),
     }
 }
 

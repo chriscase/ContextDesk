@@ -90,7 +90,7 @@ const routerBudget: RouterBudgetDto = {
   max_sources: 3,
   max_tool_rounds: 12,
   max_results_per_source: 8,
-  deadline_ms: 120_000,
+  deadline_ms: 180_000,
   deadline_is_explicit: false,
 };
 

@@ -217,6 +217,11 @@ pub struct BroadLogTriageCandidate {
     pub model_text: String,
     /// Trusted identities belonging only to this group.
     pub evidence: Vec<crate::log_analysis::SearchEvidenceIdentity>,
+    /// Redacted, bounded host excerpts keyed by the same trusted identities.
+    /// These never establish a causal role, but they let the canonical answer
+    /// renderer show the evidence a candidate-stage model actually evaluated.
+    pub evidence_excerpts:
+        std::collections::HashMap<crate::log_analysis::SearchEvidenceIdentity, String>,
 }
 
 /// One redacted, bounded global chronology row retained for final comparison.
@@ -436,6 +441,36 @@ fn broad_triage_source_identity(value: &str) -> String {
 /// The template pattern is redacted and bounded by the ingest pipeline. It
 /// carries the operational facts a synthesis model needs without exposing a
 /// raw trace key or inviting it to infer content from opaque event ids.
+fn broad_triage_template_pattern_is_informative(pattern: &str) -> bool {
+    let mut inside_placeholder = false;
+    let mut literal_alphanumeric = 0usize;
+    for character in pattern.chars() {
+        match character {
+            '<' => inside_placeholder = true,
+            '>' if inside_placeholder => inside_placeholder = false,
+            _ if !inside_placeholder && character.is_alphanumeric() => {
+                literal_alphanumeric = literal_alphanumeric.saturating_add(1);
+                if literal_alphanumeric >= 3 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn broad_triage_candidate_pattern(
+    corpus: &crate::log_analysis::LogCorpus,
+    template_id: u64,
+    fallback_message: &str,
+) -> String {
+    corpus
+        .template_pattern(template_id)
+        .filter(|pattern| broad_triage_template_pattern_is_informative(pattern))
+        .unwrap_or_else(|| fallback_message.to_string())
+}
+
 fn broad_triage_candidate_observation(
     corpus: &crate::log_analysis::LogCorpus,
     axis_value: i64,
@@ -448,15 +483,29 @@ fn broad_triage_candidate_observation(
     let source = broad_triage_source_identity(source);
     let service = broad_triage_bounded_line(service.unwrap_or("<unset>"));
     let service = serde_json::to_string(&service).unwrap_or_else(|_| "\"<invalid>\"".into());
-    let pattern = corpus
-        .template_pattern(template_id)
-        .unwrap_or_else(|| fallback_message.to_string());
+    let pattern = broad_triage_candidate_pattern(corpus, template_id, fallback_message);
     let pattern = broad_triage_bounded_line(&pattern);
     let pattern = serde_json::to_string(&pattern).unwrap_or_else(|_| "\"<invalid>\"".into());
     format!(
         "- axis_value={} level={} source={} service={} template_id={} pattern={}\n",
         axis_value, level, source, service, template_id, pattern
     )
+}
+
+/// Canonical redacted excerpt for a candidate identity. Candidate selection
+/// already relies on persisted templates; carrying the same bounded pattern
+/// into the immutable ledger avoids a content-free citation appendix without
+/// reopening raw source files during synthesis.
+fn broad_triage_candidate_excerpt(
+    corpus: &crate::log_analysis::LogCorpus,
+    identity: &crate::log_analysis::SearchEvidenceIdentity,
+    fallback_message: &str,
+) -> String {
+    broad_triage_bounded_line(&broad_triage_candidate_pattern(
+        corpus,
+        identity.template_id,
+        fallback_message,
+    ))
 }
 
 const BROAD_LOG_TRIAGE_COMPARISON_CONTEXT_ID: &str = "global_timeline_context";
@@ -676,6 +725,18 @@ fn broad_triage_template_stage_disposition(
 ) -> BroadTriageTemplateStageDisposition {
     use crate::log_analysis::StructuralTemplateRole as Role;
 
+    // A template that retained no literal signal cannot justify one of the
+    // globally bounded candidate calls. Its raw rows remain available in the
+    // deterministic brief and global chronology. Check this before correlated
+    // rendering-role admission so ERROR volume plus a placeholder-only mined
+    // pattern cannot crowd out a candidate with explicit failure mechanics.
+    if pattern.is_some_and(|pattern| !broad_triage_template_pattern_is_informative(pattern)) {
+        return BroadTriageTemplateStageDisposition {
+            admitted: false,
+            basis: "uninformative_template",
+        };
+    }
+
     // Rendering citation roles are derived from retained event records, not
     // semantic episode totals. Prefer that contextual evidence over a
     // persisted template pattern, which may have generalized away the stack
@@ -697,16 +758,22 @@ fn broad_triage_template_stage_disposition(
         None => {}
     }
 
-    match pattern.map(crate::log_analysis::classify_structural_template_pattern) {
+    let Some(pattern) = pattern else {
+        return BroadTriageTemplateStageDisposition {
+            admitted: false,
+            basis: "metadata_unavailable",
+        };
+    };
+    match crate::log_analysis::classify_structural_template_pattern(pattern) {
         // A persisted structural lead is useful candidate-scoped evidence. It
         // is still not a host-certified incident.
-        Some(Some(Role::ExceptionHeaderOrFullStack)) => BroadTriageTemplateStageDisposition {
+        Some(Role::ExceptionHeaderOrFullStack) => BroadTriageTemplateStageDisposition {
             admitted: true,
             basis: "rendering_lead",
         },
         // Frames, causes, and wrappers support a rendering. Raw ERROR volume
         // cannot promote them into a separate candidate model round.
-        Some(Some(Role::StackFrame | Role::CauseSuppressed | Role::WrapperScaffold)) => {
+        Some(Role::StackFrame | Role::CauseSuppressed | Role::WrapperScaffold) => {
             BroadTriageTemplateStageDisposition {
                 admitted: false,
                 basis: "supporting_structure",
@@ -715,21 +782,16 @@ fn broad_triage_template_stage_disposition(
         // The independent structural inventory deliberately over-identifies
         // suspicious shapes. Preserve them as evidence but withhold staged
         // promotion until their role is known.
-        Some(Some(Role::UnknownSuspicious)) => BroadTriageTemplateStageDisposition {
+        Some(Role::UnknownSuspicious) => BroadTriageTemplateStageDisposition {
             admitted: false,
             basis: "unknown_structure",
         },
         // A real persisted ERROR/FATAL template outside recognized exception
         // structure remains useful evidence for model classification. This is
         // the generic non-exception lead/control path.
-        Some(None) => BroadTriageTemplateStageDisposition {
+        None => BroadTriageTemplateStageDisposition {
             admitted: true,
             basis: "non_exception_error",
-        },
-        // Missing template metadata cannot be upgraded by event volume.
-        None => BroadTriageTemplateStageDisposition {
-            admitted: false,
-            basis: "metadata_unavailable",
         },
     }
 }
@@ -901,6 +963,7 @@ struct BroadTriageExemplar {
     ts: i64,
     source: String,
     template_id: u64,
+    message: String,
 }
 
 fn broad_triage_exclusion_sql(excluded_template_ids: &[u64]) -> CoreResult<String> {
@@ -1135,14 +1198,14 @@ fn broad_triage_occurrence_span(
     let sql = format!(
         r#"
         WITH matching AS (
-            SELECT seq, ts, source, template_id
+            SELECT seq, ts, source, template_id, message
             FROM events
             WHERE template_id = {template_id_i64}{level_sql}{exclusion_sql}
         ),
         bounds AS (
             SELECT MIN(seq) AS first_seq, MAX(seq) AS last_seq FROM matching
         )
-        SELECT m.seq, m.ts, m.source, m.template_id
+        SELECT m.seq, m.ts, m.source, m.template_id, m.message
         FROM matching m
         JOIN bounds b ON m.seq = b.first_seq OR m.seq = b.last_seq
         ORDER BY m.seq ASC
@@ -1159,6 +1222,7 @@ fn broad_triage_occurrence_span(
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(|error| {
@@ -1166,7 +1230,7 @@ fn broad_triage_occurrence_span(
             })?;
         let mut exemplars = Vec::new();
         for row in rows {
-            let (seq, ts, source, template_id) = row.map_err(|error| {
+            let (seq, ts, source, template_id, message) = row.map_err(|error| {
                 CoreError::Message(format!("broad triage occurrence span row: {error}"))
             })?;
             exemplars.push(BroadTriageExemplar {
@@ -1176,6 +1240,7 @@ fn broad_triage_occurrence_span(
                 source,
                 template_id: u64::try_from(template_id)
                     .map_err(|_| CoreError::Message("negative template id".into()))?,
+                message,
             });
         }
         Ok(match exemplars.as_slice() {
@@ -1269,6 +1334,7 @@ fn broad_triage_diverse_exemplars(
                    ts,
                    source,
                    template_id,
+                   message,
                    ROW_NUMBER() OVER (
                        PARTITION BY source
                        ORDER BY seq ASC
@@ -1276,7 +1342,7 @@ fn broad_triage_diverse_exemplars(
             FROM events
             WHERE 1=1{level_sql}{template_sql}{exclusion_sql}
         )
-        SELECT seq, ts, source, template_id
+        SELECT seq, ts, source, template_id, message
         FROM source_ranked
         ORDER BY source_rank ASC, source ASC, seq ASC
         LIMIT {limit}
@@ -1293,12 +1359,13 @@ fn broad_triage_diverse_exemplars(
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(|error| CoreError::Message(format!("broad triage exemplar query: {error}")))?;
         let mut exemplars = Vec::new();
         for row in rows {
-            let (seq, ts, source, template_id) = row.map_err(|error| {
+            let (seq, ts, source, template_id, message) = row.map_err(|error| {
                 CoreError::Message(format!("broad triage exemplar row: {error}"))
             })?;
             exemplars.push(BroadTriageExemplar {
@@ -1308,6 +1375,7 @@ fn broad_triage_diverse_exemplars(
                 source,
                 template_id: u64::try_from(template_id)
                     .map_err(|_| CoreError::Message("negative template id".into()))?,
+                message,
             });
         }
         Ok(exemplars)
@@ -2814,6 +2882,7 @@ impl ToolHost {
             ));
             let mut candidate_evidence = Vec::new();
             let mut candidate_observations = Vec::new();
+            let mut candidate_excerpts = std::collections::HashMap::new();
             for (representative_index, event) in representatives.iter().enumerate() {
                 let source = broad_triage_source_identity(&event.source);
                 let service =
@@ -2848,6 +2917,10 @@ impl ToolHost {
                     if !candidate_owned_evidence.contains(&identity)
                         && !candidate_evidence.contains(&identity)
                     {
+                        candidate_excerpts.insert(
+                            identity.clone(),
+                            broad_triage_candidate_excerpt(&corpus, &identity, &event.message),
+                        );
                         candidate_evidence.push(identity);
                         candidate_observations.push(broad_triage_candidate_observation(
                             &corpus,
@@ -2908,6 +2981,7 @@ impl ToolHost {
                     structural_kind: "unverified_trace_key_correlation_group",
                     model_text: candidate_text,
                     evidence: candidate_evidence.clone(),
+                    evidence_excerpts: candidate_excerpts,
                 });
                 candidate_owned_evidence.extend(candidate_evidence);
             }
@@ -3098,6 +3172,7 @@ impl ToolHost {
             {
                 let mut candidate_evidence = Vec::new();
                 let mut candidate_observations = Vec::new();
+                let mut candidate_excerpts = std::collections::HashMap::new();
                 for event in [&first_span, &last_span] {
                     let identity = crate::log_analysis::SearchEvidenceIdentity {
                         seq: event.seq,
@@ -3108,6 +3183,10 @@ impl ToolHost {
                     if !candidate_owned_evidence.contains(&identity)
                         && !candidate_evidence.contains(&identity)
                     {
+                        candidate_excerpts.insert(
+                            identity.clone(),
+                            broad_triage_candidate_excerpt(&corpus, &identity, &event.message),
+                        );
                         candidate_evidence.push(identity);
                         candidate_observations.push(broad_triage_candidate_observation(
                             &corpus,
@@ -3116,7 +3195,7 @@ impl ToolHost {
                             &event.source,
                             None,
                             event.template_id,
-                            "<template metadata unavailable>",
+                            &event.message,
                         ));
                     }
                 }
@@ -3133,6 +3212,10 @@ impl ToolHost {
                     if !candidate_owned_evidence.contains(&identity)
                         && !candidate_evidence.contains(&identity)
                     {
+                        candidate_excerpts.insert(
+                            identity.clone(),
+                            broad_triage_candidate_excerpt(&corpus, &identity, &event.message),
+                        );
                         candidate_evidence.push(identity);
                         candidate_observations.push(broad_triage_candidate_observation(
                             &corpus,
@@ -3141,7 +3224,7 @@ impl ToolHost {
                             &event.source,
                             None,
                             event.template_id,
-                            "<template metadata unavailable>",
+                            &event.message,
                         ));
                     }
                 }
@@ -3164,6 +3247,14 @@ impl ToolHost {
                         candidate_observations.push(broad_triage_correlated_candidate_observation(
                             &corpus, &identity, role,
                         ));
+                        candidate_excerpts.insert(
+                            identity.clone(),
+                            broad_triage_candidate_excerpt(
+                                &corpus,
+                                &identity,
+                                "<template metadata unavailable>",
+                            ),
+                        );
                         candidate_evidence.push(identity);
                     }
                 }
@@ -3198,6 +3289,7 @@ impl ToolHost {
                         structural_kind: "error_template_evidence_group",
                         model_text: candidate_text,
                         evidence: candidate_evidence.clone(),
+                        evidence_excerpts: candidate_excerpts,
                     });
                     candidate_owned_evidence.extend(candidate_evidence);
                 }
@@ -9799,6 +9891,65 @@ mod tests {
     }
 
     #[test]
+    fn broad_triage_candidate_content_falls_back_to_the_redacted_event_message() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = crate::log_analysis::LogCorpus::create(&cache, "missing template").unwrap();
+        assert!(!broad_triage_template_pattern_is_informative(
+            "<*> <*> <*> <*>"
+        ));
+        assert!(broad_triage_template_pattern_is_informative(
+            "ERROR CODE=2000 <*>"
+        ));
+        corpus
+            .upsert_templates([crate::log_analysis::TemplateRow {
+                info: crate::log_analysis::TemplateInfo {
+                    template_id: 404,
+                    pattern: "<*> <*> <*> <*>".into(),
+                    token_count: 4,
+                    count: 1,
+                    first_seen: 1_700_000_000,
+                    last_seen: 1_700_000_000,
+                    severity: 4,
+                    example: "unhelpfully generalized".into(),
+                },
+                content_hash: "placeholder-only-template".into(),
+                vector: None,
+            }])
+            .unwrap();
+        let identity = crate::log_analysis::SearchEvidenceIdentity {
+            seq: 7,
+            source: "service.log".into(),
+            citation_source: None,
+            template_id: 404,
+        };
+        let fallback = "bounded raw failure code CDLAB4206";
+        assert_eq!(
+            broad_triage_candidate_excerpt(&corpus, &identity, fallback),
+            fallback
+        );
+        let observation = broad_triage_candidate_observation(
+            &corpus,
+            1_700_000_000,
+            "ERROR",
+            &identity.source,
+            None,
+            identity.template_id,
+            fallback,
+        );
+        assert!(observation.contains(fallback));
+        assert!(!observation.contains("metadata unavailable"));
+        let missing_identity = crate::log_analysis::SearchEvidenceIdentity {
+            template_id: 405,
+            ..identity
+        };
+        assert_eq!(
+            broad_triage_candidate_excerpt(&corpus, &missing_identity, fallback),
+            fallback
+        );
+    }
+
+    #[test]
     fn broad_triage_candidates_use_ungrouped_error_templates_when_no_trace_exists() {
         let (_dir, corpus, host) = broad_triage_fixture(crate::log_analysis::TimeQuality::Wall);
         corpus
@@ -9981,6 +10132,24 @@ mod tests {
                 2_u64,
             ),
         ];
+        assert_eq!(
+            broad_triage_template_stage_disposition(Some("<*> <*> <*> <*>"), None),
+            BroadTriageTemplateStageDisposition {
+                admitted: false,
+                basis: "uninformative_template"
+            }
+        );
+        assert_eq!(
+            broad_triage_template_stage_disposition(
+                Some("<*> <*> <*> <*>"),
+                Some(crate::log_analysis::ExceptionCitationRole::RenderingLead),
+            ),
+            BroadTriageTemplateStageDisposition {
+                admitted: false,
+                basis: "uninformative_template"
+            },
+            "a correlation role cannot make a placeholder-only group spend a candidate call"
+        );
         assert_eq!(
             broad_triage_template_stage_disposition(Some(templates[0].1), None),
             BroadTriageTemplateStageDisposition {

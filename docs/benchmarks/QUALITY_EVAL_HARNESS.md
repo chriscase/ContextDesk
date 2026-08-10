@@ -113,6 +113,16 @@ gateway discovery/specialty-adapter validators. Prioritize surviving mutations
 that remove fail-closed checks, alter truth authority, shrink scoring windows,
 or weaken identity/privacy isolation rather than mutating the whole workspace.
 
+The live-role-confusion mutation also exposed a separate production-rubric
+follow-up in `triage_quality.rs`: its `symptom_vs_cause` check currently rejects
+a promoted symptom only when it is the sole causal candidate. A response can
+therefore include a valid trigger alongside a symptom assigned another causal
+role and mask the conflict; the production rubric also has no equivalent check
+for demoting an independent incident into the main chain. Harden these rules in
+a separate change with multi-cause counterexamples so legitimate multiple
+triggers remain valid. Do not treat the quality-evaluation scorer fix as proof
+that the production rubric already enforces these invariants.
+
 ## Fixture layout
 
 ```text

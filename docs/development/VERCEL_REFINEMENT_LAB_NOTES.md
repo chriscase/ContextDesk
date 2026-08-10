@@ -302,6 +302,73 @@ claims, role outcomes, model identifiers, dimensions, ranking aggregates,
 latency, token, cost, and typed failures. It excludes the key, authorization
 headers, vectors, provider error bodies, and temporary raw response dumps.
 
+### 2026-08-09 sanitized real-corpus acceptance
+
+The old development-log archive supplied for acceptance remained untouched in
+Downloads. A temporary extraction was scanned before egress. Two exported
+event files contained repeated password-shaped content, so only the temporary
+copy was replaced with `<REDACTED>` and rescanned; the original archive was not
+modified. No raw corpus, provider body, credential, hostname inventory, or
+event dump was committed.
+
+The isolated import completed in about 7.4 seconds:
+
+- 33,723 events from 154 selected files (294 discovered files);
+- 354 mined templates;
+- 33,553 syslog records and 170 plain-text records;
+- no source failures and no partial-import flag.
+
+Declaring `America/Chicago` for 133 sources changed the active timestamp basis
+from 99 explicit-wall plus 33,454 unresolved-local and 170 order-only records
+to 99 explicit-wall, 25,694 resolved-local, 7,930 order-only, and 7,760 still
+unresolved-local records. The deterministic logging-assessment score rose from
+51 to 67. The exception analyzer found 700 exception-shaped records and 256
+rendering occurrences, but 235 conflicting groups and no strong derived groups;
+it correctly refused to publish certified duplicate-incident totals. Running
+two corpus commands concurrently also exposed the existing DuckDB single-writer
+lock boundary; the same commands pass sequentially.
+
+Live DeepSeek refinement used the normal CLI product path, the isolated
+profile, the protected `file:` credential reference, and no Keychain access.
+The important sequence was:
+
+| Runtime policy / refinement | Result | Evidence learned |
+| --- | --- | --- |
+| former 120-second adaptive ceiling | one diffuse 116.6-second answer before timezone resolution, followed by two typed synthesis deadlines | candidate work could consume the final-comparison budget; compatibility was not the failure |
+| temporary explicit 240-second proof ceiling | grounded success in 130.5 seconds, five provider rounds, 24,899 tokens, about `$0.007128` | repeated persistence/JDBC connection failures were recoverable as a strong candidate, but two canonical candidate citations were content-free |
+| 180-second adaptive ceiling before partial-candidate handling | candidate-contract failure at 75.4 seconds, four rounds, about `$0.003342` | one malformed candidate response unnecessarily withheld otherwise valid drafts |
+| 180-second ceiling with v2 reserve and partial-candidate handling | grounded success in 159.5 seconds, five rounds, 21,208 tokens, about `$0.006233` | the reserve protected comparison, but high-volume placeholder-only templates crowded the stronger database candidate out of the admitted drafts |
+| final literal-signal candidate selection | grounded success in 115.9 seconds, five rounds, 23,057 tokens, about `$0.006832` | all four substantive candidates validated; comparison passed on its first attempt with 105.6 seconds remaining at comparison start |
+
+The final answer used canonical excerpts for every admitted candidate. It
+identified repeated `ERROR CODE=2000` login/decryption failure as an initiating
+cause, kept repeated persistence/JDBC connection failures as a separate
+unresolved causal candidate, classified remote disconnects as symptoms, and
+treated scheduled suspension as a competing/non-error explanation. It stated
+that the partial global timeline did not establish a complete causal chain.
+This is a useful, host-grounded answer on a 33,723-event corpus; it is not a
+claim that every initiating cause in the archive was proven, nor a substitute
+for employer-gateway acceptance.
+
+The live-derived product changes are intentionally provider-agnostic:
+
+- the managed-provider adaptive default is 180 seconds while explicit user
+  ceilings remain authoritative;
+- budget policy `contextdesk.multi_stage_budget.v2` reserves half the bounded
+  turn for final comparison and caps each candidate against that reserve;
+- an invalid candidate is excluded from the immutable ledger and reported by a
+  content-free validation category; comparison may continue only with at least
+  two independently validated drafts;
+- placeholder-only mined templates remain deterministic/global evidence but do
+  not consume one of the four candidate calls;
+- candidate ledger entries retain redacted bounded excerpts, falling back to
+  the selected event message when template metadata is absent or content-free.
+
+A manually cancelled JSONL run piped through `jq` exited with status 130 as
+requested but also printed a Rust broken-pipe panic while stdout was closing.
+This is a separate CLI pipe/cancellation robustness follow-up, not a provider,
+grounding, or Keychain failure.
+
 ### Discovery and CLI output lesson
 
 Vercel discovery returned the full account catalog successfully. An exact
