@@ -8,6 +8,7 @@ pub mod doctor;
 pub mod eval;
 pub mod exception_episodes;
 pub mod explore;
+pub mod gateway;
 pub mod import;
 pub mod logging_assessment;
 pub mod models;

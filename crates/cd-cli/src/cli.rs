@@ -167,6 +167,64 @@ pub enum Command {
         #[command(subcommand)]
         action: EvalAction,
     },
+    /// Provider-neutral gateway/model diagnostics for one explicitly selected model.
+    Gateway {
+        #[command(subcommand)]
+        action: GatewayAction,
+    },
+}
+
+/// Subcommands under `contextdesk gateway`.
+#[derive(Debug, Subcommand)]
+pub enum GatewayAction {
+    /// Bounded direct-provider vs product-path differential for one exact
+    /// model: reuses capability qualification, the real chat workflow, and
+    /// existing triage scoring — never a second HTTP client or simulated
+    /// pipeline. Shows planned checks and request/time bounds and requires
+    /// confirmation (or `--yes`) before any network call.
+    Diagnose(GatewayDiagnoseArgs),
+}
+
+/// Diagnostic depth. `Basic` is the only default; `Extended` must be chosen
+/// explicitly — this command never implicitly probes an entire catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum DiagnoseLevel {
+    #[default]
+    Basic,
+    Extended,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct GatewayDiagnoseArgs {
+    /// Diagnostic depth. `basic` (default) runs one bounded case set.
+    /// `extended` additionally re-runs each product-path case once more to
+    /// observe retry/correction stability. Never implicitly expands to the
+    /// full model catalog.
+    #[arg(long, value_enum, default_value_t = DiagnoseLevel::Basic)]
+    pub level: DiagnoseLevel,
+    /// Skip the interactive consent prompt (required in non-interactive use,
+    /// e.g. CI). The planned checks, request bound, and deadline are always
+    /// shown first regardless of this flag.
+    #[arg(long)]
+    pub yes: bool,
+    /// Bound the whole operation's wall-clock time, in seconds. Default 180.
+    #[arg(long)]
+    pub timeout: Option<u64>,
+    /// Also write an owner-only, local-only private capture containing
+    /// bounded synthetic request/response bodies and sanitized wire events
+    /// (never credentials). Requires explicit acknowledgement via
+    /// `--raw-i-understand`. Never included in the default share-safe
+    /// bundle.
+    #[arg(long, requires = "raw_i_understand")]
+    pub raw: bool,
+    /// Explicit acknowledgement required together with `--raw`.
+    #[arg(long)]
+    pub raw_i_understand: bool,
+    /// Directory to write the versioned diagnostic bundle into (default:
+    /// isolated cache dir under `gateway-diagnostics/<run-id>/`).
+    #[arg(long)]
+    pub out: Option<PathBuf>,
 }
 
 /// Subcommands under `contextdesk eval`.
@@ -630,6 +688,7 @@ where
         "retrieval-status",
         "models",
         "eval",
+        "gateway",
     ];
     let value_options = [
         "--format",
