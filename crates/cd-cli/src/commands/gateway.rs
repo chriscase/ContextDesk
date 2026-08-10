@@ -2075,3 +2075,206 @@ fn write_private_capture(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pass_lane() -> LaneResult {
+        LaneResult {
+            executed: true,
+            passed: true,
+            detail: "ok".to_string(),
+            elapsed_ms: 1,
+            attempts: 1,
+            requests_used: 1,
+        }
+    }
+
+    fn fail_lane() -> LaneResult {
+        LaneResult {
+            executed: true,
+            passed: false,
+            detail: "no".to_string(),
+            elapsed_ms: 1,
+            attempts: 1,
+            requests_used: 1,
+        }
+    }
+
+    #[test]
+    fn classify_both_lanes_failed_points_at_gateway_or_model() {
+        let scorer = LaneResult::not_applicable("n/a".to_string());
+        assert_eq!(
+            classify(&fail_lane(), &fail_lane(), &scorer, false),
+            CaseClassification::GatewayOrModelLikely
+        );
+    }
+
+    #[test]
+    fn classify_direct_pass_product_fail_points_at_product_integration() {
+        let scorer = LaneResult::not_applicable("n/a".to_string());
+        assert_eq!(
+            classify(&pass_lane(), &fail_lane(), &scorer, false),
+            CaseClassification::ProductIntegrationLikely
+        );
+    }
+
+    #[test]
+    fn classify_no_direct_baseline_and_product_failed_is_still_product_integration_evidence() {
+        let scorer = LaneResult::not_applicable("n/a".to_string());
+        let no_direct = LaneResult::not_applicable("no raw-provider equivalent".to_string());
+        assert_eq!(
+            classify(&no_direct, &fail_lane(), &scorer, false),
+            CaseClassification::ProductIntegrationLikely
+        );
+    }
+
+    #[test]
+    fn classify_both_pass_but_scorer_fails_is_a_usefulness_gap_not_a_compatibility_failure() {
+        assert_eq!(
+            classify(&pass_lane(), &pass_lane(), &fail_lane(), false),
+            CaseClassification::UsefulnessGap
+        );
+    }
+
+    #[test]
+    fn classify_both_pass_after_a_retry_is_retry_required_not_silently_compatible() {
+        let scorer = LaneResult::not_applicable("n/a".to_string());
+        assert_eq!(
+            classify(&pass_lane(), &pass_lane(), &scorer, true),
+            CaseClassification::RetryRequired
+        );
+    }
+
+    #[test]
+    fn classify_both_pass_no_retry_no_scorer_gap_is_compatible() {
+        let scorer = LaneResult::not_applicable("n/a".to_string());
+        assert_eq!(
+            classify(&pass_lane(), &pass_lane(), &scorer, false),
+            CaseClassification::Compatible
+        );
+    }
+
+    #[test]
+    fn classify_product_never_executed_is_not_run_regardless_of_direct() {
+        let not_run_product = LaneResult {
+            executed: false,
+            ..fail_lane()
+        };
+        let scorer = LaneResult::not_applicable("n/a".to_string());
+        assert_eq!(
+            classify(&pass_lane(), &not_run_product, &scorer, false),
+            CaseClassification::NotRun
+        );
+    }
+
+    #[test]
+    fn combine_lanes_requires_both_to_pass() {
+        let combined = combine_lanes(pass_lane(), fail_lane());
+        assert!(!combined.passed, "one failing probe must fail the combined lane");
+        assert!(combined.detail.contains("ok"));
+        assert!(combined.detail.contains("no"));
+        assert_eq!(combined.requests_used, 2);
+    }
+
+    #[test]
+    fn combine_lanes_both_pass_is_a_pass() {
+        let combined = combine_lanes(pass_lane(), pass_lane());
+        assert!(combined.passed);
+    }
+
+    #[test]
+    fn lane_from_qualification_reports_not_applicable_when_no_pass_was_run() {
+        let lane = lane_from_qualification(
+            None,
+            cd_core::capability_qualification::CapabilityKind::BasicGeneration,
+        );
+        assert!(!lane.executed);
+        assert!(!lane.passed);
+    }
+
+    #[test]
+    fn lane_from_qualification_surfaces_a_failed_shared_pass_as_a_failed_lane_not_not_applicable() {
+        let qual = SharedQualification {
+            report: None,
+            requests_used: 0,
+            failure_detail: Some("simulated failure".to_string()),
+        };
+        let lane = lane_from_qualification(
+            Some(&qual),
+            cd_core::capability_qualification::CapabilityKind::BasicGeneration,
+        );
+        assert!(lane.executed, "a failed shared pass must still be reported, not swallowed");
+        assert!(!lane.passed);
+        assert!(lane.detail.contains("simulated failure"));
+    }
+
+    #[test]
+    fn build_plan_never_expands_for_embedding_or_reranker_roles() {
+        let plan = build_plan(DiagnoseLevel::Basic, ModelRoleHint::Embedding, 180, false);
+        assert_eq!(plan.case_ids, vec!["embedding_or_rerank_contract"]);
+        let plan = build_plan(DiagnoseLevel::Basic, ModelRoleHint::Reranker, 180, false);
+        assert_eq!(plan.case_ids, vec!["embedding_or_rerank_contract"]);
+    }
+
+    #[test]
+    fn build_plan_chat_role_never_sends_specialty_cases() {
+        let plan = build_plan(DiagnoseLevel::Basic, ModelRoleHint::Investigator, 180, false);
+        assert!(!plan.case_ids.contains(&"embedding_or_rerank_contract"));
+        assert_eq!(plan.case_ids.len(), 5);
+    }
+
+    #[test]
+    fn build_plan_extended_level_states_a_larger_request_bound_than_basic() {
+        let basic = build_plan(DiagnoseLevel::Basic, ModelRoleHint::Investigator, 180, false);
+        let extended = build_plan(DiagnoseLevel::Extended, ModelRoleHint::Investigator, 180, false);
+        assert!(
+            extended.max_requests > basic.max_requests,
+            "extended must state a larger bound, never a silently identical one"
+        );
+    }
+
+    #[test]
+    fn build_plan_raw_adds_the_private_artifact_class_only_when_requested() {
+        let without_raw = build_plan(DiagnoseLevel::Basic, ModelRoleHint::Investigator, 180, false);
+        assert_eq!(without_raw.artifact_classes, vec!["share_safe_bundle"]);
+        let with_raw = build_plan(DiagnoseLevel::Basic, ModelRoleHint::Investigator, 180, true);
+        assert_eq!(
+            with_raw.artifact_classes,
+            vec!["share_safe_bundle", "private_raw_capture"]
+        );
+    }
+
+    #[test]
+    fn pseudonym_is_stable_for_the_same_input_and_never_echoes_it_verbatim() {
+        let a = pseudonym("profile:my-private-profile-id");
+        let b = pseudonym("profile:my-private-profile-id");
+        assert_eq!(a, b, "the same input must pseudonymize the same way within a process");
+        assert!(!a.contains("my-private-profile-id"));
+    }
+
+    #[test]
+    fn pseudonym_differs_for_different_inputs() {
+        let a = pseudonym("profile:one");
+        let b = pseudonym("profile:two");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn sha256_hex_matches_a_known_vector() {
+        // sha256("") — the standard empty-input test vector.
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn skipped_case_is_reported_as_not_run_never_as_a_silent_pass() {
+        let case = skipped_case("linked_log_triage", "deadline exceeded");
+        assert_eq!(case.classification, CaseClassification::NotRun);
+        assert!(!case.direct.executed);
+        assert!(!case.product.executed);
+    }
+}
