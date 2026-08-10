@@ -27,6 +27,13 @@ pub const RUNTIME_FORBIDDEN_EVALUATOR_TOKENS: &[&str] = &[
     "decoy:",
     "causal trigger:",
     "symptom only:",
+    "truth.json",
+    "answer key",
+    "establishability",
+    "must-include",
+    "must-exclude",
+    "forbidden_evidence",
+    "required_evidence",
 ];
 
 /// Credential / path shapes forbidden in fixtures and exports.
@@ -479,6 +486,9 @@ pub fn default_suite_path_from_manifest_dir(manifest_dir: &Path) -> PathBuf {
 
 /// Relative label for the bundled OPEN v1 suite (never an absolute path).
 pub const BUNDLED_OPEN_V1_RELATIVE: &str = "fixtures/quality-eval/open-v1";
+
+/// Relative label for the bundled adversarial v1 suite (never an absolute path).
+pub const BUNDLED_ADVERSARIAL_V1_RELATIVE: &str = "fixtures/quality-eval/adversarial-v1";
 
 /// One catalog entry for a bundled or discovered OPEN quality-eval suite.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
