@@ -1249,6 +1249,9 @@ fn final_comparison_correction(category: Option<&str>) -> String {
         "root_role" => {
             "Do not present an initiating cause as established unless the candidate's permitted evidence directly supports that role; use causal_candidates or missing_evidence otherwise."
         }
+        "role_mismatch" => {
+            "A permitted evidence id is host-labeled as downstream symptom evidence. Do not cite it in causal_candidates or initiating_causes; place it in the candidate's symptoms section and keep direct initiating evidence in initiating_causes only when the host role permits it."
+        }
         _ => "Rebuild the proposal from the unchanged host manifest, drafts, and output scaffold.",
     };
     format!("HOST VALIDATION CATEGORY: {category}\nHOST-AUTHORED CORRECTION: {guidance}\n")
@@ -14003,6 +14006,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         assert!(!comparison_prompt.contains('\\'));
         assert!(final_comparison_correction(Some("parse")).contains("extra closing delimiter"));
         assert!(final_comparison_correction(Some("duplicate_id")).contains("globally unique"));
+        assert!(final_comparison_correction(Some("role_mismatch")).contains("downstream symptom"));
         assert!(!final_comparison_correction(Some("wrong_scope")).contains("rejected"));
     }
 

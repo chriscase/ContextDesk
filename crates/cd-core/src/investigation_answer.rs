@@ -182,6 +182,9 @@ pub enum ValidationError {
     WrongRevision,
     EmptyEvidence,
     RootRole,
+    /// A claim placed in a causal-candidate section cites host evidence that
+    /// was explicitly classified as downstream symptom evidence.
+    RoleMismatch,
     EmptyLedger,
     InvalidBinding,
     DigestMismatch,
@@ -199,6 +202,7 @@ impl ValidationError {
             Self::WrongRevision => "wrong_revision",
             Self::EmptyEvidence => "empty_evidence",
             Self::RootRole => "root_role",
+            Self::RoleMismatch => "role_mismatch",
             Self::EmptyLedger => "empty_ledger",
             Self::InvalidBinding => "invalid_binding",
             Self::DigestMismatch => "digest_mismatch",
@@ -387,6 +391,14 @@ pub fn validate_model_answer(
                         .entries
                         .get(id)
                         .ok_or(ValidationError::UnknownEvidence)?;
+                    // A host-classified downstream symptom must not be
+                    // promoted into a causal-candidate claim. Reject the
+                    // proposal so the bounded semantic correction can place
+                    // the evidence in `symptoms`; the existing initiating-
+                    // cause gate still withholds unsupported roots.
+                    if kind == ClaimKind::CausalCandidate && entry.role == EvidenceRole::Symptom {
+                        return Err(ValidationError::RoleMismatch);
+                    }
                     if entry.candidate_id != candidate.candidate_id {
                         return Err(ValidationError::WrongScope);
                     }
@@ -825,6 +837,7 @@ mod tests {
             ValidationError::WrongRevision,
             ValidationError::EmptyEvidence,
             ValidationError::RootRole,
+            ValidationError::RoleMismatch,
             ValidationError::EmptyLedger,
             ValidationError::InvalidBinding,
             ValidationError::DigestMismatch,
@@ -841,6 +854,7 @@ mod tests {
                 "wrong_revision",
                 "empty_evidence",
                 "root_role",
+                "role_mismatch",
                 "empty_ledger",
                 "invalid_binding",
                 "digest_mismatch",
@@ -1010,6 +1024,20 @@ mod tests {
         assert_eq!(
             envelope.answer.candidates[0].claims[0].status,
             ClaimStatus::Withheld
+        );
+    }
+
+    #[test]
+    fn symptom_role_cannot_be_promoted_to_causal_candidate() {
+        let raw = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[{{"candidate_id":"a","causal_candidates":[{{"claim_id":"symptom-as-cause","text":"candidate root","evidence_ids":["e-a"]}}]}},{{"candidate_id":"b","observations":[{{"claim_id":"obs-b","text":"observation","evidence_ids":["e-b"]}}]}}]}}"#
+        );
+        assert_eq!(
+            validate_model_answer(
+                &raw,
+                &ledger_with_roles(EvidenceRole::Symptom, EvidenceRole::Neutral),
+            ),
+            Err(ValidationError::RoleMismatch)
         );
     }
     #[test]
