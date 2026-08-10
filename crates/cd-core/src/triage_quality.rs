@@ -1104,6 +1104,172 @@ pub fn score_structured_triage_answer(
     }
 }
 
+/// Score the typed, host-validated investigation answer used by the current
+/// broad linked-triage path.
+///
+/// The legacy [`StructuredTriageAnswer`] rubric intentionally requires
+/// confidence and missing-evidence sections that do not exist in
+/// `investigation_answer.v1`. Re-parsing the rendered Markdown back into that
+/// legacy shape therefore produces a false usefulness failure even when the
+/// production path emitted a valid typed envelope. This adapter scores the
+/// current authority boundary directly while keeping the same evaluator-only
+/// known key and host facts.
+pub fn score_validated_investigation_answer(
+    envelope: &crate::investigation_answer::AnswerEnvelopeV1,
+    key: &TriageKnownAnswerKey,
+    host: &TriageHostFacts,
+) -> TriageRubricScore {
+    use crate::investigation_answer::{ClaimKind, SCHEMA_V1};
+
+    let claims = envelope
+        .answer
+        .candidates
+        .iter()
+        .flat_map(|candidate| candidate.claims.iter())
+        .collect::<Vec<_>>();
+    let evidence = envelope
+        .evidence
+        .iter()
+        .map(|entry| (entry.evidence_id.as_str(), entry))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut dimensions = Vec::new();
+
+    let shape_ok = envelope.answer.schema == SCHEMA_V1
+        && !envelope.answer.candidates.is_empty()
+        && envelope
+            .answer
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.claims.is_empty())
+        && claims.iter().all(|claim| {
+            claim.claim_kind == ClaimKind::MissingEvidence || !claim.evidence_ids.is_empty()
+        });
+    dimensions.push(RubricDimension {
+        id: "typed_contract_shape".into(),
+        passed: shape_ok,
+        reason: if shape_ok {
+            "host-validated typed candidates contain grounded claims".into()
+        } else {
+            "typed answer is empty or contains an ungrounded non-disclosure claim".into()
+        },
+    });
+
+    let citations_ok = claims.iter().all(|claim| {
+        claim.evidence_ids.iter().all(|id| {
+            evidence.get(id.as_str()).is_some_and(|entry| {
+                entry.candidate_id == claim.candidate_id
+                    && envelope
+                        .answer
+                        .canonical_citations
+                        .iter()
+                        .any(|citation| citation.evidence_id == *id)
+            })
+        })
+    });
+    dimensions.push(RubricDimension {
+        id: "typed_citation_validity".into(),
+        passed: citations_ok,
+        reason: if citations_ok {
+            "typed claim citations remain candidate-scoped and canonical".into()
+        } else {
+            "typed claim citation set is incomplete or crosses candidate scope".into()
+        },
+    });
+
+    let evidence_matches = |claim: &crate::investigation_answer::InvestigationClaimV1,
+                            wanted: &(u64, String)| {
+        claim.evidence_ids.iter().any(|id| {
+            evidence.get(id.as_str()).is_some_and(|entry| {
+                entry.locator == format!("seq={}", wanted.0) && entry.source_label == wanted.1
+            })
+        })
+    };
+    let trigger = key
+        .true_trigger_message_token
+        .as_deref()
+        .and_then(|token| find_token_seq(host, token));
+    let trigger_ok = match trigger {
+        Some(wanted) if key.root_cause_establishable => claims.iter().any(|claim| {
+            matches!(
+                claim.claim_kind,
+                ClaimKind::CausalCandidate | ClaimKind::InitiatingCause
+            ) && evidence_matches(claim, &wanted)
+        }),
+        Some(_) => !envelope.answer.root_cause_established,
+        None => !key.root_cause_establishable || !envelope.answer.root_cause_established,
+    };
+    dimensions.push(RubricDimension {
+        id: "typed_trigger_identification".into(),
+        passed: trigger_ok,
+        reason: if trigger_ok {
+            "true trigger is cited in a causal section".into()
+        } else {
+            "true trigger is absent from typed causal claims".into()
+        },
+    });
+
+    let symptom = key
+        .symptom_message_tokens
+        .iter()
+        .find_map(|token| find_token_seq(host, token));
+    let symptom_ok = match symptom {
+        Some(wanted) => {
+            let cited_as_symptom = claims.iter().any(|claim| {
+                claim.claim_kind == ClaimKind::Symptom && evidence_matches(claim, &wanted)
+            });
+            let promoted_to_cause = claims.iter().any(|claim| {
+                claim.claim_kind == ClaimKind::InitiatingCause && evidence_matches(claim, &wanted)
+            });
+            cited_as_symptom && !promoted_to_cause
+        }
+        None => true,
+    };
+    dimensions.push(RubricDimension {
+        id: "typed_symptom_separation".into(),
+        passed: symptom_ok,
+        reason: if symptom_ok {
+            "known downstream symptom is kept out of initiating-cause claims".into()
+        } else {
+            "known symptom was omitted or promoted to an initiating cause".into()
+        },
+    });
+
+    let decoy = key
+        .decoy_earliest_error_message_token
+        .as_deref()
+        .and_then(|token| find_token_seq(host, token));
+    let decoy_ok = decoy.is_none_or(|wanted| {
+        !claims.iter().any(|claim| {
+            claim.claim_kind == ClaimKind::InitiatingCause && evidence_matches(claim, &wanted)
+        })
+    });
+    dimensions.push(RubricDimension {
+        id: "typed_decoy_separation".into(),
+        passed: decoy_ok,
+        reason: if decoy_ok {
+            "known decoy is not treated as an initiating cause".into()
+        } else {
+            "known decoy was promoted to an initiating cause".into()
+        },
+    });
+
+    // V1 carries no model-owned confidence or chronology flags. The host
+    // snapshot and canonical citations are the authority for those facts, so
+    // this dimension is explicitly neutral rather than inferred from prose.
+    dimensions.push(RubricDimension {
+        id: "typed_chronology_scope".into(),
+        passed: true,
+        reason: "typed v1 has no unvalidated confidence/chronology assertion field".into(),
+    });
+
+    let passed = dimensions.iter().all(|dimension| dimension.passed);
+    TriageRubricScore {
+        case_id: key.case_id.clone(),
+        passed,
+        dimensions,
+    }
+}
+
 fn observation_is_exact_empty_evidence_disclosure(claim: &TriageClaim) -> bool {
     matches!(
         normalize_assertion_text(&claim.text).as_str(),
@@ -1335,6 +1501,110 @@ mod tests {
             raw_exception_record_count: None,
             episode_counts_complete: false,
         }
+    }
+
+    #[test]
+    fn typed_investigation_answers_are_scored_without_rendered_markdown_reparse() {
+        use crate::investigation_answer::{
+            AnswerBindingV1, AnswerEnvelopeV1, CanonicalCitationV1, ClaimKind,
+            InvestigationAnswerV1, InvestigationCandidateV1, InvestigationClaimV1,
+            LogSnapshotRevisionV1, SCHEMA_V1,
+        };
+
+        let revision = LogSnapshotRevisionV1 {
+            event_revision: 1,
+            template_analysis_revision: 2,
+            suppression_revision: 3,
+        };
+        let binding = AnswerBindingV1 {
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            corpus_id: "c".into(),
+            revision,
+            ledger_digest: "digest".into(),
+        };
+        let evidence = vec![
+            crate::investigation_answer::HostEvidenceEntry {
+                evidence_id: "e-trigger".into(),
+                candidate_id: "c1".into(),
+                source_label: "app/worker.jsonl".into(),
+                locator: "seq=2".into(),
+                corpus_id: "c".into(),
+                revision,
+                role: crate::investigation_answer::EvidenceRole::Cause,
+                content: "causal trigger lease refused".into(),
+            },
+            crate::investigation_answer::HostEvidenceEntry {
+                evidence_id: "e-symptom".into(),
+                candidate_id: "c1".into(),
+                source_label: "app/worker.jsonl".into(),
+                locator: "seq=3".into(),
+                corpus_id: "c".into(),
+                revision,
+                role: crate::investigation_answer::EvidenceRole::Symptom,
+                content: "downstream symptom task failed".into(),
+            },
+        ];
+        let citations = evidence
+            .iter()
+            .map(|entry| CanonicalCitationV1 {
+                evidence_id: entry.evidence_id.clone(),
+                candidate_id: entry.candidate_id.clone(),
+                source_label: entry.source_label.clone(),
+                locator: entry.locator.clone(),
+                corpus_id: entry.corpus_id.clone(),
+                revision: entry.revision,
+                content: entry.content.clone(),
+            })
+            .collect();
+        let envelope = AnswerEnvelopeV1 {
+            binding,
+            evidence,
+            answer: InvestigationAnswerV1 {
+                schema: SCHEMA_V1.into(),
+                candidates: vec![InvestigationCandidateV1 {
+                    candidate_id: "c1".into(),
+                    claims: vec![
+                        InvestigationClaimV1 {
+                            claim_id: "observation".into(),
+                            claim_kind: ClaimKind::Observation,
+                            text: "The trigger was logged.".into(),
+                            candidate_id: "c1".into(),
+                            evidence_ids: vec!["e-trigger".into()],
+                            status: crate::investigation_answer::ClaimStatus::Supported,
+                        },
+                        InvestigationClaimV1 {
+                            claim_id: "cause".into(),
+                            claim_kind: ClaimKind::InitiatingCause,
+                            text: "The causal trigger was the lease refusal.".into(),
+                            candidate_id: "c1".into(),
+                            evidence_ids: vec!["e-trigger".into()],
+                            status: crate::investigation_answer::ClaimStatus::Supported,
+                        },
+                        InvestigationClaimV1 {
+                            claim_id: "symptom".into(),
+                            claim_kind: ClaimKind::Symptom,
+                            text: "The downstream symptom followed.".into(),
+                            candidate_id: "c1".into(),
+                            evidence_ids: vec!["e-symptom".into()],
+                            status: crate::investigation_answer::ClaimStatus::Supported,
+                        },
+                    ],
+                }],
+                canonical_citations: citations,
+                root_cause_established: true,
+            },
+            semantic_attempts: 0,
+        };
+
+        let score = score_validated_investigation_answer(&envelope, &sample_key(), &sample_host());
+        assert!(score.passed, "typed score failed: {:?}", score.failed_ids());
+        let mut promoted = envelope;
+        promoted.answer.candidates[0].claims[2].claim_kind = ClaimKind::InitiatingCause;
+        let mutated =
+            score_validated_investigation_answer(&promoted, &sample_key(), &sample_host());
+        assert!(!mutated.passed);
+        assert!(mutated.failed_ids().contains(&"typed_symptom_separation"));
     }
 
     fn good_answer() -> StructuredTriageAnswer {

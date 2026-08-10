@@ -59,7 +59,8 @@ use cd_core::rerank::HttpRerankBackend;
 use cd_core::sessions::SessionStore;
 use cd_core::triage_quality::{
     parse_structured_triage_answer, score_structured_triage_answer,
-    triage_answer_contract_system_text, TriageHostFacts, TriageKnownAnswerKey,
+    score_validated_investigation_answer, triage_answer_contract_system_text, TriageHostFacts,
+    TriageKnownAnswerKey,
 };
 use cd_core::turn_trace::{RecordingTurnTrace, TracedOutcome, TurnTraceSink};
 use cd_workflow::capability_qualification::{
@@ -1342,6 +1343,15 @@ fn terminal_channel_summary(events: &[StreamEvent]) -> String {
     )
 }
 
+fn typed_investigation_answer(
+    events: &[StreamEvent],
+) -> Option<&cd_core::investigation_answer::AnswerEnvelopeV1> {
+    events.iter().rev().find_map(|event| match event {
+        StreamEvent::InvestigationAnswer { envelope } => Some(envelope),
+        _ => None,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn case_ordinary_generation(
     paths: &Paths,
@@ -2042,7 +2052,20 @@ async fn case_linked_log_triage(
         if let Ok(o) = &outcome {
             created_sessions.push(o.session_id.clone());
             last_terminal_detail = terminal_channel_summary(&o.events);
-            if o.final_text.trim().is_empty() {
+            if let Some(envelope) = typed_investigation_answer(&o.events) {
+                let score = score_validated_investigation_answer(envelope, &key, &host);
+                last_scorer_detail = format!(
+                    "attempt {}: typed_v1 passed={} failed_dimensions=[{}]",
+                    attempt + 1,
+                    score.passed,
+                    score.failed_ids().join(",")
+                );
+                if score.passed {
+                    pass_seen = true;
+                } else {
+                    fail_seen = true;
+                }
+            } else if o.final_text.trim().is_empty() {
                 fail_seen = true;
                 last_scorer_detail = format!(
                     "attempt {}: no visible terminal answer; {}",
@@ -2086,7 +2109,7 @@ async fn case_linked_log_triage(
     }
 
     let product = match &last_outcome {
-        Some(Ok(o)) if o.final_text.trim().is_empty() => LaneResult {
+        Some(Ok(o)) if o.final_text.trim().is_empty() && typed_investigation_answer(&o.events).is_none() => LaneResult {
             executed: true,
             passed: false,
             detail: format!(
