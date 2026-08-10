@@ -118,11 +118,27 @@ query finds every relevant fact. Index exclusions, stale data, source limits,
 ambiguous wording, and model tool choice can all affect coverage.
 
 The default deadline policy is adaptive: local, private-network, and explicitly
-patient profiles receive a longer bounded allowance than managed profiles.
-This classification uses only saved profile configuration and the literal host;
-it does not perform DNS probing. A custom whole-turn ceiling in Settings is
-authoritative. **Settings → AI → Response timing** can also explicitly classify
-an unusual company gateway as Patient or Standard. Choosing evidence,
+patient profiles receive a longer bounded allowance than managed profiles
+(about **5 minutes** local/private vs **3 minutes** managed). This
+classification uses only saved profile configuration and the literal host; it
+does not perform DNS probing.
+
+**Settings → General → Whole-turn time limit** is the ordinary control:
+
+- **Auto (recommended)** — keeps the adaptive policy (does not lock a single
+  fixed ceiling).
+- **Standard** — fixed 3-minute whole-turn maximum.
+- **Patient** — fixed 5-minute whole-turn maximum.
+- **Custom** — friendly duration such as `90s`, `3m`, or `10m` (500ms–10m).
+
+That ceiling is a **maximum**; ContextDesk may finish sooner. CLI users can set
+the same saved policy with `contextdesk config deadline …`, or override one turn
+with `contextdesk chat --deadline 10m "…"`. Precedence: per-turn override →
+saved explicit → adaptive. Adaptive latency *learning* is future work; these
+controls only set policy.
+
+**Settings → AI → Response timing** can still classify an unusual company
+gateway as Patient or Standard for *adaptive* phase planning. Choosing evidence,
 retrieving evidence, and synthesizing the answer have separate caps, but all
 draw down the same monotonic whole-turn clock—moving to another phase never
 resets the turn.

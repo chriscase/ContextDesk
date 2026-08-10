@@ -369,7 +369,40 @@ contextdesk config init --project      # writes ./.contextdesk.toml instead
 contextdesk config validate [path]
 contextdesk config show                # effective config + which layer won each field
 contextdesk config path
+contextdesk config deadline show       # whole-turn deadline policy (read-only)
+contextdesk config deadline auto       # adaptive by provider class
+contextdesk config deadline set 10m    # explicit whole-turn ceiling (90s, 3m, 10m, …)
 ```
+
+### Whole-turn deadline
+
+The whole-turn deadline is the **maximum** time one chat turn may run. ContextDesk
+may finish sooner. Choosing, retrieval, and synthesis stay separately bounded
+inside that ceiling (see the Proven Methods handbook).
+
+**Precedence (effective ceiling for one turn):**
+
+1. Per-turn CLI override (`chat --deadline` / direct-question `--deadline`)
+2. Saved explicit policy (`config deadline set …`)
+3. Adaptive policy (`config deadline auto`) — 3 minutes for managed providers,
+   5 minutes for local/private-network profiles
+
+Adaptive *latency learning* is **not** implemented; these commands only set
+policy. Duration grammar: a positive whole number plus unit `ms`, `s`, or `m`
+(examples: `500ms`, `90s`, `3m`, `10m`). Decimals, negatives, mixed units, and
+values outside **500ms–10m** are rejected without clamping. `set` and `auto`
+change only `router.deadline_ms` / `router.deadline_is_explicit` in the shared
+`AppConfig`; they never rewrite credentials, profiles, or corpus settings.
+
+```bash
+contextdesk config deadline show
+contextdesk config deadline set 10m
+contextdesk chat --deadline 3m --dry-run "what happened?"
+contextdesk --deadline 90s "what happened?"   # direct-question shorthand
+```
+
+`--deadline` applies **only to that turn** and never writes config. Invalid
+durations fail before credential resolution or provider contact.
 
 ### The `config init` wizard
 
