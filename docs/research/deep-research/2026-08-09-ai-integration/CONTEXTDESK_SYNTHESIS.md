@@ -2,7 +2,7 @@
 
 Status: ContextDesk-owned engineering synthesis
 
-Last updated: 2026-08-09
+Last updated: 2026-08-10
 
 This document combines the three external research tasks with the current
 integration branch, existing architecture records, hermetic tests, and live
@@ -106,12 +106,17 @@ cross-model score fusion remain unsafe.
 - The quality harness separates compatibility, retrieval, answer, and
   orchestration evidence and scores semantic facts instead of exact model prose.
 - Earlier refinement-lab notes record successful DeepSeek V4 Flash triage
-  attempts, including correct initiating-cause and recovery citations.  The
-  current release line's bounded Vercel diagnostic does **not** reproduce a
-  validated linked-triage answer: lower-level generation, structured output,
-  selected context, and direct tool continuation pass, while linked triage
-  still ends in an empty-terminal/response-contract failure.  The historical
-  successes therefore remain useful evidence, not current release acceptance.
+  attempts, including correct initiating-cause and recovery citations. The
+  current release line now reproduces that result in the corrected bounded
+  Vercel diagnostic: lower-level generation, structured output, selected
+  context, direct tool continuation, and typed linked-log triage all completed
+  successfully on exact build `749e8339` (47.1 seconds, four triage requests).
+  The share-safe report records `gateway_model_status=pass`,
+  `product_workflow_status=pass`, and `answers_useful_status=pass`. The
+  diagnostic prompt must remain free of evaluator sequence examples: those
+  numbers can make the production classifier treat the request as a focused
+  query and bypass broad triage. The typed envelope, not rendered Markdown,
+  is the scorer's authority boundary.
 
 ## Product gaps revealed by the research and source audit
 
@@ -131,10 +136,10 @@ cross-model score fusion remain unsafe.
 4. **Repeat the no-Keychain live path.** Use the protected file explicitly and
    count credential-source reads; do not diagnose macOS dialog count as stage
    reloads.
-5. **Keep release claims narrow.** DeepSeek lower-level compatibility has live
-   Vercel evidence, but linked triage is still unproven on the current release
-   line.  Ordinary chat, attachments, employer-specific retrieval, and
-   packaged-app behavior need their own evidence.
+5. **Keep release claims narrow.** DeepSeek lower-level compatibility and the
+   corrected linked-triage workflow now have live Vercel evidence on the
+   release line. Employer-gateway behavior, embeddings/reranking quality, and
+   packaged-app behavior still need their own evidence.
 
 ### Retrieval integration immediately after the basics
 
@@ -186,9 +191,12 @@ The shortest honest path is:
 2. Commit the currently separated credential work.
 3. Run all documented local gates from a clean integration head.
 4. Build one acceptance artifact and run GUI/CLI smoke tests.
-5. Re-run live Vercel discovery, DeepSeek compatibility, ordinary chat,
-   attachment chat, and the accepted triage corpus without Keychain.
-6. Promote only after claims, diagnostics, and residuals match the evidence.
+5. Re-run live Vercel discovery and the bounded DeepSeek diagnostic when the
+   gateway contract or build changes; use the corrected typed triage result as
+   the Vercel baseline.
+6. Run the same focused diagnostic on the employer gateway with its exact
+   discovered model id, then promote only after claims, diagnostics, and
+   residuals match the evidence.
 
 ## Research proposals to adopt selectively
 

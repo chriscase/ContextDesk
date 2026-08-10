@@ -1,5 +1,10 @@
 # Vercel gateway diagnostic — DeepSeek V4 Flash — `e8e91178`
 
+> Historical baseline. The corrected release-line rerun is documented in
+> [`VERCEL_GATEWAY_DIAGNOSTIC_749E8339.md`](./VERCEL_GATEWAY_DIAGNOSTIC_749E8339.md)
+> and passes typed linked-log triage. The failure below remains valuable as a
+> record of the pre-fix behavior, but is not the current Vercel verdict.
+
 **Run date:** 2026-08-10  
 **Source build:** `e8e91178`  
 **Selected model:** exact discovered ID `deepseek/deepseek-v4-flash`  

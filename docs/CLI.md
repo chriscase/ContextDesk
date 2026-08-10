@@ -306,7 +306,7 @@ client, a second agent loop, or a diagnostic-only imitation of triage:
 | --- | --- |
 | Direct (smallest known-valid request through the raw provider backend) | `cd_workflow::capability_qualification::LiveQualificationTransport` + `cd_core::capability_qualification::run_qualification` — the same machinery `models verify` uses |
 | Product (the equivalent case through the real ContextDesk workflow) | `cd_workflow::chat::run_chat_workflow`, `cd_core::turn_trace::RecordingTurnTrace`, the same disposable-corpus pattern `doctor` uses |
-| Triage scoring | `cd_core::triage_quality::score_structured_triage_answer` — the same rubric `eval`/`logging-assessment` use |
+| Triage scoring | `cd_core::triage_quality::score_validated_investigation_answer` at the typed `investigation_answer.v1` authority boundary; legacy Markdown parsing remains only as a compatibility fallback |
 
 **Basic-level cases** (default; `--level extended` re-attempts each
 product-path case once more to observe retry/correction stability, never
@@ -319,12 +319,14 @@ to a model not qualified for that role, and specialty requests are never
 sent to a model not selected for that role.
 
 `linked_log_triage` seeds a disposable corpus containing an initiating
-trigger, a louder downstream symptom, an unrelated decoy incident, and a
-recovery event — the known-truth key (trigger/symptom tokens, whether root
-cause is establishable) lives only in the host-side scorer, never in
-model-visible input — then scores the model's structured answer for typed
-properties (citation identity, trigger-vs-symptom separation, recovery not
-promoted to cause, honest abstention) rather than exact wording.
+trigger, a louder downstream symptom, an independent ERROR decoy, WARN noise,
+and a recovery event — the known-truth key (trigger/symptom/decoy tokens,
+whether root cause is establishable) lives only in the host-side scorer, never
+in model-visible input — then scores the host-validated typed answer for
+citation identity, trigger-vs-symptom separation, decoy separation, and
+honest abstention rather than exact wording. The diagnostic prompt itself must
+remain free of evaluator IDs so it exercises the same broad-triage classifier
+as a real user request.
 
 **Classification** (evidence, not infallible proof of a single cause) per
 case: both lanes failed (`gateway_or_model_likely`), the direct lane passed
