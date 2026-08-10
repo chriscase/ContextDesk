@@ -425,9 +425,7 @@ fn per_case_budget(remaining: Duration, timeout_is_explicit: bool) -> Duration {
     if timeout_is_explicit {
         remaining
     } else {
-        remaining.min(Duration::from_secs(
-            DEFAULT_PER_CASE_SAFETY_TIMEOUT_SECS,
-        ))
+        remaining.min(Duration::from_secs(DEFAULT_PER_CASE_SAFETY_TIMEOUT_SECS))
     }
 }
 
@@ -2528,7 +2526,8 @@ mod tests {
         );
 
         let started = tokio::time::Instant::now();
-        let outcome = within_case_budget(budget, tokio::time::sleep(Duration::from_secs(46))).await;
+        let outcome =
+            within_case_budget(budget, tokio::time::sleep(Duration::from_secs(46))).await;
 
         assert!(outcome.is_err(), "the default safety ceiling must win");
         assert_eq!(started.elapsed(), Duration::from_secs(45));
@@ -2540,7 +2539,8 @@ mod tests {
         assert_eq!(budget, Duration::from_secs(600));
 
         let started = tokio::time::Instant::now();
-        let outcome = within_case_budget(budget, tokio::time::sleep(Duration::from_secs(46))).await;
+        let outcome =
+            within_case_budget(budget, tokio::time::sleep(Duration::from_secs(46))).await;
 
         assert!(
             outcome.is_ok(),
@@ -2553,7 +2553,8 @@ mod tests {
     async fn explicit_policy_still_bounds_a_slow_case_by_the_remaining_whole_run_deadline() {
         let budget = per_case_budget(Duration::from_secs(17), true);
         let started = tokio::time::Instant::now();
-        let outcome = within_case_budget(budget, tokio::time::sleep(Duration::from_secs(18))).await;
+        let outcome =
+            within_case_budget(budget, tokio::time::sleep(Duration::from_secs(18))).await;
 
         assert!(
             outcome.is_err(),
@@ -2585,7 +2586,10 @@ mod tests {
             cancel.store(true, Ordering::SeqCst);
         };
 
-        let (outcome, ()) = tokio::join!(within_case_budget(budget, case), cancel_after_slow_start);
+        let (outcome, ()) = tokio::join!(
+            within_case_budget(budget, case),
+            cancel_after_slow_start
+        );
 
         assert_eq!(
             outcome.expect("cancellation must beat the 600s budget"),
