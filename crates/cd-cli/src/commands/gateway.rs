@@ -2486,4 +2486,192 @@ mod tests {
         assert!(!case.direct.executed);
         assert!(!case.product.executed);
     }
+
+    /// Structural reuse guard: the orchestrator must keep calling the
+    /// production seams (qualification, product chat, triage scorer,
+    /// discard) and must not grow a second HTTP client of its own.
+    #[test]
+    fn orchestrator_source_reuses_production_entrypoints_without_a_parallel_http_client() {
+        let full = include_str!("gateway.rs");
+        // Inspect only production code — the unit-test module itself may
+        // mention forbidden strings as negative assertions.
+        let src = full
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production module precedes unit tests");
+        for symbol in [
+            "run_qualification",
+            "LiveQualificationTransport",
+            "run_chat_workflow",
+            "score_structured_triage_answer",
+            "LogCorpus::discard",
+            "backend_for_provider",
+            "redact_reason",
+        ] {
+            assert!(
+                src.contains(symbol),
+                "gateway diagnose must keep reusing production symbol `{symbol}`"
+            );
+        }
+        // A second, diagnostic-only client would re-introduce the exact risk
+        // the contract audit forbade. Production transport construction lives
+        // in LiveQualificationTransport / run_chat_workflow, not here.
+        // Split the needle so this assertion text cannot match itself.
+        let reqwest_builder = format!("{}::Client::{}", "reqwest", "builder");
+        assert!(
+            !src.contains(&reqwest_builder),
+            "orchestrator must not construct its own reqwest client"
+        );
+        let openai_ctor = format!("{}::new(", "OpenAiCompatibleClient");
+        assert!(
+            !src.contains(&openai_ctor),
+            "orchestrator must not construct a parallel OpenAI client; \
+             qualification and chat workflow own transport construction"
+        );
+    }
+
+    #[test]
+    fn resolve_credentials_once_reads_a_protected_file_exactly_once_and_never_keychain() {
+        use cd_core::keychain_store::{file_secret_ref, MemorySecretStore, ReferencedSecretStore};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingStore<S: SecretStore> {
+            inner: S,
+            reads: AtomicUsize,
+        }
+        impl<S: SecretStore> SecretStore for CountingStore<S> {
+            fn get(&self, ref_id: &str) -> cd_core::error::CoreResult<Option<String>> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                // Keychain-shaped refs must never be attempted by this path
+                // under the protected-file hermetic setup.
+                assert!(
+                    !ref_id.starts_with("keychain:") && !ref_id.starts_with("provider/"),
+                    "protected-file diagnostic setup must not touch keychain refs: {ref_id}"
+                );
+                self.inner.get(ref_id)
+            }
+            fn set(&self, ref_id: &str, secret: &str) -> cd_core::error::CoreResult<()> {
+                self.inner.set(ref_id, secret)
+            }
+            fn delete(&self, ref_id: &str) -> cd_core::error::CoreResult<()> {
+                self.inner.delete(ref_id)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gwdx-unit.secret");
+        std::fs::write(&path, "sk-gwdx-unit-only").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let reference = file_secret_ref(&path).unwrap();
+        let profile = ProviderProfile {
+            id: "unit-profile".into(),
+            label: "unit".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "http://127.0.0.1:9/v1".into(),
+            api_key_ref: Some(reference),
+            chat_model: "unit-model".into(),
+            embedding_model: None,
+            embedding_base_url: None,
+            capabilities: cd_core::providers::ProviderCapabilities::chat_remote(),
+            local_only: false,
+            deadline_preference: Default::default(),
+        };
+        let store = CountingStore {
+            inner: ReferencedSecretStore::new(),
+            reads: AtomicUsize::new(0),
+        };
+        // Touch MemorySecretStore so the import stays meaningful if routing changes.
+        let _ = MemorySecretStore::new();
+        let creds = resolve_credentials_once(&profile, &store).expect("resolve");
+        assert_eq!(
+            store.reads.load(Ordering::SeqCst),
+            1,
+            "direct-lane credential resolution must hit the SecretStore exactly once"
+        );
+        assert_eq!(creds.api_key.as_deref(), Some("sk-gwdx-unit-only"));
+        assert!(creds.credentials_read);
+    }
+
+    #[test]
+    fn resolve_credentials_once_for_ollama_performs_zero_secret_store_reads() {
+        struct CountingEmpty;
+        impl SecretStore for CountingEmpty {
+            fn get(&self, _: &str) -> cd_core::error::CoreResult<Option<String>> {
+                unreachable!("ollama must not read secrets");
+            }
+            fn set(&self, _: &str, _: &str) -> cd_core::error::CoreResult<()> {
+                Ok(())
+            }
+            fn delete(&self, _: &str) -> cd_core::error::CoreResult<()> {
+                Ok(())
+            }
+        }
+        let profile = ProviderProfile {
+            id: "ollama".into(),
+            label: "ollama".into(),
+            kind: ProviderKind::Ollama,
+            base_url: "http://127.0.0.1:11434".into(),
+            api_key_ref: None,
+            chat_model: "llama".into(),
+            embedding_model: None,
+            embedding_base_url: None,
+            capabilities: cd_core::providers::ProviderCapabilities::local_full(),
+            local_only: true,
+            deadline_preference: Default::default(),
+        };
+        let creds = resolve_credentials_once(&profile, &CountingEmpty).expect("resolve");
+        assert!(!creds.credentials_read);
+        assert!(creds.api_key.is_none());
+    }
+
+    #[test]
+    fn cleanup_report_balances_when_every_tracked_resource_is_removed() {
+        let report = CleanupReport {
+            corpora_created: 2,
+            corpora_removed: 2,
+            sessions_created: 1,
+            sessions_removed: 1,
+            failures: vec![],
+        };
+        assert!(report.ok());
+        let failed = CleanupReport {
+            corpora_created: 1,
+            corpora_removed: 0,
+            sessions_created: 0,
+            sessions_removed: 0,
+            failures: vec!["corpus x was not removed: gone".into()],
+        };
+        assert!(!failed.ok());
+    }
+
+    #[test]
+    fn answers_useful_verdict_is_independent_of_compatibility_verdicts() {
+        // A usefulness gap must flip answers_useful without flipping the two
+        // compatibility flags — the product surface documents this separation.
+        let cases = vec![CaseReport {
+            case_id: "ordinary_generation",
+            description: "x",
+            direct: pass_lane(),
+            product: pass_lane(),
+            scorer: fail_lane(),
+            classification: CaseClassification::UsefulnessGap,
+        }];
+        let v = compute_verdicts(&cases);
+        assert!(v.gateway_model_compatible);
+        assert!(v.product_workflow_compatible);
+        assert!(!v.answers_useful);
+    }
+
+    #[test]
+    fn not_run_cases_do_not_poison_compatibility_verdicts() {
+        let cases = vec![skipped_case("linked_log_triage", "deadline")];
+        let v = compute_verdicts(&cases);
+        assert!(v.gateway_model_compatible);
+        assert!(v.product_workflow_compatible);
+        assert!(v.answers_useful);
+    }
 }

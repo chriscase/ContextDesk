@@ -562,3 +562,533 @@ async fn direct_and_product_lanes_use_the_exact_selected_profile_and_model_not_t
         "expected at least one request (qualification or product-path) to carry a model field"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Deadline honesty: a permanently stalled gateway must surface deadline
+// exceeded (or cancelled-style terminal honesty) — never a silent Compatible
+// verdict for cases that never completed.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn stalled_run_marks_deadline_exceeded_and_never_silently_compatible() {
+    let gateway = MockGateway::start_routed(|_req| Step::Stall).await;
+    let data_dir = tempfile::tempdir().unwrap();
+    write_config(
+        data_dir.path(),
+        openai_profile_with_ref(&format!("{}/v1", gateway.base_url()), None),
+    );
+
+    let mut cmd = cli(data_dir.path());
+    cmd.args(["--json", "gateway", "diagnose", "--yes", "--timeout", "3"]);
+    let output = run_blocking(cmd).await;
+    let value: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    let data = &value["data"];
+
+    assert_eq!(
+        data["deadline_exceeded"], true,
+        "a permanently stalled gateway that burns the overall deadline must set \
+         deadline_exceeded=true, not leave the operator with a silent false: {data}"
+    );
+    assert_eq!(
+        data["cancelled"], false,
+        "stall/timeout must not be misclassified as operator cancel: {data}"
+    );
+
+    // No case that never finished a product lane may be reported Compatible.
+    if let Some(cases) = data["cases"].as_array() {
+        for case in cases {
+            let classification = case["classification"].as_str().unwrap_or("");
+            let product_executed = case["product"]["executed"].as_bool().unwrap_or(false);
+            if !product_executed {
+                assert_ne!(
+                    classification, "compatible",
+                    "case {} never executed product lane but was Compatible: {case}",
+                    case["case_id"]
+                );
+            }
+        }
+    }
+
+    // Cleanup still balances under the timeout terminal.
+    assert_eq!(
+        data["cleanup"]["corpora_created"],
+        data["cleanup"]["corpora_removed"]
+    );
+    assert_eq!(
+        data["cleanup"]["sessions_created"],
+        data["cleanup"]["sessions_removed"]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Failure terminal: gateway returns hard errors; cleanup still balances and
+// no case is silently Compatible without both lanes actually passing.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn hard_gateway_errors_still_cleanup_and_do_not_claim_compatible() {
+    let gateway = MockGateway::start_routed(|_req| {
+        Step::respond(Response::json(
+            500,
+            &json!({"error": {"message": "synthetic upstream failure", "type": "server_error"}}),
+        ))
+    })
+    .await;
+    let data_dir = tempfile::tempdir().unwrap();
+    write_config(
+        data_dir.path(),
+        openai_profile_with_ref(&format!("{}/v1", gateway.base_url()), None),
+    );
+
+    let mut cmd = cli(data_dir.path());
+    cmd.args(["--json", "gateway", "diagnose", "--yes", "--timeout", "30"]);
+    let output = run_blocking(cmd).await;
+    let value: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    let data = &value["data"];
+
+    assert_eq!(
+        data["cleanup"]["corpora_created"],
+        data["cleanup"]["corpora_removed"],
+        "cleanup must balance on the failure terminal: {}",
+        data["cleanup"]
+    );
+    assert_eq!(
+        data["cleanup"]["sessions_created"],
+        data["cleanup"]["sessions_removed"]
+    );
+    assert!(
+        data["cleanup"]["failures"]
+            .as_array()
+            .map(|f| f.is_empty())
+            .unwrap_or(false),
+        "cleanup failures must be empty on a normal failure-terminal run: {}",
+        data["cleanup"]
+    );
+
+    // Compatibility verdicts must not claim gateway/model ok when every
+    // exercised chat case saw dual-lane failure evidence.
+    let cases = data["cases"].as_array().cloned().unwrap_or_default();
+    let any_gateway_or_model = cases
+        .iter()
+        .any(|c| c["classification"].as_str() == Some("gateway_or_model_likely"));
+    let any_compatible = cases
+        .iter()
+        .any(|c| c["classification"].as_str() == Some("compatible"));
+    assert!(
+        any_gateway_or_model || !any_compatible,
+        "hard upstream 500s must not produce a silent all-Compatible matrix: {cases:?}"
+    );
+    assert_eq!(
+        data["verdicts"]["gateway_model_compatible"], false,
+        "verdicts.gateway_model_compatible must be false when dual-lane failures exist"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Protected-file credential: reaches Authorization on the wire once-ish,
+// never Keychain, never share-safe artifact / stdout / report details.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn protected_file_credential_reaches_wire_never_share_safe_output() {
+    let gateway = permissive_gateway().await;
+    let dir = tempfile::tempdir().unwrap();
+    let secret = "sk-gwdx-protected-file-ONLY-synthetic";
+    let api_key_ref = synthetic_protected_file(&dir, "pf.secret", secret);
+    assert!(
+        api_key_ref.starts_with("file:"),
+        "hermetic setup must use a file: protected-file ref, not keychain: {api_key_ref}"
+    );
+    let data_dir = tempfile::tempdir().unwrap();
+    write_config(
+        data_dir.path(),
+        openai_profile_with_ref(&format!("{}/v1", gateway.base_url()), Some(api_key_ref)),
+    );
+
+    let mut cmd = cli(data_dir.path());
+    cmd.args(["--json", "gateway", "diagnose", "--yes", "--timeout", "30"]);
+    let output = run_blocking(cmd).await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stdout.contains(secret) && !stderr.contains(secret),
+        "credential must never appear on stdout/stderr"
+    );
+
+    let value: Value = serde_json::from_str(&stdout).expect("json envelope");
+    let data = &value["data"];
+    assert_eq!(
+        data["credentials_read"], true,
+        "report must honestly state credentials were read for a file: ref"
+    );
+
+    // Wire: at least one Authorization bearer carrying the synthetic secret.
+    let mut auth_hits = 0usize;
+    for request in gateway.requests() {
+        if let Some(auth) = request.header("authorization") {
+            if auth.contains(secret) {
+                auth_hits += 1;
+            }
+        }
+    }
+    assert!(
+        auth_hits >= 1,
+        "protected-file credential must reach the Authorization header on the wire \
+         (got {auth_hits} hits across {} requests)",
+        gateway.request_count()
+    );
+
+    let artifact_dir = data["artifact_dir"].as_str().expect("artifact_dir");
+    let report_text =
+        std::fs::read_to_string(Path::new(artifact_dir).join("report.json")).expect("report");
+    assert!(
+        !report_text.contains(secret),
+        "share-safe report must not embed the credential"
+    );
+    assert!(
+        !report_text.contains("Authorization"),
+        "share-safe report must not embed Authorization header text"
+    );
+    // Absolute private paths: the data_dir itself must not appear in the
+    // written share-safe report (artifact_dir is set after write, so the
+    // on-disk report.json keeps artifact_dir null — still forbid data_dir).
+    let data_dir_str = data_dir.path().to_string_lossy();
+    assert!(
+        !report_text.contains(data_dir_str.as_ref()),
+        "share-safe report must not embed the operator data_dir absolute path"
+    );
+    assert!(
+        !report_text.contains(gateway.base_url()),
+        "share-safe report must not embed the raw endpoint URL"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Role gating: an embedding-named model must never plan/run chat specialty
+// cases as Compatible. Unsupported / not-run stays non-pass.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn embedding_role_never_runs_chat_cases_as_compatible() {
+    let gateway = MockGateway::start_routed(|_req| {
+        // Embeddings contract may hit /embeddings; return a tiny vector body
+        // or a generic JSON — either way the plan must not expand to chat cases.
+        Step::respond(Response::json_ok(&json!({
+            "object": "list",
+            "data": [{"embedding": [0.1, 0.2, 0.3], "index": 0}],
+            "model": "text-embedding-3-small",
+        })))
+    })
+    .await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut profile = openai_profile_with_ref(&format!("{}/v1", gateway.base_url()), None);
+    profile.chat_model = "text-embedding-3-small".into();
+    write_config(data_dir.path(), profile);
+
+    let mut cmd = cli(data_dir.path());
+    cmd.args(["--json", "gateway", "diagnose", "--yes", "--timeout", "20"]);
+    let output = run_blocking(cmd).await;
+    let value: Value = serde_json::from_slice(&output.stdout).expect("json envelope");
+    let data = &value["data"];
+
+    assert_eq!(
+        data["role_hint"], "embedding",
+        "name-hint must classify this model as embedding: {data}"
+    );
+    let cases = data["cases"].as_array().cloned().unwrap_or_default();
+    assert!(
+        cases
+            .iter()
+            .all(|c| c["case_id"].as_str() == Some("embedding_or_rerank_contract")),
+        "embedding role must plan only the specialty case, never chat cases: {cases:?}"
+    );
+    for case in &cases {
+        // Name-hint alone must never force Compatible without measured pass.
+        // If the specialty case did not execute product/direct successfully,
+        // classification must not be Compatible.
+        let classification = case["classification"].as_str().unwrap_or("");
+        let product_passed = case["product"]["passed"].as_bool().unwrap_or(false);
+        let product_executed = case["product"]["executed"].as_bool().unwrap_or(false);
+        if classification == "compatible" {
+            assert!(
+                product_executed && product_passed,
+                "Compatible requires a measured product pass, not a name hint: {case}"
+            );
+        }
+        if !product_executed {
+            assert_ne!(classification, "compatible");
+            assert_eq!(classification, "not_run");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --no-color: progressive text rendering must not emit ANSI SGR sequences.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn no_color_text_output_contains_no_ansi_escape_bytes() {
+    let gateway = permissive_gateway().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    write_config(
+        data_dir.path(),
+        openai_profile_with_ref(&format!("{}/v1", gateway.base_url()), None),
+    );
+
+    let mut cmd = cli(data_dir.path());
+    cmd.args([
+        "--no-color",
+        "gateway",
+        "diagnose",
+        "--yes",
+        "--timeout",
+        "30",
+    ]);
+    let output = run_blocking(cmd).await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains('\u{1b}') && !stderr.contains('\u{1b}'),
+        " --no-color must suppress ANSI escapes\nstdout={stdout}\nstderr={stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Share-safe report: model id, profile id, endpoint, secret, absolute paths,
+// and raw provider error bodies stay out of the written bundle.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn share_safe_report_redacts_identity_endpoint_paths_and_bodies() {
+    let gateway = MockGateway::start_routed(|_req| {
+        Step::respond(Response::json(
+            401,
+            &json!({
+                "error": {
+                    "message": "invalid_api_key sk-should-never-leak-in-report body leak",
+                    "type": "auth"
+                }
+            }),
+        ))
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let secret = "sk-should-never-leak-in-report";
+    let api_key_ref = synthetic_protected_file(&dir, "redact.secret", secret);
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut profile =
+        openai_profile_with_ref(&format!("{}/v1", gateway.base_url()), Some(api_key_ref));
+    profile.id = "private-profile-id-xyz".into();
+    profile.chat_model = "private-catalog-model-abc".into();
+    write_config(data_dir.path(), profile);
+
+    let mut cmd = cli(data_dir.path());
+    cmd.args(["--json", "gateway", "diagnose", "--yes", "--timeout", "20"]);
+    let output = run_blocking(cmd).await;
+    let value: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let artifact_dir = value["data"]["artifact_dir"].as_str().unwrap();
+    let report_text =
+        std::fs::read_to_string(Path::new(artifact_dir).join("report.json")).unwrap();
+
+    for forbidden in [
+        secret,
+        "private-profile-id-xyz",
+        "private-catalog-model-abc",
+        gateway.base_url(),
+        data_dir.path().to_str().unwrap(),
+        "Authorization",
+        "Bearer ",
+    ] {
+        assert!(
+            !report_text.contains(forbidden),
+            "share-safe report must not contain {forbidden:?}\nreport={report_text}"
+        );
+    }
+
+    // Pseudonyms present and non-empty; raw ids absent (above).
+    let report: Value = serde_json::from_str(&report_text).unwrap();
+    assert!(
+        report["profile_pseudonym"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("p-")),
+        "profile_pseudonym missing: {report}"
+    );
+    assert!(
+        report["model_pseudonym"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("p-")),
+        "model_pseudonym missing: {report}"
+    );
+    assert!(
+        report["endpoint_fingerprint"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty() && !s.contains("http")),
+        "endpoint_fingerprint must be non-URL fingerprint: {report}"
+    );
+
+    // Manifest checksum still matches report bytes under redaction.
+    let report_bytes = std::fs::read(Path::new(artifact_dir).join("report.json")).unwrap();
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(Path::new(artifact_dir).join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let expected = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&report_bytes);
+        h.finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    assert_eq!(manifest["files"][0]["sha256"].as_str().unwrap(), expected);
+}
+
+// ---------------------------------------------------------------------------
+// Missing profile fails closed before any provider contact.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn missing_profile_fails_before_any_provider_request() {
+    let gateway = permissive_gateway().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    write_config(
+        data_dir.path(),
+        openai_profile_with_ref(&format!("{}/v1", gateway.base_url()), None),
+    );
+
+    let mut cmd = cli(data_dir.path());
+    cmd.args([
+        "--json",
+        "--profile",
+        "does-not-exist",
+        "gateway",
+        "diagnose",
+        "--yes",
+        "--timeout",
+        "10",
+    ]);
+    let output = run_blocking(cmd).await;
+    assert!(
+        !output.status.success(),
+        "missing --profile must fail closed"
+    );
+    assert_eq!(
+        gateway.request_count(),
+        0,
+        "no provider request may occur when the selected profile is missing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JSONL plan advertises only share_safe unless --raw is acknowledged; one
+// terminal line remains a hard invariant under failure.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn jsonl_plan_artifact_classes_and_single_terminal_under_failure() {
+    let gateway = MockGateway::start_routed(|_req| {
+        Step::respond(Response::json(503, &json!({"error": "unavailable"})))
+    })
+    .await;
+    let data_dir = tempfile::tempdir().unwrap();
+    write_config(
+        data_dir.path(),
+        openai_profile_with_ref(&format!("{}/v1", gateway.base_url()), None),
+    );
+
+    let mut cmd = cli(data_dir.path());
+    cmd.args(["--jsonl", "gateway", "diagnose", "--yes", "--timeout", "20"]);
+    let output = run_blocking(cmd).await;
+    let lines = parse_jsonl(output.stdout.as_slice());
+    assert_eq!(lines[0]["type"], "plan");
+    let classes = lines[0]["artifact_classes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        classes
+            .iter()
+            .any(|c| c.as_str() == Some("share_safe_bundle")),
+        "plan must advertise share_safe_bundle: {classes:?}"
+    );
+    assert!(
+        !classes
+            .iter()
+            .any(|c| c.as_str() == Some("private_raw_capture")),
+        "without --raw the plan must not advertise private_raw_capture: {classes:?}"
+    );
+    let terminals = lines
+        .iter()
+        .filter(|l| l["type"] == "verdict" || l["type"] == "cancelled")
+        .count();
+    assert_eq!(
+        terminals, 1,
+        "exactly one terminal line under failure: {lines:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Investigator name-hint alone cannot force Compatible when the mock only
+// returns untyped plain text (no tools, no structured JSON, no marker echo).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn investigator_name_hint_cannot_force_compatible_without_measured_contract() {
+    let gateway = permissive_gateway().await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut profile = openai_profile_with_ref(&format!("{}/v1", gateway.base_url()), None);
+    // Strong investigator-shaped name; still must be measured, not trusted.
+    profile.chat_model = "gpt-4o-investigator-synthetic".into();
+    profile.id = "hint-profile".into();
+    write_config(data_dir.path(), profile);
+
+    let mut cmd = cli(data_dir.path());
+    cmd.args([
+        "--json",
+        "--profile",
+        "hint-profile",
+        "--model",
+        "gpt-4o-investigator-synthetic",
+        "gateway",
+        "diagnose",
+        "--yes",
+        "--timeout",
+        "30",
+    ]);
+    let output = run_blocking(cmd).await;
+    let value: Value = serde_json::from_slice(&output.stdout).expect("json");
+    let data = &value["data"];
+    let cases = data["cases"].as_array().cloned().unwrap_or_default();
+    assert!(!cases.is_empty(), "chat role must plan cases: {data}");
+
+    // The plain mock answer cannot satisfy marker/structured/tool contracts.
+    // At least one case must fail measurement rather than all silently Compatible.
+    let measured_fail = cases.iter().any(|c| {
+        matches!(
+            c["classification"].as_str(),
+            Some("gateway_or_model_likely")
+                | Some("product_integration_likely")
+                | Some("usefulness_gap")
+                | Some("retry_required")
+        )
+    });
+    assert!(
+        measured_fail,
+        "investigator name-hint alone must not green-wash a plain mock completion: {cases:?}"
+    );
+    // Direct qualification against a plain completion also fails typed checks;
+    // ordinary_generation product fails marker match. Ensure we never report
+    // Compatible for ordinary_generation under this mock.
+    if let Some(gen) = cases
+        .iter()
+        .find(|c| c["case_id"].as_str() == Some("ordinary_generation"))
+    {
+        assert_ne!(
+            gen["classification"].as_str(),
+            Some("compatible"),
+            "ordinary_generation must not be Compatible when the marker was not echoed: {gen}"
+        );
+    }
+}
