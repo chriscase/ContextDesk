@@ -23,6 +23,10 @@ use crate::human_hierarchy::{
 use crate::render::{
     ChatOutcomeSummary, ChatStatusRenderer, TerminalCapabilities, TerminalTextSanitizer,
 };
+use cd_core::capability_qualification::{
+    capability_contract_verdict, load_qualification_store, qualification_store_path,
+    CapabilityContract, ContractVerdict, QualificationKey, QualificationStore,
+};
 use cd_core::config::AppConfig;
 use cd_core::deadline_controls::{
     apply_turn_override, format_deadline_ms, parse_deadline_duration,
@@ -54,6 +58,7 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 pub async fn run(
     args: &ChatArgs,
     cache_root: &Path,
+    qualification_config_dir: &Path,
     secrets: &dyn SecretStore,
     cfg: &AppConfig,
     sessions: &SessionStore,
@@ -373,10 +378,7 @@ pub async fn run(
                 trace_sink,
                 user_selection: args.user_selection.as_deref(),
                 multi_model_mode: args.mode.to_core(),
-                // The CLI keeps no qualification store, so a required-qualified
-                // reviewer degrades honestly unless the user sets
-                // require_qualified=false in config.
-                reviewer_qualified: None,
+                reviewer_qualified: reviewer_qualification(cfg, qualification_config_dir),
             },
             Some(cancel.clone()),
             Some(&mut live_sink),
@@ -778,6 +780,39 @@ fn investigation_answer_from_events(
     })
 }
 
+/// Read the shared, secret-free qualification evidence for the configured
+/// reviewer. A missing, stale, cancelled, or malformed store is deliberately
+/// treated as unqualified/unverified by returning `None`; it must never make
+/// review appear authorized merely because a reviewer is named in config.
+fn reviewer_qualification(cfg: &AppConfig, config_dir: &Path) -> Option<bool> {
+    let path = qualification_store_path(config_dir);
+    let store = load_qualification_store(&path).ok()?;
+    reviewer_qualification_from_store(cfg, &store)
+}
+
+fn reviewer_qualification_from_store(cfg: &AppConfig, store: &QualificationStore) -> Option<bool> {
+    let reviewer = cfg.multi_model.reviewer.as_ref()?;
+    let profile = cfg
+        .providers
+        .profiles
+        .iter()
+        .find(|profile| profile.id == reviewer.profile_id)?;
+    let model = reviewer
+        .model
+        .as_deref()
+        .unwrap_or(&profile.chat_model)
+        .trim();
+    if model.is_empty() {
+        return Some(false);
+    }
+    let key = QualificationKey::new(&profile.id, &profile.base_url, model);
+    let report = store.get(&key);
+    Some(matches!(
+        capability_contract_verdict(report, CapabilityContract::JsonProposal),
+        ContractVerdict::Qualified
+    ))
+}
+
 pub fn validate_question(args: &ChatArgs, format: OutputFormat) -> CliResult<()> {
     if args.question.join(" ").trim().is_empty() {
         return fail_before_turn(
@@ -882,6 +917,80 @@ mod implicit_resolution_tests {
             resolve_implicit_profile_override(&cfg, Some("available")).unwrap(),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod reviewer_qualification_tests {
+    use super::*;
+    use cd_core::capability_qualification::{
+        CapabilityCheckResult, CapabilityKind, CapabilityStatus, QualificationReport,
+    };
+    use cd_core::config::ReviewerRoleConfig;
+    use cd_core::providers::ProviderProfile;
+
+    fn profile(id: &str) -> ProviderProfile {
+        let mut profile = ProviderProfile::ollama_local();
+        profile.id = id.to_string();
+        profile.chat_model = "reviewer-model".to_string();
+        profile
+    }
+
+    fn config() -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.providers.profiles = vec![profile("reviewer")];
+        cfg.multi_model.reviewer = Some(ReviewerRoleConfig {
+            profile_id: "reviewer".into(),
+            model: None,
+            require_qualified: true,
+            allow_remote: false,
+        });
+        cfg
+    }
+
+    fn report(cfg: &AppConfig) -> QualificationReport {
+        let profile = &cfg.providers.profiles[0];
+        QualificationReport {
+            key: QualificationKey::new(&profile.id, &profile.base_url, &profile.chat_model),
+            checks: vec![
+                CapabilityCheckResult {
+                    kind: CapabilityKind::BasicGeneration,
+                    status: CapabilityStatus::Pass,
+                    elapsed_ms: 1,
+                    tested_at: 1,
+                    reason: "pass".into(),
+                },
+                CapabilityCheckResult {
+                    kind: CapabilityKind::StructuredOutput,
+                    status: CapabilityStatus::Pass,
+                    elapsed_ms: 1,
+                    tested_at: 1,
+                    reason: "pass".into(),
+                },
+            ],
+            role_hint: "chat".into(),
+            cancelled: false,
+            stale: false,
+            finished_at: 1,
+        }
+    }
+
+    #[test]
+    fn reviewer_qualification_uses_shared_json_contract() {
+        let cfg = config();
+        let mut store = QualificationStore::default();
+        store.put(report(&cfg));
+        assert_eq!(reviewer_qualification_from_store(&cfg, &store), Some(true));
+    }
+
+    #[test]
+    fn stale_reviewer_evidence_never_authorizes_review() {
+        let cfg = config();
+        let mut evidence = report(&cfg);
+        evidence.stale = true;
+        let mut store = QualificationStore::default();
+        store.put(evidence);
+        assert_eq!(reviewer_qualification_from_store(&cfg, &store), Some(false));
     }
 }
 

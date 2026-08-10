@@ -5012,10 +5012,14 @@ async fn agent_turn(
         );
         let store = state.qualification_store.lock().ok()?;
         let report = store.get(&key)?;
-        use cd_core::capability_qualification::{CapabilityKind, CapabilityStatus};
+        use cd_core::capability_qualification::{
+            capability_contract_verdict, CapabilityContract, ContractVerdict,
+        };
         Some(
-            report.status_of(CapabilityKind::BasicGeneration) == CapabilityStatus::Pass
-                && report.status_of(CapabilityKind::StructuredOutput) == CapabilityStatus::Pass,
+            matches!(
+                capability_contract_verdict(Some(report), CapabilityContract::JsonProposal),
+                ContractVerdict::Qualified
+            ),
         )
     });
     let review_context_budget = cfg

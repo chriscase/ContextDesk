@@ -234,6 +234,7 @@ async fn dispatch(
             let result = commands::chat::run(
                 args,
                 &paths.cache_root,
+                &paths.config_dir,
                 &secrets,
                 app_cfg,
                 &sessions,
