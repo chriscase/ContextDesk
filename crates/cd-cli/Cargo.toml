@@ -39,3 +39,5 @@ cd-test-gateway = { path = "../cd-test-gateway" }
 # in-place-redraw code path is unobservable through assert_cmd's piped,
 # non-tty subprocess, since IsTerminal is always false there.
 portable-pty = "0.8"
+# Deterministic paused-clock coverage for gateway diagnostic budgets.
+tokio = { workspace = true, features = ["test-util"] }

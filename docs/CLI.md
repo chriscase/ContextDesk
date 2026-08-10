@@ -341,6 +341,16 @@ the artifact classes this run will produce are shown; the operation then
 requires an interactive `y` or `--yes` (required for any non-interactive
 use, including `--json`/`--jsonl`).
 
+**Deadline policy.** The deadline always bounds the whole diagnostic run.
+When `--timeout` is omitted, each case also has a 45-second safety ceiling so
+one accidentally stalled case cannot consume the default 180-second run. An
+explicit `--timeout N` is treated as an intentional allowance for slow
+gateways: each case may use the operation's remaining time, but can never run
+past the explicit whole-run deadline. For example, `--timeout 600` no longer
+silently imposes a 45-second case timeout. Request counts, attempt counts,
+cooperative cancellation, cleanup, and activity tracing remain bounded and
+unchanged.
+
 **Credentials.** The selected profile's credential is resolved once for
 the direct lane via the existing `SecretStore`/`ReferencedSecretStore`
 path (works with a protected-file reference — no Keychain required); the

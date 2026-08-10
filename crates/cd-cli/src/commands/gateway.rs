@@ -78,7 +78,11 @@ pub const GATEWAY_DIAGNOSTIC_SCHEMA_ID: &str = "contextdesk.gateway_diagnostic.v
 pub const GATEWAY_DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 180;
-const PER_CASE_TIMEOUT_SECS: u64 = 45;
+/// Safety ceiling for each case when the operator did not choose a deadline.
+/// An explicit `--timeout` is intentional and instead lets a case use the
+/// operation's remaining time; the whole-operation deadline is still the
+/// hard ceiling.
+const DEFAULT_PER_CASE_SAFETY_TIMEOUT_SECS: u64 = 45;
 /// Distinctive synthetic markers — never a real hostname/service/company
 /// term — so a model's answer citing one is unambiguous proof it used this
 /// run's disposable evidence, never leftover state from prior use.
@@ -326,7 +330,7 @@ pub async fn run(
             continue;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let case_budget = remaining.min(Duration::from_secs(PER_CASE_TIMEOUT_SECS));
+        let case_budget = per_case_budget(remaining, args.timeout.is_some());
         let report = run_one_case(
             case_id,
             &profile,
@@ -408,6 +412,33 @@ pub async fn run(
     );
 
     Ok(report)
+}
+
+/// Return a provider-neutral budget for one diagnostic case.
+///
+/// The operation's remaining time is always the hard upper bound. When the
+/// operator accepts the default deadline, a shorter per-case ceiling prevents
+/// one accidentally stalled case from consuming the whole run. Supplying
+/// `--timeout` explicitly opts into allowing a legitimately slow case to use
+/// the remaining operation budget, including values such as 600 seconds.
+fn per_case_budget(remaining: Duration, timeout_is_explicit: bool) -> Duration {
+    if timeout_is_explicit {
+        remaining
+    } else {
+        remaining.min(Duration::from_secs(
+            DEFAULT_PER_CASE_SAFETY_TIMEOUT_SECS,
+        ))
+    }
+}
+
+async fn within_case_budget<F>(
+    budget: Duration,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout(budget.max(Duration::from_millis(1)), future).await
 }
 
 fn run_id_for_dir(run_id: &str) -> String {
@@ -1148,7 +1179,7 @@ async fn one_turn(
         },
     ));
     let raced = tokio::select! {
-        result = tokio::time::timeout(budget.max(Duration::from_millis(1)), turn.as_mut()) => result,
+        result = within_case_budget(budget, turn.as_mut()) => result,
         _ = tokio::signal::ctrl_c(), if false => unreachable!(),
     };
     let outcome = match raced {
@@ -2259,6 +2290,7 @@ fn write_private_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn pass_lane() -> LaneResult {
         LaneResult {
@@ -2485,5 +2517,80 @@ mod tests {
         assert_eq!(case.classification, CaseClassification::NotRun);
         assert!(!case.direct.executed);
         assert!(!case.product.executed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_policy_times_out_a_slow_case_at_the_45_second_safety_ceiling() {
+        let budget = per_case_budget(Duration::from_secs(600), false);
+        assert_eq!(
+            budget,
+            Duration::from_secs(DEFAULT_PER_CASE_SAFETY_TIMEOUT_SECS)
+        );
+
+        let started = tokio::time::Instant::now();
+        let outcome = within_case_budget(budget, tokio::time::sleep(Duration::from_secs(46))).await;
+
+        assert!(outcome.is_err(), "the default safety ceiling must win");
+        assert_eq!(started.elapsed(), Duration::from_secs(45));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_600_second_deadline_allows_a_slow_case_past_45_seconds() {
+        let budget = per_case_budget(Duration::from_secs(600), true);
+        assert_eq!(budget, Duration::from_secs(600));
+
+        let started = tokio::time::Instant::now();
+        let outcome = within_case_budget(budget, tokio::time::sleep(Duration::from_secs(46))).await;
+
+        assert!(
+            outcome.is_ok(),
+            "an explicit 600s deadline must not retain the hidden 45s cap"
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(46));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_policy_still_bounds_a_slow_case_by_the_remaining_whole_run_deadline() {
+        let budget = per_case_budget(Duration::from_secs(17), true);
+        let started = tokio::time::Instant::now();
+        let outcome = within_case_budget(budget, tokio::time::sleep(Duration::from_secs(18))).await;
+
+        assert!(
+            outcome.is_err(),
+            "remaining whole-run time must stay authoritative"
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(17));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cooperative_cancellation_still_wins_and_retains_case_activity() {
+        let budget = per_case_budget(Duration::from_secs(600), true);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let activity = Arc::new(Mutex::new(Vec::new()));
+
+        let cancel_for_case = cancel.clone();
+        let activity_for_case = activity.clone();
+        let case = async move {
+            activity_for_case.lock().unwrap().push("started");
+            loop {
+                if cancel_for_case.load(Ordering::SeqCst) {
+                    activity_for_case.lock().unwrap().push("cancelled");
+                    return "cancelled";
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        };
+        let cancel_after_slow_start = async {
+            tokio::time::sleep(Duration::from_secs(46)).await;
+            cancel.store(true, Ordering::SeqCst);
+        };
+
+        let (outcome, ()) = tokio::join!(within_case_budget(budget, case), cancel_after_slow_start);
+
+        assert_eq!(
+            outcome.expect("cancellation must beat the 600s budget"),
+            "cancelled"
+        );
+        assert_eq!(*activity.lock().unwrap(), vec!["started", "cancelled"]);
     }
 }
