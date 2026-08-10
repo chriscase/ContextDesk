@@ -4,11 +4,11 @@ Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
 - branch: `integrate/acceptance-release-v1`
-- code baseline SHA: `6f477e9026217b925c16007739930edfe007e60e`
+- exact release SHA: `bbc4bf43cb850923a00bec6e64fc87b5487c3c5f`
 
-This procedure document is a later documentation-only stamp on the same
-branch. The code baseline SHA above is the identity that must be built and
-verified; the documentation commit does not change executable behavior.
+The exact release SHA above is the identity that must be fetched, built, and
+verified. Do not substitute an older baseline, a moving branch tip, or an
+unrelated local checkout.
 
 This is the source-build path for a separate company machine. It does not
 require an installer, a downloaded harness, or an OS credential store.
