@@ -124,6 +124,15 @@ pub enum ContractVerdict {
     Inconclusive,
 }
 
+impl ContractVerdict {
+    /// Source-compatibility alias for callers compiled against the initial
+    /// projection API. It serializes and compares exactly as `Inconclusive`;
+    /// it is not a fourth runtime state.
+    #[deprecated(note = "use ContractVerdict::Inconclusive")]
+    #[allow(non_upper_case_globals)]
+    pub const Unverified: Self = Self::Inconclusive;
+}
+
 impl CapabilityContract {
     /// Stable wire/display id for the execution mode.
     pub fn as_str(self) -> &'static str {
