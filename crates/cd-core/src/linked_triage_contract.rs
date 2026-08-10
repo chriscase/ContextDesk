@@ -112,6 +112,7 @@ pub fn is_empty_visible_terminal(raw: &str) -> bool {
 /// Strip complete known reasoning blocks (`<think>`, `<analysis>`,
 /// `<reasoning>`) from the start of the payload. Incomplete or mid-body tags
 /// are left untouched so untrusted content cannot smuggle structure.
+#[allow(clippy::string_slice)] // offsets from ASCII delimiter matches only
 fn strip_complete_reasoning_blocks(raw: &str) -> String {
     let mut trimmed = raw.trim();
     for _ in 0..4 {
@@ -187,7 +188,9 @@ pub fn normalize_known_json_wrapper(raw: &str) -> Option<String> {
 
 /// Prepare terminal model content for host validation: unwrap known wrappers,
 /// then reject empty visible terminals. Does not invent JSON.
-pub fn preparation_for_host_validation(raw: &str) -> Result<String, LinkedTriageDiagnosticCategory> {
+pub fn preparation_for_host_validation(
+    raw: &str,
+) -> Result<String, LinkedTriageDiagnosticCategory> {
     if is_empty_visible_terminal(raw) {
         return Err(LinkedTriageDiagnosticCategory::EmptyTerminalAnswer);
     }
@@ -216,7 +219,9 @@ pub fn visible_text_leaks_reasoning_markers(visible: &str) -> bool {
 
 /// Map a final-comparison [`ValidationError`] to the comparison-failure
 /// diagnostic (never collapses into candidate_contract).
-pub fn category_for_final_validation_error(_error: &ValidationError) -> LinkedTriageDiagnosticCategory {
+pub fn category_for_final_validation_error(
+    _error: &ValidationError,
+) -> LinkedTriageDiagnosticCategory {
     LinkedTriageDiagnosticCategory::FinalComparisonFailure
 }
 
@@ -233,9 +238,7 @@ mod tests {
             Some("{\"ok\":true}".into())
         );
         assert_eq!(
-            normalize_known_json_wrapper(
-                "<analysis>still private</analysis>\n{\"schema\":\"x\"}"
-            ),
+            normalize_known_json_wrapper("<analysis>still private</analysis>\n{\"schema\":\"x\"}"),
             Some("{\"schema\":\"x\"}".into())
         );
         assert_eq!(
@@ -284,13 +287,7 @@ mod tests {
             LinkedTriageDiagnosticCategory::CompatibleSuccess
         );
         assert_eq!(
-            classify_final_comparison_outcome(
-                false,
-                Err(ValidationError::Parse),
-                0,
-                false,
-                false
-            ),
+            classify_final_comparison_outcome(false, Err(ValidationError::Parse), 0, false, false),
             LinkedTriageDiagnosticCategory::FinalComparisonFailure
         );
         assert_eq!(

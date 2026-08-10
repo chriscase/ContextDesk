@@ -1857,10 +1857,9 @@ async fn run_multi_stage_broad_triage(
         // OpenAI-compatible gateways. Only a complete known wrapper is
         // removed; the same ledger validator still owns every field and
         // candidate/evidence relationship.
-        let validation_content = crate::linked_triage_contract::normalize_known_json_wrapper(
-            &content,
-        )
-        .unwrap_or_else(|| content.clone());
+        let validation_content =
+            crate::linked_triage_contract::normalize_known_json_wrapper(&content)
+                .unwrap_or_else(|| content.clone());
         match crate::investigation_answer::validate_model_answer(&validation_content, &ledger) {
             Ok(mut envelope) => {
                 envelope.semantic_attempts = u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
