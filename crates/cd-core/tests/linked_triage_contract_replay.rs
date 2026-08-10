@@ -15,8 +15,8 @@ use cd_core::investigation_answer::{
 };
 use cd_core::linked_triage_contract::{
     classify_candidate_stage_outcome, classify_final_comparison_outcome, is_empty_visible_terminal,
-    normalize_known_json_wrapper, preparation_for_host_validation, visible_text_leaks_reasoning_markers,
-    LinkedTriageDiagnosticCategory,
+    normalize_known_json_wrapper, preparation_for_host_validation,
+    visible_text_leaks_reasoning_markers, LinkedTriageDiagnosticCategory,
 };
 use serde_json::json;
 
@@ -86,7 +86,9 @@ fn valid_final_json() -> String {
     .to_string()
 }
 
-fn validate_after_normalize(raw: &str) -> Result<cd_core::investigation_answer::AnswerEnvelopeV1, ValidationError> {
+fn validate_after_normalize(
+    raw: &str,
+) -> Result<cd_core::investigation_answer::AnswerEnvelopeV1, ValidationError> {
     let prepared = preparation_for_host_validation(raw).map_err(|_| ValidationError::Parse)?;
     validate_model_answer(&prepared, &ledger_two_candidates())
 }
@@ -121,10 +123,7 @@ fn fenced_json_unwraps_then_validates() {
 #[test]
 fn think_wrapper_plus_json_discards_reasoning_from_authority() {
     let reasoning = "I will choose alpha as root but this must never leak";
-    let raw = format!(
-        "<think>{reasoning}</think>\n{}",
-        valid_final_json()
-    );
+    let raw = format!("<think>{reasoning}</think>\n{}", valid_final_json());
     let unwrapped = normalize_known_json_wrapper(&raw).expect("think unwrap");
     assert!(!unwrapped.contains(reasoning));
     assert!(!unwrapped.contains("<think>"));
@@ -381,13 +380,7 @@ fn successful_bounded_correction_category_requires_positive_attempts() {
 fn correction_exhausted_still_final_comparison_failure() {
     // After corrections, still parse error → final comparison failure, not timeout.
     assert_eq!(
-        classify_final_comparison_outcome(
-            false,
-            Err(ValidationError::Parse),
-            2,
-            false,
-            false
-        ),
+        classify_final_comparison_outcome(false, Err(ValidationError::Parse), 2, false, false),
         LinkedTriageDiagnosticCategory::FinalComparisonFailure
     );
 }

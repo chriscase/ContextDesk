@@ -1656,6 +1656,14 @@ async fn run_multi_stage_broad_triage(
                 MULTI_STAGE_CANDIDATE_RESPONSE_CHAR_CAP,
             )
             .unwrap_or_default();
+            // A reasoning-only or otherwise empty visible terminal is a
+            // distinct provider-response failure. Do not collapse it into a
+            // generic candidate JSON parse miss: the host needs to tell a
+            // model/channel problem from an ordinary malformed proposal.
+            if crate::linked_triage_contract::is_empty_visible_terminal(&content) {
+                validation_category = "empty_terminal_answer";
+                continue;
+            }
             let evidence = candidate.evidence.iter().cloned().collect::<HashSet<_>>();
             let assessment = parse_candidate_assessment(&content, candidate);
             if let Some((classification, analysis, classified_evidence_seqs)) = assessment {
@@ -1815,6 +1823,7 @@ async fn run_multi_stage_broad_triage(
     let mut semantic_attempts = 0usize;
     let mut validation_errors = Vec::new();
     let mut correction_category: Option<&str> = None;
+    let mut last_attempt_empty_terminal = false;
     on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
         stage: "comparison".into(),
         phase: "started".into(),
@@ -1899,48 +1908,65 @@ async fn run_multi_stage_broad_triage(
             MULTI_STAGE_COMPARISON_RESPONSE_CHAR_CAP,
         )
         .unwrap_or_default();
-        // Keep the final answer authority strict while accommodating the
-        // bounded reasoning/fence wrappers seen on otherwise compatible
-        // OpenAI-compatible gateways. Only a complete known wrapper is
-        // removed; the same ledger validator still owns every field and
-        // candidate/evidence relationship.
-        let validation_content = crate::linked_triage_contract::normalize_known_json_wrapper(
-            &content,
-        )
-        .unwrap_or_else(|| content.clone());
-        match crate::investigation_answer::validate_model_answer(&validation_content, &ledger) {
-            Ok(mut envelope) => {
-                envelope.semantic_attempts = u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
-                on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
-                    stage: "comparison".into(),
-                    phase: "finished".into(),
-                    status: Some("succeeded".into()),
-                    detail: serde_json::json!({
-                        "schema": "contextdesk.multi_stage_budget.v1",
-                        "policy_id": reserve.policy_id,
-                        "provider_rounds": used_rounds,
-                        "semantic_attempts": semantic_attempts,
-                    })
-                    .to_string(),
-                    candidate_id: None,
-                }));
-                return Ok(MultiStageTriageOutcome::Completed {
-                    // Visible text is the host's readable projection of the
-                    // validated envelope, not the authoritative JSON: the typed
-                    // event beside it stays the machine/persistence contract, and
-                    // a transcript that shows raw authority invites a caller to
-                    // read it back as authority. Both hosts consume this one
-                    // projection, so CLI and GUI cannot drift apart.
-                    content: crate::investigation_answer::render_answer_markdown(&envelope),
-                    envelope: Box::new(envelope),
-                    accepted_groups: drafts.into_iter().map(|draft| draft.group_id).collect(),
-                    rejected_groups,
-                    provider_rounds: used_rounds,
-                });
+        // Normalize only complete, known wrappers and classify a reasoning-only
+        // terminal before JSON parsing. Empty visible content is not a generic
+        // parse error: it is evidence about the provider's terminal/reasoning
+        // channel and must remain distinguishable in telemetry.
+        match crate::linked_triage_contract::preparation_for_host_validation(&content) {
+            Err(
+                crate::linked_triage_contract::LinkedTriageDiagnosticCategory::EmptyTerminalAnswer,
+            ) => {
+                last_attempt_empty_terminal = true;
+                correction_category = Some("empty_terminal_answer");
             }
-            Err(error) => {
-                correction_category = Some(error.as_str());
-                validation_errors.push(error);
+            Ok(validation_content) => {
+                last_attempt_empty_terminal = false;
+                match crate::investigation_answer::validate_model_answer(
+                    &validation_content,
+                    &ledger,
+                ) {
+                    Ok(mut envelope) => {
+                        envelope.semantic_attempts =
+                            u8::try_from(semantic_attempts).unwrap_or(u8::MAX);
+                        let diagnostic_category = if semantic_attempts > 0 {
+                            "successful_bounded_correction"
+                        } else {
+                            "compatible_success"
+                        };
+                        on_host(MultiStageHostSignal::Event(StreamEvent::MultiModelStage {
+                            stage: "comparison".into(),
+                            phase: "finished".into(),
+                            status: Some("succeeded".into()),
+                            detail: serde_json::json!({
+                                "schema": "contextdesk.multi_stage_budget.v1",
+                                "policy_id": reserve.policy_id,
+                                "provider_rounds": used_rounds,
+                                "semantic_attempts": semantic_attempts,
+                                "diagnostic_category": diagnostic_category,
+                            })
+                            .to_string(),
+                            candidate_id: None,
+                        }));
+                        return Ok(MultiStageTriageOutcome::Completed {
+                            content: crate::investigation_answer::render_answer_markdown(&envelope),
+                            envelope: Box::new(envelope),
+                            accepted_groups: drafts
+                                .into_iter()
+                                .map(|draft| draft.group_id)
+                                .collect(),
+                            rejected_groups,
+                            provider_rounds: used_rounds,
+                        });
+                    }
+                    Err(error) => {
+                        correction_category = Some(error.as_str());
+                        validation_errors.push(error);
+                    }
+                }
+            }
+            Err(_) => {
+                last_attempt_empty_terminal = true;
+                correction_category = Some("empty_terminal_answer");
             }
         }
         if semantic_attempts >= MULTI_STAGE_SEMANTIC_CORRECTION_CAP {
@@ -1957,12 +1983,21 @@ async fn run_multi_stage_broad_triage(
             "policy_id": reserve.policy_id,
             "provider_rounds": used_rounds,
             "semantic_attempts": semantic_attempts,
+            "diagnostic_category": if last_attempt_empty_terminal && validation_errors.is_empty() {
+                "empty_terminal_answer"
+            } else {
+                "final_comparison_failure"
+            },
         })
         .to_string(),
         candidate_id: None,
     }));
     Ok(MultiStageTriageOutcome::FailedClosed {
-        reason: "comparison synthesis failed bounded citation/separation validation".into(),
+        reason: if last_attempt_empty_terminal && validation_errors.is_empty() {
+            "comparison synthesis returned empty visible content after reasoning strip".into()
+        } else {
+            "comparison synthesis failed bounded citation/separation validation".into()
+        },
         validation_errors,
         semantic_attempts,
         provider_rounds: used_rounds,
@@ -14483,6 +14518,109 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             2,
             "one candidate attempt is permitted per turn"
         );
+    }
+
+    #[tokio::test]
+    async fn multi_stage_reasoning_only_comparison_emits_empty_terminal_diagnostic() {
+        // A provider may place all of its response in a reasoning channel and
+        // leave no visible terminal content. This is a provider/channel
+        // diagnostic, not an ordinary malformed proposal, and must remain
+        // visible in the host-authored comparison event.
+        let candidates = vec![
+            multi_stage_candidate("trace:alpha", 11),
+            multi_stage_candidate("trace:bravo", 22),
+        ];
+        let backend = ScriptedBackend::new(vec![
+            multi_stage_assessment(
+                "trace:alpha",
+                CandidateClassificationV1::SupportingEvidence,
+                11,
+                "independent evidence group",
+            ),
+            multi_stage_assessment(
+                "trace:bravo",
+                CandidateClassificationV1::SupportingEvidence,
+                22,
+                "independent evidence group",
+            ),
+            multi_stage_completion("<think>planning the answer</think>"),
+            multi_stage_completion("<analysis>still no visible object</analysis>"),
+        ]);
+        let opts = AgentOptions {
+            max_rounds: 4,
+            ..Default::default()
+        };
+        let clock = TurnClock::new(opts.effective_deadline_plan(), None);
+        let mut events = Vec::new();
+        let outcome = run_multi_stage_broad_triage(
+            &backend,
+            "triage",
+            &opts,
+            &clock,
+            MultiStageTriageEvidence {
+                candidates: &candidates,
+                comparison_context: None,
+                binding: crate::investigation_answer::AnswerBindingV1 {
+                    session_id: "s".into(),
+                    turn_id: "t".into(),
+                    corpus_id: "c".into(),
+                    revision: crate::investigation_answer::LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 2,
+                        suppression_revision: 3,
+                    },
+                    ledger_digest: String::new(),
+                },
+            },
+            &mut |signal| {
+                if let MultiStageHostSignal::Event(event) = signal {
+                    events.push(event);
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let MultiStageTriageOutcome::FailedClosed {
+            reason,
+            validation_errors,
+            semantic_attempts,
+            provider_rounds,
+        } = outcome
+        else {
+            panic!("reasoning-only comparison must fail closed: {outcome:?}");
+        };
+        assert!(
+            reason.contains("empty visible"),
+            "unexpected reason: {reason}"
+        );
+        assert!(validation_errors.is_empty());
+        assert_eq!(semantic_attempts, 1);
+        assert_eq!(provider_rounds, 4);
+
+        let comparison_detail = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::MultiModelStage {
+                    stage,
+                    phase,
+                    status,
+                    detail,
+                    ..
+                } if stage == "comparison"
+                    && phase == "finished"
+                    && status.as_deref() == Some("failed") =>
+                {
+                    Some(detail)
+                }
+                _ => None,
+            })
+            .expect("failed comparison event");
+        let detail: serde_json::Value =
+            serde_json::from_str(comparison_detail).expect("structured diagnostic detail");
+        assert_eq!(detail["diagnostic_category"], "empty_terminal_answer");
+        assert_eq!(detail["semantic_attempts"], 1);
+        assert_eq!(detail["provider_rounds"], 4);
     }
 
     #[tokio::test]
