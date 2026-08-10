@@ -154,6 +154,19 @@ impl ShareSafeRedactionPolicy {
         } else if contains_any(
             &lower,
             &[
+                "no visible terminal answer",
+                "empty visible answer",
+                "empty_terminal_answer",
+            ],
+        ) {
+            // A completed workflow that emitted no user-visible answer is
+            // materially different from malformed JSON or a scorer failure.
+            // Keep this host-observed distinction while still discarding all
+            // provider text and any transcript content.
+            "empty_terminal_answer"
+        } else if contains_any(
+            &lower,
+            &[
                 "contract",
                 "marker",
                 "expected",
@@ -920,5 +933,15 @@ mod tests {
         ] {
             assert!(!once.contains(forbidden), "{forbidden:?} leaked in {once}");
         }
+    }
+
+    #[test]
+    fn share_safe_failure_summary_distinguishes_empty_terminal_answer() {
+        let policy = ShareSafeRedactionPolicy::default();
+        let raw = "attempt 1: no visible terminal answer; terminal_text_chars=0, provider_rounds=4, empty_visible_answer=true, finish_reason=stop, turn_terminal=linked_invalid_grounded_answer";
+        assert_eq!(
+            policy.failure_summary(raw),
+            "failure category: empty_terminal_answer; raw provider detail omitted"
+        );
     }
 }

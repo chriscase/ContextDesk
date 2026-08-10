@@ -59,3 +59,12 @@ handling for the linked multi-stage path, while preserving the exact model ID,
 600-second allowance, and one-request-per-round accounting. Do not rerun a live
 matrix until that contract failure is understood; hermetic reproduction should
 come first.
+
+### Follow-up observability refinement
+
+The original share-safe report intentionally reduced this shape to the broad
+`response_contract` category. A host-only sanitizer refinement now recognizes
+the observed `no visible terminal answer` shape as
+`empty_terminal_answer`; it still strips provider bodies and transcript text.
+This improves the next diagnostic's explanation without changing the recorded
+run, its verdict, or the conclusion that linked triage remains unproven.
