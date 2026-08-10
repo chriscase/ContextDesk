@@ -10,7 +10,206 @@
 
 #![allow(clippy::string_slice)]
 
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
+
+/// Maximum retained characters in one share-safe diagnostic text field.
+pub const MAX_SHARE_SAFE_DIAGNOSTIC_CHARS: usize = 240;
+
+/// Provider-neutral redaction policy for diagnostics intended to be shared.
+///
+/// This is deliberately stricter than ordinary secret scrubbing: in addition
+/// to credential shapes it removes arbitrary HTTP(S) endpoints, absolute host
+/// paths, and caller-supplied private identifiers. Failure details should be
+/// projected with [`Self::failure_summary`] so raw provider response bodies are
+/// never retained merely because their contents did not match a known secret.
+#[derive(Debug, Clone)]
+pub struct ShareSafeRedactionPolicy {
+    private_identifiers: Vec<Regex>,
+}
+
+impl Default for ShareSafeRedactionPolicy {
+    fn default() -> Self {
+        Self::new(std::iter::empty::<&str>())
+    }
+}
+
+impl ShareSafeRedactionPolicy {
+    /// Build a policy that also removes each exact private identifier,
+    /// case-insensitively. Empty identifiers are ignored.
+    pub fn new<'a>(private_identifiers: impl IntoIterator<Item = &'a str>) -> Self {
+        let private_identifiers = private_identifiers
+            .into_iter()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                RegexBuilder::new(&regex::escape(value))
+                    .case_insensitive(true)
+                    .build()
+                    .expect("escaped literal always compiles")
+            })
+            .collect();
+        Self {
+            private_identifiers,
+        }
+    }
+
+    /// Redact and bound arbitrary diagnostic text.
+    pub fn redact_text(&self, raw: &str) -> String {
+        let mut out = scrub_secrets(raw);
+        out = authorization_value_regex()
+            .replace_all(&out, "[credential-redacted]")
+            .into_owned();
+        out = bearer_value_regex()
+            .replace_all(&out, "[credential-redacted]")
+            .into_owned();
+        out = http_endpoint_regex()
+            .replace_all(&out, "[endpoint-redacted]")
+            .into_owned();
+        out = crate::turn_trace::opaque_absolute_paths(&out);
+        for identifier in &self.private_identifiers {
+            out = identifier
+                .replace_all(&out, "[identity-redacted]")
+                .into_owned();
+        }
+        truncate_diagnostic_chars(&out)
+    }
+
+    /// Return a stable, useful failure category without retaining the raw
+    /// provider error/body. Classification is intentionally coarse and based
+    /// only on the transient input; the returned string contains no excerpt.
+    pub fn failure_summary(&self, raw: &str) -> String {
+        if raw.starts_with("failure category: ") && raw.ends_with("; raw provider detail omitted") {
+            return self.redact_text(raw);
+        }
+        let lower = raw.to_ascii_lowercase();
+        let category = if contains_any(&lower, &["cancelled", "canceled", "interrupted"]) {
+            "cancelled"
+        } else if contains_any(&lower, &["timed out", "timeout", "deadline"]) {
+            "timeout"
+        } else if contains_any(
+            &lower,
+            &[
+                "401",
+                "403",
+                "unauthorized",
+                "forbidden",
+                "authentication",
+                "authorization",
+                "api-key",
+                "api_key",
+                "api key",
+                "bearer",
+            ],
+        ) {
+            "authentication"
+        } else if contains_any(
+            &lower,
+            &["404", "not found", "unknown model", "unknown route"],
+        ) {
+            "model_or_route_not_found"
+        } else if contains_any(&lower, &["429", "rate limit", "rate-limit", "quota"]) {
+            "rate_limited"
+        } else if contains_any(
+            &lower,
+            &[
+                "parse",
+                "decode",
+                "invalid json",
+                "invalid response",
+                "schema",
+                "unexpected response",
+            ],
+        ) {
+            "invalid_response"
+        } else if contains_any(
+            &lower,
+            &[
+                "connection",
+                "connect",
+                "dns",
+                "socket",
+                "transport",
+                "tls",
+                "request failed",
+            ],
+        ) {
+            "transport"
+        } else if contains_any(
+            &lower,
+            &["500", "502", "503", "504", "upstream", "internal server"],
+        ) {
+            "upstream"
+        } else if contains_any(
+            &lower,
+            &[
+                "cleanup",
+                "was not removed",
+                "failed to write",
+                "failed to read",
+                "i/o",
+            ],
+        ) {
+            "local_io"
+        } else if contains_any(
+            &lower,
+            &[
+                "contract",
+                "marker",
+                "expected",
+                "failed_dimensions",
+                "scorer",
+                "answer",
+                "cites_current",
+            ],
+        ) {
+            "response_contract"
+        } else {
+            "provider_error"
+        };
+        format!("failure category: {category}; raw provider detail omitted")
+    }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn authorization_value_regex() -> &'static Regex {
+    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?i)\b(authorization|proxy-authorization|x-api-key|api[-_ ]?key)\b\s*[:=]\s*["']?(?:[a-z][a-z0-9_-]*\s+)?[^\s,;}\]]+"#,
+        )
+        .expect("static authorization regex compiles")
+    })
+}
+
+fn bearer_value_regex() -> &'static Regex {
+    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"(?i)\bbearer\s+[^\s,;}\]]+").expect("static bearer regex compiles")
+    })
+}
+
+fn http_endpoint_regex() -> &'static Regex {
+    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r#"(?i)\bhttps?://[^\s<>\"']+"#).expect("static endpoint regex compiles")
+    })
+}
+
+fn truncate_diagnostic_chars(value: &str) -> String {
+    let mut chars = value.chars();
+    let mut retained = chars
+        .by_ref()
+        .take(MAX_SHARE_SAFE_DIAGNOSTIC_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        retained.push('…');
+    }
+    retained
+}
 
 /// Result of scrubbing a candidate for durable storage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -646,5 +845,80 @@ mod tests {
             r.classes.iter().any(|c| c == "high_entropy") || r.text.contains("[REDACTED_SECRET]"),
             "{r:?}"
         );
+    }
+
+    #[test]
+    fn share_safe_policy_redacts_arbitrary_endpoints_paths_headers_and_exact_ids() {
+        let profile = "private-profile-73";
+        let model = "exact/model:customer-9";
+        let policy = ShareSafeRedactionPolicy::new([profile, model]);
+        let raw = format!(
+            "profile: {profile}, model: {model}, nested={{error: {{url: \
+             https://tenant.example.test/v1/chat, fallback: \
+             http://10.0.0.8:8080/models, path: /private/tmp/customer/body.json, \
+             home: /home/alice/.config/contextdesk/config.json, \
+             mac_home: /Users/alice/Library/Application Support/ContextDesk/config.json, \
+             windows_home: C:\\Users\\alice\\AppData\\Roaming\\ContextDesk\\config.json, \
+             Authorization: Basic opaque-value, authorization=Bearer second-value, \
+             X-API-Key: third-value, api_key=fourth-value, standalone: Bearer fifth-value, \
+             }}}}"
+        );
+
+        let safe = policy.redact_text(&raw);
+        for forbidden in [
+            "https://",
+            "http://",
+            "/private/tmp",
+            "/home/alice",
+            "/Users/alice",
+            "C:\\Users\\alice",
+            "Authorization",
+            "authorization",
+            "Bearer",
+            "X-API-Key",
+            "api_key",
+            "opaque-value",
+            "second-value",
+            "third-value",
+            "fourth-value",
+            "fifth-value",
+            profile,
+            model,
+        ] {
+            assert!(!safe.contains(forbidden), "{forbidden:?} leaked in {safe}");
+        }
+        assert!(safe.contains("[endpoint-redacted]"), "{safe}");
+        assert!(safe.contains("[local-path]"), "{safe}");
+        assert!(safe.contains("[identity-redacted]"), "{safe}");
+    }
+
+    #[test]
+    fn share_safe_failure_summary_preserves_category_but_never_raw_body() {
+        let policy = ShareSafeRedactionPolicy::new(["profile-private", "model-private"]);
+        let raw = r#"provider returned 401 from https://private.example/v1:
+            {"error":{"message":"read /private/tmp/body with Authorization: Bearer arbitrary"},
+            "model":"model-private","profile":"profile-private"}"#;
+        let once = policy.failure_summary(raw);
+        assert_eq!(
+            once,
+            "failure category: authentication; raw provider detail omitted"
+        );
+        assert_eq!(
+            policy.failure_summary(&once),
+            once,
+            "policy must be idempotent"
+        );
+        for forbidden in [
+            "https://",
+            "/private/tmp",
+            "Authorization",
+            "Bearer",
+            "arbitrary",
+            "model-private",
+            "profile-private",
+            "error",
+        ] {
+            assert!(!once.contains(forbidden), "{forbidden:?} leaked in {once}");
+        }
     }
 }

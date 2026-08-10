@@ -373,10 +373,27 @@ environment values, absolute paths, raw endpoint URLs, or exact private
 profile/model ids — the profile and model identity are stable, run-local
 pseudonyms, and the endpoint is a fingerprint
 (`cd_core::capability_qualification::fingerprint_endpoint`), the same hash
-`models verify`'s own reports already use. `--raw --raw-i-understand`
+`models verify`'s own reports already use. All lane/cleanup detail crosses one
+provider-neutral `ShareSafeRedactionPolicy` boundary before text/JSONL output
+and again before artifact serialization. Failed lanes retain a stable category
+(`authentication`, `rate_limited`, `timeout`, `transport`, `invalid_response`,
+`upstream`, `response_contract`, or a coarse fallback) but omit the raw
+provider body. Machine output reports only the run-relative artifact directory,
+never its absolute host path. `--raw --raw-i-understand`
 additionally writes an owner-only (`0600`/`0700` on Unix), local-only
 `private/capture.json` with bounded synthetic case detail — never
 credentials — that the share-safe bundle never references by content.
+
+**Remaining privacy limits.** This policy is a diagnostic-artifact boundary,
+not a general PII or proprietary-text classifier. It removes credential/header
+shapes, arbitrary HTTP(S) endpoints, absolute POSIX/Windows paths, and the exact
+selected profile/model identifiers; it intentionally does not attempt to find
+names, email addresses, ticket numbers, relative paths, or other tenant data in
+otherwise safe host-authored prose. Raw failure bodies are omitted rather than
+trying to make arbitrary bodies safe. Endpoint fingerprints are deterministic,
+so someone who already has a small candidate endpoint list can compare hashes.
+Review artifacts before external sharing when those residual correlation risks
+matter.
 
 **Output.** Text prints a `[PASS]`/`[WARN]`/`[FAIL]`/`[SKIP]` line per case
 as it completes (colored when the terminal supports it and `NO_COLOR` is

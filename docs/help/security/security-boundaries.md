@@ -36,7 +36,7 @@ and write execution.
 | Unapproved writes | Host-owned Read/SoftWrite/HardWrite tiers and UI-originated grants | A user can approve the wrong target |
 | Secret persistence | Redact before memory storage/embedding; block credential-dominant candidates | Heuristics are not a password manager or formal data classifier |
 | Audit tampering | Permission and tool outcomes enter a hash-chained audit log | Audit review does not itself prevent a bad approval |
-| Diagnostic artifact leakage | `contextdesk gateway diagnose` writes a share-safe bundle by default (pseudonymous profile/model identity, fingerprinted endpoint, no credentials or raw URLs); an unredacted local capture requires explicit `--raw --raw-i-understand` and owner-only file permissions | An operator who manually copies the private capture elsewhere takes on that sharing decision themselves |
+| Diagnostic artifact leakage | `contextdesk gateway diagnose` applies one provider-neutral share-safe policy to streamed and persisted details (pseudonymous profile/model identity, fingerprinted endpoint, no credentials/auth headers/raw URLs/absolute paths, and categorized failures with raw provider bodies omitted); an additional sanitized local capture requires explicit `--raw --raw-i-understand` and owner-only file permissions | The policy is not a general PII classifier; deterministic endpoint fingerprints and unknown tenant strings in host-authored non-failure prose still require review before external sharing |
 
 Bundled Help is first-party product guidance, but even Help content cannot grant
 a write, expand an allowlist, or supply credentials. Skills are also guidance,
@@ -55,4 +55,3 @@ configured service from seeing the request content.
 Use expandable diagnostics and the redacted GitHub-report path when sharing an
 error. Do not paste raw keys, tokens, credential files, private workspace
 content, or unredacted logs into a report.
-

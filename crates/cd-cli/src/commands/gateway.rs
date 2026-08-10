@@ -54,6 +54,7 @@ use cd_core::log_analysis::{
 };
 use cd_core::model_role_hints::{classify_model_role, ModelRoleHint};
 use cd_core::providers::{ProviderKind, ProviderProfile};
+use cd_core::redact::ShareSafeRedactionPolicy;
 use cd_core::rerank::HttpRerankBackend;
 use cd_core::sessions::SessionStore;
 use cd_core::triage_quality::{
@@ -285,6 +286,7 @@ pub async fn run(
         .map(str::to_string)
         .unwrap_or_else(|| profile.chat_model.clone());
     let role = classify_model_role(&model).role;
+    let redaction = ShareSafeRedactionPolicy::new([profile.id.as_str(), model.as_str()]);
     let deadline_secs = args.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
     let plan = build_plan(args.level, role, deadline_secs, args.raw);
@@ -323,15 +325,15 @@ pub async fn run(
             break;
         }
         if Instant::now() >= deadline {
-            cases.push(skipped_case(
-                case_id,
-                "overall deadline exceeded before this case ran",
-            ));
+            let mut skipped =
+                skipped_case(case_id, "overall deadline exceeded before this case ran");
+            sanitize_case_report(&mut skipped, &redaction);
+            cases.push(skipped);
             continue;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let case_budget = per_case_budget(remaining, args.timeout.is_some());
-        let report = run_one_case(
+        let mut report = run_one_case(
             case_id,
             &profile,
             &model,
@@ -350,6 +352,7 @@ pub async fn run(
         )
         .await;
         requests_made += report.direct.requests_used + report.product.requests_used;
+        sanitize_case_report(&mut report, &redaction);
         print_case(format, color, &caps, &report);
         cases.push(report);
     }
@@ -357,7 +360,8 @@ pub async fn run(
     let cancelled = cancel.load(Ordering::SeqCst);
     let deadline_exceeded = Instant::now() >= deadline;
 
-    let cleanup = cleanup_all(paths, sessions, &corpora, &created_sessions);
+    let mut cleanup = cleanup_all(paths, sessions, &corpora, &created_sessions);
+    sanitize_cleanup_report(&mut cleanup, &redaction);
 
     let verdicts = compute_verdicts(&cases);
     let finished_at_unix_ms = now_unix_ms();
@@ -390,13 +394,15 @@ pub async fn run(
         artifact_dir: None,
         private_capture_written: false,
     };
+    sanitize_gateway_report(&mut report, &redaction);
 
-    match write_artifact_bundle(args, paths, &run_id_for_dir(&report.run_id), &report) {
-        Ok(dir) => report.artifact_dir = Some(dir.display().to_string()),
+    let artifact_run_dir = run_id_for_dir(&report.run_id);
+    match write_artifact_bundle(args, paths, &artifact_run_dir, &report, &redaction) {
+        Ok(_dir) => report.artifact_dir = Some(artifact_run_dir.clone()),
         Err(e) => eprintln!("warning: failed to write diagnostic artifact bundle: {e}"),
     }
     if args.raw && args.raw_i_understand {
-        match write_private_capture(args, paths, &run_id_for_dir(&report.run_id), &report) {
+        match write_private_capture(args, paths, &artifact_run_dir, &report, &redaction) {
             Ok(()) => report.private_capture_written = true,
             Err(e) => eprintln!("warning: failed to write private capture: {e}"),
         }
@@ -465,6 +471,59 @@ fn cleanup_note(cleanup: &CleanupReport) -> String {
     } else {
         format!("cleanup FAILED: {}", cleanup.failures.join("; "))
     }
+}
+
+fn sanitize_lane_result(lane: &mut LaneResult, policy: &ShareSafeRedactionPolicy) {
+    let lower = lane.detail.to_ascii_lowercase();
+    let failure_shaped = lane.executed
+        || [
+            "provider returned",
+            "body=",
+            "body:",
+            "authorization",
+            "http://",
+            "https://",
+            "error",
+            "failed",
+            "failure",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker));
+    lane.detail = if !lane.passed && failure_shaped {
+        policy.failure_summary(&lane.detail)
+    } else {
+        policy.redact_text(&lane.detail)
+    };
+}
+
+fn sanitize_case_report(report: &mut CaseReport, policy: &ShareSafeRedactionPolicy) {
+    sanitize_lane_result(&mut report.direct, policy);
+    sanitize_lane_result(&mut report.product, policy);
+    sanitize_lane_result(&mut report.scorer, policy);
+}
+
+fn sanitize_cleanup_report(report: &mut CleanupReport, policy: &ShareSafeRedactionPolicy) {
+    for failure in &mut report.failures {
+        *failure = policy.failure_summary(failure);
+    }
+}
+
+fn sanitize_gateway_report(
+    report: &mut GatewayDiagnosticReport,
+    policy: &ShareSafeRedactionPolicy,
+) {
+    report.run_id = policy.redact_text(&report.run_id);
+    report.profile_pseudonym = policy.redact_text(&report.profile_pseudonym);
+    report.model_pseudonym = policy.redact_text(&report.model_pseudonym);
+    report.endpoint_fingerprint = policy.redact_text(&report.endpoint_fingerprint);
+    for case in &mut report.cases {
+        sanitize_case_report(case, policy);
+    }
+    sanitize_cleanup_report(&mut report.cleanup, policy);
+    report.artifact_dir = report
+        .artifact_dir
+        .as_deref()
+        .map(|value| run_id_for_dir(&policy.redact_text(value)));
 }
 
 fn level_str(level: DiagnoseLevel) -> &'static str {
@@ -2232,17 +2291,20 @@ fn write_artifact_bundle(
     paths: &Paths,
     run_dir: &str,
     report: &GatewayDiagnosticReport,
+    redaction: &ShareSafeRedactionPolicy,
 ) -> Result<PathBuf, String> {
     let dir = artifact_root(paths, &args.out, run_dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let body = serde_json::to_vec_pretty(report).map_err(|e| e.to_string())?;
+    let mut share_safe_report = report.clone();
+    sanitize_gateway_report(&mut share_safe_report, redaction);
+    let body = serde_json::to_vec_pretty(&share_safe_report).map_err(|e| e.to_string())?;
     let report_path = dir.join("report.json");
     std::fs::write(&report_path, &body).map_err(|e| e.to_string())?;
     let checksum = sha256_hex(&body);
     let manifest = serde_json::json!({
         "schema_id": "contextdesk.gateway_diagnostic_manifest.v1",
         "schema_version": 1,
-        "run_id": report.run_id,
+        "run_id": share_safe_report.run_id,
         "files": [
             { "name": "report.json", "sha256": checksum, "bytes": body.len() }
         ],
@@ -2265,15 +2327,18 @@ fn write_private_capture(
     paths: &Paths,
     run_dir: &str,
     report: &GatewayDiagnosticReport,
+    redaction: &ShareSafeRedactionPolicy,
 ) -> Result<(), String> {
     let dir = artifact_root(paths, &args.out, run_dir).join("private");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut safe_report = report.clone();
+    sanitize_gateway_report(&mut safe_report, redaction);
     let body = serde_json::json!({
         "schema_id": "contextdesk.gateway_diagnostic_private_capture.v1",
         "local_only": true,
         "note": "bounded synthetic lane detail only; never credentials, auth headers, or user corpora",
-        "run_id": report.run_id,
-        "cases": report.cases,
+        "run_id": safe_report.run_id,
+        "cases": safe_report.cases,
     });
     let path = dir.join("capture.json");
     std::fs::write(
@@ -2595,5 +2660,167 @@ mod tests {
             "cancelled"
         );
         assert_eq!(*activity.lock().unwrap(), vec!["started", "cancelled"]);
+    }
+
+    fn adversarial_case_detail(profile: &str, model: &str) -> String {
+        let body = serde_json::json!({
+            "error": {
+                "message": "read /private/tmp/provider-body.json and /home/alice/.config/contextdesk/config.json",
+                "nested": {
+                    "Authorization": "Bearer arbitrary-token",
+                    "X-API-Key": "another-token",
+                    "api_key": "third-token",
+                    "profile": profile,
+                    "model": model,
+                }
+            }
+        });
+        format!(
+            "provider returned 401 from https://private.example/v1/chat with fallback \
+             http://10.1.2.3:8080/v1; body={body}"
+        )
+    }
+
+    fn assert_share_safe(serialized: &str, profile: &str, model: &str) {
+        for forbidden in [
+            "https://",
+            "http://",
+            "/private/tmp",
+            "/home/alice",
+            "Authorization",
+            "authorization",
+            "Bearer",
+            "X-API-Key",
+            "api_key",
+            "arbitrary-token",
+            "another-token",
+            "third-token",
+            "provider-body.json",
+            profile,
+            model,
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "{forbidden:?} leaked in {serialized}"
+            );
+        }
+    }
+
+    fn adversarial_report(profile: &str, model: &str) -> GatewayDiagnosticReport {
+        let leaky = adversarial_case_detail(profile, model);
+        GatewayDiagnosticReport {
+            schema_id: GATEWAY_DIAGNOSTIC_SCHEMA_ID,
+            schema_version: GATEWAY_DIAGNOSTIC_SCHEMA_VERSION,
+            run_id: format!("run-{profile}-{model}"),
+            build: BuildIdentity {
+                version: "test",
+                long_version: "test",
+            },
+            started_at_unix_ms: 1,
+            finished_at_unix_ms: 2,
+            level: "basic",
+            profile_pseudonym: profile.to_string(),
+            model_pseudonym: model.to_string(),
+            role_hint: "investigator",
+            endpoint_fingerprint: "https://private.example/v1".to_string(),
+            credentials_read: true,
+            deadline_secs: 30,
+            requests_planned_max: 1,
+            requests_made: 1,
+            cases: vec![CaseReport {
+                case_id: "ordinary_generation",
+                description: "exact-marker ordinary generation",
+                direct: LaneResult {
+                    executed: true,
+                    passed: false,
+                    detail: leaky.clone(),
+                    elapsed_ms: 1,
+                    attempts: 1,
+                    requests_used: 1,
+                },
+                product: LaneResult::not_applicable(leaky.clone()),
+                scorer: LaneResult::not_applicable(leaky),
+                classification: CaseClassification::GatewayOrModelLikely,
+            }],
+            verdicts: Verdicts {
+                gateway_model_compatible: false,
+                product_workflow_compatible: true,
+                answers_useful: true,
+            },
+            cleanup: CleanupReport {
+                corpora_created: 1,
+                corpora_removed: 0,
+                sessions_created: 0,
+                sessions_removed: 0,
+                failures: vec![format!(
+                    "cleanup failed at /private/tmp/{profile}/{model}: Authorization: Bearer cleanup-token"
+                )],
+            },
+            cancelled: false,
+            deadline_exceeded: false,
+            artifact_dir: Some(format!("/private/tmp/{profile}/{model}")),
+            private_capture_written: false,
+        }
+    }
+
+    #[test]
+    fn adversarial_nested_provider_error_is_safe_in_case_jsonl_and_report_json() {
+        let profile = "private-profile-73";
+        let model = "exact-model/customer-9";
+        let policy = ShareSafeRedactionPolicy::new([profile, model]);
+        let mut report = adversarial_report(profile, model);
+        sanitize_gateway_report(&mut report, &policy);
+
+        let case_jsonl = serde_json::to_string(&DiagnoseLine::Case(&report.cases[0])).unwrap();
+        let report_json = serde_json::to_string(&report).unwrap();
+        assert_share_safe(&case_jsonl, profile, model);
+        assert_share_safe(&report_json, profile, model);
+        assert!(
+            case_jsonl.contains("failure category: authentication"),
+            "useful category was lost: {case_jsonl}"
+        );
+        assert!(
+            !report
+                .artifact_dir
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with('/'),
+            "machine output must use a relative artifact reference: {report_json}"
+        );
+    }
+
+    #[test]
+    fn artifact_writer_reapplies_policy_to_report_and_manifest() {
+        let profile = "private-profile-73";
+        let model = "exact-model/customer-9";
+        let policy = ShareSafeRedactionPolicy::new([profile, model]);
+        let report = adversarial_report(profile, model);
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(Some(temp.path()), None).unwrap();
+        let args = GatewayDiagnoseArgs {
+            level: DiagnoseLevel::Basic,
+            yes: true,
+            timeout: Some(30),
+            raw: false,
+            raw_i_understand: false,
+            out: Some(temp.path().join("artifacts")),
+        };
+
+        let dir = write_artifact_bundle(&args, &paths, "safe-run", &report, &policy).unwrap();
+        let report_json = std::fs::read_to_string(dir.join("report.json")).unwrap();
+        let manifest_json = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
+        assert_share_safe(&report_json, profile, model);
+        assert_share_safe(&manifest_json, profile, model);
+        assert!(
+            report_json.contains("failure category: authentication"),
+            "useful category was lost: {report_json}"
+        );
+
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_json).unwrap();
+        let expected = sha256_hex(report_json.as_bytes());
+        assert_eq!(
+            manifest["files"][0]["sha256"].as_str(),
+            Some(expected.as_str())
+        );
     }
 }

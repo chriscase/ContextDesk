@@ -162,7 +162,7 @@ those become stable run-local pseudonyms/fingerprints instead.
 | Provider unreachable | Transport error from the qualification/chat client | Case classified `gateway_or_model_likely` or `product_integration_likely` with the redacted reason | Operator re-runs after fixing connectivity | No partial corpus/session left behind |
 | Deadline exceeded mid-run | `Instant::now() >= deadline` check between cases | Remaining cases reported `not_run` with an explicit reason | Re-run with a larger `--timeout` | Cleanup still runs for everything created so far |
 | Ctrl-C | Cooperative cancel flag | `cancelled` terminal report | Operator re-runs | Cleanup still attempted before exit |
-| Panic-shaped provider response | Caught at the transport/workflow layer, never propagated as a Rust panic | Case reported as a failed lane with a redacted detail | Same as unreachable | Same |
+| Panic-shaped provider response | Caught at the transport/workflow layer, never propagated as a Rust panic | Case reported with a stable failure category; raw provider detail/body omitted | Same as unreachable | Same |
 
 ## 9. Observability
 
@@ -171,22 +171,34 @@ carries per-lane executed/passed/detail/elapsed/attempts/requests-used, so
 a reader can tell what was attempted, whether it passed, how long it took,
 and how many requests it spent, without re-deriving any of that from raw
 transcripts. The terminal event carries the three independent verdicts,
-cleanup outcome, and artifact location. Nothing here exposes a secret,
-private path, or full model catalog.
+cleanup outcome, and a run-relative artifact reference. Nothing here exposes a
+secret, private path, raw endpoint, exact selected identity, or full model
+catalog.
 
 ## 10. Security and privacy
 
-Redaction happens at existing chokepoints (`redact_reason`,
-`fingerprint_endpoint`) already used elsewhere in the codebase, not a new
-parallel redaction path. The default artifact is share-safe by
-construction (pseudonymous identity, no raw URL); a private, unredacted
-capture requires an explicit `--raw --raw-i-understand` pair and is
-written with owner-only permissions, never referenced by the share-safe
-bundle. Prompt-injection risk: every synthetic corpus this method seeds is
+Every diagnostic string crosses the provider-neutral
+`ShareSafeRedactionPolicy`: credential/header variants, HTTP(S) endpoints,
+absolute host paths, and the selected profile/model literals are removed and
+bounded. Failed lanes are reduced to stable categories before JSONL/report
+serialization, so an arbitrary nested provider body is omitted rather than
+trusted to match a sentinel list. The artifact writer reapplies the policy as a
+defense-in-depth boundary before computing the manifest checksum. The default
+artifact is share-safe by construction (pseudonymous identity, no raw URL); an
+explicit `--raw --raw-i-understand` capture is still sanitized, is written with
+owner-only permissions, and is never referenced by the share-safe bundle.
+Prompt-injection risk: every synthetic corpus this method seeds is
 host-authored fixture content, never live user data, so there is no
 untrusted-corpus-content injection surface distinct from what `doctor`
 already accepts. No write side effects outside disposable, run-scoped
 state; no HardWrite/SoftWrite surface is touched.
+
+The policy does not claim general PII/proprietary-content discovery. Relative
+paths, names, emails, ticket identifiers, and unknown tenant strings in
+host-authored non-failure prose are outside its pattern contract. Endpoint
+fingerprints are deterministic and therefore permit comparison against a known
+candidate list. These are residual review risks, not reasons to retain raw
+provider bodies.
 
 ## 11. UX and human factors
 
@@ -202,8 +214,8 @@ non-ANSI terminal all degrade to the same plain text.
 
 | Layer | Happy path | Boundary/adversarial path | Evidence |
 | --- | --- | --- | --- |
-| Contract/unit | Case classification, lane combination | — | Inline `#[cfg(test)]` in `gateway.rs` (follow-up: expand) |
-| Host/CLI e2e | Full run against a hermetic mock, artifact/checksum | No-`--yes` refusal, `--raw` ack enforcement, stalled-gateway deadline bound, pre-existing corpus untouched | `crates/cd-cli/tests/gateway_diagnose.rs` |
+| Contract/unit | Case classification, lane combination, provider-neutral share-safe policy | Nested provider errors; arbitrary HTTP(S) endpoints; `/private/tmp`, home, and Windows paths; Authorization/Bearer/API-key variants; exact profile/model ids; idempotence | `cd-core::redact` tests + inline `#[cfg(test)]` in `gateway.rs` |
+| Host/CLI e2e | Full run against a hermetic mock, artifact/checksum | JSONL case/report and report/manifest defense-in-depth redaction; no-`--yes` refusal, `--raw` ack enforcement, stalled-gateway deadline bound, pre-existing corpus untouched | `crates/cd-cli/tests/gateway_diagnose.rs` + inline artifact tests |
 
 ## 13. ContextDesk production anchors
 

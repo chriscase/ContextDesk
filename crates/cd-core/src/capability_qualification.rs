@@ -1025,18 +1025,7 @@ pub fn assert_outbound_clean(text: &str) -> Result<(), String> {
 
 /// Scrub free-text reasons for accidental secret shapes.
 pub fn redact_reason(raw: &str) -> String {
-    let mut out = raw.to_string();
-    for s in FORBIDDEN_OUTBOUND_SENTINELS {
-        if out.to_ascii_lowercase().contains(&s.to_ascii_lowercase()) {
-            out = out.replace(s, "[redacted]");
-        }
-    }
-    // Truncate long provider dumps.
-    if out.len() > 240 {
-        out.truncate(240);
-        out.push('…');
-    }
-    out
+    crate::redact::ShareSafeRedactionPolicy::default().redact_text(raw)
 }
 
 fn now_secs() -> i64 {
