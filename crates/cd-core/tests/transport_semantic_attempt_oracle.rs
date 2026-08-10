@@ -674,8 +674,9 @@ async fn cancellation_during_backoff_exits_promptly_without_further_requests() {
     let calls = recorder.calls();
     assert_eq!(calls.len(), 1);
     assert!(
-        matches!(&calls[0].outcome, TracedOutcome::Failed { message } if message.contains("cancelled")),
-        "the aborted attempt is recorded as cancelled, never as completed"
+        matches!(&calls[0].outcome, TracedOutcome::Cancelled),
+        "the aborted attempt is recorded as Cancelled, never as completed; got {:?}",
+        calls[0].outcome
     );
     assert_eq!(capture.waits().len(), 1, "the entered backoff was traced");
     assert_eq!(capture.recoveries(), 0);

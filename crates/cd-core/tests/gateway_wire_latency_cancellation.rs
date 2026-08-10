@@ -359,11 +359,16 @@ async fn permanently_stalled_provider_is_cut_off_by_an_explicit_user_deadline() 
     tokio::time::advance(Duration::from_secs(16)).await;
     let outcome = call.await.expect("join");
     assert!(matches!(outcome, Err("deadline")), "an explicit 15s deadline must cut off a permanent stall, not wait for the 120s client ceiling");
+    let calls = recorder.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "outer deadline drop must retain exactly one timed-out attempt"
+    );
     assert!(
-        recorder.calls().is_empty(),
-        "documents the real telemetry gap: TracingChatBackend::record() only runs after its \
-         inner future resolves, so a round dropped by the outer deadline race leaves no \
-         TracedCall at all — see docs/testing/gateway-wire-survivors-and-gaps.md"
+        matches!(&calls[0].outcome, TracedOutcome::TimedOut),
+        "deadline-dropped in-flight attempt is TimedOut, got {:?}",
+        calls[0].outcome
     );
 }
 
@@ -470,8 +475,12 @@ async fn cancellation_while_waiting_on_headers_via_the_outer_race() {
         tokio::time::sleep(Duration::from_millis(15)).await;
         cancel_setter.store(true, Ordering::SeqCst);
     });
+    // Same cancel flag is shared with complete_streaming — matching production
+    // agent.rs — so Drop can classify the terminal as Cancelled. The client
+    // still cannot interrupt header-wait itself; the outer race remains the
+    // only interrupt path (proven by the Err("cancelled") result).
     let outcome = race_with_cancel(
-        complete_streaming_once(backend.as_ref(), None),
+        complete_streaming_once(backend.as_ref(), Some(cancel.as_ref())),
         None,
         Some(cancel.as_ref()),
     )
@@ -480,7 +489,17 @@ async fn cancellation_while_waiting_on_headers_via_the_outer_race() {
         matches!(outcome, Err("cancelled")),
         "waiting on headers is only interruptible via the outer race"
     );
-    assert!(recorder.calls().is_empty());
+    let calls = recorder.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "header-wait cancel must retain exactly one cancelled attempt"
+    );
+    assert!(
+        matches!(&calls[0].outcome, TracedOutcome::Cancelled),
+        "outer-race cancel is Cancelled, got {:?}",
+        calls[0].outcome
+    );
 }
 
 #[tokio::test]
@@ -525,14 +544,13 @@ async fn cancellation_mid_stream_via_the_inner_per_chunk_check() {
     assert_eq!(
         recorder.calls().len(),
         1,
-        "unlike a header-wait cancellation, an inner-loop cancel still resolves the traced call \
-         (as Failed), because complete_streaming's own future returns normally here rather than \
-         being dropped by an outer select!"
+        "mid-stream cooperative cancel still resolves the traced call as Cancelled"
     );
-    assert!(matches!(
-        &recorder.calls()[0].outcome,
-        TracedOutcome::Failed { .. }
-    ));
+    assert!(
+        matches!(&recorder.calls()[0].outcome, TracedOutcome::Cancelled),
+        "cooperative mid-stream cancel is Cancelled, got {:?}",
+        recorder.calls()[0].outcome
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -574,9 +592,16 @@ async fn candidate_operation_cap_is_shorter_than_the_whole_turn_budget_and_wins(
         matches!(outcome, Err("deadline")),
         "the candidate cap, not the whole-turn budget, must bind"
     );
+    let calls = recorder.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "operation-cap timeout must retain exactly one timed-out attempt"
+    );
     assert!(
-        recorder.calls().is_empty(),
-        "the outer-race drop leaves no TracedCall (documented gap)"
+        matches!(&calls[0].outcome, TracedOutcome::TimedOut),
+        "operation-cap drop is TimedOut, got {:?}",
+        calls[0].outcome
     );
 }
 
@@ -649,10 +674,9 @@ async fn attempt_counting_provider_error_records_exactly_one_failed_call() {
 }
 
 #[tokio::test]
-async fn attempt_counting_inner_cancellation_still_records_one_failed_call() {
-    // The inner per-chunk cancel check returns normally from
-    // complete_streaming (proven above), so TracingChatBackend still
-    // observes and records the outcome — contrast with the outer-race cases.
+async fn attempt_counting_cancellation_before_request_start_records_zero_attempts() {
+    // Cancel already set at the attempt boundary: TracingChatBackend must not
+    // invent an attempt (and the gateway must see no HTTP).
     let gateway = MockGateway::start_ordered(vec![Step::respond(
         Response::new(200, Body::NeverEnds).with_header("content-type", "text/event-stream"),
     )])
@@ -663,14 +687,19 @@ async fn attempt_counting_inner_cancellation_still_records_one_failed_call() {
         .await
         .unwrap_err();
     assert_eq!(
+        gateway.request_count(),
+        0,
+        "cancel-at-entry must not issue a provider request"
+    );
+    assert_eq!(
         recorder.calls().len(),
-        1,
-        "pre-cancelled complete_streaming still resolves and is recorded"
+        0,
+        "cancellation before the attempt boundary invents zero attempts"
     );
 }
 
 #[tokio::test(start_paused = true)]
-async fn attempt_counting_outer_race_timeout_records_zero_calls_documented_gap() {
+async fn attempt_counting_outer_race_timeout_records_one_timed_out_call() {
     let gateway = MockGateway::start_ordered(vec![Step::respond(
         Response::new(200, Body::NeverEnds).with_header("content-type", "text/event-stream"),
     )])
@@ -687,13 +716,136 @@ async fn attempt_counting_outer_race_timeout_records_zero_calls_documented_gap()
     tokio::time::advance(Duration::from_secs(6)).await;
     let outcome = call.await.expect("join");
     assert!(matches!(outcome, Err("deadline")));
+    let calls = recorder.calls();
     assert_eq!(
-        recorder.calls().len(),
-        0,
-        "REAL GAP: a round timed out by the outer race consumes an admitted round (per \
-         agent.rs's used_rounds accounting) but leaves no TracedCall — provider_round_count \
-         and used_rounds can diverge for exactly this reason. Documented, not fixed here — see \
-         docs/testing/gateway-wire-survivors-and-gaps.md."
+        calls.len(),
+        1,
+        "outer-race timeout retains exactly one TimedOut TracedCall so \
+         provider_round_count stays honest against used_rounds"
+    );
+    assert!(matches!(&calls[0].outcome, TracedOutcome::TimedOut));
+}
+
+#[tokio::test(start_paused = true)]
+async fn whole_turn_timeout_records_one_timed_out_attempt() {
+    // Whole-turn budget is the same outer-race timeout shape as the operation
+    // cap; the attempt lifecycle must still retain exactly one TimedOut call.
+    let gateway = MockGateway::start_ordered(vec![Step::respond(
+        Response::new(200, Body::NeverEnds).with_header("content-type", "text/event-stream"),
+    )])
+    .await;
+    let (backend, recorder) = traced_backend(gateway.base_url()).await;
+    let whole_turn = Duration::from_secs(8);
+    let call = tokio::spawn(async move {
+        race_with_cancel(
+            complete_streaming_once(backend.as_ref(), None),
+            Some(whole_turn),
+            None,
+        )
+        .await
+    });
+    tokio::time::advance(Duration::from_secs(9)).await;
+    let outcome = call.await.expect("join");
+    assert!(matches!(outcome, Err("deadline")));
+    let calls = recorder.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(matches!(&calls[0].outcome, TracedOutcome::TimedOut));
+}
+
+#[tokio::test]
+async fn boundary_race_never_double_counts_a_resolved_attempt() {
+    // Inner resolves successfully while an outer cancel is also racing.
+    // Exactly one terminal record must remain (Completed wins when the
+    // operation future finishes before the select cancel branch).
+    let gateway = MockGateway::start_ordered(vec![Step::respond(sse_ok(&[
+        text_event("wins the race"),
+        finish_event(),
+    ]))])
+    .await;
+    let (backend, recorder) = traced_backend(gateway.base_url()).await;
+    let cancel = Arc::new(AtomicBool::new(false));
+    // Cancel is armed only after a generous delay so the fast provider wins.
+    let cancel_setter = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cancel_setter.store(true, Ordering::SeqCst);
+    });
+    let outcome = race_with_cancel(
+        complete_streaming_once(backend.as_ref(), Some(cancel.as_ref())),
+        Some(Duration::from_secs(5)),
+        Some(cancel.as_ref()),
+    )
+    .await;
+    match outcome {
+        Ok(Ok(completion)) => {
+            assert_eq!(completion.content, "wins the race");
+            let calls = recorder.calls();
+            assert_eq!(calls.len(), 1, "resolved success must not double-count");
+            assert!(matches!(&calls[0].outcome, TracedOutcome::Completed { .. }));
+        }
+        Ok(Err(_)) | Err(_) => {
+            // If cancel/deadline won instead, still exactly one terminal record.
+            let calls = recorder.calls();
+            assert_eq!(calls.len(), 1, "interrupted attempt must not double-count");
+            assert!(
+                matches!(
+                    &calls[0].outcome,
+                    TracedOutcome::Cancelled | TracedOutcome::TimedOut
+                ),
+                "got {:?}",
+                calls[0].outcome
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn interrupted_attempt_serialized_output_is_metadata_only() {
+    let gateway = MockGateway::start_ordered(vec![Step::respond(
+        sse_ok(&[text_event("never arrives")]).with_header_delay(Duration::from_secs(30)),
+    )])
+    .await;
+    let (backend, recorder) = traced_backend(gateway.base_url()).await;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_setter = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        cancel_setter.store(true, Ordering::SeqCst);
+    });
+    let _ = race_with_cancel(
+        complete_streaming_once(backend.as_ref(), Some(cancel.as_ref())),
+        None,
+        Some(cancel.as_ref()),
+    )
+    .await;
+    let calls = recorder.calls();
+    assert_eq!(calls.len(), 1);
+    let blob = serde_json::to_string(&calls[0]).expect("serialize traced call");
+    // Interrupt path must not retain request bodies / prompt text.
+    assert!(
+        calls[0].messages.is_empty(),
+        "interrupted attempts store no message bodies"
+    );
+    for forbidden in [
+        "latency probe",
+        "sk-",
+        "Authorization",
+        "Bearer ",
+        "http://",
+        "https://",
+        "never arrives",
+        "api_key",
+        "secret",
+    ] {
+        assert!(
+            !blob.contains(forbidden),
+            "serialized interrupt telemetry must not contain {forbidden:?}: {blob}"
+        );
+    }
+    assert!(
+        matches!(&calls[0].outcome, TracedOutcome::Cancelled),
+        "shared cancel flag classifies Drop as Cancelled, got {:?}",
+        calls[0].outcome
     );
 }
 
