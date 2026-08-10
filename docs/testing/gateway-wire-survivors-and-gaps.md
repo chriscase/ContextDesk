@@ -174,34 +174,36 @@ transport error launches a second protocol attempt.
 Each of these has a passing test that proves the current, real behavior —
 not a guess — with a clear reason it was left alone.
 
-### 1. Outer-race timeout/cancellation drops telemetry (highest risk)
+### 1. Outer-race timeout/cancellation drops telemetry — **FIXED**
 
-**What.** Production wraps every provider round in `agent.rs`'s
+**What (historical).** Production wraps every provider round in `agent.rs`'s
 `pub(crate) within_turn_deadline_with_cap`: a `tokio::select!` between the
 operation and a cancellation/deadline watcher. When the *deadline* branch
-wins (not the operation), the operation future is dropped without ever
-resolving. `TracingChatBackend::record()` only runs after its inner future
-resolves — so a round dropped this way produces **zero** `TracedCall`
+won (not the operation), the operation future was dropped without ever
+resolving. `TracingChatBackend` only recorded after its inner future
+resolved — so a round dropped this way produced **zero** `TracedCall`
 entries, even though `agent.rs`'s `used_rounds` budget accounting still
-charges for the round. `provider_round_count` (derived from traced calls)
-and `used_rounds` can diverge for exactly this reason.
+charged for the round. `provider_round_count` (derived from traced calls)
+and `used_rounds` could diverge for exactly this reason.
 
-**Proof.** `permanently_stalled_provider_is_cut_off_by_an_explicit_user_deadline`
-and `attempt_counting_outer_race_timeout_records_zero_calls_documented_gap`
-(`gateway_wire_latency_cancellation.rs`) both assert
-`recorder.calls().is_empty()` after a deadline-cut-off round, with an
-explanatory panic message pointing back to this file.
+**Fix (branch `fix/provider-attempt-telemetry-v1`).** `TracingChatBackend`
+now opens an explicit RAII `ProviderAttemptGuard` when a provider operation
+is actually started. Exactly one terminal `TracedCall` is retained:
 
-**Why not fixed.** `within_turn_deadline_with_cap` and the turn-budget
-machinery it feeds are `pub(crate)` inside `agent.rs`, load-bearing for
-every production turn, and not reachable from an integration test.
-Correctly recording a "this round was admitted but never completed"
-`TracedCall` (as opposed to just not recording one) is a real product
-change to that machinery, not a wire-conformance fix — it needs its own
-design decision (what outcome variant represents "aborted before
-resolution," how it interacts with retry accounting) rather than the
-smallest-possible patch this lab's process calls for. Recommended as the
-top follow-up item; see below.
+- inner resolves → `Completed` / `Failed` / cooperative `Cancelled`
+- host outer deadline drop → `TimedOut`
+- host cancel drop (shared cancel flag, same as production) → `Cancelled`
+- cancel already set at entry → **zero** attempts (never crossed the boundary)
+
+Double counting is impossible: a `SeqCst` `finalized` flag is swapped
+exactly once; the loser of finish-vs-Drop is a no-op. Interrupt paths are
+metadata-only (no request bodies, prompts, secrets, URLs, or provider text).
+
+**Proving tests.** `permanently_stalled_provider_is_cut_off_by_an_explicit_user_deadline`,
+`attempt_counting_outer_race_timeout_records_one_timed_out_call`,
+`cancellation_while_waiting_on_headers_via_the_outer_race`,
+`candidate_operation_cap_is_shorter_than_the_whole_turn_budget_and_wins`,
+plus unit lifecycle tests in `turn_trace.rs`.
 
 ### 2. HTTP 2xx with an error-shaped body (OpenAI-compatible dialect)
 
@@ -282,19 +284,19 @@ gateways, but exercise the same production constructors and backend methods.
 
 The same acceptance trace also showed `providerRoundCount` diverging from the
 host's charged round count when an outer cap dropped an in-flight operation.
-That independently agrees with documented gap #1. It remains a separate
-telemetry-lifecycle change and is not represented as fixed here.
+That independently agreed with historical gap #1. The integrated provider
+attempt lifecycle guard now retains those cancelled/timed-out operations as
+metadata-only terminal records without changing request or deadline policy.
 
 ## Recommended integration strategy
 
 1. **Keep the six provider-neutral fixes together in the acceptance-wire
    integration candidate** so the same conformance suite proves parsing,
    completion integrity, host-governed timeouts, and one-request semantics.
-2. **Treat gap #1 (telemetry) as the next real design task**, not a
-   follow-up bug fix — it needs a decision about what `TracedOutcome`
-   variant (or new one) represents "admitted but aborted before
-   resolution" and how `used_rounds` should reconcile against it, made by
-   whoever owns `agent.rs`'s turn-budget machinery.
+2. **Keep provider-attempt telemetry in the same candidate**: the lifecycle
+   guard records started operations dropped by host timeout/cancellation and
+   cannot double-count, while leaving request/deadline behavior unchanged.
+   Remaining product work is surface polish for distinct timeout wording.
 3. **Adopt `cd-test-gateway` as the default for new provider-boundary
    tests** going forward rather than hand-rolled TCP servers; it is a real
    workspace crate, already wired into `cd-core`/`cd-workflow`/`cd-cli`,
