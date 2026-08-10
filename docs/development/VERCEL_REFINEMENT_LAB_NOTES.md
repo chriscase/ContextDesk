@@ -842,15 +842,14 @@ worktree and confirmed:
 - **The generic TEI reranker path-prefix bug is fixed.** `/v1` is preserved
   with or without a trailing slash, and Vercel v4 now has its own explicit
   score-preserving adapter rather than being parsed as TEI.
-- **Query-time cloud egress consent is missing.** Ingest cloud embedding has an
-  explicit content-leaves-machine gate. Query embedding and reranking do not;
-  they can send the question and redacted messages once a host wires the
-  backend. Production remote retrieval must fail closed to keyword mode unless
-  an equivalent explicit consent is present.
-- Remaining honesty boundary: configured role identity and endpoint health are
-  still not live quality evidence, and query-time remote retrieval still needs
-  explicit content-leaves-machine consent before it can be activated by a
-  product host.
+- **Query-time cloud egress is now default-deny.** Each configured retrieval
+  role has an explicit `allow_remote` acknowledgment. A non-loopback endpoint
+  without it is reported as `egress_not_acknowledged`, is blocked before
+  backend construction or credential lookup, and leaves the structured/keyword
+  baseline usable. Loopback Ollama remains local without an acknowledgment.
+  This is a consent boundary, not evidence that a remote model is useful.
+- Remaining honesty boundary: configured role identity, endpoint health, and
+  protocol compatibility are still not live quality evidence.
 
 The gateway-native v4 routes are now represented by shared production adapters
 and remain separately selectable from the OpenAI-compatible dialect. The

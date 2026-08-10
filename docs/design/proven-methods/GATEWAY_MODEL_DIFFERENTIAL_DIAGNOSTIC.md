@@ -233,7 +233,7 @@ non-ANSI terminal all degrade to the same plain text.
 | --- | --- | --- | --- |
 | Chat-role two-lane differential | Local integration | Runs against a hermetic mock and real gateways alike, reusing production paths only | Not a proof of answer quality |
 | Triage typed scoring | Local integration | Reuses the production rubric scorer | The fixture is synthetic; a real incident's ambiguity may differ |
-| Embedding/reranker differential | Local integration (reranker), Planned (non-Ollama embedding) | Reranker case runs against any generic HTTP endpoint | OpenAI-compatible embedding product lane is explicitly `not_run` |
+| Embedding/reranker differential | Local integration | Explicit OpenAI/Vercel embedding and TEI/Vercel reranker adapters reuse production seams; remote retrieval is consent-gated | Not a proof of semantic quality or employer-model equivalence |
 | Replay/inspect of a private capture | Planned | Schema is versioned for this | No implementation |
 
 ## 15. Reimplementation notes

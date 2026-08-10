@@ -363,6 +363,12 @@ pub struct RetrievalRoleModel {
     /// The value is a parser selector only — it never makes a model verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dialect: Option<String>,
+    /// Explicit acknowledgment that query-time retrieval inputs may leave this
+    /// machine for a non-loopback endpoint. Defaults to false so adding a
+    /// remote role cannot silently create cloud egress. Loopback endpoints
+    /// remain usable without this acknowledgment.
+    #[serde(default)]
+    pub allow_remote: bool,
     /// Optional credential REFERENCE for a bearer credential — either an
     /// explicit Keychain id or a protected `file:` path, never the secret
     /// itself (`refuse_raw_secret_refs` enforces this on load/save).
@@ -866,6 +872,7 @@ mod tests {
             base_url: "http://127.0.0.1:8080".into(),
             model: "qwen3-reranker-0.6b".into(),
             dialect: None,
+            allow_remote: false,
             api_key_ref: None,
         });
         save_config(&path, &cfg).unwrap();
@@ -946,6 +953,7 @@ mod tests {
             base_url: "http://127.0.0.1:11434".into(),
             model: "bge-m3".into(),
             dialect: None,
+            allow_remote: false,
             api_key_ref: Some("sk-proj-not-a-reference".into()),
         });
         assert!(save_config(&path, &cfg).is_err());

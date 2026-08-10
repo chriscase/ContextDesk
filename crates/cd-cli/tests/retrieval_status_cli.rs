@@ -147,3 +147,65 @@ fn retrieval_status_reflects_configured_roles_without_probing_or_secrets() {
         "text output never leaks endpoints"
     );
 }
+
+#[test]
+fn retrieval_status_reports_remote_egress_without_contacting_provider() {
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let config = serde_json::json!({
+        "providers": {
+            "active_id": "ollama-local",
+            "profiles": [{
+                "id": "ollama-local",
+                "label": "Ollama (local)",
+                "kind": "ollama",
+                "base_url": "http://127.0.0.1:11434",
+                "api_key_ref": null,
+                "chat_model": "llama3.2",
+                "embedding_model": "nomic-embed-text",
+                "embedding_base_url": null,
+                "capabilities": {"tools": false, "stream": true, "embeddings": true}
+            }]
+        },
+        "setup_completed": true,
+        "retrieval": {
+            "embedding": {
+                "enabled": true,
+                "base_url": "https://gateway.example.invalid",
+                "model": "bge-m3",
+                "dialect": "openai_embeddings",
+                "api_key_ref": "provider/retrieval/key"
+            }
+        }
+    });
+    fs::write(
+        data.join("config.json"),
+        serde_json::to_vec_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    let out = bin()
+        .args([
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--json",
+            "retrieval-status",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let envelope: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let embedding = envelope["data"]["report"]["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|role| role["role"] == "embedding")
+        .unwrap();
+    assert_eq!(embedding["state"], "egress_not_acknowledged");
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .contains("egress_not_acknowledged"));
+}

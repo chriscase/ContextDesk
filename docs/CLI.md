@@ -409,13 +409,15 @@ never any ANSI bytes. `--json` prints one envelope with the full report.
 Exit code: `0` when both compatibility verdicts hold, `8` (`not_ready`)
 when either does not, `130` (`cancelled`) on Ctrl-C.
 
-**Known limitations.** The embedding/reranker product-lane adapter is
-wired for Ollama-hosted embedding profiles and any generic HTTP reranker
-endpoint (`cd_core::rerank::HttpRerankBackend`); an OpenAI-compatible
-embedding profile's product lane reports an explicit `not_run` state
-rather than a fabricated result — a documented follow-up, not silent
-success. An offline inspect/replay seam for turning a captured sanitized
-envelope into a hermetic regression fixture is not yet implemented.
+**Known limitations.** The embedding/reranker product lane has explicit
+Ollama, OpenAI-compatible, and Vercel v4 embedding dialects plus explicit
+TEI and Vercel v4 reranker dialects. Remote retrieval is default-deny: a
+configured role must carry an explicit `allow_remote` acknowledgment before
+query or candidate text can leave the machine; loopback Ollama does not need
+that acknowledgment. A role that lacks it is reported as
+`egress_not_acknowledged` and the keyword/structured baseline remains usable.
+These are compatibility and safety contracts, not claims of semantic quality;
+live employer-model quality still requires a consented diagnostic run.
 
 ## Isolated profiles (`--data-dir` / `--profile-dir`)
 

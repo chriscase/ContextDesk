@@ -15,6 +15,7 @@
 //! Absence or failure of every optional role leaves the structured/keyword
 //! baseline usable.
 
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -54,6 +55,8 @@ pub enum RetrievalRoleState {
     Unavailable,
     /// Enabled and reachable, but the response violated the role contract.
     Incompatible,
+    /// Enabled for a non-loopback endpoint without explicit egress consent.
+    EgressNotAcknowledged,
 }
 
 impl RetrievalRoleState {
@@ -66,6 +69,7 @@ impl RetrievalRoleState {
             Self::Healthy => "healthy",
             Self::Unavailable => "unavailable",
             Self::Incompatible => "incompatible",
+            Self::EgressNotAcknowledged => "egress_not_acknowledged",
         }
     }
 }
@@ -140,6 +144,36 @@ fn bearer_for(role: &RetrievalRoleModel, secrets: Option<&dyn SecretStore>) -> O
     secrets.and_then(|store| store.get(reference).ok().flatten())
 }
 
+/// Retrieval sends a query to the embedding service and may send query plus
+/// corpus candidates to the reranker. Treat every non-loopback endpoint as
+/// remote, including private/corporate hosts: a private address can still be
+/// another machine. This check is deliberately lexical and conservative; the
+/// SSRF policy remains responsible for validating and pinning the actual URL.
+fn retrieval_endpoint_is_remote(role: &RetrievalRoleModel) -> bool {
+    let Ok(url) = url::Url::parse(&role.base_url) else {
+        // Let backend construction report the malformed URL, but never treat
+        // an unparseable endpoint as local and silently allow egress.
+        return true;
+    };
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    let host = host.to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return false;
+    }
+    !host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn assert_retrieval_egress_allowed(role: &RetrievalRoleModel) -> CoreResult<()> {
+    if retrieval_endpoint_is_remote(role) && !role.allow_remote {
+        return Err(cd_core::error::CoreError::Policy(
+            "remote retrieval is not acknowledged; enable allow_remote only after confirming that query and candidate text may leave this machine".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Build the configured embedding backend through an explicit wire dialect.
 /// Legacy roles without a dialect retain the local Ollama default only for
 /// the conventional Ollama port; every other endpoint uses the generic
@@ -148,6 +182,7 @@ pub fn build_embedding_backend(
     role: &RetrievalRoleModel,
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn EmbedBackend>> {
+    assert_retrieval_egress_allowed(role)?;
     let dialect = role.dialect.as_deref().unwrap_or_else(|| {
         if role.base_url.contains(":11434") {
             "ollama_embeddings"
@@ -190,6 +225,7 @@ pub fn build_rerank_backend(
     role: &RetrievalRoleModel,
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn RerankBackend>> {
+    assert_retrieval_egress_allowed(role)?;
     if let Some(dialect) = role.dialect.as_deref() {
         if dialect != "tei_rerank_v1" && dialect != "vercel_v4_rerank_v1" {
             return Err(cd_core::error::CoreError::Config(format!(
@@ -242,6 +278,18 @@ fn embedding_role_status(
             detail: "configured but disabled".into(),
         },
         Some(role) => {
+            if let Err(error) = assert_retrieval_egress_allowed(role) {
+                return (
+                    RetrievalRoleStatus {
+                        role: "embedding".into(),
+                        state: RetrievalRoleState::EgressNotAcknowledged,
+                        model: Some(role.model.clone()),
+                        endpoint_fingerprint: Some(role_fingerprint(role)),
+                        detail: error.to_string(),
+                    },
+                    None,
+                );
+            }
             if !probe {
                 return (
                     RetrievalRoleStatus {
@@ -320,6 +368,15 @@ fn reranker_role_status(
             detail: "configured but disabled".into(),
         },
         Some(role) => {
+            if let Err(error) = assert_retrieval_egress_allowed(role) {
+                return RetrievalRoleStatus {
+                    role: "reranker".into(),
+                    state: RetrievalRoleState::EgressNotAcknowledged,
+                    model: Some(role.model.clone()),
+                    endpoint_fingerprint: Some(role_fingerprint(role)),
+                    detail: error.to_string(),
+                };
+            }
             if !probe {
                 return RetrievalRoleStatus {
                     role: "reranker".into(),
@@ -498,16 +555,54 @@ pub fn hybrid_search(
     )?;
     if embedding_build_failed {
         outcome.degradations.push(HybridDegradation {
-            code: "embedding_backend_construction_failed".into(),
-            detail:
+            code: if config
+                .retrieval
+                .embedding
+                .as_ref()
+                .is_some_and(|role| retrieval_endpoint_is_remote(role) && !role.allow_remote)
+            {
+                "retrieval_egress_not_acknowledged"
+            } else {
+                "embedding_backend_construction_failed"
+            }
+            .into(),
+            detail: if config
+                .retrieval
+                .embedding
+                .as_ref()
+                .is_some_and(|role| retrieval_endpoint_is_remote(role) && !role.allow_remote)
+            {
+                "remote embedding was blocked because retrieval egress was not acknowledged; structured/keyword baseline remains usable"
+            } else {
                 "embedding backend construction failed; structured/keyword baseline remains usable"
-                    .into(),
+            }
+            .into(),
         });
     }
     if reranker_build_failed {
         outcome.degradations.push(HybridDegradation {
-            code: "reranker_backend_construction_failed".into(),
-            detail: "reranker backend construction failed; pre-rerank order remains usable".into(),
+            code: if config
+                .retrieval
+                .reranker
+                .as_ref()
+                .is_some_and(|role| retrieval_endpoint_is_remote(role) && !role.allow_remote)
+            {
+                "retrieval_egress_not_acknowledged"
+            } else {
+                "reranker_backend_construction_failed"
+            }
+            .into(),
+            detail: if config
+                .retrieval
+                .reranker
+                .as_ref()
+                .is_some_and(|role| retrieval_endpoint_is_remote(role) && !role.allow_remote)
+            {
+                "remote reranking was blocked because retrieval egress was not acknowledged; pre-rerank order remains usable"
+            } else {
+                "reranker backend construction failed; pre-rerank order remains usable"
+            }
+            .into(),
         });
     }
     // `telemetry.embedding_model` is set by the engine from the identity of
@@ -530,6 +625,7 @@ mod tests {
             base_url: "http://127.0.0.1:8080".into(),
             model: "test-reranker".into(),
             dialect: Some("tei_rerank_v1".into()),
+            allow_remote: false,
             api_key_ref: api_key_ref.map(str::to_string),
         }
     }
@@ -562,6 +658,7 @@ mod tests {
             base_url: gateway.base_url().to_string(),
             model: "bge-m3".into(),
             dialect: Some("openai_embeddings".into()),
+            allow_remote: false,
             api_key_ref: Some("retrieval/embed/api_key".into()),
         };
         let backend = build_embedding_backend(&role, Some(&secrets)).unwrap();
@@ -579,6 +676,7 @@ mod tests {
             base_url: "http://127.0.0.1:8080".into(),
             model: "bge-m3".into(),
             dialect: Some("invented".into()),
+            allow_remote: false,
             api_key_ref: None,
         };
         let error = build_embedding_backend(&role, None)
@@ -591,12 +689,70 @@ mod tests {
             base_url: "http://127.0.0.1:8080".into(),
             model: "qwen3-reranker-0.6b".into(),
             dialect: Some("vercel_v4".into()),
+            allow_remote: false,
             api_key_ref: None,
         };
         let error = build_rerank_backend(&reranker, None)
             .err()
             .expect("unsupported reranker dialect must fail");
         assert!(error.to_string().contains("unsupported reranker dialect"));
+    }
+
+    #[test]
+    fn remote_retrieval_is_blocked_before_backend_or_credential_access() {
+        let role = RetrievalRoleModel {
+            enabled: true,
+            base_url: "https://ai-gateway.vercel.sh".into(),
+            model: "deepseek-v4-flash".into(),
+            dialect: Some("vercel_v4_embeddings".into()),
+            allow_remote: false,
+            api_key_ref: Some("retrieval/vercel/api_key".into()),
+        };
+        let error = build_embedding_backend(&role, None)
+            .err()
+            .expect("unacknowledged remote retrieval must fail closed");
+        assert!(error
+            .to_string()
+            .contains("remote retrieval is not acknowledged"));
+
+        let reranker = RetrievalRoleModel {
+            dialect: Some("vercel_v4_rerank_v1".into()),
+            ..role
+        };
+        let error = build_rerank_backend(&reranker, None)
+            .err()
+            .expect("unacknowledged remote reranking must fail closed");
+        assert!(error
+            .to_string()
+            .contains("remote retrieval is not acknowledged"));
+    }
+
+    #[test]
+    fn retrieval_status_exposes_egress_policy_without_probing() {
+        let cache = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.retrieval.embedding = Some(RetrievalRoleModel {
+            enabled: true,
+            base_url: "https://gateway.example.invalid".into(),
+            model: "bge-m3".into(),
+            dialect: Some("openai_embeddings".into()),
+            allow_remote: false,
+            api_key_ref: None,
+        });
+        let report = retrieval_status(
+            cache.path(),
+            &config,
+            &RetrievalStatusOptions::default(),
+            None,
+        )
+        .unwrap();
+        let embedding = report
+            .roles
+            .iter()
+            .find(|role| role.role == "embedding")
+            .unwrap();
+        assert_eq!(embedding.state, RetrievalRoleState::EgressNotAcknowledged);
+        assert!(embedding.detail.contains("remote retrieval"));
     }
 
     #[test]
@@ -644,6 +800,7 @@ mod tests {
             base_url: "http://127.0.0.1:11434".into(),
             model: "different-vector-space".into(),
             dialect: Some("ollama_embeddings".into()),
+            allow_remote: false,
             api_key_ref: None,
         });
         let report = retrieval_status(
