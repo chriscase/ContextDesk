@@ -1788,6 +1788,8 @@ fn seed_triage_corpus(
         "kind=exception level=error service=worker LeaseWindowExpired retry exhausted again";
     let decoy_msg = "kind=alert level=warn service=billing-metrics unrelated disk usage alert cleared automatically";
     let recovery_msg = "kind=config_event level=info service=control restored revision r16 lease window 4000ms lease acquisition recovered";
+    let decoy_error_msg =
+        "kind=error level=error service=search unrelated cache node rejected request";
 
     let events = vec![
         LogEvent {
@@ -1880,6 +1882,21 @@ fn seed_triage_corpus(
             message: recovery_msg.to_string(),
             source: source.clone(),
         },
+        LogEvent {
+            seq: 7,
+            ts: base_ts + 6,
+            timestamp_provenance: TimestampProvenance::ExplicitWallClock,
+            active_timestamp_basis: ActiveTimestampBasis::ExplicitWall,
+            unresolved_local_timestamp: None,
+            level: "ERROR".into(),
+            service: Some("search".into()),
+            host: Some("synthetic-host-3".into()),
+            template_id: 5,
+            params: vec![],
+            trace_id: None,
+            message: decoy_error_msg.to_string(),
+            source: source.clone(),
+        },
     ];
     corpus.push_events(&events).map_err(|e| e.to_string())?;
     let templates = [
@@ -1887,6 +1904,7 @@ fn seed_triage_corpus(
         (2u64, "unrelated disk usage alert", 2u8),
         (3u64, "LeaseWindowExpired", 4u8),
         (4u64, "restored lease window", 1u8),
+        (5u64, "unrelated cache node rejected request", 4u8),
     ];
     corpus
         .upsert_templates(
@@ -1931,7 +1949,9 @@ fn seed_triage_corpus(
         time_quality_expected: "wall".to_string(),
         sources_present: vec![source.clone()],
         sources_omitted: vec![],
-        decoy_earliest_error_message_token: None,
+        decoy_earliest_error_message_token: Some(
+            "unrelated cache node rejected request".to_string(),
+        ),
         true_trigger_message_token: Some("lease window 250ms below supported minimum".to_string()),
         competing_trigger_message_tokens: vec![],
         symptom_message_tokens: vec!["LeaseWindowExpired".to_string()],
