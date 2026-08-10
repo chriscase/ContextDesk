@@ -1212,6 +1212,13 @@ fn final_comparison_system_contract() -> String {
         "do not promote downstream symptoms or competing/noise candidates into initiating_causes. ",
         "When a draft is unknown or supporting_evidence, prefer causal_candidates, observations, or ",
         "missing_evidence over an established initiating cause. ",
+        "Candidate-stage classification is a scoped hint, not a complete semantic verdict: use the ",
+        "separately supplied global timeline to distinguish an earliest logged mechanism from later ",
+        "repeated effects. When the timeline directly supports a downstream effect, retain its ",
+        "permitted evidence in symptoms even if an earlier draft called that group supporting or ",
+        "unknown; do not omit a propagated failure merely because it is loud or repeated. A finding ",
+        "that persists independently after the main chain recovers belongs in competing_explanations ",
+        "or observations, not symptoms. ",
         "A manifest may also include `global_timeline_context`, a separately scoped ",
         "global chronology rather than an incident. Its rows may describe overlapping unrelated ",
         "processes: report only what their text and order show, never treat adjacency as correlation ",
@@ -14093,7 +14100,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         assert!(final_comparison_correction(Some("parse")).contains("extra closing delimiter"));
         assert!(final_comparison_correction(Some("duplicate_id")).contains("globally unique"));
         assert!(final_comparison_correction(Some("role_mismatch")).contains("downstream symptom"));
-        assert!(final_comparison_correction(Some("role_coverage")).contains("symptoms section"));
+        assert!(final_comparison_correction(Some("role_coverage")).contains("symptom-labeled"));
         assert!(!final_comparison_correction(Some("wrong_scope")).contains("rejected"));
     }
 
