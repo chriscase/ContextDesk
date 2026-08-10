@@ -1503,10 +1503,23 @@ pub fn parse_anthropic_models_list(text: &str) -> CoreResult<Vec<String>> {
 pub fn parse_anthropic_completion(text: &str) -> CoreResult<ChatCompletion> {
     let v: Value = serde_json::from_str(text)
         .map_err(|e| CoreError::Message(format!("anthropic json: {e}")))?;
+    // Anthropic's documented error envelope (`{"type":"error","error":{...}}`)
+    // has no `content` array — without this check it silently parsed as an
+    // ordinary empty-but-successful completion (content "", finish_reason
+    // defaulted to "end_turn"), indistinguishable from a legitimately empty
+    // answer. Mirrors the equivalent inline check the OpenAI-compatible SSE
+    // parser already applies (`parse_openai_sse_data`'s `v.get("error")`).
+    if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+        let message = v
+            .pointer("/error/message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("anthropic error response");
+        return Err(CoreError::Message(message.to_string()));
+    }
     let mut content = String::new();
     let mut tool_calls = Vec::new();
     if let Some(blocks) = v.get("content").and_then(|c| c.as_array()) {
-        for b in blocks {
+        for (idx, b) in blocks.iter().enumerate() {
             let ty = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match ty {
                 "text" => {
@@ -1515,11 +1528,17 @@ pub fn parse_anthropic_completion(text: &str) -> CoreResult<ChatCompletion> {
                     }
                 }
                 "tool_use" => {
+                    // A position-unique fallback (matching the streaming
+                    // accumulator's convention below) — a literal
+                    // "toolu_unknown" for every id-less block would collide
+                    // whenever a response has more than one, making a
+                    // tool-result continuation unable to address them
+                    // individually.
                     let id = b
                         .get("id")
                         .and_then(|x| x.as_str())
-                        .unwrap_or("toolu_unknown")
-                        .to_string();
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("toolu_{idx}"));
                     let name = b
                         .get("name")
                         .and_then(|n| n.as_str())
@@ -1571,6 +1590,9 @@ pub fn accumulate_anthropic_sse(body: &str) -> CoreResult<ChatCompletion> {
     let mut tools: std::collections::BTreeMap<usize, (String, String, String)> =
         std::collections::BTreeMap::new();
     let mut finish_reason = String::from("end_turn");
+    // True once message_delta (carrying stop_reason) or message_stop has
+    // been observed — see the fail-closed check below.
+    let mut saw_finish_signal = false;
     let mut current_event = String::new();
 
     for raw_line in body.lines() {
@@ -1647,9 +1669,26 @@ pub fn accumulate_anthropic_sse(body: &str) -> CoreResult<ChatCompletion> {
                         "tool_use" => "tool_calls".into(),
                         other => other.to_string(),
                     };
+                    saw_finish_signal = true;
                 }
             }
-            "message_stop" | "content_block_stop" => {}
+            "message_stop" => {
+                saw_finish_signal = true;
+            }
+            "content_block_stop" => {}
+            // Anthropic's documented mid-stream error event
+            // (`event: error` / `{"type":"error","error":{...}}`, e.g.
+            // `overloaded_error`). Previously fell through the wildcard arm
+            // below and was silently discarded — a provider-reported error
+            // must abort with an error, never be dropped in favor of
+            // whatever partial content streamed before it.
+            "error" => {
+                let message = v
+                    .pointer("/error/message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("anthropic stream error");
+                return Err(CoreError::Message(message.to_string()));
+            }
             _ => {
                 // Some servers put type only in data JSON without event: lines.
                 if v.get("type").and_then(|t| t.as_str()) == Some("content_block_delta") {
@@ -1662,6 +1701,17 @@ pub fn accumulate_anthropic_sse(body: &str) -> CoreResult<ChatCompletion> {
                 }
             }
         }
+    }
+
+    // Fails closed when the stream ended without ever observing
+    // message_delta or message_stop — see StreamAccumulator::into_completion
+    // (chat.rs) for the identical OpenAI-side invariant and rationale. A
+    // connection that closes cleanly mid-answer must not be reported as a
+    // completed response with a fabricated "end_turn".
+    if !saw_finish_signal {
+        return Err(CoreError::Message(
+            "anthropic stream ended before message_delta or message_stop was ever received".into(),
+        ));
     }
 
     let mut tool_calls = Vec::new();
