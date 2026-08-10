@@ -45,6 +45,9 @@ pub mod index_watch;
 pub mod injection;
 /// Strict host-validated typed investigation answers.
 pub mod investigation_answer;
+/// Provider-neutral linked multi-stage response contracts (reasoning wrappers,
+/// fences, empty terminals, diagnostic categories).
+pub mod linked_triage_contract;
 pub mod investigations;
 /// Keychain / in-memory credential store (module name avoids gitignore `*secret*`).
 pub mod keychain_store;
