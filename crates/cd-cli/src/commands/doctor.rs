@@ -96,6 +96,21 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 /// phrases its reply.
 const SYNTHETIC_MARKER: &str = "SYNTH_DOCTOR_READINESS_CHECK";
 
+fn first_turn_question() -> String {
+    format!(
+        "Search the logs for {SYNTHETIC_MARKER} and tell me exactly what correlation id it \
+         referenced. Cite the matching event exactly as seq=N plus source=\"...\" from the \
+         bounded tool result; do not substitute a template id or event id for that citation."
+    )
+}
+
+fn continuity_question() -> String {
+    format!(
+        "Search the linked logs again for {SYNTHETIC_MARKER}. Then use the prior turn and \
+         this fresh bounded result to answer: what correlation id did that event reference?"
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
@@ -905,10 +920,7 @@ async fn execute_live_turns(
     model: &str,
     timeout: Duration,
 ) -> LiveTurnOutcome {
-    let question_one = format!(
-        "Search the logs for {SYNTHETIC_MARKER} and tell me exactly what correlation id it \
-         referenced, citing the source."
-    );
+    let question_one = first_turn_question();
     let recorder = Arc::new(RecordingTurnTrace::new());
     let trace_sink: Arc<dyn TurnTraceSink> = recorder.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1028,8 +1040,7 @@ async fn execute_live_turns(
         .map(|s| s.messages.len())
         .unwrap_or(0);
 
-    let question_two =
-        "What correlation id did that event reference? Answer using only what we already found.";
+    let question_two = continuity_question();
     let mut host_two =
         match crate::adapters::tool_host_with_app_config(&paths.cache_root, cfg, secrets) {
             Ok(host) => host,
@@ -1060,7 +1071,7 @@ async fn execute_live_turns(
         sessions,
         &paths.cache_root,
         Some(&session_id),
-        question_two,
+        &question_two,
         ChatWorkflowRequest {
             corpus_id: Some(corpus_id),
             explicit_profile_id: profile_override,
@@ -1257,6 +1268,26 @@ mod tests {
             "What correlation id did that event reference?",
         ])];
         assert!(second_turn_included_prior_context(&calls).is_ok());
+    }
+
+    #[test]
+    fn continuity_prompt_requires_fresh_grounding_and_prior_context() {
+        let question = continuity_question();
+
+        assert!(question.contains(SYNTHETIC_MARKER));
+        assert!(question.contains("Search the linked logs again"));
+        assert!(question.contains("prior turn"));
+        assert!(question.contains("correlation id"));
+    }
+
+    #[test]
+    fn first_turn_prompt_requires_the_host_validated_citation_shape() {
+        let question = first_turn_question();
+
+        assert!(question.contains(SYNTHETIC_MARKER));
+        assert!(question.contains("seq=N"));
+        assert!(question.contains("source=\"...\""));
+        assert!(question.contains("do not substitute a template id or event id"));
     }
 
     /// Mutation test: strip the first turn's history from what the second
