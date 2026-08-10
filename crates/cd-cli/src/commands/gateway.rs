@@ -1302,6 +1302,44 @@ async fn one_turn(
     (outcome, recorder.calls(), started.elapsed())
 }
 
+/// Summarize the host-observed terminal channel without retaining provider
+/// bodies. This makes a completed turn with no visible answer distinguishable
+/// from a normal useful completion in share-safe diagnostic artifacts.
+fn terminal_channel_summary(events: &[StreamEvent]) -> String {
+    let text_delta_count = events
+        .iter()
+        .filter(|event| matches!(event, StreamEvent::TextDelta { .. }))
+        .count();
+    let text_delta_chars = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::TextDelta { text } => Some(text.chars().count()),
+            _ => None,
+        })
+        .sum::<usize>();
+    let turn_terminal = events.iter().rev().find_map(|event| match event {
+        StreamEvent::TurnCompleted { reason } => Some(reason.as_str()),
+        _ => None,
+    });
+    let provider_telemetry = events.iter().rev().find_map(|event| match event {
+        StreamEvent::ProviderTelemetry { telemetry } => Some(telemetry.as_ref()),
+        _ => None,
+    });
+    let (provider_rounds, empty_visible_answer, finish_reason) = provider_telemetry
+        .map(|telemetry| {
+            (
+                telemetry.provider_round_count,
+                telemetry.empty_visible_answer,
+                telemetry.finish_reason.as_deref().unwrap_or("unknown"),
+            )
+        })
+        .unwrap_or((0, false, "unknown"));
+    format!(
+        "terminal_text_chars={text_delta_chars}, text_delta_count={text_delta_count}, provider_rounds={provider_rounds}, empty_visible_answer={empty_visible_answer}, finish_reason={finish_reason}, turn_terminal={}",
+        turn_terminal.unwrap_or("unknown")
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn case_ordinary_generation(
     paths: &Paths,
@@ -1977,6 +2015,7 @@ async fn case_linked_log_triage(
     let mut pass_seen = false;
     let mut fail_seen = false;
     let mut last_scorer_detail = String::new();
+    let mut last_terminal_detail = String::new();
 
     for attempt in 0..attempts {
         if Instant::now() >= deadline {
@@ -2000,26 +2039,39 @@ async fn case_linked_log_triage(
         total_requests += calls.len().max(1) as u32;
         if let Ok(o) = &outcome {
             created_sessions.push(o.session_id.clone());
-            let parsed = parse_structured_triage_answer(&o.final_text);
-            match parsed {
-                Ok(answer) => {
-                    let score = score_structured_triage_answer(&answer, &key, &host);
-                    last_scorer_detail = format!(
-                        "attempt {}: passed={} failed_dimensions=[{}]",
-                        attempt + 1,
-                        score.passed,
-                        score.failed_ids().join(",")
-                    );
-                    if score.passed {
-                        pass_seen = true;
-                    } else {
-                        fail_seen = true;
+            last_terminal_detail = terminal_channel_summary(&o.events);
+            if o.final_text.trim().is_empty() {
+                fail_seen = true;
+                last_scorer_detail = format!(
+                    "attempt {}: no visible terminal answer; {}",
+                    attempt + 1,
+                    last_terminal_detail
+                );
+            } else {
+                let parsed = parse_structured_triage_answer(&o.final_text);
+                match parsed {
+                    Ok(answer) => {
+                        let score = score_structured_triage_answer(&answer, &key, &host);
+                        last_scorer_detail = format!(
+                            "attempt {}: passed={} failed_dimensions=[{}]",
+                            attempt + 1,
+                            score.passed,
+                            score.failed_ids().join(",")
+                        );
+                        if score.passed {
+                            pass_seen = true;
+                        } else {
+                            fail_seen = true;
+                        }
                     }
-                }
-                Err(e) => {
-                    fail_seen = true;
-                    last_scorer_detail =
-                        format!("attempt {}: contract parse failed: {e}", attempt + 1);
+                    Err(e) => {
+                        fail_seen = true;
+                        last_scorer_detail = format!(
+                            "attempt {}: contract parse failed: {e}; {}",
+                            attempt + 1,
+                            last_terminal_detail
+                        );
+                    }
                 }
             }
         } else if let Err(e) = &outcome {
@@ -2032,6 +2084,16 @@ async fn case_linked_log_triage(
     }
 
     let product = match &last_outcome {
+        Some(Ok(o)) if o.final_text.trim().is_empty() => LaneResult {
+            executed: true,
+            passed: false,
+            detail: format!(
+                "product-path turn completed without a visible terminal answer; {last_terminal_detail}"
+            ),
+            elapsed_ms: total_elapsed.as_millis() as u64,
+            attempts,
+            requests_used: total_requests,
+        },
         Some(Ok(_)) => LaneResult {
             executed: true,
             passed: true,
@@ -2410,6 +2472,16 @@ fn write_private_capture(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn terminal_channel_summary_reports_empty_completed_answer() {
+        let summary = terminal_channel_summary(&[StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }]);
+        assert!(summary.contains("terminal_text_chars=0"));
+        assert!(summary.contains("text_delta_count=0"));
+        assert!(summary.contains("turn_terminal=stop"));
+    }
 
     fn pass_lane() -> LaneResult {
         LaneResult {
