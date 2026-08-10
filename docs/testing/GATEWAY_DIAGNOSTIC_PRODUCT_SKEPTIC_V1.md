@@ -3,7 +3,7 @@
 **Branch:** `test/gateway-diagnostic-product-skeptic-v1`  
 **Base:** `60107c5e1b784e785216862bf26a846023532acd`  
 **Suite tip (tests):** `e2450564c8d3e7873760eac917d5cac17c14f9a4`  
-**Branch tip:** `0946d59996eb9143a3b7bab2be83b788965ecc90` (docs stamp; parent `a6e35ae7` is docs+fmt)  
+**Branch tip:** docs-only stamps after suite tip — run `git rev-parse HEAD` on this branch; suite tip above is authoritative for hermetic tests  
 **Kind:** adversarial hermetic audit of the **shipped** `contextdesk gateway diagnose` orchestrator  
 **Scope:** tests + docs; no production behavior change unless a hermetic test proved a provider-neutral defect (none required in this lane)
 
