@@ -89,6 +89,9 @@ impl ShareSafeRedactionPolicy {
         if raw.contains("typed_v1=absent; multi_stage_events=") {
             return self.redact_text(raw);
         }
+        if raw.contains("typed_v1 passed=") && raw.contains("failed_dimensions=[") {
+            return self.redact_text(raw);
+        }
         let lower = raw.to_ascii_lowercase();
         let category = if contains_any(&lower, &["cancelled", "canceled", "interrupted"]) {
             "cancelled"
