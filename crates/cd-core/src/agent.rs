@@ -895,6 +895,7 @@ enum MultiStageTriageOutcome {
 /// Map a multi-stage terminal outcome to the host diagnostic category used by
 /// diagnostics/projections. Pure function over host facts already on the
 /// outcome — never invents categories from raw provider text.
+#[cfg_attr(not(test), allow(dead_code))] // exercised by multi-stage unit tests + available for hosts
 fn diagnostic_category_for_outcome(
     outcome: &MultiStageTriageOutcome,
 ) -> Option<crate::linked_triage_contract::LinkedTriageDiagnosticCategory> {
@@ -1899,7 +1900,9 @@ async fn run_multi_stage_broad_triage(
         // fences, then reject empty visible terminals before ledger parse so
         // reasoning-only payloads are never collapsed into ValidationError::Parse.
         match crate::linked_triage_contract::preparation_for_host_validation(&content) {
-            Err(crate::linked_triage_contract::LinkedTriageDiagnosticCategory::EmptyTerminalAnswer) => {
+            Err(
+                crate::linked_triage_contract::LinkedTriageDiagnosticCategory::EmptyTerminalAnswer,
+            ) => {
                 last_attempt_empty_terminal = true;
                 correction_category = Some("empty_terminal_answer");
                 // No ValidationError::Parse — empty terminal is its own category.
@@ -1944,9 +1947,7 @@ async fn run_multi_stage_broad_triage(
                             // a transcript that shows raw authority invites a caller to
                             // read it back as authority. Both hosts consume this one
                             // projection, so CLI and GUI cannot drift apart.
-                            content: crate::investigation_answer::render_answer_markdown(
-                                &envelope,
-                            ),
+                            content: crate::investigation_answer::render_answer_markdown(&envelope),
                             envelope: Box::new(envelope),
                             accepted_groups: drafts
                                 .into_iter()
@@ -4927,11 +4928,12 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             accepted_groups,
                             rejected_groups,
                             provider_rounds,
-                            diagnostic_category: _,
+                            diagnostic_category,
                         } => {
                             trail.push(format!(
-                                "linked_broad_triage_multi_stage:groups={},rejected={},provider_rounds={},concurrency=1,final_citation_confinement=valid",
-                                accepted_groups.join(","), rejected_groups.join(","), provider_rounds
+                                "linked_broad_triage_multi_stage:groups={},rejected={},provider_rounds={},concurrency=1,final_citation_confinement=valid,diagnostic={}",
+                                accepted_groups.join(","), rejected_groups.join(","), provider_rounds,
+                                diagnostic_category.as_str()
                             ));
                             out.push(StreamEvent::Tool {
                                 id: stage_id,
@@ -14919,9 +14921,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             diagnostic_category_for_outcome(&MultiStageTriageOutcome::ProviderFailed(Box::new(
                 CoreError::Message("upstream 503".into())
             ))),
-            Some(
-                crate::linked_triage_contract::LinkedTriageDiagnosticCategory::TransportFailure
-            )
+            Some(crate::linked_triage_contract::LinkedTriageDiagnosticCategory::TransportFailure)
         );
     }
 

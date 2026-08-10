@@ -17,9 +17,10 @@ path — no second HTTP client, no live gateway, no model-id special-casing.
 
 | Symbol | Role |
 | --- | --- |
-| `cd_core::linked_triage_contract::normalize_known_json_wrapper` | Shared unwrap of complete `<think>`/`<analysis>`/`<reasoning>` + Markdown fences (used by multi-stage candidate + final comparison) |
-| `preparation_for_host_validation` / `is_empty_visible_terminal` | Empty visible after reasoning strip → empty terminal (never success) |
-| `LinkedTriageDiagnosticCategory` + classify_* helpers | Distinct categories for diagnostics |
+| `cd_core::linked_triage_contract::normalize_known_json_wrapper` | Shared unwrap of complete `<think>`/`<analysis>`/`<reasoning>` + Markdown fences |
+| `preparation_for_host_validation` / `is_empty_visible_terminal` | **Wired into multi-stage comparison** before `validate_model_answer`; empty → `EmptyTerminalAnswer` (not `Parse`) |
+| Candidate stage empty check | Sets `validation_category=empty_terminal_answer` on host events when reasoning-only |
+| `MultiStageTriageOutcome::{FailedClosed,Completed}.diagnostic_category` | Host-authoritative category on the production terminal |
 | `investigation_answer::validate_model_answer` | Host-owned evidence/role/revision/citation authority |
 
 ## Variant coverage (hermetic)
@@ -40,24 +41,28 @@ path — no second HTTP client, no live gateway, no model-id special-casing.
 ## Commands / counts
 
 ```text
-cargo test -p cd-core --test linked_triage_contract_replay   # 21
-cargo test -p cd-core --lib linked_triage_contract             # 4
-cargo test -p cd-core --lib known_reasoning_and_fence          # 1
-cargo test -p cd-core --lib candidate_assessment_accepts       # 1
+cargo test -p cd-core --test linked_triage_contract_replay              # 21
+cargo test -p cd-core --lib linked_triage_contract                        # 4
+cargo test -p cd-core --lib multi_stage_empty_reasoning_only_comparison  # 1 (production loop)
+cargo test -p cd-core --lib multi_stage_candidate_empty_terminal         # 1 (production loop)
+cargo test -p cd-core --lib multi_stage_uses_one_semantic_correction     # 1 (SuccessfulBoundedCorrection)
+cargo test -p cd-core --lib multi_stage_outcome_classifier               # 1 (timeout/transport)
+cargo test -p cd-workflow --lib                                           # 80
+cargo test -p cd-cli                                                      # full package exit 0
 cargo fmt --all -- --check
 cargo clippy -p cd-core --all-targets -- -D warnings
 ```
 
-## Mutations (6/6 invert-fail → restore-green)
+## Mutations (6/6 production-guard invert-fail → restore-green)
 
-| Contract | Result |
+| Production guard inverted | Result |
 | --- | --- |
-| Accept malformed JSON as Schema | fail → green |
-| Leak reasoning into visible answer | fail → green |
-| Merge candidate vs final categories | fail → green |
-| Treat empty+reasoning as CompatibleSuccess | fail → green |
-| Skip WrongScope fail-closed | fail → green |
-| Treat tool-call channel as final answer | fail → green |
+| Candidate empty-terminal `continue` | fail → green |
+| Comparison empty → invent Parse instead | fail → green |
+| `validate_model_answer` WrongScope check | fail → green |
+| Ledger `WrongRevision` construction check | fail → green |
+| Collapse empty diagnostic to FinalComparisonFailure | fail → green |
+| `preparation_for_host_validation` empty reject | fail → green |
 
 ## Readiness for one later bounded live Vercel rerun
 
