@@ -150,10 +150,12 @@ pub fn parse_deadline_duration(input: &str) -> Result<u64, DeadlineParseError> {
         return Err(DeadlineParseError::InvalidNumber);
     }
     // Unit is ASCII-only (ms/s/m); take the remainder as bytes to avoid
-    // clippy::string_slice on potentially multi-byte user input.
+    // clippy::string_slice on potentially multi-byte user input. The complete
+    // input was already trimmed above, so do not trim this substring: internal
+    // whitespace (for example `3 m`) must remain invalid and match the GUI
+    // parser's strict grammar.
     let unit = std::str::from_utf8(&bytes[i..])
         .map_err(|_| DeadlineParseError::Malformed)?
-        .trim()
         .to_ascii_lowercase();
     if unit.is_empty() {
         return Err(DeadlineParseError::InvalidUnit);
@@ -332,6 +334,10 @@ mod tests {
         ));
         assert!(matches!(
             parse_deadline_duration("1m30s"),
+            Err(DeadlineParseError::InvalidUnit)
+        ));
+        assert!(matches!(
+            parse_deadline_duration("3 m"),
             Err(DeadlineParseError::InvalidUnit)
         ));
         assert!(matches!(
