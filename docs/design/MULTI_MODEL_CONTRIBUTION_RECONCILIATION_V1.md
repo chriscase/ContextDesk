@@ -174,11 +174,14 @@ The module contains hermetic tests for:
 
 The existing `multi_model_pipeline` and
 `cheap_model_fast_triage_benchmark` suites remain the regression gates for the
-reviewer-first runtime and role-decomposition benchmark. Mutation targets for
-the next integration step are: accepting an initiating-cause kind, accepting a
-foreign id, treating a completed abstainer as role coverage, dropping an
-unavailable contributor, and making model text part of agreement. Each must
-fail closed when inverted.
+reviewer-first runtime and role-decomposition benchmark. The focused manual
+mutation lane at `24104b4f9a8838b64fdaf2edd3ad557bee9ee0f8` inverted four
+contribution promises and killed all four mutants (zero survivors, timeouts, or
+unviable mutations): symptom-to-cause rejection, abstention accounting,
+missing-role coverage, and dropout escalation. Foreign-id, stale-packet,
+malformed, and root-cause-ceiling mutations remain covered by the adjacent
+contract/pipeline adversarial suites; the manual lane is intentionally bounded
+to the highest-risk executable branch predicates.
 
 `replay_reconciliation` provides a provider-free comparison artifact for the
 same packet in deterministic-only, single-contributor, and bounded

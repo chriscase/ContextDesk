@@ -2,7 +2,7 @@
 
 **Audit date:** 2026-08-11  
 **Feature branch:** `feat/multimodel-contribution-reconcile-v1`  
-**Branch tip at this audit snapshot:** `953094eb92e55e4424fa6104c3aff0cb09160f16`
+**Branch tip at this audit snapshot:** `24104b4f9a8838b64fdaf2edd3ad557bee9ee0f8`
 **Production-code integration tip:** `59df68fadc0d51a9d8cc245959c5f9f410a06eaa`
 
 This is a release-manager evidence map for the model-agnostic investigation
@@ -18,7 +18,7 @@ an external gateway run. It makes no universal model-readiness claim.
 | Useful no-model answer floor | `deterministic_baseline`, `reconciliation_answer`; host timeline/groups/relationships/citations | Proven |
 | Bounded routing and dropout handling | `ContributionRoutingPlan`, one sequential call per selected slot, shared deadline/cancel/context limits, no hidden retry | Proven |
 | Production CLI/desktop integration | `cd-workflow` resolver, `--mode contributions`, Tauri per-turn/default mode, shared activity/telemetry | Proven hermetically |
-| Adversarial/mutation coverage | contribution contract/pipeline tests, triage-quality labs, gateway diagnostic contract audit, retrieval and wire labs | Proven hermetically |
+| Adversarial/mutation coverage | contribution contract/pipeline tests, 4 focused contribution inversions (4/4 killed), triage-quality labs, gateway diagnostic contract audit, retrieval and wire labs | Proven hermetically |
 | Replayable evaluation | `replay_reconciliation` compares deterministic-only, one contributor, and bounded multi-model outcomes | Proven provider-free |
 | Live model evidence | Exact Vercel DeepSeek/GPT-OSS reports and retrieval reports under `docs/benchmarks/`; scoped to their exact route/model/release | Prior evidence only |
 | New live capture on this branch | `gateway diagnose --raw --raw-i-understand` is implemented, but the configured protected credential file is absent in this worktree | Blocked on external state |
