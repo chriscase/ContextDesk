@@ -115,6 +115,20 @@ pub struct ResolvedFastTriage {
     pub entry_degradation: Option<FastTriageEntryDegradation>,
 }
 
+/// Whether a host may resolve the optional fast-triage runtime for this turn.
+///
+/// Resolution can build an explicitly authorized fallback backend and read its
+/// profile credential, so a turn that is not linked, is forced local, or has
+/// already been cancelled must not enter that work at all. The core route
+/// still receives the shared cancellation flag for races after admission.
+pub fn should_resolve_fast_triage(
+    linked_turn: bool,
+    force_local: bool,
+    already_cancelled: bool,
+) -> bool {
+    linked_turn && !force_local && !already_cancelled
+}
+
 impl ResolvedFastTriage {
     fn off(reason: FastTriageEntryDegradation) -> Self {
         Self {
@@ -232,6 +246,14 @@ pub fn entry_degradation_event(reason: FastTriageEntryDegradation) -> cd_core::e
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_cancelled_or_non_linked_turns_never_enter_resolution() {
+        assert!(should_resolve_fast_triage(true, false, false));
+        assert!(!should_resolve_fast_triage(true, false, true));
+        assert!(!should_resolve_fast_triage(false, false, false));
+        assert!(!should_resolve_fast_triage(true, true, false));
+    }
 
     #[test]
     fn every_degradation_has_a_distinct_label_and_a_host_detail() {

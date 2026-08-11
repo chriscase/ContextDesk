@@ -80,7 +80,7 @@ use cd_core::tool_host::ToolHost;
 use cd_core::turn_trace::{RecordingTurnTrace, TurnTraceSink};
 use serde_json::Value;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Bound on synchronous grant-and-continue rounds within one workflow call —
@@ -314,7 +314,6 @@ pub async fn run_chat_workflow(
     let multi_model_runtime = review.runtime.clone();
     let multi_model_configured = review.configured_mode;
     let multi_model_entry_degradation = review.entry_degradation;
-
     let binding = match request.corpus_id {
         Some(corpus_id) => Some(bind_linked_corpus(host, cache_root, corpus_id)?),
         None => None,
@@ -337,6 +336,25 @@ pub async fn run_chat_workflow(
         },
         None => None,
     };
+    // Fast triage is meaningful only for an accepted linked broad-log turn.
+    // Resolve it after binding/context validation so an ordinary or rejected
+    // chat must not construct an otherwise unused fallback.
+    let fast_triage = if crate::fast_triage::should_resolve_fast_triage(
+        linked_context.is_some(),
+        false,
+        cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed)),
+    ) {
+        crate::fast_triage::resolve_fast_triage_runtime(cfg, &provider_credentials, &resolved).await
+    } else {
+        crate::fast_triage::ResolvedFastTriage {
+            runtime: None,
+            entry_degradation: None,
+        }
+    };
+    let fast_triage_runtime = fast_triage.runtime.clone();
+    let fast_triage_entry_degradation = fast_triage.entry_degradation;
 
     let turn_id = format!("{}::{}", session_id, uuid::Uuid::new_v4());
     let mut all_events = Vec::new();
@@ -367,6 +385,16 @@ pub async fn run_chat_workflow(
         live_sink(event.clone());
         all_events.push(event);
     }
+    // Keep the disabled-by-default path byte-identical. When an enabled route
+    // cannot prepare its optional fallback (or has no route evidence), surface
+    // the host-authored reason once; the core route still decides selection.
+    if cfg.fast_triage.enabled {
+        if let Some(reason) = fast_triage_entry_degradation {
+            let event = crate::fast_triage::entry_degradation_event(reason);
+            live_sink(event.clone());
+            all_events.push(event);
+        }
+    }
     loop {
         let events = run_turn(
             host,
@@ -385,6 +413,7 @@ pub async fn run_chat_workflow(
                 suppress_provider_telemetry_event: true,
                 user_selection: request.user_selection,
                 multi_model: multi_model_runtime.clone(),
+                fast_triage: fast_triage_runtime.clone(),
                 ..TurnExecutionOptions::default()
             },
             Some(&mut *live_sink),

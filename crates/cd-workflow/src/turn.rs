@@ -63,6 +63,11 @@ pub struct TurnExecutionOptions<'a> {
     /// resolving qualification and egress; the presence of a runtime means
     /// "review may run at the broad-triage seam".
     pub multi_model: Option<cd_core::agent::MultiModelRuntime>,
+    /// Optional resolved host-grounded fast-triage runtime. `None` (the
+    /// default) keeps the established single/multi-stage path unchanged.
+    /// The runtime is considered only at the linked broad-triage seam after
+    /// exact persisted route evidence and fallback policy have been resolved.
+    pub fast_triage: Option<cd_core::agent::FastTriageRuntime>,
 }
 
 /// Drive the shared provider/tool kernel for either an ordinary or a linked
@@ -127,6 +132,7 @@ pub async fn run_turn(
             options.turn_id.clone(),
             options.user_selection,
             options.multi_model.clone(),
+            options.fast_triage.clone(),
         )
         .await?
     } else {
@@ -151,6 +157,7 @@ pub async fn run_turn(
             options.turn_id,
             options.user_selection,
             options.multi_model,
+            options.fast_triage,
         )
         .await?
     };
@@ -289,6 +296,7 @@ pub async fn run_linked_turn(
             applied_skill_ids: &[],
             user_selection: None,
             multi_model: None,
+            fast_triage: None,
         },
         live,
         checkpoint_out,

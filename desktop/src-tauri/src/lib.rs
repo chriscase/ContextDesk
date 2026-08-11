@@ -5127,6 +5127,26 @@ async fn agent_turn(
         }
         Err(error) => return Err(error),
     };
+    // Fast triage is meaningful only for an accepted linked-log turn. Resolve
+    // it after linked-context validation so an ordinary, rejected, or forced
+    // local turn never builds an unused fallback backend.
+    let fast_triage = if cd_workflow::fast_triage::should_resolve_fast_triage(
+        log_explorer_context.is_some(),
+        req.force_local,
+        cancel.load(std::sync::atomic::Ordering::Relaxed),
+    ) {
+        cd_workflow::fast_triage::resolve_fast_triage_runtime(
+            &cfg,
+            &provider_credentials,
+            &resolved,
+        )
+        .await
+    } else {
+        cd_workflow::fast_triage::ResolvedFastTriage {
+            runtime: None,
+            entry_degradation: None,
+        }
+    };
     let linked_synthesis_retry = if req.retry_synthesis_only {
         state
             .linked_synthesis_checkpoints
@@ -5557,6 +5577,14 @@ async fn agent_turn(
         if let Some(reason) = multi_model_review.entry_degradation {
             sink(cd_workflow::multi_model::entry_degradation_event(reason));
         }
+        // Preserve the disabled-by-default path. Enabled-route preparation
+        // failures are host-authored metadata; route selection still remains
+        // evidence-driven inside `cd-core`.
+        if cfg.fast_triage.enabled {
+            if let Some(reason) = fast_triage.entry_degradation {
+                sink(cd_workflow::fast_triage::entry_degradation_event(reason));
+            }
+        }
         cd_workflow::turn::run_turn(
             &mut host,
             &resolved,
@@ -5578,6 +5606,7 @@ async fn agent_turn(
                 applied_skill_ids: &applied_skill_ids,
                 user_selection: req.user_selection.as_deref(),
                 multi_model: multi_model_review.runtime.clone(),
+                fast_triage: fast_triage.runtime.clone(),
             },
             Some(&mut sink),
             Some(&mut next_synthesis_checkpoint),
