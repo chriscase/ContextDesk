@@ -18,7 +18,10 @@ or silently switch providers.
 
 The minimum answer remains useful when every model is unavailable: a host-built
 timeline, candidate groups, structural relationships, canonical evidence ids,
-known symptoms, and `root_cause_established=false`.
+known symptoms, explicit reconciliation state/conflicts, and
+`root_cause_established=false`. The visible renderer shows these bounded
+host-owned sections directly; it never renders untrusted model explanation text
+as part of the baseline.
 
 ## Contract
 

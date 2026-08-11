@@ -258,6 +258,96 @@ fn render_baseline(report: &super::contributions::ReconciliationReportV1) -> Str
             baseline.candidate_groups.len() - 16
         ));
     }
+    out.push_str("\n### Host structural relationships\n");
+    if baseline.relationships.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for relationship in baseline.relationships.iter().take(24) {
+            out.push_str(&format!(
+                "- {} · candidate {} · category={}\n",
+                literal_span(&relationship.evidence_id),
+                literal_span(&relationship.candidate_id),
+                relationship.category.as_str(),
+            ));
+        }
+        if baseline.relationships.len() > 24 {
+            out.push_str(&format!(
+                "- … {} additional relationships omitted by the display bound\n",
+                baseline.relationships.len() - 24
+            ));
+        }
+    }
+    out.push_str("\n### Host canonical citations\n");
+    if baseline.citations.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for evidence_id in baseline.citations.iter().take(24) {
+            out.push_str(&format!("- {}\n", literal_span(evidence_id)));
+        }
+        if baseline.citations.len() > 24 {
+            out.push_str(&format!(
+                "- … {} additional citations omitted by the display bound\n",
+                baseline.citations.len() - 24
+            ));
+        }
+    }
+    out.push_str("\n### Host-labelled symptoms\n");
+    if baseline.symptom_evidence_ids.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for evidence_id in baseline.symptom_evidence_ids.iter().take(24) {
+            out.push_str(&format!("- {}\n", literal_span(evidence_id)));
+        }
+        if baseline.symptom_evidence_ids.len() > 24 {
+            out.push_str(&format!(
+                "- … {} additional symptoms omitted by the display bound\n",
+                baseline.symptom_evidence_ids.len() - 24
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "\n### Reconciliation state\n- state={} · escalation_recommended={}\n",
+        report.state.as_str(),
+        report.escalation_recommended,
+    ));
+    out.push_str("\n### Reconciliation conflicts\n");
+    if report.conflicts.is_empty() && report.reported_contradictions.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for conflict in report.conflicts.iter().take(16) {
+            let kinds = conflict
+                .kinds
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!(
+                "- candidate {} · evidence={} · competing_kinds={}\n",
+                literal_span(&conflict.candidate_id),
+                conflict
+                    .evidence_ids
+                    .iter()
+                    .map(|id| literal_span(id))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                kinds,
+            ));
+        }
+        for contradiction in report.reported_contradictions.iter().take(16) {
+            out.push_str(&format!(
+                "- contradiction {} · candidates {} / {} · evidence={}\n",
+                literal_span(&contradiction.contradiction_id),
+                literal_span(&contradiction.candidate_a),
+                literal_span(&contradiction.candidate_b),
+                contradiction
+                    .evidence_ids
+                    .iter()
+                    .map(|id| literal_span(id))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+        }
+    }
     out
 }
 
@@ -577,6 +667,39 @@ mod tests {
         assert_eq!(outcome.attempts.len(), 2);
         assert_eq!(events.iter().filter(|event| event.started).count(), 2);
         assert!(outcome.content.contains("Root cause established: no"));
+        assert!(outcome.content.contains("Host structural relationships"));
+        assert!(outcome.content.contains("Host canonical citations"));
+        assert!(outcome.content.contains("Host-labelled symptoms"));
+        assert!(outcome.content.contains("Reconciliation conflicts"));
+    }
+
+    #[test]
+    fn host_answer_renders_conflicts_without_model_text() {
+        let packet = packet();
+        let mut report = super::super::contributions::reconcile_contributions(&packet, &[]);
+        report
+            .conflicts
+            .push(super::super::contributions::ReconciliationConflict {
+                candidate_id: "candidate-a".into(),
+                evidence_ids: vec!["opaque-a".into()],
+                kinds: vec![
+                    super::super::contributions::ContributionClaimKind::CausalCandidate,
+                    super::super::contributions::ContributionClaimKind::CompetingExplanation,
+                ],
+            });
+        report.reported_contradictions.push(
+            super::super::contributions::ValidatedContributionContradictionV1 {
+                contradiction_id: "contradiction-1".into(),
+                candidate_a: "candidate-a".into(),
+                candidate_b: "candidate-b".into(),
+                evidence_ids: vec!["opaque-a".into(), "opaque-b".into()],
+                text: "this model prose must never be rendered here".into(),
+            },
+        );
+        let rendered = render_baseline(&report);
+        assert!(rendered.contains("competing_kinds=causal_candidate,competing_explanation"));
+        assert!(rendered.contains("contradiction `contradiction-1`"));
+        assert!(!rendered.contains("this model prose must never be rendered here"));
     }
 
     #[tokio::test]
