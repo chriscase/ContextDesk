@@ -2,7 +2,7 @@
 
 Status: the provider-neutral contribution runtime is implemented on
 `feat/multimodel-contribution-reconcile-v1` at exact head
-`199160c564edd1a6e9da349f2b0ff9fe4e7522f9`. The live validation procedure is
+`4243a0bbbc9b07ce1e4afb0045320cb887330943`. The live validation procedure is
 ready, but this worktree's configured protected-file reference is currently
 missing, so no new gateway request was made in this phase.
 
@@ -121,7 +121,7 @@ data, and must not inherit Vercel model or usefulness evidence.
 
 ## Integrated wire-contract evidence
 
-The current integration head is `199160c564edd1a6e9da349f2b0ff9fe4e7522f9`.
+The current integration head is `4243a0bbbc9b07ce1e4afb0045320cb887330943`.
 It includes the dialect-honest OpenAI-compatible chat qualification ladder,
 the production OpenAI-compatible embedding adapter, and explicit TEI/Cohere
 reranking with shared fail-closed parsers. The hermetic evidence at this head
