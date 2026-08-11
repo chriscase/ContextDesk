@@ -7,6 +7,20 @@ memory, databases, connected sources, and incident logs. It assembles concise
 context deterministically, lets an AI connect the evidence, and keeps the
 sources and investigation trail visible.**
 
+## Product goal
+
+> **Make useful, evidence-grounded investigation possible with whatever models
+> a user can access.**
+
+ContextDesk should not require every model to behave like a monolithic frontier
+model. The host owns evidence selection, chronology, causal structure,
+validation, and grounded answer assembly. Capability-qualified models—local or
+remote, small or frontier—serve as replaceable specialists for bounded reasoning
+tasks they have demonstrated they can handle. Fast and inexpensive models should
+carry most of the work when their outputs validate; a stronger model is an
+explicit escalation, not a hidden requirement. When evidence is insufficient or
+results conflict, ContextDesk says so.
+
 Allowlist a workspace, import a post-mortem log corpus, or connect a governed
 read source. ContextDesk searches, filters, ranks, and caps that material on
 the host before a model sees it. The model synthesizes bounded evidence rather
