@@ -30,8 +30,9 @@ use cd_core::fast_triage::{
 use cd_core::providers::ProviderProfile;
 
 use crate::provider::{
-    resolve_provider_profile, resolve_turn_inputs_from_profile_with_credential_cache,
-    ResolvedTurnInputs, TurnProviderCredentialCache,
+    backend_for_resolved_turn, resolve_provider_profile,
+    resolve_turn_inputs_from_profile_with_credential_cache, ResolvedTurnInputs,
+    TurnProviderCredentialCache,
 };
 
 /// Exactly why a fast-triage runtime was not built, or why its fallback role is
@@ -195,8 +196,7 @@ pub async fn resolve_fast_triage_runtime(
                     profile,
                     configured.model.as_deref(),
                 );
-                match cd_core::research::backend_for(&inputs.profile, inputs.api_key.clone()).await
-                {
+                match backend_for_resolved_turn(&inputs).await {
                     Ok(backend) => {
                         fallback = Some(FastTriageFallback {
                             profile_id: inputs.profile.id.clone(),

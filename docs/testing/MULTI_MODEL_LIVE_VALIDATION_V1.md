@@ -64,6 +64,13 @@ still requires current `validated_structured_proposal` evidence for every
 role and applies the existing remote-egress acknowledgment. Missing or stale
 evidence produces a deterministic-floor result rather than a provider call.
 
+Optional reviewer, contribution, and fast-triage backends inherit the resolved
+turn's transport timeout. An explicit `--deadline`/router deadline of 600
+seconds therefore reaches the HTTP client instead of being cut off by the
+standalone 120-second backend default. The shared helper is covered by the
+workflow provider tests; the host deadline and cancellation races remain the
+authoritative stop conditions.
+
 ## Capture contract
 
 The default artifact contains pseudonymous identity, endpoint fingerprints,

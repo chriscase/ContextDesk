@@ -28,8 +28,9 @@ use cd_core::multi_model::{
 use cd_core::providers::ProviderProfile;
 
 use crate::provider::{
-    resolve_provider_profile, resolve_turn_inputs_from_profile_with_credential_cache,
-    ResolvedTurnInputs, TurnProviderCredentialCache,
+    backend_for_resolved_turn, resolve_provider_profile,
+    resolve_turn_inputs_from_profile_with_credential_cache, ResolvedTurnInputs,
+    TurnProviderCredentialCache,
 };
 
 /// End-of-resolution outcome. Exactly one of `runtime` / `entry` is set for a
@@ -146,12 +147,7 @@ pub async fn resolve_reviewer_runtime(
         reviewer_profile,
         reviewer_cfg.model.as_deref(),
     );
-    let reviewer_backend = match cd_core::research::backend_for(
-        &reviewer_inputs.profile,
-        reviewer_inputs.api_key.clone(),
-    )
-    .await
-    {
+    let reviewer_backend = match backend_for_resolved_turn(&reviewer_inputs).await {
         Ok(backend) => Arc::from(backend),
         Err(_) => return ResolvedReview::degraded(DegradationReason::ReviewerProviderFailed),
     };
@@ -266,9 +262,7 @@ pub async fn resolve_contribution_runtime(
         if qualification != ContributionQualification::Qualified {
             continue;
         }
-        let Ok(backend) =
-            cd_core::research::backend_for(&inputs.profile, inputs.api_key.clone()).await
-        else {
+        let Ok(backend) = backend_for_resolved_turn(&inputs).await else {
             continue;
         };
         slots.push(ContributionBackendSlot {

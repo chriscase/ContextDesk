@@ -10,6 +10,7 @@
 //! adapter and the CLI now call these instead of each carrying their own
 //! copy.
 
+use cd_core::agent::ChatBackend;
 use cd_core::config::AppConfig;
 use cd_core::keychain_store::SecretStore;
 use cd_core::model_curation::model_selection_key;
@@ -17,6 +18,7 @@ use cd_core::providers::ProviderProfile;
 use cd_core::router::TurnDeadlinePlan;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 
 /// Ephemeral provider-credential cache for one admitted turn.
 ///
@@ -127,6 +129,31 @@ pub struct ResolvedTurnInputs {
     pub api_key: Option<String>,
     /// Deadline plan derived from the router budget and this profile.
     pub deadline_plan: TurnDeadlinePlan,
+}
+
+/// Translate the resolved whole-turn budget into the transport ceiling used
+/// by optional model roles.  Zero preserves the standalone constructor's
+/// conservative default; an explicit/adaptive budget is carried through
+/// exactly, so the HTTP layer cannot pre-empt the host's deadline policy.
+pub fn provider_request_timeout(deadline_ms: u64) -> Duration {
+    if deadline_ms == 0 {
+        Duration::from_secs(120)
+    } else {
+        Duration::from_millis(deadline_ms)
+    }
+}
+
+/// Build an optional-role backend with the same transport ceiling as the
+/// already-resolved turn.  The generic `backend_for` constructor retains its
+/// conservative 120-second default for callers that do not own a turn budget;
+/// reviewer, contributor, and fast-triage roles do own one and must not expire
+/// earlier than an explicit user-authored deadline.
+pub async fn backend_for_resolved_turn(
+    inputs: &ResolvedTurnInputs,
+) -> cd_core::error::CoreResult<Box<dyn ChatBackend>> {
+    let timeout = provider_request_timeout(inputs.deadline_plan.total_ms);
+    cd_core::research::backend_for_with_timeout(&inputs.profile, inputs.api_key.clone(), timeout)
+        .await
 }
 
 /// Resolve profile, per-chat model override, tools-enabled flag, API key, and
@@ -283,6 +310,12 @@ mod tests {
             providers: ProviderConfig::with_local_ollama(),
             ..AppConfig::default()
         }
+    }
+
+    #[test]
+    fn optional_role_transport_timeout_follows_turn_budget() {
+        assert_eq!(provider_request_timeout(0), Duration::from_secs(120));
+        assert_eq!(provider_request_timeout(600_000), Duration::from_secs(600));
     }
 
     #[test]
