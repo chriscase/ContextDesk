@@ -1,0 +1,87 @@
+# Multi-model live validation and capture v1
+
+Status: the provider-neutral contribution runtime is implemented on
+`feat/multimodel-contribution-reconcile-v1`. The live validation procedure is
+ready, but this worktree's configured protected-file reference is currently
+missing, so no new gateway request was made in this phase.
+
+## Purpose
+
+Live traffic is used to learn wire and workflow behavior, not to grant a model
+authority. Each run is one explicitly selected, exact catalog model through the
+existing `gateway diagnose` command. The command reuses catalog discovery,
+qualification, provider construction, the real chat/triage workflow, scoring,
+deadline handling, and cleanup.
+
+The recommended sequence is:
+
+1. Discover the catalog without verification.
+2. Select one exact returned model id; never shorten or infer it.
+3. Run the basic diagnostic first. Use an explicit longer deadline for a known
+   slow model rather than relying on a hidden safety cap.
+4. Run `extended` only when the basic run exposes a meaningful stability
+   question.
+5. Compare deterministic-only, bounded contributions, and the ordinary
+   single/reviewer path on the same host packet; do not compare unlike corpora
+   or silently switch providers.
+
+The live command is intentionally bounded and requires explicit consent. An
+owner may opt into the separate local capture with `--raw
+--raw-i-understand`. This does not change the share-safe report.
+
+## Capture contract
+
+The default artifact contains pseudonymous identity, endpoint fingerprints,
+case outcomes, request counts, timing, failure categories, cleanup status, and
+typed usefulness verdicts. It must not contain credentials, authorization
+headers, endpoint URLs, private paths, or provider bodies.
+
+The explicit owner-only capture contains files with schema
+`contextdesk.gateway_diagnostic_provider_exchange.v1`. Each file is produced
+from the existing `RecordingTurnTrace`/`TracingChatBackend` seam and contains
+bounded, redacted provider-exchange events from the real product path:
+
+- request messages after the existing redaction/bounds boundary;
+- offered tool names;
+- response content/tool calls after the same boundary;
+- finish/status and provider telemetry;
+- model/profile labels and the synthetic diagnostic question;
+- an explicit count when the developer-detail cap dropped events.
+
+Cancellation and timeout paths deliberately omit request/response bodies. The
+capture directory is owner-permissioned and is never referenced by the
+share-safe report or manifest. Raw captures must not be committed.
+
+## Promoting a live observation into tests
+
+Only stable, provider-neutral facts may become committed fixtures:
+
+1. Remove credentials, headers, endpoint text, private paths, timestamps that
+   are not part of the contract, and model prose that is not needed to test a
+   parser or scorer.
+2. Keep the exact route shape, status classification, content/stream framing,
+   tool-call continuation shape, structured-output behavior, usage-field
+   presence, and bounded failure category.
+3. Convert the observation into a fixture under
+   `fixtures/gateway-contracts/v1/` or the appropriate quality-evaluation
+   suite, with a hermetic test that proves the expected behavior.
+4. Record provenance in the test documentation as an observed wire fact for a
+   specific gateway/model/run, never as a universal model capability claim.
+
+Existing fixture suites already cover the earlier Vercel observations for
+chat, streaming, tool continuation, embeddings, and reranking. The current
+model comparison documents are historical evidence and remain scoped to their
+exact route/model/release.
+
+## Current live blocker and safety boundary
+
+The active local profile names a protected credential file that is not present
+in this worktree. No key was reconstructed from conversation history and no
+Keychain fallback was attempted. Restoring the protected file is sufficient to
+resume the exact procedure; no code change or credential architecture change
+is required.
+
+Employer gateways remain a separate acceptance step. They require an explicit
+owner-authorized profile and endpoint, use only synthetic or owner-approved
+data, and must not inherit Vercel model or usefulness evidence.
+
