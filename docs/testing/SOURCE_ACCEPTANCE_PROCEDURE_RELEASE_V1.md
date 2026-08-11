@@ -4,11 +4,18 @@ Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
 - branch: `integrate/acceptance-release-v1`
-- exact tested source/build SHA: `64edb0a25161a5d493f067ff9f5f197de24f6c7e`
+- exact tested source/build SHA: `aeddff5e705b594c93d814ebd487b54feac84853`
 
 The exact tested source/build SHA above is the identity that must be fetched, built, and
 verified. Do not substitute an older baseline, a moving branch tip, or an
 unrelated local checkout.
+
+This pin supersedes the earlier `64edb0a…` acceptance input. Since that older
+pin, the release has added the chat-contract v4 transport/mode identity and
+fail-closed qualification, host-grounded fast triage, bounded deadline
+controls, wider production rerank candidate handling, and the current
+protected-file gateway diagnostic plumbing. Historical live-provider reports
+for older SHAs are not evidence for this exact release.
 
 This is the source-build path for a separate company machine. It does not
 require an installer, a downloaded harness, or an OS credential store.
