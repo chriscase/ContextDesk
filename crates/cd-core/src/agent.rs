@@ -5195,6 +5195,13 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 "contributions:state={state},stages={}",
                                 contribution_outcome.telemetry.stages.len()
                             ));
+                            out.push(StreamEvent::MultiModelStage {
+                                stage: "summary".into(),
+                                phase: "summary".into(),
+                                status: Some("contributions".into()),
+                                detail: format!("bounded contribution reconciliation: {state}"),
+                                candidate_id: None,
+                            });
                             out.push(StreamEvent::Tool {
                             id: stage_id,
                             name: "broad_log_triage_contributions".into(),

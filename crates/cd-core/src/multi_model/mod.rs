@@ -134,6 +134,9 @@ pub enum ExecutedMode {
     /// The multi-model pipeline ran but the reviewer stage did not contribute;
     /// synthesis proceeded from the typed candidate findings without review.
     ReviewDegraded,
+    /// The explicit host-grounded contribution route ran and returned its
+    /// deterministic reconciliation answer.
+    Contributions,
 }
 
 impl ExecutedMode {
@@ -143,6 +146,7 @@ impl ExecutedMode {
             Self::Single => "single",
             Self::Review => "review",
             Self::ReviewDegraded => "review_degraded",
+            Self::Contributions => "contributions",
         }
     }
 }
@@ -381,6 +385,7 @@ mod tests {
         assert_eq!(MultiModelMode::Review.as_str(), "review");
         assert_eq!(InvestigationRole::Reviewer.as_str(), "reviewer");
         assert_eq!(ExecutedMode::ReviewDegraded.as_str(), "review_degraded");
+        assert_eq!(ExecutedMode::Contributions.as_str(), "contributions");
         assert_eq!(
             DegradationReason::ReviewerRemoteForbiddenLocalOnly.as_str(),
             "reviewer_remote_forbidden_local_only"

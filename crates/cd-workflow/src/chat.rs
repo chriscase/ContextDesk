@@ -558,8 +558,8 @@ pub async fn run_chat_workflow(
 
 /// Derive the executed multi-model mode from the event stream's summary line.
 /// The seam and the entry-degradation both emit a `multi_model_stage` summary
-/// with a status of `single` / `review` / `review_degraded`; absent one, the
-/// turn was single-model.
+/// with a status of `single` / `review` / `review_degraded` / `contributions`;
+/// absent one, the turn was single-model.
 fn executed_mode_from_events(events: &[StreamEvent]) -> cd_core::multi_model::ExecutedMode {
     use cd_core::multi_model::ExecutedMode;
     events
@@ -570,6 +570,7 @@ fn executed_mode_from_events(events: &[StreamEvent]) -> cd_core::multi_model::Ex
                 match status.as_deref() {
                     Some("review") => Some(ExecutedMode::Review),
                     Some("review_degraded") => Some(ExecutedMode::ReviewDegraded),
+                    Some("contributions") => Some(ExecutedMode::Contributions),
                     _ => Some(ExecutedMode::Single),
                 }
             }
@@ -613,6 +614,10 @@ mod tests {
         assert_eq!(
             executed_mode_from_events(&[summary_event("review_degraded")]),
             ExecutedMode::ReviewDegraded
+        );
+        assert_eq!(
+            executed_mode_from_events(&[summary_event("contributions")]),
+            ExecutedMode::Contributions
         );
         // An entry-degradation single summary → single.
         assert_eq!(
