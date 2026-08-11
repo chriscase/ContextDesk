@@ -4,7 +4,7 @@ Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
 - branch: `integrate/acceptance-release-v1-final`
-- exact tested source/build SHA: `85c065f0b7edc9d09bd2a8348ed85527d9f1e32e`
+- exact tested source/build SHA: `85c065f06b9b5c91ad642b22e59f88bb1af45500`
 
 The exact tested source/build SHA above is the identity that must be fetched, built, and
 verified. Do not substitute an older baseline, a moving branch tip, or an
