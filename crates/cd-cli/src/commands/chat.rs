@@ -966,7 +966,7 @@ mod reviewer_qualification_tests {
                     tested_at: 1,
                     reason: "pass".into(),
                     request_mode: Some("plain".into()),
-                    dialect: Some("openai_compatible".into()),
+                    dialect: Some("ollama".into()),
                     schema_strict: None,
                     schema_probe_id: None,
                 },
@@ -978,7 +978,7 @@ mod reviewer_qualification_tests {
                     reason: "pass".into(),
                     // Production reviewer uses plain/prompted JSON — not native json_object.
                     request_mode: Some("prompted_json".into()),
-                    dialect: Some("openai_compatible".into()),
+                    dialect: Some("ollama".into()),
                     schema_strict: None,
                     schema_probe_id: None,
                 },
