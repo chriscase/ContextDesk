@@ -378,6 +378,18 @@ async fn dispatch(
                 verdict,
             )
         }
+        Command::RetrievalReanalyze(args) => {
+            let secrets = adapters::secret_store();
+            let result = commands::retrieval_reanalyze::run(
+                args,
+                &paths.cache_root,
+                app_cfg,
+                &cli_state.current_corpus_id,
+                &secrets,
+            )
+            .await;
+            emit(format, resolved.color.value, "retrieval_reanalyze", result)
+        }
         Command::Models(args) => {
             let secrets = adapters::secret_store();
             let result = commands::models::run(

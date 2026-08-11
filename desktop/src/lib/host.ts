@@ -1983,7 +1983,30 @@ export type LogEmbeddingStatusDto = {
   totalTemplates: number;
   reason: string | null;
   updatedAt: number;
+  /**
+   * Typed embedding-space identity the stored vectors were produced under.
+   * Absent for a corpus written before typed binding existed, which is why
+   * semantic retrieval fails closed for one until re-analysis rebinds it.
+   */
+  space?: EmbeddingSpaceIdentityDto | null;
 };
+
+/** Mirrors `cd_core::embedding_space::EmbeddingSpaceIdentity`. */
+export type EmbeddingSpaceIdentityDto = {
+  schema_id: string;
+  /** SHA-256 of the normalized endpoint. Never the URL itself. */
+  endpoint_fingerprint: string;
+  model: string;
+  dialect: string;
+  representation: string;
+  instruction?: string | null;
+  preprocessing: string;
+  chunking_version: string;
+  dimensions?: number | null;
+  synthetic: boolean;
+};
+
+
 
 export type LogTopTemplateDto = {
   id: number;

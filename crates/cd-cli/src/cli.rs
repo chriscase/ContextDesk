@@ -163,6 +163,11 @@ pub enum Command {
     /// retrieval only and never claims answer usefulness or readiness.
     #[command(visible_alias = "retrieval-diagnostic")]
     RetrievalDiagnose(RetrievalDiagnoseArgs),
+    /// Rebuild an existing corpus's template vectors under the configured
+    /// embedding space. Dry run by default; states where the work runs and
+    /// whether log content leaves this machine before anything happens.
+    #[command(visible_alias = "reanalyze")]
+    RetrievalReanalyze(RetrievalReanalyzeArgs),
     /// Discover gateway models and show or verify role-specific compatibility.
     /// Bare `models` is entirely offline and never reads credentials.
     Models(ModelsArgs),
@@ -387,6 +392,25 @@ pub struct RetrievalStatusArgs {
     /// `contextdesk corpus use`).
     #[arg(long)]
     pub corpus: bool,
+}
+
+/// Arguments for corpus template re-analysis (CLI parity with the desktop
+/// flow, for corpora that already exist).
+#[derive(Debug, clap::Args)]
+pub struct RetrievalReanalyzeArgs {
+    /// Corpus id to re-analyze. Defaults to the corpus selected by the most
+    /// recent import or `contextdesk corpus use`.
+    #[arg(long)]
+    pub corpus_id: Option<String>,
+    /// Execute the plan. Without this the command prints where the work would
+    /// run and whether log content would leave this machine, and stops without
+    /// constructing a backend, reading a credential, or using network.
+    #[arg(long)]
+    pub confirm: bool,
+    /// Acknowledge that the configured embedding endpoint is remote, so log
+    /// template text leaves this machine. Required before a remote run.
+    #[arg(long)]
+    pub acknowledge_egress: bool,
 }
 
 /// Arguments for the bounded retrieval-quality diagnostic.
@@ -748,6 +772,8 @@ pub const KNOWN_SUBCOMMANDS: &[&str] = &[
     "retrieval-status",
     "retrieval-diagnose",
     "retrieval-diagnostic",
+    "retrieval-reanalyze",
+    "reanalyze",
     "models",
     "eval",
     "gateway",

@@ -153,7 +153,16 @@ fn bearer_for(role: &RetrievalRoleModel, secrets: Option<&dyn SecretStore>) -> O
 /// remote, including private/corporate hosts: a private address can still be
 /// another machine. This check is deliberately lexical and conservative; the
 /// SSRF policy remains responsible for validating and pinning the actual URL.
-fn retrieval_endpoint_is_remote(role: &RetrievalRoleModel) -> bool {
+///
+/// Public because every surface that *describes* egress — a re-analysis plan,
+/// a diagnostic plan, a consent prompt — must agree with the factory that
+/// *enforces* it. A second implementation would eventually promise a locality
+/// this one refuses.
+///
+/// Known conservative case: `Url::host_str` keeps the brackets on an IPv6
+/// literal, so `http://[::1]` does not parse as an address and is classified
+/// remote. That errs toward asking for consent, which is the safe direction.
+pub fn retrieval_endpoint_is_remote(role: &RetrievalRoleModel) -> bool {
     let Ok(url) = url::Url::parse(&role.base_url) else {
         // Let backend construction report the malformed URL, but never treat
         // an unparseable endpoint as local and silently allow egress.

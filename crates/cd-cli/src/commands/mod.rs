@@ -15,6 +15,7 @@ pub mod models;
 pub mod normalize;
 pub mod normalized;
 pub mod retrieval_diagnose;
+pub mod retrieval_reanalyze;
 pub mod retrieval_status;
 pub mod session;
 pub mod timezone;

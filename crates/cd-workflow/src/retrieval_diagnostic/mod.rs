@@ -307,22 +307,12 @@ pub struct BlockedLane {
     pub detail: String,
 }
 
-/// Treat any non-loopback endpoint as remote — a private or corporate address
-/// is still another machine.
+/// Whether a configured role points off this machine.
+///
+/// Delegates to the retrieval factory's own classifier so a plan can never
+/// promise a locality the factory would refuse.
 fn role_is_remote(role: &RetrievalRoleModel) -> bool {
-    let Ok(url) = url::Url::parse(&role.base_url) else {
-        return true;
-    };
-    let Some(host) = url.host_str() else {
-        return true;
-    };
-    let host = host.to_ascii_lowercase();
-    if host == "localhost" || host.ends_with(".localhost") {
-        return false;
-    }
-    !host
-        .parse::<std::net::IpAddr>()
-        .is_ok_and(|ip| ip.is_loopback())
+    crate::retrieval::retrieval_endpoint_is_remote(role)
 }
 
 fn enabled_role(role: Option<&RetrievalRoleModel>) -> Option<&RetrievalRoleModel> {
