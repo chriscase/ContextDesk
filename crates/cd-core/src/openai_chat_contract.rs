@@ -22,23 +22,63 @@ use serde_json::{json, Value};
 
 /// Stable wire/evidence id for a chat request mode (secret-free).
 pub const MODE_PLAIN: &str = "plain";
-/// JSON object response_format mode.
+/// Prompted JSON over plain chat (no response_format on the wire).
+pub const MODE_PROMPTED_JSON: &str = "prompted_json";
+/// JSON object response_format mode (OpenAI-native).
 pub const MODE_JSON_OBJECT: &str = "json_object";
-/// JSON schema response_format mode.
+/// JSON schema response_format mode (non-strict).
 pub const MODE_JSON_SCHEMA: &str = "json_schema";
+/// JSON schema response_format mode with strict=true.
+pub const MODE_JSON_SCHEMA_STRICT: &str = "json_schema_strict";
+/// Automatic tool_choice mode (tools present + auto).
+pub const MODE_AUTO_TOOLS: &str = "auto_tools";
 /// Forced tool_choice mode.
 pub const MODE_FORCED_TOOL: &str = "forced_tool";
+
+/// Dialect identity for the live chat backend (secret-free, no endpoints).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatBackendDialect {
+    /// OpenAI-compatible `/v1/chat/completions`.
+    OpenAiCompatible,
+    /// Ollama native `/api/chat`.
+    Ollama,
+    /// Anthropic Messages API.
+    Anthropic,
+}
+
+impl ChatBackendDialect {
+    /// Stable wire/evidence id.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiCompatible => "openai_compatible",
+            Self::Ollama => "ollama",
+            Self::Anthropic => "anthropic",
+        }
+    }
+
+    /// Whether this dialect can transmit OpenAI-native request modes on the wire.
+    pub fn supports_openai_native_modes(self) -> bool {
+        matches!(self, Self::OpenAiCompatible)
+    }
+}
 
 /// Typed OpenAI-compatible chat request mode.
 ///
 /// Hosts pick a mode intentionally. Qualification records the mode that was
 /// measured; production chat defaults to [`Self::Plain`].
+///
+/// [`Self::PromptedJson`] is **not** native structured output: the body is the
+/// same as plain chat; only the synthetic prompt asks for JSON. It must never
+/// be recorded as `json_object`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OpenAiChatRequestMode {
     /// Ordinary completion. Tools (if any) use `tool_choice: "auto"`.
     #[default]
     Plain,
+    /// Plain wire body + instruction to reply with JSON (prompted only).
+    PromptedJson,
     /// Request a JSON object via `response_format: { "type": "json_object" }`.
     JsonObject,
     /// Request structured JSON via `response_format.json_schema`.
@@ -63,16 +103,65 @@ impl OpenAiChatRequestMode {
     pub fn evidence_id(&self) -> &'static str {
         match self {
             Self::Plain => MODE_PLAIN,
+            Self::PromptedJson => MODE_PROMPTED_JSON,
             Self::JsonObject => MODE_JSON_OBJECT,
-            Self::JsonSchema { .. } => MODE_JSON_SCHEMA,
+            Self::JsonSchema { strict: true, .. } => MODE_JSON_SCHEMA_STRICT,
+            Self::JsonSchema { strict: false, .. } => MODE_JSON_SCHEMA,
             Self::ForcedTool { .. } => MODE_FORCED_TOOL,
         }
+    }
+
+    /// True when this mode requires OpenAI-native wire fields (`response_format`
+    /// or forced `tool_choice` function object).
+    pub fn is_openai_native(&self) -> bool {
+        matches!(
+            self,
+            Self::JsonObject | Self::JsonSchema { .. } | Self::ForcedTool { .. }
+        )
     }
 
     /// True when this mode requests structured JSON via `response_format`.
     pub fn requests_json_response_format(&self) -> bool {
         matches!(self, Self::JsonObject | Self::JsonSchema { .. })
     }
+
+    /// Schema probe name when this is a json_schema mode (never the schema body).
+    pub fn schema_probe_id(&self) -> Option<&str> {
+        match self {
+            Self::JsonSchema { name, .. } => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Strictness flag for json_schema modes only.
+    pub fn schema_strict(&self) -> Option<bool> {
+        match self {
+            Self::JsonSchema { strict, .. } => Some(*strict),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a dialect may transmit the given mode. OpenAI-native modes are only
+/// honest on the OpenAI-compatible dialect.
+pub fn dialect_supports_mode(dialect: ChatBackendDialect, mode: &OpenAiChatRequestMode) -> bool {
+    if mode.is_openai_native() {
+        dialect.supports_openai_native_modes()
+    } else {
+        true
+    }
+}
+
+/// Stable unsupported-mode reason (secret-free) for transports and probes.
+pub fn unsupported_mode_reason(
+    dialect: ChatBackendDialect,
+    mode: &OpenAiChatRequestMode,
+) -> String {
+    format!(
+        "unsupported_request_mode:dialect={},mode={}",
+        dialect.as_str(),
+        mode.evidence_id()
+    )
 }
 
 /// Build the OpenAI chat/completions JSON body (pure; no I/O).
@@ -101,7 +190,9 @@ pub fn build_openai_chat_request_body(
     }
 
     match mode {
-        OpenAiChatRequestMode::Plain => {
+        // PromptedJson is intentionally identical on the wire to Plain: only
+        // the user message content differs. Never emit response_format.
+        OpenAiChatRequestMode::Plain | OpenAiChatRequestMode::PromptedJson => {
             if tools_nonempty {
                 body["tool_choice"] = json!("auto");
             }
@@ -141,6 +232,39 @@ pub fn build_openai_chat_request_body(
     }
 
     body
+}
+
+/// Synthetic schema used by qualification json_schema probes (name only is
+/// recorded in evidence; never export the body from DTOs as a secret surface).
+pub fn synth_qualify_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "qualify": { "type": "string" },
+            "v": { "type": "integer" }
+        },
+        "required": ["qualify", "v"],
+        "additionalProperties": false
+    })
+}
+
+/// Schema probe id recorded on evidence (not a schema body).
+pub const SYNTH_SCHEMA_PROBE_ID: &str = "qualify_v1";
+
+/// Validate synthetic structured content against the qualify contract.
+pub fn validate_synth_qualify_json(value: &Value) -> Result<(), String> {
+    let qualify = value
+        .get("qualify")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "missing_qualify_field".to_string())?;
+    if qualify != "ok" {
+        return Err("qualify_field_not_ok".into());
+    }
+    match value.get("v") {
+        Some(v) if v.as_i64() == Some(1) || v.as_u64() == Some(1) => Ok(()),
+        Some(_) => Err("v_field_not_1".into()),
+        None => Err("missing_v_field".into()),
+    }
 }
 
 /// Content vs reasoning channels extracted from an OpenAI message object.
@@ -352,12 +476,60 @@ mod tests {
     fn mode_evidence_ids_are_stable() {
         assert_eq!(OpenAiChatRequestMode::Plain.evidence_id(), "plain");
         assert_eq!(
+            OpenAiChatRequestMode::PromptedJson.evidence_id(),
+            "prompted_json"
+        );
+        assert_eq!(
             OpenAiChatRequestMode::JsonObject.evidence_id(),
             "json_object"
         );
         assert_eq!(
+            OpenAiChatRequestMode::JsonSchema {
+                name: "qualify_v1".into(),
+                schema: json!({}),
+                strict: false,
+            }
+            .evidence_id(),
+            "json_schema"
+        );
+        assert_eq!(
+            OpenAiChatRequestMode::JsonSchema {
+                name: "qualify_v1".into(),
+                schema: json!({}),
+                strict: true,
+            }
+            .evidence_id(),
+            "json_schema_strict"
+        );
+        assert_eq!(
             OpenAiChatRequestMode::ForcedTool { name: "x".into() }.evidence_id(),
             "forced_tool"
+        );
+        assert!(OpenAiChatRequestMode::JsonObject.is_openai_native());
+        assert!(!OpenAiChatRequestMode::PromptedJson.is_openai_native());
+        assert!(!dialect_supports_mode(
+            ChatBackendDialect::Ollama,
+            &OpenAiChatRequestMode::JsonObject
+        ));
+        assert!(dialect_supports_mode(
+            ChatBackendDialect::Ollama,
+            &OpenAiChatRequestMode::PromptedJson
+        ));
+    }
+
+    #[test]
+    fn prompted_json_body_has_no_response_format() {
+        let body = build_openai_chat_request_body(
+            "m",
+            &[user_msg(r#"Reply JSON {"qualify":"ok","v":1}"#)],
+            None,
+            false,
+            &OpenAiChatRequestMode::PromptedJson,
+        );
+        assert!(body.get("response_format").is_none());
+        assert_ne!(
+            OpenAiChatRequestMode::PromptedJson.evidence_id(),
+            MODE_JSON_OBJECT
         );
     }
 }
