@@ -91,7 +91,12 @@ second HTTP client exists in this layer.
    context budget, cancellation flag, and no hidden retry loop. Runtime
    enforcement takes the smaller of the per-turn budget and the routing plan's
    `max_rounds`/`max_context_chars` ceilings; validated policy fields are never
-   advisory.
+   advisory. Each stage's share-safe telemetry also carries a host-authored
+   degradation reason (qualification unavailable, provider-round or context
+   budget exhausted, cancellation, deadline, provider failure, or malformed
+   proposal), so `unavailable`/`malformed` cannot hide why a role dropped out.
+   If cancellation or the deadline stops admission, every later configured
+   role is recorded as an unadmitted dropout with the same reason.
 4. Validate each response locally. A failed response becomes an explicit
    `Malformed`, `TimedOut`, `Cancelled`, `Failed`, or `Unavailable` attempt.
 5. Reconcile normalized claims and host contradictions. If contested or

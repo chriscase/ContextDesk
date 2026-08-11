@@ -112,6 +112,75 @@ impl ContributionAvailability {
     }
 }
 
+/// Host-authored reason a contribution was not admitted or did not complete.
+///
+/// `ContributionAvailability` remains the coarse compatibility/status label;
+/// this enum carries the actionable cause for stage progress and share-safe
+/// telemetry. It never contains provider text, credentials, or model output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContributionDegradationReason {
+    /// The slot lacked current qualified evidence, so no provider call was sent.
+    QualificationUnavailable,
+    /// The host/provider-round ceiling was exhausted before this slot.
+    ProviderRoundBudgetExhausted,
+    /// This slot's model-facing context exceeded its per-call host budget.
+    ContextBudgetExhausted,
+    /// The route's cumulative model-facing context budget was exhausted.
+    TotalContextBudgetExhausted,
+    /// The turn was cancelled before this slot completed.
+    Cancelled,
+    /// The turn deadline elapsed before this slot completed.
+    Deadline,
+    /// The authorized provider/transport failed after bounded attempts.
+    ProviderFailed,
+    /// The provider response failed host validation.
+    MalformedProposal,
+}
+
+impl ContributionDegradationReason {
+    /// Stable wire label for diagnostics and telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::QualificationUnavailable => "qualification_unavailable",
+            Self::ProviderRoundBudgetExhausted => "provider_round_budget_exhausted",
+            Self::ContextBudgetExhausted => "context_budget_exhausted",
+            Self::TotalContextBudgetExhausted => "total_context_budget_exhausted",
+            Self::Cancelled => "cancelled",
+            Self::Deadline => "deadline",
+            Self::ProviderFailed => "provider_failed",
+            Self::MalformedProposal => "malformed_proposal",
+        }
+    }
+
+    /// One host-authored, content-free explanation for an operator-facing
+    /// stage event. Dynamic provider/model text never enters this boundary.
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::QualificationUnavailable => {
+                "contributor lacked current qualified evidence; no provider call was sent"
+            }
+            Self::ProviderRoundBudgetExhausted => {
+                "host provider-round budget was exhausted before this contributor was admitted"
+            }
+            Self::ContextBudgetExhausted => {
+                "host per-call context budget was exhausted before this contributor was admitted"
+            }
+            Self::TotalContextBudgetExhausted => {
+                "host total contribution context budget was exhausted before this contributor was admitted"
+            }
+            Self::Cancelled => "turn was cancelled before this contributor completed",
+            Self::Deadline => "turn deadline elapsed before this contributor completed",
+            Self::ProviderFailed => {
+                "authorized contributor provider failed; deterministic host floor retained"
+            }
+            Self::MalformedProposal => {
+                "contributor proposal failed host validation; deterministic host floor retained"
+            }
+        }
+    }
+}
+
 /// Hard upper bounds for one future contribution turn. These are host policy,
 /// not model suggestions, and prevent an opt-in multi-model route from turning
 /// into an unbounded panel or retry loop.

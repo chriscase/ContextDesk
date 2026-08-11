@@ -14,7 +14,8 @@ use tokio::time::Instant;
 
 use super::contributions::{
     reconcile_contributions, reconciliation_answer, ContributionAttemptV1,
-    ContributionAvailability, ContributionIdentity, ContributionRole, ContributionRoutingPlan,
+    ContributionAvailability, ContributionDegradationReason, ContributionIdentity,
+    ContributionRole, ContributionRoutingPlan,
 };
 use super::MultiModelBudget;
 use crate::agent::{within_turn_deadline, ChatBackend, TurnAwaitError, TurnClock};
@@ -95,6 +96,8 @@ pub struct ContributionStageEvent {
     pub started: bool,
     /// Bounded outcome label on exit.
     pub outcome: Option<ContributionAvailability>,
+    /// Host-authored actionable reason when the stage did not complete.
+    pub degradation: Option<ContributionDegradationReason>,
     /// Content-free detail.
     pub detail: String,
 }
@@ -116,6 +119,9 @@ pub struct ContributionStageTelemetry {
     pub context_chars_sent: u64,
     /// Explicit result.
     pub outcome: ContributionAvailability,
+    /// Host-authored actionable reason for a non-completed stage.
+    #[serde(default)]
+    pub degradation: Option<ContributionDegradationReason>,
 }
 
 /// Share-safe contribution run telemetry.
@@ -377,7 +383,14 @@ pub async fn run_contribution_pipeline(
         .min(u32::from(inputs.plan.policy.max_rounds));
     let plan_context_limit = inputs.plan.policy.max_context_chars as u64;
 
-    for slot in inputs.slots.iter().take(inputs.plan.roles.len()) {
+    let mut interrupted_after = None;
+    let mut interruption = None;
+    for (slot_index, slot) in inputs
+        .slots
+        .iter()
+        .take(inputs.plan.roles.len())
+        .enumerate()
+    {
         if !inputs.plan.roles.contains(&slot.role) {
             continue;
         }
@@ -388,90 +401,134 @@ pub async fn run_contribution_pipeline(
             identity: slot.identity.clone(),
             started: true,
             outcome: None,
+            degradation: None,
             detail: "bounded contribution started".into(),
         });
-        let mut terminal =
-            |availability: ContributionAvailability, rounds_sent: u32, chars_sent: u64| {
-                stages.push(ContributionStageTelemetry {
-                    role: slot.role,
-                    profile_id: slot.identity.profile_id.clone(),
-                    model: slot.identity.model.clone(),
-                    qualification: slot.qualification,
-                    provider_rounds: rounds_sent,
-                    context_chars_sent: chars_sent,
-                    outcome: availability,
-                });
-                on_stage(ContributionStageEvent {
-                    role: slot.role,
-                    identity: slot.identity.clone(),
-                    started: false,
-                    outcome: Some(availability),
-                    detail: availability.as_str().into(),
-                });
-            };
+        let mut terminal = |availability: ContributionAvailability,
+                            degradation: Option<ContributionDegradationReason>,
+                            rounds_sent: u32,
+                            chars_sent: u64| {
+            stages.push(ContributionStageTelemetry {
+                role: slot.role,
+                profile_id: slot.identity.profile_id.clone(),
+                model: slot.identity.model.clone(),
+                qualification: slot.qualification,
+                provider_rounds: rounds_sent,
+                context_chars_sent: chars_sent,
+                outcome: availability,
+                degradation,
+            });
+            on_stage(ContributionStageEvent {
+                role: slot.role,
+                identity: slot.identity.clone(),
+                started: false,
+                outcome: Some(availability),
+                degradation,
+                detail: degradation
+                    .map(ContributionDegradationReason::detail)
+                    .unwrap_or_else(|| availability.as_str())
+                    .into(),
+            });
+        };
 
         let mut sent = false;
 
-        let availability =
-            if rounds >= max_rounds || slot.qualification != ContributionQualification::Qualified {
-                ContributionAvailability::Unavailable
-            } else if chars > inputs.budget.context_char_budget as u64
-                || chars > plan_context_limit
-                || inputs
-                    .budget
-                    .max_context_chars_total
-                    .is_some_and(|limit| used_chars.saturating_add(chars) > limit)
-                || used_chars.saturating_add(chars) > plan_context_limit
-            {
-                ContributionAvailability::Malformed
-            } else if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
-                ContributionAvailability::Cancelled
-            } else if clock.deadline_reached() {
-                ContributionAvailability::TimedOut
-            } else {
-                used_chars = used_chars.saturating_add(chars);
-                rounds = rounds.saturating_add(1);
-                sent = true;
-                let mut buffered = String::new();
-                let mut on_text = |text: String| buffered.push_str(&text);
-                let completion = within_turn_deadline(
-                    &clock,
-                    cancel,
-                    slot.backend
-                        .complete_streaming(&messages, &[], &mut on_text, cancel),
-                )
-                .await;
-                match completion {
-                    Ok(Ok(completion)) => {
-                        let body = if buffered.trim().is_empty() {
-                            completion.content
-                        } else {
-                            buffered
-                        };
-                        match super::contributions::validate_contribution(
-                            &body,
-                            inputs.packet,
-                            slot.identity.clone(),
-                            slot.role,
-                        ) {
-                            Ok(contribution) => {
-                                attempts.push(ContributionAttemptV1::completed(contribution));
-                                ContributionAvailability::Completed
-                            }
-                            Err(_) => ContributionAvailability::Malformed,
+        let (availability, degradation) = if slot.qualification
+            != ContributionQualification::Qualified
+        {
+            (
+                ContributionAvailability::Unavailable,
+                Some(ContributionDegradationReason::QualificationUnavailable),
+            )
+        } else if rounds >= max_rounds {
+            (
+                ContributionAvailability::Unavailable,
+                Some(ContributionDegradationReason::ProviderRoundBudgetExhausted),
+            )
+        } else if chars > inputs.budget.context_char_budget as u64 || chars > plan_context_limit {
+            (
+                ContributionAvailability::Malformed,
+                Some(ContributionDegradationReason::ContextBudgetExhausted),
+            )
+        } else if inputs
+            .budget
+            .max_context_chars_total
+            .is_some_and(|limit| used_chars.saturating_add(chars) > limit)
+            || used_chars.saturating_add(chars) > plan_context_limit
+        {
+            (
+                ContributionAvailability::Malformed,
+                Some(ContributionDegradationReason::TotalContextBudgetExhausted),
+            )
+        } else if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            (
+                ContributionAvailability::Cancelled,
+                Some(ContributionDegradationReason::Cancelled),
+            )
+        } else if clock.deadline_reached() {
+            (
+                ContributionAvailability::TimedOut,
+                Some(ContributionDegradationReason::Deadline),
+            )
+        } else {
+            used_chars = used_chars.saturating_add(chars);
+            rounds = rounds.saturating_add(1);
+            sent = true;
+            let mut buffered = String::new();
+            let mut on_text = |text: String| buffered.push_str(&text);
+            let completion = within_turn_deadline(
+                &clock,
+                cancel,
+                slot.backend
+                    .complete_streaming(&messages, &[], &mut on_text, cancel),
+            )
+            .await;
+            match completion {
+                Ok(Ok(completion)) => {
+                    let body = if buffered.trim().is_empty() {
+                        completion.content
+                    } else {
+                        buffered
+                    };
+                    match super::contributions::validate_contribution(
+                        &body,
+                        inputs.packet,
+                        slot.identity.clone(),
+                        slot.role,
+                    ) {
+                        Ok(contribution) => {
+                            attempts.push(ContributionAttemptV1::completed(contribution));
+                            (ContributionAvailability::Completed, None)
                         }
+                        Err(_) => (
+                            ContributionAvailability::Malformed,
+                            Some(ContributionDegradationReason::MalformedProposal),
+                        ),
                     }
-                    Ok(Err(_)) => {
-                        if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
-                            ContributionAvailability::Cancelled
-                        } else {
-                            ContributionAvailability::Failed
-                        }
-                    }
-                    Err(TurnAwaitError::Cancelled) => ContributionAvailability::Cancelled,
-                    Err(TurnAwaitError::Deadline) => ContributionAvailability::TimedOut,
                 }
-            };
+                Ok(Err(_)) => {
+                    if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                        (
+                            ContributionAvailability::Cancelled,
+                            Some(ContributionDegradationReason::Cancelled),
+                        )
+                    } else {
+                        (
+                            ContributionAvailability::Failed,
+                            Some(ContributionDegradationReason::ProviderFailed),
+                        )
+                    }
+                }
+                Err(TurnAwaitError::Cancelled) => (
+                    ContributionAvailability::Cancelled,
+                    Some(ContributionDegradationReason::Cancelled),
+                ),
+                Err(TurnAwaitError::Deadline) => (
+                    ContributionAvailability::TimedOut,
+                    Some(ContributionDegradationReason::Deadline),
+                ),
+            }
+        };
         if availability != ContributionAvailability::Completed {
             attempts.push(ContributionAttemptV1::unavailable(
                 slot.role,
@@ -479,12 +536,58 @@ pub async fn run_contribution_pipeline(
                 availability,
             ));
         }
-        terminal(availability, u32::from(sent), if sent { chars } else { 0 });
+        terminal(
+            availability,
+            degradation,
+            u32::from(sent),
+            if sent { chars } else { 0 },
+        );
         if matches!(
             availability,
             ContributionAvailability::Cancelled | ContributionAvailability::TimedOut
         ) {
+            interrupted_after = Some(slot_index);
+            interruption = Some((
+                availability,
+                degradation.expect("interruption has a reason"),
+            ));
             break;
+        }
+    }
+    // A cancellation/deadline can stop admission before later configured
+    // roles are even inspected. Record each such role explicitly so a partial
+    // panel cannot look like a complete panel with fewer slots configured.
+    if let (Some(after), Some((availability, degradation))) = (interrupted_after, interruption) {
+        for slot in inputs
+            .slots
+            .iter()
+            .take(inputs.plan.roles.len())
+            .skip(after + 1)
+            .filter(|slot| inputs.plan.roles.contains(&slot.role))
+        {
+            attempts.push(ContributionAttemptV1::unavailable(
+                slot.role,
+                slot.identity.clone(),
+                availability,
+            ));
+            stages.push(ContributionStageTelemetry {
+                role: slot.role,
+                profile_id: slot.identity.profile_id.clone(),
+                model: slot.identity.model.clone(),
+                qualification: slot.qualification,
+                provider_rounds: 0,
+                context_chars_sent: 0,
+                outcome: availability,
+                degradation: Some(degradation),
+            });
+            on_stage(ContributionStageEvent {
+                role: slot.role,
+                identity: slot.identity.clone(),
+                started: false,
+                outcome: Some(availability),
+                degradation: Some(degradation),
+                detail: degradation.detail().into(),
+            });
         }
     }
     let report = reconcile_contributions(inputs.packet, &attempts);
@@ -756,6 +859,10 @@ mod tests {
             outcome.telemetry.stages[1].outcome,
             ContributionAvailability::Unavailable
         );
+        assert_eq!(
+            outcome.telemetry.stages[1].degradation,
+            Some(ContributionDegradationReason::ProviderRoundBudgetExhausted)
+        );
 
         let context_limited = ContributionRoutingPlan::new(
             vec![ContributionRole::ObservationExtractor],
@@ -793,6 +900,10 @@ mod tests {
             context_outcome.telemetry.stages[0].outcome,
             ContributionAvailability::Malformed
         );
+        assert_eq!(
+            context_outcome.telemetry.stages[0].degradation,
+            Some(ContributionDegradationReason::ContextBudgetExhausted)
+        );
         assert_eq!(context_outcome.telemetry.stages[0].provider_rounds, 0);
     }
 
@@ -827,6 +938,10 @@ mod tests {
         assert_eq!(
             outcome.telemetry.stages[0].outcome,
             ContributionAvailability::Malformed
+        );
+        assert_eq!(
+            outcome.telemetry.stages[0].degradation,
+            Some(ContributionDegradationReason::MalformedProposal)
         );
         assert!(!outcome.envelope.answer.root_cause_established);
     }
@@ -864,6 +979,10 @@ mod tests {
         assert_eq!(
             outcome.telemetry.stages[0].outcome,
             ContributionAvailability::Cancelled
+        );
+        assert_eq!(
+            outcome.telemetry.stages[0].degradation,
+            Some(ContributionDegradationReason::Cancelled)
         );
         assert_eq!(
             outcome.report.state,
@@ -911,8 +1030,63 @@ mod tests {
             ContributionAvailability::Unavailable
         );
         assert_eq!(
+            outcome.telemetry.stages[0].degradation,
+            Some(ContributionDegradationReason::QualificationUnavailable)
+        );
+        assert_eq!(
             outcome.report.state,
             super::super::contributions::ReconciliationState::Unavailable
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_records_unadmitted_roles_with_the_same_host_reason() {
+        let packet = packet();
+        let roles = vec![
+            ContributionRole::ObservationExtractor,
+            ContributionRole::CausalProposer,
+            ContributionRole::EvidenceGap,
+        ];
+        let slots = roles
+            .iter()
+            .enumerate()
+            .map(|(index, role)| {
+                slot(
+                    *role,
+                    &format!("cancelled-{index}"),
+                    ScriptedBackend::new(Vec::new()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let cancel = Arc::new(AtomicBool::new(true));
+        let mut events = Vec::new();
+        let outcome = run_contribution_pipeline(
+            ContributionPipelineInputs {
+                user_text: "why?",
+                packet: &packet,
+                slots: &slots,
+                budget: budget(),
+                deadline_ms: 10_000,
+                started_at: None,
+                cancel: Some(cancel),
+                plan: &plan(roles),
+            },
+            &mut |event| events.push(event),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.attempts.len(), 3);
+        assert_eq!(outcome.telemetry.stages.len(), 3);
+        assert!(outcome.telemetry.stages.iter().all(|stage| {
+            stage.outcome == ContributionAvailability::Cancelled
+                && stage.degradation == Some(ContributionDegradationReason::Cancelled)
+        }));
+        assert_eq!(events.iter().filter(|event| event.started).count(), 1);
+        assert_eq!(events.iter().filter(|event| !event.started).count(), 3);
+        assert!(events.iter().skip(1).all(|event| {
+            event.degradation == Some(ContributionDegradationReason::Cancelled)
+                && event.detail == ContributionDegradationReason::Cancelled.detail()
+        }));
     }
 }
