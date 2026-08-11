@@ -243,16 +243,10 @@ fn row_matches(exp: &GoldenExpectation, score: &PathScore) -> bool {
     } else if score.verdict != ContributionVerdict::Rejected {
         return false;
     }
-    if exp.allow_partial_extraction_credit {
-        // Partial credit is allowed but not required.
-    } else if score.credit.partial_extraction_credit
-        && matches!(
-            exp.kind,
-            CandidateKind::FabricatedCitation
-                | CandidateKind::InvalidStructuredOutput
-                | CandidateKind::OverconfidentCheapAnswer
-        )
-    {
+    // Host goldens own partial-credit authority: when a row forbids partial
+    // extraction credit, a score that still awards it is a golden mismatch
+    // (e.g. unsupported causal claim must not look like useful partial work).
+    if !exp.allow_partial_extraction_credit && score.credit.partial_extraction_credit {
         return false;
     }
     true

@@ -82,11 +82,7 @@ fn score_body(case: &BenchmarkCase, kind: CandidateKind, body: &str) -> PathScor
             }
         }
         FastTriageValidation::Rejected(categories) => {
-            let partial = kind == CandidateKind::UsefulPartialExtraction
-                || categories.contains(&FastTriageFailureCategory::RoleCoverage);
-            // Partial extraction credit only when the structure was parseable
-            // enough to bind candidates but failed role/root requirements —
-            // never when ids are fabricated or structure is invalid.
+            // Hard identity/structure failures never earn any contribution credit.
             let hard_fail = categories.iter().any(|c| {
                 matches!(
                     c,
@@ -96,13 +92,22 @@ fn score_body(case: &BenchmarkCase, kind: CandidateKind, body: &str) -> PathScor
                         | FastTriageFailureCategory::EmptyVisibleAnswer
                 )
             });
+            // Partial extraction credit is reserved for host-declared partial
+            // shapes (extraction-only / omitted role coverage). An unsupported
+            // causal claim, role confusion, fabricated id, or other mutation
+            // must not earn partial credit merely because RoleCoverage co-occurs.
+            let partial_kind = matches!(
+                kind,
+                CandidateKind::UsefulPartialExtraction | CandidateKind::OmittedEvidence
+            );
+            let partial = partial_kind && !hard_fail;
             PathScore {
                 kind,
                 verdict: ContributionVerdict::Rejected,
                 failure_categories: categories,
                 credit: ContributionCredit {
                     roles: RoleCredit {
-                        extraction_useful: partial && !hard_fail,
+                        extraction_useful: partial,
                         causal_proposal_useful: false,
                         contradiction_check_useful: matches!(
                             kind,
@@ -112,7 +117,7 @@ fn score_body(case: &BenchmarkCase, kind: CandidateKind, body: &str) -> PathScor
                         prose_alone_never_credits: true,
                     },
                     root_cause_established: false,
-                    partial_extraction_credit: partial && !hard_fail,
+                    partial_extraction_credit: partial,
                 },
                 envelope: None,
                 proposal_body: body.to_string(),
@@ -191,5 +196,39 @@ mod tests {
         let roles = path_b_roles(&case, CandidateKind::StrongStructured);
         let score = score_path_b(&case, &roles);
         assert_eq!(score.verdict, ContributionVerdict::Accepted);
+    }
+
+    #[test]
+    fn unsupported_causal_claim_never_earns_partial_extraction_credit() {
+        let case = benchmark_case(CaseId::CompleteTimeline);
+        for path_score in [
+            score_path_a(
+                &case,
+                &path_a_candidate(&case, CandidateKind::UnsupportedCausalClaim),
+            ),
+            score_path_b(
+                &case,
+                &path_b_roles(&case, CandidateKind::UnsupportedCausalClaim),
+            ),
+        ] {
+            assert_eq!(path_score.verdict, ContributionVerdict::Rejected);
+            assert!(
+                !path_score.credit.partial_extraction_credit,
+                "unsupported cause must not look like useful partial extraction; cats={:?}",
+                path_score.failure_categories
+            );
+            assert!(!path_score.credit.roles.extraction_useful);
+        }
+    }
+
+    #[test]
+    fn role_confusion_never_earns_partial_extraction_credit() {
+        let case = benchmark_case(CaseId::CompleteTimeline);
+        let score = score_path_a(
+            &case,
+            &path_a_candidate(&case, CandidateKind::RoleConfusion),
+        );
+        assert_eq!(score.verdict, ContributionVerdict::Rejected);
+        assert!(!score.credit.partial_extraction_credit);
     }
 }

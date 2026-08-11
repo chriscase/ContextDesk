@@ -277,6 +277,88 @@ fn fixtures_are_share_safe() {
 }
 
 #[test]
+fn unsupported_cause_never_earns_partial_credit_on_any_case_or_path() {
+    for id in list_case_ids() {
+        let case = benchmark_case(*id);
+        for kind in [
+            CandidateKind::UnsupportedCausalClaim,
+            CandidateKind::RoleConfusion,
+            CandidateKind::SymptomPromotedToCause,
+            CandidateKind::FabricatedCitation,
+        ] {
+            let a = score_path_a(&case, &path_a_candidate(&case, kind));
+            let b = score_path_b(&case, &path_b_roles(&case, kind));
+            assert_eq!(
+                a.verdict,
+                ContributionVerdict::Rejected,
+                "{id:?} {kind:?} A"
+            );
+            assert_eq!(
+                b.verdict,
+                ContributionVerdict::Rejected,
+                "{id:?} {kind:?} B"
+            );
+            assert!(
+                !a.credit.partial_extraction_credit,
+                "path A partial wrongly set for {id:?} {kind:?}"
+            );
+            assert!(
+                !b.credit.partial_extraction_credit,
+                "path B partial wrongly set for {id:?} {kind:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn path_b_invalid_structure_is_not_overconfident_prose_duplicate() {
+    let case = benchmark_case(CaseId::CompleteTimeline);
+    let invalid = path_b_roles(&case, CandidateKind::InvalidStructuredOutput);
+    let overconfident = path_b_roles(&case, CandidateKind::OverconfidentCheapAnswer);
+    let inv_body = invalid
+        .reviewer
+        .optional_full_proposal
+        .as_deref()
+        .expect("invalid path B must supply a full proposal body");
+    let over_body = overconfident
+        .reviewer
+        .optional_full_proposal
+        .as_deref()
+        .expect("overconfident path B must supply a full proposal body");
+    assert_ne!(
+        inv_body, over_body,
+        "path B InvalidStructuredOutput must not reuse overconfident free-text"
+    );
+    assert!(
+        inv_body.contains("```") || inv_body.contains("\"not\""),
+        "invalid structure fixture should be non-schema JSON, got {inv_body}"
+    );
+    let score = score_path_b(&case, &invalid);
+    assert_eq!(score.verdict, ContributionVerdict::Rejected);
+    assert!(score
+        .failure_categories
+        .contains(&FastTriageFailureCategory::MalformedTerminal));
+    assert!(!score.credit.partial_extraction_credit);
+}
+
+#[test]
+fn matrix_forbids_partial_credit_when_golden_disallows_it() {
+    let run = run_benchmark_matrix();
+    for row in &run.rows {
+        if !row.expectation.allow_partial_extraction_credit {
+            assert!(
+                !row.score.credit.partial_extraction_credit,
+                "golden forbids partial credit: {} {} {}",
+                row.expectation.case_id.as_str(),
+                row.expectation.path.as_str(),
+                row.expectation.kind.as_str()
+            );
+        }
+    }
+    assert_eq!(run.mismatched, 0);
+}
+
+#[test]
 fn latency_and_token_labels_do_not_affect_verdict() {
     let case = benchmark_case(CaseId::CompleteTimeline);
     let mut a = path_a_candidate(&case, CandidateKind::StrongStructured);

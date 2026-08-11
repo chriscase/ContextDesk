@@ -38,7 +38,7 @@ Strong structured · sloppy-but-recoverable · unsupported causal claims · fabr
 1. Host truth and packet roles are authoritative.  
 2. `validate_fast_answer` is the gate (same as production fast-triage).  
 3. **Persuasive prose alone never earns credit** (overconfident free-text is fail-closed).  
-4. Partial extraction may earn **partial contribution credit** when structure binds to host ids but role coverage fails — it never establishes root cause alone.  
+4. Partial extraction may earn **partial contribution credit** only for host-declared partial shapes (`useful_partial_extraction`, `omitted_evidence`) when structure binds to host ids but role coverage fails — it never establishes root cause alone. An **unsupported causal claim** (or role-confusion / fabricated-id mutation) must **not** receive partial credit even if `RoleCoverage` co-occurs.  
 5. Fabricated ids, unsupported roots, role confusion, chronology inversions, and invalid structure **fail closed**.  
 6. Latency ms and token-budget fields on matrix rows are **labels only** — not readiness, not quality passes.
 

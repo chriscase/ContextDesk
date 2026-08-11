@@ -889,7 +889,7 @@ pub fn path_b_roles(case: &BenchmarkCase, kind: CandidateKind) -> PathBRoles {
             },
             ReviewerRole::default(),
         ),
-        CandidateKind::OverconfidentCheapAnswer | CandidateKind::InvalidStructuredOutput => (
+        CandidateKind::OverconfidentCheapAnswer => (
             CausalProposalRole { claims: vec![] },
             ContradictionRole {
                 reject_claim_ids: BTreeSet::new(),
@@ -897,6 +897,20 @@ pub fn path_b_roles(case: &BenchmarkCase, kind: CandidateKind) -> PathBRoles {
             },
             ReviewerRole {
                 optional_full_proposal: Some(overconfident_for(case)),
+            },
+        ),
+        // Distinct from overconfident free-text: fenced invalid object so path B
+        // exercises the same malformed-structure fail-closed path as path A.
+        CandidateKind::InvalidStructuredOutput => (
+            CausalProposalRole { claims: vec![] },
+            ContradictionRole {
+                reject_claim_ids: BTreeSet::new(),
+                force_abstention: false,
+            },
+            ReviewerRole {
+                optional_full_proposal: Some(
+                    "```json\n{\"not\": \"a valid investigation answer\"}\n```".into(),
+                ),
             },
         ),
     };
