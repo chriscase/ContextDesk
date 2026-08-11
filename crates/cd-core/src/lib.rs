@@ -65,6 +65,8 @@ pub mod multi_model;
 pub mod multi_stage_budget;
 pub mod normalized_log_events;
 pub mod object_store;
+/// Typed OpenAI-compatible chat request modes and pure body builder.
+pub mod openai_chat_contract;
 pub mod paths;
 pub mod permissions;
 pub mod preflight;
