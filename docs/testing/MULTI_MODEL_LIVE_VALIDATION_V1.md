@@ -1,7 +1,8 @@
 # Multi-model live validation and capture v1
 
 Status: the provider-neutral contribution runtime is implemented on
-`feat/multimodel-contribution-reconcile-v1`. The live validation procedure is
+`feat/multimodel-contribution-reconcile-v1` at exact head
+`199160c564edd1a6e9da349f2b0ff9fe4e7522f9`. The live validation procedure is
 ready, but this worktree's configured protected-file reference is currently
 missing, so no new gateway request was made in this phase.
 
@@ -120,7 +121,7 @@ data, and must not inherit Vercel model or usefulness evidence.
 
 ## Integrated wire-contract evidence
 
-The current integration head is `10201e1f6285793d8a67f2cbd5de5b96048ab462`.
+The current integration head is `199160c564edd1a6e9da349f2b0ff9fe4e7522f9`.
 It includes the dialect-honest OpenAI-compatible chat qualification ladder,
 the production OpenAI-compatible embedding adapter, and explicit TEI/Cohere
 reranking with shared fail-closed parsers. The hermetic evidence at this head
@@ -138,6 +139,11 @@ includes:
 - existing gateway diagnostic contract: 17 CLI tests;
 - exact-head release gate: `FULL_GATE_PASS` with embedded-SHA identity,
   cancellation, activity/trace parity, grounded two-turn flow, and recovery.
+
+The full workspace matrix, desktop native check, frontend typecheck/lint/
+Vitest/build, and the exact-head gate all pass at this head. Frontend lint
+retains nine pre-existing React-hook warnings but no errors; they are not
+introduced by the retrieval identity fix.
 
 These tests are derived from observed gateway shapes but remain provider-neutral:
 they prove request/response contracts and host behavior, not that a model is
