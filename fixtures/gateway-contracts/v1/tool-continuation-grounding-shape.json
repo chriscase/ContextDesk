@@ -1,0 +1,86 @@
+{
+  "schema": "contextdesk.gateway_contract.tool_continuation_grounding.v1",
+  "note": "Normalized round/telemetry shape for the native tool-call + tool-result continuation case. Sanitized: no request or response bodies, no model prose, no tool arguments, no corpus/session/request ids, no endpoints, no timestamps, no token counts, no latencies. Prompt identity is expressed as `prompt_repeats_round` (a symbolic back-reference) instead of copying live token counts.",
+  "why_this_shape_matters": "Distinguishes a provider fault from a host-side evidence refusal. Both cases below completed every provider round normally; they differ only in whether the host's bounded log tool yielded a citeable evidence identity.",
+  "cases": [
+    {
+      "case": "evidence_admitted",
+      "summary": "Tool result carried a citeable event identity, so the host admitted it and the next round synthesized a grounded answer.",
+      "rounds": [
+        {
+          "round": 1,
+          "tools_offered": 1,
+          "finish_reason": "tool_calls",
+          "native_tool_calls": 1,
+          "prompt_repeats_round": null,
+          "provider_error": false
+        },
+        {
+          "round": 2,
+          "tools_offered": 0,
+          "finish_reason": "stop",
+          "native_tool_calls": 0,
+          "prompt_repeats_round": null,
+          "provider_error": false
+        }
+      ],
+      "tool_result": {
+        "ok": true,
+        "result_count": 1,
+        "evidence_identity_count": 1,
+        "exemplar_line_count": 1
+      },
+      "host_outcome": { "tool_called": true, "grounding": "grounded" },
+      "lane_passes": true,
+      "expected_failure_category": null
+    },
+    {
+      "case": "evidence_withheld",
+      "summary": "Tool result reported result_count=1 from a pattern-matched template whose events were all excluded by a structured filter, so it carried no citeable identity. The host evidence gate refused it, the model context never gained the result, so the next round re-sent the same prompt and the model repeated the same call. The host non-progress bound then withdrew the only required tool, leaving later rounds unable to satisfy the grounding instruction they were still given.",
+      "rounds": [
+        {
+          "round": 1,
+          "tools_offered": 1,
+          "finish_reason": "tool_calls",
+          "native_tool_calls": 1,
+          "prompt_repeats_round": null,
+          "provider_error": false
+        },
+        {
+          "round": 2,
+          "tools_offered": 1,
+          "finish_reason": "tool_calls",
+          "native_tool_calls": 1,
+          "prompt_repeats_round": 1,
+          "provider_error": false
+        },
+        {
+          "round": 3,
+          "tools_offered": 0,
+          "finish_reason": "stop",
+          "native_tool_calls": 0,
+          "prompt_repeats_round": null,
+          "provider_error": false
+        },
+        {
+          "round": 4,
+          "tools_offered": 0,
+          "finish_reason": "stop",
+          "native_tool_calls": 0,
+          "prompt_repeats_round": 3,
+          "provider_error": false
+        }
+      ],
+      "tool_result": {
+        "ok": true,
+        "result_count": 1,
+        "evidence_identity_count": 0,
+        "exemplar_line_count": 0
+      },
+      "host_outcome": { "tool_called": true, "grounding": "ungrounded" },
+      "lane_passes": false,
+      "expected_failure_category": "host_grounding_refused"
+    }
+  ],
+  "forbidden_failure_category": "provider_error"
+}

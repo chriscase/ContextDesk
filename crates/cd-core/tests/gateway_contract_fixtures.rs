@@ -1072,6 +1072,233 @@ fn backend_error_envelopes_fail_closed() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Tool-call continuation: provider fault vs. host evidence refusal
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ToolContinuationFixture {
+    cases: Vec<ToolContinuationCase>,
+    forbidden_failure_category: String,
+}
+
+#[derive(Deserialize)]
+struct ToolContinuationCase {
+    case: String,
+    rounds: Vec<ToolContinuationRound>,
+    tool_result: ToolContinuationToolResult,
+    host_outcome: ToolContinuationHostOutcome,
+    lane_passes: bool,
+    expected_failure_category: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ToolContinuationRound {
+    round: u32,
+    tools_offered: u32,
+    finish_reason: String,
+    native_tool_calls: u32,
+    prompt_repeats_round: Option<u32>,
+    provider_error: bool,
+}
+
+#[derive(Deserialize)]
+struct ToolContinuationToolResult {
+    ok: bool,
+    result_count: u32,
+    evidence_identity_count: u32,
+    exemplar_line_count: u32,
+}
+
+#[derive(Deserialize)]
+struct ToolContinuationHostOutcome {
+    tool_called: bool,
+    grounding: String,
+}
+
+fn tool_continuation_fixture() -> ToolContinuationFixture {
+    serde_json::from_str(include_str!(
+        "../../../fixtures/gateway-contracts/v1/tool-continuation-grounding-shape.json"
+    ))
+    .expect("tool continuation grounding fixture parses")
+}
+
+/// The observed shape contains **no provider fault**: every round terminated on
+/// a normal finish reason, and the rounds that were offered tools answered with
+/// well-formed native tool calls. Whatever failed the lane happened on the host
+/// side, after a successful exchange.
+#[test]
+fn tool_continuation_shape_records_no_provider_fault_in_either_case() {
+    for case in tool_continuation_fixture().cases {
+        assert!(
+            !case.rounds.is_empty(),
+            "{}: a case must record its rounds",
+            case.case
+        );
+        for round in &case.rounds {
+            assert!(
+                !round.provider_error,
+                "{} round {}: this shape must contain no provider fault",
+                case.case, round.round
+            );
+            assert!(
+                matches!(round.finish_reason.as_str(), "tool_calls" | "stop"),
+                "{} round {}: unexpected finish reason {:?}",
+                case.case,
+                round.round,
+                round.finish_reason
+            );
+            // Tool calls are emitted only when tools were actually offered, and
+            // an offered round that finished on `tool_calls` produced at least
+            // one — i.e. native tool calling itself worked on the wire.
+            if round.finish_reason == "tool_calls" {
+                assert!(
+                    round.tools_offered > 0 && round.native_tool_calls > 0,
+                    "{} round {}: a tool_calls finish must carry native tool calls",
+                    case.case,
+                    round.round
+                );
+            } else {
+                assert_eq!(
+                    round.native_tool_calls, 0,
+                    "{} round {}: a stop finish must carry no tool calls",
+                    case.case, round.round
+                );
+            }
+        }
+        assert!(
+            case.rounds.iter().any(|r| r.native_tool_calls > 0),
+            "{}: the case must exercise native tool calling",
+            case.case
+        );
+    }
+}
+
+/// A tool result the host declines to admit never reaches the model, so the
+/// next round re-sends a byte-identical prompt and the model can only repeat
+/// itself. `prompt_repeats_round` is the sanitized stand-in for the live
+/// prompt-token invariance that proved this.
+#[test]
+fn a_refused_tool_result_leaves_the_next_prompt_unchanged() {
+    for case in tool_continuation_fixture().cases {
+        let admitted = case.tool_result.evidence_identity_count > 0;
+        let repeated = case
+            .rounds
+            .iter()
+            .filter(|r| r.prompt_repeats_round.is_some())
+            .count();
+        if admitted {
+            assert_eq!(
+                repeated, 0,
+                "{}: an admitted tool result must change the next prompt",
+                case.case
+            );
+        } else {
+            assert!(
+                repeated > 0,
+                "{}: a refused tool result must leave a later prompt unchanged",
+                case.case
+            );
+        }
+        for round in &case.rounds {
+            let Some(source) = round.prompt_repeats_round else {
+                continue;
+            };
+            assert!(
+                source < round.round,
+                "{}: round {} cannot repeat a later round {source}",
+                case.case,
+                round.round
+            );
+            let source_round = case
+                .rounds
+                .iter()
+                .find(|r| r.round == source)
+                .unwrap_or_else(|| panic!("{}: missing repeated round {source}", case.case));
+            assert_eq!(
+                source_round.tools_offered, round.tools_offered,
+                "{}: an unchanged prompt must also carry an unchanged tool offer",
+                case.case
+            );
+        }
+    }
+}
+
+/// The divergence that separates the two cases is entirely host-side:
+/// `result_count > 0` with zero citeable identities. The host must refuse it
+/// (fail closed) rather than treat a nonzero count as evidence.
+#[test]
+fn a_nonzero_result_count_without_identities_is_never_treated_as_grounded() {
+    for case in tool_continuation_fixture().cases {
+        assert!(
+            case.tool_result.ok,
+            "{}: both cases ran the tool successfully",
+            case.case
+        );
+        assert!(
+            case.tool_result.result_count > 0,
+            "{}: both cases reported a nonzero result count",
+            case.case
+        );
+        assert_eq!(
+            case.tool_result.evidence_identity_count, case.tool_result.exemplar_line_count,
+            "{}: rendered exemplar lines and evidence identities come from the \
+             same surviving events",
+            case.case
+        );
+        let grounded = case.host_outcome.grounding == "grounded";
+        assert_eq!(
+            grounded,
+            case.tool_result.evidence_identity_count > 0,
+            "{}: grounding must track citeable identities, not result_count",
+            case.case
+        );
+        assert_eq!(
+            case.lane_passes, grounded,
+            "{}: the lane passes exactly when the host admitted evidence",
+            case.case
+        );
+    }
+}
+
+/// The share-safe report must attribute a host evidence refusal to the host.
+/// Falling back to `provider_error` tells a release manager the gateway or
+/// model is broken when the provider answered every round correctly.
+#[test]
+fn a_host_grounding_refusal_is_never_reported_as_a_provider_error() {
+    let fixture = tool_continuation_fixture();
+    let policy = cd_core::redact::ShareSafeRedactionPolicy::default();
+    for case in &fixture.cases {
+        let Some(expected) = case.expected_failure_category.as_deref() else {
+            assert!(
+                case.lane_passes,
+                "{}: only a passing lane may omit a failure category",
+                case.case
+            );
+            continue;
+        };
+        // Exactly the detail the gateway diagnostic's tool lane emits for a
+        // completed-but-declined turn.
+        let detail = format!(
+            "tool_called={} grounding={}",
+            case.host_outcome.tool_called, case.host_outcome.grounding
+        );
+        let summary = policy.failure_summary(&detail);
+        assert_eq!(
+            summary,
+            format!("failure category: {expected}; raw provider detail omitted"),
+            "{}: host-observed refusal must carry its own category",
+            case.case
+        );
+        assert!(
+            !summary.contains(&fixture.forbidden_failure_category),
+            "{}: {} must not be blamed on the provider: {summary}",
+            case.case,
+            fixture.forbidden_failure_category
+        );
+    }
+}
+
 #[test]
 fn fixtures_never_embed_secrets_or_live_metadata() {
     let root = concat!(

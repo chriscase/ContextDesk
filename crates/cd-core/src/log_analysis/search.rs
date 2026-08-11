@@ -707,6 +707,96 @@ mod tests {
         );
     }
 
+    /// The exact boundary behind a "1 result, zero citeable evidence" search.
+    ///
+    /// The structured filter above (time/level/service/trace) is applied to
+    /// **events**; the template-pattern keyword loop then admits a template on
+    /// pattern text alone. A template whose pattern matches the query is
+    /// therefore returned as a hit even when *every one of its events* was
+    /// excluded by the structured filter — with `count` carrying the
+    /// corpus-wide occurrence total, and `evidence` empty because no event
+    /// survived to supply an identity.
+    ///
+    /// This is the host-side condition that a grounded turn cannot recover
+    /// from: `result_count > 0` while `evidence.is_empty()`. The agent loop's
+    /// evidence gate (`agent.rs`, `log_result_count > 0 && !log_evidence
+    /// .is_empty()`) correctly refuses it, so this test pins the shape rather
+    /// than blessing it — the hit must never be allowed to carry a fabricated
+    /// identity to satisfy the gate.
+    #[test]
+    fn a_pattern_matched_template_can_outlive_its_time_filtered_events_with_no_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("svc.log")).unwrap();
+        for i in 0..4 {
+            // Wall-clock timestamps far outside the window queried below.
+            writeln!(
+                f,
+                r#"{{"timestamp":"2027-01-15T08:0{i}:00Z","level":"error","message":"payment reconciliation stalled for shard {i}"}}"#
+            )
+            .unwrap();
+        }
+        drop(f);
+        let report = ingest_path(dir.path(), &logs, "s", None, "c").unwrap();
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+
+        let unfiltered = search_logs(
+            &corpus,
+            &SearchLogsQuery {
+                query: Some("payment reconciliation stalled".into()),
+                semantic: false,
+                k: 8,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let grounded = unfiltered
+            .first()
+            .expect("unfiltered search must return the matching template");
+        assert!(
+            !grounded.evidence.is_empty(),
+            "without a structured filter the same query must carry citeable identities"
+        );
+
+        // Same query, but a structured time window that excludes every event.
+        // 0..604_800 is the epoch-relative week a model can synthesize when it
+        // fills in every optional parameter instead of omitting them.
+        let filtered = search_logs(
+            &corpus,
+            &SearchLogsQuery {
+                query: Some("payment reconciliation stalled".into()),
+                semantic: false,
+                k: 8,
+                time_from: Some(0),
+                time_to: Some(604_800),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+
+        let hit = filtered
+            .first()
+            .expect("pattern keyword match still admits the template as a hit");
+        assert!(
+            hit.evidence.is_empty(),
+            "no event survived the structured filter, so the hit must carry no \
+             evidence identity: {:?}",
+            hit.evidence
+        );
+        assert!(
+            hit.exemplars.is_empty(),
+            "an evidence-free hit must not render exemplar event lines either"
+        );
+        assert!(
+            hit.count > 0,
+            "count reports the corpus-wide template total, which is exactly why \
+             a rendered `result_count`/`n=` reads as if events matched"
+        );
+    }
+
     #[test]
     fn search_logs_module_has_no_dense_identity_dump_api() {
         // Guard against reintroducing production full-corpus auxiliary dumps.

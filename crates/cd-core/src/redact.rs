@@ -161,6 +161,20 @@ impl ShareSafeRedactionPolicy {
             ],
         ) {
             "local_io"
+        } else if lower.contains("tool_called=") && lower.contains("grounding=") {
+            // Host-observed grounding outcome, not a provider fault. The gateway
+            // diagnostic's tool lane reports `tool_called=<bool> grounding=<enum>`
+            // for a turn that *completed* — the provider answered, and
+            // ContextDesk's own evidence gate declined to call the answer
+            // grounded. Without this arm the string matches no provider bucket
+            // and lands in the `provider_error` fallback, which blames the
+            // gateway or model for a host-side refusal.
+            //
+            // Deliberately ordered after every provider-signal bucket above, so
+            // a real transport/auth/rate-limit/upstream signal still wins even
+            // when these host tokens are also present. Still a failure: this
+            // never converts a declined lane into a pass.
+            "host_grounding_refused"
         } else if contains_any(
             &lower,
             &[
@@ -952,6 +966,147 @@ mod tests {
         assert_eq!(
             policy.failure_summary(raw),
             "failure category: empty_terminal_answer; raw provider detail omitted"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Host grounding refusal must not be attributed to the provider.
+    //
+    // The gateway diagnostic's tool lane reports a *completed* turn that the
+    // host's own evidence gate declined, using the exact host-authored shape
+    // `tool_called=<bool> grounding=<enum>`. Before this category existed the
+    // string matched no bucket and fell through to `provider_error`, so a
+    // share-safe report blamed the gateway/model for a host-side refusal.
+    // ---------------------------------------------------------------------
+
+    /// The exact host-authored detail emitted by the tool-continuation lane.
+    fn grounding_lane_detail(tool_called: bool, grounding: &str) -> String {
+        format!("tool_called={tool_called} grounding={grounding}")
+    }
+
+    #[test]
+    fn share_safe_failure_summary_attributes_a_declined_grounding_lane_to_the_host() {
+        let policy = ShareSafeRedactionPolicy::default();
+        let summary = policy.failure_summary(&grounding_lane_detail(true, "ungrounded"));
+        assert_eq!(
+            summary,
+            "failure category: host_grounding_refused; raw provider detail omitted"
+        );
+        assert!(
+            !summary.contains("provider_error"),
+            "a completed turn declined by the host's evidence gate must never be \
+             reported as a provider fault: {summary}"
+        );
+    }
+
+    #[test]
+    fn share_safe_failure_summary_covers_every_grounding_lane_detail_the_host_can_emit() {
+        let policy = ShareSafeRedactionPolicy::default();
+        // `grounding_status` is a closed host-owned vocabulary, and the lane
+        // reports it alongside either tool_called value.
+        for tool_called in [true, false] {
+            for grounding in ["ungrounded", "grounded", "not_applicable"] {
+                let summary =
+                    policy.failure_summary(&grounding_lane_detail(tool_called, grounding));
+                assert_eq!(
+                    summary,
+                    "failure category: host_grounding_refused; raw provider detail omitted",
+                    "tool_called={tool_called} grounding={grounding} must stay host-attributed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_grounding_category_is_still_a_failure_and_retains_no_raw_detail() {
+        // Mutation guard: weakening the arm into a pass-shaped or empty summary
+        // (or one that echoes the raw lane detail) must fail here.
+        let policy = ShareSafeRedactionPolicy::new(["profile-private", "model-private"]);
+        let raw = format!(
+            "{} model=model-private profile=profile-private body={{\"hint\":\"read /private/tmp/x\"}}",
+            grounding_lane_detail(true, "ungrounded")
+        );
+        let summary = policy.failure_summary(&raw);
+        assert!(
+            summary.starts_with("failure category: "),
+            "every summary must present as a failure category: {summary}"
+        );
+        assert!(
+            summary.ends_with("; raw provider detail omitted"),
+            "every summary must disclaim the omitted detail: {summary}"
+        );
+        assert_eq!(
+            policy.failure_summary(&summary),
+            summary,
+            "policy must stay idempotent for the new category"
+        );
+        for forbidden in [
+            "tool_called=",
+            "grounding=",
+            "model-private",
+            "profile-private",
+            "/private/tmp",
+            "hint",
+        ] {
+            assert!(
+                !summary.contains(forbidden),
+                "{forbidden:?} leaked in {summary}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_provider_signal_still_outranks_the_host_grounding_tokens() {
+        // Mutation guard: hoisting the host arm above the provider buckets would
+        // mask a genuine gateway fault behind a host-attributed category. Each
+        // case carries the host tokens *and* a provider signal; the provider
+        // signal must win, so an operator never loses a real outage.
+        let policy = ShareSafeRedactionPolicy::default();
+        let host = grounding_lane_detail(true, "ungrounded");
+        for (signal, expected) in [
+            ("run cancelled by operator", "cancelled"),
+            ("deadline exceeded before terminal answer", "timeout"),
+            ("provider returned 401 unauthorized", "authentication"),
+            ("unknown model for this route", "model_or_route_not_found"),
+            ("provider returned 429 rate limit", "rate_limited"),
+            ("could not decode invalid json envelope", "invalid_response"),
+            ("tls connection reset", "transport"),
+            ("upstream returned 503", "upstream"),
+        ] {
+            let summary = policy.failure_summary(&format!("{host}; {signal}"));
+            assert_eq!(
+                summary,
+                format!("failure category: {expected}; raw provider detail omitted"),
+                "provider signal {signal:?} must outrank the host grounding tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn one_grounding_token_alone_is_not_enough_to_claim_a_host_refusal() {
+        // Mutation guard: relaxing the conjunction to a disjunction would let
+        // arbitrary text that merely mentions one token be re-attributed away
+        // from the provider. Both host-authored tokens are required.
+        let policy = ShareSafeRedactionPolicy::default();
+        for raw in [
+            "tool_called=true but the response was unusable",
+            "grounding=ungrounded per the downstream summary",
+        ] {
+            assert_eq!(
+                policy.failure_summary(raw),
+                "failure category: provider_error; raw provider detail omitted",
+                "half of the host shape must not claim a host refusal: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_failures_still_fall_back_to_provider_error() {
+        // Mutation guard: the new arm must not swallow the fallback bucket.
+        let policy = ShareSafeRedactionPolicy::default();
+        assert_eq!(
+            policy.failure_summary("something entirely unclassified happened"),
+            "failure category: provider_error; raw provider detail omitted"
         );
     }
 }
