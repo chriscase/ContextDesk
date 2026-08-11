@@ -107,7 +107,11 @@ pub fn search_logs_tool_spec() -> ToolSpec {
                 "service": { "type": "string" },
                 "trace_id": { "type": "string" },
                 "semantic": { "type": "boolean" },
-                "k": { "type": "integer" }
+                "k": { "type": "integer" },
+                "candidate_k": {
+                    "type": "integer",
+                    "description": "Optional bounded pre-rerank candidate pool. Must be at least k and is capped at 100; omit for the normal k-sized pool."
+                }
             },
             "required": []
         }),
@@ -255,6 +259,10 @@ mod tests {
         assert!(spec
             .description
             .contains(&MAX_SEARCH_LOG_TIME_WINDOW_SECS.to_string()));
+        assert_eq!(properties["candidate_k"]["type"], "integer");
+        assert!(properties["candidate_k"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("capped at 100")));
         assert_eq!(spec.parameters["required"], json!([]));
     }
 

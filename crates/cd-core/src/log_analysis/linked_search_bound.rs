@@ -119,8 +119,13 @@ impl SearchIntentKey {
             .and_then(|v| v.as_u64())
             .map(|n| n.to_string())
             .unwrap_or_else(|| "-".into());
+        let candidate_k = args
+            .get("candidate_k")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".into());
         let key = format!(
-            "q={query}|lv={level}|svc={service}|tr={trace_id}|tf={time_from}|tt={time_to}|sem={semantic}|k={k}"
+            "q={query}|lv={level}|svc={service}|tr={trace_id}|tf={time_from}|tt={time_to}|sem={semantic}|k={k}|candidate_k={candidate_k}"
         );
         Self { key }
     }
@@ -527,6 +532,17 @@ mod tests {
             SearchIntentKey::from_search_logs_args(&json!({"query": "  Job  ", "level": "ERROR"}));
         let b = SearchIntentKey::from_search_logs_args(&json!({"level": "error", "query": "job"}));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn intent_key_distinguishes_candidate_pool_budget() {
+        let narrow = SearchIntentKey::from_search_logs_args(
+            &json!({"query": "job", "k": 3, "candidate_k": 3}),
+        );
+        let wide = SearchIntentKey::from_search_logs_args(
+            &json!({"query": "job", "k": 3, "candidate_k": 10}),
+        );
+        assert_ne!(narrow, wide);
     }
 
     #[test]

@@ -162,7 +162,15 @@ pub struct SearchLogsQuery {
     pub semantic: bool,
     /// Max results.
     pub k: usize,
+    /// Optional bounded candidate pool used before reranking. When absent,
+    /// the final result budget is also the candidate budget. The host clamps
+    /// this to the final budget within 1..=100 so model-originated requests cannot
+    /// create unbounded retrieval work.
+    pub candidate_k: Option<usize>,
 }
+
+/// Maximum number of template candidates that may enter reranking.
+pub const MAX_SEARCH_CANDIDATE_K: usize = 100;
 
 /// One search hit with citeable template id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,7 +290,8 @@ pub fn search_logs_with_excluded_templates_and_rerank(
             && embedding_status.embedded_dims.is_some_and(|dims| dims > 0)
             && embedding_status.model_id.as_deref() == Some(backend.identity().as_str())
     });
-    let k = q.k.clamp(1, 100);
+    let k = q.k.clamp(1, MAX_SEARCH_CANDIDATE_K);
+    let candidate_k = q.candidate_k.unwrap_or(k).clamp(k, MAX_SEARCH_CANDIDATE_K);
     // Structured filter → allowed template ids + exemplar messages
     let mut allowed: HashSet<u64> = HashSet::new();
     let mut representative_exemplars: std::collections::HashMap<u64, Vec<SearchExemplar>> =
@@ -425,7 +434,7 @@ pub fn search_logs_with_excluded_templates_and_rerank(
                 if embedding_status.embedded_dims == u32::try_from(qvec.len()).ok() {
                     let ranked = corpus.search_templates(
                         &qvec,
-                        k.saturating_mul(3).max(k),
+                        candidate_k.saturating_mul(3).max(candidate_k),
                         Some(&allowed),
                     )?;
                     for (tid, s) in ranked {
@@ -508,7 +517,7 @@ pub fn search_logs_with_excluded_templates_and_rerank(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.template_id.cmp(&b.template_id))
     });
-    hits.truncate(k);
+    hits.truncate(candidate_k);
 
     // Rerank only the bounded prefix, after deterministic keyword/semantic
     // retrieval has established the candidate set. The provider receives
@@ -538,12 +547,15 @@ pub fn search_logs_with_excluded_templates_and_rerank(
                             .rerank_score
                             .unwrap_or(f32::NEG_INFINITY)
                             .total_cmp(&left.rerank_score.unwrap_or(f32::NEG_INFINITY))
-                            .then_with(|| left.template_id.cmp(&right.template_id))
                     });
                 }
             }
         }
     }
+    // The final answer budget applies after the wider candidate pool has had
+    // a chance to be reranked. `sort_by` is stable, so equal rerank scores
+    // retain the deterministic pre-rerank order.
+    hits.truncate(k);
     Ok(hits)
 }
 
@@ -855,6 +867,90 @@ mod tests {
         fn identity(&self) -> String {
             "synthetic-invalid-rerank (tests only)".into()
         }
+    }
+
+    struct EqualRerank;
+
+    #[async_trait::async_trait]
+    impl RerankBackend for EqualRerank {
+        async fn rerank(&self, _query: &str, documents: &[String]) -> CoreResult<Vec<f32>> {
+            Ok(vec![1.0; documents.len()])
+        }
+
+        fn identity(&self) -> String {
+            "synthetic-equal-rerank (tests only)".into()
+        }
+    }
+
+    #[test]
+    fn wider_candidate_pool_allows_reranker_to_promote_k_plus_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("wider-pool.log");
+        std::fs::write(
+            &log,
+            "level=error message=secondary marker\nlevel=error message=preferred marker\n",
+        )
+        .unwrap();
+        let report = ingest_path(dir.path(), &log, "wider-pool", None, "none").unwrap();
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        let query = SearchLogsQuery {
+            query: Some("marker".into()),
+            semantic: false,
+            k: 1,
+            candidate_k: Some(2),
+            ..Default::default()
+        };
+        let hits = search_logs_with_excluded_templates_and_rerank(
+            &corpus,
+            &query,
+            None,
+            &[],
+            Some(&PreferRerank),
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].pattern.contains("preferred"), "{hits:?}");
+    }
+
+    #[test]
+    fn equal_rerank_scores_preserve_pre_rerank_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("equal-rerank.log");
+        std::fs::write(
+            &log,
+            "level=error message=alpha marker\nlevel=error message=beta marker\n",
+        )
+        .unwrap();
+        let report = ingest_path(dir.path(), &log, "equal-rerank", None, "none").unwrap();
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        let query = SearchLogsQuery {
+            query: Some("marker".into()),
+            semantic: false,
+            k: 2,
+            candidate_k: Some(2),
+            ..Default::default()
+        };
+        let baseline = search_logs(&corpus, &query, None).unwrap();
+        let reranked = search_logs_with_excluded_templates_and_rerank(
+            &corpus,
+            &query,
+            None,
+            &[],
+            Some(&EqualRerank),
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(
+            reranked
+                .iter()
+                .map(|hit| hit.template_id)
+                .collect::<Vec<_>>(),
+            baseline
+                .iter()
+                .map(|hit| hit.template_id)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

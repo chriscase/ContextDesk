@@ -5557,6 +5557,10 @@ impl ToolHost {
                 .unwrap_or(true),
             k: (args.get("k").and_then(|v| v.as_u64()).unwrap_or(8) as usize)
                 .min(self.max_results_per_source),
+            candidate_k: args
+                .get("candidate_k")
+                .and_then(|v| v.as_u64())
+                .and_then(|value| usize::try_from(value).ok()),
         };
         let rerank_backend = self.log_rerank_backend();
         let hits = crate::log_analysis::search::search_logs_with_excluded_templates_and_rerank(
@@ -7942,6 +7946,28 @@ mod tests {
         let audit = AuditLog::new(dir.path().join("audit.jsonl"));
         let host = ToolHost::new(ws, idx, Some(audit));
         (dir, host)
+    }
+
+    struct PromotePreferredRerank;
+
+    #[async_trait::async_trait]
+    impl crate::rerank::RerankBackend for PromotePreferredRerank {
+        async fn rerank(&self, _query: &str, documents: &[String]) -> CoreResult<Vec<f32>> {
+            Ok(documents
+                .iter()
+                .map(|document| {
+                    if document.contains("preferred") {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect())
+        }
+
+        fn identity(&self) -> String {
+            "synthetic-promote-preferred (tests only)".into()
+        }
     }
 
     fn checked_in_help() -> Arc<crate::help::HelpIndex> {
@@ -12670,6 +12696,52 @@ mod tests {
             trace.detail_raw.contains("result_cap: 3"),
             "{}",
             trace.detail_raw
+        );
+    }
+
+    #[tokio::test]
+    async fn toolhost_search_logs_can_promote_candidate_beyond_final_k() {
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        fs::write(
+            logs.join("app.log"),
+            "level=error message=secondary marker\nlevel=error message=preferred marker\n",
+        )
+        .unwrap();
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let report =
+            crate::log_analysis::ingest_path(&cache, &logs, "candidate-depth", None, "none")
+                .unwrap();
+
+        let ws = Workspace::new("candidate-depth", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(report.corpus_id));
+        host.set_max_results_per_source(5);
+        host.set_log_rerank_backend(Some(Arc::new(PromotePreferredRerank)));
+
+        let result = host
+            .execute(
+                crate::log_analysis::SEARCH_LOGS,
+                &json!({
+                    "query": "marker",
+                    "semantic": false,
+                    "k": 1,
+                    "candidate_k": 2
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok, "{}", result.summary);
+        assert_eq!(result.log_result_count, Some(1));
+        assert!(
+            result.detail_raw.contains("preferred"),
+            "{}",
+            result.detail_raw
         );
     }
 

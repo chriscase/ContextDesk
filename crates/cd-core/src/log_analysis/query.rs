@@ -1986,6 +1986,7 @@ pub fn search_events_advanced_with_cancel(
             // Template discovery must not collapse to a tiny final event
             // budget before active event filters are applied.
             k: SEMANTIC_TEMPLATE_CANDIDATE_CAP,
+            candidate_k: None,
         };
         let template_hits = search_logs_with_excluded_templates(
             corpus,
