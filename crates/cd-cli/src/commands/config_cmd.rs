@@ -23,7 +23,7 @@
 //! on stdout.
 
 use crate::adapters::{load_app_config, save_app_config, Paths};
-use crate::cli::{ConfigAction, ConfigInitArgs, DeadlineAction, ProviderKindArg};
+use crate::cli::{ConfigAction, ConfigInitArgs, DeadlineAction, EffortAction, ProviderKindArg};
 use crate::config::{
     global_config_path, load_layer, project_config_path, save_layer, CliConfigFile, ImportSection,
     OutputSection, ResolvedConfig, WorkflowSection,
@@ -40,6 +40,9 @@ use cd_core::keychain_store::{
 };
 use cd_core::providers::{
     descriptor_for, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
+};
+use cd_core::reasoning_effort::{
+    effort_status, ReasoningEffortLevel, ReasoningEffortStatus, REASONING_EFFORT_SCHEMA_V1,
 };
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use serde::Serialize;
@@ -233,6 +236,81 @@ pub async fn run(
             }))
         }
         ConfigAction::Deadline(action) => run_deadline(action, paths, app_cfg),
+        ConfigAction::Effort(action) => run_effort(action, paths, app_cfg),
+    }
+}
+
+/// Read-only / mutating reasoning-effort controls for AppConfig.reasoning_effort.
+fn run_effort(
+    action: &EffortAction,
+    paths: &Paths,
+    app_cfg: &AppConfig,
+) -> CliResult<Box<dyn Render>> {
+    match action {
+        EffortAction::Show => Ok(Box::new(EffortCommandOutput {
+            schema: REASONING_EFFORT_SCHEMA_V1,
+            action: "show",
+            status: effort_status(&app_cfg.reasoning_effort),
+            changed: false,
+        })),
+        EffortAction::Auto => {
+            let mut cfg = load_app_config(paths)?;
+            // Only the effort settings field is rewritten.
+            cfg.reasoning_effort.apply_omit();
+            save_app_config(paths, &cfg)?;
+            Ok(Box::new(EffortCommandOutput {
+                schema: REASONING_EFFORT_SCHEMA_V1,
+                action: "auto",
+                status: effort_status(&cfg.reasoning_effort),
+                changed: true,
+            }))
+        }
+        EffortAction::Set { level } => {
+            let level =
+                ReasoningEffortLevel::parse(level).map_err(|e| CliError::user(e.to_string()))?;
+            let mut cfg = load_app_config(paths)?;
+            cfg.reasoning_effort.apply_level(level);
+            save_app_config(paths, &cfg)?;
+            Ok(Box::new(EffortCommandOutput {
+                schema: REASONING_EFFORT_SCHEMA_V1,
+                action: "set",
+                status: effort_status(&cfg.reasoning_effort),
+                changed: true,
+            }))
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct EffortCommandOutput {
+    schema: &'static str,
+    action: &'static str,
+    #[serde(flatten)]
+    status: ReasoningEffortStatus,
+    changed: bool,
+}
+
+impl Render for EffortCommandOutput {
+    fn render_text(&self) -> String {
+        let mut lines = vec![
+            format!("reasoning-effort policy: {}", self.status.policy),
+            format!(
+                "level: {}",
+                self.status
+                    .level
+                    .as_deref()
+                    .unwrap_or("(omit / provider default)")
+            ),
+            self.status.note.clone(),
+        ];
+        if self.changed {
+            lines.push(format!("saved via config effort {}", self.action));
+        }
+        lines.join("\n")
+    }
+
+    fn render_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("EffortCommandOutput is always serializable")
     }
 }
 

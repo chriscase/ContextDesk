@@ -1919,6 +1919,28 @@ export async function hostSetRouterBudget(
   return invoke<RouterBudgetDto>("set_router_budget", { req: budget });
 }
 
+/** Reasoning effort: omit = provider default (not a readiness badge). */
+export type ReasoningEffortDto = {
+  policy: string;
+  level?: string | null;
+};
+
+export async function hostGetReasoningEffort(): Promise<ReasoningEffortDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ReasoningEffortDto>("get_reasoning_effort");
+}
+
+export async function hostSetReasoningEffort(
+  level: string | null,
+): Promise<ReasoningEffortDto> {
+  if (!isTauri()) {
+    throw new Error("Reasoning effort settings require Tauri host");
+  }
+  return invoke<ReasoningEffortDto>("set_reasoning_effort", {
+    req: { level },
+  });
+}
+
 export async function hostSetWebResearchEnabled(
   enabled: boolean,
 ): Promise<boolean> {

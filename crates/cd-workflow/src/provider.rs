@@ -129,6 +129,8 @@ pub struct ResolvedTurnInputs {
     pub api_key: Option<String>,
     /// Deadline plan derived from the router budget and this profile.
     pub deadline_plan: TurnDeadlinePlan,
+    /// Effective reasoning-effort policy for this turn (omit by default).
+    pub reasoning_effort: cd_core::reasoning_effort::EffectiveEffortPolicy,
 }
 
 /// Translate the resolved whole-turn budget into the transport ceiling used
@@ -152,8 +154,13 @@ pub async fn backend_for_resolved_turn(
     inputs: &ResolvedTurnInputs,
 ) -> cd_core::error::CoreResult<Box<dyn ChatBackend>> {
     let timeout = provider_request_timeout(inputs.deadline_plan.total_ms);
-    cd_core::research::backend_for_with_timeout(&inputs.profile, inputs.api_key.clone(), timeout)
-        .await
+    cd_core::research::backend_for_with_timeout_and_effort(
+        &inputs.profile,
+        inputs.api_key.clone(),
+        timeout,
+        inputs.reasoning_effort,
+    )
+    .await
 }
 
 /// Resolve profile, per-chat model override, tools-enabled flag, API key, and
@@ -263,11 +270,16 @@ fn resolve_turn_inputs_from_profile_with_api_key(
     profile.capabilities.tools = model_tools_enabled(cfg, &profile, &profile.chat_model);
 
     let deadline_plan = TurnDeadlinePlan::for_profile(&cfg.router, &profile);
+    // Saved effort only; hosts apply per-turn overrides on the returned
+    // struct before `backend_for_resolved_turn` (never persisted here).
+    let reasoning_effort =
+        cd_core::reasoning_effort::resolve_effort_policy(None, &cfg.reasoning_effort);
 
     ResolvedTurnInputs {
         profile,
         api_key,
         deadline_plan,
+        reasoning_effort,
     }
 }
 

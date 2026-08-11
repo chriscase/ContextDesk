@@ -584,6 +584,12 @@ pub struct OpenAiCompatibleClient {
     pub model: String,
     /// Optional extra request headers (e.g. Grok OIDC CLI markers).
     pub extra_headers: Vec<(String, String)>,
+    /// Optional reasoning-effort policy for Chat Completions requests.
+    ///
+    /// `None` / omit keeps existing wire behavior (no effort field). Explicit
+    /// levels are applied only via the dialect map in
+    /// [`crate::reasoning_effort`].
+    pub reasoning_effort: crate::reasoning_effort::EffectiveEffortPolicy,
 }
 
 impl OpenAiCompatibleClient {
@@ -630,7 +636,44 @@ impl OpenAiCompatibleClient {
             api_key,
             model: model.into(),
             extra_headers: Vec::new(),
+            reasoning_effort: crate::reasoning_effort::EffectiveEffortPolicy::Omit,
         })
+    }
+
+    /// Set the reasoning-effort policy for subsequent Chat Completions calls.
+    ///
+    /// Default is omit (provider default). Does not persist AppConfig.
+    pub fn with_reasoning_effort(
+        mut self,
+        policy: crate::reasoning_effort::EffectiveEffortPolicy,
+    ) -> Self {
+        self.reasoning_effort = policy;
+        self
+    }
+
+    /// Build a Chat Completions body and apply the configured effort policy.
+    ///
+    /// Uses the Completions surface only — Responses nesting is never invented
+    /// on this client path.
+    fn build_body_with_effort(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+        stream: bool,
+        mode: &OpenAiChatRequestMode,
+    ) -> CoreResult<(
+        serde_json::Value,
+        crate::reasoning_effort::EffortApplyTelemetry,
+    )> {
+        let mut body = build_openai_chat_request_body(&self.model, messages, tools, stream, mode);
+        let effort_tel = crate::reasoning_effort::apply_reasoning_effort_to_body(
+            &mut body,
+            crate::openai_chat_contract::ChatBackendDialect::OpenAiCompatible,
+            crate::reasoning_effort::ChatApiSurface::ChatCompletions,
+            self.reasoning_effort,
+        )
+        .map_err(|e| CoreError::Message(e.to_string()))?;
+        Ok((body, effort_tel))
     }
 
     /// Attach extra headers (e.g. session/OIDC). If Authorization is present, clears `api_key`.
@@ -766,7 +809,7 @@ impl OpenAiCompatibleClient {
         if let Err(reason) = validate_mode_for_transmit(mode, tools) {
             return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
         }
-        let body = build_openai_chat_request_body(&self.model, messages, tools, false, mode);
+        let (body, effort_tel) = self.build_body_with_effort(messages, tools, false, mode)?;
         let resp = self
             .post_completion_with_429_retry(&body, "chat request", None)
             .await?;
@@ -800,6 +843,8 @@ impl OpenAiCompatibleClient {
         // Headers first, body second so JSON `id` / usage win over header ids.
         let mut tel = header_tel;
         tel.merge_from(&completion.telemetry);
+        tel.reasoning_effort_requested = Some(effort_tel.requested);
+        tel.reasoning_effort_effective = Some(effort_tel.effective);
         completion.telemetry = tel;
         Ok(completion)
     }
@@ -827,7 +872,7 @@ impl OpenAiCompatibleClient {
         if let Err(reason) = validate_mode_for_transmit(mode, tools) {
             return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
         }
-        let body = build_openai_chat_request_body(&self.model, messages, tools, true, mode);
+        let (body, effort_tel) = self.build_body_with_effort(messages, tools, true, mode)?;
         let resp = self
             .post_completion_with_429_retry(&body, "stream request", None)
             .await?;
@@ -865,6 +910,8 @@ impl OpenAiCompatibleClient {
         }
         let mut tel = header_tel;
         tel.merge_from(&completion.telemetry);
+        tel.reasoning_effort_requested = Some(effort_tel.requested);
+        tel.reasoning_effort_effective = Some(effort_tel.effective);
         completion.telemetry = tel;
         Ok(completion)
     }
@@ -915,7 +962,7 @@ impl OpenAiCompatibleClient {
         if let Err(reason) = validate_mode_for_transmit(mode, tools) {
             return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
         }
-        let body = build_openai_chat_request_body(&self.model, messages, tools, true, mode);
+        let (body, effort_tel) = self.build_body_with_effort(messages, tools, true, mode)?;
         let resp = self
             .post_completion_with_429_retry(&body, "stream request", cancel)
             .await?;
@@ -925,13 +972,15 @@ impl OpenAiCompatibleClient {
             return Err(provider_http_error("stream", status, &text, 300));
         }
 
-        let header_tel = crate::provider_telemetry::capture_safe_response_headers(
+        let mut header_tel = crate::provider_telemetry::capture_safe_response_headers(
             resp.headers().iter().filter_map(|(k, v)| {
                 v.to_str()
                     .ok()
                     .map(|value| (k.as_str().to_string(), value.to_string()))
             }),
         );
+        header_tel.reasoning_effort_requested = Some(effort_tel.requested.clone());
+        header_tel.reasoning_effort_effective = Some(effort_tel.effective.clone());
 
         // Some OpenAI-compatible gateways ignore `stream=true` and return a
         // normal completion with an honest JSON content type. Parse that

@@ -81,6 +81,12 @@ pub struct GlobalArgs {
     /// Precedence: this override > saved explicit policy > adaptive policy.
     #[arg(long, global = true, value_name = "DURATION")]
     pub deadline: Option<String>,
+    /// Non-persistent reasoning-effort for this chat turn only
+    /// (`none`/`low`/`medium`/`high`/`xhigh`/`max`). Never writes AppConfig.
+    /// Omit the flag for the saved policy (or provider default when unset).
+    /// Affects cost/latency; **not** a readiness badge.
+    #[arg(long, global = true, value_name = "LEVEL", alias = "effort")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -910,6 +916,9 @@ pub enum ConfigAction {
     /// Whole-turn deadline policy (adaptive vs custom ceiling).
     #[command(subcommand)]
     Deadline(DeadlineAction),
+    /// Reasoning-effort policy (omit = provider default; not a readiness badge).
+    #[command(subcommand)]
+    Effort(EffortAction),
 }
 
 /// `contextdesk config deadline` subcommands.
@@ -923,6 +932,20 @@ pub enum DeadlineAction {
     Set {
         /// Friendly duration: integer + unit `ms`, `s`, or `m`.
         duration: String,
+    },
+}
+
+/// `contextdesk config effort` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum EffortAction {
+    /// Show the saved reasoning-effort policy (read-only).
+    Show,
+    /// Use the provider default (omit effort on the wire).
+    Auto,
+    /// Persist an explicit level (`none`/`low`/`medium`/`high`/`xhigh`/`max`).
+    Set {
+        /// Effort level token.
+        level: String,
     },
 }
 
@@ -1425,5 +1448,38 @@ mod tests {
             );
             assert_eq!(normalized[1], OsString::from(name));
         }
+    }
+}
+
+#[cfg(test)]
+mod effort_flag_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn config_effort_grammar_parses() {
+        let show = Cli::try_parse_from(["contextdesk", "config", "effort", "show"]).unwrap();
+        assert!(matches!(
+            show.command,
+            Command::Config {
+                action: ConfigAction::Effort(EffortAction::Show)
+            }
+        ));
+        let set =
+            Cli::try_parse_from(["contextdesk", "config", "effort", "set", "medium"]).unwrap();
+        match set.command {
+            Command::Config {
+                action: ConfigAction::Effort(EffortAction::Set { level }),
+            } => assert_eq!(level, "medium"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_accepts_reasoning_effort_flag() {
+        let parsed =
+            Cli::try_parse_from(["contextdesk", "--reasoning-effort", "high", "chat", "hello"])
+                .unwrap();
+        assert_eq!(parsed.global.reasoning_effort.as_deref(), Some("high"));
     }
 }

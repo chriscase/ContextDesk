@@ -88,6 +88,8 @@ pub mod provider_telemetry;
 pub mod providers;
 /// Hermetic model/retrieval quality-evaluation harness (issue #867).
 pub mod quality_eval;
+/// Provider-neutral reasoning-effort contract (opt-in; omit = provider default).
+pub mod reasoning_effort;
 pub mod redact;
 pub mod rerank;
 pub mod research;

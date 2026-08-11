@@ -132,6 +132,9 @@ pub struct ChatWorkflowRequest<'a> {
     /// opts the turn into the bounded provider-neutral contribution route;
     /// leaving it `None` preserves the established Single/Review behavior.
     pub contribution_runtime: Option<cd_core::agent::ContributionRuntime>,
+    /// Per-turn reasoning-effort override (never persisted). When set, beats
+    /// the saved AppConfig policy for this turn only.
+    pub reasoning_effort_override: Option<cd_core::reasoning_effort::ReasoningEffortLevel>,
 }
 
 /// Outcome of one workflow call.
@@ -277,13 +280,18 @@ pub async fn run_chat_workflow(
     // shared with optional reviewer setup. Host/connector initialization
     // deliberately remains outside this cache.
     let provider_credentials = TurnProviderCredentialCache::new(secrets);
-    let resolved: ResolvedTurnInputs = resolve_turn_inputs_with_credential_cache(
+    let mut resolved: ResolvedTurnInputs = resolve_turn_inputs_with_credential_cache(
         &provider_credentials,
         cfg,
         request.explicit_profile_id,
         request.chat_model_override,
     )
     .map_err(CoreError::Message)?;
+    // Per-turn effort override never rewrites AppConfig.
+    if let Some(level) = request.reasoning_effort_override {
+        resolved.reasoning_effort =
+            cd_core::reasoning_effort::EffectiveEffortPolicy::Explicit(level);
+    }
 
     let mut session = match session_id {
         Some(id) => sessions.load(id)?,

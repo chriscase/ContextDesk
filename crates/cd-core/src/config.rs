@@ -249,6 +249,12 @@ pub struct AppConfig {
     /// the established single-model path runs unchanged.
     #[serde(default)]
     pub multi_model: MultiModelSettings,
+    /// Optional reasoning-effort policy (omit = provider default).
+    ///
+    /// Absent in files written before this field existed → omit. Explicit
+    /// levels affect cost/latency only and are **not** a readiness badge.
+    #[serde(default)]
+    pub reasoning_effort: crate::reasoning_effort::ReasoningEffortSettings,
     /// Optional host-grounded contribution roles. Disabled by default; when
     /// enabled, every role still requires exact qualification and explicit
     /// egress policy before it can receive a host packet.

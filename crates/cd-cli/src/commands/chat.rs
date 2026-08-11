@@ -70,6 +70,8 @@ pub async fn run(
     implicit_chat: bool,
     // Global `--deadline` (never persisted). Parsed before any host I/O.
     deadline_override: Option<&str>,
+    // Global `--reasoning-effort` (never persisted). Parsed before host I/O.
+    effort_override: Option<&str>,
 ) -> CliResult<()> {
     validate_question(args, format)?;
     // Parse the one-turn deadline before any secret-store, corpus, session,
@@ -77,6 +79,15 @@ pub async fn run(
     let deadline_override_ms = match deadline_override {
         Some(raw) => match parse_deadline_duration(raw) {
             Ok(ms) => Some(ms),
+            Err(error) => {
+                return fail_before_turn(format, CliError::user(error.to_string()));
+            }
+        },
+        None => None,
+    };
+    let effort_override_level = match effort_override {
+        Some(raw) => match cd_core::reasoning_effort::ReasoningEffortLevel::parse(raw) {
+            Ok(level) => Some(level),
             Err(error) => {
                 return fail_before_turn(format, CliError::user(error.to_string()));
             }
@@ -386,6 +397,7 @@ pub async fn run(
                 reviewer_qualified: reviewer_qualification(cfg, qualification_config_dir),
                 contribution_qualification: contribution_qualification_store.as_ref(),
                 contribution_runtime: None,
+                reasoning_effort_override: effort_override_level,
             },
             Some(cancel.clone()),
             Some(&mut live_sink),

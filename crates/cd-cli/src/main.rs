@@ -105,6 +105,7 @@ async fn run(cli: Cli, invocation: InvocationMode) -> i32 {
         &mut cli_state,
         invocation,
         cli.global.deadline.as_deref(),
+        cli.global.reasoning_effort.as_deref(),
     )
     .await;
 
@@ -195,6 +196,8 @@ async fn dispatch(
     invocation: InvocationMode,
     // Global `--deadline` for chat only; other commands ignore it.
     deadline_override: Option<&str>,
+    // Global `--reasoning-effort` for chat only; never persisted.
+    effort_override: Option<&str>,
 ) -> i32 {
     match command {
         Command::Import(args) => {
@@ -263,6 +266,7 @@ async fn dispatch(
                 resolved.default_chat_model.value.as_deref(),
                 invocation == InvocationMode::ImplicitChat,
                 deadline_override,
+                effort_override,
             )
             .await;
             match result {

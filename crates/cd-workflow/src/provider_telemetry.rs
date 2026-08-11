@@ -296,6 +296,8 @@ mod tests {
             cached_tokens: Some(cached),
             total_tokens: Some(total),
             cost: Some(cost),
+            reasoning_effort_requested: None,
+            reasoning_effort_effective: None,
         }
     }
 
