@@ -16,7 +16,7 @@ use cd_core::capability_qualification::{
     CapabilityStatus, ModelReadinessRole, ModelReadinessState, ProfileCapabilityGate,
     QualificationKey, QualificationTransport, ScriptedQualificationTransport, SyntheticChatRequest,
     SyntheticChatResponse, SyntheticEmbeddingResponse, SyntheticRerankResponse, SyntheticToolCall,
-    TransportError, INERT_PROBE_TOOL_NAME, SYNTH_GENERATION_MARKER,
+    TransportError, INERT_PROBE_TOOL_NAME, QUALIFY_CONTINUE_MARKER, SYNTH_GENERATION_MARKER,
 };
 use cd_core::discovery::{classify_probe_http_status, is_vercel_ai_gateway, ProbeOutcome};
 use cd_core::model_role_hints::{classify_model_role, sort_ids_for_chat_picker, ModelRoleHint};
@@ -173,6 +173,7 @@ fn push_full_chat_pass_queue(t: &mut ScriptedQualificationTransport) {
     let mut responses = vec![
         Ok(SyntheticChatResponse {
             content: SYNTH_GENERATION_MARKER.into(),
+            dialect: Some("openai_compatible".into()),
             ..Default::default()
         }),
         Ok(SyntheticChatResponse {
@@ -181,23 +182,58 @@ fn push_full_chat_pass_queue(t: &mut ScriptedQualificationTransport) {
                 name: INERT_PROBE_TOOL_NAME.into(),
                 arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
             }],
+            dialect: Some("openai_compatible".into()),
             ..Default::default()
         }),
         Ok(SyntheticChatResponse {
-            content: "continued".into(),
+            content: QUALIFY_CONTINUE_MARKER.into(),
+            dialect: Some("openai_compatible".into()),
+            ..Default::default()
+        }),
+        Ok(SyntheticChatResponse {
+            tool_calls: vec![SyntheticToolCall {
+                id: "call_fixture_forced".into(),
+                name: INERT_PROBE_TOOL_NAME.into(),
+                arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+            }],
+            mode_transmitted: true,
+            dialect: Some("openai_compatible".into()),
+            ..Default::default()
+        }),
+        Ok(SyntheticChatResponse {
+            content: QUALIFY_CONTINUE_MARKER.into(),
+            dialect: Some("openai_compatible".into()),
             ..Default::default()
         }),
         Ok(SyntheticChatResponse {
             content: r#"{"qualify":"ok","v":1}"#.into(),
+            dialect: Some("openai_compatible".into()),
+            ..Default::default()
+        }),
+        Ok(SyntheticChatResponse {
+            content: r#"{"qualify":"ok","v":1}"#.into(),
+            dialect: Some("openai_compatible".into()),
+            ..Default::default()
+        }),
+        Ok(SyntheticChatResponse {
+            content: r#"{"qualify":"ok","v":1}"#.into(),
+            dialect: Some("openai_compatible".into()),
+            ..Default::default()
+        }),
+        Ok(SyntheticChatResponse {
+            content: r#"{"qualify":"ok","v":1}"#.into(),
+            dialect: Some("openai_compatible".into()),
             ..Default::default()
         }),
         Ok(SyntheticChatResponse {
             content: SYNTH_GENERATION_MARKER.into(),
             streamed: true,
+            dialect: Some("openai_compatible".into()),
             ..Default::default()
         }),
         Ok(SyntheticChatResponse {
             cancelled: true,
+            dialect: Some("openai_compatible".into()),
             ..Default::default()
         }),
     ];
@@ -412,6 +448,7 @@ fn fragmented_stream_content_reassembles_to_marker() {
             let mut q = vec![
                 Ok(SyntheticChatResponse {
                     content: joined.clone(),
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
                 Ok(SyntheticChatResponse {
@@ -420,24 +457,59 @@ fn fragmented_stream_content_reassembles_to_marker() {
                         name: INERT_PROBE_TOOL_NAME.into(),
                         arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
                     }],
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
                 Ok(SyntheticChatResponse {
-                    content: "continued".into(),
+                    content: QUALIFY_CONTINUE_MARKER.into(),
+                    dialect: Some("openai_compatible".into()),
+                    ..Default::default()
+                }),
+                Ok(SyntheticChatResponse {
+                    tool_calls: vec![SyntheticToolCall {
+                        id: "forced-c1".into(),
+                        name: INERT_PROBE_TOOL_NAME.into(),
+                        arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+                    }],
+                    mode_transmitted: true,
+                    dialect: Some("openai_compatible".into()),
+                    ..Default::default()
+                }),
+                Ok(SyntheticChatResponse {
+                    content: QUALIFY_CONTINUE_MARKER.into(),
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
                 Ok(SyntheticChatResponse {
                     content: r#"{"qualify":"ok","v":1}"#.into(),
+                    dialect: Some("openai_compatible".into()),
+                    ..Default::default()
+                }),
+                Ok(SyntheticChatResponse {
+                    content: r#"{"qualify":"ok","v":1}"#.into(),
+                    dialect: Some("openai_compatible".into()),
+                    ..Default::default()
+                }),
+                Ok(SyntheticChatResponse {
+                    content: r#"{"qualify":"ok","v":1}"#.into(),
+                    dialect: Some("openai_compatible".into()),
+                    ..Default::default()
+                }),
+                Ok(SyntheticChatResponse {
+                    content: r#"{"qualify":"ok","v":1}"#.into(),
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
                 // Streaming probe: content from fragments, streamed flag set by transport.
                 Ok(SyntheticChatResponse {
                     content: joined,
                     streamed: true,
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
                 Ok(SyntheticChatResponse {
                     cancelled: true,
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
             ];
@@ -481,6 +553,7 @@ fn verbose_scripted_chat_passes_without_wall_clock_sleep() {
             if cancel.load(Ordering::SeqCst) {
                 return Ok(SyntheticChatResponse {
                     cancelled: true,
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 });
             }
@@ -499,6 +572,7 @@ fn verbose_scripted_chat_passes_without_wall_clock_sleep() {
                 0 => Ok(SyntheticChatResponse {
                     content: SYNTH_GENERATION_MARKER.into(),
                     streamed: req.stream,
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
                 1 => Ok(SyntheticChatResponse {
@@ -507,23 +581,44 @@ fn verbose_scripted_chat_passes_without_wall_clock_sleep() {
                         name: INERT_PROBE_TOOL_NAME.into(),
                         arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
                     }],
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
                 2 => Ok(SyntheticChatResponse {
-                    content: format!("continued:{content}"),
+                    content: format!("{QUALIFY_CONTINUE_MARKER}:{content}"),
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
                 3 => Ok(SyntheticChatResponse {
-                    content: r#"{"qualify":"ok","v":1}"#.into(),
+                    tool_calls: vec![SyntheticToolCall {
+                        id: "verbose_forced".into(),
+                        name: INERT_PROBE_TOOL_NAME.into(),
+                        arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+                    }],
+                    mode_transmitted: true,
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
                 4 => Ok(SyntheticChatResponse {
+                    content: format!("{QUALIFY_CONTINUE_MARKER}:{content}"),
+                    dialect: Some("openai_compatible".into()),
+                    ..Default::default()
+                }),
+                5..=8 => Ok(SyntheticChatResponse {
+                    content: r#"{"qualify":"ok","v":1}"#.into(),
+                    mode_transmitted: true,
+                    dialect: Some("openai_compatible".into()),
+                    ..Default::default()
+                }),
+                9 => Ok(SyntheticChatResponse {
                     content: SYNTH_GENERATION_MARKER.into(),
                     streamed: true,
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
                 _ => Ok(SyntheticChatResponse {
                     cancelled: true,
+                    dialect: Some("openai_compatible".into()),
                     ..Default::default()
                 }),
             }

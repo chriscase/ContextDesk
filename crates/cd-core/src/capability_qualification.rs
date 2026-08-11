@@ -2355,6 +2355,8 @@ fn probe_streaming(
     cancel: &AtomicBool,
 ) -> CapabilityCheckResult {
     let start = std::time::Instant::now();
+    let mode = OpenAiChatRequestMode::Plain;
+    let meta = CheckEvidenceMeta::from_mode(&mode);
     let req = SyntheticChatRequest {
         model_id: key.model_id.clone(),
         messages: vec![SyntheticMessage {
@@ -2365,39 +2367,48 @@ fn probe_streaming(
         }],
         tools: vec![],
         stream: true,
-        chat_mode: OpenAiChatRequestMode::Plain,
+        chat_mode: mode.clone(),
     };
     match transport.chat_complete(&req, cancel) {
-        Ok(resp) if resp.cancelled || cancel.load(Ordering::SeqCst) => check(
+        Ok(resp) if resp.cancelled || cancel.load(Ordering::SeqCst) => check_with_evidence(
             CapabilityKind::Streaming,
             CapabilityStatus::Untested,
             start,
             "cancelled",
+            meta.with_dialect(resp.dialect.as_deref()),
         ),
-        Ok(resp) if resp.streamed && !resp.content.is_empty() => check(
+        Ok(resp) if resp.streamed && !resp.content.is_empty() => check_with_evidence(
             CapabilityKind::Streaming,
             CapabilityStatus::Pass,
             start,
             "stream deltas observed",
+            meta.with_dialect(resp.dialect.as_deref()),
         ),
-        Ok(resp) if !resp.content.is_empty() => check(
+        Ok(resp) if !resp.content.is_empty() => check_with_evidence(
             CapabilityKind::Streaming,
             CapabilityStatus::Degraded,
             start,
             "completion without stream flag",
+            meta.with_dialect(resp.dialect.as_deref()),
         ),
-        Ok(_) => check(
+        Ok(resp) => check_with_evidence(
             CapabilityKind::Streaming,
             CapabilityStatus::Fail,
             start,
             "no stream content",
+            meta.with_dialect(resp.dialect.as_deref()),
         ),
-        Err(e) => check(
-            CapabilityKind::Streaming,
-            CapabilityStatus::Fail,
-            start,
-            e.reason,
-        ),
+        Err(e) => {
+            let reason = e.reason;
+            let evidence = CheckEvidenceMeta::from_mode_and_error(&mode, &reason);
+            check_with_evidence(
+                CapabilityKind::Streaming,
+                CapabilityStatus::Fail,
+                start,
+                reason,
+                evidence,
+            )
+        }
     }
 }
 
@@ -2407,13 +2418,16 @@ fn probe_cancellation(
     user_cancel: &AtomicBool,
 ) -> CapabilityCheckResult {
     let start = std::time::Instant::now();
+    let mode = OpenAiChatRequestMode::Plain;
+    let meta = CheckEvidenceMeta::from_mode(&mode);
     // User cancel before this probe: leave untested (do not measure).
     if user_cancel.load(Ordering::SeqCst) {
-        return check(
+        return check_with_evidence(
             CapabilityKind::Cancellation,
             CapabilityStatus::Untested,
             start,
             "cancelled before probe",
+            meta,
         );
     }
     // Probe-local cancel signal only — never store into the user-cancel flag.
@@ -2429,33 +2443,41 @@ fn probe_cancellation(
         }],
         tools: vec![],
         stream: true,
-        chat_mode: OpenAiChatRequestMode::Plain,
+        chat_mode: mode.clone(),
     };
     match transport.chat_complete(&req, &probe_cancel) {
-        Ok(resp) if resp.cancelled => check(
+        Ok(resp) if resp.cancelled => check_with_evidence(
             CapabilityKind::Cancellation,
             CapabilityStatus::Pass,
             start,
             "transport reported cancelled",
+            meta.with_dialect(resp.dialect.as_deref()),
         ),
-        Err(e) if e.reason.to_ascii_lowercase().contains("cancel") => check(
+        Err(e) if e.reason.to_ascii_lowercase().contains("cancel") => check_with_evidence(
             CapabilityKind::Cancellation,
             CapabilityStatus::Pass,
             start,
             "cancelled via transport error",
+            CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason),
         ),
-        Ok(_) => check(
+        Ok(resp) => check_with_evidence(
             CapabilityKind::Cancellation,
             CapabilityStatus::Fail,
             start,
             "completion ignored cancel signal",
+            meta.with_dialect(resp.dialect.as_deref()),
         ),
-        Err(e) => check(
-            CapabilityKind::Cancellation,
-            CapabilityStatus::Fail,
-            start,
-            e.reason,
-        ),
+        Err(e) => {
+            let reason = e.reason;
+            let evidence = CheckEvidenceMeta::from_mode_and_error(&mode, &reason);
+            check_with_evidence(
+                CapabilityKind::Cancellation,
+                CapabilityStatus::Fail,
+                start,
+                reason,
+                evidence,
+            )
+        }
     }
 }
 
