@@ -2,7 +2,7 @@
 
 **Audit date:** 2026-08-11  
 **Feature branch:** `feat/multimodel-contribution-reconcile-v1`  
-**Branch tip at this audit snapshot:** `dc5c3c4514c2baa986d24c9ee472422c628ed2c2`
+**Branch tip at this audit snapshot:** `953094eb92e55e4424fa6104c3aff0cb09160f16`
 **Production-code integration tip:** `59df68fadc0d51a9d8cc245959c5f9f410a06eaa`
 
 This is a release-manager evidence map for the model-agnostic investigation
