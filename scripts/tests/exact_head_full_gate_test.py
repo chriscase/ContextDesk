@@ -112,6 +112,9 @@ class FullGateTests(unittest.TestCase):
             elif "cli_public_acceptance_lab" in cmd:
                 self.assertIn("cli_public_acceptance_lab", sh)
                 self.assertIn("full_path", sh)
+            elif "desktop/src-tauri" in cmd:
+                self.assertIn("desktop_tauri_tests", sh)
+                self.assertIn("desktop/src-tauri/Cargo.toml", sh)
 
     def test_required_steps_are_stable_and_nonempty(self):
         ids = required_step_ids()

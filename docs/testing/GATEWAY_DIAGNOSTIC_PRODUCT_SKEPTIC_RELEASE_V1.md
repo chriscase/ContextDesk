@@ -1,8 +1,14 @@
 # Gateway diagnostic product-skeptic coverage on the release line
 
-**Release line:** `integrate/acceptance-release-v1`
-**Code candidate:** `64edb0a25161a5d493f067ff9f5f197de24f6c7e`
+**Evidence status:** historical hermetic coverage; not a readiness claim for the exact release pin
+**Historical release line:** `integrate/acceptance-release-v1`
+**Historical code candidate:** `64edb0a25161a5d493f067ff9f5f197de24f6c7e`
 **Coverage commit:** `a43bb37a` (17 binary hermetic tests)
+
+The authoritative source/build identity for the current release ledger is
+`c09357153e0c8953f2862c3cf3d8377ec9bc6bc7`. The candidate and coverage
+commit above are retained only as historical test provenance; they are not
+evidence that the exact pin passed a gateway or desktop acceptance run.
 
 This audit ports the adversarial product-skeptic coverage to the current
 release line. It exercises the shipped `contextdesk gateway diagnose`

@@ -1,13 +1,16 @@
 # Multi-model release audit v1
 
-**Audit date:** 2026-08-11  
-**Feature branch:** `feat/multimodel-contribution-reconcile-v1`  
-**Branch tip at this audit snapshot:** `24104b4f9a8838b64fdaf2edd3ad557bee9ee0f8`
-**Production-code integration tip:** `59df68fadc0d51a9d8cc245959c5f9f410a06eaa`
+**Audit date:** 2026-08-11
+**Feature branch:** `feat/multimodel-contribution-reconcile-v1`
+**Authoritative release evidence pin:** `c09357153e0c8953f2862c3cf3d8377ec9bc6bc7`
+**Historical feature branch pointer (included in the pin):** `24104b4f9a8838b64fdaf2edd3ad557bee9ee0f8`
+**Historical production-code pointer (included in the pin):** `59df68fadc0d51a9d8cc245959c5f9f410a06eaa`
 
 This is a release-manager evidence map for the model-agnostic investigation
 goal. It distinguishes what is proven in the repository from what still needs
-an external gateway run. It makes no universal model-readiness claim.
+an external gateway run. The two older pointers above identify historical
+evidence locations only; the exact release identity for this ledger is the
+authoritative pin. It makes no universal model-readiness claim.
 
 ## Requirement audit
 
@@ -61,7 +64,17 @@ untrusted model explanation text.
   as a host-authored deterministic-floor reason in the shared, endpoint-free
   activity summary; the provider is a hermetic wiremock and no raw body is
   retained (`cargo test -p cd-cli --test cli_activity_parity`: 15 passed).
-- `scripts/exact_head_full_gate.sh`: `FULL_GATE_PASS`
+- Historical prior-run record: `scripts/exact_head_full_gate.sh` reported
+  `FULL_GATE_PASS` before the exact c093 pin; that result is not promoted to
+  this release identity.
+- Current exact-pin native sub-gate: **pass**. The required
+  `cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked
+  --all-targets` runs 189 desktop host tests plus the zero-test binary target.
+  The two existing `RetrievalRoleModel` fixtures were missing the current
+  defaulted `embed_wire` and `rerank_dialect` fields; adding those explicit
+  defaults is test-only compile maintenance and does not change production
+  behavior. Native desktop tests are required evidence, not an inferred
+  check-only result. The complete exact-head gate was not rerun in this lane.
 - Exact-head synthetic acceptance covered identity, stale-binary rejection,
   folder/zip import parity, timezone normalization, grounded two-turn chat,
   activity/trace, honest cancellation, and recovery

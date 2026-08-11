@@ -34,7 +34,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: check Shipped anchors in docs/CLAIMS.md
-        run: sh scripts/check_claims.sh
+        run: |
+          sh scripts/check_claims_test.sh
+          sh scripts/check_claims.sh
 
   close-proof:
     name: close-proof discipline (#254)

@@ -119,6 +119,9 @@ run_step cli_activity_parity \
 run_step cli_public_acceptance_full_path \
   cargo test -p cd-cli --test cli_public_acceptance_lab full_path -- --nocapture
 
+run_step desktop_tauri_tests \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --all-targets
+
 # Consolidator: preserve exact-head identity; keep artifacts if EXACT_HEAD_OUT set.
 export EXACT_HEAD_OUT="${EXACT_HEAD_OUT:-$OUT_DIR/cli-accept}"
 export EXACT_HEAD_KEEP="${EXACT_HEAD_KEEP:-1}"
