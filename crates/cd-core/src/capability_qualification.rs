@@ -2362,19 +2362,6 @@ fn plain_probe_meta(key: &QualificationKey, dialect: Option<&str>) -> CheckEvide
     .with_dialect(dialect.or(fallback))
 }
 
-/// Plain-chat probe metadata (streaming / cancellation) with dialect honesty.
-fn plain_probe_meta(key: &QualificationKey, dialect: Option<&str>) -> CheckEvidenceMeta {
-    let fallback = match key.transport_protocol.as_str() {
-        "openai_compatible" | "ollama" | "anthropic" => Some(key.transport_protocol.as_str()),
-        _ => None,
-    };
-    CheckEvidenceMeta {
-        request_mode: Some(MODE_PLAIN),
-        ..Default::default()
-    }
-    .with_dialect(dialect.or(fallback))
-}
-
 fn probe_streaming(
     transport: &mut dyn QualificationTransport,
     key: &QualificationKey,
@@ -2382,7 +2369,6 @@ fn probe_streaming(
 ) -> CapabilityCheckResult {
     let start = std::time::Instant::now();
     let mode = OpenAiChatRequestMode::Plain;
-    let meta = CheckEvidenceMeta::from_mode(&mode);
     let req = SyntheticChatRequest {
         model_id: key.model_id.clone(),
         messages: vec![SyntheticMessage {
@@ -2441,7 +2427,6 @@ fn probe_cancellation(
 ) -> CapabilityCheckResult {
     let start = std::time::Instant::now();
     let mode = OpenAiChatRequestMode::Plain;
-    let meta = CheckEvidenceMeta::from_mode(&mode);
     // User cancel before this probe: leave untested (do not measure).
     if user_cancel.load(Ordering::SeqCst) {
         return check_with_evidence(
