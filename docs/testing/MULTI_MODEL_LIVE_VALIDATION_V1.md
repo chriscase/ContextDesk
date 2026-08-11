@@ -1,9 +1,9 @@
 # Multi-model live validation and capture v1
 
 Status: the provider-neutral contribution runtime is implemented on
-`feat/multimodel-contribution-reconcile-v1`; the production-code integration
-commit is `a7528699f91c9ed1e2c05e8f42de1cfb0c9ba4af`. Later commits on this
-branch may be documentation-only. The live validation procedure is
+`feat/multimodel-contribution-reconcile-v1`; the current production-code
+integration tip is `735ad179d655fa313c8ca46095bd9e4bb1056e7f`. The live
+validation procedure is
 ready, but this worktree's configured protected-file reference is currently
 missing, so no new gateway request was made in this phase.
 
@@ -129,10 +129,9 @@ data, and must not inherit Vercel model or usefulness evidence.
 
 ## Integrated wire-contract evidence
 
-The production-code integration head is
-`a7528699f91c9ed1e2c05e8f42de1cfb0c9ba4af`; later branch-tip commits may only
-pin evidence and documentation, so the release manager should always verify
-the exact checked-out branch tip independently.
+The production-code integration head for this validation record is
+`735ad179d655fa313c8ca46095bd9e4bb1056e7f`; the release manager should still
+verify the exact checked-out branch tip independently.
 It includes the dialect-honest OpenAI-compatible chat qualification ladder,
 the production OpenAI-compatible embedding adapter, and explicit TEI/Cohere
 reranking with shared fail-closed parsers. The hermetic evidence at this head

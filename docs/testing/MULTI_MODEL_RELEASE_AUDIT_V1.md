@@ -2,8 +2,8 @@
 
 **Audit date:** 2026-08-11  
 **Feature branch:** `feat/multimodel-contribution-reconcile-v1`  
-**Branch tip at this audit snapshot:** `cd1efaa3ff1211bb68cdb89293b739587656116e`
-**Production-code integration commit:** `a7528699f91c9ed1e2c05e8f42de1cfb0c9ba4af`
+**Branch tip at this audit snapshot:** `735ad179d655fa313c8ca46095bd9e4bb1056e7f`
+**Production-code integration tip:** `735ad179d655fa313c8ca46095bd9e4bb1056e7f`
 
 This is a release-manager evidence map for the model-agnostic investigation
 goal. It distinguishes what is proven in the repository from what still needs
@@ -31,6 +31,9 @@ turn’s transport timeout. An explicit patient deadline (for example, 600
 seconds) reaches the HTTP client instead of being cut off by the standalone
 120-second constructor default. The shared mapping is covered by a workflow
 unit test, while cancellation and host deadline races remain authoritative.
+The contribution runtime also enforces the smaller route-level
+`max_rounds`/`max_context_chars` ceilings at execution time, with an adversarial
+regression test proving those validated policy fields cannot be bypassed.
 
 ## Gate evidence
 
