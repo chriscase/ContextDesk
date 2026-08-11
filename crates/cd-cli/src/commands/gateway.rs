@@ -320,6 +320,11 @@ pub async fn run(
     let mut created_sessions: Vec<String> = Vec::new();
     let mut requests_made: u32 = 0;
     let mut cases: Vec<CaseReport> = Vec::new();
+    // `--raw --raw-i-understand` is an explicit owner-only opt-in. The
+    // directory is separate from the share-safe report and is never included
+    // in its manifest.
+    let private_capture_dir = (args.raw && args.raw_i_understand)
+        .then(|| artifact_root(paths, &args.out, &run_id).join("private"));
 
     // One shared direct-lane qualification pass, run once up front, covers
     // `ordinary_generation`/`structured_response`/`tool_call_continuation`'s
@@ -365,6 +370,7 @@ pub async fn run(
             &cancel,
             &mut corpora,
             &mut created_sessions,
+            private_capture_dir.as_deref(),
         )
         .await;
         requests_made += report.direct.requests_used + report.product.requests_used;
@@ -989,6 +995,7 @@ async fn run_one_case(
     cancel: &Arc<AtomicBool>,
     corpora: &mut Vec<String>,
     created_sessions: &mut Vec<String>,
+    private_capture_dir: Option<&std::path::Path>,
 ) -> CaseReport {
     let deadline = Instant::now() + budget;
     match case_id {
@@ -1003,6 +1010,7 @@ async fn run_one_case(
                 qual,
                 deadline,
                 cancel,
+                private_capture_dir,
             )
             .await
         }
@@ -1017,6 +1025,7 @@ async fn run_one_case(
                 qual,
                 deadline,
                 cancel,
+                private_capture_dir,
             )
             .await
         }
@@ -1033,6 +1042,7 @@ async fn run_one_case(
                 cancel,
                 corpora,
                 created_sessions,
+                private_capture_dir,
             )
             .await
         }
@@ -1047,6 +1057,7 @@ async fn run_one_case(
                 deadline,
                 cancel,
                 created_sessions,
+                private_capture_dir,
             )
             .await
         }
@@ -1063,6 +1074,7 @@ async fn run_one_case(
                 level,
                 corpora,
                 created_sessions,
+                private_capture_dir,
             )
             .await
         }
@@ -1252,12 +1264,20 @@ async fn one_turn(
     user_selection: Option<&str>,
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
+    private_capture_dir: Option<&std::path::Path>,
 ) -> (
     Result<cd_workflow::chat::ChatWorkflowOutcome, String>,
     Vec<cd_core::turn_trace::TracedCall>,
     Duration,
 ) {
-    let recorder = Arc::new(RecordingTurnTrace::new());
+    let recorder = if private_capture_dir.is_some() {
+        Arc::new(RecordingTurnTrace::with_developer_detail(
+            Instant::now(),
+            Arc::new(|_event| {}),
+        ))
+    } else {
+        Arc::new(RecordingTurnTrace::new())
+    };
     let trace_sink: Arc<dyn TurnTraceSink> = recorder.clone();
     let mut host = match build_host(paths, cfg, secrets) {
         Ok(host) => host,
@@ -1309,7 +1329,49 @@ async fn one_turn(
         Ok(Err(e)) => Err(e.to_string()),
         Err(_) => Err("turn timed out".to_string()),
     };
+    if let Some(dir) = private_capture_dir {
+        if let Err(error) = write_private_turn_capture(dir, profile_id, model, question, &recorder)
+        {
+            eprintln!("warning: failed to write private provider exchange capture: {error}");
+        }
+    }
     (outcome, recorder.calls(), started.elapsed())
+}
+
+/// Persist one bounded, redacted product-path exchange for owner-only test
+/// development. The recorder's sink boundary has already scrubbed secrets,
+/// bounded payloads, and removed request/response bodies on cancellation.
+fn write_private_turn_capture(
+    dir: &std::path::Path,
+    profile_id: &str,
+    model: &str,
+    question: &str,
+    recorder: &RecordingTurnTrace,
+) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    let capture_id = uuid::Uuid::new_v4().to_string();
+    let body = serde_json::json!({
+        "schema_id": "contextdesk.gateway_diagnostic_provider_exchange.v1",
+        "local_only": true,
+        "profile_id": cd_core::provider_telemetry::sanitize_configured_identity(profile_id),
+        "model": cd_core::provider_telemetry::sanitize_configured_identity(model),
+        "question": cd_core::redact::scrub_secrets(&question.chars().take(8_000).collect::<String>()),
+        "developer_events": recorder.developer_events(),
+        "developer_events_dropped": recorder.developer_dropped(),
+    });
+    let path = dir.join(format!("provider-exchange-{capture_id}.json"));
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&body).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 /// Summarize the host-observed terminal channel without retaining provider
@@ -1493,6 +1555,7 @@ async fn case_ordinary_generation(
     qual: Option<&SharedQualification>,
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
+    private_capture_dir: Option<&std::path::Path>,
 ) -> CaseReport {
     let direct = lane_from_qualification(
         qual,
@@ -1500,7 +1563,18 @@ async fn case_ordinary_generation(
     );
     let question = format!("Reply with exactly this token and nothing else: {GENERATION_MARKER}");
     let (outcome, calls, elapsed) = one_turn(
-        paths, cfg, secrets, sessions, profile_id, model, &question, None, None, deadline, cancel,
+        paths,
+        cfg,
+        secrets,
+        sessions,
+        profile_id,
+        model,
+        &question,
+        None,
+        None,
+        deadline,
+        cancel,
+        private_capture_dir,
     )
     .await;
     let product = match outcome {
@@ -1556,6 +1630,7 @@ async fn case_structured_response(
     qual: Option<&SharedQualification>,
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
+    private_capture_dir: Option<&std::path::Path>,
 ) -> CaseReport {
     let direct = lane_from_qualification(
         qual,
@@ -1566,7 +1641,18 @@ async fn case_structured_response(
          {{\"ok\": true, \"marker\": \"{GENERATION_MARKER}\"}}"
     );
     let (outcome, calls, elapsed) = one_turn(
-        paths, cfg, secrets, sessions, profile_id, model, &question, None, None, deadline, cancel,
+        paths,
+        cfg,
+        secrets,
+        sessions,
+        profile_id,
+        model,
+        &question,
+        None,
+        None,
+        deadline,
+        cancel,
+        private_capture_dir,
     )
     .await;
     let product = match outcome {
@@ -1700,6 +1786,7 @@ async fn case_tool_call_continuation(
     cancel: &Arc<AtomicBool>,
     corpora: &mut Vec<String>,
     created_sessions: &mut Vec<String>,
+    private_capture_dir: Option<&std::path::Path>,
 ) -> CaseReport {
     let direct = combine_lanes(
         lane_from_qualification(
@@ -1755,6 +1842,7 @@ async fn case_tool_call_continuation(
         None,
         deadline,
         cancel,
+        private_capture_dir,
     )
     .await;
     let tool_called = matches!(&outcome, Ok(o) if o.events.iter().any(|e| matches!(
@@ -1822,6 +1910,7 @@ async fn case_attachment_selected_context(
     deadline: Instant,
     cancel: &Arc<AtomicBool>,
     created_sessions: &mut Vec<String>,
+    private_capture_dir: Option<&std::path::Path>,
 ) -> CaseReport {
     let direct = LaneResult::not_applicable(
         "no raw-provider equivalent of a selected-context attachment turn".to_string(),
@@ -1844,6 +1933,7 @@ async fn case_attachment_selected_context(
         Some(&selection),
         deadline,
         cancel,
+        private_capture_dir,
     )
     .await;
     if let Ok(o) = &outcome {
@@ -2131,6 +2221,7 @@ async fn case_linked_log_triage(
     level: DiagnoseLevel,
     corpora: &mut Vec<String>,
     created_sessions: &mut Vec<String>,
+    private_capture_dir: Option<&std::path::Path>,
 ) -> CaseReport {
     let direct = LaneResult::not_applicable(
         "no raw-provider equivalent of a multi-stage product-path triage turn".to_string(),
@@ -2194,6 +2285,7 @@ async fn case_linked_log_triage(
             None,
             deadline,
             cancel,
+            private_capture_dir,
         )
         .await;
         total_elapsed += elapsed;
@@ -2655,11 +2747,10 @@ fn write_artifact_bundle(
     Ok(dir)
 }
 
-/// Owner-only, local-only private capture: bounded synthetic case detail
-/// (already redacted lane details — never raw credentials, since those
-/// never reach this struct in the first place). Written only under
-/// `--raw --raw-i-understand`, and never referenced by content from the
-/// share-safe `report.json`/`manifest.json` above.
+/// Owner-only, local-only private capture index. Provider-exchange files are
+/// written during the real product turns when `--raw --raw-i-understand` is
+/// active; their payloads have already crossed the developer-detail redaction
+/// boundary. This index is never referenced by the share-safe report/manifest.
 fn write_private_capture(
     args: &GatewayDiagnoseArgs,
     paths: &Paths,
@@ -2671,12 +2762,32 @@ fn write_private_capture(
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut safe_report = report.clone();
     sanitize_gateway_report(&mut safe_report, redaction);
+    let exchange_files = std::fs::read_dir(&dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && path.file_name().and_then(|name| name.to_str()) != Some("capture.json"))
+            .then(|| {
+                let bytes = std::fs::read(&path).ok()?;
+                Some(serde_json::json!({
+                    "name": path.file_name()?.to_string_lossy(),
+                    "sha256": sha256_hex(&bytes),
+                    "bytes": bytes.len(),
+                }))
+            })
+        })
+        .flatten()
+        .collect::<Vec<_>>();
     let body = serde_json::json!({
         "schema_id": "contextdesk.gateway_diagnostic_private_capture.v1",
         "local_only": true,
-        "note": "bounded synthetic lane detail only; never credentials, auth headers, or user corpora",
+        "note": "bounded, redacted provider exchanges from the real product path; never credentials, auth headers, or user corpora",
         "run_id": safe_report.run_id,
         "cases": safe_report.cases,
+        "provider_exchange_files": exchange_files,
     });
     let path = dir.join("capture.json");
     std::fs::write(
@@ -2997,6 +3108,41 @@ mod tests {
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    #[test]
+    fn private_provider_exchange_capture_is_local_and_separate() {
+        let temp = tempfile::tempdir().unwrap();
+        let recorder =
+            RecordingTurnTrace::with_developer_detail(Instant::now(), Arc::new(|_event| {}));
+        recorder.record_developer(cd_core::turn_trace::DeveloperDetailDraft::stage(
+            "synthetic exchange",
+            "completed",
+        ));
+
+        write_private_turn_capture(
+            temp.path(),
+            "private-profile",
+            "private-model",
+            "synthetic question",
+            &recorder,
+        )
+        .unwrap();
+
+        let files = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+        assert_eq!(
+            body["schema_id"],
+            "contextdesk.gateway_diagnostic_provider_exchange.v1"
+        );
+        assert_eq!(body["local_only"], true);
+        assert_eq!(body["profile_id"], "private-profile");
+        assert_eq!(body["model"], "private-model");
     }
 
     #[test]
