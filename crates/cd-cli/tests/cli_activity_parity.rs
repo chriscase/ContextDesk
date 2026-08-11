@@ -686,6 +686,98 @@ async fn linked_log_turn_returns_exact_grounded_evidence_and_activity_lifecycle(
     assert!(call_n.load(Ordering::SeqCst) >= 2);
 }
 
+/// A requested contribution turn must remain observable through the CLI's
+/// shared activity projection even when qualification/configuration makes the
+/// optional route degrade to the deterministic single-model floor.  This is a
+/// mocked-provider turn: it proves the production CLI wiring and the
+/// share-safe reason without manufacturing a second contribution pipeline.
+#[tokio::test]
+async fn contribution_mode_projects_truthful_entry_degradation_in_activity() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(SSE_BODY, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+    let home = tempfile::tempdir().unwrap();
+    let app_config_path = write_profile(home.path(), &server.uri(), true);
+    let logs = home.path().join("logs");
+    std::fs::create_dir(&logs).unwrap();
+    std::fs::write(
+        logs.join("app.log"),
+        "2024-01-01T00:00:00Z INFO service started\n2024-01-01T00:00:01Z ERROR payment failed code=E42\n",
+    )
+    .unwrap();
+
+    let imported = cli(home.path())
+        .args([
+            "--app-config",
+            app_config_path.to_str().unwrap(),
+            "--json",
+            "import",
+            logs.to_str().unwrap(),
+        ])
+        .output()
+        .expect("import fixture");
+    assert!(
+        imported.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&imported.stderr),
+        String::from_utf8_lossy(&imported.stdout)
+    );
+    let corpus = parse_jsonl(&imported.stdout)
+        .pop()
+        .and_then(|value| value["data"]["corpus_id"].as_str().map(str::to_owned))
+        .expect("corpus id");
+
+    let output = cli(home.path())
+        .args([
+            "--app-config",
+            app_config_path.to_str().unwrap(),
+            "--json",
+            "chat",
+            "--activity",
+            "summary",
+            "--mode",
+            "contributions",
+            "--new",
+            "--corpus",
+            &corpus,
+            "--auto-approve",
+            "What problems do you see in these logs?",
+        ])
+        .output()
+        .expect("contribution dry run");
+    assert!(
+        output.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("chat JSON");
+    assert_eq!(value["ok"], true, "{value}");
+    let activity = &value["data"]["activity"];
+    let serialized = serde_json::to_string(activity).expect("activity JSON");
+    assert!(
+        serialized.contains("contribution route is enabled but no role assignments"),
+        "the requested contribution route must expose its host-authored degradation: {activity}"
+    );
+    assert!(
+        !serialized.contains(&server.uri()),
+        "activity summary must not expose the provider endpoint: {activity}"
+    );
+    assert!(
+        activity["events"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty()),
+        "contribution dry run must still project shared activity: {activity}"
+    );
+}
+
 #[tokio::test]
 async fn hard_provider_failure_returns_bounded_failed_activity_in_json_and_jsonl() {
     let server = MockServer::start().await;
