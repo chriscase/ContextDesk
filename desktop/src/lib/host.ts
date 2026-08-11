@@ -1355,6 +1355,8 @@ export type QualificationReportDto = {
   endpoint_fingerprint: string;
   model_id: string;
   schema_version: string;
+  /** Typed transport protocol (openai_compatible / ollama / anthropic). */
+  transport_protocol?: string;
   role_hint: string;
   cancelled: boolean;
   stale: boolean;

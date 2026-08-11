@@ -805,7 +805,8 @@ fn reviewer_qualification_from_store(cfg: &AppConfig, store: &QualificationStore
     if model.is_empty() {
         return Some(false);
     }
-    let key = QualificationKey::new(&profile.id, &profile.base_url, model);
+    let key =
+        QualificationKey::with_provider_kind(&profile.id, &profile.base_url, model, profile.kind);
     let report = store.get(&key);
     Some(matches!(
         capability_contract_verdict(report, CapabilityContract::JsonProposal),
@@ -951,7 +952,12 @@ mod reviewer_qualification_tests {
     fn report(cfg: &AppConfig) -> QualificationReport {
         let profile = &cfg.providers.profiles[0];
         QualificationReport {
-            key: QualificationKey::new(&profile.id, &profile.base_url, &profile.chat_model),
+            key: QualificationKey::with_provider_kind(
+                &profile.id,
+                &profile.base_url,
+                &profile.chat_model,
+                profile.kind,
+            ),
             checks: vec![
                 CapabilityCheckResult {
                     kind: CapabilityKind::BasicGeneration,

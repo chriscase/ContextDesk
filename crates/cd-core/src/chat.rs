@@ -2,7 +2,8 @@
 
 use crate::error::{CoreError, CoreResult};
 use crate::openai_chat_contract::{
-    build_openai_chat_request_body, extract_openai_message_channels, OpenAiChatRequestMode,
+    build_openai_chat_request_body, extract_openai_message_channels, validate_mode_for_transmit,
+    validate_mode_response, OpenAiChatRequestMode,
 };
 use crate::ssrf::{build_pinned_client_for_url, SsrfPolicy, SystemResolver};
 use crate::tools::ToolSpec;
@@ -761,6 +762,10 @@ impl OpenAiCompatibleClient {
         tools: Option<&[ToolSpec]>,
         mode: &OpenAiChatRequestMode,
     ) -> CoreResult<ChatCompletion> {
+        // Fail closed before any network: forced tool / schema shape.
+        if let Err(reason) = validate_mode_for_transmit(mode, tools) {
+            return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
+        }
         let body = build_openai_chat_request_body(&self.model, messages, tools, false, mode);
         let resp = self
             .post_completion_with_429_retry(&body, "chat request", None)
@@ -781,6 +786,17 @@ impl OpenAiCompatibleClient {
             return Err(provider_http_error("chat", status, &text, 300));
         }
         let mut completion = parse_openai_completion(&text)?;
+        // Strongest safe response check for native modes only (Plain unchanged).
+        let tool_names: Vec<&str> = completion
+            .tool_calls
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
+        if let Err(reason) = validate_mode_response(mode, &completion.content, &tool_names) {
+            return Err(CoreError::Message(format!(
+                "invalid_response_for_mode:{reason}"
+            )));
+        }
         // Headers first, body second so JSON `id` / usage win over header ids.
         let mut tel = header_tel;
         tel.merge_from(&completion.telemetry);
@@ -808,6 +824,9 @@ impl OpenAiCompatibleClient {
         tools: Option<&[ToolSpec]>,
         mode: &OpenAiChatRequestMode,
     ) -> CoreResult<ChatCompletion> {
+        if let Err(reason) = validate_mode_for_transmit(mode, tools) {
+            return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
+        }
         let body = build_openai_chat_request_body(&self.model, messages, tools, true, mode);
         let resp = self
             .post_completion_with_429_retry(&body, "stream request", None)
@@ -882,6 +901,9 @@ impl OpenAiCompatibleClient {
         use crate::sse::{BoundedBodyAccumulator, SseLineDecoder};
         use futures_util::StreamExt;
 
+        if let Err(reason) = validate_mode_for_transmit(mode, tools) {
+            return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
+        }
         let body = build_openai_chat_request_body(&self.model, messages, tools, true, mode);
         let resp = self
             .post_completion_with_429_retry(&body, "stream request", cancel)

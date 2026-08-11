@@ -106,7 +106,7 @@ fn qualification_native_tool_call_passes_on_a_real_tool_call() {
         Response::json_ok(&completion_with_tool_calls(json!([{
             "id": "call_probe",
             "type": "function",
-            "function": {"name": "cd_qualify_echo", "arguments": "{\"token\":\"probe_ok\"}"}
+            "function": {"name": "cd_qualify_echo", "arguments": "{\"token\":\"QUALIFY_TOOL_V1\"}"}
         }]))),
     )]));
     let mut transport = LiveQualificationTransport::new(
@@ -232,7 +232,12 @@ fn qualification_ollama_refuses_openai_native_json_object() {
     };
     let cancel = Arc::new(AtomicBool::new(false));
     let report = run_qualification(
-        QualificationKey::new("ollama-profile", gateway.base_url(), "llama3"),
+        QualificationKey::with_protocol(
+            "ollama-profile",
+            gateway.base_url(),
+            "llama3",
+            cd_core::openai_chat_contract::ChatBackendDialect::Ollama,
+        ),
         gate,
         &mut transport,
         &cancel,
@@ -306,7 +311,12 @@ fn qualification_anthropic_refuses_openai_native_modes() {
     };
     let cancel = Arc::new(AtomicBool::new(false));
     let report = run_qualification(
-        QualificationKey::new("anthropic-profile", gateway.base_url(), "claude-test"),
+        QualificationKey::with_protocol(
+            "anthropic-profile",
+            gateway.base_url(),
+            "claude-test",
+            cd_core::openai_chat_contract::ChatBackendDialect::Anthropic,
+        ),
         gate,
         &mut transport,
         &cancel,

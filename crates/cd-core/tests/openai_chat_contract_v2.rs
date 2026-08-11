@@ -39,10 +39,10 @@ fn inert_tool() -> ToolSpec {
 }
 
 #[test]
-fn schema_version_is_v3() {
+fn schema_version_is_v4() {
     assert_eq!(
         QUALIFICATION_SCHEMA_VERSION,
-        "contextdesk.capability_qualification.v3"
+        "contextdesk.capability_qualification.v4"
     );
 }
 
@@ -150,7 +150,7 @@ impl cd_core::capability_qualification::QualificationTransport for ModeRecording
                 })
             }
             OpenAiChatRequestMode::Plain => Ok(SyntheticChatResponse {
-                content: "QUALIFY_OK_V1 continued".into(),
+                content: "QUALIFY_OK_V1".into(),
                 streamed: req.stream,
                 dialect: Some("openai_compatible".into()),
                 mode_transmitted: true,
@@ -271,7 +271,7 @@ fn native_json_object_fails_closed_without_mid_turn_downgrade() {
                 } else if !req.tools.is_empty() && req.messages.len() == 1 {
                     String::new()
                 } else {
-                    "QUALIFY_OK_V1 continued".into()
+                    "QUALIFY_OK_V1".into()
                 },
                 tool_calls: if !req.tools.is_empty() && req.messages.len() == 1 {
                     vec![cd_core::capability_qualification::SyntheticToolCall {
@@ -372,17 +372,23 @@ fn name_hint_never_alone_passes_structured() {
 }
 
 #[test]
-fn v1_and_v2_schema_keys_are_stale_vs_v3() {
-    let v3 = QualificationKey::new("p", "https://gw.example/v1", "m");
-    assert_eq!(v3.schema_version, "contextdesk.capability_qualification.v3");
-    let mut v1 = v3.clone();
-    v1.schema_version = "contextdesk.capability_qualification.v1".into();
-    let mut v2 = v3.clone();
-    v2.schema_version = "contextdesk.capability_qualification.v2".into();
-    assert_ne!(v1.storage_id(), v3.storage_id());
-    assert_ne!(v2.storage_id(), v3.storage_id());
-    assert_ne!(v1, v3);
-    assert_ne!(v2, v3);
+fn v1_through_v3_schema_keys_are_stale_vs_v4() {
+    let v4 = QualificationKey::new("p", "https://gw.example/v1", "m");
+    assert_eq!(v4.schema_version, "contextdesk.capability_qualification.v4");
+    for prior in ["v1", "v2", "v3"] {
+        let mut old = v4.clone();
+        old.schema_version = format!("contextdesk.capability_qualification.{prior}");
+        assert_ne!(old.storage_id(), v4.storage_id());
+        assert_ne!(old, v4);
+    }
+    // Same profile/base/model under different protocol is a different key.
+    let ollama = QualificationKey::with_protocol(
+        "p",
+        "https://gw.example/v1",
+        "m",
+        cd_core::openai_chat_contract::ChatBackendDialect::Ollama,
+    );
+    assert_ne!(ollama.storage_id(), v4.storage_id());
 }
 
 #[test]
@@ -531,6 +537,66 @@ async fn live_client_emits_forced_tool_choice_on_wire() {
     assert_eq!(body["tool_choice"]["type"], "function");
     assert_eq!(body["tool_choice"]["function"]["name"], "cd_qualify_echo");
     assert!(body.get("response_format").is_none());
+}
+
+#[tokio::test]
+async fn typed_client_rejects_forced_tool_without_tools_before_http() {
+    let gateway = MockGateway::start_ordered(vec![Step::respond(Response::json_ok(&json!({
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "x"}}]
+    })))])
+    .await;
+    let client = OpenAiCompatibleClient::new(
+        gateway.base_url(),
+        None,
+        "matrix-model",
+        &SsrfPolicy::default(),
+    )
+    .expect("client");
+    let err = client
+        .complete_with_mode(
+            &[user("call")],
+            None,
+            &OpenAiChatRequestMode::ForcedTool {
+                name: "cd_qualify_echo".into(),
+            },
+        )
+        .await
+        .expect_err("must fail before send");
+    assert!(
+        err.to_string().contains("invalid_request_mode")
+            && err.to_string().contains("forced_tool_missing_tools"),
+        "{err}"
+    );
+    assert_eq!(gateway.request_count(), 0, "must not contact provider");
+}
+
+#[tokio::test]
+async fn typed_client_rejects_malformed_schema_before_http() {
+    let gateway = MockGateway::start_ordered(vec![Step::respond(Response::json_ok(&json!({
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "{}"}}]
+    })))])
+    .await;
+    let client = OpenAiCompatibleClient::new(
+        gateway.base_url(),
+        None,
+        "matrix-model",
+        &SsrfPolicy::default(),
+    )
+    .expect("client");
+    let err = client
+        .complete_with_mode(
+            &[user("json")],
+            None,
+            &OpenAiChatRequestMode::JsonSchema {
+                name: "".into(),
+                schema: json!("not-an-object"),
+                strict: true,
+            },
+        )
+        .await
+        .expect_err("must fail before send");
+    assert!(err.to_string().contains("invalid_request_mode"), "{err}");
+    assert_eq!(gateway.request_count(), 0);
 }
 
 #[tokio::test]

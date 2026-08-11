@@ -252,8 +252,6 @@ pub fn build_openai_chat_request_body(
                 "type": "function",
                 "function": { "name": name }
             });
-            // Forced tool without a tools array is a caller error; still emit
-            // tool_choice so the failure is explicit on the gateway.
         }
     }
 
@@ -278,18 +276,125 @@ pub fn synth_qualify_schema() -> Value {
 pub const SYNTH_SCHEMA_PROBE_ID: &str = "qualify_v1";
 
 /// Validate synthetic structured content against the qualify contract.
+///
+/// Strict: object only, required fields, correct types, **no extra properties**.
+/// Used for both non-strict and strict schema probes at the host (content check);
+/// does **not** prove the gateway enforced `json_schema` internally.
 pub fn validate_synth_qualify_json(value: &Value) -> Result<(), String> {
-    let qualify = value
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "content_not_object".to_string())?;
+    for key in obj.keys() {
+        if key != "qualify" && key != "v" {
+            return Err(format!("extra_property:{key}"));
+        }
+    }
+    let qualify = obj
         .get("qualify")
-        .and_then(|x| x.as_str())
         .ok_or_else(|| "missing_qualify_field".to_string())?;
+    let qualify = qualify
+        .as_str()
+        .ok_or_else(|| "qualify_field_wrong_type".to_string())?;
     if qualify != "ok" {
         return Err("qualify_field_not_ok".into());
     }
-    match value.get("v") {
-        Some(v) if v.as_i64() == Some(1) || v.as_u64() == Some(1) => Ok(()),
-        Some(_) => Err("v_field_not_1".into()),
+    match obj.get("v") {
+        Some(v) if v.is_i64() || v.is_u64() => {
+            if v.as_i64() == Some(1) || v.as_u64() == Some(1) {
+                Ok(())
+            } else {
+                Err("v_field_not_1".into())
+            }
+        }
+        Some(_) => Err("v_field_wrong_type".into()),
         None => Err("missing_v_field".into()),
+    }
+}
+
+/// Fail-closed preflight for typed modes before any HTTP transmission.
+///
+/// - Forced tool: tools must be non-empty and include exactly the forced name.
+/// - Json schema: non-empty valid name, schema must be a JSON object.
+/// - Plain / PromptedJson / JsonObject: always ok here.
+pub fn validate_mode_for_transmit(
+    mode: &OpenAiChatRequestMode,
+    tools: Option<&[crate::tools::ToolSpec]>,
+) -> Result<(), String> {
+    match mode {
+        OpenAiChatRequestMode::ForcedTool { name } => {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("forced_tool_name_empty".into());
+            }
+            let specs = tools.unwrap_or(&[]);
+            if specs.is_empty() {
+                return Err("forced_tool_missing_tools".into());
+            }
+            if !specs.iter().any(|t| t.name == name) {
+                return Err(format!("forced_tool_mismatched_name:{name}"));
+            }
+            Ok(())
+        }
+        OpenAiChatRequestMode::JsonSchema { name, schema, .. } => {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("json_schema_name_empty".into());
+            }
+            if !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            {
+                return Err("json_schema_name_invalid".into());
+            }
+            if !schema.is_object() {
+                return Err("json_schema_body_not_object".into());
+            }
+            Ok(())
+        }
+        OpenAiChatRequestMode::Plain
+        | OpenAiChatRequestMode::PromptedJson
+        | OpenAiChatRequestMode::JsonObject => Ok(()),
+    }
+}
+
+/// Strongest safe response validation for native modes (not applied to Plain).
+pub fn validate_mode_response(
+    mode: &OpenAiChatRequestMode,
+    content: &str,
+    tool_call_names: &[&str],
+) -> Result<(), String> {
+    match mode {
+        OpenAiChatRequestMode::JsonObject | OpenAiChatRequestMode::JsonSchema { .. } => {
+            let channels = OpenAiMessageChannels {
+                content: content.to_string(),
+                reasoning_content: String::new(),
+            };
+            let v = parse_structured_json_from_content(&channels)?;
+            if matches!(mode, OpenAiChatRequestMode::JsonSchema { .. }) {
+                // Host validates synth contract when schema probe id matches.
+                if mode.schema_probe_id() == Some(SYNTH_SCHEMA_PROBE_ID) {
+                    validate_synth_qualify_json(&v)?;
+                } else if !v.is_object() {
+                    return Err("content_not_object".into());
+                }
+            } else if !v.is_object() {
+                return Err("content_not_object".into());
+            }
+            Ok(())
+        }
+        OpenAiChatRequestMode::ForcedTool { name } => {
+            if tool_call_names.is_empty() {
+                return Err("missing_forced_tool".into());
+            }
+            if tool_call_names.len() != 1 {
+                return Err("duplicate_or_foreign_tool_calls".into());
+            }
+            if tool_call_names[0] != name.as_str() {
+                return Err("wrong_tool".into());
+            }
+            Ok(())
+        }
+        OpenAiChatRequestMode::Plain | OpenAiChatRequestMode::PromptedJson => Ok(()),
     }
 }
 

@@ -62,6 +62,9 @@ pub struct QualificationReportDto {
     pub endpoint_fingerprint: String,
     pub model_id: String,
     pub schema_version: String,
+    /// Typed transport protocol (`openai_compatible` / `ollama` / `anthropic`).
+    #[serde(default)]
+    pub transport_protocol: String,
     pub role_hint: String,
     pub cancelled: bool,
     pub stale: bool,
@@ -92,6 +95,7 @@ pub fn qualification_report_dto(
         endpoint_fingerprint: r.key.endpoint_fingerprint.clone(),
         model_id: r.key.model_id.clone(),
         schema_version: r.key.schema_version.clone(),
+        transport_protocol: r.key.transport_protocol.clone(),
         role_hint: r.role_hint.clone(),
         cancelled: r.cancelled,
         stale: r.stale,
@@ -125,9 +129,17 @@ fn status_wire(s: CapabilityStatus) -> &'static str {
     }
 }
 
-/// Build a cache key for the selected profile/endpoint/model.
+/// Build a cache key for the selected profile/endpoint/model (OpenAI-compatible default).
 pub fn qualification_key(profile_id: &str, base_url: &str, model_id: &str) -> QualificationKey {
     QualificationKey::new(profile_id, base_url, model_id)
+}
+
+/// Build a cache key bound to the configured provider kind's transport protocol.
+pub fn qualification_key_for_profile(
+    profile: &ProviderProfile,
+    model_id: &str,
+) -> QualificationKey {
+    QualificationKey::with_provider_kind(&profile.id, &profile.base_url, model_id, profile.kind)
 }
 
 /// Profile gates are authoritative over probes.
@@ -1155,6 +1167,7 @@ mod tests {
             endpoint_fingerprint: "abc".into(),
             model_id: "m".into(),
             schema_version: QUALIFICATION_SCHEMA_VERSION.into(),
+            transport_protocol: "openai_compatible".into(),
             role_hint: "chat".into(),
             cancelled: false,
             stale: false,
@@ -1249,7 +1262,7 @@ mod tests {
     fn schema_version_present() {
         assert_eq!(
             QUALIFICATION_SCHEMA_VERSION,
-            "contextdesk.capability_qualification.v3"
+            "contextdesk.capability_qualification.v4"
         );
     }
 

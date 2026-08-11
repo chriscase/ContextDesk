@@ -18,6 +18,7 @@ use crate::openai_chat_contract::{
     MODE_PLAIN, MODE_PROMPTED_JSON, SYNTH_SCHEMA_PROBE_ID,
 };
 use crate::probe::normalize_gateway_input;
+use crate::providers::ProviderKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
@@ -28,11 +29,18 @@ use std::sync::Arc;
 
 /// Probe / result schema version (bump when probe contracts change).
 ///
-/// v3: dialect-honest multi-mode ladder (prompted JSON, native json_object,
-/// json_schema / strict, auto tools, forced tool + continuation). Exact-mode
-/// authorization for runtime paths. v1 and v2 evidence is stale via key mismatch
-/// and must never be silently reinterpreted.
-pub const QUALIFICATION_SCHEMA_VERSION: &str = "contextdesk.capability_qualification.v3";
+/// v4: evidence identity includes typed transport protocol/dialect (from
+/// configured provider kind, never model name or URL). Authorization and
+/// aggregate readiness require schema + exact mode + dialect match. Strict
+/// tool token/shape and strict schema validation. v1–v3 evidence is stale via
+/// key mismatch and never silently reinterpreted as current verification.
+pub const QUALIFICATION_SCHEMA_VERSION: &str = "contextdesk.capability_qualification.v4";
+
+/// Exact token required in inert tool probe arguments.
+pub const QUALIFY_TOOL_TOKEN: &str = "QUALIFY_TOOL_V1";
+
+/// Continuation after tool result must include this marker (fail-closed).
+pub const QUALIFY_CONTINUE_MARKER: &str = "QUALIFY_OK_V1";
 
 /// On-disk wrapper schema for the secret-free qualification evidence store.
 pub const QUALIFICATION_STORE_SCHEMA_VERSION: u32 = 1;
@@ -235,8 +243,43 @@ impl CapabilityContract {
     }
 }
 
+/// Whether a check row is honest enough to authorize routing or Verified readiness.
+///
+/// Requires present request_mode (when the kind has one) and present dialect
+/// matching the report key's transport protocol. A **Pass** on an OpenAI-native
+/// mode is only honest when dialect is `openai_compatible`. A **Fail** on a
+/// non-OpenAI dialect remains countable (unsupported mode measured honestly).
+pub fn check_evidence_is_honest(
+    report: &QualificationReport,
+    check: &CapabilityCheckResult,
+) -> bool {
+    if let Some(expected_mode) = check.kind.expected_request_mode() {
+        if check.request_mode.as_deref() != Some(expected_mode) {
+            return false;
+        }
+    }
+    let Some(dialect) = check.dialect.as_deref() else {
+        // Chat probes must record dialect; embed/rerank may omit.
+        return check.kind.expected_request_mode().is_none();
+    };
+    if !report.key.transport_protocol.is_empty() && dialect != report.key.transport_protocol {
+        return false;
+    }
+    // Native OpenAI Pass is never honest on Ollama/Anthropic.
+    if check.status == CapabilityStatus::Pass
+        && matches!(
+            check.request_mode.as_deref(),
+            Some(MODE_JSON_OBJECT | MODE_JSON_SCHEMA | MODE_JSON_SCHEMA_STRICT | MODE_FORCED_TOOL)
+        )
+        && dialect != ChatBackendDialect::OpenAiCompatible.as_str()
+    {
+        return false;
+    }
+    true
+}
+
 /// Status of one kind only when the check's request_mode matches `mode`
-/// (when `mode` is Some). Mismatched mode evidence does not count.
+/// (when `mode` is Some) **and** dialect/mode honesty holds.
 pub fn status_of_exact_mode(
     report: &QualificationReport,
     kind: CapabilityKind,
@@ -251,6 +294,7 @@ pub fn status_of_exact_mode(
                     None => true,
                     Some(m) => c.request_mode.as_deref() == Some(m),
                 }
+                && check_evidence_is_honest(report, c)
         })
         .map(|c| c.status)
         .unwrap_or(CapabilityStatus::Untested)
@@ -258,9 +302,10 @@ pub fn status_of_exact_mode(
 
 /// Project one exact report into a routing-safe capability contract verdict.
 ///
-/// Requires each required kind to Pass **with the exact request_mode** the
-/// runtime path will send. JsonObject evidence never authorizes prompted JSON
-/// (and vice versa). Missing, stale, cancelled, or untested → Inconclusive.
+/// Requires each required kind to Pass with the exact request_mode **and**
+/// dialect matching the key's transport protocol. JsonObject evidence never
+/// authorizes prompted JSON (and vice versa). Missing, stale, cancelled,
+/// untested, or malformed mode/dialect → Inconclusive/Unqualified.
 pub fn capability_contract_verdict(
     report: Option<&QualificationReport>,
     contract: CapabilityContract,
@@ -273,6 +318,10 @@ pub fn capability_contract_verdict(
     }
     // Reject prior schema generations even if somehow loaded under a matching key.
     if report.key.schema_version != QUALIFICATION_SCHEMA_VERSION {
+        return ContractVerdict::Inconclusive;
+    }
+    // Empty protocol on a v4-shaped report is incomplete evidence.
+    if report.key.transport_protocol.is_empty() {
         return ContractVerdict::Inconclusive;
     }
     let mut saw_untested = false;
@@ -422,6 +471,10 @@ pub struct CapabilityCheckResult {
 }
 
 /// Cache / report identity (no raw secrets; endpoint is fingerprinted).
+///
+/// v4 includes a typed transport protocol derived from the configured provider
+/// kind so the same profile/base/model under Ollama vs OpenAI-compatible does
+/// not share evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QualificationKey {
     /// Provider profile id (local identity, not a secret).
@@ -432,25 +485,80 @@ pub struct QualificationKey {
     pub model_id: String,
     /// Probe schema version that produced the report.
     pub schema_version: String,
+    /// Typed transport protocol (`openai_compatible` / `ollama` / `anthropic`).
+    /// Never a model name or raw URL. Absent/empty on pre-v4 files → mismatch.
+    #[serde(default)]
+    pub transport_protocol: String,
 }
 
 impl QualificationKey {
-    /// Build a key from profile identity fields.
+    /// Build a key with OpenAI-compatible transport (tests / generic helpers).
+    ///
+    /// Prefer [`Self::with_provider_kind`] or [`Self::with_protocol`] when the
+    /// configured profile kind is known.
     pub fn new(profile_id: &str, base_url: &str, model_id: &str) -> Self {
+        Self::with_protocol(
+            profile_id,
+            base_url,
+            model_id,
+            ChatBackendDialect::OpenAiCompatible,
+        )
+    }
+
+    /// Build a key from profile identity and a typed transport dialect.
+    pub fn with_protocol(
+        profile_id: &str,
+        base_url: &str,
+        model_id: &str,
+        protocol: ChatBackendDialect,
+    ) -> Self {
         Self {
             profile_id: profile_id.trim().to_string(),
             endpoint_fingerprint: fingerprint_endpoint(base_url),
             model_id: model_id.trim().to_string(),
             schema_version: QUALIFICATION_SCHEMA_VERSION.to_string(),
+            transport_protocol: protocol.as_str().to_string(),
         }
     }
 
-    /// Compact storage id.
+    /// Build a key from the configured provider kind (authoritative transport map).
+    pub fn with_provider_kind(
+        profile_id: &str,
+        base_url: &str,
+        model_id: &str,
+        kind: ProviderKind,
+    ) -> Self {
+        Self::with_protocol(
+            profile_id,
+            base_url,
+            model_id,
+            protocol_from_provider_kind(kind),
+        )
+    }
+
+    /// Compact storage id (includes transport protocol for v4 isolation).
     pub fn storage_id(&self) -> String {
         format!(
-            "{}::{}::{}::{}",
-            self.profile_id, self.endpoint_fingerprint, self.model_id, self.schema_version
+            "{}::{}::{}::{}::{}",
+            self.profile_id,
+            self.endpoint_fingerprint,
+            self.model_id,
+            self.transport_protocol,
+            self.schema_version
         )
+    }
+}
+
+/// Map configured provider kind to the typed chat transport dialect.
+///
+/// Provider-neutral: never derived from model names or hostnames.
+pub fn protocol_from_provider_kind(kind: ProviderKind) -> ChatBackendDialect {
+    match kind {
+        ProviderKind::Ollama => ChatBackendDialect::Ollama,
+        ProviderKind::Anthropic => ChatBackendDialect::Anthropic,
+        ProviderKind::OpenAiCompatible | ProviderKind::XaiGrokBuild => {
+            ChatBackendDialect::OpenAiCompatible
+        }
     }
 }
 
@@ -987,7 +1095,12 @@ pub fn configured_model_readiness(
             }
         }
         for model_id in models {
-            let key = QualificationKey::new(&profile.id, &profile.base_url, &model_id);
+            let key = QualificationKey::with_provider_kind(
+                &profile.id,
+                &profile.base_url,
+                &model_id,
+                profile.kind,
+            );
             rows.push(ConfiguredModelReadiness {
                 profile_id: profile.id.clone(),
                 profile_label: profile.label.clone(),
@@ -1043,14 +1156,28 @@ pub fn model_readiness_for_report(report: &QualificationReport) -> ModelReadines
         };
     }
 
+    // Pre-v4 / incomplete keys never project Verified.
+    if report.key.schema_version != QUALIFICATION_SCHEMA_VERSION
+        || report.key.transport_protocol.is_empty()
+    {
+        return ModelReadiness {
+            role,
+            state: ModelReadinessState::Unverified,
+            basis: ModelReadinessBasis::Measured,
+            tested_at: Some(report.finished_at),
+            detail: "Measured evidence is for an older probe schema or missing transport protocol."
+                .into(),
+        };
+    }
+
     let (state, detail) = match role {
         ModelReadinessRole::Chat | ModelReadinessRole::Unknown => project_chat_readiness(report),
         ModelReadinessRole::Embedding => project_single_contract(
-            report.status_of(CapabilityKind::EmbeddingContract),
+            status_of_exact_mode(report, CapabilityKind::EmbeddingContract, None),
             "embedding",
         ),
         ModelReadinessRole::Reranker => project_single_contract(
-            report.status_of(CapabilityKind::RerankerContract),
+            status_of_exact_mode(report, CapabilityKind::RerankerContract, None),
             "reranking",
         ),
     };
@@ -1064,7 +1191,21 @@ pub fn model_readiness_for_report(report: &QualificationReport) -> ModelReadines
 }
 
 fn project_chat_readiness(report: &QualificationReport) -> (ModelReadinessState, String) {
-    let basic = report.status_of(CapabilityKind::BasicGeneration);
+    // Fail closed: any Pass-shaped chat check missing mode/dialect blocks Verified.
+    let malformed_chat_pass = report.checks.iter().any(|c| {
+        c.kind.expected_request_mode().is_some()
+            && c.status == CapabilityStatus::Pass
+            && !check_evidence_is_honest(report, c)
+    });
+    if malformed_chat_pass {
+        return (
+            ModelReadinessState::Unverified,
+            "Measured checks are missing or mismatched request mode/dialect; compatibility is not verified."
+                .into(),
+        );
+    }
+
+    let basic = status_of_exact_mode(report, CapabilityKind::BasicGeneration, Some(MODE_PLAIN));
     if basic == CapabilityStatus::Fail {
         return (
             ModelReadinessState::Failed,
@@ -1085,19 +1226,24 @@ fn project_chat_readiness(report: &QualificationReport) -> (ModelReadinessState,
     }
 
     let core = [
-        CapabilityKind::NativeToolCall,
-        CapabilityKind::ToolResultContinuation,
-        CapabilityKind::StructuredOutput,
+        (CapabilityKind::NativeToolCall, Some(MODE_AUTO_TOOLS)),
+        (
+            CapabilityKind::ToolResultContinuation,
+            Some(MODE_AUTO_TOOLS),
+        ),
+        (CapabilityKind::StructuredOutput, Some(MODE_PROMPTED_JSON)),
     ];
     if core
         .iter()
-        .all(|kind| report.status_of(*kind) == CapabilityStatus::Pass)
+        .all(|(kind, mode)| status_of_exact_mode(report, *kind, *mode) == CapabilityStatus::Pass)
     {
-        let supporting = [CapabilityKind::Streaming, CapabilityKind::Cancellation];
-        let detail = if supporting
-            .iter()
-            .all(|kind| report.status_of(*kind) == CapabilityStatus::Pass)
-        {
+        let supporting = [
+            (CapabilityKind::Streaming, Some(MODE_PLAIN)),
+            (CapabilityKind::Cancellation, Some(MODE_PLAIN)),
+        ];
+        let detail = if supporting.iter().all(|(kind, mode)| {
+            status_of_exact_mode(report, *kind, *mode) == CapabilityStatus::Pass
+        }) {
             "Verified for ContextDesk triage generation, tools, structured output, streaming, and cancellation."
         } else {
             "Verified for core ContextDesk triage and investigation contracts; review streaming and cancellation details."
@@ -1305,16 +1451,30 @@ pub fn inert_probe_tools() -> Vec<InertToolSpec> {
 }
 
 /// Host-side execution of the inert tool (pure, no I/O).
+///
+/// Strict argument shape: JSON object with only `token` string equal to
+/// [`QUALIFY_TOOL_TOKEN`]. Extra properties, wrong token, or wrong types fail.
 pub fn execute_inert_probe_tool(name: &str, arguments_json: &str) -> Result<String, String> {
     if name != INERT_PROBE_TOOL_NAME {
         return Err("unknown_probe_tool".into());
     }
     let v: serde_json::Value =
         serde_json::from_str(arguments_json).map_err(|_| "invalid_tool_arguments".to_string())?;
-    let token = v
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "invalid_tool_arguments".to_string())?;
+    for key in obj.keys() {
+        if key != "token" {
+            return Err(format!("extra_tool_arg:{key}"));
+        }
+    }
+    let token = obj
         .get("token")
         .and_then(|t| t.as_str())
         .ok_or_else(|| "missing_token".to_string())?;
+    if token != QUALIFY_TOOL_TOKEN {
+        return Err("wrong_token".into());
+    }
     if token.len() > 64
         || !token
             .bytes()
@@ -1323,6 +1483,23 @@ pub fn execute_inert_probe_tool(name: &str, arguments_json: &str) -> Result<Stri
         return Err("token_rejected".into());
     }
     Ok(format!(r#"{{"echo":"{token}"}}"#))
+}
+
+/// Fail-closed validation of a model tool-call list for qualification probes.
+///
+/// Requires exactly one call, exact inert name, and strict QUALIFY_TOOL_V1 args.
+pub fn validate_qualify_tool_calls(tool_calls: &[SyntheticToolCall]) -> Result<(), String> {
+    if tool_calls.is_empty() {
+        return Err("missing_forced_tool".into());
+    }
+    if tool_calls.len() != 1 {
+        return Err("duplicate_or_foreign_tool_calls".into());
+    }
+    let tc = &tool_calls[0];
+    if tc.name != INERT_PROBE_TOOL_NAME {
+        return Err("wrong_tool".into());
+    }
+    execute_inert_probe_tool(&tc.name, &tc.arguments_json).map(|_| ())
 }
 
 /// Assert outbound text has no forbidden sentinels (for tests and host scrub).
@@ -1681,61 +1858,31 @@ fn probe_native_tool_call(
         }
         Ok(resp) => {
             let dialect = resp.dialect.as_deref();
-            let hit = resp
-                .tool_calls
-                .iter()
-                .any(|t| t.name == INERT_PROBE_TOOL_NAME);
             // Fabricated prose that only *mentions* tools must not pass.
             let prose_fake =
                 resp.content.contains(INERT_PROBE_TOOL_NAME) && resp.tool_calls.is_empty();
-            if hit {
-                // Fail-closed: wrong tool name or unparseable args are not a pass.
-                if let Some(tc) = resp
-                    .tool_calls
-                    .iter()
-                    .find(|t| t.name == INERT_PROBE_TOOL_NAME)
-                {
-                    match execute_inert_probe_tool(&tc.name, &tc.arguments_json) {
-                        Ok(_) => check_with_evidence(
-                            CapabilityKind::NativeToolCall,
-                            CapabilityStatus::Pass,
-                            start,
-                            "native auto tool_call for inert probe tool",
-                            meta.with_dialect(dialect),
-                        ),
-                        Err(e) => check_with_evidence(
-                            CapabilityKind::NativeToolCall,
-                            CapabilityStatus::Fail,
-                            start,
-                            format!("tool args rejected: {e}"),
-                            meta.with_dialect(dialect),
-                        ),
-                    }
-                } else {
-                    check_with_evidence(
-                        CapabilityKind::NativeToolCall,
-                        CapabilityStatus::Fail,
-                        start,
-                        "wrong tool name",
-                        meta.with_dialect(dialect),
-                    )
-                }
-            } else if prose_fake {
-                check_with_evidence(
+            match validate_qualify_tool_calls(&resp.tool_calls) {
+                Ok(()) => check_with_evidence(
+                    CapabilityKind::NativeToolCall,
+                    CapabilityStatus::Pass,
+                    start,
+                    "native auto tool_call for inert probe tool",
+                    meta.with_dialect(dialect),
+                ),
+                Err(e) if prose_fake => check_with_evidence(
                     CapabilityKind::NativeToolCall,
                     CapabilityStatus::Fail,
                     start,
                     "tool-shaped prose without native tool_call",
                     meta.with_dialect(dialect),
-                )
-            } else {
-                check_with_evidence(
+                ),
+                Err(e) => check_with_evidence(
                     CapabilityKind::NativeToolCall,
                     CapabilityStatus::Fail,
                     start,
-                    "no native tool_call observed",
+                    format!("tool validation: {e}"),
                     meta.with_dialect(dialect),
-                )
+                ),
             }
         }
         Err(e) => check_with_evidence(
@@ -1816,11 +1963,18 @@ fn probe_tool_result_continuation(
             resp.raw_error.unwrap_or_default(),
             meta.with_dialect(resp.dialect.as_deref()),
         ),
-        Ok(resp) if !resp.content.trim().is_empty() => check_with_evidence(
+        Ok(resp) if resp.content.contains(QUALIFY_CONTINUE_MARKER) => check_with_evidence(
             CapabilityKind::ToolResultContinuation,
             CapabilityStatus::Pass,
             start,
-            "non-empty continuation after inert tool result",
+            "continuation marker after inert tool result",
+            meta.with_dialect(resp.dialect.as_deref()),
+        ),
+        Ok(resp) if !resp.content.trim().is_empty() => check_with_evidence(
+            CapabilityKind::ToolResultContinuation,
+            CapabilityStatus::Fail,
+            start,
+            "continuation missing QUALIFY_OK_V1 marker",
             meta.with_dialect(resp.dialect.as_deref()),
         ),
         Ok(resp) => check_with_evidence(
@@ -1877,16 +2031,25 @@ fn eval_structured_content(
     };
     match parse_structured_json_from_content(&channels) {
         Ok(v) => match validate_synth_qualify_json(&v) {
-            Ok(()) => check_with_evidence(
-                kind,
-                CapabilityStatus::Pass,
-                start,
-                format!("valid synthetic JSON via mode={mode_id}"),
-                meta,
-            ),
+            Ok(()) => {
+                let reason = if matches!(
+                    mode,
+                    OpenAiChatRequestMode::JsonSchema { .. } | OpenAiChatRequestMode::JsonObject
+                ) {
+                    // Honest: host observed matching content after an accepted request —
+                    // not proof the gateway enforced schema internally.
+                    format!(
+                        "request accepted and matching validated output observed (mode={mode_id}; \
+                         not proof of gateway schema enforcement)"
+                    )
+                } else {
+                    format!("valid synthetic JSON via mode={mode_id}")
+                };
+                check_with_evidence(kind, CapabilityStatus::Pass, start, reason, meta)
+            }
             Err(e) => check_with_evidence(
                 kind,
-                CapabilityStatus::Degraded,
+                CapabilityStatus::Fail,
                 start,
                 format!("mode={mode_id}: schema_invalid:{e}"),
                 meta,
@@ -2097,24 +2260,16 @@ fn probe_forced_tool_call(
             meta.with_dialect(first.dialect.as_deref()),
         );
     }
-    let Some(tc) = first
-        .tool_calls
-        .iter()
-        .find(|t| t.name == INERT_PROBE_TOOL_NAME)
-    else {
-        let reason = if first.tool_calls.is_empty() {
-            format!("mode={mode_id}: missing_forced_tool")
-        } else {
-            format!("mode={mode_id}: wrong_tool")
-        };
+    if let Err(e) = validate_qualify_tool_calls(&first.tool_calls) {
         return check_with_evidence(
             CapabilityKind::ForcedToolCall,
             CapabilityStatus::Fail,
             start,
-            reason,
+            format!("mode={mode_id}: {e}"),
             meta.with_dialect(first.dialect.as_deref()),
         );
-    };
+    }
+    let tc = &first.tool_calls[0];
     let tool_result = match execute_inert_probe_tool(&tc.name, &tc.arguments_json) {
         Ok(s) => s,
         Err(e) => {
@@ -2163,12 +2318,19 @@ fn probe_forced_tool_call(
             "cancelled during continuation",
             meta.with_dialect(resp.dialect.as_deref()),
         ),
-        Ok(resp) if !resp.content.trim().is_empty() => check_with_evidence(
+        Ok(resp) if resp.content.contains(QUALIFY_CONTINUE_MARKER) => check_with_evidence(
             CapabilityKind::ForcedToolCall,
             CapabilityStatus::Pass,
             start,
-            format!("mode={mode_id}: forced inert tool + continuation"),
+            format!("mode={mode_id}: forced inert tool + continuation marker"),
             meta.with_dialect(first.dialect.as_deref()),
+        ),
+        Ok(resp) if !resp.content.trim().is_empty() => check_with_evidence(
+            CapabilityKind::ForcedToolCall,
+            CapabilityStatus::Fail,
+            start,
+            format!("mode={mode_id}: continuation missing QUALIFY_OK_V1 marker"),
+            meta.with_dialect(resp.dialect.as_deref()),
         ),
         Ok(resp) => check_with_evidence(
             CapabilityKind::ForcedToolCall,
@@ -2594,7 +2756,7 @@ mod tests {
                 ..Default::default()
             }),
             Ok(SyntheticChatResponse {
-                content: "continued".into(),
+                content: QUALIFY_CONTINUE_MARKER.into(),
                 mode_transmitted: true,
                 ..Default::default()
             }),
@@ -2605,7 +2767,7 @@ mod tests {
                 ..Default::default()
             }),
             Ok(SyntheticChatResponse {
-                content: "forced continued".into(),
+                content: QUALIFY_CONTINUE_MARKER.into(),
                 mode_transmitted: true,
                 ..Default::default()
             }),
@@ -3299,12 +3461,18 @@ mod tests {
 
     #[test]
     fn inert_tool_has_no_side_effects_and_rejects_unknown() {
-        let ok = execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"ABC_1"}"#).unwrap();
-        assert!(ok.contains("ABC_1"));
+        let ok = execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"QUALIFY_TOOL_V1"}"#)
+            .unwrap();
+        assert!(ok.contains("QUALIFY_TOOL_V1"));
         assert!(execute_inert_probe_tool("write_file", r#"{}"#).is_err());
         assert!(
             execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"../etc/passwd"}"#)
                 .is_err()
+        );
+        assert!(
+            execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"WRONG"}"#)
+                .unwrap_err()
+                .contains("wrong_token")
         );
     }
 
@@ -3483,7 +3651,7 @@ mod tests {
                         ..Default::default()
                     }),
                     Ok(SyntheticChatResponse {
-                        content: "continued".into(),
+                        content: QUALIFY_CONTINUE_MARKER.into(),
                         ..Default::default()
                     }),
                     Ok(SyntheticChatResponse {
@@ -3583,7 +3751,7 @@ mod tests {
                 ..Default::default()
             }),
             Ok(SyntheticChatResponse {
-                content: "continued".into(),
+                content: QUALIFY_CONTINUE_MARKER.into(),
                 mode_transmitted: true,
                 ..Default::default()
             }),
@@ -3593,7 +3761,7 @@ mod tests {
                 ..Default::default()
             }),
             Ok(SyntheticChatResponse {
-                content: "forced cont".into(),
+                content: QUALIFY_CONTINUE_MARKER.into(),
                 mode_transmitted: true,
                 ..Default::default()
             }),
@@ -3658,7 +3826,7 @@ mod tests {
                 ..Default::default()
             }),
             Ok(SyntheticChatResponse {
-                content: "continued".into(),
+                content: QUALIFY_CONTINUE_MARKER.into(),
                 mode_transmitted: true,
                 ..Default::default()
             }),
@@ -3668,7 +3836,7 @@ mod tests {
                 ..Default::default()
             }),
             Ok(SyntheticChatResponse {
-                content: "forced cont".into(),
+                content: QUALIFY_CONTINUE_MARKER.into(),
                 mode_transmitted: true,
                 ..Default::default()
             }),
@@ -3800,7 +3968,7 @@ mod tests {
             }
             Ok(base(
                 if req.messages.iter().any(|m| m.role == "tool") {
-                    "continued"
+                    QUALIFY_CONTINUE_MARKER
                 } else {
                     SYNTH_GENERATION_MARKER
                 },
@@ -3835,8 +4003,14 @@ mod tests {
     #[test]
     fn ollama_scripted_dialect_refuses_openai_native_modes() {
         let mut t = OllamaHonestTransport { modes: vec![] };
+        let ollama_key = QualificationKey::with_protocol(
+            "profile-a",
+            "https://gateway.example.com/v1",
+            "llama3",
+            ChatBackendDialect::Ollama,
+        );
         let report = run_qualification(
-            key("llama3"),
+            ollama_key,
             gate_full(),
             &mut t,
             &Arc::new(AtomicBool::new(false)),
@@ -4005,7 +4179,7 @@ mod tests {
                     }],
                     ..Default::default()
                 },
-                "tool args rejected",
+                "extra_tool_arg",
             ),
         ];
         for (label, response, token) in cases {
@@ -4050,8 +4224,14 @@ mod tests {
             chat_queue: full_ladder_success_queue(),
             ..Default::default()
         };
+        let anth_key = QualificationKey::with_protocol(
+            "profile-a",
+            "https://gateway.example.com/v1",
+            "claude-script",
+            ChatBackendDialect::Anthropic,
+        );
         let report = run_qualification(
-            key("claude-script"),
+            anth_key,
             gate_full(),
             &mut t,
             &Arc::new(AtomicBool::new(false)),
@@ -4079,31 +4259,279 @@ mod tests {
     }
 
     #[test]
-    fn v1_and_v2_schema_evidence_is_inconclusive_under_v3() {
-        let mut v2 = key("m");
-        v2.schema_version = "contextdesk.capability_qualification.v2".into();
-        let mut report = readiness_report(
-            v2,
+    fn v1_through_v3_schema_evidence_is_inconclusive_under_v4() {
+        for prior in ["v1", "v2", "v3"] {
+            let mut k = key("m");
+            k.schema_version = format!("contextdesk.capability_qualification.{prior}");
+            let report = readiness_report(
+                k,
+                "chat",
+                &[
+                    (CapabilityKind::BasicGeneration, CapabilityStatus::Pass),
+                    (CapabilityKind::StructuredOutput, CapabilityStatus::Pass),
+                ],
+            );
+            assert_eq!(
+                capability_contract_verdict(Some(&report), CapabilityContract::JsonProposal),
+                ContractVerdict::Inconclusive,
+                "{prior}"
+            );
+            assert_ne!(
+                model_readiness_for_report(&report).state,
+                ModelReadinessState::Verified,
+                "{prior} must not display Verified"
+            );
+        }
+        let v4 = key("m");
+        assert_eq!(v4.schema_version, QUALIFICATION_SCHEMA_VERSION);
+        assert_eq!(v4.transport_protocol, "openai_compatible");
+    }
+
+    #[test]
+    fn provider_kind_change_invalidates_same_profile_base_model_evidence() {
+        let openai = QualificationKey::with_provider_kind(
+            "p",
+            "https://gw.example/v1",
+            "m",
+            ProviderKind::OpenAiCompatible,
+        );
+        let ollama = QualificationKey::with_provider_kind(
+            "p",
+            "https://gw.example/v1",
+            "m",
+            ProviderKind::Ollama,
+        );
+        assert_eq!(openai.endpoint_fingerprint, ollama.endpoint_fingerprint);
+        assert_ne!(openai.storage_id(), ollama.storage_id());
+        assert_ne!(openai.transport_protocol, ollama.transport_protocol);
+
+        let mut store = QualificationStore::default();
+        let report = readiness_report(
+            openai.clone(),
             "chat",
             &[
                 (CapabilityKind::BasicGeneration, CapabilityStatus::Pass),
                 (CapabilityKind::StructuredOutput, CapabilityStatus::Pass),
             ],
         );
-        // Even with Pass checks, wrong schema version is inconclusive.
+        store.put(report);
+        assert!(store.get(&openai).is_some());
+        assert!(store.get(&ollama).is_none());
+        // Selection near-miss: same profile+model, different protocol → not an exact hit.
+        let got = store.get_for_selection(&ollama);
+        assert!(got.is_some());
+        // Prior openai evidence must not authorize under ollama key.
         assert_eq!(
-            capability_contract_verdict(Some(&report), CapabilityContract::JsonProposal),
+            capability_contract_verdict(got, CapabilityContract::JsonProposal),
             ContractVerdict::Inconclusive
         );
-        report.key.schema_version = "contextdesk.capability_qualification.v1".into();
-        assert_eq!(
-            capability_contract_verdict(Some(&report), CapabilityContract::JsonProposal),
-            ContractVerdict::Inconclusive
+        // Exact ollama key has no report of its own.
+        assert!(store.get(&ollama).is_none());
+    }
+
+    #[test]
+    fn malformed_pass_without_mode_or_dialect_never_verified() {
+        let mut report = readiness_report(
+            key("m"),
+            "chat",
+            &[
+                (CapabilityKind::BasicGeneration, CapabilityStatus::Pass),
+                (CapabilityKind::NativeToolCall, CapabilityStatus::Pass),
+                (
+                    CapabilityKind::ToolResultContinuation,
+                    CapabilityStatus::Pass,
+                ),
+                (CapabilityKind::StructuredOutput, CapabilityStatus::Pass),
+                (CapabilityKind::Streaming, CapabilityStatus::Pass),
+                (CapabilityKind::Cancellation, CapabilityStatus::Pass),
+            ],
         );
-        // Current v3 key identity differs from v1/v2 storage ids.
-        let v3 = key("m");
-        assert_ne!(v3.schema_version, "contextdesk.capability_qualification.v2");
-        assert_eq!(v3.schema_version, QUALIFICATION_SCHEMA_VERSION);
+        // Strip mode/dialect from all checks (malformed persisted evidence).
+        for c in &mut report.checks {
+            c.request_mode = None;
+            c.dialect = None;
+        }
+        assert_ne!(
+            model_readiness_for_report(&report).state,
+            ModelReadinessState::Verified
+        );
+        assert_ne!(
+            capability_contract_verdict(Some(&report), CapabilityContract::JsonProposal),
+            ContractVerdict::Qualified
+        );
+        assert_ne!(
+            capability_contract_verdict(Some(&report), CapabilityContract::NativeToolLoop),
+            ContractVerdict::Qualified
+        );
+    }
+
+    #[test]
+    fn strict_tool_rejects_wrong_token_duplicate_and_foreign() {
+        assert!(validate_qualify_tool_calls(&[SyntheticToolCall {
+            id: "c1".into(),
+            name: INERT_PROBE_TOOL_NAME.into(),
+            arguments_json: r#"{"token":"WRONG"}"#.into(),
+        }])
+        .unwrap_err()
+        .contains("wrong_token"));
+        assert!(validate_qualify_tool_calls(&[
+            SyntheticToolCall {
+                id: "c1".into(),
+                name: INERT_PROBE_TOOL_NAME.into(),
+                arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+            },
+            SyntheticToolCall {
+                id: "c2".into(),
+                name: INERT_PROBE_TOOL_NAME.into(),
+                arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+            },
+        ])
+        .unwrap_err()
+        .contains("duplicate"));
+        assert!(validate_qualify_tool_calls(&[SyntheticToolCall {
+            id: "c1".into(),
+            name: "other_tool".into(),
+            arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+        }])
+        .unwrap_err()
+        .contains("wrong_tool"));
+        assert!(validate_qualify_tool_calls(&[SyntheticToolCall {
+            id: "c1".into(),
+            name: INERT_PROBE_TOOL_NAME.into(),
+            arguments_json: r#"{"token":"QUALIFY_TOOL_V1","extra":1}"#.into(),
+        }])
+        .is_err());
+        assert!(validate_qualify_tool_calls(&[SyntheticToolCall {
+            id: "c1".into(),
+            name: INERT_PROBE_TOOL_NAME.into(),
+            arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+        }])
+        .is_ok());
+    }
+
+    #[test]
+    fn strict_json_rejects_extra_property_and_wrong_type() {
+        use crate::openai_chat_contract::validate_synth_qualify_json;
+        assert!(validate_synth_qualify_json(&serde_json::json!({
+            "qualify": "ok",
+            "v": 1,
+            "extra": true
+        }))
+        .unwrap_err()
+        .contains("extra_property"));
+        assert!(validate_synth_qualify_json(&serde_json::json!({
+            "qualify": "ok",
+            "v": "1"
+        }))
+        .unwrap_err()
+        .contains("wrong_type"));
+        assert!(validate_synth_qualify_json(&serde_json::json!({
+            "qualify": "ok",
+            "v": 1
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn auto_and_forced_tool_fail_on_wrong_token_in_ladder() {
+        struct WrongTokenTools;
+        impl QualificationTransport for WrongTokenTools {
+            fn chat_complete(
+                &mut self,
+                req: &SyntheticChatRequest,
+                cancel: &AtomicBool,
+            ) -> Result<SyntheticChatResponse, TransportError> {
+                if cancel.load(Ordering::SeqCst) {
+                    return Ok(SyntheticChatResponse {
+                        cancelled: true,
+                        dialect: Some("openai_compatible".into()),
+                        mode_transmitted: true,
+                        ..Default::default()
+                    });
+                }
+                let dialect = Some("openai_compatible".into());
+                if !req.tools.is_empty() && req.messages.len() == 1 {
+                    return Ok(SyntheticChatResponse {
+                        tool_calls: vec![SyntheticToolCall {
+                            id: "c1".into(),
+                            name: INERT_PROBE_TOOL_NAME.into(),
+                            arguments_json: r#"{"token":"WRONG_TOKEN"}"#.into(),
+                        }],
+                        dialect,
+                        mode_transmitted: true,
+                        ..Default::default()
+                    });
+                }
+                if matches!(
+                    req.chat_mode,
+                    OpenAiChatRequestMode::PromptedJson
+                        | OpenAiChatRequestMode::JsonObject
+                        | OpenAiChatRequestMode::JsonSchema { .. }
+                ) {
+                    return Ok(SyntheticChatResponse {
+                        content: r#"{"qualify":"ok","v":1}"#.into(),
+                        dialect,
+                        mode_transmitted: true,
+                        ..Default::default()
+                    });
+                }
+                Ok(SyntheticChatResponse {
+                    content: if req.messages.iter().any(|m| m.role == "tool") {
+                        QUALIFY_CONTINUE_MARKER.into()
+                    } else {
+                        SYNTH_GENERATION_MARKER.into()
+                    },
+                    streamed: req.stream,
+                    dialect,
+                    mode_transmitted: true,
+                    ..Default::default()
+                })
+            }
+            fn embed(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: &AtomicBool,
+            ) -> Result<SyntheticEmbeddingResponse, TransportError> {
+                Err(TransportError {
+                    reason: "n/a".into(),
+                })
+            }
+            fn rerank(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: &[&str],
+                _: &AtomicBool,
+            ) -> Result<SyntheticRerankResponse, TransportError> {
+                Err(TransportError {
+                    reason: "n/a".into(),
+                })
+            }
+        }
+        let mut t = WrongTokenTools;
+        let report = run_qualification(
+            key("wrong-token"),
+            gate_full(),
+            &mut t,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::NativeToolCall),
+            CapabilityStatus::Fail
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::ForcedToolCall),
+            CapabilityStatus::Fail
+        );
+        assert_ne!(
+            capability_contract_verdict(Some(&report), CapabilityContract::NativeToolLoop),
+            ContractVerdict::Qualified
+        );
+        assert_ne!(
+            capability_contract_verdict(Some(&report), CapabilityContract::ForcedToolLoop),
+            ContractVerdict::Qualified
+        );
     }
 
     #[test]

@@ -1,23 +1,25 @@
-# OpenAI-compatible chat contract v3
+# OpenAI-compatible chat contract v4
 
 Status: hermetic product path. **Does not claim live model compatibility.**
 
-## Problem (v2 residual)
+## Problem (v3 residual)
 
-v2 recorded `json_object` for structured probes even when Ollama/Anthropic
-ignored `chat_mode` and sent ordinary chat. Production reviewer paths still
-use plain/prompted JSON, so a native json_object pass incorrectly authorized
-plain request contracts.
+v3 fixed mode honesty per request but evidence identity still keyed only by
+profile/endpoint/model/schema. Changing provider kind while keeping the same
+profile/base/model could reuse evidence. Aggregate readiness could still treat
+mode/dialect-less Pass rows as Verified. Tool probes accepted any token shape;
+strict schema did not reject extra properties.
 
-## Contract (v3)
+## Contract (v4)
 
 | Piece | Location |
 | --- | --- |
 | Typed modes + pure body builder | `cd_core::openai_chat_contract` |
 | Dialect honesty | `ChatBackendDialect` + `dialect_supports_mode` |
-| Production client | `OpenAiCompatibleClient::complete_with_mode` / stream variants |
+| Evidence identity | profile + endpoint fingerprint + model + **transport_protocol** + schema |
+| Production client | `complete_with_mode` pre-transmit + response validation (native modes) |
 | Live transport | OpenAI transmits modes; Ollama/Anthropic **refuse** OpenAI-native modes |
-| Evidence schema | `contextdesk.capability_qualification.v3` |
+| Evidence schema | `contextdesk.capability_qualification.v4` |
 | Per-check fields | `request_mode`, `dialect`, `schema_strict`, `schema_probe_id` |
 
 ### Measured ladder (investigator)
@@ -47,9 +49,10 @@ plain request contracts.
 
 ### Migration
 
-v1 and v2 keys/reports are storage-id / schema mismatches under v3. Verdicts
-treat non-v3 `schema_version` as **Inconclusive** even if checks look green.
-Do not silently reinterpret old files as v3 evidence.
+v1–v3 keys/reports are storage-id / schema mismatches under v4 (and lack
+`transport_protocol`). Verdicts and readiness treat non-v4 schema or empty
+protocol as **Inconclusive** / not **Verified**. Do not silently reinterpret
+old files as v4 evidence.
 
 ### Channel integrity
 
