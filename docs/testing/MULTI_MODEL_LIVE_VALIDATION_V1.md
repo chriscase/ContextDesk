@@ -120,7 +120,7 @@ data, and must not inherit Vercel model or usefulness evidence.
 
 ## Integrated wire-contract evidence
 
-The current integration head is `96cfbd7d68ff0e4fa460b2b05576be01d6f1d5ab`.
+The current integration head is `10201e1f6285793d8a67f2cbd5de5b96048ab462`.
 It includes the dialect-honest OpenAI-compatible chat qualification ladder,
 the production OpenAI-compatible embedding adapter, and explicit TEI/Cohere
 reranking with shared fail-closed parsers. The hermetic evidence at this head
@@ -130,6 +130,11 @@ includes:
 - production embedding: 7 adapter tests;
 - production reranking: 4 dialect tests and 12 real-wire tests;
 - production retrieval path: 5 factory/ablation/share-safe tests;
+- production retrieval diagnostic path: 20 production-factory and identity
+  reconciliation tests;
+- OpenAI-compatible embedding spaces publish the measured endpoint/model/dialect
+  identity used by the diagnostic, so stored vectors cannot be mislabeled as
+  `unclassified`;
 - existing gateway diagnostic contract: 17 CLI tests;
 - exact-head release gate: `FULL_GATE_PASS` with embedded-SHA identity,
   cancellation, activity/trace parity, grounded two-turn flow, and recovery.
