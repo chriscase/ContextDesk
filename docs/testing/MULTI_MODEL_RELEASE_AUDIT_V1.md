@@ -2,8 +2,8 @@
 
 **Audit date:** 2026-08-11  
 **Feature branch:** `feat/multimodel-contribution-reconcile-v1`  
-**Branch tip at this audit snapshot:** `735ad179d655fa313c8ca46095bd9e4bb1056e7f`
-**Production-code integration tip:** `735ad179d655fa313c8ca46095bd9e4bb1056e7f`
+**Branch tip at this audit snapshot:** `59df68fadc0d51a9d8cc245959c5f9f410a06eaa`
+**Production-code integration tip:** `59df68fadc0d51a9d8cc245959c5f9f410a06eaa`
 
 This is a release-manager evidence map for the model-agnostic investigation
 goal. It distinguishes what is proven in the repository from what still needs
@@ -34,6 +34,9 @@ unit test, while cancellation and host deadline races remain authoritative.
 The contribution runtime also enforces the smaller route-level
 `max_rounds`/`max_context_chars` ceilings at execution time, with an adversarial
 regression test proving those validated policy fields cannot be bypassed.
+Its deterministic answer renderer now exposes bounded host relationships,
+citations, symptoms, reconciliation state, and conflicts without rendering
+untrusted model explanation text.
 
 ## Gate evidence
 
