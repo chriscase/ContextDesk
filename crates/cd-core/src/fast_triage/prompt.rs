@@ -408,7 +408,10 @@ mod tests {
         // dropping a check cannot silently keep old evidence valid.
         let mut hasher = Sha256::new();
         hasher.update(b"contextdesk.fast_triage.contract.v1");
-        assert_ne!(format!("{:x}", hasher.finalize()), fast_triage_contract_fingerprint());
+        assert_ne!(
+            format!("{:x}", hasher.finalize()),
+            fast_triage_contract_fingerprint()
+        );
     }
 
     #[test]

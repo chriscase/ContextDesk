@@ -384,7 +384,8 @@ mod tests {
         // A fresh record cannot rescue a stale one for the same exact tuple.
         let mixed = vec![record("profile-a", "model-a"), stale];
         assert_eq!(
-            select_fast_triage_route(&mixed, request(Some("profile-a"), Some("model-a"))).rejection(),
+            select_fast_triage_route(&mixed, request(Some("profile-a"), Some("model-a")))
+                .rejection(),
             Some(FastTriageRouteRejection::ContractFingerprintStale)
         );
     }
@@ -399,9 +400,12 @@ mod tests {
         let mut other_contract = request(Some("profile-a"), Some("model-a"));
         other_contract.contract_fingerprint = "fp-1";
         assert!(select_fast_triage_route(&records, other_contract).is_selected());
-        assert!(serde_json::from_str::<FastTriageWorkflowContract>("\"native_tool_loop\"").is_err());
-        assert!(serde_json::from_str::<FastTriageWorkflowContract>("\"ordinary_generation\"")
-            .is_err());
+        assert!(
+            serde_json::from_str::<FastTriageWorkflowContract>("\"native_tool_loop\"").is_err()
+        );
+        assert!(
+            serde_json::from_str::<FastTriageWorkflowContract>("\"ordinary_generation\"").is_err()
+        );
     }
 
     #[test]
@@ -437,7 +441,10 @@ mod tests {
             "http://",
             "https://",
         ] {
-            assert!(!serialized.contains(forbidden), "route record leaked {forbidden}");
+            assert!(
+                !serialized.contains(forbidden),
+                "route record leaked {forbidden}"
+            );
         }
     }
 
@@ -447,7 +454,10 @@ mod tests {
             FastTriageWorkflowContract::HostGroundedSynthesisCompletePacket.as_str(),
             "host_grounded_synthesis_complete_packet"
         );
-        assert_eq!(FastTriageRouteVerdict::Inconclusive.as_str(), "inconclusive");
+        assert_eq!(
+            FastTriageRouteVerdict::Inconclusive.as_str(),
+            "inconclusive"
+        );
         for rejection in [
             FastTriageRouteRejection::RouteDisabled,
             FastTriageRouteRejection::TurnIdentityUnknown,

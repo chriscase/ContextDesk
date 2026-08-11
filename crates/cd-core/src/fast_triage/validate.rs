@@ -32,7 +32,9 @@ use super::packet::{FastTriageEvidenceScope, FastTriagePacketV1};
 /// any evidence text, or any provider detail, so all three consumers — the
 /// bounded correction, the escalation request, and telemetry — can read the
 /// same value without any of them becoming a leak.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FastTriageFailureCategory {
     /// No visible content survived reasoning removal.
@@ -377,7 +379,10 @@ mod tests {
         }
     }
 
-    fn packet_from(entries: Vec<HostEvidenceEntry>, independent: Option<&str>) -> FastTriagePacketV1 {
+    fn packet_from(
+        entries: Vec<HostEvidenceEntry>,
+        independent: Option<&str>,
+    ) -> FastTriagePacketV1 {
         let binding = AnswerBindingV1 {
             session_id: "s".into(),
             turn_id: "t".into(),
@@ -528,7 +533,9 @@ mod tests {
              "symptoms": [claim("s1", &["e:g-a:10"])]},
             {"candidate_id": "g-b", "observations": [claim("o1", &["e:g-b:20"])]},
         ]));
-        let categories = validate_fast_answer(&inverted, &packet).categories().to_vec();
+        let categories = validate_fast_answer(&inverted, &packet)
+            .categories()
+            .to_vec();
         assert!(categories.contains(&FastTriageFailureCategory::ChronologyInverted));
         // The same placement in the correct order is not a chronology failure.
         let ordered = proposal(json!([
@@ -564,7 +571,8 @@ mod tests {
             {"candidate_id": "g-a", "causal_candidates": [claim("c1", &["e:g-a:10"])]},
             {"candidate_id": "g-b", "observations": [claim("o1", &["e:g-b:20"])]},
         ]));
-        let FastTriageValidation::Accepted(envelope) = validate_fast_answer(&honest, &neutral) else {
+        let FastTriageValidation::Accepted(envelope) = validate_fast_answer(&honest, &neutral)
+        else {
             panic!("honest candidate answer must be accepted");
         };
         assert!(!envelope.answer.root_cause_established);
@@ -644,9 +652,18 @@ mod tests {
     #[test]
     fn every_shared_validator_error_maps_to_one_category() {
         for (error, expected) in [
-            (ValidationError::Parse, FastTriageFailureCategory::MalformedTerminal),
-            (ValidationError::Schema, FastTriageFailureCategory::SchemaMismatch),
-            (ValidationError::DuplicateId, FastTriageFailureCategory::DuplicateId),
+            (
+                ValidationError::Parse,
+                FastTriageFailureCategory::MalformedTerminal,
+            ),
+            (
+                ValidationError::Schema,
+                FastTriageFailureCategory::SchemaMismatch,
+            ),
+            (
+                ValidationError::DuplicateId,
+                FastTriageFailureCategory::DuplicateId,
+            ),
             (
                 ValidationError::UnknownEvidence,
                 FastTriageFailureCategory::ForeignEvidenceId,
@@ -663,12 +680,18 @@ mod tests {
                 ValidationError::EmptyEvidence,
                 FastTriageFailureCategory::UngroundedClaim,
             ),
-            (ValidationError::RootRole, FastTriageFailureCategory::RootUnsupported),
+            (
+                ValidationError::RootRole,
+                FastTriageFailureCategory::RootUnsupported,
+            ),
             (
                 ValidationError::RoleMismatch,
                 FastTriageFailureCategory::SymptomPromotedToCause,
             ),
-            (ValidationError::RoleCoverage, FastTriageFailureCategory::RoleCoverage),
+            (
+                ValidationError::RoleCoverage,
+                FastTriageFailureCategory::RoleCoverage,
+            ),
             (
                 ValidationError::DigestMismatch,
                 FastTriageFailureCategory::HostPacketInvalid,

@@ -21,7 +21,9 @@
 //! second, more permissive unwrap path for "fast" models.
 
 use crate::chat::ChatCompletion;
-use crate::linked_triage_contract::{normalize_known_json_wrapper, split_complete_reasoning_prefix};
+use crate::linked_triage_contract::{
+    normalize_known_json_wrapper, split_complete_reasoning_prefix,
+};
 
 /// What the provider actually terminated with, before any host validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -219,8 +221,10 @@ mod tests {
 
     #[test]
     fn a_reasoning_only_terminal_is_empty_not_a_pass() {
-        let terminal =
-            FastTriageTerminal::parse(&completion("<think>I will answer next turn</think>", Vec::new()), "");
+        let terminal = FastTriageTerminal::parse(
+            &completion("<think>I will answer next turn</think>", Vec::new()),
+            "",
+        );
         assert_eq!(terminal.state(), FastTriageTerminalState::EmptyVisible);
         assert!(terminal.typed_object().is_none());
         assert!(terminal.reasoning_present());
@@ -251,10 +255,10 @@ mod tests {
             "",
         );
         assert_eq!(two.state(), FastTriageTerminalState::TypedObject);
-        assert!(serde_json::from_str::<serde_json::Value>(
-            two.typed_object().unwrap_or_default()
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<serde_json::Value>(two.typed_object().unwrap_or_default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -262,8 +266,10 @@ mod tests {
         let from_stream =
             FastTriageTerminal::parse(&completion("   ", Vec::new()), "{\"schema\":\"x\"}");
         assert_eq!(from_stream.typed_object(), Some("{\"schema\":\"x\"}"));
-        let from_completion =
-            FastTriageTerminal::parse(&completion("{\"schema\":\"y\"}", Vec::new()), "{\"schema\":\"x\"}");
+        let from_completion = FastTriageTerminal::parse(
+            &completion("{\"schema\":\"y\"}", Vec::new()),
+            "{\"schema\":\"x\"}",
+        );
         assert_eq!(from_completion.typed_object(), Some("{\"schema\":\"y\"}"));
     }
 
@@ -292,7 +298,10 @@ mod tests {
 
     #[test]
     fn wire_labels_are_stable_snake_case() {
-        assert_eq!(FastTriageTerminalState::TypedObject.as_str(), "typed_object");
+        assert_eq!(
+            FastTriageTerminalState::TypedObject.as_str(),
+            "typed_object"
+        );
         assert_eq!(
             FastTriageTerminalState::EmptyVisible.as_str(),
             "empty_visible"

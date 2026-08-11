@@ -42,7 +42,9 @@ pub const FAST_TRIAGE_PACKET_SCHEMA_V1: &str = "contextdesk.fast_triage.packet.v
 /// not what the row means. That is exactly why it can be validated: the host can
 /// prove a row came from the separately scoped linked timeline without claiming
 /// to know whether it is a cause.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FastTriageEvidenceScope {
     /// Belongs to one candidate evidence/correlation group.
@@ -441,7 +443,8 @@ impl FastTriagePacketV1 {
                     literal_span(entry.map_or("", |entry| entry.source_label.as_str())),
                     literal_span(entry.map_or("", |entry| entry.locator.as_str())),
                 ));
-                let content = literal_display_text(entry.map_or("", |entry| entry.content.as_str()));
+                let content =
+                    literal_display_text(entry.map_or("", |entry| entry.content.as_str()));
                 if !content.is_empty() {
                     out.push_str(&format!("    content: {}\n", literal_span(&content)));
                 }
@@ -510,9 +513,7 @@ fn packet_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::investigation_answer::{
-        AnswerBindingV1, HostEvidenceEntry, LogSnapshotRevisionV1,
-    };
+    use crate::investigation_answer::{AnswerBindingV1, HostEvidenceEntry, LogSnapshotRevisionV1};
 
     fn revision() -> LogSnapshotRevisionV1 {
         LogSnapshotRevisionV1 {
@@ -522,7 +523,12 @@ mod tests {
         }
     }
 
-    fn entry(evidence_id: &str, candidate_id: &str, seq: u64, role: EvidenceRole) -> HostEvidenceEntry {
+    fn entry(
+        evidence_id: &str,
+        candidate_id: &str,
+        seq: u64,
+        role: EvidenceRole,
+    ) -> HostEvidenceEntry {
         HostEvidenceEntry {
             evidence_id: evidence_id.into(),
             candidate_id: candidate_id.into(),
@@ -570,10 +576,15 @@ mod tests {
             Some(FastTriageEvidenceScope::Candidate)
         );
         assert_eq!(
-            packet.row("e:g-a:10").and_then(|row| row.chronology_ordinal),
+            packet
+                .row("e:g-a:10")
+                .and_then(|row| row.chronology_ordinal),
             Some(10)
         );
-        assert_eq!(packet.candidate_ids(), ["g-a", "g-b"].map(String::from).into());
+        assert_eq!(
+            packet.candidate_ids(),
+            ["g-a", "g-b"].map(String::from).into()
+        );
         assert_eq!(packet.role_evidence(), FastTriageRoleEvidence::HostLabelled);
     }
 
@@ -678,7 +689,10 @@ mod tests {
         // The boundary is line structure, not a character allowlist: the text is
         // still shown, but it can no longer *begin* a line, which is what every
         // Markdown block construct and every host status line is anchored on.
-        assert!(body.contains("forged heading"), "content must still be shown");
+        assert!(
+            body.contains("forged heading"),
+            "content must still be shown"
+        );
         for line in body.lines() {
             let trimmed = line.trim_start();
             assert!(

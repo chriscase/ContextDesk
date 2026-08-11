@@ -210,7 +210,9 @@ impl FastTriageOutcomeLabel {
     pub fn is_verified(self) -> bool {
         matches!(
             self,
-            Self::VerifiedFastAnswer | Self::VerifiedAfterCorrection | Self::VerifiedAfterEscalation
+            Self::VerifiedFastAnswer
+                | Self::VerifiedAfterCorrection
+                | Self::VerifiedAfterEscalation
         )
     }
 }
@@ -386,7 +388,10 @@ mod tests {
         ]
         .map(FastTriageOutcomeLabel::as_str);
         assert_eq!(
-            outcomes.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            outcomes
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             outcomes.len()
         );
         assert!(FastTriageOutcomeLabel::VerifiedAfterEscalation.is_verified());
@@ -404,7 +409,10 @@ mod tests {
         ]
         .map(FastTriageEscalationState::as_str);
         assert_eq!(
-            states.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            states
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             states.len()
         );
         assert_eq!(FastTriageStage::Correction.as_str(), "correction");

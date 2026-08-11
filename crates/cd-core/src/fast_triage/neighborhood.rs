@@ -288,8 +288,7 @@ pub fn classify_neighborhood(
             }
             _ => FastTriageEvidenceCategory::Focus,
         };
-        out.categories
-            .insert(row.evidence_id.to_string(), category);
+        out.categories.insert(row.evidence_id.to_string(), category);
     }
 
     // Independent-scope rows are the host's bounded chronology sample. Rank
@@ -388,8 +387,7 @@ pub fn classify_neighborhood(
             out.withheld_over_budget += 1;
             FastTriageEvidenceCategory::IndependentNoise
         };
-        out.categories
-            .insert(row.evidence_id.to_string(), category);
+        out.categories.insert(row.evidence_id.to_string(), category);
     }
     out
 }
@@ -421,9 +419,27 @@ mod tests {
     #[test]
     fn same_source_context_splits_into_preceding_and_following() {
         let rows = vec![
-            row("f", "g-a", "app.log", FastTriageEvidenceScope::Candidate, 50),
-            row("before", "tl", "app.log", FastTriageEvidenceScope::Independent, 49),
-            row("after", "tl", "app.log", FastTriageEvidenceScope::Independent, 51),
+            row(
+                "f",
+                "g-a",
+                "app.log",
+                FastTriageEvidenceScope::Candidate,
+                50,
+            ),
+            row(
+                "before",
+                "tl",
+                "app.log",
+                FastTriageEvidenceScope::Independent,
+                49,
+            ),
+            row(
+                "after",
+                "tl",
+                "app.log",
+                FastTriageEvidenceScope::Independent,
+                51,
+            ),
         ];
         let near = classify_neighborhood(
             &rows,
@@ -446,8 +462,20 @@ mod tests {
     #[test]
     fn cross_source_context_needs_a_resolved_comparable_clock() {
         let rows = vec![
-            row("f", "g-a", "app.log", FastTriageEvidenceScope::Candidate, 50),
-            row("other", "tl", "db.log", FastTriageEvidenceScope::Independent, 51),
+            row(
+                "f",
+                "g-a",
+                "app.log",
+                FastTriageEvidenceScope::Candidate,
+                50,
+            ),
+            row(
+                "other",
+                "tl",
+                "db.log",
+                FastTriageEvidenceScope::Independent,
+                51,
+            ),
         ];
         let untrustworthy = classify_neighborhood(
             &rows,
@@ -496,8 +524,20 @@ mod tests {
         // stays independent; even with one it is only *temporal* context, never
         // part of the chain (the packet validator enforces the rest).
         let rows = vec![
-            row("f", "g-a", "app.log", FastTriageEvidenceScope::Candidate, 50),
-            row("noise", "tl", "unrelated.log", FastTriageEvidenceScope::Independent, 50),
+            row(
+                "f",
+                "g-a",
+                "app.log",
+                FastTriageEvidenceScope::Candidate,
+                50,
+            ),
+            row(
+                "noise",
+                "tl",
+                "unrelated.log",
+                FastTriageEvidenceScope::Independent,
+                50,
+            ),
         ];
         assert_eq!(
             classify_neighborhood(
@@ -531,9 +571,27 @@ mod tests {
             50,
         )];
         // Two rows inside the default radius of 2, one outside it.
-        rows.push(row("n1", "tl", "app.log", FastTriageEvidenceScope::Independent, 48));
-        rows.push(row("n2", "tl", "app.log", FastTriageEvidenceScope::Independent, 52));
-        rows.push(row("far", "tl", "app.log", FastTriageEvidenceScope::Independent, 90));
+        rows.push(row(
+            "n1",
+            "tl",
+            "app.log",
+            FastTriageEvidenceScope::Independent,
+            48,
+        ));
+        rows.push(row(
+            "n2",
+            "tl",
+            "app.log",
+            FastTriageEvidenceScope::Independent,
+            52,
+        ));
+        rows.push(row(
+            "far",
+            "tl",
+            "app.log",
+            FastTriageEvidenceScope::Independent,
+            90,
+        ));
         let bounded = classify_neighborhood(
             &rows,
             &no_traces(),
@@ -566,15 +624,18 @@ mod tests {
             capped.category("n2"),
             Some(FastTriageEvidenceCategory::IndependentNoise)
         );
-        assert_eq!(capped, classify_neighborhood(
-            &rows,
-            &no_traces(),
-            FastTriageClockCompatibility::OrderOnly,
-            FastTriageNeighborhoodBudget {
-                max_context_rows: 1,
-                ..FastTriageNeighborhoodBudget::default()
-            },
-        ));
+        assert_eq!(
+            capped,
+            classify_neighborhood(
+                &rows,
+                &no_traces(),
+                FastTriageClockCompatibility::OrderOnly,
+                FastTriageNeighborhoodBudget {
+                    max_context_rows: 1,
+                    ..FastTriageNeighborhoodBudget::default()
+                },
+            )
+        );
     }
 
     #[test]
@@ -583,10 +644,34 @@ mod tests {
         // source (propagation of the same linked execution); `c` shares the
         // earliest ordinal in another source, so it is a link, not propagation.
         let rows = vec![
-            row("a", "trace:x", "app.log", FastTriageEvidenceScope::Candidate, 10),
-            row("b", "trace:x", "db.log", FastTriageEvidenceScope::Candidate, 30),
-            row("c", "trace:x", "db.log", FastTriageEvidenceScope::Candidate, 10),
-            row("d", "template:y", "db.log", FastTriageEvidenceScope::Candidate, 40),
+            row(
+                "a",
+                "trace:x",
+                "app.log",
+                FastTriageEvidenceScope::Candidate,
+                10,
+            ),
+            row(
+                "b",
+                "trace:x",
+                "db.log",
+                FastTriageEvidenceScope::Candidate,
+                30,
+            ),
+            row(
+                "c",
+                "trace:x",
+                "db.log",
+                FastTriageEvidenceScope::Candidate,
+                10,
+            ),
+            row(
+                "d",
+                "template:y",
+                "db.log",
+                FastTriageEvidenceScope::Candidate,
+                40,
+            ),
         ];
         let traces = BTreeSet::from(["trace:x".to_string()]);
         let near = classify_neighborhood(

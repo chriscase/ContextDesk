@@ -684,10 +684,7 @@ pub async fn run_fast_triage_route(
                 categories = rejected;
                 // A host-side failure is not something a model can repair.
                 // Asking it to try would be theatre, so the route stops.
-                if categories
-                    .iter()
-                    .any(|category| category.is_host_side())
-                {
+                if categories.iter().any(|category| category.is_host_side()) {
                     return Ok(FastTriageRouteOutcome::Partial {
                         categories,
                         telemetry: Box::new(finish(
@@ -791,10 +788,7 @@ pub async fn run_fast_triage_route(
             Ok(FastTriageRouteOutcome::Verified {
                 envelope,
                 content,
-                telemetry: Box::new(finish(
-                    run,
-                    FastTriageOutcomeLabel::VerifiedAfterEscalation,
-                )),
+                telemetry: Box::new(finish(run, FastTriageOutcomeLabel::VerifiedAfterEscalation)),
             })
         }
         AttemptResult::Rejected(rejected) => {
@@ -869,7 +863,9 @@ mod tests {
                 authorized: true,
             }
         );
-        for forbidden in ["url", "http", "host", "port", "endpoint", "api_key", "token"] {
+        for forbidden in [
+            "url", "http", "host", "port", "endpoint", "api_key", "token",
+        ] {
             assert!(
                 !debug.to_ascii_lowercase().contains(forbidden),
                 "fallback leaked {forbidden}"

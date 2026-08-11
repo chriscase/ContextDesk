@@ -120,6 +120,68 @@ MUTATIONS = [
         replacement="        if let Err(e) = Ok::<(), std::io::Error>(()) {\n",
         test_filter="legacy_cleanup_failure_surfaces_and_blocks_attach",
     ),
+    # --- host-grounded fast triage -----------------------------------------
+    # Each of these removes exactly one promise the route makes, so a survivor
+    # would mean the promise is documented but not enforced.
+    Mutation(
+        name="fast_triage_validator_bypass",
+        file="crates/cd-core/src/fast_triage/validate.rs",
+        needle="""    if categories.is_empty() {
+        FastTriageValidation::Accepted(Box::new(envelope))
+    } else {
+        FastTriageValidation::Rejected(categories.into_iter().collect())
+    }
+""",
+        replacement="    FastTriageValidation::Accepted(Box::new(envelope))\n",
+        test_filter="each_recorded_causal_failure_is_caught_with_its_own_category",
+    ),
+    Mutation(
+        name="fast_triage_second_correction",
+        file="crates/cd-core/src/fast_triage/route.rs",
+        needle="        self.max_corrections.min(FAST_TRIAGE_MAX_CORRECTIONS)\n",
+        replacement="        self.max_corrections\n",
+        test_filter="the_correction_is_bounded_at_one_however_config_is_set",
+    ),
+    Mutation(
+        name="fast_triage_escalation_evidence_mutation",
+        file="crates/cd-core/src/fast_triage/route.rs",
+        needle="""    let escalation_messages = fast_triage_messages(
+        inputs.user_text,
+        packet,
+        &evidence_block,
+        categories.first().copied(),
+    );
+""",
+        replacement="""    let escalation_messages = fast_triage_messages(
+        inputs.user_text,
+        packet,
+        &fast_triage_evidence_block(packet),
+        categories.first().copied(),
+    );
+""",
+        test_filter="an_authorized_escalation_succeeds_with_a_byte_identical_packet",
+    ),
+    Mutation(
+        name="fast_triage_silent_gateway_switch",
+        file="crates/cd-core/src/fast_triage/route.rs",
+        needle="        (Some(fallback), Some(backend)) if fallback.authorized => Some((fallback, backend)),\n",
+        replacement="        (Some(fallback), Some(backend)) => Some((fallback, backend)),\n",
+        test_filter="an_unauthorized_fallback_is_never_called",
+    ),
+    Mutation(
+        name="fast_triage_reasoning_into_visible_answer",
+        file="crates/cd-core/src/fast_triage/terminal.rs",
+        needle="        let (reasoning, visible) = split_complete_reasoning_prefix(raw);\n",
+        replacement="        let (reasoning, visible) = (String::new(), raw.trim().to_string());\n",
+        test_filter="a_reasoning_only_terminal_is_empty_not_a_pass",
+    ),
+    Mutation(
+        name="fast_triage_reasoning_into_debug_projection",
+        file="crates/cd-core/src/fast_triage/terminal.rs",
+        needle="            .field(\"reasoning_chars\", &self.reasoning.chars().count())\n",
+        replacement="            .field(\"reasoning_chars\", &self.reasoning)\n",
+        test_filter="reasoning_stays_in_its_own_channel_and_never_becomes_visible",
+    ),
 ]
 
 

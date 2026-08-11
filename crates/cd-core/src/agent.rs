@@ -1524,10 +1524,7 @@ fn fast_triage_packet(
     binding: crate::investigation_answer::AnswerBindingV1,
     clock: crate::fast_triage::FastTriageClockCompatibility,
     neighborhood: crate::fast_triage::FastTriageNeighborhoodBudget,
-) -> Result<
-    crate::fast_triage::FastTriagePacketV1,
-    crate::investigation_answer::ValidationError,
-> {
+) -> Result<crate::fast_triage::FastTriagePacketV1, crate::investigation_answer::ValidationError> {
     use crate::investigation_answer::{EvidenceRole, HostEvidenceEntry, HostEvidenceLedger};
 
     let mut evidence = Vec::new();
@@ -1597,7 +1594,9 @@ fn fast_triage_packet(
 #[derive(Debug)]
 enum FastTriageSeamOutcome {
     /// The route did not run. The caller continues with its established path.
-    NotEntered { reason: &'static str },
+    NotEntered {
+        reason: &'static str,
+    },
     /// A host-validated typed answer.
     Verified {
         content: String,
@@ -1614,17 +1613,26 @@ enum FastTriageSeamOutcome {
     ProviderFailed(Box<CoreError>),
 }
 
+/// The turn-owned evidence this seam needs, kept together so the seam's own
+/// signature stays readable.
+struct FastTriageSeamInputs<'a> {
+    user_text: &'a str,
+    /// The deterministic brief this turn already built. Nothing is re-retrieved.
+    brief: &'a crate::tool_host::BroadLogTriageBrief,
+    /// This turn's answer binding, before the ledger digest is computed.
+    binding: crate::investigation_answer::AnswerBindingV1,
+    /// Whole-turn wall-clock ceiling.
+    deadline_ms: u64,
+}
+
 /// Drive one fast-triage route from the deterministic brief this turn already
 /// built. Provider work, deadlines, cancellation, and stage events all reuse the
 /// shared agent seams — there is no second client and no second loop.
 async fn run_fast_triage_seam(
     backend: &dyn ChatBackend,
-    user_text: &str,
     opts: &AgentOptions,
     runtime: &FastTriageRuntime,
-    brief: &crate::tool_host::BroadLogTriageBrief,
-    binding: crate::investigation_answer::AnswerBindingV1,
-    deadline_ms: u64,
+    inputs: FastTriageSeamInputs<'_>,
     on_event: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> CoreResult<FastTriageSeamOutcome> {
     use crate::fast_triage::{
@@ -1632,6 +1640,12 @@ async fn run_fast_triage_seam(
         FastTriageInputs, FastTriageRouteOutcome,
     };
 
+    let FastTriageSeamInputs {
+        user_text,
+        brief,
+        binding,
+        deadline_ms,
+    } = inputs;
     let packet = match fast_triage_packet(
         &brief.candidate_groups,
         brief.comparison_context.as_ref(),
@@ -1674,9 +1688,7 @@ async fn run_fast_triage_seam(
             on_event(StreamEvent::MultiModelStage {
                 stage: event.stage.as_str().into(),
                 phase: if event.started { "started" } else { "finished" }.into(),
-                status: event
-                    .outcome
-                    .map(|outcome| outcome.as_str().to_string()),
+                status: event.outcome.map(|outcome| outcome.as_str().to_string()),
                 detail: event.detail,
                 candidate_id: None,
             });
@@ -4974,12 +4986,14 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     if let Some(runtime) = opts.fast_triage.clone() {
                         match run_fast_triage_seam(
                             backend,
-                            user_text,
                             opts,
                             &runtime,
-                            &brief,
-                            multi_stage_binding.clone(),
-                            deadline_plan.total_ms,
+                            FastTriageSeamInputs {
+                                user_text,
+                                brief: &brief,
+                                binding: multi_stage_binding.clone(),
+                                deadline_ms: deadline_plan.total_ms,
+                            },
                             &mut |event| out.push(event),
                         )
                         .await?
