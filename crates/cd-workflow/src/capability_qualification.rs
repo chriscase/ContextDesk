@@ -391,7 +391,13 @@ impl LiveQualificationTransport {
 
         if req.stream {
             let result = client
-                .complete_stream_cb(&messages, tools, |_| {}, Some(cancel))
+                .complete_stream_cb_with_mode(
+                    &messages,
+                    tools,
+                    &req.chat_mode,
+                    |_| {},
+                    Some(cancel),
+                )
                 .await;
             match result {
                 Ok(comp) => Ok(Self::map_completion(
@@ -416,10 +422,12 @@ impl LiveQualificationTransport {
                 }
             }
         } else {
-            let mut body_tools = tools;
-            // Structured output: still chat; host only checks JSON shape of content.
-            let _ = req.expect_json_object;
-            match client.complete(&messages, body_tools.take()).await {
+            // Honor typed chat mode (response_format / forced tool). Never discard;
+            // never silent mid-turn downgrade when the gateway rejects the mode.
+            match client
+                .complete_with_mode(&messages, tools, &req.chat_mode)
+                .await
+            {
                 Ok(comp) => Ok(Self::map_completion(
                     comp.content,
                     comp.tool_calls,
@@ -1108,7 +1116,7 @@ mod tests {
     fn schema_version_present() {
         assert_eq!(
             QUALIFICATION_SCHEMA_VERSION,
-            "contextdesk.capability_qualification.v1"
+            "contextdesk.capability_qualification.v2"
         );
     }
 

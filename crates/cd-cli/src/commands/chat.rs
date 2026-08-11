@@ -959,6 +959,7 @@ mod reviewer_qualification_tests {
                     elapsed_ms: 1,
                     tested_at: 1,
                     reason: "pass".into(),
+                    request_mode: None,
                 },
                 CapabilityCheckResult {
                     kind: CapabilityKind::StructuredOutput,
@@ -966,6 +967,7 @@ mod reviewer_qualification_tests {
                     elapsed_ms: 1,
                     tested_at: 1,
                     reason: "pass".into(),
+                    request_mode: Some("json_object".into()),
                 },
             ],
             role_hint: "chat".into(),

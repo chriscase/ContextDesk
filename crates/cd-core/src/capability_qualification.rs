@@ -11,6 +11,9 @@
 use crate::config::AppConfig;
 use crate::error::{CoreError, CoreResult};
 use crate::model_role_hints::{classify_model_role, ModelRoleHint};
+use crate::openai_chat_contract::{
+    parse_structured_json_from_content, OpenAiChatRequestMode, OpenAiMessageChannels,
+};
 use crate::probe::normalize_gateway_input;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,7 +24,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Probe / result schema version (bump when probe contracts change).
-pub const QUALIFICATION_SCHEMA_VERSION: &str = "contextdesk.capability_qualification.v1";
+///
+/// v2: structured-output probes request a typed OpenAI chat mode
+/// (`response_format` / forced tool) and record `request_mode` on each check.
+/// Prior v1 evidence is treated as stale via key mismatch.
+pub const QUALIFICATION_SCHEMA_VERSION: &str = "contextdesk.capability_qualification.v2";
 
 /// On-disk wrapper schema for the secret-free qualification evidence store.
 pub const QUALIFICATION_STORE_SCHEMA_VERSION: u32 = 1;
@@ -273,6 +280,13 @@ pub struct CapabilityCheckResult {
     pub tested_at: i64,
     /// Secret-free human reason.
     pub reason: String,
+    /// Typed OpenAI chat request mode measured for this check (when applicable).
+    ///
+    /// Evidence is keyed by profile/endpoint/model/schema; the mode is recorded
+    /// on the check so a `json_object` pass cannot be confused with a plain-chat
+    /// coincidence. Absent for non-chat probes (embed/rerank).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_mode: Option<String>,
 }
 
 /// Cache / report identity (no raw secrets; endpoint is fingerprinted).
@@ -998,8 +1012,11 @@ pub struct SyntheticChatRequest {
     pub tools: Vec<InertToolSpec>,
     /// Whether the transport should stream tokens.
     pub stream: bool,
-    /// Whether the transport should request JSON-object structured output.
-    pub expect_json_object: bool,
+    /// Typed OpenAI-compatible request mode for this probe turn.
+    ///
+    /// Live OpenAI-compatible transport must honor this (emit `response_format`
+    /// / forced `tool_choice`). Never discarded. No silent mid-turn downgrade.
+    pub chat_mode: OpenAiChatRequestMode,
 }
 
 /// Chat message for probes.
@@ -1199,12 +1216,23 @@ fn check(
     start: std::time::Instant,
     reason: impl Into<String>,
 ) -> CapabilityCheckResult {
+    check_with_mode(kind, status, start, reason, None)
+}
+
+fn check_with_mode(
+    kind: CapabilityKind,
+    status: CapabilityStatus,
+    start: std::time::Instant,
+    reason: impl Into<String>,
+    request_mode: Option<&str>,
+) -> CapabilityCheckResult {
     CapabilityCheckResult {
         kind,
         status,
         elapsed_ms: elapsed_ms(start),
         tested_at: now_secs(),
         reason: redact_reason(&reason.into()),
+        request_mode: request_mode.map(str::to_string),
     }
 }
 
@@ -1320,7 +1348,7 @@ fn probe_basic_generation(
         }],
         tools: vec![],
         stream: false,
-        expect_json_object: false,
+        chat_mode: OpenAiChatRequestMode::Plain,
     };
     if let Err(e) = assert_outbound_clean(&req.messages[0].content) {
         return check(
@@ -1388,7 +1416,7 @@ fn probe_native_tool_call(
         }],
         tools: inert_probe_tools(),
         stream: false,
-        expect_json_object: false,
+        chat_mode: OpenAiChatRequestMode::Plain,
     };
     let _ = assert_outbound_clean(&req.messages[0].content);
     match transport.chat_complete(&req, cancel) {
@@ -1502,7 +1530,7 @@ fn probe_tool_result_continuation(
         ],
         tools: inert_probe_tools(),
         stream: false,
-        expect_json_object: false,
+        chat_mode: OpenAiChatRequestMode::Plain,
     };
     match transport.chat_complete(&req, cancel) {
         Ok(resp) if resp.cancelled || cancel.load(Ordering::SeqCst) => check(
@@ -1543,7 +1571,11 @@ fn probe_structured_output(
     key: &QualificationKey,
     cancel: &AtomicBool,
 ) -> CapabilityCheckResult {
+    // Measured ladder step: request json_object mode explicitly. Do not pass
+    // from model name, and do not silently downgrade to plain chat mid-turn.
     let start = std::time::Instant::now();
+    let mode = OpenAiChatRequestMode::JsonObject;
+    let mode_id = mode.evidence_id();
     let req = SyntheticChatRequest {
         model_id: key.model_id.clone(),
         messages: vec![SyntheticMessage {
@@ -1554,49 +1586,69 @@ fn probe_structured_output(
         }],
         tools: vec![],
         stream: false,
-        expect_json_object: true,
+        chat_mode: mode,
     };
     match transport.chat_complete(&req, cancel) {
-        Ok(resp) if resp.cancelled || cancel.load(Ordering::SeqCst) => check(
+        Ok(resp) if resp.cancelled || cancel.load(Ordering::SeqCst) => check_with_mode(
             CapabilityKind::StructuredOutput,
             CapabilityStatus::Untested,
             start,
             "cancelled",
+            Some(mode_id),
         ),
-        Ok(resp) if resp.raw_error.is_some() => check(
+        Ok(resp) if resp.raw_error.is_some() => check_with_mode(
             CapabilityKind::StructuredOutput,
             CapabilityStatus::Fail,
             start,
-            resp.raw_error.unwrap_or_default(),
+            format!("mode={mode_id}: {}", resp.raw_error.unwrap_or_default()),
+            Some(mode_id),
         ),
         Ok(resp) => {
-            let parsed = serde_json::from_str::<serde_json::Value>(resp.content.trim());
-            match parsed {
-                Ok(v) if v.get("qualify").and_then(|x| x.as_str()) == Some("ok") => check(
-                    CapabilityKind::StructuredOutput,
-                    CapabilityStatus::Pass,
-                    start,
-                    "valid synthetic JSON object",
-                ),
-                Ok(_) => check(
+            // Content channel only — reasoning-only JSON is not success.
+            let channels = OpenAiMessageChannels {
+                content: resp.content.clone(),
+                reasoning_content: String::new(),
+            };
+            match parse_structured_json_from_content(&channels) {
+                Ok(v) if v.get("qualify").and_then(|x| x.as_str()) == Some("ok") => {
+                    check_with_mode(
+                        CapabilityKind::StructuredOutput,
+                        CapabilityStatus::Pass,
+                        start,
+                        format!("valid synthetic JSON object via mode={mode_id}"),
+                        Some(mode_id),
+                    )
+                }
+                Ok(_) => check_with_mode(
                     CapabilityKind::StructuredOutput,
                     CapabilityStatus::Degraded,
                     start,
-                    "JSON object missing expected fields",
+                    format!("JSON object missing expected fields via mode={mode_id}"),
+                    Some(mode_id),
                 ),
-                Err(_) => check(
+                Err(reason) if reason == "reasoning_channel_only_not_success" => check_with_mode(
                     CapabilityKind::StructuredOutput,
                     CapabilityStatus::Fail,
                     start,
-                    "response is not a JSON object",
+                    format!("mode={mode_id}: reasoning channel is not structured success"),
+                    Some(mode_id),
+                ),
+                Err(reason) => check_with_mode(
+                    CapabilityKind::StructuredOutput,
+                    CapabilityStatus::Fail,
+                    start,
+                    format!("mode={mode_id}: {reason}"),
+                    Some(mode_id),
                 ),
             }
         }
-        Err(e) => check(
+        Err(e) => check_with_mode(
             CapabilityKind::StructuredOutput,
             CapabilityStatus::Fail,
             start,
-            e.reason,
+            // Fail closed with the measured mode; never retry as plain here.
+            format!("mode={mode_id}: {}", e.reason),
+            Some(mode_id),
         ),
     }
 }
@@ -1617,7 +1669,7 @@ fn probe_streaming(
         }],
         tools: vec![],
         stream: true,
-        expect_json_object: false,
+        chat_mode: OpenAiChatRequestMode::Plain,
     };
     match transport.chat_complete(&req, cancel) {
         Ok(resp) if resp.cancelled || cancel.load(Ordering::SeqCst) => check(
@@ -1681,7 +1733,7 @@ fn probe_cancellation(
         }],
         tools: vec![],
         stream: true,
-        expect_json_object: false,
+        chat_mode: OpenAiChatRequestMode::Plain,
     };
     match transport.chat_complete(&req, &probe_cancel) {
         Ok(resp) if resp.cancelled => check(
@@ -1923,6 +1975,7 @@ mod tests {
                     elapsed_ms: 1,
                     tested_at: 100,
                     reason: "synthetic test result".into(),
+                    request_mode: None,
                 })
                 .collect(),
             role_hint: role_hint.into(),
@@ -2953,13 +3006,20 @@ mod tests {
             report.status_of(CapabilityKind::StructuredOutput),
             CapabilityStatus::Fail
         );
-        assert!(report
+        let structured = report
             .checks
             .iter()
             .find(|c| c.kind == CapabilityKind::StructuredOutput)
-            .unwrap()
-            .reason
-            .contains("not a JSON"));
+            .unwrap();
+        // v2 reasons name the measured mode and the content-channel parse error.
+        assert!(
+            structured.reason.contains("content_not_json")
+                || structured.reason.contains("not a JSON")
+                || structured.reason.contains("mode=json_object"),
+            "unexpected structured fail reason: {}",
+            structured.reason
+        );
+        assert_eq!(structured.request_mode.as_deref(), Some("json_object"));
     }
 
     #[test]
