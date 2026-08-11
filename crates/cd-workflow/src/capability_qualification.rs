@@ -13,6 +13,7 @@ use cd_core::capability_qualification::{
     QualificationKey, QualificationReport, QualificationStore, QualificationTransport,
     SyntheticChatRequest, SyntheticChatResponse, SyntheticEmbeddingResponse, SyntheticMessage,
     SyntheticRerankResponse, SyntheticToolCall, TransportError, INERT_PROBE_TOOL_NAME,
+    QUALIFY_TOOL_TOKEN,
 };
 use cd_core::chat::{
     ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role as ChatRole, ToolCallMsg,
@@ -1284,8 +1285,12 @@ mod tests {
 
     #[test]
     fn execute_inert_has_no_filesystem_side_effects() {
-        let r = execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"abc"}"#).unwrap();
-        assert!(r.contains("abc"));
+        let r = execute_inert_probe_tool(
+            INERT_PROBE_TOOL_NAME,
+            &format!(r#"{{"token":"{QUALIFY_TOOL_TOKEN}"}}"#),
+        )
+        .unwrap();
+        assert!(r.contains(QUALIFY_TOOL_TOKEN));
         assert!(execute_inert_probe_tool("rm", "{}").is_err());
         assert!(execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"../etc"}"#).is_err());
     }
