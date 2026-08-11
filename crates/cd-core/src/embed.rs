@@ -876,6 +876,14 @@ impl EmbedBackend for OpenAiCompatibleEmbedBackend {
     fn identity(&self) -> String {
         self.model.clone()
     }
+
+    fn space(&self) -> EmbeddingSpaceIdentity {
+        EmbeddingSpaceIdentity::new(
+            crate::capability_qualification::fingerprint_endpoint(self.endpoint.as_str()),
+            self.model.clone(),
+            "openai_embeddings",
+        )
+    }
 }
 
 /// Local Ollama embeddings backend (network; opt-in only).

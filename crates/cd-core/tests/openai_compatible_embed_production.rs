@@ -63,6 +63,13 @@ async fn batch_embeddings_preserve_order_with_permuted_indexes() {
     assert_eq!(body["model"], "bge-m3");
     assert_eq!(body["input"].as_array().unwrap().len(), 3);
     assert_eq!(backend.identity(), "bge-m3");
+    let space = backend.space();
+    assert_eq!(space.model, "bge-m3");
+    assert_eq!(space.dialect, "openai_embeddings");
+    assert_eq!(
+        space.endpoint_fingerprint,
+        cd_core::capability_qualification::fingerprint_endpoint(backend.endpoint_url())
+    );
 }
 
 #[tokio::test]
