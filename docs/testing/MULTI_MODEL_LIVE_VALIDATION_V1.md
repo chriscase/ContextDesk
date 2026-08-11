@@ -117,3 +117,25 @@ is required.
 Employer gateways remain a separate acceptance step. They require an explicit
 owner-authorized profile and endpoint, use only synthetic or owner-approved
 data, and must not inherit Vercel model or usefulness evidence.
+
+## Integrated wire-contract evidence
+
+The current integration head is `96cfbd7d68ff0e4fa460b2b05576be01d6f1d5ab`.
+It includes the dialect-honest OpenAI-compatible chat qualification ladder,
+the production OpenAI-compatible embedding adapter, and explicit TEI/Cohere
+reranking with shared fail-closed parsers. The hermetic evidence at this head
+includes:
+
+- chat contract v4: 18 focused contract tests plus 5 qualification-wire tests;
+- production embedding: 7 adapter tests;
+- production reranking: 4 dialect tests and 12 real-wire tests;
+- production retrieval path: 5 factory/ablation/share-safe tests;
+- existing gateway diagnostic contract: 17 CLI tests;
+- exact-head release gate: `FULL_GATE_PASS` with embedded-SHA identity,
+  cancellation, activity/trace parity, grounded two-turn flow, and recovery.
+
+These tests are derived from observed gateway shapes but remain provider-neutral:
+they prove request/response contracts and host behavior, not that a model is
+universally compatible or useful. Any future live observation should be
+promoted through the capture rules above and added to the smallest relevant
+hermetic wire or quality suite.
