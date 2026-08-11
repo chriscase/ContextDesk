@@ -31,9 +31,12 @@
 //!   presentation boundary ([`crate::investigation_answer::literal_span`]).
 
 pub mod contracts;
+/// Provider-neutral contribution proposals and deterministic reconciliation.
+pub mod contributions;
 pub mod pipeline;
 
 pub use contracts::*;
+pub use contributions::*;
 pub use pipeline::*;
 
 use serde::{Deserialize, Serialize};

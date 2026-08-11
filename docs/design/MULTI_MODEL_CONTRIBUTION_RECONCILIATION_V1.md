@@ -1,0 +1,142 @@
+# Multi-model contribution and reconciliation v1
+
+Status: pure contract and evaluation seam; opt-in runtime routing is not yet
+enabled.
+
+This design is the next phase after the single-model and reviewer-first release
+work. It makes several inexpensive models useful without making any model a
+hard dependency and without moving evidence authority out of ContextDesk.
+
+## Product rule
+
+Models contribute bounded interpretations. The host owns the corpus, packet,
+candidate identities, evidence identities, chronology, roles, citations, scope,
+budgets, and final answer. A model cannot mint evidence, establish an
+initiating cause, promote a symptom, pull independent chronology into a chain,
+or silently switch providers.
+
+The minimum answer remains useful when every model is unavailable: a host-built
+timeline, candidate groups, structural relationships, canonical evidence ids,
+known symptoms, and `root_cause_established=false`.
+
+## Contract
+
+`cd_core::multi_model::contributions` defines the provider-neutral schema
+`contextdesk.multi_model.contribution.v1`.
+
+The host assigns one of these roles to each bounded call:
+
+| Role | May propose | May not do |
+| --- | --- | --- |
+| `observation_extractor` | host-grounded observations | propose causal roles |
+| `causal_proposer` | symptoms, causal candidates, competing explanations | establish an initiating cause |
+| `contradiction_checker` | contradictions between distinct host candidates | change evidence or merge candidates |
+| `evidence_gap` | missing-evidence reports | cite evidence that is not present |
+| `reviewer` | the union of the above bounded proposals | override host validation |
+
+Every proposal must echo the exact host `packet_id`. The host rejects unknown
+or cross-candidate ids, independent-timeline evidence in causal proposals,
+host-labelled symptoms used as causes, stale packets, wrong-role sections,
+duplicate/unsafe model labels, and malformed JSON. `initiating_cause` is absent
+from the contribution schema by construction.
+
+Agreement is calculated from normalized tuples of
+`(candidate_id, claim_kind, sorted_evidence_ids)`. Model prose and model claim
+labels do not affect agreement. This prevents vocabulary differences or output
+ordering from changing the result.
+
+## Deterministic reconciliation
+
+`reconcile_contributions` records every attempt's availability state and then
+produces a `ReconciliationReportV1`:
+
+- `supported`: non-root proposals have complete observation/causal coverage
+  and no deterministic conflict;
+- `contested`: competing causal readings or an explicit contradiction report;
+- `insufficient_evidence`: some bounded contributions completed but a required
+  role was missing or abstained;
+- `abstained`: all usable contributors explicitly abstained;
+- `escalation_recommended`: a bounded reviewer/escalation may help, never an
+  automatic retry or provider switch;
+- `unavailable`: attempts existed but none completed;
+- `deterministic_baseline`: no model was attempted, so the host floor is used.
+
+The report always includes `root_cause_established=false`. Only the existing
+host answer validator can establish a root cause from host `Cause` provenance.
+
+## Bounded routing policy (future integration)
+
+`ContributionRoutingPolicy` and `ContributionRoutingPlan` are the pure host
+guard before workflow integration. They cap contributors, parallelism, rounds,
+and context, while allowing duplicate role slots for independent models.
+
+1. Build exactly one immutable `FastTriagePacketV1` and record its identity.
+2. Run a small, explicitly selected set of qualified roles in parallel when
+   the user permits it; otherwise run them sequentially.
+3. Give each role one bounded call, with the existing whole-turn deadline,
+   context budget, cancellation flag, and no hidden retry loop.
+4. Validate each response locally. A failed response becomes an explicit
+   `Malformed`, `TimedOut`, `Cancelled`, `Failed`, or `Unavailable` attempt.
+5. Reconcile normalized claims and host contradictions. If contested or
+   incomplete, optionally run one qualified reviewer against the *same packet*.
+6. Feed only host-validated, bounded material into the existing synthesis and
+   final answer validator. If no valid synthesis exists, present the baseline.
+
+This is additive: `MultiModelMode::Single` and the existing reviewer-first path
+remain the default and are not changed by this pure module.
+
+## Privacy and telemetry
+
+Activity output should expose role, stage, bounded counts, availability,
+deadline, and reconciliation state. Share-safe reports may include packet and
+model fingerprints, evidence counts, dimensions, and failure categories. They
+must not include credentials, authorization headers, endpoints, private paths,
+or raw provider bodies. Owner-local detail views can render model text through
+the existing literal presentation boundary.
+
+## Evidence and testing
+
+The module contains hermetic tests for:
+
+- exact packet binding and stale packet rejection;
+- root-cause, symptom-promotion, independent-noise, foreign-id, cross-scope,
+  and unsafe-label rejection;
+- explicit unavailable, timeout, cancellation, and abstention states;
+- partial role dropout and escalation recommendation;
+- agreement independent of model wording, labels, and output order;
+- contradiction-checker reports and contested outcomes;
+- deterministic baseline contents and root-cause ceiling;
+- deterministic permutation invariance.
+
+The existing `multi_model_pipeline` and
+`cheap_model_fast_triage_benchmark` suites remain the regression gates for the
+reviewer-first runtime and role-decomposition benchmark. Mutation targets for
+the next integration step are: accepting an initiating-cause kind, accepting a
+foreign id, treating a completed abstainer as role coverage, dropping an
+unavailable contributor, and making model text part of agreement. Each must
+fail closed when inverted.
+
+## Current model evidence
+
+The current Vercel observations are evidence for routing policy, not universal
+compatibility claims:
+
+- DeepSeek V4 Flash completed the product linked-log triage path and produced a
+  useful result, but direct capability checks remained limited.
+- GPT-OSS 120B completed the product path quickly, but its typed scorer found
+  symptom-separation failure (initiating causes were asserted without a
+  downstream symptom section).
+
+Those observations support a bounded role decomposition and deterministic
+reconciliation. They do not justify a readiness badge or a hard-coded model
+preference. See `docs/benchmarks/VERCEL_MODEL_COMPARISON_D39688C7.md` and the
+two model-specific diagnostic reports for the exact synthetic-run evidence.
+
+## Follow-up acceptance plan
+
+After the pure contract and regression gates are green, add opt-in routing and
+activity/CLI/GUI presentation. Then run the provider-neutral gateway diagnostic
+against one selected catalog model at a time. Acceptance should compare
+deterministic-only, bounded multi-model, and single/reviewer outputs on the same
+host packet, with no employer gateway call until the owner explicitly authorizes
+it.
