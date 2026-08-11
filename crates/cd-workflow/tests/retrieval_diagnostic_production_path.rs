@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use cd_core::config::{AppConfig, RetrievalRoleModel};
+use cd_core::embed::EmbedBackend;
 use cd_core::error::{CoreError, CoreResult};
 use cd_core::index::KeywordIndex;
 use cd_core::keychain_store::{file_secret_ref, ReferencedSecretStore, SecretStore};
@@ -825,4 +826,74 @@ async fn measuring_never_writes_configuration_or_corpus_state() {
         leftovers.is_empty(),
         "leftover staging files: {leftovers:?}"
     );
+}
+
+/// `ToolHost::log_embed_backend` falls back to the SHARED host embedder when
+/// the log-specific slot is empty. A keyword lane that only cleared the log
+/// slot would silently inherit semantic retrieval from a host the caller
+/// configured for other reasons — and the "keyword baseline" column would be
+/// measuring a lane that does not exist.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_keyword_lane_never_borrows_a_shared_embedder_from_the_host() {
+    let fixture = fixture().await;
+
+    let counting = Arc::new(CountingEmbed {
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let calls = Arc::clone(&counting.calls);
+
+    let request = DiagnosticRequest {
+        corpus_id: fixture.corpus_id.clone(),
+        queries: vec![query()],
+        budgets: DiagnosticBudgets::default(),
+        // Only the keyword lanes, so ANY embedding call is a leak.
+        lanes: vec![
+            DiagnosticLane::KeywordBaseline,
+            DiagnosticLane::KeywordBaselineRerank,
+        ],
+        egress_acknowledged: false,
+    };
+    let cache_root = fixture.cache_root.clone();
+    let report = run_diagnostic(
+        &fixture.cache_root,
+        &request,
+        &fixture.config,
+        Some(&fixture.secrets),
+        move |_lane| {
+            // A host that ALREADY carries a shared embedder, exactly as a host
+            // configured for ambient memory recall would.
+            let mut host = tool_host(&cache_root)?;
+            host.set_embed_backend(Some(Arc::clone(&counting) as Arc<dyn EmbedBackend>));
+            Ok(host)
+        },
+        None,
+    )
+    .await
+    .expect("keyword lanes run");
+
+    for lane in &report.lanes {
+        assert_ne!(lane.status, LaneStatus::Blocked, "lane {}", lane.lane);
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a keyword lane must never reach an embedder, shared or otherwise"
+    );
+}
+
+/// Counts embedding calls; used to prove a keyword lane makes none.
+struct CountingEmbed {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl cd_core::embed::EmbedBackend for CountingEmbed {
+    async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+    }
+
+    fn identity(&self) -> String {
+        "counting-embed (deterministic synthetic; tests only, not a capability)".into()
+    }
 }

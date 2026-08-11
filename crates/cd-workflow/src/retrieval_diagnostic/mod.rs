@@ -1125,6 +1125,13 @@ pub async fn run_diagnostic(
         }
         let mut host = host_for_lane(*lane)?;
         // Attach only what this lane is entitled to.
+        //
+        // Both slots are cleared for a keyword lane, not just the log-specific
+        // one: `ToolHost::log_embed_backend` falls back to the SHARED host
+        // embedder when the log slot is empty, so clearing one alone would let
+        // a keyword baseline silently borrow semantic retrieval from a host the
+        // caller happened to configure — and the whole comparison would be
+        // measuring a lane that does not exist.
         if lane.uses_embedder() {
             if let (Some(backend), Some(role)) =
                 (&embed, enabled_role(config.retrieval.embedding.as_ref()))
@@ -1133,6 +1140,7 @@ pub async fn run_diagnostic(
             }
         } else {
             host.set_log_embed_backend(None, "");
+            host.set_embed_backend(None);
         }
         host.set_log_rerank_backend(if lane.uses_reranker() {
             rerank.as_ref().map(Arc::clone)
