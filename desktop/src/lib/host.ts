@@ -1321,6 +1321,14 @@ export type CapabilityCheckDto = {
   elapsed_ms: number;
   tested_at: number;
   reason: string;
+  /** Exact request-mode identity (plain, prompted_json, json_object, …). */
+  request_mode?: string | null;
+  /** Backend dialect (openai_compatible, ollama, anthropic). */
+  dialect?: string | null;
+  /** Schema strictness when a json_schema probe was measured. */
+  schema_strict?: boolean | null;
+  /** Schema probe name identity — never a schema body. */
+  schema_probe_id?: string | null;
 };
 
 export type ContractVerdict =
@@ -1332,8 +1340,14 @@ export type ContractVerdict =
 /** Shared provider-neutral execution projection from the Rust host. */
 export type CapabilityContractProjection = {
   host_grounded_generation: ContractVerdict;
+  /** Prompted JSON over plain chat (production reviewer path). */
   validated_structured_proposal: ContractVerdict;
+  /** Native OpenAI json_object — never authorized by prompted JSON. */
+  native_json_object?: ContractVerdict;
+  native_json_schema?: ContractVerdict;
+  native_json_schema_strict?: ContractVerdict;
   native_tool_loop: ContractVerdict;
+  forced_tool_loop?: ContractVerdict;
 };
 
 export type QualificationReportDto = {

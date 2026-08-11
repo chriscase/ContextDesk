@@ -242,6 +242,12 @@ export function CapabilityQualificationPanel({
                 <span className="cap-qual__kind">{kindLabel(c.kind)}</span>
                 <span className="cap-qual__meta">
                   {c.elapsed_ms}ms · {c.reason}
+                  {c.request_mode ? ` · mode=${c.request_mode}` : ""}
+                  {c.dialect ? ` · dialect=${c.dialect}` : ""}
+                  {c.schema_strict != null
+                    ? ` · strict=${c.schema_strict ? "true" : "false"}`
+                    : ""}
+                  {c.schema_probe_id ? ` · schema=${c.schema_probe_id}` : ""}
                 </span>
               </li>
             ))}
