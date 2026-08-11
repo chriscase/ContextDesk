@@ -108,6 +108,41 @@ workflow resolver reads the shared qualification store and uses the existing
 credential cache/provider builder, so unqualified or unauthorized roles are
 never contacted.
 
+A minimal configuration is explicit and intentionally boring; profile ids and
+model ids are copied from the local catalog/qualification output rather than
+guessed from names:
+
+```json
+{
+  "contributions": {
+    "enabled": true,
+    "roles": [
+      {
+        "role": "observation_extractor",
+        "profile_id": "vercel-live",
+        "model": "<exact-qualified-model-id>",
+        "require_qualified": true,
+        "allow_remote": true
+      },
+      {
+        "role": "causal_proposer",
+        "profile_id": "vercel-live",
+        "model": "<exact-qualified-model-id>",
+        "require_qualified": true,
+        "allow_remote": true
+      }
+    ]
+  }
+}
+```
+
+The placeholders are documentation only and must not be copied literally.
+Qualification evidence is keyed by the exact profile, endpoint fingerprint,
+provider kind, and model id. The desktop selector can enable or disable the
+route, while role assignments remain host configuration; selecting the route
+without assignments or current qualification visibly falls back to the
+deterministic floor.
+
 ## Privacy and telemetry
 
 Activity output should expose role, stage, bounded counts, availability,
