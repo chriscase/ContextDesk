@@ -751,7 +751,7 @@ async fn contribution_mode_projects_truthful_entry_degradation_in_activity() {
             "What problems do you see in these logs?",
         ])
         .output()
-        .expect("contribution dry run");
+        .expect("contribution turn");
     assert!(
         output.status.success(),
         "stderr={} stdout={}",
@@ -774,7 +774,7 @@ async fn contribution_mode_projects_truthful_entry_degradation_in_activity() {
         activity["events"]
             .as_array()
             .is_some_and(|events| !events.is_empty()),
-        "contribution dry run must still project shared activity: {activity}"
+        "contribution turn must still project shared activity: {activity}"
     );
 }
 
