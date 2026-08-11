@@ -38,7 +38,8 @@ function sampleReport(
     profile_id: "p1",
     endpoint_fingerprint: "abc",
     model_id: "gpt-4o",
-    schema_version: "contextdesk.capability_qualification.v1",
+    schema_version: "contextdesk.capability_qualification.v4",
+    transport_protocol: "openai_compatible",
     role_hint: "chat",
     cancelled: false,
     stale: false,
@@ -53,7 +54,11 @@ function sampleReport(
     contracts: {
       host_grounded_generation: "qualified",
       validated_structured_proposal: "qualified",
+      native_json_object: "inconclusive",
+      native_json_schema: "inconclusive",
+      native_json_schema_strict: "inconclusive",
       native_tool_loop: "unqualified",
+      forced_tool_loop: "inconclusive",
     },
     checks: [
       {
@@ -62,6 +67,8 @@ function sampleReport(
         elapsed_ms: 12,
         tested_at: 1,
         reason: "synthetic marker present",
+        request_mode: "plain",
+        dialect: "openai_compatible",
       },
       {
         kind: "native_tool_call",
@@ -69,6 +76,8 @@ function sampleReport(
         elapsed_ms: 5,
         tested_at: 1,
         reason: "no native tool call",
+        request_mode: "auto_tools",
+        dialect: "openai_compatible",
       },
     ],
     ...over,

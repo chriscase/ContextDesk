@@ -396,8 +396,13 @@ pub async fn run(
         profile_pseudonym: pseudonym(&format!("profile:{}", profile.id)),
         model_pseudonym: pseudonym(&format!("model:{model}")),
         role_hint: role_str(role),
-        endpoint_fingerprint: QualificationKey::new(&profile.id, &profile.base_url, &model)
-            .endpoint_fingerprint,
+        endpoint_fingerprint: QualificationKey::with_provider_kind(
+            &profile.id,
+            &profile.base_url,
+            &model,
+            profile.kind,
+        )
+        .endpoint_fingerprint,
         credentials_read: credentials.credentials_read,
         deadline_secs,
         requests_planned_max: plan.max_requests,
@@ -1094,7 +1099,12 @@ async fn run_shared_qualification(
         let mut transport =
             LiveQualificationTransport::new(backend, base_url, api_key, profile.local_only)
                 .with_extra_headers(extra_headers);
-        let key = QualificationKey::new(&profile.id, &profile.base_url, &model);
+        let key = QualificationKey::with_provider_kind(
+            &profile.id,
+            &profile.base_url,
+            &model,
+            profile.kind,
+        );
         let gate = gate_for_model(&profile, true, &model);
         let cancel = Arc::new(AtomicBool::new(false));
         run_qualification(key, gate, &mut transport, &cancel)

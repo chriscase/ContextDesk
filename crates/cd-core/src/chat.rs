@@ -1,6 +1,10 @@
 //! Chat provider clients (OpenAI-compatible, Ollama, Anthropic Messages).
 
 use crate::error::{CoreError, CoreResult};
+use crate::openai_chat_contract::{
+    build_openai_chat_request_body, extract_openai_message_channels, validate_mode_for_transmit,
+    validate_mode_response, OpenAiChatRequestMode,
+};
 use crate::ssrf::{build_pinned_client_for_url, SsrfPolicy, SystemResolver};
 use crate::tools::ToolSpec;
 use chrono::{DateTime, Utc};
@@ -737,23 +741,32 @@ impl OpenAiCompatibleClient {
         }
     }
 
-    /// Non-streaming chat completion.
+    /// Non-streaming chat completion (plain mode).
     pub async fn complete(
         &self,
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
     ) -> CoreResult<ChatCompletion> {
-        let mut body = json!({
-            "model": self.model,
-            "messages": messages,
-            "stream": false,
-        });
-        if let Some(specs) = tools {
-            if !specs.is_empty() {
-                body["tools"] = tools_to_openai(specs);
-                body["tool_choice"] = json!("auto");
-            }
+        self.complete_with_mode(messages, tools, &OpenAiChatRequestMode::Plain)
+            .await
+    }
+
+    /// Non-streaming chat completion with a typed request mode.
+    ///
+    /// Structured modes emit `response_format` / forced `tool_choice` via
+    /// [`crate::openai_chat_contract::build_openai_chat_request_body`]. There is
+    /// no silent mid-turn downgrade when a gateway rejects the mode.
+    pub async fn complete_with_mode(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+        mode: &OpenAiChatRequestMode,
+    ) -> CoreResult<ChatCompletion> {
+        // Fail closed before any network: forced tool / schema shape.
+        if let Err(reason) = validate_mode_for_transmit(mode, tools) {
+            return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
         }
+        let body = build_openai_chat_request_body(&self.model, messages, tools, false, mode);
         let resp = self
             .post_completion_with_429_retry(&body, "chat request", None)
             .await?;
@@ -773,6 +786,17 @@ impl OpenAiCompatibleClient {
             return Err(provider_http_error("chat", status, &text, 300));
         }
         let mut completion = parse_openai_completion(&text)?;
+        // Strongest safe response check for native modes only (Plain unchanged).
+        let tool_names: Vec<&str> = completion
+            .tool_calls
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
+        if let Err(reason) = validate_mode_response(mode, &completion.content, &tool_names) {
+            return Err(CoreError::Message(format!(
+                "invalid_response_for_mode:{reason}"
+            )));
+        }
         // Headers first, body second so JSON `id` / usage win over header ids.
         let mut tel = header_tel;
         tel.merge_from(&completion.telemetry);
@@ -789,17 +813,21 @@ impl OpenAiCompatibleClient {
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
     ) -> CoreResult<ChatCompletion> {
-        let mut body = json!({
-            "model": self.model,
-            "messages": messages,
-            "stream": true,
-        });
-        if let Some(specs) = tools {
-            if !specs.is_empty() {
-                body["tools"] = tools_to_openai(specs);
-                body["tool_choice"] = json!("auto");
-            }
+        self.complete_stream_with_mode(messages, tools, &OpenAiChatRequestMode::Plain)
+            .await
+    }
+
+    /// Streaming chat completion with a typed request mode.
+    pub async fn complete_stream_with_mode(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+        mode: &OpenAiChatRequestMode,
+    ) -> CoreResult<ChatCompletion> {
+        if let Err(reason) = validate_mode_for_transmit(mode, tools) {
+            return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
         }
+        let body = build_openai_chat_request_body(&self.model, messages, tools, true, mode);
         let resp = self
             .post_completion_with_429_retry(&body, "stream request", None)
             .await?;
@@ -842,6 +870,28 @@ impl OpenAiCompatibleClient {
         &self,
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
+        on_delta: F,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> CoreResult<ChatCompletion>
+    where
+        F: FnMut(StreamDelta),
+    {
+        self.complete_stream_cb_with_mode(
+            messages,
+            tools,
+            &OpenAiChatRequestMode::Plain,
+            on_delta,
+            cancel,
+        )
+        .await
+    }
+
+    /// Streaming chat with typed mode and per-delta callback.
+    pub async fn complete_stream_cb_with_mode<F>(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+        mode: &OpenAiChatRequestMode,
         mut on_delta: F,
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> CoreResult<ChatCompletion>
@@ -851,17 +901,10 @@ impl OpenAiCompatibleClient {
         use crate::sse::{BoundedBodyAccumulator, SseLineDecoder};
         use futures_util::StreamExt;
 
-        let mut body = json!({
-            "model": self.model,
-            "messages": messages,
-            "stream": true,
-        });
-        if let Some(specs) = tools {
-            if !specs.is_empty() {
-                body["tools"] = tools_to_openai(specs);
-                body["tool_choice"] = json!("auto");
-            }
+        if let Err(reason) = validate_mode_for_transmit(mode, tools) {
+            return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
         }
+        let body = build_openai_chat_request_body(&self.model, messages, tools, true, mode);
         let resp = self
             .post_completion_with_429_retry(&body, "stream request", cancel)
             .await?;
@@ -1052,6 +1095,11 @@ pub fn parse_openai_style_models_list(text: &str) -> CoreResult<Vec<String>> {
 }
 
 /// Parse OpenAI chat completion JSON (also used in tests with fixtures).
+///
+/// Reasoning channels (`reasoning_content` / `reasoning`) are never merged
+/// into [`ChatCompletion::content`]. Use
+/// [`crate::openai_chat_contract::extract_openai_message_channels`] when a
+/// caller must inspect the reasoning channel explicitly.
 pub fn parse_openai_completion(text: &str) -> CoreResult<ChatCompletion> {
     let v: Value = serde_json::from_str(text)?;
     let choice = v
@@ -1062,11 +1110,9 @@ pub fn parse_openai_completion(text: &str) -> CoreResult<ChatCompletion> {
     let message = choice
         .get("message")
         .ok_or_else(|| CoreError::Message("no message".into()))?;
-    let content = message
-        .get("content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
+    // Content channel only — reasoning must not leak into success text.
+    let channels = extract_openai_message_channels(message);
+    let content = channels.content;
     let finish = choice
         .get("finish_reason")
         .and_then(|f| f.as_str())

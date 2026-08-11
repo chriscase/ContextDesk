@@ -48,7 +48,12 @@ fn models_reports_persisted_verification_without_network_or_credentials() {
     let (cfg, profile) = configured_gateway();
     save_config(&data.path().join("config.json"), &cfg).unwrap();
 
-    let key = QualificationKey::new(&profile.id, &profile.base_url, &profile.chat_model);
+    let key = QualificationKey::with_provider_kind(
+        &profile.id,
+        &profile.base_url,
+        &profile.chat_model,
+        profile.kind,
+    );
     let checks = [
         CapabilityKind::BasicGeneration,
         CapabilityKind::NativeToolCall,
@@ -62,6 +67,10 @@ fn models_reports_persisted_verification_without_network_or_credentials() {
         elapsed_ms: 1,
         tested_at: 100,
         reason: "synthetic pass".into(),
+        request_mode: kind.expected_request_mode().map(str::to_string),
+        dialect: Some("openai_compatible".into()),
+        schema_strict: None,
+        schema_probe_id: None,
     })
     .collect();
     let mut store = QualificationStore::default();

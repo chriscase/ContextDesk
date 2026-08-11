@@ -5045,10 +5045,11 @@ async fn agent_turn(
             .iter()
             .find(|p| p.id == rev.profile_id)?;
         let model = rev.model.as_deref().unwrap_or(&prof.chat_model);
-        let key = cd_core::capability_qualification::QualificationKey::new(
+        let key = cd_core::capability_qualification::QualificationKey::with_provider_kind(
             &prof.id,
             &prof.base_url,
             model,
+            prof.kind,
         );
         let store = state.qualification_store.lock().ok()?;
         let report = store.get(&key)?;
@@ -7320,7 +7321,7 @@ fn get_capability_qualification(
 ) -> Result<Option<capability_qualification_host::QualificationReportDto>, String> {
     let (profile, model) = resolve_qualification_identity_target(&state, &req)?;
     let key =
-        capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
+        capability_qualification_host::qualification_key_for_profile(&profile, &model);
     let cfg = state.config.lock().expect("config").clone();
     let tools_for_model = model_tools_enabled(&cfg, &profile, &model);
     let gate = capability_qualification_host::gate_for_model(&profile, tools_for_model, &model);
@@ -7346,7 +7347,7 @@ async fn start_capability_qualification(
     let tools_for_model = model_tools_enabled(&cfg, &profile, &model);
     let gate = capability_qualification_host::gate_for_model(&profile, tools_for_model, &model);
     let key =
-        capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
+        capability_qualification_host::qualification_key_for_profile(&profile, &model);
 
     // Single-flight cancel flag (one qualification at a time).
     let cancel = {
@@ -7438,7 +7439,7 @@ fn clear_capability_qualification(
 ) -> Result<bool, String> {
     let (profile, model) = resolve_qualification_identity_target(&state, &req)?;
     let key =
-        capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
+        capability_qualification_host::qualification_key_for_profile(&profile, &model);
     let mut store = state
         .qualification_store
         .lock()
@@ -7762,10 +7763,11 @@ async fn build_model_options(
             else {
                 continue;
             };
-            let key = cd_core::capability_qualification::QualificationKey::new(
+            let key = cd_core::capability_qualification::QualificationKey::with_provider_kind(
                 &profile.id,
                 &profile.base_url,
                 &option.id,
+                profile.kind,
             );
             option.readiness =
                 cd_core::capability_qualification::model_readiness_for_selection(&mut store, &key);

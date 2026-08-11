@@ -664,7 +664,12 @@ async fn verify_models(
         }
         let tools_enabled = cd_workflow::provider::model_tools_enabled(app_cfg, profile, model_id);
         let gate = gate_for_model(profile, tools_enabled, model_id);
-        let key = QualificationKey::new(&profile.id, &profile.base_url, model_id);
+        let key = QualificationKey::with_provider_kind(
+            &profile.id,
+            &profile.base_url,
+            model_id,
+            profile.kind,
+        );
         let backend = backend_for_provider(profile.kind);
         let base_url =
             if profile.kind == ProviderKind::XaiGrokBuild && profile.base_url.trim().is_empty() {
