@@ -29,6 +29,32 @@ The live command is intentionally bounded and requires explicit consent. An
 owner may opt into the separate local capture with `--raw
 --raw-i-understand`. This does not change the share-safe report.
 
+## Minimal reproducible invocation
+
+Use an isolated data directory and an existing app-config file that already
+contains the protected-file credential reference. The discovery response is
+the authority for every model id used afterward:
+
+```text
+contextdesk --data-dir <isolated-data> --app-config <app-config> \
+  --profile <profile> --format json models discover
+```
+
+After choosing one exact returned id, run one targeted qualification/diagnostic
+at a time. Do not use `--verify-all` or `models verify --all` for a first pass:
+
+```text
+contextdesk --data-dir <isolated-data> --app-config <app-config> \
+  --profile <profile> --model <exact-returned-id> --format jsonl \
+  gateway diagnose --yes --level basic --timeout 600 \
+  --raw --raw-i-understand --out <diagnostic-output>
+```
+
+The output directory contains the share-safe bundle and, only when explicitly
+requested, a separate owner-only capture index plus bounded exchange files.
+Keep those owner-only files local; upload only the share-safe report and
+manifest when requesting help.
+
 ## Capture contract
 
 The default artifact contains pseudonymous identity, endpoint fingerprints,
@@ -84,4 +110,3 @@ is required.
 Employer gateways remain a separate acceptance step. They require an explicit
 owner-authorized profile and endpoint, use only synthetic or owner-approved
 data, and must not inherit Vercel model or usefulness evidence.
-
