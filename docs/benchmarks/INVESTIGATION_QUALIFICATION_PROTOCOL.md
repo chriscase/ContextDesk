@@ -3,6 +3,15 @@
 Independent qualification-architecture report and certification protocol, produced by a
 read-only audit session on 2026-08-08.
 
+> **Historical audit note (updated 2026-08-11):** The live-provider claims in this
+> document remain intentionally false for the audited 2026-08-08 commits. The
+> current release-line synthetic Vercel evidence is recorded separately in
+> [`VERCEL_GATEWAY_DIAGNOSTIC_505C3793.md`](./VERCEL_GATEWAY_DIAGNOSTIC_505C3793.md),
+> [`VERCEL_GATEWAY_DIAGNOSTIC_GPT_OSS_D39688C7.md`](./VERCEL_GATEWAY_DIAGNOSTIC_GPT_OSS_D39688C7.md),
+> and [`VERCEL_MODEL_COMPARISON_D39688C7.md`](./VERCEL_MODEL_COMPARISON_D39688C7.md).
+> Those runs prove exact-route behavior only; they do not turn the hermetic
+> protocol audit into a universal model-quality certification.
+
 ## Read this first — scope and standing caveats
 
 1. **Audited tips.** This document audits three exact git states:
