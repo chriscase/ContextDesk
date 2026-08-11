@@ -137,6 +137,7 @@ pub async fn run_turn(
             options.multi_model.clone(),
             options.fast_triage.clone(),
             options.contribution_runtime.clone(),
+            resolved.reasoning_effort,
         )
         .await?
     } else {
@@ -163,6 +164,7 @@ pub async fn run_turn(
             options.multi_model,
             options.fast_triage,
             options.contribution_runtime,
+            resolved.reasoning_effort,
         )
         .await?
     };
