@@ -18,6 +18,9 @@ pub mod branding;
 pub mod build_identity;
 pub mod capability_qualification;
 pub mod chat;
+/// Hermetic cheap/fast-model contribution benchmark for host-grounded triage.
+/// Scripted candidates only — never live providers or readiness claims.
+pub mod cheap_model_fast_triage_benchmark;
 pub mod config;
 pub mod confluence_ro;
 pub mod connectors;
