@@ -15,6 +15,8 @@
 
 pub mod capability_qualification;
 pub mod chat;
+/// Workflow-layer resolution of the host-grounded fast-triage runtime.
+pub mod fast_triage;
 pub mod import;
 pub mod logging_quality;
 pub mod multi_model;

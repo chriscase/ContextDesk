@@ -31,6 +31,9 @@ pub mod discovery;
 pub mod embed;
 pub mod error;
 pub mod events;
+/// Host-grounded fast-triage route: complete evidence packet, typed-only
+/// parsing, local validation, one bounded correction, one visible escalation.
+pub mod fast_triage;
 pub mod git_source;
 pub mod grok_auth;
 pub mod harvest;

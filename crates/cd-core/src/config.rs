@@ -249,6 +249,60 @@ pub struct AppConfig {
     /// the established single-model path runs unchanged.
     #[serde(default)]
     pub multi_model: MultiModelSettings,
+    /// Optional host-grounded fast-triage route settings.
+    ///
+    /// Absent in files written before this existed, so it takes
+    /// [`FastTriageSettings::default`] — disabled, with no route evidence and
+    /// no fallback, meaning every established path runs unchanged.
+    #[serde(default)]
+    pub fast_triage: FastTriageSettings,
+}
+
+/// Host-grounded fast-triage route configuration.
+///
+/// The route is off by default and, even when enabled, runs only when a
+/// persisted record in [`FastTriageSettings::routes`] matches the turn's exact
+/// profile, model, workflow contract, and host contract fingerprint. There is
+/// deliberately no "enable for fast models" switch, no model-name pattern, and
+/// no gateway field: those are exactly the shortcuts this route must not take.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FastTriageSettings {
+    /// Master switch. `false` (the default) means the route never runs, whatever
+    /// evidence is persisted.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Persisted per-(profile, model, workflow) route evidence. An empty list
+    /// means no route is authorized, which is the honest default.
+    #[serde(default)]
+    pub routes: Vec<crate::fast_triage::FastTriageRouteRecord>,
+    /// Optional fallback role for the one visible escalation. `None` means a
+    /// failed fast answer is reported as an escalation request rather than
+    /// silently retried somewhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<FastTriageFallbackConfig>,
+}
+
+/// Fallback role assignment for the one visible fast-triage escalation.
+///
+/// Provider-neutral: it names an existing provider profile id, never a provider
+/// kind and never a raw secret, so credentials stay behind that profile's own
+/// explicit `api_key_ref`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FastTriageFallbackConfig {
+    /// Existing provider profile id to fill the fallback role.
+    pub profile_id: String,
+    /// Model id override; `None` uses the profile's chat model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Explicit authorization to send this turn's evidence packet to the
+    /// fallback. Default false: a configured-but-unauthorized fallback is
+    /// reported as such and never called.
+    #[serde(default)]
+    pub authorized: bool,
+    /// Explicit acknowledgment that this fallback may egress to a remote
+    /// provider. Default false; ignored for local-only providers.
+    #[serde(default)]
+    pub allow_remote: bool,
 }
 
 /// Multi-model investigation configuration. Additive; the default is the
@@ -938,6 +992,52 @@ mod tests {
                 .unwrap()
                 .require_qualified
         );
+    }
+
+    #[test]
+    fn a_config_without_the_fast_triage_section_still_loads_as_disabled() {
+        use crate::fast_triage::{
+            FastTriageRouteRecord, FastTriageRouteVerdict, FastTriageWorkflowContract,
+        };
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &cfg).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("fast_triage");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.fast_triage, FastTriageSettings::default());
+        assert!(!loaded.fast_triage.enabled);
+        assert!(loaded.fast_triage.routes.is_empty());
+        assert!(loaded.fast_triage.fallback.is_none());
+
+        // Route evidence and a fallback round-trip, and both reference profile
+        // and model ids only — never a gateway or a secret.
+        cfg.fast_triage.enabled = true;
+        cfg.fast_triage.routes = vec![FastTriageRouteRecord {
+            profile_id: "ollama-local".into(),
+            model_id: "some-configured-model".into(),
+            workflow_contract: FastTriageWorkflowContract::HostGroundedSynthesisCompletePacket,
+            verdict: FastTriageRouteVerdict::Qualified,
+            contract_fingerprint: "a".repeat(64),
+        }];
+        cfg.fast_triage.fallback = Some(FastTriageFallbackConfig {
+            profile_id: "ollama-local".into(),
+            model: None,
+            authorized: false,
+            allow_remote: false,
+        });
+        save_config(&path, &cfg).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.fast_triage, cfg.fast_triage);
+        // A configured fallback is not an authorized one.
+        assert!(!loaded.fast_triage.fallback.as_ref().unwrap().authorized);
     }
 
     #[test]

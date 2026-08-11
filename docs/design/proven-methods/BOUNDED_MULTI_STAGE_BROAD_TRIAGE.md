@@ -268,6 +268,136 @@ drafts, or an invalid final comparison after its bounded semantic correction,
 fails closed rather than silently mixing unvalidated content into a global
 single-stage answer.
 
+## Host-grounded fast triage (`cd_core::fast_triage`)
+
+The preserved Vercel research recorded something narrower than "fast models are
+bad at this". The exact configured model qualified for ordinary generation,
+prompted JSON, native tool calls, tool-result continuation, streaming, and
+cancellation — so its product failures were **not** transport failures. What it
+did instead was withhold the true initiating cause, promote a downstream failure
+into a cause, or promote an independent telemetry finding into the main chain.
+The same model answered a direct, **complete-timeline** request correctly.
+
+The difference was evidence handoff, not intelligence. Candidate-local final
+synthesis never received enough of the picture; a complete host-prepared
+timeline did. So this route changes the handoff and then checks the result. It
+reuses the same deterministic retrieval, evidence ledger, deduplication,
+chronology, candidate grouping, and separately scoped linked timeline described
+above — it adds no second assembler, no second HTTP client, and no second
+truth or scoring engine.
+
+### Selected by evidence, never by a name
+
+The route runs only when a persisted record matches this turn's exact
+`(profile_id, model_id, workflow_contract, contract_fingerprint)` and records a
+measured pass. A model *name* never selects it, a gateway URL never selects it,
+and evidence measured for a different workflow contract never transfers into it.
+The record type has no field able to express a base URL, endpoint, credential,
+or provider kind, so no code path can consult one.
+
+The contract fingerprint hashes the system contract, the answer schema, the
+packet schema, and the complete ordered validator vocabulary. Change any of
+them and previously measured evidence no longer describes what the build would
+run, so the record is reported stale rather than honoured. Every non-selection
+names its own reason (`route_disabled`, `turn_identity_unknown`,
+`no_record_for_profile_model`, `workflow_contract_mismatch`,
+`verdict_not_qualified`, `contract_fingerprint_stale`) and the established path
+runs unchanged.
+
+### The complete packet, and the bounded neighborhood inside it
+
+The packet is the whole permitted evidence set in one bounded request: every
+candidate group plus the host-owned chronology, each row printed with its
+literal host evidence id, its host role from a fixed vocabulary
+(`initiating_cause`, `downstream_symptom`, `supporting_evidence`,
+`unclassified`), its host scope, and its host chronology ordinal. Every dynamic
+value passes the shared `literal_span` presentation boundary, and the body is
+fenced once in a nonce-bound untrusted-data envelope.
+
+Rows also carry a **context category** describing the host-assembled
+neighborhood. This is a classification of what
+`broad_triage_comparison_context` already selected and already bounded (±2
+sequence neighbors around each candidate's first and last row, endpoint rows,
+32-row cap) — not a parallel assembler and not new retrieval:
+
+| Context category | What the host proves | Where it comes from |
+| --- | --- | --- |
+| `focus` | the host's own candidate selection | candidate groups |
+| `preceding_same_source` | same source, earlier, inside the bounded window | existing neighbor window |
+| `following_same_source` | same source, later, inside the bounded window | existing neighbor window |
+| `cross_source_temporal` | a different source, admitted **only** under resolved comparable clocks | existing neighbor window + time-quality verdict |
+| `trace_linked` | a host-computed trace/request correlation | trace-correlation grouping |
+| `propagation` | trace-linked, different source, strictly later | trace grouping + ordinals |
+| `independent_noise` | separately scoped chronology, or a row a bound or the clock gate withheld | `global_timeline_context` |
+
+A preceding configuration or deployment change lands in
+`preceding_same_source`, and a rollback or recovery lands in
+`following_same_source` — as *positions*. The host marks where a row sits; it
+never asserts that a row **is** a configuration change or a repair, because it
+cannot prove that from position.
+
+Three rules are enforced rather than requested. Adjacency and co-occurrence
+never establish correlation or causality — no category can express "because".
+Records the host did not resolve to comparable clocks are never compared as
+wall-clock events: `TimeQuality::Mixed` is deliberately *not* comparable, the
+default is fail-closed, and a withheld cross-source reading is counted in
+telemetry rather than silently applied. And expansion is never unbounded: radius
+and row caps are the host's own, truncation is deterministic by
+`(distance, ordinal, evidence_id)`, and what falls outside a cap is reported.
+
+The packet carries its own identity, a digest over the binding, ledger digest,
+every row's id/candidate/role/scope/category/ordinal, the clock verdict, and the
+neighborhood budget. That is what makes "the *unchanged* host packet was
+escalated" a checkable fact instead of a claim.
+
+### Typed-only parsing, then local validation
+
+Only explicitly typed output is parsed, through the same shared normalizer the
+multi-stage path uses. Visible answer, reasoning, tool calls, terminal state,
+and errors stay separate channels; reasoning has no accessor and no `Debug`
+projection, so it is structurally unable to reach a renderer or a log line.
+Malformed prose is never guessed into a pass, and a reasoning-only terminal is
+an empty terminal, not an answer.
+
+Validation is `validate_model_answer` — unchanged authority — plus the stricter
+requirements that belong to this contract: an unsupported root, a host-labelled
+symptom promoted into either causal section, chronology evidence pulled into a
+causal chain, an inverted cause/symptom order, missing host role coverage, one
+id held in two conflicting roles, a candidate left with no grounded claim, and a
+packet identity that no longer holds.
+
+Where the host holds **no** role evidence, role checks abstain and telemetry
+reports `role_evidence: host_neutral` rather than implying a pass. That is the
+honest state for the current production seam: multi-stage roles come from the
+candidate-stage model's classification, and this route has no candidate stage.
+Inventing a role from structure — earliest-is-cause, loudest-is-cause — is
+exactly what `triage_quality`'s mutations treat as a failure. The structural
+checks (scope isolation, chronology, contradictions, citation completeness, and
+the unsupported-root gate) still apply in full.
+
+### One correction, one escalation, then honesty
+
+A rejected proposal earns exactly one bounded correction, written by the host
+for one stable validator category. The rejected proposal is never replayed as
+truth, and every other authorized input is repeated byte-for-byte — same
+contract, same question, same packet, same envelope nonce. The cap is clamped in
+code, not read from config.
+
+The outcome is typed: a verified fast answer, an honest partial/inconclusive
+result, or an escalation request carrying the **unchanged** packet and the
+failure categories. When an explicitly configured *and* explicitly authorized
+fallback exists, the route performs exactly one visible escalation with the
+byte-identical packet and the host's category instruction; a failed escalation
+ends the run rather than looping or correcting again. A configured-but-
+unauthorized fallback is reported and never called, and a fallback backend
+without configuration can never be reached — a spare handle is not
+authorization, and a profile or gateway change requires host config.
+
+Telemetry is share-safe by shape: no field can hold a prompt, an evidence
+excerpt, a rejected proposal, reasoning text, an endpoint, a credential, a
+username, or a path. Reasoning appears only as presence and length. The same
+value drives the activity stream, so an operator reads what telemetry recorded.
+
 ## Limitations
 
 Candidate grouping is intentionally structural, not a root-cause verdict.
@@ -291,6 +421,18 @@ a bounded context, but cannot itself grant causal authority.
 The bounded sequential executor favors predictable cancellation, cost, and
 telemetry over latency; live-provider quality and safe parallelism remain
 separate acceptance work.
+
+The fast-triage route's usefulness is **not** demonstrated by this work. Every
+test in `crates/cd-core/tests/fast_triage_production_path.rs` is hermetic and
+scripted: they prove the host catches the recorded failure shapes, bounds the
+correction and the escalation, preserves packet identity, and keeps telemetry
+share-safe. They say nothing about whether any live model produces a good
+answer. Recording a `qualified` route record for a real `(profile, model)` pair
+requires the live measurement described above, repeated, against the exact
+gateway — and "inconclusive" is not "pass". In the current production seam the
+packet is `host_neutral`, so role-coverage and symptom-promotion checks have
+nothing to assert there; they become load-bearing for a host that supplies role
+labels.
 
 The response caps above bound what the multi-stage executor accumulates from
 callbacks and retains or validates from a returned completion. Some provider

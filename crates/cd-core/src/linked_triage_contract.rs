@@ -113,7 +113,26 @@ pub fn is_empty_visible_terminal(raw: &str) -> bool {
 /// `<reasoning>`) from the start of the payload. Incomplete or mid-body tags
 /// are left untouched so untrusted content cannot smuggle structure.
 fn strip_complete_reasoning_blocks(raw: &str) -> String {
+    split_complete_reasoning_prefix(raw).1
+}
+
+/// Split a raw terminal into its complete leading reasoning blocks and the
+/// remaining **visible** payload.
+///
+/// This is the same bounded, prefix-only unwrap [`is_empty_visible_terminal`]
+/// and [`normalize_known_json_wrapper`] apply — exposed so a caller that must
+/// keep the reasoning channel *separate* (rather than merely discarding it)
+/// shares one normalizer instead of keeping a second, drifting copy. Incomplete
+/// or mid-body tags are left in the visible remainder so untrusted content
+/// cannot smuggle structure.
+///
+/// The reasoning half is returned so a host can *account* for it (length,
+/// presence). Callers must never render it: reasoning is not answer text.
+pub fn split_complete_reasoning_prefix(raw: &str) -> (String, String) {
     let mut trimmed = raw.trim();
+    let mut reasoning = String::new();
+    // A bounded number of nested wrappers is enough for real gateways and
+    // prevents a hostile response from turning normalization into recursion.
     for _ in 0..4 {
         let mut unwrapped = false;
         for tag in ["think", "analysis", "reasoning"] {
@@ -121,6 +140,9 @@ fn strip_complete_reasoning_blocks(raw: &str) -> String {
             let close = format!("</{tag}>");
             if let Some(body) = trimmed.strip_prefix(open.as_str()) {
                 if let Some(end) = body.find(close.as_str()) {
+                    if let Some(block) = body.get(..end) {
+                        reasoning.push_str(block);
+                    }
                     trimmed = body.get(end + close.len()..).unwrap_or_default().trim();
                     unwrapped = true;
                     break;
@@ -131,7 +153,7 @@ fn strip_complete_reasoning_blocks(raw: &str) -> String {
             break;
         }
     }
-    trimmed.to_string()
+    (reasoning, trimmed.to_string())
 }
 
 /// Normalize only the small set of provider response wrappers that are known

@@ -125,7 +125,12 @@ const BROAD_LOG_TRIAGE_TRACE_CHAIN_DISPLAY_CAP: usize = 6;
 const BROAD_LOG_TRIAGE_NOISE_SUGGESTION_CAP: usize = 6;
 const BROAD_LOG_TRIAGE_LINE_MAX_BYTES: usize = 192;
 const BROAD_LOG_TRIAGE_COMPARISON_ENDPOINT_CAP: usize = 6;
-const BROAD_LOG_TRIAGE_COMPARISON_NEIGHBOR_RADIUS: u64 = 2;
+/// Sequence radius the deterministic global-chronology sampler expands around
+/// each candidate's first and last row. Public so a consumer of the resulting
+/// neighborhood (for example
+/// [`crate::fast_triage::neighborhood`]) bounds itself by the same host cap
+/// instead of keeping a second, drifting number.
+pub const BROAD_LOG_TRIAGE_COMPARISON_NEIGHBOR_RADIUS: u64 = 2;
 
 /// Documented ranking formulas locked by tests. Every score/rank in the brief
 /// must stay explainable and deterministic (stable ties).
