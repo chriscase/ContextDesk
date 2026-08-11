@@ -852,6 +852,17 @@ impl OpenAiCompatibleClient {
         } else {
             accumulate_openai_sse(&text)?
         };
+        // Same native-mode response contract as non-stream complete_with_mode.
+        let tool_names: Vec<&str> = completion
+            .tool_calls
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
+        if let Err(reason) = validate_mode_response(mode, &completion.content, &tool_names) {
+            return Err(CoreError::Message(format!(
+                "invalid_response_for_mode:{reason}"
+            )));
+        }
         let mut tel = header_tel;
         tel.merge_from(&completion.telemetry);
         completion.telemetry = tel;
@@ -944,6 +955,16 @@ impl OpenAiCompatibleClient {
                 full_body.push(&bytes)?;
             }
             let mut completion = parse_openai_completion(&full_body.finish()?)?;
+            let tool_names: Vec<&str> = completion
+                .tool_calls
+                .iter()
+                .map(|t| t.function.name.as_str())
+                .collect();
+            if let Err(reason) = validate_mode_response(mode, &completion.content, &tool_names) {
+                return Err(CoreError::Message(format!(
+                    "invalid_response_for_mode:{reason}"
+                )));
+            }
             let mut tel = header_tel.clone();
             tel.merge_from(&completion.telemetry);
             completion.telemetry = tel;
@@ -988,6 +1009,16 @@ impl OpenAiCompatibleClient {
         // lines and route the complete body through the non-stream parser.
         if !saw_sse_data {
             let mut completion = parse_openai_completion(full_body.finish()?.trim())?;
+            let tool_names: Vec<&str> = completion
+                .tool_calls
+                .iter()
+                .map(|t| t.function.name.as_str())
+                .collect();
+            if let Err(reason) = validate_mode_response(mode, &completion.content, &tool_names) {
+                return Err(CoreError::Message(format!(
+                    "invalid_response_for_mode:{reason}"
+                )));
+            }
             let mut tel = header_tel;
             tel.merge_from(&completion.telemetry);
             completion.telemetry = tel;
@@ -1008,7 +1039,18 @@ impl OpenAiCompatibleClient {
                 }
             }
         }
-        acc.into_completion()
+        let completion = acc.into_completion()?;
+        let tool_names: Vec<&str> = completion
+            .tool_calls
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
+        if let Err(reason) = validate_mode_response(mode, &completion.content, &tool_names) {
+            return Err(CoreError::Message(format!(
+                "invalid_response_for_mode:{reason}"
+            )));
+        }
+        Ok(completion)
     }
 
     /// List models via GET …/models (tries several path shapes like TriageTool).

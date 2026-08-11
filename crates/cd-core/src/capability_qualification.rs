@@ -2349,6 +2349,19 @@ fn probe_forced_tool_call(
     }
 }
 
+/// Plain-chat probe metadata (streaming / cancellation) with dialect honesty.
+fn plain_probe_meta(key: &QualificationKey, dialect: Option<&str>) -> CheckEvidenceMeta {
+    let fallback = match key.transport_protocol.as_str() {
+        "openai_compatible" | "ollama" | "anthropic" => Some(key.transport_protocol.as_str()),
+        _ => None,
+    };
+    CheckEvidenceMeta {
+        request_mode: Some(MODE_PLAIN),
+        ..Default::default()
+    }
+    .with_dialect(dialect.or(fallback))
+}
+
 fn probe_streaming(
     transport: &mut dyn QualificationTransport,
     key: &QualificationKey,
@@ -2368,35 +2381,40 @@ fn probe_streaming(
         chat_mode: OpenAiChatRequestMode::Plain,
     };
     match transport.chat_complete(&req, cancel) {
-        Ok(resp) if resp.cancelled || cancel.load(Ordering::SeqCst) => check(
+        Ok(resp) if resp.cancelled || cancel.load(Ordering::SeqCst) => check_with_evidence(
             CapabilityKind::Streaming,
             CapabilityStatus::Untested,
             start,
             "cancelled",
+            plain_probe_meta(key, resp.dialect.as_deref()),
         ),
-        Ok(resp) if resp.streamed && !resp.content.is_empty() => check(
+        Ok(resp) if resp.streamed && !resp.content.is_empty() => check_with_evidence(
             CapabilityKind::Streaming,
             CapabilityStatus::Pass,
             start,
             "stream deltas observed",
+            plain_probe_meta(key, resp.dialect.as_deref()),
         ),
-        Ok(resp) if !resp.content.is_empty() => check(
+        Ok(resp) if !resp.content.is_empty() => check_with_evidence(
             CapabilityKind::Streaming,
             CapabilityStatus::Degraded,
             start,
             "completion without stream flag",
+            plain_probe_meta(key, resp.dialect.as_deref()),
         ),
-        Ok(_) => check(
+        Ok(resp) => check_with_evidence(
             CapabilityKind::Streaming,
             CapabilityStatus::Fail,
             start,
             "no stream content",
+            plain_probe_meta(key, resp.dialect.as_deref()),
         ),
-        Err(e) => check(
+        Err(e) => check_with_evidence(
             CapabilityKind::Streaming,
             CapabilityStatus::Fail,
             start,
             e.reason,
+            plain_probe_meta(key, None),
         ),
     }
 }
@@ -2409,11 +2427,12 @@ fn probe_cancellation(
     let start = std::time::Instant::now();
     // User cancel before this probe: leave untested (do not measure).
     if user_cancel.load(Ordering::SeqCst) {
-        return check(
+        return check_with_evidence(
             CapabilityKind::Cancellation,
             CapabilityStatus::Untested,
             start,
             "cancelled before probe",
+            plain_probe_meta(key, None),
         );
     }
     // Probe-local cancel signal only — never store into the user-cancel flag.
@@ -2432,29 +2451,33 @@ fn probe_cancellation(
         chat_mode: OpenAiChatRequestMode::Plain,
     };
     match transport.chat_complete(&req, &probe_cancel) {
-        Ok(resp) if resp.cancelled => check(
+        Ok(resp) if resp.cancelled => check_with_evidence(
             CapabilityKind::Cancellation,
             CapabilityStatus::Pass,
             start,
             "transport reported cancelled",
+            plain_probe_meta(key, resp.dialect.as_deref()),
         ),
-        Err(e) if e.reason.to_ascii_lowercase().contains("cancel") => check(
+        Err(e) if e.reason.to_ascii_lowercase().contains("cancel") => check_with_evidence(
             CapabilityKind::Cancellation,
             CapabilityStatus::Pass,
             start,
             "cancelled via transport error",
+            plain_probe_meta(key, dialect_from_transport_reason(&e.reason)),
         ),
-        Ok(_) => check(
+        Ok(resp) => check_with_evidence(
             CapabilityKind::Cancellation,
             CapabilityStatus::Fail,
             start,
             "completion ignored cancel signal",
+            plain_probe_meta(key, resp.dialect.as_deref()),
         ),
-        Err(e) => check(
+        Err(e) => check_with_evidence(
             CapabilityKind::Cancellation,
             CapabilityStatus::Fail,
             start,
             e.reason,
+            plain_probe_meta(key, None),
         ),
     }
 }
@@ -3232,6 +3255,26 @@ mod tests {
         assert_eq!(
             capability_contract_verdict(Some(&report), CapabilityContract::NativeJsonObject),
             ContractVerdict::Qualified
+        );
+        // Streaming / cancellation must record plain mode + dialect so Verified is reachable.
+        let stream = report
+            .checks
+            .iter()
+            .find(|c| c.kind == CapabilityKind::Streaming)
+            .unwrap();
+        assert_eq!(stream.request_mode.as_deref(), Some(MODE_PLAIN));
+        assert_eq!(stream.dialect.as_deref(), Some("openai_compatible"));
+        let cancel_row = report
+            .checks
+            .iter()
+            .find(|c| c.kind == CapabilityKind::Cancellation)
+            .unwrap();
+        assert_eq!(cancel_row.request_mode.as_deref(), Some(MODE_PLAIN));
+        assert_eq!(cancel_row.dialect.as_deref(), Some("openai_compatible"));
+        assert_eq!(
+            model_readiness_for_report(&report).state,
+            ModelReadinessState::Verified,
+            "full honest ladder must display Verified, not be blocked by bare stream/cancel checks"
         );
         // Cancellation *probe* must not set report.cancelled (user-cancel only).
         assert!(
