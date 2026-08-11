@@ -944,6 +944,50 @@ pub fn reconcile_contributions(
     }
 }
 
+/// Replay comparison of the host floor, one contributor, and a bounded set of
+/// contributors. It contains only normalized counts/states, so it is safe to
+/// persist as a hermetic quality-evaluation artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconciliationReplayV1 {
+    /// Exact packet identity.
+    pub packet_id: String,
+    /// State with no model attempts.
+    pub deterministic_only: ReconciliationState,
+    /// State after the optional single-contributor attempt.
+    pub single_contributor: ReconciliationState,
+    /// State after the bounded multi-contributor attempts.
+    pub bounded_multi_model: ReconciliationState,
+    /// Normalized claim count for the single attempt.
+    pub single_claim_count: usize,
+    /// Normalized claim count for the bounded attempts.
+    pub bounded_claim_count: usize,
+    /// Number of bounded conflicts.
+    pub bounded_conflict_count: usize,
+}
+
+/// Replay the same immutable packet through three host-only evaluation modes.
+pub fn replay_reconciliation(
+    packet: &FastTriagePacketV1,
+    single: Option<&ContributionAttemptV1>,
+    bounded: &[ContributionAttemptV1],
+) -> ReconciliationReplayV1 {
+    let deterministic = reconcile_contributions(packet, &[]);
+    let single_report = single
+        .map(|attempt| reconcile_contributions(packet, std::slice::from_ref(attempt)))
+        .unwrap_or_else(|| reconcile_contributions(packet, &[]));
+    let bounded_report = reconcile_contributions(packet, bounded);
+    ReconciliationReplayV1 {
+        packet_id: packet.packet_id().to_string(),
+        deterministic_only: deterministic.state,
+        single_contributor: single_report.state,
+        bounded_multi_model: bounded_report.state,
+        single_claim_count: single_report.claims.len(),
+        bounded_claim_count: bounded_report.claims.len(),
+        bounded_conflict_count: bounded_report.conflicts.len()
+            + bounded_report.reported_contradictions.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1323,5 +1367,26 @@ mod tests {
             ),
             Err(ContributionRoutingError::TooMuchParallelism)
         );
+    }
+
+    #[test]
+    fn replay_compares_deterministic_single_and_bounded_modes_without_network() {
+        let packet = packet();
+        let observation = extraction(&packet, "fast");
+        let causal = causal(&packet, "careful");
+        let replay =
+            replay_reconciliation(&packet, Some(&observation), &[observation.clone(), causal]);
+        assert_eq!(
+            replay.deterministic_only,
+            ReconciliationState::DeterministicBaseline
+        );
+        assert_eq!(
+            replay.single_contributor,
+            ReconciliationState::InsufficientEvidence
+        );
+        assert_eq!(replay.bounded_multi_model, ReconciliationState::Supported);
+        assert_eq!(replay.single_claim_count, 1);
+        assert_eq!(replay.bounded_claim_count, 2);
+        assert_eq!(replay.bounded_conflict_count, 0);
     }
 }

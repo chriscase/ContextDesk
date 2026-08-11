@@ -116,6 +116,12 @@ foreign id, treating a completed abstainer as role coverage, dropping an
 unavailable contributor, and making model text part of agreement. Each must
 fail closed when inverted.
 
+`replay_reconciliation` provides a provider-free comparison artifact for the
+same packet in deterministic-only, single-contributor, and bounded
+multi-contributor modes. It records states and normalized claim/conflict counts
+only, so a quality lab can compare routing strategies without storing model
+prose or contacting a gateway.
+
 ## Current model evidence
 
 The current Vercel observations are evidence for routing policy, not universal
