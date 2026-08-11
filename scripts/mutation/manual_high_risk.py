@@ -182,6 +182,47 @@ MUTATIONS = [
         replacement="            .field(\"reasoning_chars\", &self.reasoning)\n",
         test_filter="reasoning_stays_in_its_own_channel_and_never_becomes_visible",
     ),
+    # --- provider-neutral contribution reconciliation ---------------------
+    # These invert one host-owned promise each.  The focused tests below are
+    # intentionally small so the mutation lane can run independently of the
+    # broader historical mutation campaign.
+    Mutation(
+        name="contribution_symptom_cause_gate",
+        file="crates/cd-core/src/multi_model/contributions.rs",
+        needle="""            if row.role == EvidenceRole::Symptom
+                && matches!(
+                    claim.kind,
+                    ContributionClaimKind::CausalCandidate
+                        | ContributionClaimKind::CompetingExplanation
+                )
+            {
+                return Err(ContributionValidationError::RoleMismatch);
+            }
+""",
+        replacement="            if false {\n                return Err(ContributionValidationError::RoleMismatch);\n            }\n",
+        test_filter="host_labelled_symptom_cannot_be_proposed_as_causal_candidate",
+    ),
+    Mutation(
+        name="contribution_abstention_counts_as_support",
+        file="crates/cd-core/src/multi_model/contributions.rs",
+        needle="        if !contribution.abstained {\n",
+        replacement="        if true {\n",
+        test_filter="explicit_abstention_is_not_reported_as_support",
+    ),
+    Mutation(
+        name="contribution_missing_role_coverage_ignored",
+        file="crates/cd-core/src/multi_model/contributions.rs",
+        needle="    let missing_role_coverage = !has_observation_claim || !has_causal_claim;\n",
+        replacement="    let missing_role_coverage = false;\n",
+        test_filter="dropout_is_explicit_and_does_not_hide_a_useful_partial_result",
+    ),
+    Mutation(
+        name="contribution_dropout_not_escalated",
+        file="crates/cd-core/src/multi_model/contributions.rs",
+        needle="    let has_dropout = attempts\n        .iter()\n        .any(|attempt| attempt.availability != ContributionAvailability::Completed);\n",
+        replacement="    let has_dropout = false;\n",
+        test_filter="complete_role_coverage_with_dropout_recommends_escalation",
+    ),
 ]
 
 
@@ -265,12 +306,24 @@ def main() -> int:
         default="HEAD",
         help="commit whose mutation-target bytes must match the worktree",
     )
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        help="run only the named mutation(s); may be repeated",
+    )
     args = parser.parse_args()
+
+    mutations = [
+        mutation for mutation in MUTATIONS if not args.only or mutation.name in args.only
+    ]
+    if not mutations:
+        parser.error("--only did not match any mutation name")
 
     tested_sha = subprocess.check_output(
         ["git", "rev-parse", args.tested_sha], cwd=ROOT, text=True
     ).strip()
-    target_files = sorted({mutation.file for mutation in MUTATIONS})
+    target_files = sorted({mutation.file for mutation in mutations})
     target_diff = subprocess.run(
         ["git", "diff", "--quiet", tested_sha, "--", *target_files],
         cwd=ROOT,
@@ -283,7 +336,7 @@ def main() -> int:
         )
 
     results = []
-    for mutation in MUTATIONS:
+    for mutation in mutations:
         print(f"MUTATE {mutation.name}", flush=True)
         result = run_mutation(mutation, args.timeout)
         results.append(result)

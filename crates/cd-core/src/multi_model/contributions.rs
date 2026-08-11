@@ -1230,6 +1230,31 @@ mod tests {
     }
 
     #[test]
+    fn host_labelled_symptom_cannot_be_proposed_as_causal_candidate() {
+        let packet = packet();
+        let raw = proposal(
+            &packet,
+            ContributionRole::CausalProposer,
+            json!([{
+                "claim_id": "symptom-as-cause",
+                "candidate_id": "candidate-b",
+                "kind": "causal_candidate",
+                "text": "downstream symptom promoted to cause",
+                "evidence_ids": ["opaque-b"]
+            }]),
+        );
+        assert_eq!(
+            validate_contribution(
+                &raw,
+                &packet,
+                identity("m"),
+                ContributionRole::CausalProposer
+            ),
+            Err(ContributionValidationError::RoleMismatch)
+        );
+    }
+
+    #[test]
     fn baseline_is_useful_and_explicitly_not_a_root_cause() {
         let baseline = deterministic_baseline(&packet());
         assert_eq!(baseline.timeline.len(), 3);
@@ -1309,6 +1334,23 @@ mod tests {
         assert!(report.escalation_recommended);
         assert_eq!(report.availability.len(), 2);
         assert_eq!(report.claims.len(), 1);
+    }
+
+    #[test]
+    fn complete_role_coverage_with_dropout_recommends_escalation() {
+        let packet = packet();
+        let attempts = vec![
+            extraction(&packet, "fast"),
+            causal(&packet, "careful"),
+            ContributionAttemptV1::unavailable(
+                ContributionRole::Reviewer,
+                identity("reviewer"),
+                ContributionAvailability::TimedOut,
+            ),
+        ];
+        let report = reconcile_contributions(&packet, &attempts);
+        assert_eq!(report.state, ReconciliationState::EscalationRecommended);
+        assert!(report.escalation_recommended);
     }
 
     #[test]
