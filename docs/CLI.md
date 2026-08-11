@@ -332,12 +332,17 @@ as a real user request.
 case: both lanes failed (`gateway_or_model_likely`), the direct lane passed
 but the product lane failed (`product_integration_likely`), both executed
 but a typed scorer failed (`usefulness_gap`), a correction/retry was needed
-(`retry_required`), or `compatible`. Three verdicts stay separate in the
+(`retry_required`), a host projection was internally inconsistent
+(`diagnostic_fault`), or `compatible`. Three verdicts stay separate in the
 final report — `gateway_model_compatible`, `product_workflow_compatible`,
 `answers_useful` — and each has an explicit `*_status` of `pass`, `fail`, or
-`inconclusive`. The legacy Boolean fields are true only for `pass`; a timeout
-or all-skipped run is therefore never reported as a compatibility success. A
-quality gap never downgrades or upgrades either compatibility verdict.
+`inconclusive`. A diagnostic fault is not provider or usefulness evidence; the
+affected dimensions remain inconclusive. The legacy Boolean fields are true
+only for `pass`; a timeout or all-skipped run is therefore never reported as a
+compatibility success. In extended mode every planned attempt must pass: a
+mixed fail/pass sequence is explicitly fail-closed and remains
+`retry_required`, never a usefulness pass. A quality gap never downgrades or
+upgrades either compatibility verdict.
 
 **Consent gate.** Before any network call, the planned case list, the
 maximum request bound, the active deadline (`--timeout`, default 180s), and
@@ -400,7 +405,7 @@ so someone who already has a small candidate endpoint list can compare hashes.
 Review artifacts before external sharing when those residual correlation risks
 matter.
 
-**Output.** Text prints a `[PASS]`/`[WARN]`/`[FAIL]`/`[SKIP]` line per case
+**Output.** Text prints a `[PASS]`/`[WARN]`/`[FAIL]`/`[FAULT]`/`[SKIP]` line per case
 as it completes (colored when the terminal supports it and `NO_COLOR` is
 unset; the bracketed label is always present regardless of color, and
 `--color never`/redirected output/`TERM=dumb` fall back to plain ASCII).
@@ -408,8 +413,11 @@ unset; the bracketed label is always present regardless of color, and
 `{"type":"case",...}` line per completed case, then exactly one terminal
 `{"type":"verdict",...}` line (or `{"type":"cancelled",...}` on Ctrl-C) —
 never any ANSI bytes. `--json` prints one envelope with the full report.
-Exit code: `0` when both compatibility verdicts hold, `8` (`not_ready`)
-when either does not, `130` (`cancelled`) on Ctrl-C.
+Exit code: `0` when both compatibility verdicts hold and no measured
+usefulness failure exists, `8` (`not_ready`) when either compatibility verdict
+does not hold or `answers_useful_status=fail`, and `130` (`cancelled`) on
+Ctrl-C. An `answers_useful_status=inconclusive` result is allowed for roles
+without an answer scorer; it is not a pass claim.
 
 **Known limitations.** The embedding/reranker product lane has explicit
 Ollama, OpenAI-compatible, and Vercel v4 embedding dialects plus explicit

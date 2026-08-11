@@ -139,6 +139,11 @@ pub enum CaseClassification {
     /// The product lane needed a correction/retry to succeed — compatible,
     /// but fragile.
     RetryRequired,
+    /// The host observed an internally inconsistent diagnostic projection,
+    /// such as a validated typed answer with no visible answer projection.
+    /// This is a harness/diagnostic fault, not provider compatibility or
+    /// model usefulness evidence.
+    DiagnosticFault,
     /// This case does not apply to the selected model's role, or was
     /// skipped by the deadline/level before it ran.
     NotRun,
@@ -247,6 +252,17 @@ impl GatewayDiagnosticReport {
     fn to_envelope_value(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or_default()
     }
+}
+
+/// Automation contract for a completed diagnostic: a measured usefulness
+/// failure is a non-ready result even when the transport and product lanes
+/// themselves passed.  Inconclusive usefulness is allowed for roles without
+/// an answer scorer (for example embedding/reranker diagnostics), but a
+/// measured failure must never exit successfully.
+pub fn report_requires_not_ready(report: &GatewayDiagnosticReport) -> bool {
+    !report.verdicts.gateway_model_compatible
+        || !report.verdicts.product_workflow_compatible
+        || report.verdicts.answers_useful_status == VerdictStatus::Fail
 }
 
 /// One `--jsonl` line. Streamed as each case completes, then exactly one
@@ -664,7 +680,12 @@ fn compute_verdicts(cases: &[CaseReport]) -> Verdicts {
             && !c.product.passed
             && c.classification == CaseClassification::GatewayOrModelLikely
     });
-    let product_workflow_status = if !product_executed {
+    let diagnostic_fault = cases
+        .iter()
+        .any(|c| c.classification == CaseClassification::DiagnosticFault);
+    let product_workflow_status = if diagnostic_fault {
+        VerdictStatus::Inconclusive
+    } else if !product_executed {
         VerdictStatus::Inconclusive
     } else if product_failed {
         VerdictStatus::Fail
@@ -676,7 +697,9 @@ fn compute_verdicts(cases: &[CaseReport]) -> Verdicts {
 
     let scorer_executed = cases.iter().any(|c| c.scorer.executed);
     let scorer_failed = cases.iter().any(|c| c.scorer.executed && !c.scorer.passed);
-    let answers_useful_status = if !scorer_executed {
+    let answers_useful_status = if diagnostic_fault {
+        VerdictStatus::Inconclusive
+    } else if !scorer_executed {
         VerdictStatus::Inconclusive
     } else if scorer_failed {
         VerdictStatus::Fail
@@ -834,6 +857,7 @@ fn status_tag(classification: CaseClassification) -> &'static str {
         CaseClassification::ProductIntegrationLikely => "FAIL",
         CaseClassification::UsefulnessGap => "WARN",
         CaseClassification::RetryRequired => "WARN",
+        CaseClassification::DiagnosticFault => "FAULT",
         CaseClassification::NotRun => "SKIP",
     }
 }
@@ -843,6 +867,7 @@ fn color_for(tag: &str) -> &'static str {
         "PASS" => "\x1b[32m",
         "WARN" => "\x1b[33m",
         "FAIL" => "\x1b[31m",
+        "FAULT" => "\x1b[35m",
         _ => "\x1b[2m",
     }
 }
@@ -873,7 +898,10 @@ fn print_case(
             print_lane("direct", &report.direct);
             print_lane("product", &report.product);
             if report.scorer.executed
-                || matches!(report.classification, CaseClassification::UsefulnessGap)
+                || matches!(
+                    report.classification,
+                    CaseClassification::UsefulnessGap | CaseClassification::DiagnosticFault
+                )
             {
                 print_lane("scorer", &report.scorer);
             }
@@ -1421,6 +1449,29 @@ fn typed_investigation_answer(
         StreamEvent::InvestigationAnswer { envelope } => Some(envelope),
         _ => None,
     })
+}
+
+/// A typed investigation envelope and the human-facing text projection are
+/// independent host-owned outputs.  A valid envelope with no visible text is
+/// therefore not a model/usefulness failure: it is an inconsistent product
+/// projection which makes this diagnostic unable to measure the case.
+fn projection_has_diagnostic_fault(
+    final_text: &str,
+    typed_envelope_present: bool,
+    typed_score_passed: bool,
+) -> bool {
+    typed_envelope_present && typed_score_passed && final_text.trim().is_empty()
+}
+
+/// Extended diagnostics require every planned attempt to pass.  A single
+/// successful retry is evidence of fragility, never a usefulness pass.
+fn scorer_attempts_pass(
+    pass_count: u32,
+    fail_count: u32,
+    completed_attempts: u32,
+    expected_attempts: u32,
+) -> bool {
+    pass_count > 0 && fail_count == 0 && completed_attempts == expected_attempts
 }
 
 /// Summarize only host-owned shape/role counts from a typed answer. This is
@@ -2266,6 +2317,10 @@ async fn case_linked_log_triage(
     let mut total_requests = 0u32;
     let mut pass_seen = false;
     let mut fail_seen = false;
+    let mut projection_fault = false;
+    let mut pass_count = 0u32;
+    let mut fail_count = 0u32;
+    let mut completed_attempts = 0u32;
     let mut last_scorer_detail = String::new();
     let mut last_terminal_detail = String::new();
 
@@ -2290,6 +2345,7 @@ async fn case_linked_log_triage(
         .await;
         total_elapsed += elapsed;
         total_requests += calls.len().max(1) as u32;
+        completed_attempts += 1;
         if let Ok(o) = &outcome {
             created_sessions.push(o.session_id.clone());
             last_terminal_detail = terminal_channel_summary(&o.events);
@@ -2305,11 +2361,16 @@ async fn case_linked_log_triage(
                 );
                 if score.passed {
                     pass_seen = true;
+                    pass_count += 1;
+                    projection_fault |=
+                        projection_has_diagnostic_fault(&o.final_text, true, score.passed);
                 } else {
                     fail_seen = true;
+                    fail_count += 1;
                 }
             } else if o.final_text.trim().is_empty() {
                 fail_seen = true;
+                fail_count += 1;
                 last_scorer_detail = format!(
                     "attempt {}: no visible terminal answer; {}; {}",
                     attempt + 1,
@@ -2330,12 +2391,15 @@ async fn case_linked_log_triage(
                         );
                         if score.passed {
                             pass_seen = true;
+                            pass_count += 1;
                         } else {
                             fail_seen = true;
+                            fail_count += 1;
                         }
                     }
                     Err(e) => {
                         fail_seen = true;
+                        fail_count += 1;
                         last_scorer_detail = format!(
                             "attempt {}: contract parse failed: {e}; {}; {}",
                             attempt + 1,
@@ -2347,6 +2411,7 @@ async fn case_linked_log_triage(
             }
         } else if let Err(e) = &outcome {
             fail_seen = true;
+            fail_count += 1;
             last_scorer_detail =
                 format!("attempt {}: turn failed: {}", attempt + 1, redact_reason(e));
         }
@@ -2354,7 +2419,31 @@ async fn case_linked_log_triage(
         last_calls = calls;
     }
 
-    let product = match &last_outcome {
+    let aggregate = if completed_attempts < attempts {
+        "incomplete_attempt_set"
+    } else if pass_seen && fail_seen {
+        "all_attempts_required_mixed_fail"
+    } else if pass_seen {
+        "all_attempts_pass"
+    } else {
+        "all_attempts_fail"
+    };
+    let aggregate_detail = format!(
+        "aggregate={aggregate} completed_attempts={completed_attempts}/{attempts} pass_count={pass_count} fail_count={fail_count}"
+    );
+    let product = if projection_fault {
+        LaneResult {
+            executed: true,
+            passed: false,
+            detail: format!(
+                "typed envelope passed but visible answer projection was empty; diagnostic_fault; {aggregate_detail}"
+            ),
+            elapsed_ms: total_elapsed.as_millis() as u64,
+            attempts: completed_attempts,
+            requests_used: total_requests,
+        }
+    } else {
+        match &last_outcome {
         Some(Ok(o)) if o.final_text.trim().is_empty() && typed_investigation_answer(&o.events).is_none() => LaneResult {
             executed: true,
             passed: false,
@@ -2363,7 +2452,7 @@ async fn case_linked_log_triage(
                 linked_triage_authority_summary(&o.events)
             ),
             elapsed_ms: total_elapsed.as_millis() as u64,
-            attempts,
+            attempts: completed_attempts,
             requests_used: total_requests,
         },
         Some(Ok(_)) => LaneResult {
@@ -2371,7 +2460,7 @@ async fn case_linked_log_triage(
             passed: true,
             detail: "product-path triage turn completed".to_string(),
             elapsed_ms: total_elapsed.as_millis() as u64,
-            attempts,
+            attempts: completed_attempts,
             requests_used: total_requests,
         },
         Some(Err(e)) => LaneResult {
@@ -2379,7 +2468,7 @@ async fn case_linked_log_triage(
             passed: false,
             detail: redact_reason(e),
             elapsed_ms: total_elapsed.as_millis() as u64,
-            attempts,
+            attempts: completed_attempts,
             requests_used: total_requests,
         },
         None => LaneResult {
@@ -2390,18 +2479,21 @@ async fn case_linked_log_triage(
             attempts: 0,
             requests_used: total_requests,
         },
+        }
     };
     let scorer = LaneResult {
         executed: !last_scorer_detail.is_empty(),
-        passed: pass_seen,
-        detail: last_scorer_detail,
+        passed: scorer_attempts_pass(pass_count, fail_count, completed_attempts, attempts),
+        detail: format!("{last_scorer_detail}; {aggregate_detail}"),
         elapsed_ms: 0,
-        attempts,
+        attempts: completed_attempts,
         requests_used: 0,
     };
     let retried = pass_seen && fail_seen;
     let classification = if !product.executed {
         CaseClassification::NotRun
+    } else if projection_fault {
+        CaseClassification::DiagnosticFault
     } else if !product.passed {
         CaseClassification::ProductIntegrationLikely
     } else if scorer.executed && !scorer.passed && !retried {
@@ -2819,6 +2911,81 @@ mod tests {
         assert!(summary.contains("terminal_text_chars=0"));
         assert!(summary.contains("text_delta_count=0"));
         assert!(summary.contains("turn_terminal=stop"));
+    }
+
+    #[test]
+    fn typed_envelope_without_visible_projection_is_a_diagnostic_fault() {
+        let raw = include_str!(
+            "../../../../fixtures/gateway-contracts/v1/diagnostic-projection-typed-envelope.json"
+        );
+        let fixture: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let fault = projection_has_diagnostic_fault(
+            &" ".repeat(fixture["final_text_chars"].as_u64().unwrap() as usize),
+            fixture["typed_envelope_present"].as_bool().unwrap(),
+            fixture["typed_score_passed"].as_bool().unwrap(),
+        );
+        assert!(fault);
+        assert_eq!(fixture["expected_classification"], "diagnostic_fault");
+    }
+
+    #[test]
+    fn projection_fault_requires_a_valid_typed_envelope() {
+        assert!(!projection_has_diagnostic_fault("", false, true));
+        assert!(!projection_has_diagnostic_fault("", true, false));
+        assert!(!projection_has_diagnostic_fault("visible", true, true));
+    }
+
+    #[test]
+    fn extended_scorer_is_fail_closed_for_mixed_attempts() {
+        assert!(!scorer_attempts_pass(1, 1, 2, 2));
+        assert!(!scorer_attempts_pass(1, 0, 1, 2));
+        assert!(scorer_attempts_pass(2, 0, 2, 2));
+        assert!(!scorer_attempts_pass(0, 2, 2, 2));
+    }
+
+    #[test]
+    fn usefulness_failure_requires_non_ready_exit() {
+        let report = GatewayDiagnosticReport {
+            schema_id: GATEWAY_DIAGNOSTIC_SCHEMA_ID,
+            schema_version: GATEWAY_DIAGNOSTIC_SCHEMA_VERSION,
+            run_id: "run".into(),
+            build: BuildIdentity {
+                version: "v",
+                long_version: "v",
+            },
+            started_at_unix_ms: 0,
+            finished_at_unix_ms: 0,
+            level: "extended",
+            profile_pseudonym: "p".into(),
+            model_pseudonym: "m".into(),
+            role_hint: "investigator",
+            endpoint_fingerprint: "f".into(),
+            credentials_read: false,
+            deadline_secs: 1,
+            requests_planned_max: 1,
+            requests_made: 1,
+            cases: Vec::new(),
+            verdicts: Verdicts {
+                gateway_model_compatible: true,
+                product_workflow_compatible: true,
+                answers_useful: false,
+                gateway_model_status: VerdictStatus::Pass,
+                product_workflow_status: VerdictStatus::Pass,
+                answers_useful_status: VerdictStatus::Fail,
+            },
+            cleanup: CleanupReport {
+                corpora_created: 0,
+                corpora_removed: 0,
+                sessions_created: 0,
+                sessions_removed: 0,
+                failures: Vec::new(),
+            },
+            cancelled: false,
+            deadline_exceeded: false,
+            artifact_dir: None,
+            private_capture_written: false,
+        };
+        assert!(report_requires_not_ready(&report));
     }
 
     fn pass_lane() -> LaneResult {

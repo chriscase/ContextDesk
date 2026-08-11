@@ -428,9 +428,7 @@ async fn dispatch(
                 Ok(report) => {
                     if report.cancelled {
                         ExitCategory::Cancelled.code()
-                    } else if !report.verdicts.gateway_model_compatible
-                        || !report.verdicts.product_workflow_compatible
-                    {
+                    } else if commands::gateway::report_requires_not_ready(&report) {
                         ExitCategory::NotReady.code()
                     } else {
                         0

@@ -161,6 +161,13 @@ impl ShareSafeRedactionPolicy {
             ],
         ) {
             "local_io"
+        } else if lower.contains("diagnostic_fault") {
+            // Host-authored projection inconsistency: a typed envelope passed
+            // while the visible answer projection was empty. This is a
+            // diagnostic fault, not provider compatibility or usefulness
+            // evidence. Keep it after provider-signal buckets so a real
+            // transport/auth/upstream failure still wins.
+            "diagnostic_fault"
         } else if lower.contains("tool_called=") && lower.contains("grounding=") {
             // Host-observed grounding outcome, not a provider fault. The gateway
             // diagnostic's tool lane reports `tool_called=<bool> grounding=<enum>`
@@ -966,6 +973,16 @@ mod tests {
         assert_eq!(
             policy.failure_summary(raw),
             "failure category: empty_terminal_answer; raw provider detail omitted"
+        );
+    }
+
+    #[test]
+    fn share_safe_failure_summary_distinguishes_diagnostic_fault_from_response_contract() {
+        let policy = ShareSafeRedactionPolicy::default();
+        let raw = "typed envelope passed but visible answer projection was empty; diagnostic_fault; aggregate=all_attempts_pass";
+        assert_eq!(
+            policy.failure_summary(raw),
+            "failure category: diagnostic_fault; raw provider detail omitted"
         );
     }
 
