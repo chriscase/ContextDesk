@@ -244,6 +244,14 @@ pub struct DiagnosticRequest {
     /// Explicit acknowledgement that retrieval inputs may leave this machine.
     /// Required before any non-loopback role is constructed.
     pub egress_acknowledged: bool,
+    /// Include the raw ranked row identities each lane returned.
+    ///
+    /// Off by default. The identities are durable `seq` numbers, which are
+    /// meaningless without the corpus that produced them — but they still say
+    /// exactly which rows of someone's logs a query surfaced, which is more
+    /// than a share-safe artifact should carry. Callers must obtain explicit,
+    /// separate consent before setting this.
+    pub include_raw: bool,
 }
 
 impl DiagnosticRequest {
@@ -255,6 +263,7 @@ impl DiagnosticRequest {
             budgets: DiagnosticBudgets::default(),
             lanes: DiagnosticLane::ALL.to_vec(),
             egress_acknowledged: false,
+            include_raw: false,
         }
     }
 }
@@ -531,6 +540,22 @@ pub struct LaneReport {
     /// Share-safe reason when the lane is blocked or cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<BlockedLane>,
+    /// Raw ranked row identities, present ONLY when the caller explicitly
+    /// opted in. Absent by default so the report stays share-safe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_rankings: Vec<RawRanking>,
+}
+
+/// The exact rows one lane returned for one query, in rank order.
+///
+/// Local-only: `seq` numbers are meaningless outside their corpus, but they
+/// still identify which rows of someone's logs a query surfaced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawRanking {
+    /// Query these rows answered.
+    pub query_id: String,
+    /// Durable event identities, rank 1 first.
+    pub ranked_seqs: Vec<u64>,
 }
 
 /// Explicit evidence labels. Every one of these is a claim the report is
@@ -736,6 +761,7 @@ async fn run_lane(
         mean_decoy_contamination: None,
         execution: LaneExecutionFacts::default(),
         blocked_reason: None,
+        raw_rankings: Vec::new(),
     };
     if lane.uses_embedder() {
         if let Some(role) = enabled_role(config.retrieval.embedding.as_ref()) {
@@ -819,6 +845,12 @@ async fn run_lane(
                     &query.truth,
                     budgets.candidate_k,
                 ));
+                if request.include_raw {
+                    report.raw_rankings.push(RawRanking {
+                        query_id: query.query_id.clone(),
+                        ranked_seqs: result.ranked_seqs,
+                    });
+                }
             }
         }
     }
@@ -1120,6 +1152,7 @@ pub async fn run_diagnostic(
                 mean_decoy_contamination: None,
                 execution: LaneExecutionFacts::default(),
                 blocked_reason: Some(blocked.clone()),
+                raw_rankings: Vec::new(),
             });
             continue;
         }
@@ -1296,6 +1329,7 @@ mod tests {
                 mean_decoy_contamination: None,
                 execution: LaneExecutionFacts::default(),
                 blocked_reason: None,
+                raw_rankings: Vec::new(),
             }],
             vector_stability: None,
             rerank_semantics: None,

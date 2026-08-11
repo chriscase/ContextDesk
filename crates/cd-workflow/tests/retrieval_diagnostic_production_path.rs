@@ -316,6 +316,7 @@ async fn every_lane_runs_through_production_factories_and_reports_measured_facts
         },
         lanes: DiagnosticLane::ALL.to_vec(),
         egress_acknowledged: false,
+        include_raw: false,
     };
     let cache_root = fixture.cache_root.clone();
     let report = run_diagnostic(
@@ -852,6 +853,7 @@ async fn a_keyword_lane_never_borrows_a_shared_embedder_from_the_host() {
             DiagnosticLane::KeywordBaselineRerank,
         ],
         egress_acknowledged: false,
+        include_raw: false,
     };
     let cache_root = fixture.cache_root.clone();
     let report = run_diagnostic(
@@ -895,5 +897,78 @@ impl cd_core::embed::EmbedBackend for CountingEmbed {
 
     fn identity(&self) -> String {
         "counting-embed (deterministic synthetic; tests only, not a capability)".into()
+    }
+}
+
+/// Raw ranked identities say exactly which rows of someone's logs a query
+/// surfaced. They are absent by default, and appear only when the caller
+/// explicitly opts in — which is what makes the CLI's double consent mean
+/// something rather than gating a flag that does nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn raw_rankings_are_absent_by_default_and_present_only_on_opt_in() {
+    let fixture = fixture().await;
+    let cache_root = fixture.cache_root.clone();
+
+    let share_safe = run_diagnostic(
+        &fixture.cache_root,
+        &DiagnosticRequest::new(fixture.corpus_id.clone(), vec![query()]),
+        &fixture.config,
+        Some(&fixture.secrets),
+        |_lane| tool_host(&cache_root),
+        None,
+    )
+    .await
+    .expect("default run");
+    assert!(
+        share_safe
+            .lanes
+            .iter()
+            .all(|lane| lane.raw_rankings.is_empty()),
+        "the default artifact must carry no raw row identities"
+    );
+    let json = serde_json::to_string(&share_safe).expect("serializes");
+    assert!(
+        !json.contains("raw_rankings"),
+        "an absent opt-in must not even leave the key behind"
+    );
+
+    let mut opted_in = DiagnosticRequest::new(fixture.corpus_id.clone(), vec![query()]);
+    opted_in.include_raw = true;
+    let cache_root = fixture.cache_root.clone();
+    let raw = run_diagnostic(
+        &fixture.cache_root,
+        &opted_in,
+        &fixture.config,
+        Some(&fixture.secrets),
+        |_lane| tool_host(&cache_root),
+        None,
+    )
+    .await
+    .expect("opted-in run");
+    let with_rows = raw
+        .lanes
+        .iter()
+        .filter(|lane| !lane.raw_rankings.is_empty())
+        .count();
+    assert!(
+        with_rows > 0,
+        "opting in must actually add the rows it warns about"
+    );
+    for lane in &raw.lanes {
+        for ranking in &lane.raw_rankings {
+            assert_eq!(ranking.query_id, "storage");
+            assert!(
+                ranking.ranked_seqs.len() as u32 <= raw.budgets.candidate_k,
+                "raw rows stay inside the same K budget"
+            );
+        }
+    }
+    // Even opted in, the artifact never gains an endpoint, credential, or
+    // corpus text: the opt-in adds identities, not content.
+    let json = serde_json::to_string(&raw).expect("serializes");
+    assert!(!json.contains("http://"));
+    assert!(!json.contains("synthetic-retrieval-key"));
+    for row in ROWS {
+        assert!(!json.contains(row), "opt-in must not add corpus text");
     }
 }

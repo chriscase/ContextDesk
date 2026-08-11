@@ -227,6 +227,57 @@ fn raw_output_requires_two_separate_consents() {
 }
 
 #[test]
+fn the_raw_consent_actually_changes_the_artifact() {
+    // A consent gate in front of a flag that does nothing teaches people to
+    // click through it. Confirm the opt-in adds the rows it warns about, and
+    // that the default genuinely omits them.
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    let queries = write_queries(tmp.path());
+    let corpus = import_corpus(&data, tmp.path());
+
+    let run = |extra: &[&str]| -> serde_json::Value {
+        let mut args = vec![
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--json",
+            "retrieval-diagnose",
+            "--queries",
+            queries.as_str(),
+            "--corpus-id",
+            corpus.as_str(),
+            "--confirm",
+        ];
+        args.extend_from_slice(extra);
+        let assert = bin().args(args).assert().code(8);
+        let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        serde_json::from_str(&stdout).expect("envelope")
+    };
+
+    let default_report = run(&[]);
+    let default_body = default_report["data"]["report"].to_string();
+    assert!(
+        !default_body.contains("raw_rankings"),
+        "the default artifact must omit raw row identities entirely"
+    );
+
+    let raw_report = run(&["--include-raw", "--raw-output-is-not-share-safe"]);
+    let lanes = raw_report["data"]["report"]["lanes"].as_array().unwrap();
+    let with_rows = lanes
+        .iter()
+        .filter(|lane| {
+            lane["raw_rankings"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+        })
+        .count();
+    assert!(
+        with_rows > 0,
+        "the opt-in must add the rows it warns about: {raw_report}"
+    );
+}
+
+#[test]
 fn an_invalid_lane_or_missing_query_file_fails_before_anything_runs() {
     let tmp = TempDir::new().unwrap();
     let data = tmp.path().join("data");

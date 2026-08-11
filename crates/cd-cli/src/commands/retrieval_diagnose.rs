@@ -298,6 +298,12 @@ impl Render for DiagnoseRunOutput {
                     lane.execution.fallback_codes.join(", ")
                 ));
             }
+            for raw in &lane.raw_rankings {
+                out.push_str(&format!(
+                    "    raw[{}]: {:?}   (local only — not share-safe)\n",
+                    raw.query_id, raw.ranked_seqs
+                ));
+            }
             for query in &lane.queries {
                 if !query.missing_mandatory_anchors.is_empty() {
                     out.push_str(&format!(
@@ -537,6 +543,8 @@ pub async fn run(
         budgets,
         lanes,
         egress_acknowledged: args.acknowledge_egress,
+        // Both consents were checked above; raw rankings are local-only.
+        include_raw: args.include_raw,
     };
 
     let plan = plan_diagnostic(cache_root, &request, app_cfg)
