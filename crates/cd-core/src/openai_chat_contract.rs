@@ -164,6 +164,32 @@ pub fn unsupported_mode_reason(
     )
 }
 
+/// Extract dialect id from a transport error reason when it is an unsupported-mode refusal.
+///
+/// Used so probe evidence records typed `dialect` on refuse paths, not only a reason string.
+pub fn dialect_from_transport_reason(reason: &str) -> Option<&'static str> {
+    fn map_dialect(dialect: &str) -> Option<&'static str> {
+        match dialect.trim() {
+            "openai_compatible" => Some("openai_compatible"),
+            "ollama" => Some("ollama"),
+            "anthropic" => Some("anthropic"),
+            _ => None,
+        }
+    }
+    // Prefer structured token from unsupported_mode_reason.
+    if let Some(rest) = reason.strip_prefix("unsupported_request_mode:dialect=") {
+        let dialect = rest.split(',').next().unwrap_or(rest);
+        return map_dialect(dialect);
+    }
+    // Fallback: reason embeds dialect=… anywhere (e.g. "mode=json_object: … dialect=ollama").
+    // Split on the ASCII marker without byte-index slicing untrusted UTF-8.
+    if let Some((_, after)) = reason.split_once("dialect=") {
+        let dialect = after.split([',', ' ', ':']).next().unwrap_or("");
+        return map_dialect(dialect);
+    }
+    None
+}
+
 /// Build the OpenAI chat/completions JSON body (pure; no I/O).
 ///
 /// `tools` is applied when non-empty. Forced-tool mode requires the named tool
@@ -515,6 +541,44 @@ mod tests {
             ChatBackendDialect::Ollama,
             &OpenAiChatRequestMode::PromptedJson
         ));
+        assert!(!dialect_supports_mode(
+            ChatBackendDialect::Anthropic,
+            &OpenAiChatRequestMode::JsonObject
+        ));
+        assert!(!dialect_supports_mode(
+            ChatBackendDialect::Anthropic,
+            &OpenAiChatRequestMode::JsonSchema {
+                name: "q".into(),
+                schema: json!({}),
+                strict: true,
+            }
+        ));
+        assert!(!dialect_supports_mode(
+            ChatBackendDialect::Anthropic,
+            &OpenAiChatRequestMode::ForcedTool {
+                name: "cd_qualify_echo".into()
+            }
+        ));
+        assert!(dialect_supports_mode(
+            ChatBackendDialect::Anthropic,
+            &OpenAiChatRequestMode::PromptedJson
+        ));
+        let refuse = unsupported_mode_reason(
+            ChatBackendDialect::Anthropic,
+            &OpenAiChatRequestMode::JsonObject,
+        );
+        assert_eq!(
+            dialect_from_transport_reason(&refuse),
+            Some("anthropic")
+        );
+        assert_eq!(
+            dialect_from_transport_reason(&format!("mode=json_object: {refuse}")),
+            Some("anthropic")
+        );
+        assert_eq!(
+            dialect_from_transport_reason("unrelated error"),
+            None
+        );
     }
 
     #[test]

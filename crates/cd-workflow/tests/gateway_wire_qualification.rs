@@ -258,4 +258,120 @@ fn qualification_ollama_refuses_openai_native_json_object() {
         bodies.iter().all(|b| !b.contains("response_format")),
         "ollama must never receive OpenAI response_format: {bodies:?}"
     );
+    assert_eq!(
+        native.dialect.as_deref(),
+        Some("ollama"),
+        "typed dialect field must be set on refuse, not only reason text"
+    );
+    // Schema and forced-tool native modes also fail closed (not Pass).
+    for kind in [
+        CapabilityKind::StructuredJsonSchema,
+        CapabilityKind::StructuredJsonSchemaStrict,
+        CapabilityKind::ForcedToolCall,
+    ] {
+        let row = report.checks.iter().find(|c| c.kind == kind);
+        if let Some(row) = row {
+            assert_ne!(row.status, CapabilityStatus::Pass, "{kind:?}");
+            if row.reason.contains("unsupported_request_mode") {
+                assert_eq!(row.dialect.as_deref(), Some("ollama"));
+            }
+        }
+    }
+}
+
+/// Anthropic live transport must refuse OpenAI-native modes before inventing a
+/// pass. Deleting refuse_unsupported_mode from chat_anthropic alone must fail.
+#[test]
+fn qualification_anthropic_refuses_openai_native_modes() {
+    let rt = tokio::runtime::Runtime::new().expect("gateway runtime");
+    // Anthropic path posts to /v1/messages when it actually transmits. Refuse
+    // happens before HTTP for OpenAI-native modes; still mount a safe response
+    // for any plain/prompted probes that do contact the mock.
+    let gateway = rt.block_on(MockGateway::start_ordered(vec![Step::respond(
+        Response::json_ok(&json!({
+            "content": [{"type": "text", "text": "QUALIFY_OK_V1"}],
+            "stop_reason": "end_turn"
+        })),
+    )]));
+    let mut transport = LiveQualificationTransport::new(
+        LiveBackendKind::Anthropic,
+        format!("{}/v1", gateway.base_url()),
+        Some("sk-test-fixture-not-secret".into()),
+        true,
+    );
+    let gate = ProfileCapabilityGate {
+        tools_enabled: true,
+        stream_enabled: false,
+        embeddings_enabled: false,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let report = run_qualification(
+        QualificationKey::new("anthropic-profile", gateway.base_url(), "claude-test"),
+        gate,
+        &mut transport,
+        &cancel,
+    );
+
+    for (kind, mode_token) in [
+        (CapabilityKind::StructuredJsonObject, "json_object"),
+        (CapabilityKind::StructuredJsonSchema, "json_schema"),
+        (
+            CapabilityKind::StructuredJsonSchemaStrict,
+            "json_schema_strict",
+        ),
+        (CapabilityKind::ForcedToolCall, "forced_tool"),
+    ] {
+        let row = report
+            .checks
+            .iter()
+            .find(|c| c.kind == kind)
+            .unwrap_or_else(|| panic!("missing check row for {kind:?}"));
+        assert_eq!(
+            row.status,
+            CapabilityStatus::Fail,
+            "{kind:?} must fail closed: {}",
+            row.reason
+        );
+        assert!(
+            row.reason.contains("unsupported_request_mode")
+                && row.reason.contains("anthropic")
+                && row.reason.contains(mode_token),
+            "{kind:?} reason must be dialect-honest: {}",
+            row.reason
+        );
+        assert_eq!(
+            row.dialect.as_deref(),
+            Some("anthropic"),
+            "{kind:?} typed dialect must be anthropic on refuse"
+        );
+        assert_eq!(
+            row.request_mode.as_deref(),
+            Some(mode_token),
+            "{kind:?} must still record the requested mode identity"
+        );
+        assert_ne!(row.status, CapabilityStatus::Pass);
+    }
+
+    // No OpenAI-native wire fields may appear on any Anthropic request that did fire.
+    let bodies: Vec<String> = gateway
+        .requests()
+        .iter()
+        .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+        .collect();
+    assert!(
+        bodies
+            .iter()
+            .all(|b| !b.contains("response_format") && !b.contains("\"tool_choice\"")),
+        "anthropic must never receive OpenAI-native response_format/tool_choice: {bodies:?}"
+    );
+
+    use cd_core::capability_qualification::{capability_contract_verdict, CapabilityContract, ContractVerdict};
+    assert_eq!(
+        capability_contract_verdict(Some(&report), CapabilityContract::NativeJsonObject),
+        ContractVerdict::Unqualified
+    );
+    assert_eq!(
+        capability_contract_verdict(Some(&report), CapabilityContract::ForcedToolLoop),
+        ContractVerdict::Unqualified
+    );
 }

@@ -12,10 +12,10 @@ use crate::config::AppConfig;
 use crate::error::{CoreError, CoreResult};
 use crate::model_role_hints::{classify_model_role, ModelRoleHint};
 use crate::openai_chat_contract::{
-    parse_structured_json_from_content, synth_qualify_schema, validate_synth_qualify_json,
-    ChatBackendDialect, OpenAiChatRequestMode, OpenAiMessageChannels, MODE_AUTO_TOOLS,
-    MODE_FORCED_TOOL, MODE_JSON_OBJECT, MODE_JSON_SCHEMA, MODE_JSON_SCHEMA_STRICT, MODE_PLAIN,
-    MODE_PROMPTED_JSON, SYNTH_SCHEMA_PROBE_ID,
+    dialect_from_transport_reason, parse_structured_json_from_content, synth_qualify_schema,
+    validate_synth_qualify_json, ChatBackendDialect, OpenAiChatRequestMode, OpenAiMessageChannels,
+    MODE_AUTO_TOOLS, MODE_FORCED_TOOL, MODE_JSON_OBJECT, MODE_JSON_SCHEMA, MODE_JSON_SCHEMA_STRICT,
+    MODE_PLAIN, MODE_PROMPTED_JSON, SYNTH_SCHEMA_PROBE_ID,
 };
 use crate::probe::normalize_gateway_input;
 use serde::{Deserialize, Serialize};
@@ -1378,6 +1378,13 @@ impl CheckEvidenceMeta {
         }
     }
 
+    /// Mode metadata plus dialect recovered from a transport error reason
+    /// (`unsupported_request_mode:dialect=…`) so refuse paths stay dialect-honest
+    /// on the typed field, not only in free-text reasons.
+    fn from_mode_and_error(mode: &OpenAiChatRequestMode, reason: &str) -> Self {
+        Self::from_mode(mode).with_dialect(dialect_from_transport_reason(reason))
+    }
+
     fn with_dialect(mut self, dialect: Option<&str>) -> Self {
         self.dialect = dialect.map(|d| {
             // Leak-free static when known; otherwise omit (caller passes statics).
@@ -1936,7 +1943,7 @@ fn probe_structured_prompted_json(
             CapabilityStatus::Fail,
             start,
             format!("mode={mode_id}: {}", e.reason),
-            CheckEvidenceMeta::from_mode(&mode),
+            CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason),
         ),
     }
 }
@@ -1971,13 +1978,13 @@ fn probe_structured_json_object(
             cancel,
         ),
         Err(e) => {
-            // Unsupported dialect → Fail (not Pass); reason carries dialect honesty.
+            // Unsupported dialect → Fail (not Pass); typed dialect from refuse reason.
             check_with_evidence(
                 CapabilityKind::StructuredJsonObject,
                 CapabilityStatus::Fail,
                 start,
                 format!("mode={mode_id}: {}", e.reason),
-                CheckEvidenceMeta::from_mode(&mode),
+                CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason),
             )
         }
     }
@@ -2020,7 +2027,7 @@ fn probe_structured_json_schema(
             CapabilityStatus::Fail,
             start,
             format!("mode={mode_id}: {}", e.reason),
-            CheckEvidenceMeta::from_mode(&mode),
+            CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason),
         ),
     }
 }
@@ -2068,7 +2075,7 @@ fn probe_forced_tool_call(
                 CapabilityStatus::Fail,
                 start,
                 format!("mode={mode_id}: {}", e.reason),
-                meta,
+                CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason),
             );
         }
     };
@@ -3880,6 +3887,198 @@ mod tests {
             "modes seen: {:?}",
             t.modes
         );
+    }
+
+    /// Scripted ForcedToolCall fail-closed matrix: missing tool, wrong tool, bad args.
+    struct ForcedToolScript {
+        response: SyntheticChatResponse,
+    }
+
+    impl QualificationTransport for ForcedToolScript {
+        fn chat_complete(
+            &mut self,
+            req: &SyntheticChatRequest,
+            cancel: &AtomicBool,
+        ) -> Result<SyntheticChatResponse, TransportError> {
+            if cancel.load(Ordering::SeqCst) {
+                return Ok(SyntheticChatResponse {
+                    cancelled: true,
+                    dialect: Some("openai_compatible".into()),
+                    mode_transmitted: true,
+                    ..Default::default()
+                });
+            }
+            if matches!(
+                req.chat_mode,
+                OpenAiChatRequestMode::ForcedTool { .. }
+            ) {
+                let mut r = self.response.clone();
+                r.dialect = Some("openai_compatible".into());
+                r.mode_transmitted = true;
+                return Ok(r);
+            }
+            // Non-forced ladder steps: keep running until ForcedToolCall.
+            Ok(SyntheticChatResponse {
+                content: if matches!(
+                    req.chat_mode,
+                    OpenAiChatRequestMode::PromptedJson
+                        | OpenAiChatRequestMode::JsonObject
+                        | OpenAiChatRequestMode::JsonSchema { .. }
+                ) {
+                    r#"{"qualify":"ok","v":1}"#.into()
+                } else if !req.tools.is_empty() && req.messages.len() == 1 {
+                    String::new()
+                } else {
+                    SYNTH_GENERATION_MARKER.into()
+                },
+                tool_calls: if !req.tools.is_empty()
+                    && req.messages.len() == 1
+                    && !matches!(req.chat_mode, OpenAiChatRequestMode::ForcedTool { .. })
+                {
+                    vec![SyntheticToolCall {
+                        id: "c1".into(),
+                        name: INERT_PROBE_TOOL_NAME.into(),
+                        arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+                    }]
+                } else {
+                    vec![]
+                },
+                streamed: req.stream,
+                dialect: Some("openai_compatible".into()),
+                mode_transmitted: true,
+                ..Default::default()
+            })
+        }
+
+        fn embed(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &AtomicBool,
+        ) -> Result<SyntheticEmbeddingResponse, TransportError> {
+            Err(TransportError {
+                reason: "n/a".into(),
+            })
+        }
+
+        fn rerank(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &[&str],
+            _: &AtomicBool,
+        ) -> Result<SyntheticRerankResponse, TransportError> {
+            Err(TransportError {
+                reason: "n/a".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn forced_tool_fail_closed_missing_wrong_and_malformed_args() {
+        let cases = [
+            (
+                "missing",
+                SyntheticChatResponse {
+                    tool_calls: vec![],
+                    content: "I will not call tools".into(),
+                    ..Default::default()
+                },
+                "missing_forced_tool",
+            ),
+            (
+                "wrong",
+                SyntheticChatResponse {
+                    tool_calls: vec![SyntheticToolCall {
+                        id: "c1".into(),
+                        name: "other_tool".into(),
+                        arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+                    }],
+                    ..Default::default()
+                },
+                "wrong_tool",
+            ),
+            (
+                "bad_args",
+                SyntheticChatResponse {
+                    tool_calls: vec![SyntheticToolCall {
+                        id: "c1".into(),
+                        name: INERT_PROBE_TOOL_NAME.into(),
+                        arguments_json: r#"{"not_token":1}"#.into(),
+                    }],
+                    ..Default::default()
+                },
+                "tool args rejected",
+            ),
+        ];
+        for (label, response, token) in cases {
+            let mut t = ForcedToolScript { response };
+            let report = run_qualification(
+                key(&format!("forced-{label}")),
+                gate_full(),
+                &mut t,
+                &Arc::new(AtomicBool::new(false)),
+            );
+            let row = report
+                .checks
+                .iter()
+                .find(|c| c.kind == CapabilityKind::ForcedToolCall)
+                .unwrap_or_else(|| panic!("{label}: missing ForcedToolCall row"));
+            assert_eq!(
+                row.status,
+                CapabilityStatus::Fail,
+                "{label}: {}",
+                row.reason
+            );
+            assert!(
+                row.reason.contains(token),
+                "{label}: expected reason token `{token}` in {}",
+                row.reason
+            );
+            assert_eq!(row.request_mode.as_deref(), Some(MODE_FORCED_TOOL));
+            assert_eq!(
+                capability_contract_verdict(Some(&report), CapabilityContract::ForcedToolLoop),
+                ContractVerdict::Unqualified,
+                "{label}: ForcedToolLoop must not be Qualified"
+            );
+        }
+    }
+
+    #[test]
+    fn refuse_err_path_records_typed_dialect_on_native_modes() {
+        let mut t = ScriptedQualificationTransport {
+            dialect: ChatBackendDialect::Anthropic,
+            // Only need enough plain replies for early probes; natives refuse
+            // without consuming the queue.
+            chat_queue: full_ladder_success_queue(),
+            ..Default::default()
+        };
+        let report = run_qualification(
+            key("claude-script"),
+            gate_full(),
+            &mut t,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        let native = report
+            .checks
+            .iter()
+            .find(|c| c.kind == CapabilityKind::StructuredJsonObject)
+            .unwrap();
+        assert_eq!(native.status, CapabilityStatus::Fail);
+        assert_eq!(
+            native.dialect.as_deref(),
+            Some("anthropic"),
+            "typed dialect must not be None on refuse: {:?}",
+            native
+        );
+        assert!(native.reason.contains("anthropic"));
+        let forced = report
+            .checks
+            .iter()
+            .find(|c| c.kind == CapabilityKind::ForcedToolCall)
+            .unwrap();
+        assert_eq!(forced.dialect.as_deref(), Some("anthropic"));
+        assert_eq!(forced.status, CapabilityStatus::Fail);
     }
 
     #[test]
