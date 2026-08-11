@@ -37,6 +37,10 @@ unit test, while cancellation and host deadline races remain authoritative.
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy -p cd-workflow --all-targets -- -D warnings`: pass
 - `cargo test -p cd-workflow --lib --tests --no-fail-fast`: pass
+- Desktop native `cargo check --locked`: pass
+- Frontend typecheck: pass; lint: pass with nine pre-existing warnings and no
+  errors; Vitest: 188 files / 1,861 tests; Node checks: 54; production build:
+  pass
 - Focused workflow suites: resolver, fast-triage, gateway diagnostic contract,
   credentials, qualification, retrieval production, and transport-oracle all
   pass
@@ -68,4 +72,3 @@ gateway. Upload only its share-safe report/manifest. For the employer gateway,
 repeat discovery and targeted qualification in the owner’s source checkout,
 preserve the existing corpus/configuration/timezone, and run one selected-model
 triage turn. Do not infer model ids, reuse Vercel evidence, or run a matrix.
-
