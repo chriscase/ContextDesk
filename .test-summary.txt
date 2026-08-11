@@ -1,3 +1,0 @@
-error[E0063]: missing field `include_raw` in initializer of `DiagnosticRequest`
-error[E0063]: missing field `include_raw` in initializer of `DiagnosticRequest`
-error: could not compile `cd-workflow` (test "retrieval_diagnostic_production_path") due to 2 previous errors

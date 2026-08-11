@@ -153,6 +153,11 @@ outside the corpus that produced them.
 - `Url::host_str` keeps IPv6 brackets, so `http://[::1]` is classified remote
   by every surface. That errs toward asking for consent, and is consistent, but
   it is stricter than reality.
+- The diagnostic does not emit per-lane events to the Activity Inspector. Its
+  execution facts (call counts, latency, fallback codes, the mode that actually
+  ran, the dialect that actually parsed) are carried in the report instead, so
+  the information exists — but a reader watching Activity during a run sees the
+  underlying `search_logs` calls without the lane framing around them.
 - No measurement of live retrieval quality is claimed anywhere. The hermetic
   tests prove the plumbing, the gates, and the arithmetic; they do not prove
   that any particular embedder or reranker helps on a real corpus.
