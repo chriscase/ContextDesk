@@ -124,6 +124,9 @@ pub struct AgentOptions {
     /// broad-triage seam with two or more candidates, the reviewer pipeline
     /// runs; any unavailability degrades to the same seam's single-model path.
     pub multi_model: Option<MultiModelRuntime>,
+    /// Optional host-grounded contribution runtime. `None` preserves the
+    /// established single/reviewer behavior byte-for-byte.
+    pub contribution_runtime: Option<ContributionRuntime>,
     /// Optional host-grounded fast-triage runtime. `None` (the default) leaves
     /// every established path byte-identical. When present *and* exact
     /// persisted profile/model/workflow evidence selects the route at the
@@ -196,6 +199,33 @@ impl std::fmt::Debug for MultiModelRuntime {
             .field("configured_mode", &self.configured_mode)
             .field("role_ids", &self.role_ids)
             .field("budget", &self.budget)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Host-resolved model contributors for the provider-neutral contribution
+/// route. Backends are supplied by workflow resolution, never selected from a
+/// model name inside the agent. The route is deliberately opt-in and has its
+/// own hard plan/packet/cancellation boundaries.
+#[derive(Clone)]
+pub struct ContributionRuntime {
+    /// Host-selected role/backend slots.
+    pub slots: Vec<crate::multi_model::ContributionBackendSlot>,
+    /// Explicit role plan and hard contributor bounds.
+    pub plan: crate::multi_model::ContributionRoutingPlan,
+    /// Per-turn provider/context ceilings.
+    pub budget: crate::multi_model::MultiModelBudget,
+    /// Bounded neighborhood expansion used while assembling the packet.
+    pub neighborhood: crate::fast_triage::FastTriageNeighborhoodBudget,
+}
+
+impl std::fmt::Debug for ContributionRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContributionRuntime")
+            .field("slots", &self.slots.len())
+            .field("plan", &self.plan)
+            .field("budget", &self.budget)
+            .field("neighborhood", &self.neighborhood)
             .finish_non_exhaustive()
     }
 }
@@ -3099,6 +3129,7 @@ impl Default for AgentOptions {
             applied_skill_ids: Vec::new(),
             user_selection: None,
             multi_model: None,
+            contribution_runtime: None,
             fast_triage: None,
             #[cfg(test)]
             test_fixture_evidence_blocks: Vec::new(),
@@ -3135,6 +3166,7 @@ impl AgentOptions {
             applied_skill_ids: Vec::new(),
             user_selection: None,
             multi_model: None,
+            contribution_runtime: None,
             fast_triage: None,
             #[cfg(test)]
             test_fixture_evidence_blocks: Vec::new(),
@@ -5090,6 +5122,112 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                 }
                                 return Ok(out.into_events());
                             }
+                        }
+                    }
+                    // Provider-neutral contribution route (opt-in). It uses
+                    // the exact same host packet and turn deadline as the
+                    // established routes, but returns only a host-validated
+                    // reconciliation answer. Single and legacy Review remain
+                    // untouched when this runtime is absent.
+                    if let Some(runtime) = opts.contribution_runtime.clone() {
+                        let packet = match fast_triage_packet(
+                            &brief.candidate_groups,
+                            brief.comparison_context.as_ref(),
+                            multi_stage_binding.clone(),
+                            crate::fast_triage::clock_compatibility_from_time_quality(
+                                brief.time_quality,
+                            ),
+                            runtime.neighborhood,
+                        ) {
+                            Ok(packet) => Some(packet),
+                            Err(_) => {
+                                out.push(StreamEvent::MultiModelStage {
+                                    stage: "contributions".into(),
+                                    phase: "summary".into(),
+                                    status: Some("unavailable".into()),
+                                    detail:
+                                        "host packet validation failed; deterministic path retained"
+                                            .into(),
+                                    candidate_id: None,
+                                });
+                                trail.push("contributions:host_packet_invalid".into());
+                                // The production runtime is opt-in. A host
+                                // packet failure must never become a model
+                                // claim or silently switch providers.
+                                None
+                            }
+                        };
+                        if let Some(packet) = packet {
+                            let mut budget = runtime.budget;
+                            budget.context_char_budget = opts.effective_context_char_budget();
+                            let contribution_outcome =
+                                crate::multi_model::run_contribution_pipeline(
+                                    crate::multi_model::ContributionPipelineInputs {
+                                        user_text,
+                                        packet: &packet,
+                                        slots: &runtime.slots,
+                                        budget,
+                                        deadline_ms: deadline_plan.total_ms,
+                                        started_at: opts.turn_started_at,
+                                        cancel: opts.cancel.clone(),
+                                        plan: &runtime.plan,
+                                    },
+                                    &mut |event| {
+                                        out.push(StreamEvent::MultiModelStage {
+                                            stage: event.role.as_str().into(),
+                                            phase: if event.started {
+                                                "started"
+                                            } else {
+                                                "finished"
+                                            }
+                                            .into(),
+                                            status: event
+                                                .outcome
+                                                .map(|outcome| outcome.as_str().into()),
+                                            detail: event.detail,
+                                            candidate_id: None,
+                                        });
+                                    },
+                                )
+                                .await?;
+                            let state = contribution_outcome.report.state.as_str();
+                            trail.push(format!(
+                                "contributions:state={state},stages={}",
+                                contribution_outcome.telemetry.stages.len()
+                            ));
+                            out.push(StreamEvent::Tool {
+                            id: stage_id,
+                            name: "broad_log_triage_contributions".into(),
+                            phase: crate::events::ToolPhase::Finished,
+                            summary: format!("Bounded model contributions: {state}"),
+                            detail: Some(
+                                serde_json::to_string(&contribution_outcome.telemetry)
+                                    .unwrap_or_else(|_| {
+                                        "{\"schema\":\"contextdesk.multi_model.contribution_telemetry.v1\",\"serialization\":\"failed\"}".into()
+                                    }),
+                            ),
+                            ok: Some(true),
+                        });
+                            out.push(StreamEvent::TextDelta {
+                                text: contribution_outcome.content.clone(),
+                            });
+                            out.push(StreamEvent::InvestigationAnswer {
+                                envelope: (*contribution_outcome.envelope).clone(),
+                            });
+                            out.push(StreamEvent::SearchTrail { steps: trail });
+                            out.push(StreamEvent::TurnCompleted {
+                                reason: "stop".into(),
+                            });
+                            history.push(ChatMessage {
+                                role: Role::Assistant,
+                                content: contribution_outcome.content,
+                                tool_call_id: None,
+                                tool_calls: None,
+                            });
+                            if let Some(slot) = checkpoint_out.as_deref_mut() {
+                                *slot = None;
+                            }
+                            return Ok(out.into_events());
                         }
                     }
                     // Multi-model reviewer path (opt-in). It runs the same seam
@@ -11422,6 +11560,98 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         }
     }
 
+    struct ContributionAbstainBackend {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ChatBackend for ContributionAbstainBackend {
+        async fn complete(
+            &self,
+            messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let marker = "\"packet_id\":\"";
+            let role = messages
+                .iter()
+                .find(|message| message.role == Role::System)
+                .and_then(|message| {
+                    [
+                        "observation_extractor",
+                        "causal_proposer",
+                        "contradiction_checker",
+                        "evidence_gap",
+                        "reviewer",
+                    ]
+                    .into_iter()
+                    .find(|candidate| message.content.contains(candidate))
+                })
+                .unwrap_or("observation_extractor");
+            let user_content = messages
+                .iter()
+                .find(|message| message.role == Role::User)
+                .map(|message| message.content.as_str())
+                .ok_or_else(|| {
+                    CoreError::Message("user message missing from contribution prompt".into())
+                })?;
+            let content = user_content
+                .split_once(marker)
+                .and_then(|(_, rest)| rest.split('"').next())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    CoreError::Message("packet id missing from contribution prompt".into())
+                })?;
+            Ok(ChatCompletion::from_parts(
+                serde_json::json!({
+                    "schema": crate::multi_model::CONTRIBUTION_SCHEMA_V1,
+                    "packet_id": content,
+                    "role": role,
+                    "abstained": true,
+                    "claims": [],
+                })
+                .to_string(),
+                Vec::new(),
+                "stop",
+            ))
+        }
+    }
+
+    fn contribution_runtime(
+        backends: Vec<(&'static str, std::sync::Arc<dyn ChatBackend>)>,
+    ) -> ContributionRuntime {
+        let roles = vec![
+            crate::multi_model::ContributionRole::ObservationExtractor,
+            crate::multi_model::ContributionRole::CausalProposer,
+        ];
+        let slots = backends
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, (model, backend))| crate::multi_model::ContributionBackendSlot {
+                    role: roles[index],
+                    identity: crate::multi_model::ContributionIdentity {
+                        profile_id: "test-profile".into(),
+                        model: model.into(),
+                    },
+                    qualification: crate::multi_model::ContributionQualification::Qualified,
+                    backend,
+                },
+            )
+            .collect();
+        ContributionRuntime {
+            slots,
+            plan: crate::multi_model::ContributionRoutingPlan::new(roles, Default::default())
+                .unwrap(),
+            budget: crate::multi_model::MultiModelBudget {
+                max_total_provider_rounds: 4,
+                context_char_budget: 100_000,
+                ..Default::default()
+            },
+            neighborhood: crate::fast_triage::FastTriageNeighborhoodBudget::default(),
+        }
+    }
+
     struct ToolThenNeverBackend {
         calls: std::sync::atomic::AtomicUsize,
     }
@@ -11875,6 +12105,79 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
             }),
             "{events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn opt_in_contribution_runtime_owns_linked_turn_with_host_answer() {
+        let (_dir, mut host, context) = linked_multi_candidate_fixture();
+        let contributor = std::sync::Arc::new(ContributionAbstainBackend {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let runtime = contribution_runtime(vec![
+            (
+                "fast-a",
+                contributor.clone() as std::sync::Arc<dyn ChatBackend>,
+            ),
+            (
+                "fast-b",
+                contributor.clone() as std::sync::Arc<dyn ChatBackend>,
+            ),
+        ]);
+        let mut history = Vec::new();
+        let events = run_agent_turn(
+            &NeverCompletesBackend,
+            &mut host,
+            "What problems do you see in these logs?",
+            &mut history,
+            &AgentOptions {
+                session_id: "contribution-runtime-linked".into(),
+                model: Some("main-model".into()),
+                provider_profile_id: Some("main-profile".into()),
+                log_explorer_context: Some(context),
+                contribution_runtime: Some(runtime),
+                max_rounds: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("contribution route must return a host answer");
+
+        assert_eq!(
+            contributor.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::Tool {
+                    name,
+                    ok: Some(true),
+                    ..
+                } if name == "broad_log_triage_contributions"
+            )
+        }));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        StreamEvent::MultiModelStage {
+                            stage,
+                            phase,
+                            ..
+                        } if phase == "started" && (stage == "observation_extractor" || stage == "causal_proposer")
+                    )
+                })
+                .count(),
+            2
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::InvestigationAnswer { envelope } if !envelope.answer.root_cause_established)));
+        assert!(events.iter().any(|event| {
+            matches!(event, StreamEvent::TurnCompleted { reason } if reason == "stop")
+        }));
     }
 
     #[tokio::test(start_paused = true)]

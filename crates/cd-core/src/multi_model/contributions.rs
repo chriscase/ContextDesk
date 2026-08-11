@@ -17,7 +17,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::fast_triage::{FastTriageEvidenceCategory, FastTriageEvidenceScope, FastTriagePacketV1};
-use crate::investigation_answer::EvidenceRole;
+use crate::investigation_answer::{
+    validate_model_answer, AnswerEnvelopeV1, EvidenceRole, ValidationError, SCHEMA_V1,
+};
 
 /// Stable schema id for model contribution proposals.
 pub const CONTRIBUTION_SCHEMA_V1: &str = "contextdesk.multi_model.contribution.v1";
@@ -988,6 +990,82 @@ pub fn replay_reconciliation(
     }
 }
 
+/// Build a host-validated investigation answer from normalized contributions.
+///
+/// This is the deterministic answer floor for a contribution route: it uses
+/// only claims that passed packet validation, includes every host candidate,
+/// and never emits an initiating-cause claim. The ordinary single/reviewer
+/// synthesizer may still produce a richer answer later, but this function is a
+/// complete, safe answer when no synthesizer is available.
+pub fn reconciliation_answer(
+    packet: &FastTriagePacketV1,
+    attempts: &[ContributionAttemptV1],
+) -> Result<AnswerEnvelopeV1, ValidationError> {
+    let mut claims_by_key = BTreeMap::<(String, ContributionClaimKind, Vec<String>), String>::new();
+    for attempt in attempts {
+        if attempt.availability != ContributionAvailability::Completed {
+            continue;
+        }
+        let Some(contribution) = attempt.contribution.as_ref() else {
+            continue;
+        };
+        for claim in &contribution.claims {
+            let key = (
+                claim.candidate_id.clone(),
+                claim.kind,
+                claim.evidence_ids.clone(),
+            );
+            // Deterministically choose the lexicographically smallest bounded
+            // model text for one normalized claim key. Text never decides
+            // agreement, and no provider gets precedence by arrival order.
+            claims_by_key
+                .entry(key)
+                .and_modify(|text| {
+                    if claim.text.as_str() < text.as_str() {
+                        *text = claim.text.clone();
+                    }
+                })
+                .or_insert_with(|| claim.text.clone());
+        }
+    }
+
+    let mut by_candidate = BTreeMap::<String, serde_json::Map<String, serde_json::Value>>::new();
+    for candidate_id in packet.ledger().candidate_ids() {
+        let mut object = serde_json::Map::new();
+        object.insert("candidate_id".into(), serde_json::json!(candidate_id));
+        by_candidate.insert(candidate_id, object);
+    }
+    let mut claim_index = 0usize;
+    for ((candidate_id, kind, evidence_ids), text) in claims_by_key {
+        let section = match kind {
+            ContributionClaimKind::Observation => "observations",
+            ContributionClaimKind::Symptom => "symptoms",
+            ContributionClaimKind::CausalCandidate => "causal_candidates",
+            ContributionClaimKind::CompetingExplanation => "competing_explanations",
+        };
+        let claim = serde_json::json!({
+            "claim_id": format!("reconciled-{claim_index}"),
+            "text": text,
+            "evidence_ids": evidence_ids,
+        });
+        claim_index = claim_index.saturating_add(1);
+        by_candidate
+            .get_mut(&candidate_id)
+            .ok_or(ValidationError::WrongScope)?
+            .entry(section)
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or(ValidationError::Schema)?
+            .push(claim);
+    }
+    let proposal = serde_json::json!({
+        "schema": SCHEMA_V1,
+        "candidates": by_candidate.into_values().map(serde_json::Value::Object).collect::<Vec<_>>(),
+    })
+    .to_string();
+    validate_model_answer(&proposal, packet.ledger())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1388,5 +1466,24 @@ mod tests {
         assert_eq!(replay.single_claim_count, 1);
         assert_eq!(replay.bounded_claim_count, 2);
         assert_eq!(replay.bounded_conflict_count, 0);
+    }
+
+    #[test]
+    fn reconciliation_answer_is_host_validated_and_never_establishes_root() {
+        let packet = packet();
+        let attempts = vec![extraction(&packet, "fast"), causal(&packet, "careful")];
+        let envelope = reconciliation_answer(&packet, &attempts).expect("answer floor");
+        assert!(!envelope.answer.root_cause_established);
+        assert_eq!(envelope.answer.candidates.len(), 3);
+        assert!(envelope
+            .answer
+            .candidates
+            .iter()
+            .flat_map(|candidate| candidate.claims.iter())
+            .all(
+                |claim| claim.claim_kind != crate::investigation_answer::ClaimKind::InitiatingCause
+            ));
+        let rendered = crate::investigation_answer::render_answer_markdown(&envelope);
+        assert!(rendered.contains("Root cause established: no"));
     }
 }

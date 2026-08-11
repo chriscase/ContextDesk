@@ -379,6 +379,7 @@ pub async fn run(
                 user_selection: args.user_selection.as_deref(),
                 multi_model_mode: args.mode.to_core(),
                 reviewer_qualified: reviewer_qualification(cfg, qualification_config_dir),
+                contribution_runtime: None,
             },
             Some(cancel.clone()),
             Some(&mut live_sink),

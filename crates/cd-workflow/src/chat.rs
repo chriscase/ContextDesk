@@ -124,6 +124,10 @@ pub struct ChatWorkflowRequest<'a> {
     /// qualification store leaves this `None`; a `require_qualified` reviewer
     /// then degrades honestly.
     pub reviewer_qualified: Option<bool>,
+    /// Optional host-resolved contribution runtime. Supplying this explicitly
+    /// opts the turn into the bounded provider-neutral contribution route;
+    /// leaving it `None` preserves the established Single/Review behavior.
+    pub contribution_runtime: Option<cd_core::agent::ContributionRuntime>,
 }
 
 /// Outcome of one workflow call.
@@ -414,6 +418,7 @@ pub async fn run_chat_workflow(
                 user_selection: request.user_selection,
                 multi_model: multi_model_runtime.clone(),
                 fast_triage: fast_triage_runtime.clone(),
+                contribution_runtime: request.contribution_runtime.clone(),
                 ..TurnExecutionOptions::default()
             },
             Some(&mut *live_sink),

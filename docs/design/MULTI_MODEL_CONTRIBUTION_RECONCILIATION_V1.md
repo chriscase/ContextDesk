@@ -1,7 +1,8 @@
 # Multi-model contribution and reconciliation v1
 
-Status: pure contract and evaluation seam; opt-in runtime routing is not yet
-enabled.
+Status: contract, evaluation, and opt-in runtime seam; workflow injection is
+enabled on this feature branch. Persistent contributor configuration and live
+gateway qualification remain follow-up work.
 
 This design is the next phase after the single-model and reviewer-first release
 work. It makes several inexpensive models useful without making any model a
@@ -64,26 +65,40 @@ produces a `ReconciliationReportV1`:
 The report always includes `root_cause_established=false`. Only the existing
 host answer validator can establish a root cause from host `Cause` provenance.
 
-## Bounded routing policy (future integration)
+## Bounded routing policy and runtime seam
 
-`ContributionRoutingPolicy` and `ContributionRoutingPlan` are the pure host
-guard before workflow integration. They cap contributors, parallelism, rounds,
-and context, while allowing duplicate role slots for independent models.
+`ContributionRoutingPolicy` and `ContributionRoutingPlan` are the host guard
+for workflow execution. They cap contributors, parallelism, rounds, and
+context, while allowing duplicate role slots for independent models.
+
+`cd_core::multi_model::contribution_pipeline::run_contribution_pipeline` is the
+production-neutral execution seam. The workflow host supplies already-built,
+already-authorized `ContributionBackendSlot` values, each carrying an exact
+role identity and measured `ContributionQualification`. An unverified or
+unqualified slot becomes an explicit `unavailable` attempt and is never sent a
+packet. The agent receives the runtime through
+`AgentOptions::contribution_runtime` / `ChatWorkflowRequest` only when a host
+explicitly opts in; no model-name lookup, credential read, provider switch, or
+second HTTP client exists in this layer.
 
 1. Build exactly one immutable `FastTriagePacketV1` and record its identity.
-2. Run a small, explicitly selected set of qualified roles in parallel when
-   the user permits it; otherwise run them sequentially.
+2. Run a small, explicitly selected set of qualified roles sequentially in v1
+   (the plan retains a parallelism bound for a later scheduler).
 3. Give each role one bounded call, with the existing whole-turn deadline,
    context budget, cancellation flag, and no hidden retry loop.
 4. Validate each response locally. A failed response becomes an explicit
    `Malformed`, `TimedOut`, `Cancelled`, `Failed`, or `Unavailable` attempt.
 5. Reconcile normalized claims and host contradictions. If contested or
    incomplete, optionally run one qualified reviewer against the *same packet*.
-6. Feed only host-validated, bounded material into the existing synthesis and
-   final answer validator. If no valid synthesis exists, present the baseline.
+6. The opt-in contribution route returns a host-rendered reconciliation answer
+   and typed envelope directly. If no valid proposal exists, the same envelope
+   remains root-cause-false and the explicit unavailable/abstention state is
+   shown; the established Single/Review routes are unchanged when the runtime
+   is absent.
 
 This is additive: `MultiModelMode::Single` and the existing reviewer-first path
-remain the default and are not changed by this pure module.
+remain the default and are not changed unless a host explicitly injects the
+contribution runtime.
 
 ## Privacy and telemetry
 
@@ -122,6 +137,11 @@ multi-contributor modes. It records states and normalized claim/conflict counts
 only, so a quality lab can compare routing strategies without storing model
 prose or contacting a gateway.
 
+The runtime seam additionally proves successful role progress, malformed
+output, pre-cancellation, qualification dropout, share-safe telemetry, and an
+end-to-end linked-log turn that calls only the explicitly selected contribution
+slots.
+
 ## Current model evidence
 
 The current Vercel observations are evidence for routing policy, not universal
@@ -140,8 +160,10 @@ two model-specific diagnostic reports for the exact synthetic-run evidence.
 
 ## Follow-up acceptance plan
 
-After the pure contract and regression gates are green, add opt-in routing and
-activity/CLI/GUI presentation. Then run the provider-neutral gateway diagnostic
+Next, add persistent contributor-role configuration and workflow-side
+qualification/backend resolution on top of the existing protected-file and
+capability stores. Then expose the already share-safe stage events in the
+diagnostic/CLI/GUI surfaces and run the provider-neutral gateway diagnostic
 against one selected catalog model at a time. Acceptance should compare
 deterministic-only, bounded multi-model, and single/reviewer outputs on the same
 host packet, with no employer gateway call until the owner explicitly authorizes

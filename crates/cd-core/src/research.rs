@@ -906,6 +906,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -947,6 +948,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     user_selection: Option<&str>,
     multi_model: Option<crate::agent::MultiModelRuntime>,
     fast_triage: Option<crate::agent::FastTriageRuntime>,
+    contribution_runtime: Option<crate::agent::ContributionRuntime>,
 ) -> CoreResult<Vec<StreamEvent>> {
     let user_selection = match user_selection.map(str::trim) {
         Some("") | None => None,
@@ -1169,6 +1171,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     opts.user_selection = user_selection;
     opts.multi_model = multi_model;
     opts.fast_triage = fast_triage;
+    opts.contribution_runtime = contribution_runtime;
     // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
     opts.ambient_recall_enabled =
         !dry_run && host.ambient_recall_enabled() && host.durable_memory_active();

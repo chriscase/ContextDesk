@@ -31,11 +31,14 @@
 //!   presentation boundary ([`crate::investigation_answer::literal_span`]).
 
 pub mod contracts;
+/// Bounded provider execution for contribution proposals.
+pub mod contribution_pipeline;
 /// Provider-neutral contribution proposals and deterministic reconciliation.
 pub mod contributions;
 pub mod pipeline;
 
 pub use contracts::*;
+pub use contribution_pipeline::*;
 pub use contributions::*;
 pub use pipeline::*;
 
