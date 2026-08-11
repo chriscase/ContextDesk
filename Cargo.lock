@@ -633,6 +633,7 @@ dependencies = [
 name = "cd-workflow"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cd-core",
  "cd-test-gateway",
  "chrono",

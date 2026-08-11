@@ -2,6 +2,10 @@
  * Structural tests for Logs list|detail chrome (no Tauri).
  */
 import { readFileSync } from "node:fs";
+import {
+  LOCAL_REANALYSIS_COPY,
+  REMOTE_REANALYSIS_COPY,
+} from "../../lib/reanalysisCopy";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -2529,8 +2533,15 @@ describe("LogPane", () => {
     fireEvent.click(reanalyze);
 
     await waitFor(() => {
+      // Assert the SHARED constant, not a hand-written substring: the point
+      // of the constant is that this sentence cannot drift away from the
+      // Rust-side copy, and a substring match would not catch that.
       expect(hostMocks.confirm).toHaveBeenCalledWith(
-        expect.stringContaining("stays on this machine"),
+        expect.stringContaining(LOCAL_REANALYSIS_COPY),
+        expect.any(Object),
+      );
+      expect(hostMocks.confirm).toHaveBeenCalledWith(
+        expect.not.stringContaining(REMOTE_REANALYSIS_COPY),
         expect.any(Object),
       );
       expect(hostMocks.reanalyze).toHaveBeenCalledWith(

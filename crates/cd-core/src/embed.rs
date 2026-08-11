@@ -12,6 +12,7 @@
 //! `w_kw=0.55`, `w_sem=0.35`, `w_rec=0.10`. When no embed backend is present,
 //! semantic is 0 and weights are renormalized onto keyword+recency only.
 
+use crate::embedding_space::{EmbeddingSpaceIdentity, LOCAL_ENDPOINT_FINGERPRINT};
 use crate::error::{CoreError, CoreResult};
 use crate::ssrf::{build_pinned_client_for_url, SsrfPolicy, SystemResolver};
 use async_trait::async_trait;
@@ -44,6 +45,21 @@ pub trait EmbedBackend: Send + Sync {
     /// capability. Stored template vectors are only comparable to query
     /// vectors produced under the same identity and dimension count.
     fn identity(&self) -> String;
+
+    /// Typed embedding-space identity for fail-closed vector binding.
+    ///
+    /// This is the full set of inputs that shaped the vector space — endpoint
+    /// fingerprint, exact model, wire dialect, representation, instruction,
+    /// preprocessing, and chunking version — not just a model label. Measured
+    /// `dimensions` are filled in by whoever observed real vectors; a backend
+    /// never claims them from configuration.
+    ///
+    /// The default marks the space `unclassified` so an adapter that forgets
+    /// to override this can never be mistaken for a known dialect; every
+    /// adapter in this crate overrides it.
+    fn space(&self) -> EmbeddingSpaceIdentity {
+        EmbeddingSpaceIdentity::new(LOCAL_ENDPOINT_FINGERPRINT, self.identity(), "unclassified")
+    }
 }
 
 /// Production OpenAI-compatible embedding adapter.
@@ -352,6 +368,14 @@ impl EmbedBackend for HttpEmbedBackend {
     fn identity(&self) -> String {
         self.model.clone()
     }
+
+    fn space(&self) -> EmbeddingSpaceIdentity {
+        EmbeddingSpaceIdentity::new(
+            crate::capability_qualification::fingerprint_endpoint(self.endpoint.as_str()),
+            self.model.clone(),
+            "openai_embeddings",
+        )
+    }
 }
 
 #[async_trait]
@@ -428,6 +452,14 @@ impl EmbedBackend for VercelV4EmbedBackend {
 
     fn identity(&self) -> String {
         self.model.clone()
+    }
+
+    fn space(&self) -> EmbeddingSpaceIdentity {
+        EmbeddingSpaceIdentity::new(
+            crate::capability_qualification::fingerprint_endpoint(self.endpoint.as_str()),
+            self.model.clone(),
+            "vercel_v4_embeddings",
+        )
     }
 }
 
@@ -552,6 +584,14 @@ impl EmbedBackend for OllamaEmbedBackend {
         // served-model identity to verify against.
         self.client.model().to_string()
     }
+
+    fn space(&self) -> EmbeddingSpaceIdentity {
+        EmbeddingSpaceIdentity::new(
+            crate::capability_qualification::fingerprint_endpoint(&self.client.base_url),
+            self.client.model().to_string(),
+            "ollama_embeddings",
+        )
+    }
 }
 
 /// Deterministic offline mock: fixed-dimension pseudo-vectors from text hash.
@@ -617,6 +657,10 @@ impl EmbedBackend for MockHashEmbedBackend {
 
     fn identity(&self) -> String {
         "mock-hash-embed (deterministic synthetic; tests only, not a capability)".into()
+    }
+
+    fn space(&self) -> EmbeddingSpaceIdentity {
+        EmbeddingSpaceIdentity::synthetic(self.identity())
     }
 }
 
@@ -728,6 +772,13 @@ impl EmbedBackend for ConceptEmbedBackend {
         // dimension-binding mismatch, not an identity mismatch.
         "concept-embed (deterministic synthetic; contract tests only, not a capability)".into()
     }
+
+    fn space(&self) -> EmbeddingSpaceIdentity {
+        // Dimensions stay unmeasured here for the same reason `identity` omits
+        // them: a dimension change must surface as dimension drift measured
+        // from real vectors, not as a different space label.
+        EmbeddingSpaceIdentity::synthetic(self.identity())
+    }
 }
 
 /// Local in-process ONNX embeddings via **fastembed-rs** (#359).
@@ -778,6 +829,11 @@ impl EmbedBackend for FastembedEmbedBackend {
 
     fn identity(&self) -> String {
         LOCAL_LOG_EMBED_MODEL_ID.into()
+    }
+
+    fn space(&self) -> EmbeddingSpaceIdentity {
+        // In-process ONNX: no endpoint, no egress, real (not synthetic) model.
+        EmbeddingSpaceIdentity::local(LOCAL_LOG_EMBED_MODEL_ID, "local_onnx")
     }
 }
 

@@ -58,6 +58,10 @@ pub enum ExitCategory {
     /// verdict), so this is not an error in the usual sense, only a
     /// process-exit-code signal a script can gate on (`contextdesk doctor
     /// && start_demo.sh`).
+    ///
+    /// `contextdesk retrieval-diagnose` reuses this for the same reason: an
+    /// inconclusive run produced an honest verdict without failing, and a
+    /// script needs to tell that apart from a usable comparison.
     NotReady = 8,
     /// A normalized stream inspection completed and found one or more files
     /// non-conforming. The report is complete; this code makes it gateable.

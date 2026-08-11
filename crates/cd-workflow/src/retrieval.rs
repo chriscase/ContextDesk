@@ -30,7 +30,10 @@ use cd_core::log_analysis::{
 };
 use cd_core::memory::embed_blocking;
 use cd_core::process_progress::CancelFlag;
-use cd_core::rerank::{rerank_blocking, validate_rerank_scores, HttpRerankBackend, RerankBackend};
+use cd_core::rerank::{
+    rerank_blocking, validate_rerank_scores, HttpRerankBackend, RerankBackend,
+    RERANK_DIALECT_VERCEL_V4, SUPPORTED_RERANK_DIALECTS,
+};
 
 /// Wire schema identity for [`RetrievalStatusReport`].
 pub const RETRIEVAL_STATUS_SCHEMA_ID: &str = "contextdesk.retrieval_status.v1";
@@ -150,7 +153,16 @@ fn bearer_for(role: &RetrievalRoleModel, secrets: Option<&dyn SecretStore>) -> O
 /// remote, including private/corporate hosts: a private address can still be
 /// another machine. This check is deliberately lexical and conservative; the
 /// SSRF policy remains responsible for validating and pinning the actual URL.
-fn retrieval_endpoint_is_remote(role: &RetrievalRoleModel) -> bool {
+///
+/// Public because every surface that *describes* egress — a re-analysis plan,
+/// a diagnostic plan, a consent prompt — must agree with the factory that
+/// *enforces* it. A second implementation would eventually promise a locality
+/// this one refuses.
+///
+/// Known conservative case: `Url::host_str` keeps the brackets on an IPv6
+/// literal, so `http://[::1]` does not parse as an address and is classified
+/// remote. That errs toward asking for consent, which is the safe direction.
+pub fn retrieval_endpoint_is_remote(role: &RetrievalRoleModel) -> bool {
     let Ok(url) = url::Url::parse(&role.base_url) else {
         // Let backend construction report the malformed URL, but never treat
         // an unparseable endpoint as local and silently allow egress.
@@ -220,22 +232,37 @@ pub fn build_embedding_backend(
     }
 }
 
-/// Build the configured rerank backend through an explicit wire dialect. A
-/// URL or model name never changes the parser.
+/// Build the configured rerank backend through an **explicit** wire dialect.
+///
+/// The dialect is mandatory. A URL shape, a port, or a model name never
+/// selects the parser: two providers can share a hostname pattern and a model
+/// label while speaking different envelopes, so inferring the dialect either
+/// mis-parses a valid response or — worse — accepts a mis-parsed permutation
+/// as if it were valid. An omitted dialect fails closed with the supported
+/// list, before any credential is read or any endpoint is contacted.
 pub fn build_rerank_backend(
     role: &RetrievalRoleModel,
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn RerankBackend>> {
     assert_retrieval_egress_allowed(role)?;
-    if let Some(dialect) = role.dialect.as_deref() {
-        if dialect != "tei_rerank_v1" && dialect != "vercel_v4_rerank_v1" {
+    let dialect = role.dialect.as_deref().map(str::trim).unwrap_or("");
+    let dialect = match dialect {
+        "" => {
             return Err(cd_core::error::CoreError::Config(format!(
-                "unsupported reranker dialect '{dialect}'; use tei_rerank_v1 or vercel_v4_rerank_v1"
+                "reranker dialect must be set explicitly; use one of {}",
+                SUPPORTED_RERANK_DIALECTS.join(", ")
             )));
         }
-    }
+        value if SUPPORTED_RERANK_DIALECTS.contains(&value) => value,
+        unsupported => {
+            return Err(cd_core::error::CoreError::Config(format!(
+                "unsupported reranker dialect '{unsupported}'; use {}",
+                SUPPORTED_RERANK_DIALECTS.join(" or ")
+            )));
+        }
+    };
     let bearer = bearer_for(role, secrets);
-    if role.dialect.as_deref() == Some("vercel_v4_rerank_v1") {
+    if dialect == RERANK_DIALECT_VERCEL_V4 {
         if !cd_core::discovery::is_vercel_ai_gateway(&role.base_url) {
             return Err(cd_core::error::CoreError::Config(
                 "vercel_v4_rerank_v1 requires the ai-gateway.vercel.sh host".into(),
@@ -510,6 +537,25 @@ pub fn retrieval_status(
     })
 }
 
+/// Run the production hybrid search with backends the caller already built.
+///
+/// [`hybrid_search`] is this function plus role construction. A caller that
+/// builds the roles once and runs many searches — a benchmark comparing lanes,
+/// for example — uses this directly so a six-lane sweep stays one credential
+/// read per role instead of one per lane. There is deliberately no second
+/// engine here: this is the same [`hybrid_search_events`] the product runs.
+pub fn hybrid_search_with_backends(
+    cache_root: &Path,
+    corpus_id: &str,
+    options: &HybridOptions,
+    embed: Option<&dyn EmbedBackend>,
+    rerank: Option<&dyn RerankBackend>,
+    cancel: Option<&CancelFlag>,
+) -> CoreResult<HybridOutcome> {
+    let corpus = LogCorpus::open(cache_root, corpus_id)?;
+    hybrid_search_events(&corpus, options, embed, rerank, cancel)
+}
+
 /// Shared hybrid-search entry: builds the configured optional backends and
 /// runs [`cd_core::log_analysis::hybrid_search_events`] over an imported
 /// corpus. Backend construction failures degrade to the baseline with a
@@ -522,7 +568,6 @@ pub fn hybrid_search(
     secrets: Option<&dyn SecretStore>,
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<HybridOutcome> {
-    let corpus = LogCorpus::open(cache_root, corpus_id)?;
     let (embed, embedding_build_failed) = match config
         .retrieval
         .embedding
@@ -547,8 +592,9 @@ pub fn hybrid_search(
             Err(_) => (None, true),
         },
     };
-    let mut outcome = hybrid_search_events(
-        &corpus,
+    let mut outcome = hybrid_search_with_backends(
+        cache_root,
+        corpus_id,
         options,
         embed.as_deref(),
         rerank.as_deref(),
@@ -697,6 +743,64 @@ mod tests {
             .err()
             .expect("unsupported reranker dialect must fail");
         assert!(error.to_string().contains("unsupported reranker dialect"));
+    }
+
+    #[test]
+    fn a_reranker_without_an_explicit_dialect_fails_closed() {
+        // Two providers can share a hostname pattern and a model label while
+        // speaking different envelopes, so a missing dialect is a refusal, not
+        // a cue to default to the most common parser.
+        let secrets = MemorySecretStore::new();
+        secrets
+            .set("retrieval/test/api_key", "must-not-be-read")
+            .unwrap();
+        for dialect in [None, Some(String::new()), Some("   ".into())] {
+            let role = RetrievalRoleModel {
+                dialect,
+                ..reranker_role(Some("retrieval/test/api_key"))
+            };
+            let error = build_rerank_backend(&role, Some(&secrets))
+                .err()
+                .expect("an implicit reranker dialect must fail closed");
+            let message = error.to_string();
+            assert!(
+                message.contains("must be set explicitly"),
+                "unexpected message: {message}"
+            );
+            // The supported list is named so the refusal is actionable.
+            assert!(message.contains("tei_rerank_v1"));
+            assert!(message.contains("vercel_v4_rerank_v1"));
+        }
+    }
+
+    #[test]
+    fn every_supported_rerank_dialect_reports_the_parser_that_ran() {
+        let role = reranker_role(None);
+        let backend = build_rerank_backend(&role, None).expect("tei adapter");
+        assert_eq!(
+            backend.dialect(),
+            cd_core::rerank::RERANK_DIALECT_TEI_V1,
+            "the adapter reports its own parser; nothing infers it from the URL"
+        );
+        assert_eq!(
+            SUPPORTED_RERANK_DIALECTS,
+            [
+                cd_core::rerank::RERANK_DIALECT_TEI_V1,
+                cd_core::rerank::RERANK_DIALECT_VERCEL_V4
+            ]
+        );
+
+        // A URL that looks like a Vercel gateway does NOT select the Vercel
+        // parser: only the configured dialect does.
+        let vercel_shaped = RetrievalRoleModel {
+            base_url: "https://ai-gateway.vercel.sh".into(),
+            allow_remote: true,
+            dialect: Some(cd_core::rerank::RERANK_DIALECT_TEI_V1.into()),
+            ..reranker_role(None)
+        };
+        let backend =
+            build_rerank_backend(&vercel_shaped, None).expect("explicit tei on that host");
+        assert_eq!(backend.dialect(), cd_core::rerank::RERANK_DIALECT_TEI_V1);
     }
 
     #[test]

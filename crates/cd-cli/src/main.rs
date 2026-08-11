@@ -355,6 +355,41 @@ async fn dispatch(
             );
             emit(format, resolved.color.value, "retrieval_status", result)
         }
+        Command::RetrievalDiagnose(args) => {
+            let secrets = adapters::secret_store();
+            let result = commands::retrieval_diagnose::run(
+                args,
+                &paths.cache_root,
+                app_cfg,
+                &cli_state.current_corpus_id,
+                &secrets,
+            )
+            .await;
+            let verdict = result
+                .as_ref()
+                .ok()
+                .filter(|output| output.failed_verdict())
+                .map(|_| ExitCategory::NotReady);
+            emit_completed(
+                format,
+                resolved.color.value,
+                "retrieval_diagnose",
+                result,
+                verdict,
+            )
+        }
+        Command::RetrievalReanalyze(args) => {
+            let secrets = adapters::secret_store();
+            let result = commands::retrieval_reanalyze::run(
+                args,
+                &paths.cache_root,
+                app_cfg,
+                &cli_state.current_corpus_id,
+                &secrets,
+            )
+            .await;
+            emit(format, resolved.color.value, "retrieval_reanalyze", result)
+        }
         Command::Models(args) => {
             let secrets = adapters::secret_store();
             let result = commands::models::run(
