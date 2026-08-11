@@ -717,37 +717,49 @@ pub enum InvocationMode {
 /// positional. Global options may precede the question. Recognized commands
 /// and their aliases are never rewritten, preserving every existing grammar
 /// and machine-output contract.
+/// Every explicit subcommand name and visible alias.
+///
+/// [`normalize_invocation_args`] inserts an implicit `chat` in front of any
+/// invocation whose first token is not one of these, so a subcommand missing
+/// from this list is not rejected — it is silently reinterpreted as a chat
+/// question, which fails with a baffling "unexpected argument" error. The
+/// `every_clap_subcommand_is_registered_for_implicit_chat` test derives the
+/// truth from clap itself so the two can never drift again.
+pub const KNOWN_SUBCOMMANDS: &[&str] = &[
+    "import",
+    "normalize",
+    "normalized",
+    "corpus",
+    "timezone",
+    "explore",
+    "search",
+    "context",
+    "session",
+    "chat",
+    "ask",
+    "config",
+    "confluence",
+    "capabilities",
+    "doctor",
+    "logging-assessment",
+    "assess",
+    "exception-episodes",
+    "episodes",
+    "retrieval-status",
+    "retrieval-diagnose",
+    "retrieval-diagnostic",
+    "models",
+    "eval",
+    "gateway",
+];
+
 pub fn normalize_invocation_args<I, T>(args: I) -> (Vec<OsString>, InvocationMode)
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
     let mut args = args.into_iter().map(Into::into).collect::<Vec<_>>();
-    let commands = [
-        "import",
-        "normalize",
-        "normalized",
-        "corpus",
-        "timezone",
-        "explore",
-        "search",
-        "context",
-        "session",
-        "chat",
-        "ask",
-        "config",
-        "confluence",
-        "capabilities",
-        "doctor",
-        "logging-assessment",
-        "assess",
-        "exception-episodes",
-        "episodes",
-        "retrieval-status",
-        "models",
-        "eval",
-        "gateway",
-    ];
+    let commands = KNOWN_SUBCOMMANDS;
     let value_options = [
         "--format",
         "--color",
@@ -1289,5 +1301,50 @@ mod tests {
             panic!("exact verification did not parse")
         };
         assert_eq!(args.model_ids, ["deepseek-v4-flash", "bge-m3"]);
+    }
+
+    /// The implicit-chat normalizer routes any first token it does not
+    /// recognize into `chat`, so a subcommand missing from
+    /// [`KNOWN_SUBCOMMANDS`] is not rejected — it becomes a chat question and
+    /// fails with an "unexpected argument" error that points nowhere near the
+    /// real cause. Derive the truth from clap so the two lists cannot drift.
+    #[test]
+    fn every_clap_subcommand_is_registered_for_implicit_chat() {
+        use clap::CommandFactory;
+        let command = Cli::command();
+        let mut missing = Vec::new();
+        for subcommand in command.get_subcommands() {
+            let name = subcommand.get_name().to_string();
+            if !KNOWN_SUBCOMMANDS.contains(&name.as_str()) {
+                missing.push(name);
+            }
+            for alias in subcommand.get_visible_aliases() {
+                if !KNOWN_SUBCOMMANDS.contains(&alias) {
+                    missing.push(alias.to_string());
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these subcommands/aliases would be swallowed by implicit chat: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn the_retrieval_diagnostic_is_reachable_by_name_and_alias() {
+        for name in ["retrieval-diagnose", "retrieval-diagnostic"] {
+            let (normalized, mode) = normalize_invocation_args([
+                OsString::from("contextdesk"),
+                OsString::from(name),
+                OsString::from("--queries"),
+                OsString::from("q.json"),
+            ]);
+            assert_eq!(
+                mode,
+                InvocationMode::Explicit,
+                "`{name}` must not be reinterpreted as a chat question"
+            );
+            assert_eq!(normalized[1], OsString::from(name));
+        }
     }
 }
