@@ -133,11 +133,10 @@ fn qualification_native_tool_call_passes_on_a_real_tool_call() {
     );
 }
 
-/// Structured-output probe must emit `response_format: json_object` on the
-/// wire (chat contract v2). A prose-only gateway reply must not pass merely
-/// because the model name suggests JSON mode.
+/// Prompted structured output uses plain chat; native json_object emits
+/// `response_format` on the OpenAI-compatible wire (chat contract v3).
 #[test]
-fn qualification_structured_output_emits_response_format_on_wire() {
+fn qualification_native_json_object_emits_response_format_on_wire() {
     let rt = tokio::runtime::Runtime::new().expect("gateway runtime");
     let gateway = rt.block_on(MockGateway::start_ordered(vec![Step::respond(
         Response::json_ok(&json!({
@@ -169,22 +168,31 @@ fn qualification_structured_output_emits_response_format_on_wire() {
         &mut transport,
         &cancel,
     );
+    // Prompted JSON (production reviewer path) does not require response_format.
     assert_eq!(
         report.status_of(CapabilityKind::StructuredOutput),
         CapabilityStatus::Pass
     );
-    let structured = report
+    let prompted = report
         .checks
         .iter()
         .find(|c| c.kind == CapabilityKind::StructuredOutput)
-        .expect("structured check");
-    assert_eq!(
-        structured.request_mode.as_deref(),
-        Some("json_object"),
-        "evidence must record the measured request mode"
-    );
+        .expect("prompted structured check");
+    assert_eq!(prompted.request_mode.as_deref(), Some("prompted_json"));
+    assert_eq!(prompted.dialect.as_deref(), Some("openai_compatible"));
 
-    // At least one request must have carried response_format (the structured probe).
+    // Native json_object is a separate measurement.
+    assert_eq!(
+        report.status_of(CapabilityKind::StructuredJsonObject),
+        CapabilityStatus::Pass
+    );
+    let native = report
+        .checks
+        .iter()
+        .find(|c| c.kind == CapabilityKind::StructuredJsonObject)
+        .expect("native structured check");
+    assert_eq!(native.request_mode.as_deref(), Some("json_object"));
+
     let bodies: Vec<serde_json::Value> = gateway
         .requests()
         .iter()
@@ -194,6 +202,60 @@ fn qualification_structured_output_emits_response_format_on_wire() {
         bodies
             .iter()
             .any(|b| b["response_format"]["type"] == "json_object"),
-        "LiveQualificationTransport must emit response_format for structured probe; bodies={bodies:?}"
+        "native json_object probe must emit response_format; bodies={bodies:?}"
+    );
+    // At least one body must be plain (prompted) without response_format.
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.get("response_format").is_none() && b.get("stream") == Some(&json!(false))),
+        "prompted JSON must not invent response_format; bodies={bodies:?}"
+    );
+}
+
+/// Ollama live transport must refuse OpenAI-native modes before inventing a pass.
+#[test]
+fn qualification_ollama_refuses_openai_native_json_object() {
+    let rt = tokio::runtime::Runtime::new().expect("gateway runtime");
+    // Ollama path uses /api/chat; serve a success body so plain probes work.
+    let gateway = rt.block_on(MockGateway::start_ordered(vec![Step::respond(
+        Response::json_ok(&json!({
+            "message": {"role": "assistant", "content": "QUALIFY_OK_V1"}
+        })),
+    )]));
+    let mut transport =
+        LiveQualificationTransport::new(LiveBackendKind::Ollama, gateway.base_url(), None, true);
+    let gate = ProfileCapabilityGate {
+        tools_enabled: false,
+        stream_enabled: false,
+        embeddings_enabled: false,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let report = run_qualification(
+        QualificationKey::new("ollama-profile", gateway.base_url(), "llama3"),
+        gate,
+        &mut transport,
+        &cancel,
+    );
+    let native = report
+        .checks
+        .iter()
+        .find(|c| c.kind == CapabilityKind::StructuredJsonObject)
+        .expect("native check row");
+    assert_eq!(native.status, CapabilityStatus::Fail);
+    assert!(
+        native.reason.contains("unsupported_request_mode") && native.reason.contains("ollama"),
+        "ollama must refuse openai-native mode: {}",
+        native.reason
+    );
+    // No request may have been made with response_format (Ollama never got it).
+    let bodies: Vec<String> = gateway
+        .requests()
+        .iter()
+        .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+        .collect();
+    assert!(
+        bodies.iter().all(|b| !b.contains("response_format")),
+        "ollama must never receive OpenAI response_format: {bodies:?}"
     );
 }

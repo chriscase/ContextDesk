@@ -1,48 +1,61 @@
-# OpenAI-compatible chat contract v2
+# OpenAI-compatible chat contract v3
 
 Status: hermetic product path. **Does not claim live model compatibility.**
 
-## Problem
+## Problem (v2 residual)
 
-Capability qualification set `expect_json_object: true` on structured probes,
-but `LiveQualificationTransport` discarded the flag (`let _ = req.expect_json_object`)
-and `OpenAiCompatibleClient` never emitted `response_format` or forced
-`tool_choice`. Structured "passes" could therefore be prose coincidences.
+v2 recorded `json_object` for structured probes even when Ollama/Anthropic
+ignored `chat_mode` and sent ordinary chat. Production reviewer paths still
+use plain/prompted JSON, so a native json_object pass incorrectly authorized
+plain request contracts.
 
-## Contract
+## Contract (v3)
 
 | Piece | Location |
 | --- | --- |
 | Typed modes + pure body builder | `cd_core::openai_chat_contract` |
-| Production client | `OpenAiCompatibleClient::complete_with_mode` / `complete_stream*_with_mode` |
-| Qualification request | `SyntheticChatRequest.chat_mode` |
-| Live transport | `LiveQualificationTransport` → `complete_with_mode` (no discard) |
-| Evidence schema | `QUALIFICATION_SCHEMA_VERSION = contextdesk.capability_qualification.v2` |
-| Per-check mode | `CapabilityCheckResult.request_mode` |
+| Dialect honesty | `ChatBackendDialect` + `dialect_supports_mode` |
+| Production client | `OpenAiCompatibleClient::complete_with_mode` / stream variants |
+| Live transport | OpenAI transmits modes; Ollama/Anthropic **refuse** OpenAI-native modes |
+| Evidence schema | `contextdesk.capability_qualification.v3` |
+| Per-check fields | `request_mode`, `dialect`, `schema_strict`, `schema_probe_id` |
 
-### Modes
+### Measured ladder (investigator)
 
-- `plain` — default; tools use `tool_choice: "auto"`
-- `json_object` — `response_format: { "type": "json_object" }`
-- `json_schema` — `response_format.json_schema` with name/schema/strict
-- `forced_tool` — `tool_choice: { type: function, function: { name } }`
+| Capability kind | Request mode | Wire |
+| --- | --- | --- |
+| `basic_generation` | `plain` | ordinary chat |
+| `native_tool_call` | `auto_tools` | tools + tool_choice auto |
+| `tool_result_continuation` | `auto_tools` | tools + prior tool result |
+| `forced_tool_call` | `forced_tool` | forced tool_choice + continuation |
+| `structured_output` | `prompted_json` | plain body + JSON instruction |
+| `structured_json_object` | `json_object` | `response_format` |
+| `structured_json_schema` | `json_schema` | json_schema strict=false |
+| `structured_json_schema_strict` | `json_schema_strict` | json_schema strict=true |
 
-### Ladder / evidence rules
+### Exact-mode authorization
 
-1. Measured only — model name never alone produces a structured pass.
-2. Structured probe uses **json_object** mode; failures keep `mode=json_object`
-   in the reason and **do not** silently retry as plain mid-turn.
-3. Evidence keys: profile + endpoint fingerprint + model + schema version;
-   mode is recorded on the check for audit.
-4. Schema bump to v2 makes prior v1 reports a storage-id / selection near-miss
-   (stale), not silently current.
+| Runtime contract | Requires |
+| --- | --- |
+| `validated_structured_proposal` (JsonProposal) | `basic_generation`+`plain` **and** `structured_output`+`prompted_json` |
+| `native_json_object` | `structured_json_object`+`json_object` |
+| `native_json_schema` / `_strict` | matching schema kinds + mode |
+| `native_tool_loop` | auto tools + continuation |
+| `forced_tool_loop` | forced tool + continuation |
+
+**Never:** JsonObject evidence authorize prompted JSON (or vice versa).
+
+### Migration
+
+v1 and v2 keys/reports are storage-id / schema mismatches under v3. Verdicts
+treat non-v3 `schema_version` as **Inconclusive** even if checks look green.
+Do not silently reinterpret old files as v3 evidence.
 
 ### Channel integrity
 
-- `parse_openai_completion` uses content only.
-- `reasoning_content` / `reasoning` never merge into success text.
-- Reasoning-only JSON is not structured success
-  (`reasoning_channel_only_not_success`).
+- Content channel only for structured success.
+- Reasoning-only JSON is not success.
+- Schema bodies are never exported on DTOs (name/strict only).
 
 ## Hermetic evidence
 
@@ -53,12 +66,9 @@ cargo test -p cd-core --test openai_chat_contract_v2
 cargo test -p cd-workflow --test gateway_wire_qualification
 ```
 
-Mutation guards: body builder must emit `response_format` for JsonObject;
-gateway 400 on json_object yields exactly one request (no plain retry).
-
 ## Explicit non-claims
 
-- No claim that any live employer gateway supports `response_format`.
-- No change to provider retry/fallback policy, multi-stage budget allocation,
-  credential resolution, retrieval, embeddings, or prompts.
-- Adaptive latency learning remains future work.
+- No live employer gateway compatibility claim.
+- Ordinary production chat remains plain unless a host explicitly selects a
+  qualified exact mode (not implemented as auto-upgrade here).
+- No retrieval/embed/rerank/fast-triage product-path rewrites.

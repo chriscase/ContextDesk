@@ -11,7 +11,7 @@ use cd_core::chat::{ChatMessage, OpenAiCompatibleClient, Role};
 use cd_core::openai_chat_contract::{
     build_openai_chat_request_body, extract_openai_message_channels,
     parse_structured_json_from_content, OpenAiChatRequestMode, OpenAiMessageChannels,
-    MODE_JSON_OBJECT, MODE_PLAIN,
+    MODE_JSON_OBJECT, MODE_PLAIN, MODE_PROMPTED_JSON,
 };
 use cd_core::ssrf::SsrfPolicy;
 use cd_core::tools::{ToolSideEffect, ToolSpec};
@@ -39,10 +39,10 @@ fn inert_tool() -> ToolSpec {
 }
 
 #[test]
-fn schema_version_is_v2() {
+fn schema_version_is_v3() {
     assert_eq!(
         QUALIFICATION_SCHEMA_VERSION,
-        "contextdesk.capability_qualification.v2"
+        "contextdesk.capability_qualification.v3"
     );
 }
 
@@ -89,7 +89,7 @@ fn parse_completion_keeps_content_when_reasoning_also_present() {
     assert_eq!(v["qualify"], "ok");
 }
 
-/// Mode-aware transport: records each chat mode and returns contract-shaped replies.
+/// Mode-aware OpenAI-compatible transport for the full v3 ladder.
 struct ModeRecordingTransport {
     modes: Vec<&'static str>,
 }
@@ -101,42 +101,59 @@ impl cd_core::capability_qualification::QualificationTransport for ModeRecording
         cancel: &AtomicBool,
     ) -> Result<SyntheticChatResponse, cd_core::capability_qualification::TransportError> {
         self.modes.push(req.chat_mode.evidence_id());
+        let dialect = Some("openai_compatible".into());
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(SyntheticChatResponse {
                 cancelled: true,
                 streamed: req.stream,
+                dialect,
+                mode_transmitted: false,
                 ..Default::default()
             });
         }
+        let ok_json = || SyntheticChatResponse {
+            content: r#"{"qualify":"ok","v":1}"#.into(),
+            dialect: Some("openai_compatible".into()),
+            mode_transmitted: true,
+            ..Default::default()
+        };
+        let tool = || cd_core::capability_qualification::SyntheticToolCall {
+            id: "c1".into(),
+            name: cd_core::capability_qualification::INERT_PROBE_TOOL_NAME.into(),
+            arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+        };
         match &req.chat_mode {
-            OpenAiChatRequestMode::JsonObject => Ok(SyntheticChatResponse {
-                content: r#"{"qualify":"ok","v":1}"#.into(),
+            OpenAiChatRequestMode::PromptedJson
+            | OpenAiChatRequestMode::JsonObject
+            | OpenAiChatRequestMode::JsonSchema { .. } => Ok(ok_json()),
+            OpenAiChatRequestMode::ForcedTool { .. } => Ok(SyntheticChatResponse {
+                tool_calls: vec![tool()],
+                dialect: Some("openai_compatible".into()),
+                mode_transmitted: true,
                 ..Default::default()
             }),
             OpenAiChatRequestMode::Plain if req.tools.is_empty() && req.stream => {
                 Ok(SyntheticChatResponse {
                     content: "QUALIFY_OK_V1".into(),
                     streamed: true,
+                    dialect: Some("openai_compatible".into()),
+                    mode_transmitted: true,
                     ..Default::default()
                 })
             }
             OpenAiChatRequestMode::Plain if !req.tools.is_empty() && req.messages.len() == 1 => {
                 Ok(SyntheticChatResponse {
-                    tool_calls: vec![cd_core::capability_qualification::SyntheticToolCall {
-                        id: "c1".into(),
-                        name: cd_core::capability_qualification::INERT_PROBE_TOOL_NAME.into(),
-                        arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
-                    }],
+                    tool_calls: vec![tool()],
+                    dialect: Some("openai_compatible".into()),
+                    mode_transmitted: true,
                     ..Default::default()
                 })
             }
             OpenAiChatRequestMode::Plain => Ok(SyntheticChatResponse {
                 content: "QUALIFY_OK_V1 continued".into(),
                 streamed: req.stream,
-                ..Default::default()
-            }),
-            _ => Ok(SyntheticChatResponse {
-                content: "QUALIFY_OK_V1".into(),
+                dialect: Some("openai_compatible".into()),
+                mode_transmitted: true,
                 ..Default::default()
             }),
         }
@@ -173,7 +190,7 @@ impl cd_core::capability_qualification::QualificationTransport for ModeRecording
 }
 
 #[test]
-fn structured_probe_records_json_object_mode_and_passes() {
+fn structured_ladder_records_prompted_and_native_modes() {
     let mut transport = ModeRecordingTransport { modes: vec![] };
     let key = QualificationKey::new("p", "https://gw.example/v1", "model-x");
     let cancel = Arc::new(AtomicBool::new(false));
@@ -188,95 +205,134 @@ fn structured_probe_records_json_object_mode_and_passes() {
         &cancel,
     );
 
-    let structured = report
+    let prompted = report
         .checks
         .iter()
         .find(|c| c.kind == CapabilityKind::StructuredOutput)
-        .expect("structured check");
+        .expect("prompted structured check");
     assert_eq!(
-        structured.status,
+        prompted.status,
         CapabilityStatus::Pass,
-        "reason={}",
-        structured.reason
+        "{}",
+        prompted.reason
     );
-    assert_eq!(
-        structured.request_mode.as_deref(),
-        Some(MODE_JSON_OBJECT),
-        "structured evidence must record measured mode"
-    );
+    assert_eq!(prompted.request_mode.as_deref(), Some(MODE_PROMPTED_JSON));
+
+    let native = report
+        .checks
+        .iter()
+        .find(|c| c.kind == CapabilityKind::StructuredJsonObject)
+        .expect("native structured check");
+    assert_eq!(native.status, CapabilityStatus::Pass, "{}", native.reason);
+    assert_eq!(native.request_mode.as_deref(), Some(MODE_JSON_OBJECT));
     assert!(
-        structured.reason.contains("json_object"),
-        "reason should name mode: {}",
-        structured.reason
-    );
-    assert!(
-        transport.modes.contains(&MODE_JSON_OBJECT),
-        "transport must have observed json_object mode: {:?}",
+        transport.modes.contains(&MODE_PROMPTED_JSON)
+            && transport.modes.contains(&MODE_JSON_OBJECT),
+        "modes: {:?}",
         transport.modes
     );
     assert_eq!(report.key.schema_version, QUALIFICATION_SCHEMA_VERSION);
 }
 
 #[test]
-fn structured_probe_fails_closed_without_mid_turn_downgrade() {
-    let mut transport = ScriptedQualificationTransport {
-        chat_queue: vec![
-            // For each probe pop one; fail only structured by placing error when
-            // chat_mode is JsonObject — scripted transport doesn't inspect mode,
-            // so we fail via content that is not JSON after tools/gen succeed.
+fn native_json_object_fails_closed_without_mid_turn_downgrade() {
+    // Mode-aware: JsonObject returns bad content; no silent plain retry.
+    struct FailNativeJson;
+    impl cd_core::capability_qualification::QualificationTransport for FailNativeJson {
+        fn chat_complete(
+            &mut self,
+            req: &cd_core::capability_qualification::SyntheticChatRequest,
+            cancel: &AtomicBool,
+        ) -> Result<SyntheticChatResponse, cd_core::capability_qualification::TransportError>
+        {
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(SyntheticChatResponse {
+                    cancelled: true,
+                    mode_transmitted: true,
+                    dialect: Some("openai_compatible".into()),
+                    ..Default::default()
+                });
+            }
+            if matches!(req.chat_mode, OpenAiChatRequestMode::JsonObject) {
+                return Ok(SyntheticChatResponse {
+                    content: "I cannot emit JSON".into(),
+                    mode_transmitted: true,
+                    dialect: Some("openai_compatible".into()),
+                    ..Default::default()
+                });
+            }
+            // Other modes succeed so the ladder reaches native json_object.
             Ok(SyntheticChatResponse {
-                content: "not cancelled".into(),
-                cancelled: false,
-                streamed: true,
+                content: if matches!(
+                    req.chat_mode,
+                    OpenAiChatRequestMode::PromptedJson | OpenAiChatRequestMode::JsonSchema { .. }
+                ) {
+                    r#"{"qualify":"ok","v":1}"#.into()
+                } else if !req.tools.is_empty() && req.messages.len() == 1 {
+                    String::new()
+                } else {
+                    "QUALIFY_OK_V1 continued".into()
+                },
+                tool_calls: if !req.tools.is_empty() && req.messages.len() == 1 {
+                    vec![cd_core::capability_qualification::SyntheticToolCall {
+                        id: "c1".into(),
+                        name: cd_core::capability_qualification::INERT_PROBE_TOOL_NAME.into(),
+                        arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+                    }]
+                } else {
+                    vec![]
+                },
+                streamed: req.stream,
+                mode_transmitted: true,
+                dialect: Some("openai_compatible".into()),
                 ..Default::default()
-            }),
-            Ok(SyntheticChatResponse {
-                content: "QUALIFY_OK_V1".into(),
-                streamed: true,
-                ..Default::default()
-            }),
-            Ok(SyntheticChatResponse {
-                content: "I cannot emit JSON".into(), // structured fail
-                ..Default::default()
-            }),
-            Ok(SyntheticChatResponse {
-                content: "continued".into(),
-                ..Default::default()
-            }),
-            Ok(SyntheticChatResponse {
-                tool_calls: vec![cd_core::capability_qualification::SyntheticToolCall {
-                    id: "c1".into(),
-                    name: cd_core::capability_qualification::INERT_PROBE_TOOL_NAME.into(),
-                    arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
-                }],
-                ..Default::default()
-            }),
-            Ok(SyntheticChatResponse {
-                content: "QUALIFY_OK_V1".into(),
-                ..Default::default()
-            }),
-        ],
-        ..Default::default()
-    };
-    transport.chat_queue.reverse();
+            })
+        }
+        fn embed(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &AtomicBool,
+        ) -> Result<
+            cd_core::capability_qualification::SyntheticEmbeddingResponse,
+            cd_core::capability_qualification::TransportError,
+        > {
+            Err(cd_core::capability_qualification::TransportError {
+                reason: "n/a".into(),
+            })
+        }
+        fn rerank(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &[&str],
+            _: &AtomicBool,
+        ) -> Result<
+            cd_core::capability_qualification::SyntheticRerankResponse,
+            cd_core::capability_qualification::TransportError,
+        > {
+            Err(cd_core::capability_qualification::TransportError {
+                reason: "n/a".into(),
+            })
+        }
+    }
 
-    let key = QualificationKey::new("p", "https://gw.example/v1", "model-y");
-    let cancel = Arc::new(AtomicBool::new(false));
+    let mut transport = FailNativeJson;
     let report = run_qualification(
-        key,
+        QualificationKey::new("p", "https://gw.example/v1", "model-y"),
         ProfileCapabilityGate {
             tools_enabled: true,
             stream_enabled: true,
             embeddings_enabled: false,
         },
         &mut transport,
-        &cancel,
+        &Arc::new(AtomicBool::new(false)),
     );
 
     let structured = report
         .checks
         .iter()
-        .find(|c| c.kind == CapabilityKind::StructuredOutput)
+        .find(|c| c.kind == CapabilityKind::StructuredJsonObject)
         .unwrap();
     assert_eq!(structured.status, CapabilityStatus::Fail);
     assert_eq!(structured.request_mode.as_deref(), Some(MODE_JSON_OBJECT));
@@ -316,13 +372,17 @@ fn name_hint_never_alone_passes_structured() {
 }
 
 #[test]
-fn v1_schema_key_is_stale_vs_v2() {
-    let v2 = QualificationKey::new("p", "https://gw.example/v1", "m");
-    assert_eq!(v2.schema_version, "contextdesk.capability_qualification.v2");
-    let mut v1 = v2.clone();
+fn v1_and_v2_schema_keys_are_stale_vs_v3() {
+    let v3 = QualificationKey::new("p", "https://gw.example/v1", "m");
+    assert_eq!(v3.schema_version, "contextdesk.capability_qualification.v3");
+    let mut v1 = v3.clone();
     v1.schema_version = "contextdesk.capability_qualification.v1".into();
-    assert_ne!(v1.storage_id(), v2.storage_id());
-    assert_ne!(v1, v2);
+    let mut v2 = v3.clone();
+    v2.schema_version = "contextdesk.capability_qualification.v2".into();
+    assert_ne!(v1.storage_id(), v3.storage_id());
+    assert_ne!(v2.storage_id(), v3.storage_id());
+    assert_ne!(v1, v3);
+    assert_ne!(v2, v3);
 }
 
 #[test]
