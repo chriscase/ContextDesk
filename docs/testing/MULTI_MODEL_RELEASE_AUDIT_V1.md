@@ -2,7 +2,7 @@
 
 **Audit date:** 2026-08-11  
 **Feature branch:** `feat/multimodel-contribution-reconcile-v1`  
-**Branch tip:** `7130c7f5b387de1aa03f5a9e25619271522e603b`  
+**Branch tip at this audit snapshot:** `cd1efaa3ff1211bb68cdb89293b739587656116e`
 **Production-code integration commit:** `a7528699f91c9ed1e2c05e8f42de1cfb0c9ba4af`
 
 This is a release-manager evidence map for the model-agnostic investigation
@@ -44,6 +44,12 @@ unit test, while cancellation and host deadline races remain authoritative.
 - Focused workflow suites: resolver, fast-triage, gateway diagnostic contract,
   credentials, qualification, retrieval production, and transport-oracle all
   pass
+- Gateway-interaction fixture suite: `cargo test -p cd-core --test
+  gateway_contract_fixtures -- --nocapture` — 15 passed. This is the durable
+  regression ledger for earlier live Vercel observations: mixed catalog roles,
+  exact observed role hints, chat qualification markers, fragmented streams,
+  Vercel v4 embedding/rerank envelopes, malformed and role-mismatched payloads,
+  and secret/metadata exclusion.
 - `scripts/exact_head_full_gate.sh`: `FULL_GATE_PASS`
 - Exact-head synthetic acceptance covered identity, stale-binary rejection,
   folder/zip import parity, timezone normalization, grounded two-turn chat,
