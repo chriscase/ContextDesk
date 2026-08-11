@@ -242,6 +242,8 @@ mod tests {
             dialect: Some("openai_embeddings".into()),
             allow_remote: false,
             api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         };
         for local in ["http://127.0.0.1:11434", "http://localhost:8080"] {
             assert!(

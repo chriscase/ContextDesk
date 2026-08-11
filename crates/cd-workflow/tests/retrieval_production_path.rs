@@ -38,6 +38,8 @@ fn embedding_role(base_url: &str, api_key_ref: &str) -> RetrievalRoleModel {
         dialect: Some("openai_embeddings".into()),
         allow_remote: false,
         api_key_ref: Some(api_key_ref.to_string()),
+        embed_wire: Default::default(),
+        rerank_dialect: Default::default(),
     }
 }
 
@@ -49,6 +51,8 @@ fn reranker_role(base_url: &str, api_key_ref: &str) -> RetrievalRoleModel {
         dialect: Some("tei_rerank_v1".into()),
         allow_remote: false,
         api_key_ref: Some(api_key_ref.to_string()),
+        embed_wire: Default::default(),
+        rerank_dialect: Default::default(),
     }
 }
 

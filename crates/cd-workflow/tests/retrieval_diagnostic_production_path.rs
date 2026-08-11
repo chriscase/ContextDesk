@@ -182,6 +182,8 @@ fn roles(base_url: &str, secret_ref: &str) -> (RetrievalRoleModel, RetrievalRole
             dialect: Some("openai_embeddings".into()),
             allow_remote: false,
             api_key_ref: Some(secret_ref.to_string()),
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         },
         RetrievalRoleModel {
             enabled: true,
@@ -190,6 +192,8 @@ fn roles(base_url: &str, secret_ref: &str) -> (RetrievalRoleModel, RetrievalRole
             dialect: Some("tei_rerank_v1".into()),
             allow_remote: false,
             api_key_ref: Some(secret_ref.to_string()),
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         },
     )
 }

@@ -455,6 +455,8 @@ mod credential_tests {
             dialect: Some("openai_embeddings".into()),
             allow_remote: false,
             api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         });
         cfg.retrieval.reranker = Some(cd_core::config::RetrievalRoleModel {
             enabled: true,
@@ -463,6 +465,8 @@ mod credential_tests {
             dialect: Some("tei_rerank_v1".into()),
             allow_remote: false,
             api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         });
 
         let host = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();

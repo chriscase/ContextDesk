@@ -17,7 +17,9 @@ use cd_core::capability_qualification::{
 use cd_core::chat::{
     ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role as ChatRole, ToolCallMsg,
 };
-use cd_core::embed::{EmbedBackend, HttpEmbedBackend, VercelV4EmbedBackend};
+use cd_core::embed::{
+    EmbedBackend, HttpEmbedBackend, OpenAiCompatibleEmbedBackend, VercelV4EmbedBackend,
+};
 use cd_core::openai_chat_contract::{
     dialect_supports_mode, unsupported_mode_reason, ChatBackendDialect,
 };
@@ -814,6 +816,25 @@ async fn openai_embed(
 ) -> Result<Vec<f32>, String> {
     if is_vercel_ai_gateway(base_url) {
         return vercel_v4_embed(api_key, extra_headers, policy, model_id, text).await;
+    }
+    // Use the production adapter and parser for the ordinary path. Extra
+    // gateway headers are retained through the older shared adapter until the
+    // production adapter grows the same header hook; both paths use the same
+    // response contract and bounds.
+    if extra_headers.is_empty() {
+        let backend = OpenAiCompatibleEmbedBackend::new(
+            base_url,
+            model_id.to_string(),
+            api_key.map(str::to_string),
+        )
+        .map_err(|error| redact_host_err(&error.to_string()))?;
+        return backend
+            .embed(&[text.to_string()])
+            .await
+            .map_err(|error| redact_host_err(&error.to_string()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "embed_missing_vector".to_string());
     }
     let backend = HttpEmbedBackend::new_with_policy(
         base_url,

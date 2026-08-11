@@ -11,6 +11,7 @@
 //! facts and are surfaced separately by the retrieval status DTOs.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, CoreResult};
 
@@ -43,6 +44,109 @@ pub const RERANK_DIALECT_SYNTHETIC: &str = "synthetic";
 /// inferring the dialect silently mis-parses a valid response (or, worse,
 /// accepts a mis-parsed permutation as a valid one).
 pub const SUPPORTED_RERANK_DIALECTS: &[&str] = &[RERANK_DIALECT_TEI_V1, RERANK_DIALECT_VERCEL_V4];
+
+/// Explicit response dialect for the conventional indexed rerank envelope.
+/// This typed value is used by configuration and qualification; the Vercel v4
+/// route remains a separate explicit string dialect because its envelope is
+/// structurally different.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankDialect {
+    /// TEI/Cohere/Jina/Infinity/Qwen-compatible `{results:[...]}` response.
+    #[default]
+    TeiCohere,
+}
+
+impl RerankDialect {
+    /// Stable configuration label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TeiCohere => "tei_cohere",
+        }
+    }
+
+    /// Parse only an explicit registered dialect name. URLs are rejected.
+    pub fn parse_explicit(name: &str) -> CoreResult<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "tei_cohere" | "tei-cohere" | "cohere" | "qwen_reranker" | "qwen-reranker" => {
+                Ok(Self::TeiCohere)
+            }
+            other => Err(CoreError::Config(format!(
+                "unknown rerank dialect `{other}`; registered dialects: tei_cohere"
+            ))),
+        }
+    }
+}
+
+/// Resolve an optional typed dialect without consulting an endpoint URL.
+pub fn resolve_rerank_dialect(configured: Option<RerankDialect>) -> RerankDialect {
+    configured.unwrap_or_default()
+}
+
+/// Parse TEI/Cohere/Qwen indexed scores into request-document order.
+pub fn parse_tei_cohere_rerank_scores(
+    body: &serde_json::Value,
+    document_count: usize,
+) -> CoreResult<Vec<f32>> {
+    if document_count == 0 {
+        return Ok(Vec::new());
+    }
+    let rows = body
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            CoreError::Message("rerank response contract: missing results array".into())
+        })?;
+    let mut scores = vec![f32::NAN; document_count];
+    let mut seen = vec![false; document_count];
+    for row in rows {
+        let index = row
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| CoreError::Message("rerank response contract: invalid index".into()))?;
+        if index >= document_count {
+            return Err(CoreError::Message(
+                "rerank response contract: out of range index".into(),
+            ));
+        }
+        if seen[index] {
+            return Err(CoreError::Message(
+                "rerank response contract: duplicate index".into(),
+            ));
+        }
+        let score = row
+            .get("relevance_score")
+            .or_else(|| row.get("relevanceScore"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| CoreError::Message("rerank response contract: invalid score".into()))?;
+        seen[index] = true;
+        scores[index] = score as f32;
+    }
+    if seen.iter().any(|seen| !seen) {
+        return Err(CoreError::Message(
+            "rerank response contract: missing score for one or more documents".into(),
+        ));
+    }
+    validate_rerank_scores(&scores, document_count)?;
+    Ok(scores)
+}
+
+/// Parse an indexed response and return stable descending ranking indices.
+pub fn parse_tei_cohere_ranking_indices(
+    body: &serde_json::Value,
+    document_count: usize,
+) -> CoreResult<Vec<usize>> {
+    let scores = parse_tei_cohere_rerank_scores(body, document_count)?;
+    let mut indexed: Vec<(usize, f32)> = scores.into_iter().enumerate().collect();
+    indexed.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    Ok(indexed.into_iter().map(|(index, _)| index).collect())
+}
 
 /// Route the Vercel v4 rerank adapter posts to.
 const VERCEL_V4_RERANK_PATH: &str = "/v4/ai/reranking-model";
@@ -206,6 +310,7 @@ pub struct HttpRerankBackend {
     model: String,
     bearer: Option<String>,
     extra_headers: Vec<(String, String)>,
+    dialect: RerankDialect,
 }
 
 /// Vercel AI Gateway v4 reranking adapter.
@@ -378,7 +483,26 @@ impl HttpRerankBackend {
             model: model.into(),
             bearer,
             extra_headers: Vec::new(),
+            dialect: RerankDialect::default(),
         })
+    }
+
+    /// Build with an explicit registered response dialect. Unknown dialects
+    /// are rejected before any provider work.
+    pub fn with_dialect(
+        base_url: &str,
+        model: impl Into<String>,
+        bearer: Option<String>,
+        dialect: RerankDialect,
+    ) -> CoreResult<Self> {
+        let mut backend = Self::new(base_url, model, bearer)?;
+        backend.dialect = dialect;
+        Ok(backend)
+    }
+
+    /// Typed response dialect used by this backend.
+    pub fn dialect(&self) -> RerankDialect {
+        self.dialect
     }
 
     /// Add provider-specific headers without exposing them through identity
@@ -402,17 +526,6 @@ struct RerankRequest<'a> {
     query: &'a str,
     documents: &'a [String],
     top_n: usize,
-}
-
-#[derive(serde::Deserialize)]
-struct RerankResponse {
-    results: Vec<RerankResultRow>,
-}
-
-#[derive(serde::Deserialize)]
-struct RerankResultRow {
-    index: usize,
-    relevance_score: f32,
 }
 
 #[async_trait]
@@ -452,31 +565,13 @@ impl RerankBackend for HttpRerankBackend {
                 "rerank endpoint returned HTTP {status}"
             )));
         }
-        let parsed: RerankResponse = response
+        let parsed: serde_json::Value = response
             .json()
             .await
             .map_err(|e| CoreError::Message(format!("rerank response contract: {e}")))?;
-        let mut scores = vec![f32::NEG_INFINITY; documents.len()];
-        let mut seen = vec![false; documents.len()];
-        for row in parsed.results {
-            if row.index >= scores.len() {
-                return Err(CoreError::Message(format!(
-                    "rerank response contract: index {} out of range for {} documents",
-                    row.index,
-                    documents.len()
-                )));
-            }
-            if seen[row.index] {
-                return Err(CoreError::Message(format!(
-                    "rerank response contract: duplicate index {}",
-                    row.index
-                )));
-            }
-            seen[row.index] = true;
-            scores[row.index] = row.relevance_score;
+        match self.dialect {
+            RerankDialect::TeiCohere => parse_tei_cohere_rerank_scores(&parsed, documents.len()),
         }
-        validate_rerank_scores(&scores, documents.len())?;
-        Ok(scores)
     }
 
     fn identity(&self) -> String {

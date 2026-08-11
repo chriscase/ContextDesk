@@ -2479,6 +2479,8 @@ async fn case_embedding_or_rerank(
             .api_key
             .as_ref()
             .map(|_| credential_ref.to_string()),
+        embed_wire: Default::default(),
+        rerank_dialect: Default::default(),
     };
     let request_timeout = deadline
         .saturating_duration_since(Instant::now())

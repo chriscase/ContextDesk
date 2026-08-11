@@ -21,8 +21,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cd_core::capability_qualification::QualificationKey;
-use cd_core::config::{AppConfig, RetrievalRoleModel};
-use cd_core::embed::{EmbedBackend, HttpEmbedBackend, OllamaEmbedBackend, VercelV4EmbedBackend};
+use cd_core::config::{AppConfig, EmbedWireKind, RetrievalRoleModel};
+use cd_core::embed::{
+    EmbedBackend, OllamaEmbedBackend, OpenAiCompatibleEmbedBackend, VercelV4EmbedBackend,
+};
 use cd_core::error::CoreResult;
 use cd_core::keychain_store::SecretStore;
 use cd_core::log_analysis::{
@@ -31,8 +33,8 @@ use cd_core::log_analysis::{
 use cd_core::memory::embed_blocking;
 use cd_core::process_progress::CancelFlag;
 use cd_core::rerank::{
-    rerank_blocking, validate_rerank_scores, HttpRerankBackend, RerankBackend,
-    RERANK_DIALECT_VERCEL_V4, SUPPORTED_RERANK_DIALECTS,
+    rerank_blocking, resolve_rerank_dialect, validate_rerank_scores, HttpRerankBackend,
+    RerankBackend, RerankDialect, RERANK_DIALECT_VERCEL_V4, SUPPORTED_RERANK_DIALECTS,
 };
 
 /// Wire schema identity for [`RetrievalStatusReport`].
@@ -196,19 +198,27 @@ pub fn build_embedding_backend(
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn EmbedBackend>> {
     assert_retrieval_egress_allowed(role)?;
-    let dialect = role.dialect.as_deref().unwrap_or_else(|| {
-        if role.base_url.contains(":11434") {
-            "ollama_embeddings"
-        } else {
-            "openai_embeddings"
-        }
-    });
+    let dialect = role.dialect.as_deref();
+    if dialect.is_none() {
+        return match role.embed_wire {
+            EmbedWireKind::OpenAiCompatible => Ok(Arc::new(OpenAiCompatibleEmbedBackend::new(
+                &role.base_url,
+                role.model.clone(),
+                bearer_for(role, secrets),
+            )?)),
+            EmbedWireKind::Ollama => {
+                let client = cd_core::chat::OllamaClient::new(&role.base_url, &role.model)?;
+                Ok(Arc::new(OllamaEmbedBackend::new(client)))
+            }
+        };
+    }
+    let dialect = dialect.unwrap_or_default();
     match dialect {
         "ollama_embeddings" => {
             let client = cd_core::chat::OllamaClient::new(&role.base_url, &role.model)?;
             Ok(Arc::new(OllamaEmbedBackend::new(client)))
         }
-        "openai_embeddings" => Ok(Arc::new(HttpEmbedBackend::new(
+        "openai_embeddings" => Ok(Arc::new(OpenAiCompatibleEmbedBackend::new(
             &role.base_url,
             role.model.clone(),
             bearer_for(role, secrets),
@@ -245,24 +255,9 @@ pub fn build_rerank_backend(
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn RerankBackend>> {
     assert_retrieval_egress_allowed(role)?;
-    let dialect = role.dialect.as_deref().map(str::trim).unwrap_or("");
-    let dialect = match dialect {
-        "" => {
-            return Err(cd_core::error::CoreError::Config(format!(
-                "reranker dialect must be set explicitly; use one of {}",
-                SUPPORTED_RERANK_DIALECTS.join(", ")
-            )));
-        }
-        value if SUPPORTED_RERANK_DIALECTS.contains(&value) => value,
-        unsupported => {
-            return Err(cd_core::error::CoreError::Config(format!(
-                "unsupported reranker dialect '{unsupported}'; use {}",
-                SUPPORTED_RERANK_DIALECTS.join(" or ")
-            )));
-        }
-    };
+    let dialect = role.dialect.as_deref().map(str::trim);
     let bearer = bearer_for(role, secrets);
-    if dialect == RERANK_DIALECT_VERCEL_V4 {
+    if dialect == Some(RERANK_DIALECT_VERCEL_V4) {
         if !cd_core::discovery::is_vercel_ai_gateway(&role.base_url) {
             return Err(cd_core::error::CoreError::Config(
                 "vercel_v4_rerank_v1 requires the ai-gateway.vercel.sh host".into(),
@@ -276,13 +271,117 @@ pub fn build_rerank_backend(
                 &cd_core::ssrf::SsrfPolicy::default(),
             )?,
         ))
-    } else {
-        Ok(Arc::new(HttpRerankBackend::new(
+    } else if let Some(dialect) = dialect {
+        if !SUPPORTED_RERANK_DIALECTS.contains(&dialect) {
+            return Err(cd_core::error::CoreError::Config(format!(
+                "unsupported reranker dialect '{dialect}'; use {}",
+                SUPPORTED_RERANK_DIALECTS.join(" or ")
+            )));
+        }
+        Ok(Arc::new(HttpRerankBackend::with_dialect(
             &role.base_url,
             role.model.clone(),
             bearer,
+            RerankDialect::TeiCohere,
+        )?))
+    } else {
+        Ok(Arc::new(HttpRerankBackend::with_dialect(
+            &role.base_url,
+            role.model.clone(),
+            bearer,
+            resolve_rerank_dialect(Some(role.rerank_dialect)),
         )?))
     }
+}
+
+/// Dialect the production and qualification adapters share for a role.
+/// Explicit typed configuration is authoritative; the URL and model name are
+/// never used to infer a parser.
+pub fn registered_rerank_dialect(role: &RetrievalRoleModel) -> RerankDialect {
+    resolve_rerank_dialect(Some(role.rerank_dialect))
+}
+
+// ---------------------------------------------------------------------------
+// Share-safe retrieval report (ablation / diagnostics)
+// ---------------------------------------------------------------------------
+
+/// Wire schema for share-safe retrieval ablation / mode comparison reports.
+pub const RETRIEVAL_ABLATION_SCHEMA_ID: &str = "contextdesk.retrieval_ablation.v1";
+/// Schema version for [`ShareSafeRetrievalReport`].
+pub const RETRIEVAL_ABLATION_SCHEMA_VERSION: u32 = 1;
+
+/// One mode's ranking aggregates — never raw vectors, URLs, or secrets.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShareSafeModeAggregate {
+    pub mode: String,
+    pub candidate_count: u64,
+    pub latency_ms: Option<u64>,
+    pub embedding_calls: Option<u64>,
+    pub rerank_calls: Option<u64>,
+    pub failure_categories: Vec<String>,
+    pub pinned_evidence_hits: u64,
+}
+
+/// Share-safe retrieval report: pseudonyms + fingerprints + aggregates only.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShareSafeRetrievalReport {
+    pub schema_id: String,
+    pub schema_version: u32,
+    pub profile_pseudonym: String,
+    pub model_pseudonym: String,
+    pub endpoint_fingerprint: Option<String>,
+    pub embedding_dimensions: Option<u32>,
+    pub rerank_dialect: Option<String>,
+    pub modes: Vec<ShareSafeModeAggregate>,
+    pub total_latency_ms: Option<u64>,
+}
+
+/// Build a share-safe report. Labels are hashed into pseudonyms and never
+/// echoed; callers must not pass secrets or vectors.
+pub fn share_safe_retrieval_report(
+    profile_label: &str,
+    model_label: &str,
+    endpoint_base_url: Option<&str>,
+    embedding_dimensions: Option<u32>,
+    rerank_dialect: Option<RerankDialect>,
+    modes: Vec<ShareSafeModeAggregate>,
+    total_latency_ms: Option<u64>,
+) -> ShareSafeRetrievalReport {
+    let profile_fp =
+        QualificationKey::new("retrieval-profile", profile_label, model_label).endpoint_fingerprint;
+    let model_fp =
+        QualificationKey::new("retrieval-model", model_label, model_label).endpoint_fingerprint;
+    ShareSafeRetrievalReport {
+        schema_id: RETRIEVAL_ABLATION_SCHEMA_ID.into(),
+        schema_version: RETRIEVAL_ABLATION_SCHEMA_VERSION,
+        profile_pseudonym: format!("p-{}", &profile_fp[..12.min(profile_fp.len())]),
+        model_pseudonym: format!("p-{}", &model_fp[..12.min(model_fp.len())]),
+        endpoint_fingerprint: endpoint_base_url.map(|url| {
+            QualificationKey::new("retrieval-ep", url, model_label).endpoint_fingerprint
+        }),
+        embedding_dimensions,
+        rerank_dialect: rerank_dialect.map(|d| d.as_str().to_string()),
+        modes,
+        total_latency_ms,
+    }
+}
+
+/// Assert a serialized share-safe report contains none of the forbidden
+/// classes. Returns an error with the first hit for tests.
+pub fn assert_share_safe_json(report_json: &str, forbidden: &[&str]) -> Result<(), String> {
+    for forbidden_value in forbidden {
+        if !forbidden_value.is_empty() && report_json.contains(forbidden_value) {
+            return Err(format!(
+                "share-safe report must not contain {forbidden_value:?}"
+            ));
+        }
+    }
+    for needle in ["\"embedding\":[", "Bearer ", "sk-", "Authorization"] {
+        if report_json.contains(needle) {
+            return Err(format!("share-safe report must not contain {needle:?}"));
+        }
+    }
+    Ok(())
 }
 
 fn embedding_role_status(
@@ -674,6 +773,8 @@ mod tests {
             dialect: Some("tei_rerank_v1".into()),
             allow_remote: false,
             api_key_ref: api_key_ref.map(str::to_string),
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         }
     }
 
@@ -707,6 +808,8 @@ mod tests {
             dialect: Some("openai_embeddings".into()),
             allow_remote: false,
             api_key_ref: Some("retrieval/embed/api_key".into()),
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         };
         let backend = build_embedding_backend(&role, Some(&secrets)).unwrap();
         let vectors = backend.embed(&["synthetic query".into()]).await.unwrap();
@@ -725,6 +828,8 @@ mod tests {
             dialect: Some("invented".into()),
             allow_remote: false,
             api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         };
         let error = build_embedding_backend(&role, None)
             .err()
@@ -738,6 +843,8 @@ mod tests {
             dialect: Some("vercel_v4".into()),
             allow_remote: false,
             api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         };
         let error = build_rerank_backend(&reranker, None)
             .err()
@@ -746,30 +853,28 @@ mod tests {
     }
 
     #[test]
-    fn a_reranker_without_an_explicit_dialect_fails_closed() {
-        // Two providers can share a hostname pattern and a model label while
-        // speaking different envelopes, so a missing dialect is a refusal, not
-        // a cue to default to the most common parser.
+    fn a_reranker_uses_typed_default_but_rejects_blank_legacy_dialects() {
+        // The typed field has a documented TEI/Cohere default. Legacy string
+        // fields remain fail-closed when present but blank; neither URL nor
+        // model name is used to infer a parser.
         let secrets = MemorySecretStore::new();
         secrets
             .set("retrieval/test/api_key", "must-not-be-read")
             .unwrap();
-        for dialect in [None, Some(String::new()), Some("   ".into())] {
+        let default_role = reranker_role(Some("retrieval/test/api_key"));
+        let backend = build_rerank_backend(&default_role, Some(&secrets))
+            .expect("typed default should construct without reading the key");
+        assert_eq!(backend.dialect(), cd_core::rerank::RERANK_DIALECT_TEI_V1);
+
+        for dialect in [String::new(), "   ".into()] {
             let role = RetrievalRoleModel {
-                dialect,
-                ..reranker_role(Some("retrieval/test/api_key"))
+                dialect: Some(dialect),
+                ..default_role.clone()
             };
             let error = build_rerank_backend(&role, Some(&secrets))
                 .err()
-                .expect("an implicit reranker dialect must fail closed");
-            let message = error.to_string();
-            assert!(
-                message.contains("must be set explicitly"),
-                "unexpected message: {message}"
-            );
-            // The supported list is named so the refusal is actionable.
-            assert!(message.contains("tei_rerank_v1"));
-            assert!(message.contains("vercel_v4_rerank_v1"));
+                .expect("blank legacy dialect must fail closed");
+            assert!(error.to_string().contains("unsupported reranker dialect"));
         }
     }
 
@@ -812,6 +917,8 @@ mod tests {
             dialect: Some("vercel_v4_embeddings".into()),
             allow_remote: false,
             api_key_ref: Some("retrieval/vercel/api_key".into()),
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         };
         let error = build_embedding_backend(&role, None)
             .err()
@@ -843,6 +950,8 @@ mod tests {
             dialect: Some("openai_embeddings".into()),
             allow_remote: false,
             api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         });
         let report = retrieval_status(
             cache.path(),
@@ -907,6 +1016,8 @@ mod tests {
             dialect: Some("ollama_embeddings".into()),
             allow_remote: false,
             api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
         });
         let report = retrieval_status(
             cache.path(),

@@ -140,11 +140,13 @@ async fn fewer_results_than_documents_fails_closed_over_the_real_wire() {
     })))])
     .await;
     let err = backend(&gateway).rerank("q", &docs(3)).await.unwrap_err();
-    // Uncovered document slots stay at the f32::NEG_INFINITY sentinel
-    // (rerank.rs), so this fails the *finiteness* check, not a length
-    // mismatch — the score vector is always pre-sized to `documents.len()`
-    // regardless of how many results the provider actually returned.
-    assert!(err.to_string().contains("finite"), "{err}");
+    // Shared TEI/Cohere parser rejects incomplete envelopes before inventing
+    // zeros or non-finite sentinels for uncovered document slots.
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing") || msg.contains("finite") || msg.contains("contract"),
+        "{msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
