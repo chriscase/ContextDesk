@@ -5524,7 +5524,7 @@ impl ToolHost {
                     .into(),
             ));
         }
-        let q = crate::log_analysis::SearchLogsQuery {
+        let mut q = crate::log_analysis::SearchLogsQuery {
             query: args
                 .get("query")
                 .and_then(|v| v.as_str())
@@ -5563,6 +5563,12 @@ impl ToolHost {
                 .and_then(|value| usize::try_from(value).ok()),
         };
         let rerank_backend = self.log_rerank_backend();
+        if q.candidate_k.is_none() && rerank_backend.is_some() {
+            q.candidate_k = Some(
+                q.k.saturating_mul(3)
+                    .min(crate::log_analysis::search::MAX_SEARCH_CANDIDATE_K),
+            );
+        }
         let hits = crate::log_analysis::search::search_logs_with_excluded_templates_and_rerank(
             &corpus,
             &q,
@@ -5579,7 +5585,8 @@ impl ToolHost {
         let mut raw = String::new();
         let rerank_applied = hits.iter().any(|hit| hit.rerank_score.is_some());
         raw.push_str(&format!(
-            "retrieval_reranker_configured: {}\nretrieval_reranker_applied: {}\n",
+            "retrieval_candidate_k: {}\nretrieval_reranker_configured: {}\nretrieval_reranker_applied: {}\n",
+            q.candidate_k.unwrap_or(q.k),
             rerank_backend.is_some(),
             rerank_applied
         ));
