@@ -18,6 +18,9 @@ use cd_core::chat::{
     ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role as ChatRole, ToolCallMsg,
 };
 use cd_core::embed::{EmbedBackend, HttpEmbedBackend, VercelV4EmbedBackend};
+use cd_core::openai_chat_contract::{
+    dialect_supports_mode, unsupported_mode_reason, ChatBackendDialect,
+};
 use cd_core::providers::{ProviderKind, ProviderProfile};
 use cd_core::rerank::{RerankBackend, VercelV4RerankBackend};
 use cd_core::ssrf::SsrfPolicy;
@@ -38,6 +41,18 @@ pub struct CapabilityCheckDto {
     pub elapsed_ms: u64,
     pub tested_at: i64,
     pub reason: String,
+    /// Request-mode identity (`plain`, `prompted_json`, `json_object`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_mode: Option<String>,
+    /// Backend dialect (`openai_compatible`, `ollama`, `anthropic`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialect: Option<String>,
+    /// Schema strictness when a json_schema probe was measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_strict: Option<bool>,
+    /// Schema probe name identity (never a schema body).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_probe_id: Option<String>,
 }
 
 /// Wire DTO for a qualification report (no raw endpoint URL or secrets).
@@ -92,6 +107,10 @@ pub fn qualification_report_dto(
                 elapsed_ms: c.elapsed_ms,
                 tested_at: c.tested_at,
                 reason: c.reason.clone(),
+                request_mode: c.request_mode.clone(),
+                dialect: c.dialect.clone(),
+                schema_strict: c.schema_strict,
+                schema_probe_id: c.schema_probe_id.clone(),
             })
             .collect(),
     }
@@ -334,11 +353,21 @@ impl LiveQualificationTransport {
             .collect()
     }
 
+    fn dialect(&self) -> ChatBackendDialect {
+        match self.kind {
+            LiveBackendKind::OpenAiCompatible => ChatBackendDialect::OpenAiCompatible,
+            LiveBackendKind::Ollama => ChatBackendDialect::Ollama,
+            LiveBackendKind::Anthropic => ChatBackendDialect::Anthropic,
+        }
+    }
+
     fn map_completion(
         content: String,
         tool_calls: Vec<ToolCallMsg>,
         streamed: bool,
         cancelled: bool,
+        dialect: ChatBackendDialect,
+        mode_transmitted: bool,
     ) -> SyntheticChatResponse {
         SyntheticChatResponse {
             content,
@@ -353,7 +382,30 @@ impl LiveQualificationTransport {
             streamed,
             cancelled,
             raw_error: None,
+            dialect: Some(dialect.as_str().into()),
+            mode_transmitted,
         }
+    }
+
+    /// Refuse OpenAI-native modes on dialects that cannot transmit them.
+    fn refuse_unsupported_mode(&self, req: &SyntheticChatRequest) -> Result<(), TransportError> {
+        let dialect = self.dialect();
+        if !dialect_supports_mode(dialect, &req.chat_mode) {
+            return Err(TransportError {
+                reason: unsupported_mode_reason(dialect, &req.chat_mode),
+            });
+        }
+        // Forced tool without tools is a host misconfiguration — fail closed.
+        if matches!(
+            &req.chat_mode,
+            cd_core::openai_chat_contract::OpenAiChatRequestMode::ForcedTool { .. }
+        ) && req.tools.is_empty()
+        {
+            return Err(TransportError {
+                reason: format!("missing_forced_tools:mode={}", req.chat_mode.evidence_id()),
+            });
+        }
+        Ok(())
     }
 
     async fn chat_openai(
@@ -361,9 +413,13 @@ impl LiveQualificationTransport {
         req: &SyntheticChatRequest,
         cancel: &AtomicBool,
     ) -> Result<SyntheticChatResponse, TransportError> {
+        self.refuse_unsupported_mode(req)?;
+        let dialect = ChatBackendDialect::OpenAiCompatible;
         if cancel.load(Ordering::SeqCst) {
             return Ok(SyntheticChatResponse {
                 cancelled: true,
+                dialect: Some(dialect.as_str().into()),
+                mode_transmitted: false,
                 ..Default::default()
             });
         }
@@ -405,6 +461,8 @@ impl LiveQualificationTransport {
                     comp.tool_calls,
                     true,
                     cancel.load(Ordering::SeqCst),
+                    dialect,
+                    true,
                 )),
                 Err(e) => {
                     let msg = e.to_string();
@@ -412,6 +470,8 @@ impl LiveQualificationTransport {
                         Ok(SyntheticChatResponse {
                             cancelled: true,
                             streamed: true,
+                            dialect: Some(dialect.as_str().into()),
+                            mode_transmitted: true,
                             ..Default::default()
                         })
                     } else {
@@ -433,6 +493,8 @@ impl LiveQualificationTransport {
                     comp.tool_calls,
                     false,
                     cancel.load(Ordering::SeqCst),
+                    dialect,
+                    true,
                 )),
                 Err(e) => Err(TransportError {
                     reason: redact_host_err(&e.to_string()),
@@ -446,9 +508,14 @@ impl LiveQualificationTransport {
         req: &SyntheticChatRequest,
         cancel: &AtomicBool,
     ) -> Result<SyntheticChatResponse, TransportError> {
+        // OpenAI-native modes are never silently sent as ordinary chat.
+        self.refuse_unsupported_mode(req)?;
+        let dialect = ChatBackendDialect::Ollama;
         if cancel.load(Ordering::SeqCst) {
             return Ok(SyntheticChatResponse {
                 cancelled: true,
+                dialect: Some(dialect.as_str().into()),
+                mode_transmitted: false,
                 ..Default::default()
             });
         }
@@ -465,12 +532,15 @@ impl LiveQualificationTransport {
         };
         // Ollama client uses non-stream complete only. Never claim streamed=true
         // without observing real stream deltas — Streaming probe must degrade/fail honestly.
+        // Only plain / prompted_json reach here (native modes refused above).
         match client.complete(&messages, tools).await {
             Ok(comp) => Ok(Self::map_completion(
                 comp.content,
                 comp.tool_calls,
                 false,
                 cancel.load(Ordering::SeqCst),
+                dialect,
+                true, // plain/prompted modes were transmitted as ordinary chat
             )),
             Err(e) => Err(TransportError {
                 reason: redact_host_err(&e.to_string()),
@@ -483,9 +553,13 @@ impl LiveQualificationTransport {
         req: &SyntheticChatRequest,
         cancel: &AtomicBool,
     ) -> Result<SyntheticChatResponse, TransportError> {
+        self.refuse_unsupported_mode(req)?;
+        let dialect = ChatBackendDialect::Anthropic;
         if cancel.load(Ordering::SeqCst) {
             return Ok(SyntheticChatResponse {
                 cancelled: true,
+                dialect: Some(dialect.as_str().into()),
+                mode_transmitted: false,
                 ..Default::default()
             });
         }
@@ -515,6 +589,8 @@ impl LiveQualificationTransport {
                     comp.tool_calls,
                     true,
                     cancel.load(Ordering::SeqCst),
+                    dialect,
+                    true,
                 )),
                 Err(e) => {
                     let msg = e.to_string();
@@ -522,6 +598,8 @@ impl LiveQualificationTransport {
                         Ok(SyntheticChatResponse {
                             cancelled: true,
                             streamed: true,
+                            dialect: Some(dialect.as_str().into()),
+                            mode_transmitted: true,
                             ..Default::default()
                         })
                     } else {
@@ -538,6 +616,8 @@ impl LiveQualificationTransport {
                     comp.tool_calls,
                     false,
                     cancel.load(Ordering::SeqCst),
+                    dialect,
+                    true,
                 )),
                 Err(e) => Err(TransportError {
                     reason: redact_host_err(&e.to_string()),
@@ -885,7 +965,19 @@ pub fn redacted_export_summary(report: &QualificationReportDto) -> String {
         report
             .checks
             .iter()
-            .map(|c| format!("{}:{}", c.kind, c.status))
+            .map(|c| {
+                let mode = c.request_mode.as_deref().unwrap_or("-");
+                let dialect = c.dialect.as_deref().unwrap_or("-");
+                let strict = c
+                    .schema_strict
+                    .map(|s| if s { "strict" } else { "nonstrict" })
+                    .unwrap_or("-");
+                let schema_id = c.schema_probe_id.as_deref().unwrap_or("-");
+                format!(
+                    "{}:{}:mode={}:dialect={}:schema={}:{}",
+                    c.kind, c.status, mode, dialect, schema_id, strict
+                )
+            })
             .collect::<Vec<_>>()
             .join(",")
     )
@@ -1075,12 +1167,53 @@ mod tests {
                 elapsed_ms: 1,
                 tested_at: 0,
                 reason: "ok".into(),
+                request_mode: Some("plain".into()),
+                dialect: Some("openai_compatible".into()),
+                schema_strict: None,
+                schema_probe_id: None,
             }],
         };
         let s = redacted_export_summary(&dto);
         assert!(!s.contains("https://"));
         assert!(!s.contains("secret"));
         assert!(s.contains("basic_generation:pass"));
+        assert!(s.contains("mode=plain"));
+        assert!(s.contains("dialect=openai_compatible"));
+        // No schema bodies or private endpoints in export.
+        assert!(!s.contains("properties"));
+        assert!(!s.contains("additionalProperties"));
+    }
+
+    #[test]
+    fn report_dto_projects_mode_and_dialect_fields() {
+        use cd_core::capability_qualification::{
+            CapabilityCheckResult, CapabilityKind, CapabilityStatus, QualificationReport,
+        };
+        let report = QualificationReport {
+            key: qualification_key("p", "https://private.example/v1", "m"),
+            checks: vec![CapabilityCheckResult {
+                kind: CapabilityKind::StructuredJsonObject,
+                status: CapabilityStatus::Pass,
+                elapsed_ms: 1,
+                tested_at: 1,
+                reason: "ok".into(),
+                request_mode: Some("json_object".into()),
+                dialect: Some("openai_compatible".into()),
+                schema_strict: None,
+                schema_probe_id: None,
+            }],
+            role_hint: "chat".into(),
+            cancelled: false,
+            stale: false,
+            finished_at: 1,
+        };
+        let dto = QualificationReportDto::from(&report);
+        assert_eq!(dto.checks[0].request_mode.as_deref(), Some("json_object"));
+        assert_eq!(dto.checks[0].dialect.as_deref(), Some("openai_compatible"));
+        assert_eq!(dto.schema_version, QUALIFICATION_SCHEMA_VERSION);
+        let s = redacted_export_summary(&dto);
+        assert!(!s.contains("private.example"));
+        assert!(s.contains("mode=json_object"));
     }
 
     #[test]
@@ -1116,7 +1249,7 @@ mod tests {
     fn schema_version_present() {
         assert_eq!(
             QUALIFICATION_SCHEMA_VERSION,
-            "contextdesk.capability_qualification.v2"
+            "contextdesk.capability_qualification.v3"
         );
     }
 

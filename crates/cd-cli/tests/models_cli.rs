@@ -62,7 +62,10 @@ fn models_reports_persisted_verification_without_network_or_credentials() {
         elapsed_ms: 1,
         tested_at: 100,
         reason: "synthetic pass".into(),
-        request_mode: None,
+        request_mode: kind.expected_request_mode().map(str::to_string),
+        dialect: Some("openai_compatible".into()),
+        schema_strict: None,
+        schema_probe_id: None,
     })
     .collect();
     let mut store = QualificationStore::default();
