@@ -365,7 +365,9 @@ fn qualification_anthropic_refuses_openai_native_modes() {
         "anthropic must never receive OpenAI-native response_format/tool_choice: {bodies:?}"
     );
 
-    use cd_core::capability_qualification::{capability_contract_verdict, CapabilityContract, ContractVerdict};
+    use cd_core::capability_qualification::{
+        capability_contract_verdict, CapabilityContract, ContractVerdict,
+    };
     assert_eq!(
         capability_contract_verdict(Some(&report), CapabilityContract::NativeJsonObject),
         ContractVerdict::Unqualified

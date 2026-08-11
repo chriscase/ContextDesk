@@ -3908,10 +3908,7 @@ mod tests {
                     ..Default::default()
                 });
             }
-            if matches!(
-                req.chat_mode,
-                OpenAiChatRequestMode::ForcedTool { .. }
-            ) {
+            if matches!(req.chat_mode, OpenAiChatRequestMode::ForcedTool { .. }) {
                 let mut r = self.response.clone();
                 r.dialect = Some("openai_compatible".into());
                 r.mode_transmitted = true;

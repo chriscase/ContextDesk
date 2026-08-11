@@ -567,18 +567,12 @@ mod tests {
             ChatBackendDialect::Anthropic,
             &OpenAiChatRequestMode::JsonObject,
         );
-        assert_eq!(
-            dialect_from_transport_reason(&refuse),
-            Some("anthropic")
-        );
+        assert_eq!(dialect_from_transport_reason(&refuse), Some("anthropic"));
         assert_eq!(
             dialect_from_transport_reason(&format!("mode=json_object: {refuse}")),
             Some("anthropic")
         );
-        assert_eq!(
-            dialect_from_transport_reason("unrelated error"),
-            None
-        );
+        assert_eq!(dialect_from_transport_reason("unrelated error"), None);
     }
 
     #[test]
