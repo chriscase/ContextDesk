@@ -124,10 +124,53 @@ pub struct AgentOptions {
     /// broad-triage seam with two or more candidates, the reviewer pipeline
     /// runs; any unavailability degrades to the same seam's single-model path.
     pub multi_model: Option<MultiModelRuntime>,
+    /// Optional host-grounded fast-triage runtime. `None` (the default) leaves
+    /// every established path byte-identical. When present *and* exact
+    /// persisted profile/model/workflow evidence selects the route at the
+    /// broad-triage seam, the fast route owns the turn's synthesis; a
+    /// non-selection reports its exact reason and the established multi-stage
+    /// path runs unchanged.
+    pub fast_triage: Option<FastTriageRuntime>,
     /// Test-only oversize evidence blocks appended **after** real governed tool
     /// results. Never compiled into release; does not change search_logs semantics.
     #[cfg(test)]
     pub test_fixture_evidence_blocks: Vec<String>,
+}
+
+/// Resolved fast-triage runtime handed to the agent turn.
+///
+/// The host resolves persisted route evidence, the fallback profile/model, its
+/// authorization and egress policy, and builds the fallback backend *before*
+/// constructing this. The presence of a runtime means "the route may be
+/// considered"; the exact-evidence selection inside
+/// [`crate::fast_triage::run_fast_triage_route`] still decides whether it runs.
+#[derive(Clone)]
+pub struct FastTriageRuntime {
+    /// Whether the host enabled the route for this turn.
+    pub enabled: bool,
+    /// Persisted per-(profile, model, workflow) route evidence.
+    pub records: Vec<crate::fast_triage::FastTriageRouteRecord>,
+    /// Explicitly configured fallback for the one visible escalation.
+    pub fallback: Option<crate::fast_triage::FastTriageFallback>,
+    /// The fallback backend, when one was built. Never consulted unless
+    /// `fallback` names a configured, authorized role.
+    pub fallback_backend: Option<std::sync::Arc<dyn ChatBackend>>,
+    /// Per-run ceilings.
+    pub budget: crate::fast_triage::FastTriageBudget,
+    /// Bounded neighborhood expansion budget for packet assembly.
+    pub neighborhood: crate::fast_triage::FastTriageNeighborhoodBudget,
+}
+
+impl std::fmt::Debug for FastTriageRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FastTriageRuntime")
+            .field("enabled", &self.enabled)
+            .field("records", &self.records.len())
+            .field("fallback", &self.fallback)
+            .field("budget", &self.budget)
+            .field("neighborhood", &self.neighborhood)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Resolved reviewer runtime handed to the agent turn. The host resolves the
@@ -1455,6 +1498,226 @@ fn multi_stage_ledger(
         ..binding
     };
     HostEvidenceLedger::new(binding, evidence)
+}
+
+/// Structural kind the deterministic brief assigns to a trace/request
+/// correlation group. The fast route uses it to tell a host-computed link from
+/// mere adjacency; it is not an incident classification.
+const TRACE_CORRELATION_STRUCTURAL_KIND: &str = "unverified_trace_key_correlation_group";
+
+/// Build the complete host-owned fast-triage packet from the same deterministic
+/// brief every other path uses.
+///
+/// The ledger is assembled exactly as [`multi_stage_ledger`] assembles its own —
+/// same id minting, same locators, same excerpts, same separately scoped
+/// chronology — with one deliberate difference: **every candidate row is
+/// `Neutral`**. Roles in the multi-stage ledger come from the candidate-stage
+/// model's classification, and this route has no candidate stage. Inventing a
+/// role from structure (earliest-is-cause, loudest-is-cause) is precisely the
+/// failure the triage rubric treats as a mutation, so the host says
+/// `unclassified` and the packet reports `role_evidence: host_neutral`. Every
+/// structural check still applies: scope isolation, chronology, contradictions,
+/// citation completeness, and an unsupported root are all still rejected.
+fn fast_triage_packet(
+    candidates: &[crate::tool_host::BroadLogTriageCandidate],
+    comparison_context: Option<&crate::tool_host::BroadLogTriageComparisonContext>,
+    binding: crate::investigation_answer::AnswerBindingV1,
+    clock: crate::fast_triage::FastTriageClockCompatibility,
+    neighborhood: crate::fast_triage::FastTriageNeighborhoodBudget,
+) -> Result<
+    crate::fast_triage::FastTriagePacketV1,
+    crate::investigation_answer::ValidationError,
+> {
+    use crate::investigation_answer::{EvidenceRole, HostEvidenceEntry, HostEvidenceLedger};
+
+    let mut evidence = Vec::new();
+    let mut trace_correlated = std::collections::BTreeSet::new();
+    for candidate in candidates.iter().take(MULTI_STAGE_CANDIDATE_CAP) {
+        if candidate.structural_kind == TRACE_CORRELATION_STRUCTURAL_KIND {
+            trace_correlated.insert(candidate.group_id.clone());
+        }
+        for identity in &candidate.evidence {
+            evidence.push(HostEvidenceEntry {
+                evidence_id: format!("e:{}:{}", candidate.group_id, identity.seq),
+                candidate_id: candidate.group_id.clone(),
+                source_label: identity
+                    .citation_source
+                    .clone()
+                    .unwrap_or_else(|| identity.source.clone()),
+                locator: format!("seq={}", identity.seq),
+                corpus_id: binding.corpus_id.clone(),
+                revision: binding.revision,
+                role: EvidenceRole::Neutral,
+                content: candidate
+                    .evidence_excerpts
+                    .get(identity)
+                    .cloned()
+                    .unwrap_or_default(),
+            });
+        }
+    }
+    let independent_candidate_id = comparison_context.map(|context| context.candidate_id.clone());
+    if let Some(context) = comparison_context {
+        for row in &context.evidence {
+            let identity = &row.identity;
+            evidence.push(HostEvidenceEntry {
+                evidence_id: format!("e:{}:{}", context.candidate_id, identity.seq),
+                candidate_id: context.candidate_id.clone(),
+                source_label: identity
+                    .citation_source
+                    .clone()
+                    .unwrap_or_else(|| identity.source.clone()),
+                locator: format!("seq={}", identity.seq),
+                corpus_id: binding.corpus_id.clone(),
+                revision: binding.revision,
+                // Global chronology is descriptive. Order alone never grants
+                // causal, support, or symptom authority.
+                role: EvidenceRole::Neutral,
+                content: row.content.clone(),
+            });
+        }
+    }
+    let binding = crate::investigation_answer::AnswerBindingV1 {
+        ledger_digest: HostEvidenceLedger::digest(&evidence),
+        ..binding
+    };
+    Ok(crate::fast_triage::FastTriagePacketV1::build(
+        crate::fast_triage::FastTriagePacketInputs {
+            ledger: HostEvidenceLedger::new(binding, evidence)?,
+            independent_candidate_id: independent_candidate_id.as_deref(),
+            timeline_complete: comparison_context.is_some_and(|context| context.complete),
+            clock,
+            trace_correlated_candidates: &trace_correlated,
+            neighborhood,
+        },
+    ))
+}
+
+/// What the fast-triage seam decided for this turn.
+#[derive(Debug)]
+enum FastTriageSeamOutcome {
+    /// The route did not run. The caller continues with its established path.
+    NotEntered { reason: &'static str },
+    /// A host-validated typed answer.
+    Verified {
+        content: String,
+        envelope: Box<crate::investigation_answer::AnswerEnvelopeV1>,
+        telemetry: Box<crate::fast_triage::FastTriageTelemetryV1>,
+    },
+    /// The route ran and produced no validated answer. Withheld, never mixed
+    /// into the established path as if nothing had happened.
+    Withheld {
+        telemetry: Box<crate::fast_triage::FastTriageTelemetryV1>,
+    },
+    Cancelled,
+    Deadline,
+    ProviderFailed(Box<CoreError>),
+}
+
+/// Drive one fast-triage route from the deterministic brief this turn already
+/// built. Provider work, deadlines, cancellation, and stage events all reuse the
+/// shared agent seams — there is no second client and no second loop.
+async fn run_fast_triage_seam(
+    backend: &dyn ChatBackend,
+    user_text: &str,
+    opts: &AgentOptions,
+    runtime: &FastTriageRuntime,
+    brief: &crate::tool_host::BroadLogTriageBrief,
+    binding: crate::investigation_answer::AnswerBindingV1,
+    deadline_ms: u64,
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
+) -> CoreResult<FastTriageSeamOutcome> {
+    use crate::fast_triage::{
+        clock_compatibility_from_time_quality, run_fast_triage_route, FastTriageBudget,
+        FastTriageInputs, FastTriageRouteOutcome,
+    };
+
+    let packet = match fast_triage_packet(
+        &brief.candidate_groups,
+        brief.comparison_context.as_ref(),
+        binding,
+        clock_compatibility_from_time_quality(brief.time_quality),
+        runtime.neighborhood,
+    ) {
+        Ok(packet) => packet,
+        // An unusable host packet is a host problem, not a model problem. Fall
+        // through to the established path rather than escalating nothing.
+        Err(_) => {
+            return Ok(FastTriageSeamOutcome::NotEntered {
+                reason: "host_packet_invalid",
+            })
+        }
+    };
+    let expected_packet_id = packet.packet_id().to_string();
+    let budget = FastTriageBudget {
+        deadline_ms,
+        context_char_budget: opts.effective_context_char_budget(),
+        ..runtime.budget
+    };
+    let outcome = run_fast_triage_route(
+        backend,
+        runtime.fallback_backend.as_deref(),
+        FastTriageInputs {
+            user_text,
+            packet: &packet,
+            expected_packet_id: Some(&expected_packet_id),
+            enabled: runtime.enabled,
+            records: &runtime.records,
+            profile_id: opts.provider_profile_id.as_deref(),
+            model_id: opts.model.as_deref(),
+            fallback: runtime.fallback.as_ref(),
+            budget,
+            started_at: opts.turn_started_at,
+            cancel: opts.cancel.clone(),
+        },
+        &mut |event| {
+            on_event(StreamEvent::MultiModelStage {
+                stage: event.stage.as_str().into(),
+                phase: if event.started { "started" } else { "finished" }.into(),
+                status: event
+                    .outcome
+                    .map(|outcome| outcome.as_str().to_string()),
+                detail: event.detail,
+                candidate_id: None,
+            });
+        },
+    )
+    .await?;
+
+    // One host-authored summary line for every terminal, so activity and
+    // telemetry tell the same story whatever happened.
+    let telemetry = outcome.telemetry().clone();
+    on_event(StreamEvent::MultiModelStage {
+        stage: "summary".into(),
+        phase: "summary".into(),
+        status: Some(telemetry.outcome.as_str().into()),
+        detail: telemetry.activity_detail(),
+        candidate_id: None,
+    });
+
+    Ok(match outcome {
+        FastTriageRouteOutcome::NotSelected { rejection, .. } => {
+            FastTriageSeamOutcome::NotEntered {
+                reason: rejection.as_str(),
+            }
+        }
+        FastTriageRouteOutcome::Verified {
+            envelope, content, ..
+        } => FastTriageSeamOutcome::Verified {
+            content,
+            envelope,
+            telemetry: Box::new(telemetry),
+        },
+        FastTriageRouteOutcome::Partial { .. }
+        | FastTriageRouteOutcome::EscalationRequested { .. } => FastTriageSeamOutcome::Withheld {
+            telemetry: Box::new(telemetry),
+        },
+        FastTriageRouteOutcome::Cancelled { .. } => FastTriageSeamOutcome::Cancelled,
+        FastTriageRouteOutcome::Deadline { .. } => FastTriageSeamOutcome::Deadline,
+        FastTriageRouteOutcome::ProviderFailed { error, .. } => {
+            FastTriageSeamOutcome::ProviderFailed(error)
+        }
+    })
 }
 
 /// Require the final typed triage proposal to preserve host-classified roles.
@@ -2824,6 +3087,7 @@ impl Default for AgentOptions {
             applied_skill_ids: Vec::new(),
             user_selection: None,
             multi_model: None,
+            fast_triage: None,
             #[cfg(test)]
             test_fixture_evidence_blocks: Vec::new(),
         }
@@ -2859,6 +3123,7 @@ impl AgentOptions {
             applied_skill_ids: Vec::new(),
             user_selection: None,
             multi_model: None,
+            fast_triage: None,
             #[cfg(test)]
             test_fixture_evidence_blocks: Vec::new(),
         }
@@ -4699,6 +4964,120 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                         },
                         ledger_digest: String::new(),
                     };
+                    // Host-grounded fast-triage route (opt-in, and even then
+                    // only when exact persisted profile/model/workflow evidence
+                    // selects it). It reuses this same deterministic brief —
+                    // retrieval, ledger, grouping, chronology — and hands the
+                    // complete packet to the selected model in one bounded
+                    // request. A non-selection reports its exact reason and
+                    // falls through, leaving every established path unchanged.
+                    if let Some(runtime) = opts.fast_triage.clone() {
+                        match run_fast_triage_seam(
+                            backend,
+                            user_text,
+                            opts,
+                            &runtime,
+                            &brief,
+                            multi_stage_binding.clone(),
+                            deadline_plan.total_ms,
+                            &mut |event| out.push(event),
+                        )
+                        .await?
+                        {
+                            FastTriageSeamOutcome::NotEntered { reason } => {
+                                trail.push(format!("fast_triage_not_selected:{reason}"));
+                            }
+                            FastTriageSeamOutcome::Cancelled => return terminal_cancel(out),
+                            FastTriageSeamOutcome::Deadline => {
+                                let retry_available = checkpoint_out
+                                    .as_ref()
+                                    .is_some_and(|checkpoint| checkpoint.is_some());
+                                return terminal_synthesis_time(
+                                    out,
+                                    &trail,
+                                    deadline_plan.total_ms,
+                                    retry_available,
+                                );
+                            }
+                            FastTriageSeamOutcome::ProviderFailed(error) => {
+                                let (class, _) = classify_provider_turn_failure(&error);
+                                trail.push(format!("fast_triage_provider_failure:{class}"));
+                                let retry_available = checkpoint_out
+                                    .as_ref()
+                                    .is_some_and(|checkpoint| checkpoint.is_some());
+                                return terminal_linked_provider_failure(
+                                    out,
+                                    &mut trail,
+                                    retry_available,
+                                    &[],
+                                );
+                            }
+                            FastTriageSeamOutcome::Withheld { telemetry } => {
+                                trail.push(format!(
+                                    "fast_triage_withheld:{}",
+                                    telemetry.outcome.as_str()
+                                ));
+                                out.push(StreamEvent::Tool {
+                                    id: stage_id,
+                                    name: "fast_triage".into(),
+                                    phase: crate::events::ToolPhase::Finished,
+                                    summary: "Fast-triage synthesis withheld".into(),
+                                    detail: Some(telemetry.activity_detail()),
+                                    ok: Some(false),
+                                });
+                                out.push(StreamEvent::Error {
+                                    code: "linked_invalid_grounded_answer".into(),
+                                    message: "A bounded host-grounded fast-triage synthesis failed its evidence, role, chronology, or scope validation. ContextDesk withheld it rather than presenting an unvalidated answer.".into(),
+                                });
+                                out.push(StreamEvent::SearchTrail { steps: trail });
+                                out.push(StreamEvent::TurnCompleted {
+                                    reason: "linked_invalid_grounded_answer".into(),
+                                });
+                                return Ok(out.into_events());
+                            }
+                            FastTriageSeamOutcome::Verified {
+                                content,
+                                envelope,
+                                telemetry,
+                            } => {
+                                trail.push(format!(
+                                    "fast_triage:{},provider_attempts={},correction={},escalation={}",
+                                    telemetry.outcome.as_str(),
+                                    telemetry.provider_attempts,
+                                    telemetry.correction_used,
+                                    telemetry.escalation.state.as_str()
+                                ));
+                                out.push(StreamEvent::Tool {
+                                    id: stage_id,
+                                    name: "fast_triage".into(),
+                                    phase: crate::events::ToolPhase::Finished,
+                                    summary: "Host-grounded fast-triage synthesis".into(),
+                                    detail: Some(telemetry.activity_detail()),
+                                    ok: Some(true),
+                                });
+                                out.push(StreamEvent::TextDelta {
+                                    text: content.clone(),
+                                });
+                                out.push(StreamEvent::InvestigationAnswer {
+                                    envelope: (*envelope).clone(),
+                                });
+                                out.push(StreamEvent::SearchTrail { steps: trail });
+                                out.push(StreamEvent::TurnCompleted {
+                                    reason: "stop".into(),
+                                });
+                                history.push(ChatMessage {
+                                    role: Role::Assistant,
+                                    content,
+                                    tool_call_id: None,
+                                    tool_calls: None,
+                                });
+                                if let Some(slot) = checkpoint_out.as_deref_mut() {
+                                    *slot = None;
+                                }
+                                return Ok(out.into_events());
+                            }
+                        }
+                    }
                     // Multi-model reviewer path (opt-in). It runs the same seam
                     // with a reviewer stage; any unavailability falls through to
                     // the established single-model multi-stage path below. Stage
