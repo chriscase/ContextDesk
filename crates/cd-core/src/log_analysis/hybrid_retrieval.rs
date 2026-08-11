@@ -13,9 +13,15 @@
 //!    the corpus actually holds embedded templates AND the stored embedding
 //!    binding (model identity + vector dimensions) matches the query backend
 //!    (the production honesty gates); otherwise the outcome says why.
-//! 3. The rerank stage reorders only the top [`HybridOptions::rerank_top_n`]
-//!    merged candidates in ONE bounded request; pre-rerank ranks and scores
-//!    are retained in diagnostics.
+//! 3. The rerank stage runs over a **candidate pool that is deliberately
+//!    broader than the final K** ([`HybridOptions::rerank_candidate_depth`]):
+//!    reranking only the rows that already fit in K can reorder them but can
+//!    never recover a relevant row that fused just outside K. One bounded
+//!    request scores the pool; the result is then truncated to K. Pre-rerank
+//!    ranks and scores are retained in diagnostics.
+//!    Exact-phrase, structured-filter, and chronology-boundary rows are
+//!    **pinned anchors**: a rerank may reorder them but may never evict them
+//!    from the final K. Anchor promotion is reported, never silent.
 //! 4. Merge and deduplication are deterministic: candidates deduplicate by
 //!    `seq` and order by reciprocal-rank fusion across the lanes
 //!    (`RRF_K = 60`; ties by ts ASC, seq ASC) before rerank, and by
@@ -119,8 +125,48 @@ pub struct HybridCandidate {
     pub semantic_lane_rank: Option<u64>,
     /// Score assigned by the rerank stage, when it ran and covered this row.
     pub rerank_score: Option<f32>,
+    /// Why this row is pinned into the final K, when it is. A pinned row may
+    /// be reordered by rerank but never evicted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<HybridAnchorKind>,
+    /// True when this row was outside the reranked top-K and was restored
+    /// because it is a pinned anchor. Always reported, never silent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub anchor_promoted: bool,
     /// Final 1-based rank after optional reranking.
     pub final_rank: u64,
+}
+
+/// Why a candidate is pinned into the final K.
+///
+/// Anchors exist because a relevance reranker scores *topical similarity to
+/// the query text*. That signal is genuinely useful, but it is blind to three
+/// things an investigator depends on: an exact literal match, an explicitly
+/// requested structured constraint, and the chronological boundaries of the
+/// window under examination. Letting a similarity score silently drop those
+/// rows trades a checkable fact for a model opinion, so it is not allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HybridAnchorKind {
+    /// The row's message literally contains one of the keyword terms.
+    ExactPhrase,
+    /// The row satisfies a structured constraint the caller explicitly asked
+    /// for (level, source, service, or time window).
+    Structured,
+    /// The row is the earliest or latest row in the candidate pool, so the
+    /// answer can still state the boundaries of the window it looked at.
+    Chronology,
+}
+
+impl HybridAnchorKind {
+    /// Stable snake_case wire label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactPhrase => "exact_phrase",
+            Self::Structured => "structured",
+            Self::Chronology => "chronology",
+        }
+    }
 }
 
 /// Measured execution telemetry. `Some(0)` is a measured zero; `None` means
@@ -139,6 +185,21 @@ pub struct HybridTelemetry {
     pub rerank_latency_ms: Option<u64>,
     /// Configured reranker identity, when the stage produced scores.
     pub rerank_model: Option<String>,
+    /// Explicit wire dialect of the reranker that produced scores. Reported
+    /// from the adapter, never inferred from an endpoint or a model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_dialect: Option<String>,
+    /// Documents actually submitted to the rerank stage (the bounded candidate
+    /// pool, which is deliberately wider than the final K).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_pool_size: Option<u64>,
+    /// Merged candidates retained before rerank and truncation to K.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_pool_size: Option<u64>,
+    /// Pinned anchors restored into the final K after reranking (`Some(0)` is
+    /// a measured zero: the rerank kept every anchor on its own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchors_promoted: Option<u64>,
     /// Tokens in, when a backend reports them; no backend in this repository
     /// does today, so this stays `None` (never fabricated).
     pub tokens_in: Option<u64>,
@@ -153,6 +214,7 @@ pub struct HybridTelemetry {
 pub struct HybridDegradation {
     /// Stable machine code: `embedding_backend_absent`,
     /// `corpus_not_embedded`, `embedding_model_mismatch`,
+    /// `embedding_space_legacy_unbound`, `embedding_space_drift`,
     /// `embedding_lane_failed`, `rerank_backend_absent`,
     /// `rerank_failed_or_timed_out`, `rerank_invalid_response`.
     pub code: String,
@@ -197,9 +259,14 @@ pub struct HybridOptions {
     /// Structured filter applied to every lane (levels/sources/services/time).
     pub filter: EventQuery,
     /// Final candidate budget (1..=500, the production search page bound).
+    /// This is what the caller receives.
     pub k: usize,
-    /// How many merged candidates the optional rerank stage may reorder.
-    pub rerank_top_n: usize,
+    /// How many merged candidates enter the rerank pool, **before** truncation
+    /// to `k`. Clamped to `[k, RERANK_MAX_DOCUMENTS]`, so it is never narrower
+    /// than the final budget: reranking only the rows that already fit in `k`
+    /// can reorder them but can never recover a relevant row that fused just
+    /// outside `k`.
+    pub rerank_candidate_depth: usize,
     /// Wall-clock budget for the single rerank request.
     pub rerank_timeout_ms: u64,
 }
@@ -211,7 +278,10 @@ impl Default for HybridOptions {
             semantic_query: None,
             filter: EventQuery::default(),
             k: 50,
-            rerank_top_n: 50,
+            // Twice the final budget, still inside the one-request document
+            // bound: wide enough to promote a near-miss, narrow enough to stay
+            // one bounded call.
+            rerank_candidate_depth: 100,
             rerank_timeout_ms: RERANK_DEFAULT_TIMEOUT_MS,
         }
     }
@@ -249,37 +319,64 @@ impl<'a> EmbedBackend for CountingEmbed<'a> {
     fn identity(&self) -> String {
         self.inner.identity()
     }
+
+    fn space(&self) -> crate::embedding_space::EmbeddingSpaceIdentity {
+        // A measuring decorator must be transparent to the binding gates: it
+        // observes calls, it does not define a different vector space.
+        self.inner.space()
+    }
 }
 
 /// Typed reason when the stored embedding binding cannot be honestly compared
-/// against the query backend; `None` means the identities match and the
-/// semantic lane may run (dimensions are then verified against the vectors the
-/// query backend actually returns).
+/// against the query backend; `None` means every binding check passed and the
+/// semantic lane may run (dimensions are then verified again against the
+/// vectors the query backend actually returns).
+///
+/// Two gates run, in this order, and both fail closed:
+///
+/// 1. The **measured dimension** gate — stored vectors with no single positive
+///    dimension count cannot pin any geometry.
+/// 2. The **typed embedding-space** gate
+///    ([`crate::embedding_space::evaluate_space_binding`]) — legacy corpora
+///    (no typed space) and any drifting identity field are refused. The
+///    free-form `model_id` is still compared as a defence in depth for stores
+///    written before the typed space existed alongside it.
 fn embedding_binding_mismatch(
     status: &super::store::CorpusEmbeddingStatus,
     query_identity: &str,
-) -> Option<String> {
+    query_space: &crate::embedding_space::EmbeddingSpaceIdentity,
+) -> Option<(String, String)> {
     if status.embedded_dims.is_none_or(|dims| dims == 0) {
-        return Some(
+        return Some((
+            "embedding_model_mismatch".into(),
             "stored template vectors have no single valid dimension binding; re-run template \
              re-analysis before semantic retrieval; structured/keyword results kept"
                 .into(),
-        );
+        ));
+    }
+    let verdict =
+        crate::embedding_space::evaluate_space_binding(status.space.as_ref(), query_space);
+    if !verdict.is_bound() {
+        return Some((verdict.code().to_string(), verdict.detail()));
     }
     match status
         .model_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        None => Some(
+        None => Some((
+            "embedding_model_mismatch".into(),
             "stored template vectors carry no model identity (legacy corpus); re-run template \
              re-analysis to bind them before semantic retrieval; structured/keyword results kept"
                 .into(),
-        ),
-        Some(stored) if stored != query_identity => Some(format!(
-            "stored template vectors were produced by `{stored}` but the query backend is \
-             `{query_identity}`; vectors from different models are not comparable; \
-             structured/keyword results kept"
+        )),
+        Some(stored) if stored != query_identity => Some((
+            "embedding_model_mismatch".into(),
+            format!(
+                "stored template vectors were produced by `{stored}` but the query backend is \
+                 `{query_identity}`; vectors from different models are not comparable; \
+                 structured/keyword results kept"
+            ),
         )),
         Some(_) => None,
     }
@@ -334,6 +431,173 @@ fn cancelled(cancel: Option<&CancelFlag>) -> bool {
     cancel.is_some_and(CancelFlag::is_cancelled)
 }
 
+/// Whether the caller asked for any structured constraint. Only an explicitly
+/// requested constraint creates a structured anchor; pinning rows for a filter
+/// nobody asked for would pin the whole corpus.
+fn filter_is_structured(filter: &EventQuery) -> bool {
+    !filter.levels.is_empty()
+        || !filter.sources.is_empty()
+        || !filter.services.is_empty()
+        || filter.time_from.is_some()
+        || filter.time_to.is_some()
+}
+
+/// Assign pinned anchors over the candidate pool, in place.
+///
+/// Precedence is exact phrase, then structured, then chronology, so a row that
+/// qualifies several ways reports the strongest reason. Chronology pins only
+/// the earliest and latest rows in the pool — enough for an answer to state
+/// the boundaries of the window it examined, without pinning the middle.
+fn assign_anchors(pool: &mut [HybridCandidate], options: &HybridOptions) {
+    let terms: Vec<String> = options
+        .keyword_terms
+        .iter()
+        .map(|term| term.trim().to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect();
+    let structured = filter_is_structured(&options.filter);
+    for candidate in pool.iter_mut() {
+        let message = candidate.message.to_lowercase();
+        candidate.anchor = if terms.iter().any(|term| message.contains(term)) {
+            Some(HybridAnchorKind::ExactPhrase)
+        } else if structured {
+            // Every pooled row already passed the requested filter on every
+            // lane, so presence in the pool IS the structured evidence.
+            Some(HybridAnchorKind::Structured)
+        } else {
+            None
+        };
+    }
+    if pool.is_empty() {
+        return;
+    }
+    let mut chronological: Vec<usize> = (0..pool.len()).collect();
+    chronological.sort_by_key(|index| (pool[*index].ts, pool[*index].seq));
+    for boundary in [
+        chronological.first().copied(),
+        chronological.last().copied(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if pool[boundary].anchor.is_none() {
+            pool[boundary].anchor = Some(HybridAnchorKind::Chronology);
+        }
+    }
+}
+
+/// Outcome of applying the rerank stage to a candidate pool.
+pub(crate) struct RerankStageOutcome {
+    /// Final candidates, already truncated to `k` and ranked.
+    pub candidates: Vec<HybridCandidate>,
+    /// Whether the stage actually reordered anything.
+    pub reranked: bool,
+    /// Pinned anchors restored into the final K after reranking.
+    pub anchors_promoted: u64,
+}
+
+/// Apply the rerank stage to a candidate pool and truncate to `k`.
+///
+/// This is a **pure function** on purpose: the guarantee that an invalid,
+/// timed-out, or cancelled rerank leaves the pre-rerank order byte-identical
+/// is the whole point of the stage, and it is only checkable if the ordering
+/// decision does not also own the transport.
+///
+/// * `scores == None` — the call failed, timed out, or was cancelled. The
+///   pre-rerank pool is truncated to `k` and returned unchanged: no
+///   `rerank_score` is set on any row, so the bytes are identical to a run
+///   with no reranker at all.
+/// * `scores == Some(invalid)` — a response that cannot be aligned one-to-one
+///   with the submitted documents is treated exactly like a failure.
+/// * `scores == Some(valid)` — rows are reordered by (score DESC, pre-rerank
+///   rank ASC); pinned anchors that fall outside `k` displace the
+///   worst-reranked non-anchor rows and are marked `anchor_promoted`.
+pub(crate) fn apply_rerank_stage(
+    pool: Vec<HybridCandidate>,
+    submitted: usize,
+    scores: Option<Vec<f32>>,
+    k: usize,
+) -> RerankStageOutcome {
+    let truncate_pre_rerank = |mut pool: Vec<HybridCandidate>| {
+        pool.truncate(k);
+        for (index, candidate) in pool.iter_mut().enumerate() {
+            candidate.final_rank = index as u64 + 1;
+        }
+        RerankStageOutcome {
+            candidates: pool,
+            reranked: false,
+            anchors_promoted: 0,
+        }
+    };
+
+    let Some(scores) = scores else {
+        return truncate_pre_rerank(pool);
+    };
+    if submitted > pool.len() || validate_rerank_scores(&scores, submitted).is_err() {
+        return truncate_pre_rerank(pool);
+    }
+
+    let mut pool = pool;
+    for (candidate, score) in pool.iter_mut().zip(scores.iter()) {
+        candidate.rerank_score = Some(*score);
+    }
+    // Only the submitted prefix was scored; unscored rows keep their
+    // pre-rerank position behind it.
+    let mut scored: Vec<HybridCandidate> = pool.drain(..submitted).collect();
+    scored.sort_by(|a, b| {
+        b.rerank_score
+            .unwrap_or(f32::NEG_INFINITY)
+            .total_cmp(&a.rerank_score.unwrap_or(f32::NEG_INFINITY))
+            .then(a.pre_rerank_rank.cmp(&b.pre_rerank_rank))
+    });
+    scored.append(&mut pool);
+
+    // Select the reranked top-K, then restore any pinned anchor that fell out
+    // by displacing the worst-reranked non-anchor selection.
+    let mut selected: Vec<usize> = (0..scored.len().min(k)).collect();
+    let mut anchors_promoted = 0u64;
+    let missing_anchors: Vec<usize> = (k..scored.len())
+        .filter(|index| scored[*index].anchor.is_some())
+        .collect();
+    for anchor in missing_anchors {
+        let Some(position) = selected
+            .iter()
+            .rposition(|index| scored[*index].anchor.is_none())
+        else {
+            // Every selected row is itself an anchor; there is nothing to
+            // displace and no honest way to fit more into K.
+            break;
+        };
+        selected.remove(position);
+        // Keep the reranked order among the final set.
+        let insert_at = selected.partition_point(|index| *index < anchor);
+        selected.insert(insert_at, anchor);
+        anchors_promoted += 1;
+    }
+
+    let promoted_positions: std::collections::BTreeSet<usize> = selected
+        .iter()
+        .copied()
+        .filter(|index| *index >= k)
+        .collect();
+    let mut candidates: Vec<HybridCandidate> = selected
+        .into_iter()
+        .map(|index| {
+            let mut candidate = scored[index].clone();
+            candidate.anchor_promoted = promoted_positions.contains(&index);
+            candidate
+        })
+        .collect();
+    for (index, candidate) in candidates.iter_mut().enumerate() {
+        candidate.final_rank = index as u64 + 1;
+    }
+    RerankStageOutcome {
+        candidates,
+        reranked: true,
+        anchors_promoted,
+    }
+}
+
 /// Run one hybrid retrieval over an imported corpus.
 ///
 /// `embed`/`rerank` are OPTIONAL roles: `None` (or a failing backend) leaves
@@ -346,7 +610,13 @@ pub fn hybrid_search_events(
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<HybridOutcome> {
     let k = options.k.clamp(1, 500);
-    let rerank_top_n = options.rerank_top_n.clamp(1, RERANK_MAX_DOCUMENTS).min(k);
+    // The rerank pool is deliberately at least as wide as the final budget: a
+    // pool narrower than K could only reorder rows that already fit, never
+    // recover one that fused just outside it.
+    let candidate_depth = options
+        .rerank_candidate_depth
+        .max(k)
+        .clamp(1, RERANK_MAX_DOCUMENTS);
     let pinned_event = corpus.event_revision();
     let pinned_template = corpus.template_analysis_revision();
     let cancel_probe = || cancelled(cancel);
@@ -374,7 +644,9 @@ pub fn hybrid_search_events(
             query: Some(term.clone()),
             filter: options.filter.clone(),
             semantic: false,
-            k,
+            // Each lane returns up to the pool depth, not the final K, so the
+            // pool the reranker sees is genuinely wider than the answer.
+            k: candidate_depth,
             match_mode: SearchMatchMode::Literal,
             case_sensitive: false,
         };
@@ -407,6 +679,8 @@ pub fn hybrid_search_events(
                     keyword_lane_rank: None,
                     semantic_lane_rank: None,
                     rerank_score: None,
+                    anchor: None,
+                    anchor_promoted: false,
                     final_rank: 0,
                 });
         }
@@ -437,13 +711,12 @@ pub fn hybrid_search_events(
                     code: "corpus_not_embedded".into(),
                     detail: "corpus has no embedded templates; the production honesty gate keeps semantic ranking off".into(),
                 });
-            } else if let Some(detail) =
-                embedding_binding_mismatch(&embedding_binding, &backend.identity())
-            {
-                degradations.push(HybridDegradation {
-                    code: "embedding_model_mismatch".into(),
-                    detail,
-                });
+            } else if let Some((code, detail)) = embedding_binding_mismatch(
+                &embedding_binding,
+                &backend.identity(),
+                &backend.space(),
+            ) {
+                degradations.push(HybridDegradation { code, detail });
             } else if cancelled(cancel) {
                 return Err(CoreError::Cancelled);
             } else {
@@ -458,7 +731,7 @@ pub fn hybrid_search_events(
                     query: Some(question.to_string()),
                     filter: options.filter.clone(),
                     semantic: true,
-                    k,
+                    k: candidate_depth,
                     match_mode: SearchMatchMode::Literal,
                     case_sensitive: false,
                 };
@@ -544,6 +817,8 @@ pub fn hybrid_search_events(
                                     keyword_lane_rank: None,
                                     semantic_lane_rank: Some(lane_rank),
                                     rerank_score: None,
+                                    anchor: None,
+                                    anchor_promoted: false,
                                     final_rank: 0,
                                 });
                         }
@@ -573,14 +848,22 @@ pub fn hybrid_search_events(
             .then(a.ts.cmp(&b.ts))
             .then(a.seq.cmp(&b.seq))
     });
-    if ordered.len() > k {
+    // The candidate POOL is retained at `candidate_depth`, deliberately wider
+    // than the final K, so the optional rerank stage can promote a row that
+    // fused just outside K. Truncation to K happens after that stage.
+    if ordered.len() > candidate_depth {
         partial = true;
-        ordered.truncate(k);
+        ordered.truncate(candidate_depth);
     }
     for (index, candidate) in ordered.iter_mut().enumerate() {
         candidate.pre_rerank_rank = index as u64 + 1;
         candidate.final_rank = candidate.pre_rerank_rank;
     }
+    assign_anchors(&mut ordered, options);
+    telemetry.candidate_pool_size = Some(ordered.len() as u64);
+    // Everything the pool holds beyond K is dropped from the answer, so a pool
+    // wider than K is itself a partial result.
+    partial |= ordered.len() > k;
     invoke_hybrid_stage_hook("merged");
     check_hybrid_revisions(corpus, pinned_event, pinned_template)?;
 
@@ -594,6 +877,8 @@ pub fn hybrid_search_events(
                     detail: "no rerank backend configured; merged order is final".into(),
                 });
             }
+            let stage = apply_rerank_stage(ordered, 0, None, k);
+            ordered = stage.candidates;
         }
         Some(_) if ordered.is_empty() => {
             // There is no candidate identity to align with a score. Avoid an
@@ -604,9 +889,10 @@ pub fn hybrid_search_events(
             if cancelled(cancel) {
                 return Err(CoreError::Cancelled);
             }
-            let top: Vec<String> = ordered
+            let submitted = ordered.len().min(RERANK_MAX_DOCUMENTS);
+            let pool: Vec<String> = ordered
                 .iter()
-                .take(rerank_top_n)
+                .take(submitted)
                 .map(|candidate| candidate.message.clone())
                 .collect();
             let query_text = options
@@ -614,45 +900,34 @@ pub fn hybrid_search_events(
                 .clone()
                 .unwrap_or_else(|| options.keyword_terms.join(" "));
             let started = std::time::Instant::now();
-            let scores = rerank_blocking(backend, &query_text, &top, options.rerank_timeout_ms);
+            let scores = rerank_blocking(backend, &query_text, &pool, options.rerank_timeout_ms);
             telemetry.rerank_latency_ms = Some(started.elapsed().as_millis() as u64);
             telemetry.rerank_calls = Some(1);
-            match scores {
+            telemetry.rerank_pool_size = Some(submitted as u64);
+            match &scores {
                 None => degradations.push(HybridDegradation {
                     code: "rerank_failed_or_timed_out".into(),
                     detail: format!(
-                        "rerank call failed or exceeded {} ms; pre-rerank order kept",
+                        "rerank call failed, was cancelled, or exceeded {} ms; pre-rerank order kept byte for byte",
                         options.rerank_timeout_ms
                     ),
                 }),
-                Some(scores) if validate_rerank_scores(&scores, top.len()).is_err() => {
+                Some(values) if validate_rerank_scores(values, submitted).is_err() => {
                     degradations.push(HybridDegradation {
                         code: "rerank_invalid_response".into(),
-                        detail: "rerank response did not contain exactly one finite score per submitted document; pre-rerank order kept".into(),
+                        detail: "rerank response did not contain exactly one finite score per submitted document; pre-rerank order kept byte for byte".into(),
                     });
                 }
-                Some(scores) => {
-                    rerank_ran = true;
-                    telemetry.rerank_model = Some(backend.identity());
-                    for (candidate, score) in ordered.iter_mut().zip(scores.iter()) {
-                        candidate.rerank_score = Some(*score);
-                    }
-                    // Reorder ONLY the reranked prefix; ties break on the
-                    // retained pre-rerank rank for determinism.
-                    let mut prefix: Vec<HybridCandidate> = ordered.drain(..top.len()).collect();
-                    prefix.sort_by(|a, b| {
-                        b.rerank_score
-                            .unwrap_or(f32::NEG_INFINITY)
-                            .total_cmp(&a.rerank_score.unwrap_or(f32::NEG_INFINITY))
-                            .then(a.pre_rerank_rank.cmp(&b.pre_rerank_rank))
-                    });
-                    prefix.append(&mut ordered);
-                    ordered = prefix;
-                    for (index, candidate) in ordered.iter_mut().enumerate() {
-                        candidate.final_rank = index as u64 + 1;
-                    }
-                }
+                Some(_) => {}
             }
+            let stage = apply_rerank_stage(ordered, submitted, scores, k);
+            rerank_ran = stage.reranked;
+            if rerank_ran {
+                telemetry.rerank_model = Some(backend.identity());
+                telemetry.rerank_dialect = Some(backend.dialect().to_string());
+                telemetry.anchors_promoted = Some(stage.anchors_promoted);
+            }
+            ordered = stage.candidates;
         }
     }
     invoke_hybrid_stage_hook("reranked");
@@ -705,6 +980,12 @@ mod tests {
             // outage test exercises the lane-failure path, not the identity
             // gate in front of it.
             ConceptEmbedBackend::default().identity()
+        }
+
+        fn space(&self) -> crate::embedding_space::EmbeddingSpaceIdentity {
+            // Same reason as `identity`: bind to the fixture's stored space so
+            // the outage path is what is under test.
+            ConceptEmbedBackend::default().space()
         }
     }
 
@@ -919,10 +1200,18 @@ mod tests {
             0,
             "known identity mismatches must be rejected before model work"
         );
+        assert!(
+            identity_mismatch
+                .degradations
+                .iter()
+                .any(|d| d.code == "embedding_space_drift"),
+            "a foreign vector space must be refused by the typed space gate: {:?}",
+            identity_mismatch.degradations
+        );
         assert!(identity_mismatch
             .degradations
             .iter()
-            .any(|d| d.code == "embedding_model_mismatch"));
+            .any(|d| d.detail.contains("model") && d.detail.contains("dialect")));
         assert!(identity_mismatch.telemetry.embedding_model.is_none());
 
         // Concept identities deliberately do not encode dimensions, so this
@@ -1039,7 +1328,7 @@ mod tests {
         let corpus = LogCorpus::open(cache.path(), &corpus_id).expect("open");
         let concept = ConceptEmbedBackend::default();
         let mut opts = options(&["alpha-token"], Some("storage saturation free space"));
-        opts.rerank_top_n = 4;
+        opts.rerank_candidate_depth = 4;
         let plain = hybrid_search_events(&corpus, &opts, Some(&concept), None, None)
             .expect("pre-rerank baseline");
         let expected_ids = plain
@@ -1105,6 +1394,214 @@ mod tests {
         assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(outcome.telemetry.rerank_calls, Some(0));
         assert!(outcome.telemetry.rerank_model.is_none());
+    }
+
+    /// A synthetic candidate pool with fully controlled scores, so the ordering
+    /// contract can be exercised without a corpus in the way.
+    fn pooled_candidate(seq: u64, anchor: Option<HybridAnchorKind>) -> HybridCandidate {
+        HybridCandidate {
+            seq,
+            source: "pool.log".into(),
+            ts: 1_700_000_000 + seq as i64,
+            timestamp_provenance: "ExplicitWall".into(),
+            level: "info".into(),
+            template_id: seq,
+            message: format!("row {seq}"),
+            origins: vec![HybridOrigin::Keyword { term_index: 0 }],
+            pre_rerank_rank: seq,
+            pre_rerank_score: 1.0 / seq as f32,
+            keyword_lane_rank: Some(seq),
+            semantic_lane_rank: None,
+            rerank_score: None,
+            anchor,
+            anchor_promoted: false,
+            final_rank: seq,
+        }
+    }
+
+    #[test]
+    fn a_rerank_pool_wider_than_k_can_promote_a_row_that_fused_outside_k() {
+        // Pool of 6, final K of 3. Rank 6 is the most relevant to the query, a
+        // row a pool capped at K could never have recovered.
+        let pool: Vec<HybridCandidate> = (1..=6).map(|seq| pooled_candidate(seq, None)).collect();
+        let scores = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.9];
+        let stage = apply_rerank_stage(pool, 6, Some(scores), 3);
+        assert!(stage.reranked);
+        assert_eq!(
+            stage
+                .candidates
+                .iter()
+                .map(|candidate| candidate.seq)
+                .collect::<Vec<_>>(),
+            vec![6, 5, 4],
+            "the k+1..pool tail must be able to reach the answer"
+        );
+        assert_eq!(
+            stage.candidates.len(),
+            3,
+            "the answer is still truncated to K"
+        );
+        assert_eq!(stage.anchors_promoted, 0);
+        let ranks: Vec<u64> = stage
+            .candidates
+            .iter()
+            .map(|candidate| candidate.final_rank)
+            .collect();
+        assert_eq!(ranks, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn pinned_anchors_survive_a_rerank_that_would_have_evicted_them() {
+        // Rank 5 is an exact-phrase anchor the reranker scores lowest of all.
+        let pool: Vec<HybridCandidate> = (1..=6)
+            .map(|seq| pooled_candidate(seq, (seq == 5).then_some(HybridAnchorKind::ExactPhrase)))
+            .collect();
+        let scores = vec![0.9, 0.8, 0.7, 0.6, 0.01, 0.5];
+        let stage = apply_rerank_stage(pool, 6, Some(scores), 3);
+        assert!(stage.reranked);
+        assert_eq!(stage.anchors_promoted, 1, "the promotion is reported");
+        let seqs: Vec<u64> = stage
+            .candidates
+            .iter()
+            .map(|candidate| candidate.seq)
+            .collect();
+        assert!(
+            seqs.contains(&5),
+            "an exact-phrase anchor may be reordered but never evicted: {seqs:?}"
+        );
+        assert_eq!(seqs.len(), 3, "promotion displaces, it does not widen K");
+        let promoted = stage
+            .candidates
+            .iter()
+            .find(|candidate| candidate.seq == 5)
+            .expect("anchor present");
+        assert!(promoted.anchor_promoted, "promotion is never silent");
+        assert_eq!(promoted.anchor, Some(HybridAnchorKind::ExactPhrase));
+        // The displaced row is the worst-reranked non-anchor selection.
+        assert!(
+            !seqs.contains(&3),
+            "worst-reranked non-anchor is displaced: {seqs:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_rerank_keeps_the_pre_rerank_order_byte_for_byte() {
+        let pool: Vec<HybridCandidate> = (1..=6).map(|seq| pooled_candidate(seq, None)).collect();
+        let baseline = apply_rerank_stage(pool.clone(), 0, None, 3);
+        let baseline_bytes = serde_json::to_vec(&baseline.candidates).expect("baseline serializes");
+        assert!(!baseline.reranked);
+
+        // Every refusal reason — transport failure, timeout, cancellation
+        // (all surface as `None`), and every unalignable score vector — must
+        // produce exactly these bytes.
+        let refusals: Vec<Option<Vec<f32>>> = vec![
+            None,
+            Some(vec![0.9, 0.8, 0.7, 0.6, 0.5]),
+            Some(vec![0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]),
+            Some(vec![f32::NAN, 0.8, 0.7, 0.6, 0.5, 0.4]),
+            Some(vec![f32::INFINITY, 0.8, 0.7, 0.6, 0.5, 0.4]),
+        ];
+        for (index, scores) in refusals.into_iter().enumerate() {
+            let submitted = if scores.is_none() { 0 } else { 6 };
+            let outcome = apply_rerank_stage(pool.clone(), submitted, scores, 3);
+            assert!(!outcome.reranked, "refusal {index} must not claim a rerank");
+            assert_eq!(outcome.anchors_promoted, 0);
+            assert_eq!(
+                serde_json::to_vec(&outcome.candidates).expect("serializes"),
+                baseline_bytes,
+                "refusal {index} changed the pre-rerank bytes"
+            );
+            assert!(outcome
+                .candidates
+                .iter()
+                .all(|candidate| candidate.rerank_score.is_none()));
+        }
+    }
+
+    #[test]
+    fn a_pool_of_only_anchors_is_never_widened_past_k() {
+        let pool: Vec<HybridCandidate> = (1..=5)
+            .map(|seq| pooled_candidate(seq, Some(HybridAnchorKind::Structured)))
+            .collect();
+        let stage = apply_rerank_stage(pool, 5, Some(vec![0.1, 0.2, 0.3, 0.4, 0.5]), 2);
+        assert_eq!(
+            stage.candidates.len(),
+            2,
+            "K is a hard budget even when every row is pinned"
+        );
+    }
+
+    #[test]
+    fn anchors_cover_exact_phrase_structured_and_chronology_rows() {
+        let mut pool: Vec<HybridCandidate> =
+            (1..=4).map(|seq| pooled_candidate(seq, None)).collect();
+        pool[1].message = "warehouse shipment alpha-token dispatched".into();
+        let mut opts = options(&["alpha-token"], None);
+        assign_anchors(&mut pool, &opts);
+        assert_eq!(pool[1].anchor, Some(HybridAnchorKind::ExactPhrase));
+        // Chronology boundaries are pinned so an answer can still state the
+        // window it examined; the interior is not.
+        assert_eq!(pool[0].anchor, Some(HybridAnchorKind::Chronology));
+        assert_eq!(pool[3].anchor, Some(HybridAnchorKind::Chronology));
+        assert_eq!(pool[2].anchor, None);
+
+        // An explicitly requested structured constraint pins every pooled row,
+        // because passing that filter is what put the row in the pool.
+        opts.filter.levels = vec!["error".into()];
+        let mut structured: Vec<HybridCandidate> =
+            (1..=4).map(|seq| pooled_candidate(seq, None)).collect();
+        assign_anchors(&mut structured, &opts);
+        assert!(structured
+            .iter()
+            .all(|candidate| candidate.anchor == Some(HybridAnchorKind::Structured)));
+
+        // With no terms and no filter, only the chronology boundaries pin.
+        let mut unconstrained: Vec<HybridCandidate> =
+            (1..=4).map(|seq| pooled_candidate(seq, None)).collect();
+        assign_anchors(&mut unconstrained, &options(&[], None));
+        assert_eq!(
+            unconstrained
+                .iter()
+                .filter(|candidate| candidate.anchor.is_some())
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn the_rerank_pool_is_never_narrower_than_k_and_is_reported() {
+        let (cache, corpus_id) = fixture(true);
+        let corpus = LogCorpus::open(cache.path(), &corpus_id).expect("open");
+        let concept = ConceptEmbedBackend::default();
+        let mut opts = options(&["alpha-token"], Some("storage saturation free space"));
+        opts.k = 3;
+        // A caller asking for a pool narrower than K gets K: a narrower pool
+        // could only reorder rows that already fit.
+        opts.rerank_candidate_depth = 1;
+        let outcome = hybrid_search_events(
+            &corpus,
+            &opts,
+            Some(&concept),
+            Some(&ScriptedRerankBackend),
+            None,
+        )
+        .expect("reranked");
+        assert!(outcome.candidates.len() <= 3);
+        let pool = outcome
+            .telemetry
+            .candidate_pool_size
+            .expect("pool measured");
+        assert!(pool >= outcome.candidates.len() as u64);
+        assert!(outcome.telemetry.rerank_pool_size.expect("submitted") >= 1);
+        assert_eq!(
+            outcome.telemetry.rerank_dialect.as_deref(),
+            Some(crate::rerank::RERANK_DIALECT_SYNTHETIC),
+            "the dialect that actually parsed is reported, never inferred"
+        );
+        assert!(
+            outcome.telemetry.anchors_promoted.is_some(),
+            "a rerank that ran must report a measured promotion count, not silence"
+        );
     }
 
     #[test]

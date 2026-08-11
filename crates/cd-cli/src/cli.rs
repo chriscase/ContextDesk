@@ -158,6 +158,16 @@ pub enum Command {
     /// configured state, optional live health probe, and the retrieval mode
     /// configuration would select (no provider / LLM).
     RetrievalStatus(RetrievalStatusArgs),
+    /// Compare executable retrieval lanes over one imported corpus under fixed
+    /// budgets, using the production search path. Dry run by default; measures
+    /// retrieval only and never claims answer usefulness or readiness.
+    #[command(visible_alias = "retrieval-diagnostic")]
+    RetrievalDiagnose(RetrievalDiagnoseArgs),
+    /// Rebuild an existing corpus's template vectors under the configured
+    /// embedding space. Dry run by default; states where the work runs and
+    /// whether log content leaves this machine before anything happens.
+    #[command(visible_alias = "reanalyze")]
+    RetrievalReanalyze(RetrievalReanalyzeArgs),
     /// Discover gateway models and show or verify role-specific compatibility.
     /// Bare `models` is entirely offline and never reads credentials.
     Models(ModelsArgs),
@@ -382,6 +392,78 @@ pub struct RetrievalStatusArgs {
     /// `contextdesk corpus use`).
     #[arg(long)]
     pub corpus: bool,
+}
+
+/// Arguments for corpus template re-analysis (CLI parity with the desktop
+/// flow, for corpora that already exist).
+#[derive(Debug, clap::Args)]
+pub struct RetrievalReanalyzeArgs {
+    /// Corpus id to re-analyze. Defaults to the corpus selected by the most
+    /// recent import or `contextdesk corpus use`.
+    #[arg(long)]
+    pub corpus_id: Option<String>,
+    /// Execute the plan. Without this the command prints where the work would
+    /// run and whether log content would leave this machine, and stops without
+    /// constructing a backend, reading a credential, or using network.
+    #[arg(long)]
+    pub confirm: bool,
+    /// Acknowledge that the configured embedding endpoint is remote, so log
+    /// template text leaves this machine. Required before a remote run.
+    #[arg(long)]
+    pub acknowledge_egress: bool,
+}
+
+/// Arguments for the bounded retrieval-quality diagnostic.
+#[derive(Debug, clap::Args)]
+pub struct RetrievalDiagnoseArgs {
+    /// Host-owned query file (JSON) with questions and the truth used to score
+    /// them. Truth never leaves this machine and is never sent to a provider.
+    #[arg(long)]
+    pub queries: PathBuf,
+    /// Corpus id to measure. Defaults to the corpus selected by the most
+    /// recent import or `contextdesk corpus use`.
+    #[arg(long)]
+    pub corpus_id: Option<String>,
+    /// Lane to run; repeatable. Defaults to all six.
+    #[arg(long, value_name = "LANE")]
+    pub lane: Vec<String>,
+    /// Final candidate budget every lane returns (held identical across lanes).
+    #[arg(long, default_value_t = 10)]
+    pub k: u32,
+    /// Rerank candidate pool depth, clamped to at least `--k`. A pool wider
+    /// than K is what lets the rerank stage promote a near miss.
+    #[arg(long, default_value_t = 40)]
+    pub rerank_candidate_depth: u32,
+    /// Packed-context character budget, measured per lane and held identical.
+    #[arg(long, default_value_t = 8_000)]
+    pub packed_context_chars: u32,
+    /// Wall-clock budget for one rerank request.
+    #[arg(long, default_value_t = 8_000)]
+    pub rerank_timeout_ms: u64,
+    /// Execute the lanes. Without this the command prints the plan and stops
+    /// without constructing a backend, reading a credential, or using network.
+    #[arg(long)]
+    pub confirm: bool,
+    /// Acknowledge that a configured remote role means query and candidate
+    /// text leave this machine. Required before any remote lane runs.
+    #[arg(long)]
+    pub acknowledge_egress: bool,
+    /// Include raw local material in the report. Requires
+    /// `--raw-output-is-not-share-safe` as a second, explicit consent.
+    #[arg(long)]
+    pub include_raw: bool,
+    /// Second consent for `--include-raw`. Raw output is local-only.
+    #[arg(long)]
+    pub raw_output_is_not_share_safe: bool,
+    /// Write a machine report to this path (only the basename is printed).
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    /// File export shape when `--output` is set: `json` or `jsonl`.
+    #[arg(long = "report-format", value_name = "json|jsonl")]
+    pub report_format: Option<String>,
+    /// Replace an existing `--output` file.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -659,37 +741,51 @@ pub enum InvocationMode {
 /// positional. Global options may precede the question. Recognized commands
 /// and their aliases are never rewritten, preserving every existing grammar
 /// and machine-output contract.
+/// Every explicit subcommand name and visible alias.
+///
+/// [`normalize_invocation_args`] inserts an implicit `chat` in front of any
+/// invocation whose first token is not one of these, so a subcommand missing
+/// from this list is not rejected — it is silently reinterpreted as a chat
+/// question, which fails with a baffling "unexpected argument" error. The
+/// `every_clap_subcommand_is_registered_for_implicit_chat` test derives the
+/// truth from clap itself so the two can never drift again.
+pub const KNOWN_SUBCOMMANDS: &[&str] = &[
+    "import",
+    "normalize",
+    "normalized",
+    "corpus",
+    "timezone",
+    "explore",
+    "search",
+    "context",
+    "session",
+    "chat",
+    "ask",
+    "config",
+    "confluence",
+    "capabilities",
+    "doctor",
+    "logging-assessment",
+    "assess",
+    "exception-episodes",
+    "episodes",
+    "retrieval-status",
+    "retrieval-diagnose",
+    "retrieval-diagnostic",
+    "retrieval-reanalyze",
+    "reanalyze",
+    "models",
+    "eval",
+    "gateway",
+];
+
 pub fn normalize_invocation_args<I, T>(args: I) -> (Vec<OsString>, InvocationMode)
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
     let mut args = args.into_iter().map(Into::into).collect::<Vec<_>>();
-    let commands = [
-        "import",
-        "normalize",
-        "normalized",
-        "corpus",
-        "timezone",
-        "explore",
-        "search",
-        "context",
-        "session",
-        "chat",
-        "ask",
-        "config",
-        "confluence",
-        "capabilities",
-        "doctor",
-        "logging-assessment",
-        "assess",
-        "exception-episodes",
-        "episodes",
-        "retrieval-status",
-        "models",
-        "eval",
-        "gateway",
-    ];
+    let commands = KNOWN_SUBCOMMANDS;
     let value_options = [
         "--format",
         "--color",
@@ -1231,5 +1327,50 @@ mod tests {
             panic!("exact verification did not parse")
         };
         assert_eq!(args.model_ids, ["deepseek-v4-flash", "bge-m3"]);
+    }
+
+    /// The implicit-chat normalizer routes any first token it does not
+    /// recognize into `chat`, so a subcommand missing from
+    /// [`KNOWN_SUBCOMMANDS`] is not rejected — it becomes a chat question and
+    /// fails with an "unexpected argument" error that points nowhere near the
+    /// real cause. Derive the truth from clap so the two lists cannot drift.
+    #[test]
+    fn every_clap_subcommand_is_registered_for_implicit_chat() {
+        use clap::CommandFactory;
+        let command = Cli::command();
+        let mut missing = Vec::new();
+        for subcommand in command.get_subcommands() {
+            let name = subcommand.get_name().to_string();
+            if !KNOWN_SUBCOMMANDS.contains(&name.as_str()) {
+                missing.push(name);
+            }
+            for alias in subcommand.get_visible_aliases() {
+                if !KNOWN_SUBCOMMANDS.contains(&alias) {
+                    missing.push(alias.to_string());
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these subcommands/aliases would be swallowed by implicit chat: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn the_retrieval_diagnostic_is_reachable_by_name_and_alias() {
+        for name in ["retrieval-diagnose", "retrieval-diagnostic"] {
+            let (normalized, mode) = normalize_invocation_args([
+                OsString::from("contextdesk"),
+                OsString::from(name),
+                OsString::from("--queries"),
+                OsString::from("q.json"),
+            ]);
+            assert_eq!(
+                mode,
+                InvocationMode::Explicit,
+                "`{name}` must not be reinterpreted as a chat question"
+            );
+            assert_eq!(normalized[1], OsString::from(name));
+        }
     }
 }

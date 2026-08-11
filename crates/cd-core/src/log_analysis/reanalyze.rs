@@ -203,6 +203,13 @@ fn reanalyze_corpus_embeddings_inner(
         // The binding identity comes from the backend that actually produced
         // the vectors; the caller's `model_id` label cannot overwrite it.
         model_id: (embedded > 0).then(|| backend.identity()),
+        // Typed space binding recorded from the backend that actually produced
+        // the vectors, with the dimensions it actually produced.
+        space: (embedded > 0).then(|| {
+            backend
+                .space()
+                .with_dimensions(expected_dims.and_then(|dims| u32::try_from(dims).ok()))
+        }),
         embedded_dims: expected_dims.map(|dims| dims as u32),
         embedded_templates: embedded as u64,
         total_templates: total as u64,

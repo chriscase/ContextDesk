@@ -25,6 +25,7 @@ pub mod normalized;
 pub mod provider;
 pub mod provider_telemetry;
 pub mod retrieval;
+pub mod retrieval_diagnostic;
 pub mod session;
 pub mod timezone;
 pub mod tools;

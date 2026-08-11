@@ -3272,10 +3272,12 @@ fn ingest_path_into_cache(
     // Binding facts recorded from the backend that actually produced vectors,
     // never from a caller-supplied label.
     let mut embed_identity: Option<String> = None;
+    let mut embed_space: Option<crate::embedding_space::EmbeddingSpaceIdentity> = None;
     let mut embedded_dims_written: Option<u32> = None;
     if let Some(backend) = embed.filter(|_| !deferred) {
         check_ingest_fault(fault, IngestCheckpoint::DuringEmbedding)?;
         embed_identity = Some(backend.identity());
+        embed_space = Some(backend.space());
         let mut templates = corpus.list_templates();
         templates.sort_by_key(|r| std::cmp::Reverse(r.info.count));
         let cap = BULK_EMBED_TEMPLATE_CAP.min(templates.len());
@@ -3401,6 +3403,12 @@ fn ingest_path_into_cache(
             }
             .into(),
         ),
+        // The typed space is recorded only when vectors were actually written,
+        // and carries the dimensions those vectors actually had. A deferred or
+        // keyword-only corpus has no space to bind.
+        space: (embedded > 0)
+            .then(|| embed_space.map(|space| space.with_dimensions(embedded_dims_written)))
+            .flatten(),
         updated_at: crate::embed::now_unix_secs(),
     };
 
