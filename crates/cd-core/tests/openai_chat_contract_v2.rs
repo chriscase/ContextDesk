@@ -571,6 +571,70 @@ async fn typed_client_rejects_forced_tool_without_tools_before_http() {
 }
 
 #[tokio::test]
+async fn typed_client_rejects_forced_tool_mismatched_name_before_http() {
+    let gateway = MockGateway::start_ordered(vec![Step::respond(Response::json_ok(&json!({
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "x"}}]
+    })))])
+    .await;
+    let client = OpenAiCompatibleClient::new(
+        gateway.base_url(),
+        None,
+        "matrix-model",
+        &SsrfPolicy::default(),
+    )
+    .expect("client");
+    let tools = [inert_tool()];
+    let err = client
+        .complete_with_mode(
+            &[user("call")],
+            Some(&tools),
+            &OpenAiChatRequestMode::ForcedTool {
+                name: "some_other_tool".into(),
+            },
+        )
+        .await
+        .expect_err("must fail before send");
+    assert!(
+        err.to_string().contains("invalid_request_mode")
+            && err.to_string().contains("forced_tool_mismatched_name"),
+        "{err}"
+    );
+    assert_eq!(gateway.request_count(), 0, "must not contact provider");
+}
+
+#[tokio::test]
+async fn stream_json_object_rejects_invalid_content_without_silent_accept() {
+    // Stream returns non-JSON content for json_object mode — must fail closed.
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"not-json\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let gateway =
+        MockGateway::start_ordered(vec![Step::respond(Response::sse_ok(sse.as_bytes()))]).await;
+    let client = OpenAiCompatibleClient::new(
+        gateway.base_url(),
+        None,
+        "matrix-model",
+        &SsrfPolicy::default(),
+    )
+    .expect("client");
+    let err = client
+        .complete_stream_with_mode(
+            &[user("json please")],
+            None,
+            &OpenAiChatRequestMode::JsonObject,
+        )
+        .await
+        .expect_err("invalid stream JSON must not be accepted");
+    assert!(
+        err.to_string().contains("invalid_response_for_mode"),
+        "got {err}"
+    );
+    assert_eq!(gateway.request_count(), 1);
+}
+
+#[tokio::test]
 async fn typed_client_rejects_malformed_schema_before_http() {
     let gateway = MockGateway::start_ordered(vec![Step::respond(Response::json_ok(&json!({
         "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "{}"}}]

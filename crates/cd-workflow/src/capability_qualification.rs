@@ -1295,6 +1295,11 @@ mod tests {
         assert!(r.contains(cd_core::capability_qualification::QUALIFY_TOOL_TOKEN));
         assert!(execute_inert_probe_tool("rm", "{}").is_err());
         assert!(execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"../etc"}"#).is_err());
+        assert!(
+            execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"WRONG"}"#)
+                .unwrap_err()
+                .contains("wrong_token")
+        );
     }
 
     #[test]
