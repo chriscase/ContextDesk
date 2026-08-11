@@ -621,11 +621,16 @@ pub async fn run_fast_triage_route(
     let initial = fast_triage_messages(inputs.user_text, packet, &evidence_block, None);
     if crate::agent::estimate_context_chars(&initial) > packing_budget {
         // The complete packet is the point of this route. A packet that does
-        // not fit is not silently trimmed into a partial one — the route
-        // declines and the caller keeps its established behavior.
+        // not fit is not silently trimmed into a partial one, and it is not
+        // reported as "disabled" either — the host names the real reason and
+        // the caller keeps its established behavior.
+        let rejection = FastTriageRouteRejection::PacketExceedsContextBudget;
+        let mut telemetry = finish(run, FastTriageOutcomeLabel::NotSelected);
+        telemetry.route_selected = false;
+        telemetry.selection_rejection = Some(rejection);
         return Ok(FastTriageRouteOutcome::NotSelected {
-            rejection: FastTriageRouteRejection::RouteDisabled,
-            telemetry: Box::new(finish(run, FastTriageOutcomeLabel::NotSelected)),
+            rejection,
+            telemetry: Box::new(telemetry),
         });
     }
 

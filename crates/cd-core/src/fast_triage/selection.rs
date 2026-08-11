@@ -126,6 +126,11 @@ pub enum FastTriageRouteRejection {
     /// A record exists and passed, but was measured against a different host
     /// contract than this build runs.
     ContractFingerprintStale,
+    /// Exact evidence authorized the route, but the *complete* packet does not
+    /// fit this turn's model-context budget. The complete packet is the whole
+    /// point of the contract, so the host declines rather than sending a
+    /// quietly trimmed one and calling it complete.
+    PacketExceedsContextBudget,
 }
 
 impl FastTriageRouteRejection {
@@ -138,6 +143,7 @@ impl FastTriageRouteRejection {
             Self::WorkflowContractMismatch => "workflow_contract_mismatch",
             Self::VerdictNotQualified => "verdict_not_qualified",
             Self::ContractFingerprintStale => "contract_fingerprint_stale",
+            Self::PacketExceedsContextBudget => "packet_exceeds_context_budget",
         }
     }
 
@@ -164,6 +170,10 @@ impl FastTriageRouteRejection {
             Self::ContractFingerprintStale => {
                 "persisted fast-route evidence was measured against a different host contract \
                  than this build runs"
+            }
+            Self::PacketExceedsContextBudget => {
+                "the complete evidence packet does not fit this turn's model-context budget; \
+                 a trimmed packet would not be the contract that was measured"
             }
         }
     }
@@ -465,6 +475,7 @@ mod tests {
             FastTriageRouteRejection::WorkflowContractMismatch,
             FastTriageRouteRejection::VerdictNotQualified,
             FastTriageRouteRejection::ContractFingerprintStale,
+            FastTriageRouteRejection::PacketExceedsContextBudget,
         ] {
             assert!(!rejection.as_str().is_empty());
             assert!(!rejection.detail().is_empty());
