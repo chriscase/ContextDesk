@@ -972,3 +972,521 @@ async fn raw_rankings_are_absent_by_default_and_present_only_on_opt_in() {
         assert!(!json.contains(row), "opt-in must not add corpus text");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Safety pass: mutation tests for the five production blockers
+// ---------------------------------------------------------------------------
+
+/// Blocker 1. A cancelled run must not read a credential, construct a backend,
+/// or contact a provider. The previous shape checked cancellation only inside
+/// the lane loop, by which point both roles had already been built and both
+/// contract probes had already issued their requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pre_cancelled_run_touches_no_credential_and_no_provider() {
+    let fixture = fixture().await;
+    let cancel = CancelFlag::default();
+    cancel.cancel();
+
+    let cache_root = fixture.cache_root.clone();
+    let report = run_diagnostic(
+        &fixture.cache_root,
+        &DiagnosticRequest::new(fixture.corpus_id.clone(), vec![query()]),
+        &fixture.config,
+        Some(&fixture.secrets),
+        |_lane| tool_host(&cache_root),
+        Some(&cancel),
+    )
+    .await
+    .expect("a cancelled run still produces an honest artifact");
+
+    assert_eq!(
+        fixture.reads.load(Ordering::SeqCst),
+        0,
+        "a cancelled run must not read a credential"
+    );
+    assert_eq!(
+        fixture.gateway.request_count(),
+        fixture.requests_after_ingest,
+        "a cancelled run must not reach a provider, including via the probes"
+    );
+    assert!(report.vector_stability.is_none());
+    assert!(report.rerank_semantics.is_none());
+    assert_eq!(report.verdict, DiagnosticVerdict::Inconclusive);
+    assert!(
+        report
+            .lanes
+            .iter()
+            .all(|lane| lane.status == LaneStatus::Cancelled),
+        "every requested lane must be reported cancelled, not silently absent"
+    );
+}
+
+/// Blocker 1. Unacknowledged remote egress must stop before construction, not
+/// after. A remote reranker is included: its documents leave the machine too,
+/// so gating only the embedder would leak candidate text under a consent the
+/// caller never gave.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unacknowledged_egress_blocks_before_any_credential_or_provider_work() {
+    let fixture = fixture().await;
+    // Re-point both roles at a non-loopback host so consent is required. No
+    // request will be made, so the host never has to exist.
+    let mut config = fixture.config.clone();
+    for role in [
+        config.retrieval.embedding.as_mut(),
+        config.retrieval.reranker.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        role.base_url = "https://gateway.invalid".into();
+        role.allow_remote = true;
+    }
+
+    let cache_root = fixture.cache_root.clone();
+    let mut request = DiagnosticRequest::new(fixture.corpus_id.clone(), vec![query()]);
+    request.egress_acknowledged = false;
+    let report = run_diagnostic(
+        &fixture.cache_root,
+        &request,
+        &config,
+        Some(&fixture.secrets),
+        |_lane| tool_host(&cache_root),
+        None,
+    )
+    .await
+    .expect("runs and blocks");
+
+    assert_eq!(
+        fixture.reads.load(Ordering::SeqCst),
+        0,
+        "an unacknowledged remote role must not have its credential read"
+    );
+    assert_eq!(
+        fixture.gateway.request_count(),
+        fixture.requests_after_ingest,
+        "an unacknowledged remote role must not be probed"
+    );
+    // Every lane needing either remote role is blocked for the consent reason.
+    for lane in &report.lanes {
+        let needs_remote = lane.lane != "keyword_baseline";
+        if needs_remote {
+            assert_eq!(lane.status, LaneStatus::Blocked, "lane {}", lane.lane);
+            assert_eq!(
+                lane.blocked_reason.as_ref().map(|r| r.code.as_str()),
+                Some("retrieval_egress_not_acknowledged"),
+                "lane {}",
+                lane.lane
+            );
+        }
+    }
+    // Including the rerank-only lane, which has no embedder at all.
+    let rerank_only = report
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "keyword_baseline_rerank")
+        .expect("rerank lane present");
+    assert_eq!(rerank_only.status, LaneStatus::Blocked);
+}
+
+/// Blocker 2. A role no runnable lane needs is never built, so its credential
+/// is never read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_role_no_selected_lane_needs_is_never_built() {
+    let fixture = fixture().await;
+    let cache_root = fixture.cache_root.clone();
+    let request = DiagnosticRequest {
+        corpus_id: fixture.corpus_id.clone(),
+        queries: vec![query()],
+        budgets: DiagnosticBudgets::default(),
+        // Keyword only: neither the embedder nor the reranker is required.
+        lanes: vec![DiagnosticLane::KeywordBaseline],
+        egress_acknowledged: false,
+        include_raw: false,
+    };
+    let before = fixture.gateway.request_count();
+    let _ = run_diagnostic(
+        &fixture.cache_root,
+        &request,
+        &fixture.config,
+        Some(&fixture.secrets),
+        |_lane| tool_host(&cache_root),
+        None,
+    )
+    .await
+    .expect("keyword lane runs");
+
+    assert_eq!(
+        fixture.reads.load(Ordering::SeqCst),
+        0,
+        "no selected lane needs a role, so no credential should be read"
+    );
+    assert_eq!(
+        fixture.gateway.request_count(),
+        before,
+        "no role was required, so no probe should have run"
+    );
+}
+
+/// Blocker 2. A factory refusal must block the dependent lane with the real
+/// reason. Swallowing it left the lane running without the capability while
+/// still publishing a configured-looking model, dialect, and `mode_used` —
+/// telemetry that reads as a measured semantic lane and is not one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_factory_refusal_blocks_the_lane_instead_of_faking_healthy_telemetry() {
+    let fixture = fixture().await;
+    let mut config = fixture.config.clone();
+    // A dialect no build can serve: construction must fail.
+    if let Some(role) = config.retrieval.embedding.as_mut() {
+        role.dialect = Some("openai_embeddings".into());
+        role.base_url = "not a url".into();
+    }
+
+    let cache_root = fixture.cache_root.clone();
+    let mut request = DiagnosticRequest::new(fixture.corpus_id.clone(), vec![query()]);
+    request.egress_acknowledged = true;
+    let report = run_diagnostic(
+        &fixture.cache_root,
+        &request,
+        &config,
+        Some(&fixture.secrets),
+        |_lane| tool_host(&cache_root),
+        None,
+    )
+    .await
+    .expect("runs");
+
+    let dense = report
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "dense")
+        .expect("dense lane present");
+    assert_eq!(
+        dense.status,
+        LaneStatus::Blocked,
+        "a lane whose backend could not be built must not run: {dense:?}"
+    );
+    assert!(
+        dense.embedding_model.is_none() && dense.embedding_space_fingerprint.is_none(),
+        "a blocked lane must not publish a configured-looking identity"
+    );
+    assert!(
+        dense.execution.mode_used.is_none(),
+        "a blocked lane must not publish a mode it never used"
+    );
+    let reason = dense.blocked_reason.as_ref().expect("a stated reason");
+    assert!(
+        !reason.detail.is_empty() && !reason.detail.contains("http"),
+        "the reason is stated and share-safe: {reason:?}"
+    );
+    // The keyword baseline is unaffected: one broken role does not take the
+    // whole run down.
+    let baseline = report
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "keyword_baseline")
+        .expect("baseline present");
+    assert_ne!(baseline.status, LaneStatus::Blocked);
+}
+
+/// Blocker 3. A corpus that changes mid-run makes the lanes incomparable, and
+/// the report must say so instead of publishing per-lane numbers that were
+/// measured against two different corpora.
+///
+/// The mutation is a suppression edit, which is the subtlest of the three
+/// pinned revisions: it changes which rows a query can see at all without
+/// touching a single event, so a run that pinned only the event revision would
+/// report the drifted lanes as a clean comparison.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_corpus_that_changes_mid_run_makes_the_report_inconclusive() {
+    let fixture = fixture().await;
+    let cache_root = fixture.cache_root.clone();
+    let corpus_id = fixture.corpus_id.clone();
+    let lanes_started = Arc::new(AtomicUsize::new(0));
+    let lanes_for_host = Arc::clone(&lanes_started);
+
+    let request = DiagnosticRequest {
+        corpus_id: fixture.corpus_id.clone(),
+        queries: vec![query()],
+        budgets: DiagnosticBudgets::default(),
+        lanes: vec![
+            DiagnosticLane::KeywordBaseline,
+            DiagnosticLane::KeywordBaselineRerank,
+        ],
+        egress_acknowledged: false,
+        include_raw: false,
+    };
+    let host_cache = cache_root.clone();
+    let report = run_diagnostic(
+        &fixture.cache_root,
+        &request,
+        &fixture.config,
+        Some(&fixture.secrets),
+        move |_lane| {
+            // Bump the suppression revision between the first and second lane,
+            // exactly as a human accepting a suppression rule would.
+            if lanes_for_host.fetch_add(1, Ordering::SeqCst) == 1 {
+                bump_suppression_revision(&host_cache, &corpus_id);
+            }
+            tool_host(&host_cache)
+        },
+        None,
+    )
+    .await
+    .expect("runs");
+
+    assert!(
+        report.corpus_stability.drifted,
+        "the run must notice the corpus moved: {:?}",
+        report.corpus_stability
+    );
+    assert!(
+        report
+            .corpus_stability
+            .drifted_fields
+            .contains(&"suppression_revision".to_string()),
+        "the moved revision is named: {:?}",
+        report.corpus_stability
+    );
+    assert!(report.corpus_stability.observed_at.is_some());
+    assert_eq!(
+        report.verdict,
+        DiagnosticVerdict::Inconclusive,
+        "lanes measured against different corpora are not a comparison"
+    );
+    assert!(!report.corpus_stability.stable());
+}
+
+/// Advance the suppression sidecar by one revision.
+///
+/// The sidecar enforces that its revision matches its latest audit entry, so a
+/// bare revision bump would be rejected as corrupt rather than observed as a
+/// change. The entry is appended the way an activation writes one, which keeps
+/// this a genuine suppression edit instead of a damaged file.
+fn bump_suppression_revision(cache_root: &std::path::Path, corpus_id: &str) {
+    use cd_core::log_analysis::{SuppressionAuditAction, SuppressionAuditEntry};
+
+    let corpus = cd_core::log_analysis::LogCorpus::open(cache_root, corpus_id).expect("open");
+    let mut document =
+        cd_core::log_analysis::load_suppression_document(&corpus).expect("load sidecar");
+    document.revision += 1;
+    document.audit.push(SuppressionAuditEntry {
+        id: "01930000-0000-7000-8000-000000000001".into(),
+        revision: document.revision,
+        action: SuppressionAuditAction::Previewed,
+        rule_id: None,
+        preview_token: None,
+        created_at: 1_735_740_000,
+    });
+    let path = corpus.root().join("suppression.json");
+    std::fs::write(&path, serde_json::to_vec(&document).expect("encode")).expect("write sidecar");
+    // Prove the sidecar is still loadable, so a failure here is a broken test
+    // rather than a silently mis-detected drift.
+    let reloaded = cd_core::log_analysis::load_suppression_document(&corpus)
+        .unwrap_or_else(|error| panic!("sidecar unreadable after write: {error}"));
+    assert_eq!(reloaded.revision, document.revision);
+}
+
+/// Blocker 3. The pinned identity carries all three revisions, so a reader can
+/// tell whether two reports describe the same corpus state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_pinned_identity_names_every_revision_that_decides_visibility() {
+    let fixture = fixture().await;
+    let cache_root = fixture.cache_root.clone();
+    let report = run_diagnostic(
+        &fixture.cache_root,
+        &DiagnosticRequest::new(fixture.corpus_id.clone(), vec![query()]),
+        &fixture.config,
+        Some(&fixture.secrets),
+        |_lane| tool_host(&cache_root),
+        None,
+    )
+    .await
+    .expect("runs");
+
+    assert_eq!(
+        report.corpus.event_revision,
+        report.corpus_stability.pinned_event_revision
+    );
+    assert_eq!(
+        report.corpus.template_analysis_revision,
+        report.corpus_stability.pinned_template_analysis_revision
+    );
+    assert_eq!(
+        report.corpus.suppression_revision,
+        report.corpus_stability.pinned_suppression_revision
+    );
+    assert!(report.corpus_stability.stable());
+    assert!(report.corpus_stability.drifted_fields.is_empty());
+}
+
+/// Blocker 4. A private-network endpoint is neither silently allowed nor
+/// silently denied: the lane is blocked with a named code before construction,
+/// and the detail says an override is what would change it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_private_network_gateway_is_refused_explicitly_not_silently() {
+    let fixture = fixture().await;
+    let mut config = fixture.config.clone();
+    // Both roles: with only one private, the other is still legitimately
+    // needed by a lane and its credential read would be correct.
+    for role in [
+        config.retrieval.embedding.as_mut(),
+        config.retrieval.reranker.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        role.base_url = "http://10.0.0.5:8080".into();
+        role.allow_remote = true;
+    }
+
+    let mut request = DiagnosticRequest::new(fixture.corpus_id.clone(), vec![query()]);
+    request.egress_acknowledged = true;
+    let plan = plan_diagnostic(&fixture.cache_root, &request, &config).expect("plan");
+    let blocked = plan
+        .blocked_lanes
+        .iter()
+        .find(|blocked| blocked.code == "retrieval_private_network_not_permitted")
+        .expect("the private endpoint is named in the plan");
+    assert!(
+        blocked.detail.contains("override"),
+        "the refusal says what would change it: {blocked:?}"
+    );
+    assert!(
+        !blocked.detail.contains("10.0.0.5"),
+        "the refusal stays share-safe: {blocked:?}"
+    );
+
+    let cache_root = fixture.cache_root.clone();
+    let report = run_diagnostic(
+        &fixture.cache_root,
+        &request,
+        &config,
+        Some(&fixture.secrets),
+        |_lane| tool_host(&cache_root),
+        None,
+    )
+    .await
+    .expect("runs");
+    assert_eq!(
+        fixture.reads.load(Ordering::SeqCst),
+        0,
+        "a refused private endpoint must not have its credential read"
+    );
+    let dense = report
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "dense")
+        .expect("dense present");
+    assert_eq!(dense.status, LaneStatus::Blocked);
+}
+
+/// Blocker 5. The fingerprint a lane publishes must be the one the backend
+/// that ran would report, and it must be comparable with what the corpus
+/// stored. Before this, the lane fingerprinted the bare configured base URL
+/// while every adapter fingerprints its own normalized route, so the two could
+/// never match for byte-identical configuration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn published_fingerprints_describe_the_endpoint_that_actually_ran() {
+    let fixture = fixture().await;
+    let cache_root = fixture.cache_root.clone();
+    let mut request = DiagnosticRequest::new(fixture.corpus_id.clone(), vec![query()]);
+    request.egress_acknowledged = true;
+    let report = run_diagnostic(
+        &fixture.cache_root,
+        &request,
+        &fixture.config,
+        Some(&fixture.secrets),
+        |_lane| tool_host(&cache_root),
+        None,
+    )
+    .await
+    .expect("runs");
+
+    assert_eq!(
+        report.fingerprint_agreement.configured_matches_backend,
+        Some(true),
+        "configuration and the built backend must describe one endpoint: {:?}",
+        report.fingerprint_agreement
+    );
+    assert_eq!(
+        report.fingerprint_agreement.stored_matches_backend,
+        Some(true),
+        "the corpus was embedded by this very backend: {:?}",
+        report.fingerprint_agreement
+    );
+    assert!(report.fingerprint_agreement.findings.is_empty());
+
+    // The lane's own fingerprint agrees with the corpus's stored one, which is
+    // the comparison a reader actually makes.
+    let dense = report
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "dense")
+        .expect("dense present");
+    assert_eq!(
+        dense.embedding_space_fingerprint.as_deref(),
+        report.corpus.stored_space_fingerprint.as_deref(),
+        "lane and stored fingerprints must be comparable"
+    );
+    // And the probe describes the same space.
+    let probe = report.vector_stability.as_ref().expect("probe ran");
+    assert_eq!(
+        Some(probe.space_fingerprint.as_str()),
+        dense.embedding_space_fingerprint.as_deref()
+    );
+}
+
+/// Blocker 1. Cancellation must take effect BETWEEN the calls a probe makes,
+/// not only between whole probes.
+///
+/// The vector-stability probe deliberately issues two requests — that second
+/// call is how cross-call dimension drift is caught. A cancel checked only
+/// around the probe as a whole would therefore still let a cancelled run issue
+/// a provider request after the user asked it to stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancellation_between_two_probe_calls_stops_the_second_request() {
+    /// Cancels the run as soon as it has answered once.
+    struct CancelAfterFirstCall {
+        calls: Arc<AtomicUsize>,
+        cancel: Arc<CancelFlag>,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbedBackend for CancelAfterFirstCall {
+        async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.cancel.cancel();
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+
+        fn identity(&self) -> String {
+            "cancel-after-first-call (deterministic synthetic; tests only)".into()
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let cancel = Arc::new(CancelFlag::default());
+    let backend = CancelAfterFirstCall {
+        calls: Arc::clone(&calls),
+        cancel: Arc::clone(&cancel),
+    };
+
+    let outcome = cd_workflow::retrieval_diagnostic::run_probes(
+        Some(&backend as &dyn EmbedBackend),
+        None,
+        1_000,
+        Some(&cancel),
+    );
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the second probe request must not be issued after cancellation"
+    );
+    assert!(outcome.cancelled, "the outcome says it was cut short");
+    assert!(
+        outcome.vector.is_none(),
+        "a probe missing half its evidence must be discarded, not reported as a \
+         contract violation the provider never committed"
+    );
+}

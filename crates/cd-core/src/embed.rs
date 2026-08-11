@@ -125,7 +125,7 @@ impl VercelV4EmbedBackend {
             &SystemResolver,
             std::time::Duration::from_millis(HTTP_EMBED_TIMEOUT_MS),
         )?;
-        endpoint.set_path("/v4/ai/embedding-model");
+        endpoint.set_path(VERCEL_V4_EMBEDDING_PATH);
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         Ok(Self {
@@ -181,6 +181,60 @@ impl std::fmt::Debug for HttpEmbedBackend {
     }
 }
 
+/// Rewrite `endpoint` to the concrete OpenAI-compatible embeddings route.
+///
+/// Kept as one function so the adapter and the config-only fingerprint path
+/// cannot drift apart; see [`embedding_endpoint_for_dialect`].
+fn apply_openai_embedding_path(endpoint: &mut reqwest::Url) {
+    let base_path = endpoint.path().trim_end_matches('/');
+    let embedding_path = if base_path.is_empty() {
+        "/v1/embeddings".to_string()
+    } else if base_path.ends_with("/v1") || base_path.contains("/v1/") {
+        format!("{base_path}/embeddings")
+    } else {
+        format!("{base_path}/v1/embeddings")
+    };
+    endpoint.set_path(&embedding_path);
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+}
+
+/// The concrete endpoint a dialect will POST to, derived from a configured
+/// base URL without resolving DNS, opening a client, or reading a credential.
+///
+/// Every embedding adapter normalizes its base URL before it fingerprints its
+/// own space, so a fingerprint taken from the bare configured base URL can
+/// never equal the one the adapter records — a plan would promise one
+/// embedding space and the corpus would store another, with nothing in either
+/// artifact revealing the disagreement. Both paths route through this function
+/// so a plan, a lane, a probe, and a stored binding all name the same endpoint.
+///
+/// Returns `None` for a dialect this build cannot serve, so an unknown dialect
+/// yields no fingerprint rather than a confidently wrong one.
+pub fn embedding_endpoint_for_dialect(base_url: &str, dialect: &str) -> Option<String> {
+    let mut endpoint = reqwest::Url::parse(base_url.trim()).ok()?;
+    match dialect {
+        // `OllamaClient` keeps the parsed base URL with its trailing slash
+        // trimmed and appends routes per call, so the space it fingerprints is
+        // the base itself.
+        "ollama_embeddings" => Some(endpoint.as_str().trim_end_matches('/').to_string()),
+        "openai_embeddings" => {
+            apply_openai_embedding_path(&mut endpoint);
+            Some(endpoint.to_string())
+        }
+        "vercel_v4_embeddings" => {
+            endpoint.set_path(VERCEL_V4_EMBEDDING_PATH);
+            endpoint.set_query(None);
+            endpoint.set_fragment(None);
+            Some(endpoint.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Route the Vercel v4 embedding adapter posts to.
+const VERCEL_V4_EMBEDDING_PATH: &str = "/v4/ai/embedding-model";
+
 impl HttpEmbedBackend {
     /// Build the adapter against a base URL with an optional bearer token.
     /// The URL is SSRF-vetted and pinned using the same policy as chat and
@@ -208,17 +262,7 @@ impl HttpEmbedBackend {
             &SystemResolver,
             std::time::Duration::from_millis(HTTP_EMBED_TIMEOUT_MS),
         )?;
-        let base_path = endpoint.path().trim_end_matches('/');
-        let embedding_path = if base_path.is_empty() {
-            "/v1/embeddings".to_string()
-        } else if base_path.ends_with("/v1") || base_path.contains("/v1/") {
-            format!("{base_path}/embeddings")
-        } else {
-            format!("{base_path}/v1/embeddings")
-        };
-        endpoint.set_path(&embedding_path);
-        endpoint.set_query(None);
-        endpoint.set_fragment(None);
+        apply_openai_embedding_path(&mut endpoint);
         Ok(Self {
             client,
             endpoint,
@@ -1116,5 +1160,56 @@ mod tests {
                 > cosine_similarity(&vectors[0], &vectors[2]),
             "explicit concept geometry must outrank residual noise"
         );
+    }
+}
+
+#[cfg(test)]
+mod endpoint_identity_tests {
+    use super::*;
+
+    /// The fingerprint a caller can compute from configuration alone must be
+    /// the one the built adapter reports.
+    ///
+    /// Adapters normalize the configured base URL into a concrete route before
+    /// they fingerprint their space, so a fingerprint taken from the bare base
+    /// URL disagrees with the stored one for byte-identical configuration —
+    /// and nothing in either artifact reveals it. Port 9 (discard) is used so
+    /// construction resolves a loopback literal without connecting.
+    #[test]
+    fn a_configured_endpoint_fingerprints_the_same_as_the_backend_that_serves_it() {
+        for base in [
+            "http://127.0.0.1:9",
+            "http://127.0.0.1:9/",
+            "http://127.0.0.1:9/v1",
+            "http://127.0.0.1:9/proxy",
+        ] {
+            let backend = HttpEmbedBackend::new(base, "m", None).expect("build openai adapter");
+            let from_config = embedding_endpoint_for_dialect(base, "openai_embeddings")
+                .expect("known dialect has a known route");
+            assert_eq!(
+                backend.space().endpoint_fingerprint,
+                crate::capability_qualification::fingerprint_endpoint(&from_config),
+                "openai_embeddings disagreed for base {base}"
+            );
+        }
+    }
+
+    /// An unknown dialect has no known route, so no fingerprint is offered
+    /// rather than a confidently wrong one taken from the bare base URL.
+    #[test]
+    fn an_unknown_dialect_yields_no_endpoint_rather_than_a_wrong_one() {
+        assert!(embedding_endpoint_for_dialect("http://127.0.0.1:9", "not_a_dialect").is_none());
+        assert!(embedding_endpoint_for_dialect("not a url", "openai_embeddings").is_none());
+    }
+
+    /// Ollama posts per-call routes off its stored base, so its space is the
+    /// base itself with the trailing slash trimmed — the same string
+    /// `OllamaClient` keeps.
+    #[test]
+    fn the_ollama_dialect_fingerprints_its_stored_base() {
+        let from_config =
+            embedding_endpoint_for_dialect("http://127.0.0.1:11434/", "ollama_embeddings")
+                .expect("known dialect");
+        assert_eq!(from_config, "http://127.0.0.1:11434");
     }
 }

@@ -44,6 +44,51 @@ pub const RERANK_DIALECT_SYNTHETIC: &str = "synthetic";
 /// accepts a mis-parsed permutation as a valid one).
 pub const SUPPORTED_RERANK_DIALECTS: &[&str] = &[RERANK_DIALECT_TEI_V1, RERANK_DIALECT_VERCEL_V4];
 
+/// Route the Vercel v4 rerank adapter posts to.
+const VERCEL_V4_RERANK_PATH: &str = "/v4/ai/reranking-model";
+
+/// Rewrite `endpoint` to the concrete TEI rerank route.
+///
+/// Kept as one function so the adapter and the config-only fingerprint path
+/// cannot drift apart; see [`rerank_endpoint_for_dialect`].
+fn apply_tei_rerank_path(endpoint: &mut reqwest::Url) {
+    let base_path = endpoint.path().trim_end_matches('/');
+    let rerank_path = if base_path.is_empty() {
+        "/rerank".to_string()
+    } else {
+        format!("{base_path}/rerank")
+    };
+    endpoint.set_path(&rerank_path);
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+}
+
+/// The concrete endpoint a rerank dialect will POST to, derived from a
+/// configured base URL without resolving DNS, opening a client, or reading a
+/// credential.
+///
+/// Mirrors [`crate::embed::embedding_endpoint_for_dialect`]: adapters
+/// normalize their base URL before they report an endpoint identity, so a
+/// fingerprint taken from the bare configured base URL would disagree with the
+/// one the adapter reports. Returns `None` for a dialect this build cannot
+/// serve.
+pub fn rerank_endpoint_for_dialect(base_url: &str, dialect: &str) -> Option<String> {
+    let mut endpoint = reqwest::Url::parse(base_url.trim()).ok()?;
+    match dialect {
+        RERANK_DIALECT_TEI_V1 => {
+            apply_tei_rerank_path(&mut endpoint);
+            Some(endpoint.to_string())
+        }
+        RERANK_DIALECT_VERCEL_V4 => {
+            endpoint.set_path(VERCEL_V4_RERANK_PATH);
+            endpoint.set_query(None);
+            endpoint.set_fragment(None);
+            Some(endpoint.to_string())
+        }
+        _ => None,
+    }
+}
+
 /// A provider-neutral reranker: scores `documents` for relevance to `query`,
 /// returning one score per document in input order (higher = more relevant).
 #[async_trait]
@@ -213,7 +258,7 @@ impl VercelV4RerankBackend {
             &resolver,
             std::time::Duration::from_millis(RERANK_DEFAULT_TIMEOUT_MS),
         )?;
-        endpoint.set_path("/v4/ai/reranking-model");
+        endpoint.set_path(VERCEL_V4_RERANK_PATH);
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         Ok(Self {
@@ -326,15 +371,7 @@ impl HttpRerankBackend {
         // treats a slash-less final segment as a file and would silently drop
         // it (`https://host/v1` -> `https://host/rerank`).
         let mut endpoint = url;
-        let base_path = endpoint.path().trim_end_matches('/');
-        let rerank_path = if base_path.is_empty() {
-            "/rerank".to_string()
-        } else {
-            format!("{base_path}/rerank")
-        };
-        endpoint.set_path(&rerank_path);
-        endpoint.set_query(None);
-        endpoint.set_fragment(None);
+        apply_tei_rerank_path(&mut endpoint);
         Ok(Self {
             client,
             endpoint,

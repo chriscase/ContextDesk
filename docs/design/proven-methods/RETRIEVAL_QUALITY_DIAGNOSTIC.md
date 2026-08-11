@@ -37,6 +37,11 @@ than implying them.
 | CLI parity for existing corpora               | Local integration  | `contextdesk retrieval-reanalyze`                                                                            | No progress rendering yet; the desktop flow has one                            |
 | Lanes execute through production paths        | Local integration  | `retrieval_diagnostic/mod.rs`; `every_lane_runs_through_production_factories_and_reports_measured_facts`     | Keyword/dense lanes use `search_logs`, which is template-level, not RRF         |
 | Share-safe artifacts                          | Local integration  | `the_report_is_share_safe_and_carries_no_endpoint_credential_or_corpus_text`                                 | —                                                                              |
+| Cancel/egress stop before any provider work   | Local integration  | `a_pre_cancelled_run_touches_no_credential_and_no_provider`, `unacknowledged_egress_blocks_before_any_credential_or_provider_work`, `cancellation_between_two_probe_calls_stops_the_second_request` | —                                                                              |
+| Only required roles built; failures block     | Local integration  | `a_role_no_selected_lane_needs_is_never_built`, `a_factory_refusal_blocks_the_lane_instead_of_faking_healthy_telemetry` | —                                                                              |
+| Revisions pinned for the whole run            | Local integration  | `read_corpus_pin`/`note_drift`; `a_corpus_that_changes_mid_run_makes_the_report_inconclusive`, `the_pinned_identity_names_every_revision_that_decides_visibility` | Drift invalidates the run; it does not retry or re-pin                         |
+| Private-network policy explicit               | Local integration  | `classify_endpoint`; `a_private_network_gateway_is_refused_explicitly_not_silently`                          | Only IP literals classify; a DNS name that resolves private is refused deeper, by the factory |
+| Fingerprints agree with the endpoint that ran | Local integration  | `embedding_endpoint_for_dialect`; `a_configured_endpoint_fingerprints_the_same_as_the_backend_that_serves_it`, `published_fingerprints_describe_the_endpoint_that_actually_ran` | —                                                                              |
 | Measured live retrieval quality               | **Not claimed**    | —                                                                                                            | Requires a real corpus, real truth, and a real provider; none is asserted here  |
 
 ## 3. Reusable method
@@ -66,6 +71,29 @@ than implying them.
    reimplementing retrieval, the measurement is about the reimplementation.
 7. **Report retrieval separately from answer usefulness**, and let a run be
    inconclusive. Fewer than two usable lanes is not a winner.
+8. **Gate consent and cancellation before construction, not before use.** A
+   check placed after the backends are built has already read the credential
+   and issued the probe requests it was meant to prevent. Cancellation also has
+   to reach *between* the calls a single probe makes: a probe that issues two
+   requests will issue the second one after the stop unless the check sits
+   inside the call seam.
+9. **Build only what the selected work needs.** A role no runnable lane
+   requires should never be constructed, because constructing it reads a
+   credential for a capability this run is not measuring.
+10. **Never swallow a factory error.** A refused build that degrades to `None`
+    is indistinguishable from "not configured", and the dependent lane then
+    runs without the capability while still publishing a configured-looking
+    model, dialect, and mode. Keep the failure and block the lane with it.
+11. **Pin every revision that decides visibility, and re-read it.** Events are
+    the obvious one; template analysis and suppression change what a query can
+    see without changing a single event. Re-read before and after each unit of
+    work, treat an unreadable pin as drift, and make the whole run inconclusive
+    — a comparison that cannot prove its inputs were identical is not one.
+12. **Derive every published fingerprint from one normalization.** Adapters
+    normalize a configured base URL into a concrete route before they
+    fingerprint it, so a fingerprint taken from the bare base URL disagrees
+    with the stored one for byte-identical configuration, and nothing in either
+    artifact reveals it.
 
 ```mermaid
 flowchart LR
@@ -158,6 +186,15 @@ outside the corpus that produced them.
   ran, the dialect that actually parsed) are carried in the report instead, so
   the information exists — but a reader watching Activity during a run sees the
   underlying `search_logs` calls without the lane framing around them.
+- Corpus drift invalidates a run rather than recovering from it: the report
+  goes inconclusive and names the revision that moved. It does not re-pin and
+  retry, so a corpus under active ingest may need a quiet window to measure.
+- Private-network classification covers IP literals only. A DNS name that
+  resolves into a private range is still refused, but deeper — by the pinned
+  client during construction — so it surfaces as a blocked lane with a factory
+  reason rather than the named private-network code.
+- Remote re-analysis is still one corpus at a time; there is no batching, and
+  the diagnostic plans the re-analysis without performing it.
 - No measurement of live retrieval quality is claimed anywhere. The hermetic
   tests prove the plumbing, the gates, and the arithmetic; they do not prove
   that any particular embedder or reranker helps on a real corpus.

@@ -196,9 +196,25 @@ impl Render for DiagnoseRunOutput {
         out.push_str(&format!("  Verdict:   {}\n", report.verdict.as_str()));
         out.push_str(&format!("  Corpus:    {}\n", report.corpus.corpus_id));
         out.push_str(&format!(
-            "  Revisions: events {} / templates {}\n",
-            report.corpus.event_revision, report.corpus.template_analysis_revision
+            "  Revisions: events {} / templates {} / suppression {}\n",
+            report.corpus.event_revision,
+            report.corpus.template_analysis_revision,
+            report.corpus.suppression_revision
         ));
+        if report.corpus_stability.drifted {
+            out.push_str(&format!(
+                "  CORPUS MOVED: {} changed {} — lanes are not comparable\n",
+                report.corpus_stability.drifted_fields.join(", "),
+                report
+                    .corpus_stability
+                    .observed_at
+                    .as_deref()
+                    .unwrap_or("during the run")
+            ));
+        }
+        for finding in &report.fingerprint_agreement.findings {
+            out.push_str(&format!("  FINGERPRINT: {finding}\n"));
+        }
         out.push_str(&format!(
             "  Corpus:    {} events, {} templates, {} embedded\n",
             report.corpus.event_count,
