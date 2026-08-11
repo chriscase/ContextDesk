@@ -1284,9 +1284,8 @@ mod tests {
 
     #[test]
     fn execute_inert_has_no_filesystem_side_effects() {
-        let r =
-            execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"QUALIFY_TOOL_V1"}"#)
-                .unwrap();
+        let r = execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"QUALIFY_TOOL_V1"}"#)
+            .unwrap();
         assert!(r.contains("QUALIFY_TOOL_V1"));
         assert!(execute_inert_probe_tool("rm", "{}").is_err());
         assert!(execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"../etc"}"#).is_err());
