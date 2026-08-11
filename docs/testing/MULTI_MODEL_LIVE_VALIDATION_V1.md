@@ -146,7 +146,7 @@ includes:
 - OpenAI-compatible embedding spaces publish the measured endpoint/model/dialect
   identity used by the diagnostic, so stored vectors cannot be mislabeled as
   `unclassified`;
-- existing gateway diagnostic contract: 17 CLI tests;
+- existing gateway diagnostic contract: 18 CLI tests;
 - exact-head release gate: `FULL_GATE_PASS` with embedded-SHA identity,
   cancellation, activity/trace parity, grounded two-turn flow, and recovery.
 

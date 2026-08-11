@@ -2,7 +2,7 @@
 
 **Audit date:** 2026-08-11  
 **Feature branch:** `feat/multimodel-contribution-reconcile-v1`  
-**Branch tip at this audit snapshot:** `59df68fadc0d51a9d8cc245959c5f9f410a06eaa`
+**Branch tip at this audit snapshot:** `dc5c3c4514c2baa986d24c9ee472422c628ed2c2`
 **Production-code integration tip:** `59df68fadc0d51a9d8cc245959c5f9f410a06eaa`
 
 This is a release-manager evidence map for the model-agnostic investigation
@@ -56,6 +56,11 @@ untrusted model explanation text.
   exact observed role hints, chat qualification markers, fragmented streams,
   Vercel v4 embedding/rerank envelopes, malformed and role-mismatched payloads,
   and secret/metadata exclusion.
+- CLI contribution-mode activity parity: the real `cd-cli` linked-corpus path
+  now proves that an unqualified/empty contribution configuration is surfaced
+  as a host-authored deterministic-floor reason in the shared, endpoint-free
+  activity summary; the provider is a hermetic wiremock and no raw body is
+  retained (`cargo test -p cd-cli --test cli_activity_parity`: 15 passed).
 - `scripts/exact_head_full_gate.sh`: `FULL_GATE_PASS`
 - Exact-head synthetic acceptance covered identity, stale-binary rejection,
   folder/zip import parity, timezone normalization, grounded two-turn chat,
