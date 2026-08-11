@@ -303,16 +303,30 @@ fn qualification_suite_covers_generation_tools_continuation_and_structured_on_li
         // NativeToolCall
         Step::respond(Response::json_ok(&completion_tools(
             cd_core::capability_qualification::INERT_PROBE_TOOL_NAME,
-            "{\"token\":\"probe_ok\"}",
+            "{\"token\":\"QUALIFY_TOOL_V1\"}",
         ))),
         // ToolResultContinuation
-        Step::respond(Response::json_ok(&completion_stop("continued-ok"))),
+        Step::respond(Response::json_ok(&completion_stop(
+            cd_core::capability_qualification::QUALIFY_CONTINUE_MARKER,
+        ))),
+        // ForcedToolCall (first response) and its continuation.
+        Step::respond(Response::json_ok(&completion_tools(
+            cd_core::capability_qualification::INERT_PROBE_TOOL_NAME,
+            "{\"token\":\"QUALIFY_TOOL_V1\"}",
+        ))),
+        Step::respond(Response::json_ok(&completion_stop(
+            cd_core::capability_qualification::QUALIFY_CONTINUE_MARKER,
+        ))),
         // StructuredOutput
         Step::respond(Response::json_ok(&completion_json_object())),
-        // Streaming (may still hit non-stream path depending on gate)
-        Step::respond(Response::json_ok(&completion_stop("stream-ok"))),
-        // Cancellation probe
-        Step::respond(Response::json_ok(&completion_stop("cancel-ok"))),
+        // Native structured modes (json_object, json_schema, strict schema).
+        Step::respond(Response::json_ok(&completion_json_object())),
+        Step::respond(Response::json_ok(&completion_json_object())),
+        Step::respond(Response::json_ok(&completion_json_object())),
+        // Streaming. Cancellation is probe-local and is answered before HTTP.
+        Step::respond(Response::json_ok(&completion_stop(
+            cd_core::capability_qualification::SYNTH_GENERATION_MARKER,
+        ))),
     ]));
 
     let mut transport = LiveQualificationTransport::new(
