@@ -718,6 +718,64 @@ mod tests {
     }
 
     #[test]
+    fn a_reranker_without_an_explicit_dialect_fails_closed() {
+        // Two providers can share a hostname pattern and a model label while
+        // speaking different envelopes, so a missing dialect is a refusal, not
+        // a cue to default to the most common parser.
+        let secrets = MemorySecretStore::new();
+        secrets
+            .set("retrieval/test/api_key", "must-not-be-read")
+            .unwrap();
+        for dialect in [None, Some(String::new()), Some("   ".into())] {
+            let role = RetrievalRoleModel {
+                dialect,
+                ..reranker_role(Some("retrieval/test/api_key"))
+            };
+            let error = build_rerank_backend(&role, Some(&secrets))
+                .err()
+                .expect("an implicit reranker dialect must fail closed");
+            let message = error.to_string();
+            assert!(
+                message.contains("must be set explicitly"),
+                "unexpected message: {message}"
+            );
+            // The supported list is named so the refusal is actionable.
+            assert!(message.contains("tei_rerank_v1"));
+            assert!(message.contains("vercel_v4_rerank_v1"));
+        }
+    }
+
+    #[test]
+    fn every_supported_rerank_dialect_reports_the_parser_that_ran() {
+        let role = reranker_role(None);
+        let backend = build_rerank_backend(&role, None).expect("tei adapter");
+        assert_eq!(
+            backend.dialect(),
+            cd_core::rerank::RERANK_DIALECT_TEI_V1,
+            "the adapter reports its own parser; nothing infers it from the URL"
+        );
+        assert_eq!(
+            SUPPORTED_RERANK_DIALECTS,
+            [
+                cd_core::rerank::RERANK_DIALECT_TEI_V1,
+                cd_core::rerank::RERANK_DIALECT_VERCEL_V4
+            ]
+        );
+
+        // A URL that looks like a Vercel gateway does NOT select the Vercel
+        // parser: only the configured dialect does.
+        let vercel_shaped = RetrievalRoleModel {
+            base_url: "https://ai-gateway.vercel.sh".into(),
+            allow_remote: true,
+            dialect: Some(cd_core::rerank::RERANK_DIALECT_TEI_V1.into()),
+            ..reranker_role(None)
+        };
+        let backend =
+            build_rerank_backend(&vercel_shaped, None).expect("explicit tei on that host");
+        assert_eq!(backend.dialect(), cd_core::rerank::RERANK_DIALECT_TEI_V1);
+    }
+
+    #[test]
     fn remote_retrieval_is_blocked_before_backend_or_credential_access() {
         let role = RetrievalRoleModel {
             enabled: true,

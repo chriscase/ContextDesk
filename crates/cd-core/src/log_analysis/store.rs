@@ -1172,6 +1172,17 @@ impl LogCorpus {
         self.template_analysis_revision.load(Ordering::SeqCst)
     }
 
+    /// Public, process-local template-analysis revision marker.
+    ///
+    /// Pairs with [`Self::revision`]: a retrieval diagnostic must pin BOTH
+    /// clocks, because a template re-analysis changes what the semantic lane
+    /// can return without appending a single event. Reporting only the event
+    /// revision would let two runs over materially different indexes look
+    /// like runs over the same corpus.
+    pub fn template_revision(&self) -> u64 {
+        self.template_analysis_revision()
+    }
+
     /// Set embedding for a template (content-hash cached by caller).
     pub fn set_template_vector(&self, template_id: u64, vector: Vec<f32>) -> CoreResult<()> {
         {
