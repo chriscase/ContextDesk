@@ -504,6 +504,17 @@ pub fn search_logs_with_excluded_templates_and_rerank(
             .into_iter()
             .map(|exemplar| (exemplar.text, exemplar.identity))
             .unzip();
+
+        // A structured filter is authoritative over event membership. A
+        // template admitted by pattern text alone must not survive when no
+        // event in that template satisfied the filter: its corpus-wide count
+        // would otherwise look like a grounded match while there is no
+        // citeable identity to support it. Keep the search result fail-closed
+        // at the retrieval boundary rather than making the agent discover the
+        // contradiction later.
+        if !no_struct && evidence.is_empty() {
+            continue;
+        }
         hits.push(SearchHit {
             template_id: tid,
             pattern: row.info.pattern.clone(),
@@ -777,23 +788,10 @@ mod tests {
         )
         .unwrap();
 
-        let hit = filtered
-            .first()
-            .expect("pattern keyword match still admits the template as a hit");
         assert!(
-            hit.evidence.is_empty(),
-            "no event survived the structured filter, so the hit must carry no \
-             evidence identity: {:?}",
-            hit.evidence
-        );
-        assert!(
-            hit.exemplars.is_empty(),
-            "an evidence-free hit must not render exemplar event lines either"
-        );
-        assert!(
-            hit.count > 0,
-            "count reports the corpus-wide template total, which is exactly why \
-             a rendered `result_count`/`n=` reads as if events matched"
+            filtered.is_empty(),
+            "a pattern-only template with no event surviving the structured \
+             filter must be excluded at the retrieval boundary: {filtered:?}"
         );
     }
 
