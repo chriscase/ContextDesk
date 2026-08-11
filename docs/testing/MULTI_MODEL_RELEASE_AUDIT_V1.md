@@ -67,14 +67,17 @@ untrusted model explanation text.
 - Historical prior-run record: `scripts/exact_head_full_gate.sh` reported
   `FULL_GATE_PASS` before the exact c093 pin; that result is not promoted to
   this release identity.
-- Current exact-pin native sub-gate: **pass**. The required
+- On the exact c093 source pin, the required
   `cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked
-  --all-targets` runs 189 desktop host tests plus the zero-test binary target.
-  The two existing `RetrievalRoleModel` fixtures were missing the current
-  defaulted `embed_wire` and `rerank_dialect` fields; adding those explicit
-  defaults is test-only compile maintenance and does not change production
-  behavior. Native desktop tests are required evidence, not an inferred
-  check-only result. The complete exact-head gate was not rerun in this lane.
+  --all-targets` exposed two stale `RetrievalRoleModel` test fixtures. The
+  evidence branch's test-only maintenance commit (`ba347482`) adds the
+  current defaulted `embed_wire` and `rerank_dialect` fields; the same native
+  command then passes 189 desktop host tests plus the zero-test binary target.
+  This maintenance does not change production behavior, but the c093 source
+  pin itself must not be described as having passed that native sub-gate until
+  the test-only commit is integrated. Native desktop tests are required
+  evidence, not an inferred check-only result. The complete exact-head gate
+  was not rerun in this lane.
 - Exact-head synthetic acceptance covered identity, stale-binary rejection,
   folder/zip import parity, timezone normalization, grounded two-turn chat,
   activity/trace, honest cancellation, and recovery

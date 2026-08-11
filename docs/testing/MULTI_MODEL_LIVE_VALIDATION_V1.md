@@ -152,9 +152,11 @@ includes:
 - historical exact-head release gate record: `FULL_GATE_PASS` with
   embedded-SHA identity, cancellation, activity/trace parity, grounded
   two-turn flow, and recovery. It is not a current full-gate verdict. The
-  current exact-pin native desktop sub-gate passes 189 tests after adding
-  explicit default fields to two test-only `RetrievalRoleModel` fixtures;
-  the complete exact-head gate remains to be rerun.
+  the evidence branch's test-only maintenance commit `ba347482` makes the
+  native desktop sub-gate pass 189 tests by adding explicit default fields to
+  two `RetrievalRoleModel` fixtures. The exact c093 pin itself predates that
+  maintenance, and the complete exact-head gate remains to be rerun after
+  integrating it.
 
 The full workspace matrix, desktop native check, frontend typecheck/lint/
 Vitest/build, and the exact-head gate all pass at this head. Frontend lint
