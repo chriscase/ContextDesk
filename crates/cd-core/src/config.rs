@@ -249,6 +249,11 @@ pub struct AppConfig {
     /// the established single-model path runs unchanged.
     #[serde(default)]
     pub multi_model: MultiModelSettings,
+    /// Optional host-grounded contribution roles. Disabled by default; when
+    /// enabled, every role still requires exact qualification and explicit
+    /// egress policy before it can receive a host packet.
+    #[serde(default)]
+    pub contributions: ContributionSettings,
     /// Optional host-grounded fast-triage route settings.
     ///
     /// Absent in files written before this existed, so it takes
@@ -322,6 +327,50 @@ pub struct MultiModelSettings {
     /// Per-turn ceilings for the multi-model path.
     #[serde(default)]
     pub budget: MultiModelBudgetConfig,
+}
+
+/// Persisted configuration for the provider-neutral contribution route.
+///
+/// This is deliberately separate from reviewer-first `multi_model`: users can
+/// opt into several bounded cheap contributors without changing the existing
+/// single/reviewer default. Profiles are references only; credentials remain
+/// behind each profile's configured secret source.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContributionSettings {
+    /// Master switch. `false` preserves the established path byte-for-byte.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Explicit role assignments. Empty means the route cannot run.
+    #[serde(default)]
+    pub roles: Vec<ContributionRoleConfig>,
+    /// Hard routing policy for contributor count, rounds, context, and review.
+    #[serde(default)]
+    pub policy: crate::multi_model::ContributionRoutingPolicy,
+    /// Per-turn model/context budget.
+    #[serde(default)]
+    pub budget: MultiModelBudgetConfig,
+    /// Bounded host neighborhood packet expansion.
+    #[serde(default)]
+    pub neighborhood: crate::fast_triage::FastTriageNeighborhoodBudget,
+}
+
+/// One explicit contributor assignment. The role and profile/model identity
+/// are host configuration; the model never selects or changes them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContributionRoleConfig {
+    /// Functional contribution role.
+    pub role: crate::multi_model::ContributionRole,
+    /// Existing provider profile id.
+    pub profile_id: String,
+    /// Optional exact model id override; absent uses the profile model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Require the exact prompted-JSON contribution contract to be measured.
+    #[serde(default = "default_true")]
+    pub require_qualified: bool,
+    /// Explicit acknowledgment for remote evidence-packet egress.
+    #[serde(default)]
+    pub allow_remote: bool,
 }
 
 /// Reviewer role assignment. Provider-neutral: it names a profile id, not a
@@ -951,6 +1000,7 @@ mod tests {
         value.as_object_mut().unwrap().remove("multi_model");
         std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
         let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.contributions, ContributionSettings::default());
         assert_eq!(loaded.multi_model, MultiModelSettings::default());
         assert_eq!(
             loaded.multi_model.mode,

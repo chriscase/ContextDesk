@@ -605,7 +605,7 @@ export async function hostGetConfig(): Promise<HostConfigDto | null> {
 
 /** Non-secret multi-model settings for the Settings surface. */
 export type MultiModelSettingsDto = {
-  mode: "single" | "review" | string;
+  mode: "single" | "review" | "contributions" | string;
   reviewer_profile_id: string | null;
   reviewer_model: string | null;
   reviewer_allow_remote: boolean;
@@ -618,7 +618,7 @@ export async function hostGetMultiModelSettings(): Promise<MultiModelSettingsDto
 }
 
 export async function hostSetMultiModelMode(
-  mode: "single" | "review",
+  mode: "single" | "review" | "contributions",
 ): Promise<void> {
   if (!isTauri()) return;
   await invoke<void>("set_multi_model_mode", { mode });

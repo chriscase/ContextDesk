@@ -1847,7 +1847,7 @@ fn get_config(state: State<'_, AppState>) -> AppConfig {
 /// references a provider profile id; no credential ever crosses IPC.
 #[derive(Clone, Serialize)]
 struct MultiModelSettingsDto {
-    /// `"single"` | `"review"`.
+    /// `"single"` | `"review"` | `"contributions"`.
     mode: String,
     /// Reviewer provider profile id, if configured.
     reviewer_profile_id: Option<String>,
@@ -1863,8 +1863,13 @@ struct MultiModelSettingsDto {
 fn get_multi_model_settings(state: State<'_, AppState>) -> MultiModelSettingsDto {
     let cfg = state.config.lock().expect("config lock");
     let mm = &cfg.multi_model;
+    let mode = if cfg.contributions.enabled {
+        cd_core::multi_model::MultiModelMode::Contributions
+    } else {
+        mm.mode
+    };
     MultiModelSettingsDto {
-        mode: mm.mode.as_str().to_string(),
+        mode: mode.as_str().to_string(),
         reviewer_profile_id: mm.reviewer.as_ref().map(|r| r.profile_id.clone()),
         reviewer_model: mm.reviewer.as_ref().and_then(|r| r.model.clone()),
         reviewer_allow_remote: mm.reviewer.as_ref().is_some_and(|r| r.allow_remote),
@@ -1872,7 +1877,7 @@ fn get_multi_model_settings(state: State<'_, AppState>) -> MultiModelSettingsDto
     }
 }
 
-/// Set the default multi-model mode (`single`/`review`). Persists and rebuilds
+/// Set the default multi-model mode (`single`/`review`/`contributions`). Persists and rebuilds
 /// the host. Reviewer assignment is edited via the provider config; this is
 /// the on/off toggle the composer honors by default.
 #[tauri::command]
@@ -1880,10 +1885,12 @@ fn set_multi_model_mode(state: State<'_, AppState>, mode: String) -> Result<(), 
     let new_mode = match mode.as_str() {
         "review" => cd_core::multi_model::MultiModelMode::Review,
         "single" => cd_core::multi_model::MultiModelMode::Single,
+        "contributions" => cd_core::multi_model::MultiModelMode::Contributions,
         other => return Err(format!("unknown multi-model mode: {other}")),
     };
     let mut cfg = state.config.lock().expect("config lock").clone();
     cfg.multi_model.mode = new_mode;
+    cfg.contributions.enabled = matches!(new_mode, cd_core::multi_model::MultiModelMode::Contributions);
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
     save_config(&path, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock().expect("config lock") = cfg;
@@ -3650,9 +3657,9 @@ struct AgentTurnReq {
     /// Explorer viewport, ambient memory, or other host observations.
     #[serde(default)]
     user_selection: Option<String>,
-    /// Multi-model mode for this turn: `"single"` (default) or `"review"`.
-    /// Review opts in to the reviewer pipeline; it degrades to single-model
-    /// and reports the reason when unavailable.
+    /// Multi-model mode for this turn: `"single"` (default), `"review"`, or
+    /// `"contributions"`. Each opt-in route degrades honestly when its
+    /// configured, qualified roles are unavailable.
     #[serde(default)]
     multi_model_mode: Option<String>,
 }
@@ -5029,6 +5036,14 @@ async fn agent_turn(
     let turn_started_at = tokio::time::Instant::now();
     let deadline_plan = resolved.deadline_plan;
 
+    let contributions_requested = match req.multi_model_mode.as_deref() {
+        Some("single") => false,
+        Some("contributions") => true,
+        _ => {
+            cfg.contributions.enabled
+                || cfg.multi_model.mode == cd_core::multi_model::MultiModelMode::Contributions
+        }
+    };
     // Resolve the multi-model reviewer runtime for this turn (opt-in via
     // req.multi_model_mode). The desktop host resolves the reviewer's measured
     // qualification from its own store; a name is never a qualification.
@@ -5070,7 +5085,7 @@ async fn agent_turn(
         &cfg,
         &provider_credentials,
         // Review is only meaningful for a corpus-linked investigation turn.
-        if req.log_explorer_context.is_some() {
+        if req.log_explorer_context.is_some() && !contributions_requested {
             requested_review_mode
         } else {
             cd_core::multi_model::MultiModelMode::Single
@@ -5078,6 +5093,21 @@ async fn agent_turn(
         &resolved,
         reviewer_qualified,
         review_context_budget,
+    )
+    .await;
+    let contribution_qualification = state
+        .qualification_store
+        .lock()
+        .ok()
+        .map(|store| (*store).clone());
+    let contributions = cd_workflow::multi_model::resolve_contribution_runtime(
+        &cfg,
+        &provider_credentials,
+        &resolved,
+        contribution_qualification.as_ref(),
+        review_context_budget,
+        req.log_explorer_context.is_some() && contributions_requested,
+        req.multi_model_mode.as_deref() == Some("contributions"),
     )
     .await;
 
@@ -5577,6 +5607,15 @@ async fn agent_turn(
         if let Some(reason) = multi_model_review.entry_degradation {
             sink(cd_workflow::multi_model::entry_degradation_event(reason));
         }
+        if let Some(detail) = contributions.entry_degradation {
+            sink(cd_core::events::StreamEvent::MultiModelStage {
+                stage: "summary".into(),
+                phase: "summary".into(),
+                status: Some("single".into()),
+                detail: detail.into(),
+                candidate_id: None,
+            });
+        }
         // Preserve the disabled-by-default path. Enabled-route preparation
         // failures are host-authored metadata; route selection still remains
         // evidence-driven inside `cd-core`.
@@ -5606,6 +5645,7 @@ async fn agent_turn(
                 applied_skill_ids: &applied_skill_ids,
                 user_selection: req.user_selection.as_deref(),
                 multi_model: multi_model_review.runtime.clone(),
+                contribution_runtime: contributions.runtime.clone(),
                 fast_triage: fast_triage.runtime.clone(),
             },
             Some(&mut sink),

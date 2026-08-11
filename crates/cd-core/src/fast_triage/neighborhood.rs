@@ -151,7 +151,7 @@ impl FastTriageEvidenceCategory {
 
 /// Bounded expansion budget. Defaults mirror the existing production seam's own
 /// caps so the fast route cannot quietly widen what the host already bounded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FastTriageNeighborhoodBudget {
     /// Maximum ordinal distance for a same-source context row.
     pub same_source_radius: u64,

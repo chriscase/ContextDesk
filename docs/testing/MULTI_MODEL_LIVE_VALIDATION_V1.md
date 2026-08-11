@@ -55,6 +55,13 @@ requested, a separate owner-only capture index plus bounded exchange files.
 Keep those owner-only files local; upload only the share-safe report and
 manifest when requesting help.
 
+To exercise the multi-model path after qualification, configure
+`AppConfig.contributions` with explicit role/profile/model assignments, set its
+`enabled` flag, or pass `--mode contributions` for one CLI turn. The resolver
+still requires current `validated_structured_proposal` evidence for every
+role and applies the existing remote-egress acknowledgment. Missing or stale
+evidence produces a deterministic-floor result rather than a provider call.
+
 ## Capture contract
 
 The default artifact contains pseudonymous identity, endpoint fingerprints,

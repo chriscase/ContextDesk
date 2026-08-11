@@ -55,6 +55,9 @@ pub enum MultiModelMode {
     /// One investigator + one reviewer (same or distinct provider), then
     /// host synthesis. Opt-in; degrades to `Single` on any unavailability.
     Review,
+    /// Bounded provider-neutral role contributions reconciled by the host.
+    /// Opt-in; unavailable contributors degrade to the deterministic floor.
+    Contributions,
 }
 
 impl MultiModelMode {
@@ -63,6 +66,7 @@ impl MultiModelMode {
         match self {
             Self::Single => "single",
             Self::Review => "review",
+            Self::Contributions => "contributions",
         }
     }
 }

@@ -69,6 +69,7 @@ use crate::provider::{
 };
 use crate::turn::{bind_linked_corpus, run_turn, unbind_linked_corpus, TurnExecutionOptions};
 use cd_core::agent::LogExplorerTurnContext;
+use cd_core::capability_qualification::QualificationStore;
 use cd_core::chat::{ChatMessage, Role};
 use cd_core::config::AppConfig;
 use cd_core::error::{CoreError, CoreResult};
@@ -124,6 +125,9 @@ pub struct ChatWorkflowRequest<'a> {
     /// qualification store leaves this `None`; a `require_qualified` reviewer
     /// then degrades honestly.
     pub reviewer_qualified: Option<bool>,
+    /// Shared secret-free qualification evidence used to authorize configured
+    /// contribution roles. `None` keeps the route fail-closed.
+    pub contribution_qualification: Option<&'a QualificationStore>,
     /// Optional host-resolved contribution runtime. Supplying this explicitly
     /// opts the turn into the bounded provider-neutral contribution route;
     /// leaving it `None` preserves the established Single/Review behavior.
@@ -301,7 +305,13 @@ pub async fn run_chat_workflow(
     let review_context_budget = host
         .model_context_budgets()
         .resolve(Some(resolved.profile.chat_model.as_str()));
-    let review_mode = if request.corpus_id.is_some() {
+    let contributions_requested = request.multi_model_mode
+        == cd_core::multi_model::MultiModelMode::Contributions
+        || (request.corpus_id.is_some()
+            && (cfg.contributions.enabled
+                || cfg.multi_model.mode == cd_core::multi_model::MultiModelMode::Contributions)
+            && request.multi_model_mode == cd_core::multi_model::MultiModelMode::Single);
+    let review_mode = if request.corpus_id.is_some() && !contributions_requested {
         request.multi_model_mode
     } else {
         cd_core::multi_model::MultiModelMode::Single
@@ -316,8 +326,23 @@ pub async fn run_chat_workflow(
     )
     .await;
     let multi_model_runtime = review.runtime.clone();
-    let multi_model_configured = review.configured_mode;
+    let multi_model_configured = if contributions_requested {
+        cd_core::multi_model::MultiModelMode::Contributions
+    } else {
+        review.configured_mode
+    };
     let multi_model_entry_degradation = review.entry_degradation;
+    let contribution_resolution = crate::multi_model::resolve_contribution_runtime(
+        cfg,
+        &provider_credentials,
+        &resolved,
+        request.contribution_qualification,
+        review_context_budget,
+        request.corpus_id.is_some() && contributions_requested,
+        request.multi_model_mode == cd_core::multi_model::MultiModelMode::Contributions,
+    )
+    .await;
+    let contribution_runtime = contribution_resolution.runtime.clone();
     let binding = match request.corpus_id {
         Some(corpus_id) => Some(bind_linked_corpus(host, cache_root, corpus_id)?),
         None => None,
@@ -389,6 +414,17 @@ pub async fn run_chat_workflow(
         live_sink(event.clone());
         all_events.push(event);
     }
+    if let Some(detail) = contribution_resolution.entry_degradation {
+        let event = StreamEvent::MultiModelStage {
+            stage: "summary".into(),
+            phase: "summary".into(),
+            status: Some("single".into()),
+            detail: detail.into(),
+            candidate_id: None,
+        };
+        live_sink(event.clone());
+        all_events.push(event);
+    }
     // Keep the disabled-by-default path byte-identical. When an enabled route
     // cannot prepare its optional fallback (or has no route evidence), surface
     // the host-authored reason once; the core route still decides selection.
@@ -418,7 +454,9 @@ pub async fn run_chat_workflow(
                 user_selection: request.user_selection,
                 multi_model: multi_model_runtime.clone(),
                 fast_triage: fast_triage_runtime.clone(),
-                contribution_runtime: request.contribution_runtime.clone(),
+                contribution_runtime: contribution_runtime
+                    .clone()
+                    .or_else(|| request.contribution_runtime.clone()),
                 ..TurnExecutionOptions::default()
             },
             Some(&mut *live_sink),

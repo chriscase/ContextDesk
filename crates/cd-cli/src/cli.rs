@@ -627,6 +627,9 @@ pub enum ChatMode {
     /// reviewer is unconfigured, unqualified, remote-without-ack, over budget,
     /// or the turn is not eligible; the exact reason is reported.
     Review,
+    /// Opt in to configured, host-grounded contribution roles. Every role
+    /// must have current structured-proposal qualification evidence.
+    Contributions,
 }
 
 impl ChatMode {
@@ -635,6 +638,7 @@ impl ChatMode {
         match self {
             Self::Single => cd_core::multi_model::MultiModelMode::Single,
             Self::Review => cd_core::multi_model::MultiModelMode::Review,
+            Self::Contributions => cd_core::multi_model::MultiModelMode::Contributions,
         }
     }
 }
@@ -685,10 +689,9 @@ pub struct ChatArgs {
     /// `corpus use`, if any; otherwise an ordinary, unlinked turn).
     #[arg(long)]
     pub corpus: Option<String>,
-    /// Multi-model mode. `single` (default) or `review` to opt in to the
-    /// reviewer pipeline. Review needs a configured, qualified (or
-    /// `require_qualified=false`) reviewer and a corpus-linked turn; otherwise
-    /// it degrades to single-model and reports the reason.
+    /// Multi-model mode. `single` (default), `review`, or `contributions`.
+    /// Contributions use persisted role assignments and fail closed to the
+    /// deterministic floor when they are absent or unqualified.
     #[arg(long, value_enum, default_value_t = ChatMode::Single)]
     pub mode: ChatMode,
     /// Continue a specific durable session instead of the CLI's current one.
@@ -1327,6 +1330,26 @@ mod tests {
             panic!("exact verification did not parse")
         };
         assert_eq!(args.model_ids, ["deepseek-v4-flash", "bge-m3"]);
+    }
+
+    #[test]
+    fn chat_accepts_the_opt_in_contribution_mode() {
+        let parsed = Cli::try_parse_from([
+            "contextdesk",
+            "chat",
+            "--mode",
+            "contributions",
+            "why did the service fail?",
+        ])
+        .unwrap();
+        let Command::Chat(args) = parsed.command else {
+            panic!("chat command did not parse");
+        };
+        assert_eq!(args.mode, ChatMode::Contributions);
+        assert_eq!(
+            args.mode.to_core(),
+            cd_core::multi_model::MultiModelMode::Contributions
+        );
     }
 
     /// The implicit-chat normalizer routes any first token it does not

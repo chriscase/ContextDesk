@@ -1,12 +1,10 @@
 /**
- * Multi-model review mode toggle. On/off control for the reviewer pipeline.
+ * Multi-model investigation mode selector. It keeps the established
+ * single-model default while exposing the opt-in reviewer and contribution
+ * routes through the same host command.
  *
- * Turning it on sets the configured default mode to `review`; corpus-linked
- * investigation turns then run investigator → reviewer → synthesis, degrading
- * to single-model (with a reported reason) whenever the reviewer is
- * unconfigured, unqualified, remote-without-acknowledgment, over budget, or
- * the turn is not eligible. The reviewer references a provider profile id;
- * credentials never leave the Rust host.
+ * The reviewer and contribution routes degrade honestly when their configured
+ * roles are unavailable. Provider profiles and credentials stay host-owned.
  */
 import { useEffect, useState } from "react";
 import {
@@ -36,13 +34,16 @@ export function MultiModelReviewToggle() {
 
   if (!settings) return null;
 
-  const enabled = settings.mode === "review";
+  const mode =
+    settings.mode === "review" || settings.mode === "contributions"
+      ? settings.mode
+      : "single";
 
-  async function toggle(next: boolean) {
+  async function setMode(next: "single" | "review" | "contributions") {
     setBusy(true);
     setError(null);
     try {
-      await hostSetMultiModelMode(next ? "review" : "single");
+      await hostSetMultiModelMode(next);
       const fresh = await hostGetMultiModelSettings();
       setSettings(fresh);
     } catch (err) {
@@ -54,16 +55,28 @@ export function MultiModelReviewToggle() {
 
   return (
     <section className="settings-block">
-      <h3 className="settings-block__title">Multi-model review</h3>
-      <label className="settings-toggle">
-        <input
-          type="checkbox"
-          checked={enabled}
+      <h3 className="settings-block__title">Investigation mode</h3>
+      <label>
+        <span className="sr-only">Investigation mode</span>
+        <select
+          value={mode}
           disabled={busy}
-          onChange={(e) => void toggle(e.target.checked)}
-        />
-        <span>Review investigations with a second model</span>
+          onChange={(e) =>
+            void setMode(e.target.value as "single" | "review" | "contributions")
+          }
+        >
+          <option value="single">Single model</option>
+          <option value="review">Single model + reviewer</option>
+          <option value="contributions">Bounded model contributions</option>
+        </select>
       </label>
+      <p className="settings-block__hint">
+        {mode === "contributions"
+          ? "Uses explicitly configured, qualified roles and always keeps the host as final authority."
+          : mode === "review"
+            ? "Adds one qualified reviewer and degrades honestly when unavailable."
+            : "Uses the established single-model path."}
+      </p>
       <p className="settings-block__hint">
         {settings.reviewer_profile_id
           ? `Reviewer: ${settings.reviewer_profile_id}${
@@ -71,7 +84,7 @@ export function MultiModelReviewToggle() {
             }${settings.reviewer_require_qualified ? " · requires qualification" : ""}${
               settings.reviewer_allow_remote ? " · remote allowed" : ""
             }`
-          : "No reviewer configured — review will degrade to single-model until a reviewer profile is set."}
+          : "No reviewer configured — reviewer mode will degrade to single-model until a profile is set."}
       </p>
       {error ? <p className="settings-block__error">{error}</p> : null}
     </section>

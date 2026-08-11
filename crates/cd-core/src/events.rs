@@ -67,6 +67,15 @@ fn multi_model_label(stage: &str, phase: &str) -> String {
         ("comparison", "started") => "Comparing admitted candidates",
         ("comparison", "finished") => "Candidate comparison finished",
         ("admission", "skipped") => "Candidate admission stopped",
+        ("observation_extractor", "started") => "Extracting bounded observations",
+        ("observation_extractor", "finished") => "Observation extraction finished",
+        ("causal_proposer", "started") => "Proposing bounded causal roles",
+        ("causal_proposer", "finished") => "Causal-role proposal finished",
+        ("contradiction_checker", "started") => "Checking candidate contradictions",
+        ("contradiction_checker", "finished") => "Contradiction check finished",
+        ("evidence_gap", "started") => "Checking evidence gaps",
+        ("evidence_gap", "finished") => "Evidence-gap check finished",
+        ("contributions", "summary") => "Contribution reconciliation summary",
         ("summary", _) => "Multi-model review summary",
         (_, "started") => "Starting model stage",
         (_, "finished") => "Model stage finished",
@@ -549,6 +558,19 @@ mod tests {
         assert_eq!(reviewer.category, "multi_model");
         assert_eq!(reviewer.label, "Reviewing candidate findings");
         assert_eq!(reviewer.elapsed_ms, 375);
+
+        let contribution = progress_for_stream_event(
+            &StreamEvent::MultiModelStage {
+                stage: "causal_proposer".into(),
+                phase: "started".into(),
+                status: None,
+                detail: "bounded contribution started".into(),
+                candidate_id: None,
+            },
+            400,
+        )
+        .expect("contribution progress");
+        assert_eq!(contribution.label, "Proposing bounded causal roles");
 
         let unsafe_detail = format!(
             "authorization=Bearer test-token-value {}",

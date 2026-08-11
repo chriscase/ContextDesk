@@ -354,6 +354,11 @@ pub async fn run(
         }
     };
 
+    // Contribution roles use the same secret-free qualification store as the
+    // reviewer path. A missing or malformed store remains an honest
+    // unqualified result; it never triggers a probe or provider call here.
+    let contribution_qualification_store =
+        load_qualification_store(&qualification_store_path(qualification_config_dir)).ok();
     let cancel = Arc::new(AtomicBool::new(false));
     // Scoped so the pinned turn future (and its mutable borrow of `host`)
     // is dropped as soon as `result` is settled — `build_trace_lines` below
@@ -379,6 +384,7 @@ pub async fn run(
                 user_selection: args.user_selection.as_deref(),
                 multi_model_mode: args.mode.to_core(),
                 reviewer_qualified: reviewer_qualification(cfg, qualification_config_dir),
+                contribution_qualification: contribution_qualification_store.as_ref(),
                 contribution_runtime: None,
             },
             Some(cancel.clone()),

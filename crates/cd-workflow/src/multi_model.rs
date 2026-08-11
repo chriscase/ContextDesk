@@ -14,10 +14,16 @@
 
 use std::sync::Arc;
 
+use cd_core::agent::ContributionRuntime;
 use cd_core::agent::MultiModelRuntime;
+use cd_core::capability_qualification::{
+    capability_contract_verdict, CapabilityContract, ContractVerdict, QualificationKey,
+    QualificationStore,
+};
 use cd_core::config::AppConfig;
 use cd_core::multi_model::{
-    DegradationReason, MultiModelBudget, MultiModelMode, MultiModelRoleIds,
+    ContributionBackendSlot, ContributionQualification, ContributionRoutingPlan, DegradationReason,
+    MultiModelBudget, MultiModelMode, MultiModelRoleIds,
 };
 use cd_core::providers::ProviderProfile;
 
@@ -36,6 +42,32 @@ pub struct ResolvedReview {
     pub entry_degradation: Option<DegradationReason>,
     /// What the caller asked for this turn.
     pub configured_mode: MultiModelMode,
+}
+
+/// Workflow-side resolution result for the opt-in contribution route.
+pub struct ResolvedContributions {
+    /// Present only when at least one explicitly configured, qualified role
+    /// backend was built and the linked turn is eligible.
+    pub runtime: Option<ContributionRuntime>,
+    /// Host-authored explanation when configuration requested contributions
+    /// but they could not be prepared. It contains no provider text or secret.
+    pub entry_degradation: Option<&'static str>,
+}
+
+impl ResolvedContributions {
+    fn disabled() -> Self {
+        Self {
+            runtime: None,
+            entry_degradation: None,
+        }
+    }
+
+    fn degraded(detail: &'static str) -> Self {
+        Self {
+            runtime: None,
+            entry_degradation: Some(detail),
+        }
+    }
 }
 
 impl ResolvedReview {
@@ -79,7 +111,7 @@ pub async fn resolve_reviewer_runtime(
     reviewer_qualified: Option<bool>,
     context_char_budget: usize,
 ) -> ResolvedReview {
-    if requested_mode == MultiModelMode::Single {
+    if requested_mode != MultiModelMode::Review {
         return ResolvedReview::single();
     }
 
@@ -158,6 +190,126 @@ pub async fn resolve_reviewer_runtime(
     }
 }
 
+/// Resolve the persistent contribution-role configuration into already
+/// authorized backend slots. This is the only layer that reads config,
+/// qualification evidence, credentials, and provider construction; the core
+/// pipeline remains provider-neutral. Every role is fail-closed unless the
+/// exact prompted-JSON proposal contract is measured for its profile/model.
+pub async fn resolve_contribution_runtime(
+    cfg: &AppConfig,
+    credentials: &TurnProviderCredentialCache<'_>,
+    investigator: &ResolvedTurnInputs,
+    qualification_store: Option<&QualificationStore>,
+    context_char_budget: usize,
+    linked_turn: bool,
+    force_enable: bool,
+) -> ResolvedContributions {
+    let settings = &cfg.contributions;
+    if !settings.enabled && !force_enable {
+        return ResolvedContributions::disabled();
+    }
+    if !linked_turn && !force_enable {
+        return ResolvedContributions::disabled();
+    }
+    if !linked_turn {
+        return ResolvedContributions::degraded(
+            "contribution route requested for an ordinary chat; answered with the single-model path",
+        );
+    }
+    if settings.roles.is_empty() {
+        return ResolvedContributions::degraded(
+            "contribution route is enabled but no role assignments are configured; answered with the deterministic floor",
+        );
+    }
+
+    let mut slots = Vec::new();
+    for assignment in &settings.roles {
+        let Ok(profile) = resolve_provider_profile(cfg, Some(&assignment.profile_id)) else {
+            continue;
+        };
+        if is_remote(&profile) && investigator.profile.local_only {
+            continue;
+        }
+        if is_remote(&profile) && !assignment.allow_remote {
+            continue;
+        }
+        let inputs = resolve_turn_inputs_from_profile_with_credential_cache(
+            credentials,
+            cfg,
+            profile,
+            assignment.model.as_deref(),
+        );
+        let key = QualificationKey::with_provider_kind(
+            &inputs.profile.id,
+            &inputs.profile.base_url,
+            &inputs.profile.chat_model,
+            inputs.profile.kind,
+        );
+        let qualification = qualification_store
+            .and_then(|store| store.get(&key))
+            .map(|report| {
+                matches!(
+                    capability_contract_verdict(Some(report), CapabilityContract::JsonProposal),
+                    ContractVerdict::Qualified
+                )
+            })
+            .map_or(ContributionQualification::Unverified, |qualified| {
+                if qualified {
+                    ContributionQualification::Qualified
+                } else {
+                    ContributionQualification::Unqualified
+                }
+            });
+        if assignment.require_qualified && qualification != ContributionQualification::Qualified {
+            continue;
+        }
+        if qualification != ContributionQualification::Qualified {
+            continue;
+        }
+        let Ok(backend) =
+            cd_core::research::backend_for(&inputs.profile, inputs.api_key.clone()).await
+        else {
+            continue;
+        };
+        slots.push(ContributionBackendSlot {
+            role: assignment.role,
+            identity: cd_core::multi_model::ContributionIdentity {
+                profile_id: inputs.profile.id,
+                model: inputs.profile.chat_model,
+            },
+            qualification,
+            backend: Arc::from(backend),
+        });
+    }
+    if slots.is_empty() {
+        return ResolvedContributions::degraded(
+            "no configured contribution role has current qualified evidence; answered with the deterministic floor",
+        );
+    }
+    let roles = slots.iter().map(|slot| slot.role).collect::<Vec<_>>();
+    let Ok(plan) = ContributionRoutingPlan::new(roles, settings.policy) else {
+        return ResolvedContributions::degraded(
+            "contribution role configuration exceeds its host routing policy; answered with the deterministic floor",
+        );
+    };
+    let budget = MultiModelBudget {
+        max_total_provider_rounds: settings.budget.max_total_provider_rounds,
+        max_semantic_corrections_per_stage: settings.budget.max_semantic_corrections_per_stage,
+        context_char_budget: context_char_budget.min(settings.policy.max_context_chars),
+        deadline_ms: 0,
+        max_context_chars_total: settings.budget.max_context_chars_total,
+    };
+    ResolvedContributions {
+        runtime: Some(ContributionRuntime {
+            slots,
+            plan,
+            budget,
+            neighborhood: settings.neighborhood,
+        }),
+        entry_degradation: None,
+    }
+}
+
 /// A stage-progress `StreamEvent` for an entry-time degradation, so the caller
 /// reports the configured mode, executed mode, and exact reason honestly
 /// before the single-model turn runs.
@@ -168,5 +320,97 @@ pub fn entry_degradation_event(reason: DegradationReason) -> cd_core::events::St
         status: Some("single".into()),
         detail: reason.detail().into(),
         candidate_id: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cd_core::config::ContributionRoleConfig;
+    use cd_core::keychain_store::SecretStore;
+    use cd_core::providers::ProviderConfig;
+
+    struct NoSecrets;
+    impl SecretStore for NoSecrets {
+        fn get(&self, _reference: &str) -> cd_core::error::CoreResult<Option<String>> {
+            Ok(None)
+        }
+
+        fn set(&self, _reference: &str, _value: &str) -> cd_core::error::CoreResult<()> {
+            Ok(())
+        }
+
+        fn delete(&self, _reference: &str) -> cd_core::error::CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_qualification_degrades_before_backend_construction() {
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        cfg.contributions.enabled = true;
+        cfg.contributions.roles = vec![ContributionRoleConfig {
+            role: cd_core::multi_model::ContributionRole::ObservationExtractor,
+            profile_id: cfg.providers.profiles[0].id.clone(),
+            model: Some("cheap-local".into()),
+            require_qualified: true,
+            allow_remote: false,
+        }];
+        let secrets = NoSecrets;
+        let cache = TurnProviderCredentialCache::new(&secrets);
+        let profile = resolve_provider_profile(&cfg, None).unwrap();
+        let resolved =
+            resolve_turn_inputs_from_profile_with_credential_cache(&cache, &cfg, profile, None);
+        let result =
+            resolve_contribution_runtime(&cfg, &cache, &resolved, None, 10_000, true, false).await;
+        assert!(result.runtime.is_none());
+        assert!(result
+            .entry_degradation
+            .is_some_and(|detail| detail.contains("qualified evidence")));
+    }
+
+    #[tokio::test]
+    async fn disabled_contributions_are_a_noop_even_with_roles_configured() {
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        cfg.contributions.roles = vec![ContributionRoleConfig {
+            role: cd_core::multi_model::ContributionRole::CausalProposer,
+            profile_id: cfg.providers.profiles[0].id.clone(),
+            model: None,
+            require_qualified: true,
+            allow_remote: false,
+        }];
+        let secrets = NoSecrets;
+        let cache = TurnProviderCredentialCache::new(&secrets);
+        let profile = resolve_provider_profile(&cfg, None).unwrap();
+        let resolved =
+            resolve_turn_inputs_from_profile_with_credential_cache(&cache, &cfg, profile, None);
+        let result =
+            resolve_contribution_runtime(&cfg, &cache, &resolved, None, 10_000, true, false).await;
+        assert!(result.runtime.is_none());
+        assert!(result.entry_degradation.is_none());
+    }
+
+    #[tokio::test]
+    async fn enabled_contributions_are_a_noop_for_ordinary_chat() {
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        cfg.contributions.enabled = true;
+        let secrets = NoSecrets;
+        let cache = TurnProviderCredentialCache::new(&secrets);
+        let profile = resolve_provider_profile(&cfg, None).unwrap();
+        let resolved =
+            resolve_turn_inputs_from_profile_with_credential_cache(&cache, &cfg, profile, None);
+        let result =
+            resolve_contribution_runtime(&cfg, &cache, &resolved, None, 10_000, false, false).await;
+        assert!(result.runtime.is_none());
+        assert!(result.entry_degradation.is_none());
     }
 }

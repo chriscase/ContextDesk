@@ -1,8 +1,8 @@
 # Multi-model contribution and reconciliation v1
 
-Status: contract, evaluation, and opt-in runtime seam; workflow injection is
-enabled on this feature branch. Persistent contributor configuration and live
-gateway qualification remain follow-up work.
+Status: contract, persistent opt-in configuration, workflow/CLI/desktop
+injection, evaluation, and redacted diagnostics are implemented on this
+feature branch. New live gateway validation remains an external-evidence step.
 
 This design is the next phase after the single-model and reviewer-first release
 work. It makes several inexpensive models useful without making any model a
@@ -100,6 +100,14 @@ This is additive: `MultiModelMode::Single` and the existing reviewer-first path
 remain the default and are not changed unless a host explicitly injects the
 contribution runtime.
 
+Persistent configuration now lives under `AppConfig.contributions`:
+`enabled`, explicit role assignments, a routing policy, per-turn budgets, and a
+bounded neighborhood budget. `--mode contributions` is available in the CLI;
+the desktop host accepts the same per-turn mode and persisted default. The
+workflow resolver reads the shared qualification store and uses the existing
+credential cache/provider builder, so unqualified or unauthorized roles are
+never contacted.
+
 ## Privacy and telemetry
 
 Activity output should expose role, stage, bounded counts, availability,
@@ -160,11 +168,8 @@ two model-specific diagnostic reports for the exact synthetic-run evidence.
 
 ## Follow-up acceptance plan
 
-Next, add persistent contributor-role configuration and workflow-side
-qualification/backend resolution on top of the existing protected-file and
-capability stores. Then expose the already share-safe stage events in the
-diagnostic/CLI/GUI surfaces and run the provider-neutral gateway diagnostic
-against one selected catalog model at a time. Acceptance should compare
+Next, run the provider-neutral gateway diagnostic against one selected catalog
+model at a time with the configured role assignments. Acceptance should compare
 deterministic-only, bounded multi-model, and single/reviewer outputs on the same
 host packet, with no employer gateway call until the owner explicitly authorizes
 it.
