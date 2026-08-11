@@ -279,7 +279,13 @@ pub async fn run_contribution_pipeline(
     let mut stages = Vec::new();
     let mut rounds = 0u32;
     let mut used_chars = 0u64;
-    let max_rounds = inputs.budget.max_total_provider_rounds;
+    // Both layers are host policy. The per-turn budget is the outer ceiling;
+    // the routing plan may impose a smaller route-specific ceiling.
+    let max_rounds = inputs
+        .budget
+        .max_total_provider_rounds
+        .min(u32::from(inputs.plan.policy.max_rounds));
+    let plan_context_limit = inputs.plan.policy.max_context_chars as u64;
 
     for slot in inputs.slots.iter().take(inputs.plan.roles.len()) {
         if !inputs.plan.roles.contains(&slot.role) {
@@ -320,10 +326,12 @@ pub async fn run_contribution_pipeline(
             if rounds >= max_rounds || slot.qualification != ContributionQualification::Qualified {
                 ContributionAvailability::Unavailable
             } else if chars > inputs.budget.context_char_budget as u64
+                || chars > plan_context_limit
                 || inputs
                     .budget
                     .max_context_chars_total
                     .is_some_and(|limit| used_chars.saturating_add(chars) > limit)
+                || used_chars.saturating_add(chars) > plan_context_limit
             {
                 ContributionAvailability::Malformed
             } else if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
@@ -425,6 +433,7 @@ mod tests {
     use crate::investigation_answer::{
         AnswerBindingV1, EvidenceRole, HostEvidenceEntry, HostEvidenceLedger, LogSnapshotRevisionV1,
     };
+    use crate::multi_model::ContributionRoutingPolicy;
     use serde_json::json;
 
     fn packet() -> FastTriagePacketV1 {
@@ -568,6 +577,100 @@ mod tests {
         assert_eq!(outcome.attempts.len(), 2);
         assert_eq!(events.iter().filter(|event| event.started).count(), 2);
         assert!(outcome.content.contains("Root cause established: no"));
+    }
+
+    #[tokio::test]
+    async fn routing_plan_round_and_context_caps_are_execution_hard_limits() {
+        let packet = packet();
+        let observation = slot(
+            ContributionRole::ObservationExtractor,
+            "fast-a",
+            ScriptedBackend::new(vec![response(
+                &packet,
+                ContributionRole::ObservationExtractor,
+                json!([]),
+            )]),
+        );
+        let causal = slot(
+            ContributionRole::CausalProposer,
+            "fast-b",
+            ScriptedBackend::new(vec![response(
+                &packet,
+                ContributionRole::CausalProposer,
+                json!([]),
+            )]),
+        );
+        let round_limited = ContributionRoutingPlan::new(
+            vec![
+                ContributionRole::ObservationExtractor,
+                ContributionRole::CausalProposer,
+            ],
+            ContributionRoutingPolicy {
+                max_rounds: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let slots = vec![observation, causal];
+        let outcome = run_contribution_pipeline(
+            ContributionPipelineInputs {
+                user_text: "why?",
+                packet: &packet,
+                slots: &slots,
+                budget: budget(),
+                deadline_ms: 10_000,
+                started_at: None,
+                cancel: None,
+                plan: &round_limited,
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.telemetry.stages.len(), 2);
+        assert_eq!(outcome.telemetry.stages[0].provider_rounds, 1);
+        assert_eq!(
+            outcome.telemetry.stages[1].outcome,
+            ContributionAvailability::Unavailable
+        );
+
+        let context_limited = ContributionRoutingPlan::new(
+            vec![ContributionRole::ObservationExtractor],
+            ContributionRoutingPolicy {
+                max_context_chars: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let context_slot = slot(
+            ContributionRole::ObservationExtractor,
+            "fast-context",
+            ScriptedBackend::new(vec![response(
+                &packet,
+                ContributionRole::ObservationExtractor,
+                json!([]),
+            )]),
+        );
+        let context_outcome = run_contribution_pipeline(
+            ContributionPipelineInputs {
+                user_text: "why?",
+                packet: &packet,
+                slots: &[context_slot],
+                budget: budget(),
+                deadline_ms: 10_000,
+                started_at: None,
+                cancel: None,
+                plan: &context_limited,
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            context_outcome.telemetry.stages[0].outcome,
+            ContributionAvailability::Malformed
+        );
+        assert_eq!(context_outcome.telemetry.stages[0].provider_rounds, 0);
     }
 
     #[tokio::test]

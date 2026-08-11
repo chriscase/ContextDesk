@@ -85,7 +85,10 @@ second HTTP client exists in this layer.
 2. Run a small, explicitly selected set of qualified roles sequentially in v1
    (the plan retains a parallelism bound for a later scheduler).
 3. Give each role one bounded call, with the existing whole-turn deadline,
-   context budget, cancellation flag, and no hidden retry loop.
+   context budget, cancellation flag, and no hidden retry loop. Runtime
+   enforcement takes the smaller of the per-turn budget and the routing plan's
+   `max_rounds`/`max_context_chars` ceilings; validated policy fields are never
+   advisory.
 4. Validate each response locally. A failed response becomes an explicit
    `Malformed`, `TimedOut`, `Cancelled`, `Failed`, or `Unavailable` attempt.
 5. Reconcile normalized claims and host contradictions. If contested or
