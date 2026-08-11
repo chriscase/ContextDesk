@@ -24,6 +24,26 @@ pub const RERANK_MAX_DOCUMENTS: usize = 100;
 /// Default wall-clock budget for one rerank call.
 pub const RERANK_DEFAULT_TIMEOUT_MS: u64 = 8_000;
 
+/// Explicit wire dialect: the widely-implemented `/rerank` JSON contract
+/// (text-embeddings-inference, Cohere, Jina, Infinity, vLLM).
+pub const RERANK_DIALECT_TEI_V1: &str = "tei_rerank_v1";
+
+/// Explicit wire dialect: the Vercel AI Gateway v4 reranking route.
+pub const RERANK_DIALECT_VERCEL_V4: &str = "vercel_v4_rerank_v1";
+
+/// Explicit wire dialect marker for deterministic offline adapters. Never a
+/// shipped capability; a report that sees this must say the run was scripted.
+pub const RERANK_DIALECT_SYNTHETIC: &str = "synthetic";
+
+/// Every rerank dialect this build can construct, in stable order.
+///
+/// A dialect is always chosen explicitly by configuration. A URL shape, a port
+/// number, or a model name must never select a parser: two providers can share
+/// a hostname pattern and a model label while speaking different envelopes, so
+/// inferring the dialect silently mis-parses a valid response (or, worse,
+/// accepts a mis-parsed permutation as a valid one).
+pub const SUPPORTED_RERANK_DIALECTS: &[&str] = &[RERANK_DIALECT_TEI_V1, RERANK_DIALECT_VERCEL_V4];
+
 /// A provider-neutral reranker: scores `documents` for relevance to `query`,
 /// returning one score per document in input order (higher = more relevant).
 #[async_trait]
@@ -37,6 +57,17 @@ pub trait RerankBackend: Send + Sync {
     /// `"qwen3-reranker-0.6b"`). Synthetic backends MUST say so in the
     /// identity so a scripted run can never be mistaken for a capability.
     fn identity(&self) -> String;
+
+    /// Explicit wire dialect this adapter speaks — one of
+    /// [`SUPPORTED_RERANK_DIALECTS`] or [`RERANK_DIALECT_SYNTHETIC`].
+    ///
+    /// Reported so a diagnostic can state which parser actually ran instead of
+    /// guessing it back from an endpoint or a model name. The default is
+    /// deliberately `"unclassified"`: an adapter that does not declare its
+    /// dialect must never be reported as speaking a known one.
+    fn dialect(&self) -> &'static str {
+        "unclassified"
+    }
 }
 
 /// Truncate a document to the rerank character cap on a char boundary.
@@ -414,6 +445,10 @@ impl RerankBackend for HttpRerankBackend {
     fn identity(&self) -> String {
         self.model.clone()
     }
+
+    fn dialect(&self) -> &'static str {
+        RERANK_DIALECT_TEI_V1
+    }
 }
 
 #[async_trait]
@@ -484,6 +519,10 @@ impl RerankBackend for VercelV4RerankBackend {
     fn identity(&self) -> String {
         self.model.clone()
     }
+
+    fn dialect(&self) -> &'static str {
+        RERANK_DIALECT_VERCEL_V4
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +576,10 @@ impl RerankBackend for ScriptedRerankBackend {
 
     fn identity(&self) -> String {
         "scripted-rerank (deterministic synthetic; contract tests only, not a capability)".into()
+    }
+
+    fn dialect(&self) -> &'static str {
+        RERANK_DIALECT_SYNTHETIC
     }
 }
 

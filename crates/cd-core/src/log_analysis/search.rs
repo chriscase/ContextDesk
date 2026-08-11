@@ -272,15 +272,21 @@ pub fn search_logs_with_excluded_templates_and_rerank(
 ) -> CoreResult<Vec<SearchHit>> {
     let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
     // A configured model does not make a keyword-only corpus semantic. Require
-    // an explicit semantic request plus an exact stored/query model binding and
-    // one measured non-zero dimension count. Query-vector dimensions are
-    // checked again below before cosine search.
+    // an explicit semantic request, one measured non-zero dimension count, an
+    // exact stored/query model binding, AND a bound typed embedding space
+    // (legacy corpora and any drifting identity field fail closed). Query-vector
+    // dimensions are checked again below before cosine search.
     let embedding_status = corpus.embedding_status();
     let embed = embed.filter(|backend| {
         q.semantic
             && embedding_status.embedded_templates > 0
             && embedding_status.embedded_dims.is_some_and(|dims| dims > 0)
             && embedding_status.model_id.as_deref() == Some(backend.identity().as_str())
+            && crate::embedding_space::evaluate_space_binding(
+                embedding_status.space.as_ref(),
+                &backend.space(),
+            )
+            .is_bound()
     });
     let k = q.k.clamp(1, 100);
     // Structured filter → allowed template ids + exemplar messages

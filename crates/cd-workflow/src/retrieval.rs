@@ -30,7 +30,10 @@ use cd_core::log_analysis::{
 };
 use cd_core::memory::embed_blocking;
 use cd_core::process_progress::CancelFlag;
-use cd_core::rerank::{rerank_blocking, validate_rerank_scores, HttpRerankBackend, RerankBackend};
+use cd_core::rerank::{
+    rerank_blocking, validate_rerank_scores, HttpRerankBackend, RerankBackend,
+    RERANK_DIALECT_VERCEL_V4, SUPPORTED_RERANK_DIALECTS,
+};
 
 /// Wire schema identity for [`RetrievalStatusReport`].
 pub const RETRIEVAL_STATUS_SCHEMA_ID: &str = "contextdesk.retrieval_status.v1";
@@ -220,22 +223,37 @@ pub fn build_embedding_backend(
     }
 }
 
-/// Build the configured rerank backend through an explicit wire dialect. A
-/// URL or model name never changes the parser.
+/// Build the configured rerank backend through an **explicit** wire dialect.
+///
+/// The dialect is mandatory. A URL shape, a port, or a model name never
+/// selects the parser: two providers can share a hostname pattern and a model
+/// label while speaking different envelopes, so inferring the dialect either
+/// mis-parses a valid response or — worse — accepts a mis-parsed permutation
+/// as if it were valid. An omitted dialect fails closed with the supported
+/// list, before any credential is read or any endpoint is contacted.
 pub fn build_rerank_backend(
     role: &RetrievalRoleModel,
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn RerankBackend>> {
     assert_retrieval_egress_allowed(role)?;
-    if let Some(dialect) = role.dialect.as_deref() {
-        if dialect != "tei_rerank_v1" && dialect != "vercel_v4_rerank_v1" {
+    let dialect = role.dialect.as_deref().map(str::trim).unwrap_or("");
+    let dialect = match dialect {
+        "" => {
             return Err(cd_core::error::CoreError::Config(format!(
-                "unsupported reranker dialect '{dialect}'; use tei_rerank_v1 or vercel_v4_rerank_v1"
+                "reranker dialect must be set explicitly; use one of {}",
+                SUPPORTED_RERANK_DIALECTS.join(", ")
             )));
         }
-    }
+        value if SUPPORTED_RERANK_DIALECTS.contains(&value) => value,
+        unsupported => {
+            return Err(cd_core::error::CoreError::Config(format!(
+                "unsupported reranker dialect '{unsupported}'; use {}",
+                SUPPORTED_RERANK_DIALECTS.join(" or ")
+            )));
+        }
+    };
     let bearer = bearer_for(role, secrets);
-    if role.dialect.as_deref() == Some("vercel_v4_rerank_v1") {
+    if dialect == RERANK_DIALECT_VERCEL_V4 {
         if !cd_core::discovery::is_vercel_ai_gateway(&role.base_url) {
             return Err(cd_core::error::CoreError::Config(
                 "vercel_v4_rerank_v1 requires the ai-gateway.vercel.sh host".into(),

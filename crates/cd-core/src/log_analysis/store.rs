@@ -244,6 +244,15 @@ pub struct CorpusEmbeddingStatus {
     /// Stable non-sensitive policy/result reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Typed embedding-space identity the stored vectors were produced under.
+    ///
+    /// `None` means the corpus predates typed binding (written by an older
+    /// build). Comparability cannot be proven for such a corpus, so semantic
+    /// retrieval fails closed until an explicit re-analysis rebinds it — see
+    /// [`crate::embedding_space::evaluate_space_binding`]. Never carries an
+    /// endpoint URL, a credential, or corpus text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<crate::embedding_space::EmbeddingSpaceIdentity>,
     /// Unix time of the last completed embedding decision.
     #[serde(default)]
     pub updated_at: i64,
@@ -258,6 +267,7 @@ impl Default for CorpusEmbeddingStatus {
             embedded_templates: 0,
             total_templates: 0,
             reason: Some("legacy_or_not_embedded".into()),
+            space: None,
             updated_at: 0,
         }
     }
@@ -786,6 +796,18 @@ impl LogCorpus {
         status.total_templates = total;
         status.embedded_templates = embedded;
         status.embedded_dims = measured_dims;
+        // The typed space describes vectors that actually exist. Re-anchor its
+        // dimensions on the measured value so a persisted claim can never
+        // outlive the vectors it described, and drop it entirely when no
+        // vectors remain.
+        status.space = if embedded == 0 {
+            None
+        } else {
+            status
+                .space
+                .take()
+                .map(|space| space.with_dimensions(measured_dims))
+        };
         let model_bound = status
             .model_id
             .as_deref()
@@ -2538,6 +2560,7 @@ mod tests {
                     embedded_templates: 2,
                     total_templates: 2,
                     reason: Some("claimed-complete".into()),
+                    space: None,
                     updated_at: 1,
                 },
             )

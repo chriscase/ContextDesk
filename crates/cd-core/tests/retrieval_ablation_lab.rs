@@ -1743,7 +1743,10 @@ fn fixed_ablation_options(lane: FixedAblationLane, query: &RaQuery) -> HybridOpt
             ..Default::default()
         },
         k: RA_K as usize,
-        rerank_top_n: RA_K as usize,
+        // The frozen ablation holds the candidate budget fixed: the rerank pool
+        // is exactly K, so this suite keeps measuring reordering within a fixed
+        // budget rather than silently gaining recall from a wider pool.
+        rerank_candidate_depth: RA_K as usize,
         ..HybridOptions::default()
     }
 }

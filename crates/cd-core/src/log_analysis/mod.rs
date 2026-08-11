@@ -33,6 +33,7 @@ pub mod operational_metrics;
 pub mod package;
 pub mod parse;
 pub mod query;
+pub mod reanalysis_plan;
 pub mod reanalyze;
 pub mod redact_log;
 pub mod reviewed_format;
@@ -207,6 +208,10 @@ pub use query::{
     MAX_SHARED_TIMELINE_LANES, MAX_SOURCE_CATALOG_CURSOR_BYTES, MAX_SOURCE_CATALOG_PAGE,
     MAX_SOURCE_CATALOG_SEARCH_CHARS, MAX_TIMELINE_BUCKETS, MIN_WALL_TS,
     SHARED_TIMELINE_SEVERITY_SERIES,
+};
+pub use reanalysis_plan::{
+    plan_from_status, plan_reanalysis, ReanalysisLocality, ReanalysisPlan, ReanalysisReason,
+    LOCAL_REANALYSIS_COPY, REANALYSIS_PLAN_SCHEMA_ID, REMOTE_REANALYSIS_COPY,
 };
 pub use reanalyze::{
     reanalyze_corpus_embeddings, reanalyze_corpus_embeddings_quiet, LOCAL_REANALYZE_TEMPLATE_CAP,

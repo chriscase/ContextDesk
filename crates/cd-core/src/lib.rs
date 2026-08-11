@@ -29,6 +29,7 @@ pub mod context_plan;
 pub mod deadline_controls;
 pub mod discovery;
 pub mod embed;
+pub mod embedding_space;
 pub mod error;
 pub mod events;
 pub mod git_source;
