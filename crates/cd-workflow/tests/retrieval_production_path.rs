@@ -124,7 +124,9 @@ async fn configured_roles_use_protected_file_and_real_hybrid_retrieval_seam() {
                 keyword_terms: vec!["database".into()],
                 semantic_query: Some("database connection timeout".into()),
                 k: 10,
-                rerank_top_n: 10,
+                // Pool == K: this test asserts the wire seam, not the effect
+                // of a wider candidate pool.
+                rerank_candidate_depth: 10,
                 ..HybridOptions::default()
             },
             Some(embedding.as_ref()),

@@ -528,6 +528,25 @@ pub fn retrieval_status(
     })
 }
 
+/// Run the production hybrid search with backends the caller already built.
+///
+/// [`hybrid_search`] is this function plus role construction. A caller that
+/// builds the roles once and runs many searches — a benchmark comparing lanes,
+/// for example — uses this directly so a six-lane sweep stays one credential
+/// read per role instead of one per lane. There is deliberately no second
+/// engine here: this is the same [`hybrid_search_events`] the product runs.
+pub fn hybrid_search_with_backends(
+    cache_root: &Path,
+    corpus_id: &str,
+    options: &HybridOptions,
+    embed: Option<&dyn EmbedBackend>,
+    rerank: Option<&dyn RerankBackend>,
+    cancel: Option<&CancelFlag>,
+) -> CoreResult<HybridOutcome> {
+    let corpus = LogCorpus::open(cache_root, corpus_id)?;
+    hybrid_search_events(&corpus, options, embed, rerank, cancel)
+}
+
 /// Shared hybrid-search entry: builds the configured optional backends and
 /// runs [`cd_core::log_analysis::hybrid_search_events`] over an imported
 /// corpus. Backend construction failures degrade to the baseline with a
@@ -540,7 +559,6 @@ pub fn hybrid_search(
     secrets: Option<&dyn SecretStore>,
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<HybridOutcome> {
-    let corpus = LogCorpus::open(cache_root, corpus_id)?;
     let (embed, embedding_build_failed) = match config
         .retrieval
         .embedding
@@ -565,8 +583,9 @@ pub fn hybrid_search(
             Err(_) => (None, true),
         },
     };
-    let mut outcome = hybrid_search_events(
-        &corpus,
+    let mut outcome = hybrid_search_with_backends(
+        cache_root,
+        corpus_id,
         options,
         embed.as_deref(),
         rerank.as_deref(),

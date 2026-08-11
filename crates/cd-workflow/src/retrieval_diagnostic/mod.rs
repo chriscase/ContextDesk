@@ -56,7 +56,7 @@ use cd_core::embedding_space::EmbeddingSpaceIdentity;
 use cd_core::error::{CoreError, CoreResult};
 use cd_core::keychain_store::SecretStore;
 use cd_core::log_analysis::{
-    plan_reanalysis, EventQuery, HybridOptions, LogCorpus, ReanalysisPlan,
+    plan_reanalysis, EventQuery, HybridOptions, LogCorpus, ReanalysisLocality, ReanalysisPlan,
 };
 use cd_core::process_progress::CancelFlag;
 use cd_core::rerank::{rerank_blocking, RerankBackend, RERANK_DEFAULT_TIMEOUT_MS};
@@ -401,7 +401,17 @@ pub fn plan_diagnostic(
         None => None,
         Some(role) => {
             let space = configured_embedding_space(role);
-            plan_reanalysis(cache_root, &request.corpus_id, &space).ok()
+            // Locality comes from the ROLE, not the space: an endpoint
+            // fingerprint is deliberately one-way, so it cannot tell a
+            // loopback endpoint from a remote one.
+            let locality = if role_is_remote(role) {
+                ReanalysisLocality::Remote {
+                    endpoint_fingerprint: space.endpoint_fingerprint.clone(),
+                }
+            } else {
+                ReanalysisLocality::Local
+            };
+            plan_reanalysis(cache_root, &request.corpus_id, &space, locality).ok()
         }
     };
 
@@ -708,7 +718,8 @@ async fn run_lane(
     cache_root: &Path,
     request: &DiagnosticRequest,
     config: &AppConfig,
-    secrets: Option<&dyn SecretStore>,
+    embed: Option<&dyn EmbedBackend>,
+    rerank: Option<&dyn RerankBackend>,
     budgets: &DiagnosticBudgets,
     cancel: Option<&CancelFlag>,
 ) -> LaneReport {
@@ -763,10 +774,10 @@ async fn run_lane(
         }
         let outcome = if lane.uses_rrf() {
             run_rrf_query(
-                cache_root, request, config, secrets, budgets, query, lane, cancel,
+                cache_root, request, embed, rerank, budgets, query, lane, cancel,
             )
         } else {
-            run_tool_host_query(host, budgets, query, lane).await
+            run_tool_host_query(host, &request.corpus_id, budgets, query, lane).await
         };
         match outcome {
             Err(error) => {
@@ -877,11 +888,15 @@ struct LaneQueryOutcome {
 /// Execute one query through the REAL `search_logs` tool surface.
 async fn run_tool_host_query(
     host: &mut ToolHost,
+    corpus_id: &str,
     budgets: &DiagnosticBudgets,
     query: &DiagnosticQuery,
     lane: DiagnosticLane,
 ) -> CoreResult<LaneQueryOutcome> {
     let mut arguments = serde_json::json!({
+        // Scope the tool explicitly to the corpus under test: a diagnostic
+        // must never inherit whatever corpus the host happened to have open.
+        "corpus": corpus_id,
         "query": query.question,
         "semantic": lane.uses_embedder(),
         "k": budgets.candidate_k,
@@ -941,22 +956,18 @@ async fn run_tool_host_query(
 fn run_rrf_query(
     cache_root: &Path,
     request: &DiagnosticRequest,
-    config: &AppConfig,
-    secrets: Option<&dyn SecretStore>,
+    embed: Option<&dyn EmbedBackend>,
+    rerank: Option<&dyn RerankBackend>,
     budgets: &DiagnosticBudgets,
     query: &DiagnosticQuery,
     lane: DiagnosticLane,
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<LaneQueryOutcome> {
-    // A lane without the rerank role must not silently inherit the configured
-    // one, so the reranker is stripped from the config this lane sees.
-    let mut lane_config = config.clone();
-    if !lane.uses_reranker() {
-        lane_config.retrieval.reranker = None;
-    }
-    if !lane.uses_embedder() {
-        lane_config.retrieval.embedding = None;
-    }
+    // A lane without a role must not silently inherit the configured one, so
+    // the backend this lane is not entitled to is dropped here rather than
+    // being passed and hopefully ignored.
+    let embed = lane.uses_embedder().then_some(embed).flatten();
+    let rerank = lane.uses_reranker().then_some(rerank).flatten();
     let options = HybridOptions {
         keyword_terms: query.keyword_terms.clone(),
         semantic_query: lane.uses_embedder().then(|| query.question.clone()),
@@ -968,12 +979,12 @@ fn run_rrf_query(
         rerank_candidate_depth: budgets.rerank_candidate_depth as usize,
         rerank_timeout_ms: budgets.rerank_timeout_ms,
     };
-    let outcome = crate::retrieval::hybrid_search(
+    let outcome = crate::retrieval::hybrid_search_with_backends(
         cache_root,
         &request.corpus_id,
         &options,
-        &lane_config,
-        secrets,
+        embed,
+        rerank,
         cancel,
     )?;
     let packed_chars = outcome
@@ -1140,7 +1151,15 @@ pub async fn run_diagnostic(
         });
         lanes.push(
             run_lane(
-                *lane, &mut host, cache_root, request, config, secrets, &budgets, cancel,
+                *lane,
+                &mut host,
+                cache_root,
+                request,
+                config,
+                embed.as_deref(),
+                rerank.as_deref(),
+                &budgets,
+                cancel,
             )
             .await,
         );

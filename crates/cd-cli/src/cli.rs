@@ -158,6 +158,11 @@ pub enum Command {
     /// configured state, optional live health probe, and the retrieval mode
     /// configuration would select (no provider / LLM).
     RetrievalStatus(RetrievalStatusArgs),
+    /// Compare executable retrieval lanes over one imported corpus under fixed
+    /// budgets, using the production search path. Dry run by default; measures
+    /// retrieval only and never claims answer usefulness or readiness.
+    #[command(visible_alias = "retrieval-diagnostic")]
+    RetrievalDiagnose(RetrievalDiagnoseArgs),
     /// Discover gateway models and show or verify role-specific compatibility.
     /// Bare `models` is entirely offline and never reads credentials.
     Models(ModelsArgs),
@@ -382,6 +387,59 @@ pub struct RetrievalStatusArgs {
     /// `contextdesk corpus use`).
     #[arg(long)]
     pub corpus: bool,
+}
+
+/// Arguments for the bounded retrieval-quality diagnostic.
+#[derive(Debug, clap::Args)]
+pub struct RetrievalDiagnoseArgs {
+    /// Host-owned query file (JSON) with questions and the truth used to score
+    /// them. Truth never leaves this machine and is never sent to a provider.
+    #[arg(long)]
+    pub queries: PathBuf,
+    /// Corpus id to measure. Defaults to the corpus selected by the most
+    /// recent import or `contextdesk corpus use`.
+    #[arg(long)]
+    pub corpus_id: Option<String>,
+    /// Lane to run; repeatable. Defaults to all six.
+    #[arg(long, value_name = "LANE")]
+    pub lane: Vec<String>,
+    /// Final candidate budget every lane returns (held identical across lanes).
+    #[arg(long, default_value_t = 10)]
+    pub k: u32,
+    /// Rerank candidate pool depth, clamped to at least `--k`. A pool wider
+    /// than K is what lets the rerank stage promote a near miss.
+    #[arg(long, default_value_t = 40)]
+    pub rerank_candidate_depth: u32,
+    /// Packed-context character budget, measured per lane and held identical.
+    #[arg(long, default_value_t = 8_000)]
+    pub packed_context_chars: u32,
+    /// Wall-clock budget for one rerank request.
+    #[arg(long, default_value_t = 8_000)]
+    pub rerank_timeout_ms: u64,
+    /// Execute the lanes. Without this the command prints the plan and stops
+    /// without constructing a backend, reading a credential, or using network.
+    #[arg(long)]
+    pub confirm: bool,
+    /// Acknowledge that a configured remote role means query and candidate
+    /// text leave this machine. Required before any remote lane runs.
+    #[arg(long)]
+    pub acknowledge_egress: bool,
+    /// Include raw local material in the report. Requires
+    /// `--raw-output-is-not-share-safe` as a second, explicit consent.
+    #[arg(long)]
+    pub include_raw: bool,
+    /// Second consent for `--include-raw`. Raw output is local-only.
+    #[arg(long)]
+    pub raw_output_is_not_share_safe: bool,
+    /// Write a machine report to this path (only the basename is printed).
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    /// File export shape when `--output` is set: `json` or `jsonl`.
+    #[arg(long = "report-format", value_name = "json|jsonl")]
+    pub report_format: Option<String>,
+    /// Replace an existing `--output` file.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, clap::Args)]

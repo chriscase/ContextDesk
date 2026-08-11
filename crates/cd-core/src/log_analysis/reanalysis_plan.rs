@@ -66,9 +66,14 @@ pub enum ReanalysisLocality {
 }
 
 impl ReanalysisLocality {
-    /// Classify the target space. Anything that is not the in-process marker
-    /// is treated as remote: a private or corporate address is still another
-    /// machine, and guessing otherwise would create silent egress.
+    /// Classify a space that carries the in-process marker.
+    ///
+    /// This can only ever recognise an **in-process** backend. An endpoint
+    /// fingerprint is a one-way hash, so it cannot distinguish a loopback
+    /// endpoint from a remote one: everything else is therefore classified
+    /// remote, which is the safe direction (it asks for consent it may not
+    /// have needed) but is often too strict. A caller that holds the actual
+    /// URL should build the variant directly instead of using this.
     pub fn for_space(space: &EmbeddingSpaceIdentity) -> Self {
         if space.endpoint_fingerprint == LOCAL_ENDPOINT_FINGERPRINT {
             Self::Local
@@ -192,19 +197,24 @@ pub fn plan_reanalysis(
     cache_root: &Path,
     corpus_id: &str,
     target_space: &EmbeddingSpaceIdentity,
+    locality: ReanalysisLocality,
 ) -> CoreResult<ReanalysisPlan> {
     let corpus = LogCorpus::open(cache_root, corpus_id)?;
     let status = corpus.embedding_status();
-    Ok(plan_from_status(corpus_id, &status, target_space))
+    Ok(plan_from_status(corpus_id, &status, target_space, locality))
 }
 
 /// Build a plan from an already-loaded corpus status (same rules, no I/O).
+///
+/// `locality` is supplied by the caller because it is the only party that can
+/// know it: the space carries a one-way endpoint fingerprint, which cannot be
+/// resolved back to "is this machine or another one".
 pub fn plan_from_status(
     corpus_id: &str,
     status: &CorpusEmbeddingStatus,
     target_space: &EmbeddingSpaceIdentity,
+    locality: ReanalysisLocality,
 ) -> ReanalysisPlan {
-    let locality = ReanalysisLocality::for_space(target_space);
     let reason = if status.embedded_templates == 0 {
         ReanalysisReason::NotEmbedded
     } else {
@@ -266,7 +276,12 @@ mod tests {
 
     #[test]
     fn a_local_plan_needs_no_consent_and_says_content_stays() {
-        let plan = plan_from_status("corpus-a", &bound_status(remote_space()), &local_space());
+        let plan = plan_from_status(
+            "corpus-a",
+            &bound_status(remote_space()),
+            &local_space(),
+            ReanalysisLocality::Local,
+        );
         assert_eq!(plan.locality, ReanalysisLocality::Local);
         assert!(!plan.locality.leaves_machine());
         assert!(!plan.requires_egress_consent);
@@ -278,7 +293,12 @@ mod tests {
 
     #[test]
     fn a_remote_plan_fails_closed_without_explicit_consent() {
-        let plan = plan_from_status("corpus-a", &bound_status(local_space()), &remote_space());
+        let plan = plan_from_status(
+            "corpus-a",
+            &bound_status(local_space()),
+            &remote_space(),
+            ReanalysisLocality::for_space(&remote_space()),
+        );
         assert!(matches!(plan.locality, ReanalysisLocality::Remote { .. }));
         assert!(plan.requires_egress_consent);
         assert_eq!(plan.locality_copy(), REMOTE_REANALYSIS_COPY);
@@ -308,18 +328,24 @@ mod tests {
         unembedded.embedded_templates = 0;
         unembedded.space = None;
         assert_eq!(
-            plan_from_status("c", &unembedded, &target).reason,
+            plan_from_status("c", &unembedded, &target, ReanalysisLocality::Local).reason,
             ReanalysisReason::NotEmbedded
         );
 
         let mut legacy = bound_status(local_space());
         legacy.space = None;
         assert_eq!(
-            plan_from_status("c", &legacy, &target).reason,
+            plan_from_status("c", &legacy, &target, ReanalysisLocality::Local).reason,
             ReanalysisReason::LegacyUnbound
         );
 
-        let drifted = plan_from_status("c", &bound_status(remote_space()), &target).reason;
+        let drifted = plan_from_status(
+            "c",
+            &bound_status(remote_space()),
+            &target,
+            ReanalysisLocality::Local,
+        )
+        .reason;
         match &drifted {
             ReanalysisReason::SpaceDrift { fields } => {
                 assert!(fields.iter().any(|field| field == "model"));
@@ -329,14 +355,25 @@ mod tests {
         }
         assert!(drifted.requires_rebind());
 
-        let bound = plan_from_status("c", &bound_status(local_space()), &target).reason;
+        let bound = plan_from_status(
+            "c",
+            &bound_status(local_space()),
+            &target,
+            ReanalysisLocality::Local,
+        )
+        .reason;
         assert_eq!(bound, ReanalysisReason::AlreadyBound);
         assert!(!bound.requires_rebind());
     }
 
     #[test]
     fn a_plan_is_share_safe_and_bounded() {
-        let plan = plan_from_status("corpus-a", &bound_status(local_space()), &remote_space());
+        let plan = plan_from_status(
+            "corpus-a",
+            &bound_status(local_space()),
+            &remote_space(),
+            ReanalysisLocality::for_space(&remote_space()),
+        );
         let json = serde_json::to_string(&plan).expect("serializes");
         assert!(
             !json.contains("http"),
@@ -351,7 +388,8 @@ mod tests {
         // can never promise more templates than re-analysis would embed.
         let mut huge = bound_status(local_space());
         huge.total_templates = u64::from(u32::MAX);
-        let bounded = plan_from_status("corpus-a", &huge, &local_space());
+        let bounded =
+            plan_from_status("corpus-a", &huge, &local_space(), ReanalysisLocality::Local);
         assert_eq!(
             bounded.templates_to_embed,
             super::super::reanalyze::LOCAL_REANALYZE_TEMPLATE_CAP as u64
