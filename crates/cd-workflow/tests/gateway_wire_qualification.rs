@@ -132,3 +132,68 @@ fn qualification_native_tool_call_passes_on_a_real_tool_call() {
         CapabilityStatus::Pass
     );
 }
+
+/// Structured-output probe must emit `response_format: json_object` on the
+/// wire (chat contract v2). A prose-only gateway reply must not pass merely
+/// because the model name suggests JSON mode.
+#[test]
+fn qualification_structured_output_emits_response_format_on_wire() {
+    let rt = tokio::runtime::Runtime::new().expect("gateway runtime");
+    let gateway = rt.block_on(MockGateway::start_ordered(vec![Step::respond(
+        Response::json_ok(&json!({
+            "id": "chatcmpl-json",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"qualify\":\"ok\",\"v\":1}"
+                }
+            }]
+        })),
+    )]));
+    let mut transport = LiveQualificationTransport::new(
+        LiveBackendKind::OpenAiCompatible,
+        format!("{}/v1", gateway.base_url()),
+        None,
+        true,
+    );
+    let gate = ProfileCapabilityGate {
+        tools_enabled: false,
+        stream_enabled: false,
+        embeddings_enabled: false,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let report = run_qualification(
+        QualificationKey::new("qual-profile", gateway.base_url(), "matrix-model"),
+        gate,
+        &mut transport,
+        &cancel,
+    );
+    assert_eq!(
+        report.status_of(CapabilityKind::StructuredOutput),
+        CapabilityStatus::Pass
+    );
+    let structured = report
+        .checks
+        .iter()
+        .find(|c| c.kind == CapabilityKind::StructuredOutput)
+        .expect("structured check");
+    assert_eq!(
+        structured.request_mode.as_deref(),
+        Some("json_object"),
+        "evidence must record the measured request mode"
+    );
+
+    // At least one request must have carried response_format (the structured probe).
+    let bodies: Vec<serde_json::Value> = gateway
+        .requests()
+        .iter()
+        .filter_map(|r| serde_json::from_slice(&r.body).ok())
+        .collect();
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b["response_format"]["type"] == "json_object"),
+        "LiveQualificationTransport must emit response_format for structured probe; bodies={bodies:?}"
+    );
+}
