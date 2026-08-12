@@ -36,11 +36,14 @@ pub mod contribution_pipeline;
 /// Provider-neutral contribution proposals and deterministic reconciliation.
 pub mod contributions;
 pub mod pipeline;
+/// Versioned, provider-neutral triage policy and pure preflight compiler.
+pub mod triage_policy;
 
 pub use contracts::*;
 pub use contribution_pipeline::*;
 pub use contributions::*;
 pub use pipeline::*;
+pub use triage_policy::*;
 
 use serde::{Deserialize, Serialize};
 
