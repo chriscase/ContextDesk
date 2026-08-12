@@ -6,6 +6,7 @@ import {
   parseCompiledTriagePolicyV2,
   parseTriageCancellationV1,
   parseTriageReplayV1,
+  parseTriageRunEventV2,
   parseTriageRequestV2,
 } from "./triageSdkV2";
 
@@ -24,6 +25,81 @@ describe("Rust-generated triage SDK v2 contracts", () => {
     expect(parseTriageReplayV1(load("replay.cancelled-partial.json")).events).toHaveLength(5);
     expect(parseCompiledTriagePolicyV2(load("policy-preflight.standard.json")).slots).toHaveLength(1);
     expect(parseTriageCancellationV1(load("cancellation.json")).run_id).toBe("run:golden:01");
+  });
+
+  it("accepts the canonical enhanced phase graph and bounded correction", () => {
+    const replay = structuredClone(load("replay.partial.json")) as {
+      events: Array<Record<string, any>>;
+    };
+    const contributor = replay.events[2].event.attempt;
+    const attempt = (slot: string, role: Record<string, string> | string) => {
+      const copy = structuredClone(contributor) as Record<string, unknown>;
+      delete copy.model;
+      return {
+        ...copy,
+        attempt_id: `attempt:${slot}`,
+        role_slot_id: `slot:${slot}`,
+        role,
+        status: "abstained",
+        reason_codes: ["not_required"],
+        terminal_disposition: "abstained",
+      };
+    };
+    replay.events[3].event = {
+      kind: "preliminary_reconciliation",
+      summary: replay.events[3].event.summary,
+    };
+    const completed = replay.events.pop()!;
+    replay.events.pop(); // replace the legacy validation with the canonical late validation
+    replay.events.push(
+      {
+        schema_id: "contextdesk.triage.run_event.v2",
+        run_id: "run:golden:01",
+        sequence: 4,
+        privacy: "owner_only",
+        event: { kind: "role_attempt", attempt: attempt("reviewer", "reviewer") },
+      },
+      {
+        schema_id: "contextdesk.triage.run_event.v2",
+        run_id: "run:golden:01",
+        sequence: 5,
+        privacy: "owner_only",
+        event: { kind: "final_reconciliation", summary: replay.events[3].event.summary },
+      },
+      {
+        schema_id: "contextdesk.triage.run_event.v2",
+        run_id: "run:golden:01",
+        sequence: 6,
+        privacy: "owner_only",
+        event: { kind: "role_attempt", attempt: attempt("finalizer", "finalizer") },
+      },
+      {
+        schema_id: "contextdesk.triage.run_event.v2",
+        run_id: "run:golden:01",
+        sequence: 7,
+        privacy: "owner_only",
+        event: { kind: "validation", passed: false, reason_codes: ["partial"] },
+      },
+      {
+        schema_id: "contextdesk.triage.run_event.v2",
+        run_id: "run:golden:01",
+        sequence: 8,
+        privacy: "owner_only",
+        event: { kind: "correction", applied: false, reason_codes: ["not_admitted"] },
+      },
+      completed,
+    );
+    replay.events.forEach((event, sequence) => {
+      event.sequence = sequence;
+    });
+    replay.events.forEach((event, index) => {
+      try {
+        parseTriageRunEventV2(event);
+      } catch (error) {
+        throw new Error(`synthetic event ${index}: ${String(error)}`);
+      }
+    });
+    expect(parseTriageReplayV1(replay).events).toHaveLength(10);
   });
 
   it.each([
