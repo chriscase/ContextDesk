@@ -329,3 +329,101 @@ fn example_is_standard_offline_and_progressive() {
     assert!(text.contains("Output privacy: owner-only"));
     assert!(text.contains("Network: no"));
 }
+
+fn run_policy_in_isolated_dir(policy: &TriagePolicyV2, extra: &[&str]) -> std::process::Output {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let policy_path = temp.path().join("policy.json");
+    std::fs::write(
+        &policy_path,
+        serde_json::to_vec_pretty(policy).expect("policy JSON"),
+    )
+    .expect("write policy");
+    let mut command = cli();
+    command
+        .args(["--json", "--data-dir"])
+        .arg(temp.path())
+        .args(["triage-policy", "run", "--policy"])
+        .arg(&policy_path)
+        .args([
+            "--task",
+            "What problems do you see in these logs?",
+            "--corpus",
+            "no-such-corpus",
+            "--run-id",
+            "run-cli-test-1",
+        ])
+        .args(extra);
+    command.output().expect("run CLI")
+}
+
+#[test]
+fn run_refuses_unresolvable_policy_with_typed_output_and_no_provider_call() {
+    // The isolated data dir has no provider profile matching the policy and
+    // no qualification evidence, so preflight fails closed before any
+    // provider, corpus, or network work — a hermetic production-path proof
+    // that the run subcommand wires config, resolver, and compiler together.
+    let policy = enhanced_same_model();
+    let output = run_policy_in_isolated_dir(&policy, &[]);
+    assert_eq!(output.status.code(), Some(8), "refusal exits not_ready");
+    let envelope = envelope(&output);
+    let data = &envelope["data"];
+    assert_eq!(
+        data["schema_id"].as_str(),
+        Some("contextdesk.cli.triage_policy_run.v1")
+    );
+    assert_eq!(data["accepted"].as_bool(), Some(false));
+    assert_eq!(data["terminal"].as_str(), Some("refused"));
+    assert_eq!(data["privacy"].as_str(), Some("owner_only"));
+    assert_eq!(
+        data["refusal"]["category"].as_str(),
+        Some("policy_preflight_rejected")
+    );
+    let slots = data["slots"].as_array().expect("complete dispositions");
+    assert_eq!(slots.len(), 3, "every configured slot stays visible");
+    let rendered = String::from_utf8(output.stdout).expect("utf8");
+    for forbidden in ["api_key", "authorization", "provider_body"] {
+        assert!(
+            !rendered.to_ascii_lowercase().contains(forbidden),
+            "owner-only refusal output leaked {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn run_standard_policy_is_refused_toward_the_established_path() {
+    // Standard remains on the established single-model chat route. In an
+    // isolated dir the refusal is the compile-time preflight rejection for
+    // the unresolvable model — never a silent run or provider substitution.
+    let policy = standard(false);
+    let output = run_policy_in_isolated_dir(&policy, &[]);
+    assert_eq!(output.status.code(), Some(8));
+    let envelope = envelope(&output);
+    assert_eq!(envelope["data"]["accepted"].as_bool(), Some(false));
+    assert_eq!(envelope["data"]["terminal"].as_str(), Some("refused"));
+}
+
+#[test]
+fn run_without_corpus_or_state_is_a_user_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let policy_path = temp.path().join("policy.json");
+    std::fs::write(
+        &policy_path,
+        serde_json::to_vec_pretty(&enhanced_same_model()).expect("policy JSON"),
+    )
+    .expect("write policy");
+    let output = cli()
+        .args(["--json", "--data-dir"])
+        .arg(temp.path())
+        .args(["triage-policy", "run", "--policy"])
+        .arg(&policy_path)
+        .args(["--task", "why?"])
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    let rendered = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(
+        rendered.contains("no corpus selected"),
+        "operator gets an actionable corpus error: {rendered}"
+    );
+}

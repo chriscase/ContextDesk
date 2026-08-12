@@ -287,6 +287,41 @@ pub enum TriagePolicyAction {
     Compile(TriagePolicyFileArgs),
     /// Print a safe Standard-policy example with placeholder identities.
     Example,
+    /// Run one Enhanced/Advanced contributor policy against a linked corpus
+    /// on the production path, emitting the shared V2 event ledger.
+    Run(TriagePolicyRunArgs),
+}
+
+/// Arguments for one policy-bound production triage run.
+#[derive(Debug, Clone, clap::Args)]
+pub struct TriagePolicyRunArgs {
+    /// JSON file containing one `contextdesk.triage_policy.v2` policy.
+    #[arg(long, value_name = "FILE")]
+    pub policy: PathBuf,
+    /// Investigation task text.
+    #[arg(long, value_name = "TEXT")]
+    pub task: String,
+    /// Corpus to ground the run in. Defaults to the current corpus.
+    #[arg(long, value_name = "CORPUS_ID")]
+    pub corpus: Option<String>,
+    /// Stable run identity. A fresh UUID is minted when omitted.
+    #[arg(long, value_name = "ID")]
+    pub run_id: Option<String>,
+    /// Per-run whole-turn deadline override in milliseconds. May narrow but
+    /// never extend a policy-authored deadline.
+    #[arg(long, value_name = "MS")]
+    pub deadline_ms: Option<u64>,
+    /// Per-run provider-call override. May narrow but never extend the
+    /// policy's whole-turn call cap.
+    #[arg(long, value_name = "N")]
+    pub max_provider_calls: Option<u32>,
+    /// Write the owner-only V2 event replay as JSON Lines to this file.
+    #[arg(long, value_name = "FILE")]
+    pub events_out: Option<PathBuf>,
+    /// Write the share-safe projection (events + metadata result) to this
+    /// file as JSON. Fails closed if a share-safe result cannot be produced.
+    #[arg(long, value_name = "FILE")]
+    pub share_safe_out: Option<PathBuf>,
 }
 
 /// Explicit files for provider-free policy validation and compilation.

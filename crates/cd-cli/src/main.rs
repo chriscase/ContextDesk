@@ -165,7 +165,9 @@ async fn run_state_free(cli: &Cli) -> Option<i32> {
                 .map(|_| ExitCategory::NotReady);
             Some(emit_completed(format, color, "eval", result, verdict))
         }
-        Command::TriagePolicy { action } => {
+        // `triage-policy run` needs config, credentials, and a corpus; it
+        // continues into stateful dispatch below.
+        Command::TriagePolicy { action } if !matches!(action, cli::TriagePolicyAction::Run(_)) => {
             let result = commands::triage_policy::run(action);
             let verdict = result
                 .as_ref()
@@ -214,12 +216,36 @@ async fn dispatch(
             }
             emit(format, resolved.color.value, "import", result)
         }
-        Command::Normalize(_)
-        | Command::Normalized { .. }
-        | Command::Eval { .. }
-        | Command::TriagePolicy { .. } => {
+        Command::Normalize(_) | Command::Normalized { .. } | Command::Eval { .. } => {
             unreachable!("state-free commands return before stateful dispatch")
         }
+        Command::TriagePolicy { action } => match action {
+            cli::TriagePolicyAction::Run(args) => {
+                let secrets = adapters::secret_store();
+                let result = commands::triage_policy::run_policy(
+                    args,
+                    &paths.cache_root,
+                    &paths.config_dir,
+                    &secrets,
+                    app_cfg,
+                    cli_state,
+                )
+                .await;
+                let verdict = result
+                    .as_ref()
+                    .ok()
+                    .filter(|output| !output.accepted())
+                    .map(|_| ExitCategory::NotReady);
+                emit_completed(
+                    format,
+                    resolved.color.value,
+                    "triage_policy_run",
+                    result,
+                    verdict,
+                )
+            }
+            _ => unreachable!("offline triage-policy actions return before stateful dispatch"),
+        },
         Command::Corpus { action } => {
             let result = commands::corpus::run(action, &paths.cache_root);
             if matches!(action, cli::CorpusAction::Use { .. }) {
