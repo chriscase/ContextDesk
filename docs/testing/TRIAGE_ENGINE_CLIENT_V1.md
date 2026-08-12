@@ -1,7 +1,8 @@
 # Triage EngineClient Adapter V1
 
-Status: provider-free TypeScript adapter and conformance foundation. It does
-not wire a production Tauri or HTTP command and makes no live-model claim.
+Status: provider-neutral TypeScript adapter with a production Tauri command
+surface and a replay-only HTTP/SSE surface. It makes no live-model or release
+readiness claim.
 
 ## Shared boundary
 
@@ -28,15 +29,19 @@ models transport delivery, abort/cancel selection, and subscription behavior.
   replay rather than inventing success;
 - unsupported adapters report capability false and reject with the typed
   `unsupported` error;
+- the Tauri adapter routes preflight, execution, cancellation, and replay to
+  the Rust-owned host resolver and returns the same ordered event objects;
 - owner-only terminal content and exact model identities cannot be relabelled
   share-safe;
 - the import/time conformance suite remains unchanged and green.
 
-## Residual production wiring
+## Remaining wiring and boundaries
 
-`createTauriEngineClient` intentionally installs an unsupported triage service.
-A later production slice must add thin Tauri commands that call the Rust
-policy compiler and host-neutral workflow, forward the shared event stream,
-bind cancellation, and return the authoritative terminal. It must not port the
-compiler or orchestration into TypeScript. HTTP/SSE support should implement
-the same `TriageService` and run this conformance suite.
+`createTauriEngineClient` now calls the thin Tauri commands
+`triage_preflight_v2`, `triage_run_v2`, and `triage_cancel_v2`. Rust owns policy
+selection, qualification, packet construction, provider calls, validation,
+cancellation, and cleanup; TypeScript only parses DTOs and forwards the one
+ordered event stream. The HTTP/SSE route currently exposes validated replay
+only, so a headless live runner still needs an authenticated stateful host
+before it can claim live execution. Both surfaces must continue to use the
+same `TriageService` contracts and conformance suite.

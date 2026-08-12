@@ -5,9 +5,9 @@
  * deterministic fake transport, which proves the adapter's argument mapping,
  * error-string classification, and event wiring hold the same behavioral
  * contract the mock satisfies. It does NOT execute the Rust commands: host
- * behavior (plan verification, allowlist ingest, zero-importable refusal,
- * cancellation) is proven by the cd-core tests over real filesystems and the
- * src-tauri source-contract tests that pin the command wiring.
+ * behavior (policy selection, qualification, packet construction, provider
+ * execution, cancellation, cleanup) is proven by workflow/native tests and
+ * the src-tauri source-contract tests that pin the command wiring.
  */
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -63,6 +63,9 @@ function createFakeTransport(): TauriTransport {
   model.events.onProcessProgress((progress) => {
     for (const listener of progressListeners) listener({ payload: progress });
   });
+  model.triage.onRunEvent((event) => {
+    for (const listener of triageListeners) listener({ payload: event });
+  });
   const rethrowAsHostString = async <T>(operation: Promise<T>): Promise<T> => {
     try {
       return await operation;
@@ -90,12 +93,22 @@ function createFakeTransport(): TauriTransport {
           ) as Promise<T>;
         case "cancel_log_ingest":
           return rethrowAsHostString(model.import.cancel()) as Promise<T>;
+        case "triage_preflight_v2":
+          return rethrowAsHostString(
+            model.triage.preflight(args!.request as never),
+          ) as Promise<T>;
+        case "triage_run_v2":
+          return rethrowAsHostString(
+            model.triage.run(args!.request as never),
+          ) as Promise<T>;
+        case "triage_cancel_v2":
+          return rethrowAsHostString(
+            model.triage.cancel(args!.request as never),
+          ) as Promise<T>;
         case "triage_replay": {
-          const replay = parseTriageReplayV1(structuredClone(args!.replay));
-          for (const event of replay.events) {
-            for (const listener of triageListeners) listener({ payload: event });
-          }
-          return replay.events.at(-1)! as T;
+          return rethrowAsHostString(
+            model.triage.replay(parseTriageReplayV1(structuredClone(args!.replay))),
+          ) as Promise<T>;
         }
         case "log_load_timezone_state":
           return rethrowAsHostString(
@@ -155,13 +168,13 @@ describe("tauri engine adapter conformance", () => {
 });
 
 describe("tauri engine adapter mapping", () => {
-  it("reports triage unsupported until a production host command is wired", async () => {
+  it("reports the live triage host capability and rejects malformed requests", async () => {
     const transport = createFakeTransport();
     const client = createTauriEngineClient(transport);
-    expect(client.triage.capability.supported).toBe(false);
+    expect(client.triage.capability.supported).toBe(true);
     await expect(client.triage.preflight({} as never)).rejects.toMatchObject({
       name: "EngineError",
-      code: "unsupported",
+      code: "failed",
     });
   });
 
@@ -175,7 +188,7 @@ describe("tauri engine adapter mapping", () => {
     const terminal = await client.triage.replay(replay, {
       onEvent: (event) => delivered.push(event),
     });
-    expect(client.triage.capability).toMatchObject({ supported: false, replay: true });
+    expect(client.triage.capability).toMatchObject({ supported: true, replay: true });
     expect(delivered).toEqual(replay.events);
     expect(subscribed).toEqual(replay.events);
     expect(terminal).toEqual(replay.events.at(-1));
