@@ -1604,7 +1604,11 @@ fn apply_configured_retrieval_roles(
     secrets: &ReferencedSecretStore,
 ) {
     if let Some(role) = cfg.retrieval.embedding.as_ref().filter(|role| role.enabled) {
-        match cd_workflow::retrieval::build_embedding_backend(role, Some(secrets)) {
+        match cd_workflow::retrieval::build_embedding_backend_with_timeout(
+            role,
+            Some(secrets),
+            cfg.router.deadline_ms,
+        ) {
             Ok(backend) => {
                 host.set_embed_backend_with_model(Some(Arc::clone(&backend)), &role.model);
                 // Linked-log search and ingest use the same configured model
@@ -1619,7 +1623,11 @@ fn apply_configured_retrieval_roles(
         }
     }
     if let Some(role) = cfg.retrieval.reranker.as_ref().filter(|role| role.enabled) {
-        match cd_workflow::retrieval::build_rerank_backend(role, Some(secrets)) {
+        match cd_workflow::retrieval::build_rerank_backend_with_timeout(
+            role,
+            Some(secrets),
+            cfg.router.deadline_ms,
+        ) {
             Ok(backend) => {
                 host.set_log_rerank_backend(Some(backend));
                 tracing::info!(model = %role.model, "configured retrieval reranker role attached");
