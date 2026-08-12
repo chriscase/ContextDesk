@@ -1,5 +1,6 @@
 {
   "schema_id": "contextdesk.gateway_cost_ledger_historical_row.v1",
+  "schema_version": 1,
   "historical_row": true,
   "documented_source": "docs/benchmarks/VERCEL_DEEPSEEK_TRIAGE_DIAGNOSTIC_77E520DA.md",
   "run_id": "gwdx-hist-77e520da-run1",

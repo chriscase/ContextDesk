@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::schema::{
-    ComparisonCaveat, LedgerRunRecord, MetricF64, MetricU64, TokenUsage, VerdictDimension,
-    VerdictStatus, AGGREGATE_SCHEMA_ID, AGGREGATE_SCHEMA_VERSION,
+    ComparisonCaveat, LedgerRunRecord, LedgerSourceKind, MetricF64, MetricU64, ObservationBool,
+    TokenUsage, VerdictDimension, VerdictStatus, AGGREGATE_SCHEMA_ID, AGGREGATE_SCHEMA_VERSION,
 };
 
 /// Aggregate summary for one model/gateway grouping key.
@@ -19,6 +19,8 @@ pub struct LedgerAggregateSummary {
     pub group_key: String,
     /// Display label for the group.
     pub display_label: String,
+    /// Provenance cohort; diagnostic observations and historical rows never mix.
+    pub source_kind: LedgerSourceKind,
     /// Number of runs in this aggregate.
     pub run_count: u64,
     /// Total requests across runs (unknown if any run omitted the count).
@@ -35,10 +37,10 @@ pub struct LedgerAggregateSummary {
     pub product_workflow: DimensionCounts,
     /// Answers-useful dimension counts.
     pub answers_useful: DimensionCounts,
-    /// Runs that exceeded their deadline.
-    pub deadline_exceeded_runs: u64,
-    /// Runs that were cancelled.
-    pub cancelled_runs: u64,
+    /// Known true/false and unknown deadline observations.
+    pub deadline_exceeded: BooleanCounts,
+    /// Known true/false and unknown cancellation observations.
+    pub cancelled: BooleanCounts,
     /// Runs whose cleanup failed.
     pub cleanup_failed_runs: u64,
     /// Distinct failure category codes observed.
@@ -57,6 +59,28 @@ pub struct DimensionCounts {
     pub fail: u64,
     /// Unmeasured / inconclusive.
     pub inconclusive: u64,
+}
+
+/// Counts for a boolean observation without collapsing unknown into false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct BooleanCounts {
+    /// Sources that explicitly reported true.
+    pub true_count: u64,
+    /// Sources that explicitly reported false.
+    pub false_count: u64,
+    /// Sources that omitted the observation.
+    pub unknown: u64,
+}
+
+impl BooleanCounts {
+    fn record(&mut self, value: ObservationBool) {
+        match value {
+            ObservationBool::Known(true) => self.true_count += 1,
+            ObservationBool::Known(false) => self.false_count += 1,
+            ObservationBool::Unknown => self.unknown += 1,
+        }
+    }
 }
 
 impl DimensionCounts {
@@ -84,7 +108,7 @@ impl DimensionCounts {
 pub fn aggregate_runs(runs: &[LedgerRunRecord]) -> Vec<LedgerAggregateSummary> {
     let mut groups: Vec<(String, Vec<&LedgerRunRecord>)> = Vec::new();
     for run in runs {
-        let key = run.model.grouping_key();
+        let key = run_group_key(run);
         if let Some((_, bucket)) = groups.iter_mut().find(|(k, _)| *k == key) {
             bucket.push(run);
         } else {
@@ -99,17 +123,33 @@ pub fn aggregate_runs(runs: &[LedgerRunRecord]) -> Vec<LedgerAggregateSummary> {
         .collect()
 }
 
+pub(crate) fn run_group_key(run: &LedgerRunRecord) -> String {
+    let model = match &run.model {
+        super::schema::IdentityLabel::Unknown => format!("unknown-run:{}", run.run_id),
+        _ => run.model.grouping_key(),
+    };
+    let gateway = match &run.gateway {
+        super::schema::IdentityLabel::Unknown => format!("unknown-run:{}", run.run_id),
+        _ => run.gateway.grouping_key(),
+    };
+    format!("{}:{gateway}:{model}", run.source_kind.as_str())
+}
+
 fn summarize_group(group_key: String, runs: &[&LedgerRunRecord]) -> LedgerAggregateSummary {
     let display_label = runs
         .first()
         .map(|r| r.model.display().to_string())
         .unwrap_or_else(|| "unknown".to_string());
+    let source_kind = runs
+        .first()
+        .map(|run| run.source_kind)
+        .unwrap_or(LedgerSourceKind::LedgerRun);
 
     let mut gateway_model = DimensionCounts::default();
     let mut product_workflow = DimensionCounts::default();
     let mut answers_useful = DimensionCounts::default();
-    let mut deadline_exceeded_runs = 0u64;
-    let mut cancelled_runs = 0u64;
+    let mut deadline_exceeded = BooleanCounts::default();
+    let mut cancelled = BooleanCounts::default();
     let mut cleanup_failed_runs = 0u64;
     let mut failure_categories: Vec<String> = Vec::new();
     let mut elapsed_known: Vec<u64> = Vec::new();
@@ -119,12 +159,8 @@ fn summarize_group(group_key: String, runs: &[&LedgerRunRecord]) -> LedgerAggreg
         gateway_model.record(run.verdict(VerdictDimension::GatewayModel));
         product_workflow.record(run.verdict(VerdictDimension::ProductWorkflow));
         answers_useful.record(run.verdict(VerdictDimension::AnswersUseful));
-        if run.deadline_exceeded {
-            deadline_exceeded_runs += 1;
-        }
-        if run.cancelled {
-            cancelled_runs += 1;
-        }
+        deadline_exceeded.record(run.deadline_exceeded);
+        cancelled.record(run.cancelled);
         if matches!(run.cleanup, super::schema::CleanupStatus::Failed) {
             cleanup_failed_runs += 1;
         }
@@ -175,6 +211,7 @@ fn summarize_group(group_key: String, runs: &[&LedgerRunRecord]) -> LedgerAggreg
         schema_version: AGGREGATE_SCHEMA_VERSION,
         group_key,
         display_label,
+        source_kind,
         run_count: runs.len() as u64,
         request_count,
         tokens,
@@ -183,8 +220,8 @@ fn summarize_group(group_key: String, runs: &[&LedgerRunRecord]) -> LedgerAggreg
         gateway_model,
         product_workflow,
         answers_useful,
-        deadline_exceeded_runs,
-        cancelled_runs,
+        deadline_exceeded,
+        cancelled,
         cleanup_failed_runs,
         failure_categories,
         caveats,

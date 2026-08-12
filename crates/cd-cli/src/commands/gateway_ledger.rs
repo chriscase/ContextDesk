@@ -7,9 +7,10 @@
 
 use cd_core::gateway_cost_ledger::{
     build_comparison_report, emit_comparison_json, ingest_path, render_comparison_text,
-    ComparisonReport, LedgerRunRecord,
+    ComparisonReport, LedgerRunRecord, MAX_LEDGER_RUNS,
 };
 use serde::Serialize;
+use std::io::Write;
 
 use crate::cli::GatewayLedgerArgs;
 use crate::envelope::{CliError, CliResult, Render};
@@ -44,15 +45,20 @@ impl Render for GatewayLedgerOutput {
 pub fn run(args: &GatewayLedgerArgs) -> CliResult<GatewayLedgerOutput> {
     if args.inputs.is_empty() {
         return Err(CliError::user(
-            "gateway ledger requires at least one --input path (share-safe report dir, report JSON, or historical row JSON)",
+            "gateway ledger requires at least one --input path (share-safe report+manifest directory, report JSON, or historical row JSON)",
         ));
     }
 
     let mut runs: Vec<LedgerRunRecord> = Vec::new();
-    for input in &args.inputs {
+    for (index, input) in args.inputs.iter().enumerate() {
         let ingested = ingest_path(input)
-            .map_err(|e| CliError::user(format!("failed to ingest {}: {e}", input.display())))?;
+            .map_err(|e| CliError::user(format!("failed to ingest input #{}: {e}", index + 1)))?;
         runs.extend(ingested);
+        if runs.len() > MAX_LEDGER_RUNS {
+            return Err(CliError::user(format!(
+                "ledger input exceeds the {MAX_LEDGER_RUNS}-run limit"
+            )));
+        }
     }
 
     if runs.is_empty() {
@@ -67,12 +73,21 @@ pub fn run(args: &GatewayLedgerArgs) -> CliResult<GatewayLedgerOutput> {
     let json = emit_comparison_json(&comparison).map_err(CliError::user)?;
 
     if let Some(out) = &args.out {
-        if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CliError::user(format!("could not create output directory: {e}")))?;
-        }
-        std::fs::write(out, json)
-            .map_err(|e| CliError::user(format!("could not write {}: {e}", out.display())))?;
+        let parent = out
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CliError::user(format!("could not create output directory: {e}")))?;
+        let mut staged = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| CliError::user(format!("could not stage ledger output: {e}")))?;
+        staged
+            .write_all(json.as_bytes())
+            .and_then(|_| staged.as_file().sync_all())
+            .map_err(|e| CliError::user(format!("could not write ledger output: {e}")))?;
+        staged
+            .persist(out)
+            .map_err(|e| CliError::user(format!("could not publish ledger output: {}", e.error)))?;
     }
 
     Ok(GatewayLedgerOutput {

@@ -5,7 +5,7 @@
 //! over time. It never makes live gateway calls, never invents observations,
 //! and never emits readiness/`verified` badges from aggregates.
 //!
-//! Missing cost or token fields stay [`Unknownable::Unknown`] — never coerced
+//! Missing cost or token fields stay explicitly unknown — never coerced
 //! to zero. [`VerdictStatus::Inconclusive`] stays distinct from pass and fail.
 //!
 //! Independent of the Luna tool-continuation hardening lane: owner-local Luna
@@ -18,7 +18,7 @@ mod ingest;
 mod redact;
 mod schema;
 
-pub use aggregate::{aggregate_runs, LedgerAggregateSummary};
+pub use aggregate::{aggregate_runs, BooleanCounts, LedgerAggregateSummary};
 pub use compare::{
     build_comparison_report, emit_comparison_json, render_comparison_text, ComparisonReport,
     ModelComparisonRow,
@@ -29,10 +29,10 @@ pub use ingest::{
 };
 pub use redact::{assert_share_safe_ledger_json, redact_ledger_run, LedgerRedactionError};
 pub use schema::{
-    CleanupStatus, ComparisonCaveat, FailureCategory, IdentityLabel, LedgerRunRecord, MetricF64,
-    MetricU64, TokenUsage, VerdictDimension, VerdictStatus, AGGREGATE_SCHEMA_ID,
-    AGGREGATE_SCHEMA_VERSION, COMPARISON_SCHEMA_ID, COMPARISON_SCHEMA_VERSION, LEDGER_SCHEMA_ID,
-    LEDGER_SCHEMA_VERSION,
+    CleanupStatus, ComparisonCaveat, FailureCategory, IdentityLabel, LedgerRunRecord,
+    LedgerSourceKind, MetricF64, MetricU64, ObservationBool, TokenUsage, VerdictDimension,
+    VerdictStatus, AGGREGATE_SCHEMA_ID, AGGREGATE_SCHEMA_VERSION, COMPARISON_SCHEMA_ID,
+    COMPARISON_SCHEMA_VERSION, LEDGER_SCHEMA_ID, LEDGER_SCHEMA_VERSION, MAX_LEDGER_RUNS,
 };
 
 #[cfg(test)]

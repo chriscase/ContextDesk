@@ -6,8 +6,10 @@ Hermetic, share-safe inputs for `cd_core::gateway_cost_ledger` and
 These are **not** live observations. Report shapes mirror the production
 `contextdesk.gateway_diagnostic.v1` share-safe artifact. Historical rows are
 transcribed from committed docs under `docs/benchmarks/` (DeepSeek / GPT-OSS
-diagnostic write-ups). Exact model/gateway labels appear only when they already
-exist in committed share-safe catalog/docs data.
+diagnostic write-ups). Diagnostic exact labels in these source-shaped fixtures
+are deliberately ignored by ledger ingest in favor of their pseudonyms.
+Public exact labels survive only in typed historical rows on the explicit
+allowlist.
 
 | Path | Purpose |
 | --- | --- |

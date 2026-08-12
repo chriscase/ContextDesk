@@ -215,7 +215,7 @@ pub enum GatewayAction {
 /// Options for `contextdesk gateway ledger`.
 #[derive(Debug, Clone, clap::Args)]
 pub struct GatewayLedgerArgs {
-    /// Share-safe diagnostic bundle directory (`report.json` + optional
+    /// Share-safe diagnostic bundle directory (`report.json` + verified
     /// `manifest.json`), a report JSON file, or a documented historical row
     /// JSON file. Repeatable.
     #[arg(long = "input", required = true)]

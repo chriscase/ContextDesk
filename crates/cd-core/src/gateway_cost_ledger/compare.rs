@@ -2,11 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::aggregate::{aggregate_runs, DimensionCounts, LedgerAggregateSummary};
+use super::aggregate::{aggregate_runs, run_group_key, DimensionCounts, LedgerAggregateSummary};
 use super::redact::assert_share_safe_ledger_json;
 use super::schema::{
-    ComparisonCaveat, LedgerRunRecord, MetricF64, MetricU64, VerdictStatus, COMPARISON_SCHEMA_ID,
-    COMPARISON_SCHEMA_VERSION,
+    ComparisonCaveat, LedgerRunRecord, LedgerSourceKind, MetricF64, MetricU64, ObservationBool,
+    VerdictStatus, COMPARISON_SCHEMA_ID, COMPARISON_SCHEMA_VERSION,
 };
 
 /// One per-model row inside a comparison report.
@@ -15,6 +15,10 @@ use super::schema::{
 pub struct ModelComparisonRow {
     /// Model grouping / display identity.
     pub model: String,
+    /// Gateway grouping/display identity.
+    pub gateway: String,
+    /// Evidence provenance cohort.
+    pub source_kind: LedgerSourceKind,
     /// Grouping key.
     pub group_key: String,
     /// Runs contributing to this row.
@@ -32,7 +36,7 @@ pub struct RunSummary {
     /// Run id.
     pub run_id: String,
     /// Source kind.
-    pub source_kind: String,
+    pub source_kind: LedgerSourceKind,
     /// Source reference (logical, never private absolute path).
     pub source_ref: String,
     /// Gateway display label.
@@ -44,9 +48,9 @@ pub struct RunSummary {
     /// Elapsed ms.
     pub elapsed_ms: MetricU64,
     /// Deadline exceeded?
-    pub deadline_exceeded: bool,
+    pub deadline_exceeded: ObservationBool,
     /// Cancelled?
-    pub cancelled: bool,
+    pub cancelled: ObservationBool,
     /// Cleanup status label.
     pub cleanup: String,
     /// Gateway/model verdict.
@@ -106,7 +110,7 @@ pub fn build_comparison_report(runs: &[LedgerRunRecord]) -> ComparisonReport {
             let group_key = aggregate.group_key.clone();
             let model_runs: Vec<RunSummary> = runs_sorted
                 .iter()
-                .filter(|r| r.model.grouping_key() == group_key)
+                .filter(|r| run_group_key(r) == group_key)
                 .map(run_summary)
                 .collect();
             let pass_rates = DimensionPassRates {
@@ -114,8 +118,14 @@ pub fn build_comparison_report(runs: &[LedgerRunRecord]) -> ComparisonReport {
                 product_workflow: aggregate.product_workflow.measured_pass_rate(),
                 answers_useful: aggregate.answers_useful.measured_pass_rate(),
             };
+            let gateway = model_runs
+                .first()
+                .map(|run| run.gateway.clone())
+                .unwrap_or_else(|| "unknown".into());
             ModelComparisonRow {
                 model: aggregate.display_label.clone(),
+                gateway,
+                source_kind: aggregate.source_kind,
                 group_key,
                 runs: model_runs,
                 aggregate,
@@ -128,7 +138,7 @@ pub fn build_comparison_report(runs: &[LedgerRunRecord]) -> ComparisonReport {
     let mut confidence_caveats = vec![
         ComparisonCaveat {
             code: "share_safe_sources_only".into(),
-            detail: "comparison uses committed share-safe diagnostic reports/fixtures and documented historical rows only; no live gateway observations were invented".into(),
+            detail: "comparison uses only operator-selected share-safe diagnostic artifacts and documented historical rows; no gateway observation is invented".into(),
         },
         ComparisonCaveat {
             code: "no_readiness_claim_from_aggregate".into(),
@@ -137,6 +147,14 @@ pub fn build_comparison_report(runs: &[LedgerRunRecord]) -> ComparisonReport {
         ComparisonCaveat {
             code: "unknown_cost_is_not_zero".into(),
             detail: "missing cost or token fields remain unknown and are never zero-filled in aggregates".into(),
+        },
+        ComparisonCaveat {
+            code: "provenance_cohorts_separate".into(),
+            detail: "observed diagnostic artifacts and documented historical rows are never combined in one aggregate".into(),
+        },
+        ComparisonCaveat {
+            code: "unknown_boolean_is_not_false".into(),
+            detail: "missing deadline or cancellation observations remain unknown rather than false".into(),
         },
     ];
 
@@ -166,7 +184,7 @@ pub fn build_comparison_report(runs: &[LedgerRunRecord]) -> ComparisonReport {
 fn run_summary(run: &LedgerRunRecord) -> RunSummary {
     RunSummary {
         run_id: run.run_id.clone(),
-        source_kind: run.source_kind.clone(),
+        source_kind: run.source_kind,
         source_ref: run.source_ref.clone(),
         gateway: run.gateway.display().to_string(),
         request_count: run.request_count,
@@ -212,7 +230,12 @@ pub fn render_comparison_text(report: &ComparisonReport) -> String {
     out.push_str("NOTE: aggregates are evidence comparisons only — not readiness claims.\n\n");
 
     for model in &report.models {
-        out.push_str(&format!("model: {}\n", model.model));
+        out.push_str(&format!(
+            "model: {}  gateway: {}  source: {}\n",
+            model.model,
+            model.gateway,
+            model.source_kind.as_str()
+        ));
         out.push_str(&format!(
             "  runs={}  median_elapsed_ms={}  requests={}  cost={}\n",
             model.aggregate.run_count,
@@ -250,7 +273,7 @@ pub fn render_comparison_text(report: &ComparisonReport) -> String {
             out.push_str(&format!(
                 "  - {} [{}] req={} elapsed={} cost={} gw={:?} product={:?} useful={:?} cleanup={} deadline_exceeded={} cancelled={}\n",
                 run.run_id,
-                run.source_kind,
+                run.source_kind.as_str(),
                 metric_u64_label(run.request_count),
                 metric_u64_label(run.elapsed_ms),
                 metric_f64_label(run.reported_cost),
@@ -258,8 +281,8 @@ pub fn render_comparison_text(report: &ComparisonReport) -> String {
                 run.product_workflow,
                 run.answers_useful,
                 run.cleanup,
-                run.deadline_exceeded,
-                run.cancelled,
+                observation_bool_label(run.deadline_exceeded),
+                observation_bool_label(run.cancelled),
             ));
         }
         out.push('\n');
@@ -283,6 +306,14 @@ fn metric_f64_label(value: MetricF64) -> String {
     match value {
         MetricF64::Known(v) => format!("{v}"),
         MetricF64::Unknown => "unknown".into(),
+    }
+}
+
+fn observation_bool_label(value: ObservationBool) -> &'static str {
+    match value {
+        ObservationBool::Known(true) => "true",
+        ObservationBool::Known(false) => "false",
+        ObservationBool::Unknown => "unknown",
     }
 }
 

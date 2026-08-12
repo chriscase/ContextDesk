@@ -5,6 +5,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 #[cfg(test)]
+use super::schema::LedgerSourceKind;
+#[cfg(test)]
 use super::schema::{ComparisonCaveat, FailureCategory, MetricF64, MetricU64, TokenUsage};
 use super::schema::{IdentityLabel, LedgerRunRecord};
 
@@ -26,6 +28,15 @@ const FORBIDDEN_TOP_LEVEL_KEYS: &[&str] = &[
     "choices",
     "private_capture",
     "credentials",
+    "body",
+    "request_body",
+    "response_body",
+    "request_headers",
+    "response_headers",
+    "headers",
+    "endpoint",
+    "url",
+    "path",
 ];
 
 /// Substrings that must never survive in serialized ledger JSON.
@@ -47,6 +58,9 @@ pub enum LedgerRedactionError {
     /// Input contained a forbidden credential or private-capture field.
     #[error("ledger input rejected: forbidden field `{0}`")]
     ForbiddenField(String),
+    /// Input text itself contained a credential, endpoint, or private path.
+    #[error("ledger input rejected: forbidden content `{0}`")]
+    ForbiddenContent(String),
     /// Serialized ledger still contained a forbidden substring after redaction.
     #[error("ledger output is not share-safe: contains `{0}`")]
     NotShareSafe(String),
@@ -70,6 +84,11 @@ fn reject_forbidden_fields_rec(value: &Value, path: &str) -> Result<(), LedgerRe
                     || lower.contains("raw_prompt")
                     || lower.contains("raw_response")
                     || lower.contains("provider_body")
+                    || lower.contains("request_body")
+                    || lower.contains("response_body")
+                    || lower.contains("request_headers")
+                    || lower.contains("response_headers")
+                    || (lower.contains("private_capture") && lower != "private_capture_written")
                 {
                     return Err(LedgerRedactionError::ForbiddenField(if path.is_empty() {
                         key.clone()
@@ -92,8 +111,32 @@ fn reject_forbidden_fields_rec(value: &Value, path: &str) -> Result<(), LedgerRe
             }
             Ok(())
         }
+        Value::String(text) => reject_forbidden_text(text),
         _ => Ok(()),
     }
+}
+
+fn reject_forbidden_text(text: &str) -> Result<(), LedgerRedactionError> {
+    let lower = text.to_ascii_lowercase();
+    let forbidden = [
+        ("authorization", "authorization material"),
+        ("bearer ", "bearer credential"),
+        ("x-api-key", "API key header"),
+        ("sk-live-", "credential-shaped value"),
+        ("sk-proj-", "credential-shaped value"),
+        ("ghp_", "credential-shaped value"),
+        ("xoxb-", "credential-shaped value"),
+        ("begin private key", "private key material"),
+        ("https://", "endpoint URL"),
+        ("http://", "endpoint URL"),
+        ("/private/", "absolute private path"),
+        ("/users/", "absolute user path"),
+        ("c:\\users\\", "absolute user path"),
+    ];
+    if let Some((_, label)) = forbidden.iter().find(|(needle, _)| lower.contains(needle)) {
+        return Err(LedgerRedactionError::ForbiddenContent((*label).to_string()));
+    }
+    Ok(())
 }
 
 /// Apply share-safe redaction to every free-text field on a ledger run.
@@ -198,16 +241,16 @@ pub fn assert_share_safe_ledger_json(json: &str) -> Result<(), LedgerRedactionEr
 /// redaction were skipped.
 #[cfg(test)]
 pub(crate) fn leaky_run_for_mutation() -> LedgerRunRecord {
-    let mut run = LedgerRunRecord::blank("leak-run", "mutation");
+    let mut run = LedgerRunRecord::blank("leak-run", LedgerSourceKind::LedgerRun);
     run.source_ref = "/private/tmp/secret-out".into();
     run.model = IdentityLabel::Exact {
-        value: "Authorization: Bearer sk-live-mutation-secret".into(),
+        value: "Authorization: Bearer synthetic-mutation-canary".into(),
     };
     run.gateway = IdentityLabel::Exact {
         value: "https://private.gateway.example/v1".into(),
     };
     run.failure_categories.push(FailureCategory {
-        code: "raw body: {\"error\":\"secret\"} Authorization: Bearer tok".into(),
+        code: "raw body: synthetic response canary; Authorization header present".into(),
     });
     run.caveats.push(ComparisonCaveat {
         code: "path".into(),

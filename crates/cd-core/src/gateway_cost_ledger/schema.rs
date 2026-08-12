@@ -17,6 +17,29 @@ pub const COMPARISON_SCHEMA_ID: &str = "contextdesk.gateway_cost_ledger_comparis
 /// Schema version for comparison reports.
 pub const COMPARISON_SCHEMA_VERSION: u32 = 1;
 
+/// Hard limits for untrusted ledger inputs. These are deliberately far above
+/// normal diagnostic values while still preventing corrupt evidence from
+/// becoming plausible-looking aggregates.
+pub const MAX_LEDGER_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum number of run records accepted by one CLI aggregation.
+pub const MAX_LEDGER_RUNS: usize = 10_000;
+/// Maximum array/object entries accepted in untrusted JSON.
+pub const MAX_LEDGER_COLLECTION_ITEMS: usize = 2_048;
+/// Maximum UTF-8 bytes accepted in any input string.
+pub const MAX_LEDGER_STRING_BYTES: usize = 16 * 1024;
+/// Maximum request count accepted for one run.
+pub const MAX_REQUEST_COUNT: u64 = 10_000_000;
+/// Maximum token count accepted for one metric.
+pub const MAX_TOKEN_COUNT: u64 = 1_000_000_000_000;
+/// Maximum one-run elapsed time accepted by the ledger.
+pub const MAX_ELAPSED_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+/// Maximum configured deadline accepted by the ledger.
+pub const MAX_DEADLINE_SECS: u64 = 7 * 24 * 60 * 60;
+/// Maximum reported USD cost accepted for one run or aggregate.
+pub const MAX_REPORTED_COST: f64 = 1_000_000.0;
+/// Upper bound for Unix milliseconds (9999-12-31T23:59:59.999Z).
+pub const MAX_UNIX_TIMESTAMP_MS: u64 = 253_402_300_799_999;
+
 /// A numeric counter that may be known or explicitly unknown.
 ///
 /// Missing provider usage must deserialize as [`MetricU64::Unknown`], never as
@@ -83,19 +106,54 @@ pub enum MetricF64 {
     Known(f64),
 }
 
-impl MetricF64 {
-    /// Construct from an optional report field.
-    pub fn from_option(value: Option<f64>) -> Self {
-        match value {
-            Some(v) if v.is_finite() => Self::Known(v),
-            _ => Self::Unknown,
+/// A boolean observation that preserves missing evidence separately from a
+/// genuine observed `false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "status", content = "value", rename_all = "snake_case")]
+pub enum ObservationBool {
+    /// The source did not report the value.
+    #[default]
+    Unknown,
+    /// The source explicitly reported true or false.
+    Known(bool),
+}
+
+impl ObservationBool {
+    /// Construct from an optional source value without zero/false filling.
+    pub fn from_option(value: Option<bool>) -> Self {
+        value.map_or(Self::Unknown, Self::Known)
+    }
+}
+
+/// Typed provenance cohort. Historical documentation is never silently
+/// combined with observed diagnostic traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerSourceKind {
+    /// Observed output from the share-safe gateway diagnostic.
+    DiagnosticBundle,
+    /// A documented historical benchmark row; never treated as live traffic.
+    HistoricalBenchmarkRow,
+    /// An already-shaped ledger record imported from another ledger artifact.
+    LedgerRun,
+}
+
+impl LedgerSourceKind {
+    /// Stable wire/display label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DiagnosticBundle => "diagnostic_bundle",
+            Self::HistoricalBenchmarkRow => "historical_benchmark_row",
+            Self::LedgerRun => "ledger_run",
         }
     }
+}
 
+impl MetricF64 {
     /// Known value when present and finite.
     pub fn known(self) -> Option<f64> {
         match self {
-            Self::Known(v) if v.is_finite() => Some(v),
+            Self::Known(v) if v.is_finite() && v >= 0.0 => Some(v),
             _ => None,
         }
     }
@@ -107,7 +165,9 @@ impl MetricF64 {
         for value in values {
             any = true;
             match value {
-                Self::Known(v) if v.is_finite() => sum += v,
+                Self::Known(v) if v.is_finite() && (0.0..=MAX_REPORTED_COST).contains(&v) => {
+                    sum += v
+                }
                 _ => return Self::Unknown,
             }
         }
@@ -121,13 +181,13 @@ impl MetricF64 {
 
 /// How a model or gateway identity is recorded.
 ///
-/// Exact labels are retained only when the share-safe source already carried
-/// them (committed fixtures/docs). Otherwise the ledger stores a pseudonym or
-/// explicit unknown — never an invented private catalog id.
+/// Diagnostic observations retain only supplied share-safe pseudonyms.
+/// Exact labels are limited to an explicit public allowlist for typed,
+/// documented historical rows. Otherwise identity is explicit unknown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IdentityLabel {
-    /// Exact label already present in share-safe committed data.
+    /// Public exact label from a typed documented historical row.
     Exact {
         /// Share-safe exact label (e.g. a public catalog id from fixtures).
         value: String,
@@ -263,7 +323,7 @@ pub struct LedgerRunRecord {
     /// Stable run id from the source report or historical row.
     pub run_id: String,
     /// Provenance kind for this record.
-    pub source_kind: String,
+    pub source_kind: LedgerSourceKind,
     /// Relative or logical source reference (never a private absolute path).
     pub source_ref: String,
     /// Optional build / release identity already present in the source.
@@ -275,9 +335,9 @@ pub struct LedgerRunRecord {
     /// Optional finish timestamp (unix ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at_unix_ms: Option<u64>,
-    /// Model identity (exact only when share-safe source already had it).
+    /// Model identity under the source cohort's disclosure policy.
     pub model: IdentityLabel,
-    /// Gateway identity (exact only when share-safe source already had it).
+    /// Gateway identity under the source cohort's disclosure policy.
     pub gateway: IdentityLabel,
     /// Role hint when present (`chat`, `embedding`, `reranker`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -297,9 +357,9 @@ pub struct LedgerRunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_secs: Option<u64>,
     /// Whether the whole-run deadline was exceeded.
-    pub deadline_exceeded: bool,
+    pub deadline_exceeded: ObservationBool,
     /// Whether the run was cancelled.
-    pub cancelled: bool,
+    pub cancelled: ObservationBool,
     /// Cleanup status for disposable state.
     pub cleanup: CleanupStatus,
     /// Coarse failure categories (share-safe).
@@ -320,12 +380,12 @@ pub struct LedgerRunRecord {
 
 impl LedgerRunRecord {
     /// Construct an empty shell with required schema fields filled.
-    pub fn blank(run_id: impl Into<String>, source_kind: impl Into<String>) -> Self {
+    pub fn blank(run_id: impl Into<String>, source_kind: LedgerSourceKind) -> Self {
         Self {
             schema_id: LEDGER_SCHEMA_ID.to_string(),
             schema_version: LEDGER_SCHEMA_VERSION,
             run_id: run_id.into(),
-            source_kind: source_kind.into(),
+            source_kind,
             source_ref: String::new(),
             build_identity: None,
             started_at_unix_ms: None,
@@ -339,8 +399,8 @@ impl LedgerRunRecord {
             reported_cost: MetricF64::Unknown,
             elapsed_ms: MetricU64::Unknown,
             deadline_secs: None,
-            deadline_exceeded: false,
-            cancelled: false,
+            deadline_exceeded: ObservationBool::Unknown,
+            cancelled: ObservationBool::Unknown,
             cleanup: CleanupStatus::Unknown,
             failure_categories: Vec::new(),
             gateway_model: VerdictStatus::Inconclusive,

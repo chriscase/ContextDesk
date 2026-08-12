@@ -1,7 +1,7 @@
 {
   "schema_id": "contextdesk.gateway_diagnostic.v1",
   "run_id": "bad-auth",
-  "authorization": "Bearer sk-live-should-reject",
+  "authorization": "synthetic credential canary",
   "verdicts": {
     "gateway_model_status": "pass"
   },

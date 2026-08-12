@@ -1,8 +1,9 @@
 # Gateway cost/reliability ledger v1
 
-**Status:** Local integration on branch `cursor/cost-reliability-ledger-7914`
-(base `c09357153e0c8953f2862c3cf3d8377ec9bc6bc7`). Offline ledger only — no live
-gateway calls.
+**Status:** Hardened integration candidate on
+`feat/cost-reliability-ledger-hardening-v1`, based on the Triage Policy V2
+integration line. Offline ledger only — no live gateway calls and no
+readiness claim.
 
 ## Purpose
 
@@ -17,13 +18,21 @@ handling.
 ## Honesty rules
 
 - Missing cost or token fields stay **unknown**, never zero-filled.
+- Missing deadline/cancellation booleans stay **unknown**; an observed `false`
+  remains distinct from missing evidence.
 - Genuine reported `0` / `0.0` remains distinct from unknown.
 - `inconclusive` stays separate from `fail` and `pass`; pass rates ignore
   inconclusive rather than treating it as failure.
 - Aggregates never emit `verified` badges or readiness claims.
-- Exact model/gateway labels are retained only when already present in
-  committed share-safe data (catalog fixtures / documented benchmarks);
-  otherwise the ledger records a pseudonym or `unknown`.
+- Diagnostic observations retain only their supplied share-safe pseudonyms (or
+  `unknown`). Owner-local exact model/gateway identities are never emitted.
+- Exact public labels are limited to the explicit allowlist used by committed
+  historical benchmark rows. They are not inferred from a model name.
+- Diagnostic observations and documented historical rows are separate typed
+  provenance cohorts and are never combined in one aggregate.
+- Present-but-negative, non-numeric, non-finite, or out-of-range cost, token,
+  request, deadline, timestamp, and latency evidence is rejected. It is never
+  silently converted to `unknown`.
 
 ## Schemas
 
@@ -36,16 +45,23 @@ handling.
 
 ## Inputs
 
-1. Share-safe gateway diagnose bundles (`report.json` + optional
-   `manifest.json`) — checksum-validated when a manifest is present.
+1. Share-safe gateway diagnose bundle directories (`report.json` + required
+   `manifest.json`) — run id, byte count, and SHA-256 are validated. A directly
+   selected standalone report remains possible but carries no manifest proof.
 2. Documented historical benchmark rows under
    `fixtures/gateway-cost-ledger/v1/historical/`, transcribed from
    `docs/benchmarks/VERCEL_GATEWAY_DIAGNOSTIC_*.md` and related write-ups.
 3. Already-shaped ledger run JSON.
 
-Forbidden fields (credentials, authorization headers, raw prompts/responses,
-provider bodies, private captures) cause ingest rejection. Surviving free text
-crosses `ShareSafeRedactionPolicy`.
+Forbidden fields or values (credentials, authorization headers, endpoint URLs,
+absolute private paths, raw prompts/responses, provider bodies/headers, private
+captures) cause ingest rejection before mapping. Surviving free text crosses
+`ShareSafeRedactionPolicy`, and emitted JSON passes a second share-safe gate.
+
+Untrusted inputs are bounded to 16 MiB per JSON file, 2,048 entries per
+array/object, 16 KiB per string, and 10,000 aggregate runs. Numeric limits are
+documented in `gateway_cost_ledger::schema` and deliberately exceed ordinary
+diagnostic use.
 
 ## CLI
 
@@ -59,9 +75,10 @@ contextdesk gateway ledger \
   --out /tmp/ledger-comparison.json
 ```
 
-Text output is a deterministic per-model table (runs, pass rates by dimension,
-median latency, cost/token summaries, caveats). JSON uses the comparison
-schema above.
+Text output is a deterministic provenance × gateway × model cohort table
+(runs, pass rates by dimension, median latency, cost/token summaries, caveats).
+Unknown identities never collapse unrelated runs into one cohort. JSON uses
+the comparison schema above.
 
 ## Importing owner-local Luna reports later (without committing raw data)
 
@@ -72,13 +89,14 @@ Recommended offline import path:
 
 1. On the owner machine, keep the private capture directory out of git
    (local-only permissions as produced by `gateway diagnose --raw`).
-2. Copy **only** the share-safe pair `report.json` + `manifest.json` into a
-   scratch directory outside the repository (or a gitignored workspace path).
+2. Point the ledger only at the directory containing the share-safe pair
+   `report.json` + `manifest.json`; it never recursively opens a `private/`
+   subtree. A read-only copy outside the repository is optional, not required.
 3. Confirm the report has no `private_capture` payload inline and that
    `private_capture_written` (if present) does not imply the private files are
    being ingested — the ledger reader never opens `private/`.
 4. Run `contextdesk gateway ledger --input <scratch-dir> …` locally.
-5. If a share-safe ledger run JSON is useful for a future PR, export the
+5. If a share-safe comparison JSON is useful for a future PR, export the
    **ledger record / comparison output** (already redacted) — not the raw
    capture, not Authorization headers, not endpoint URLs, not prompts.
 
@@ -100,3 +118,10 @@ lane.
 - Readiness / verified badges derived from aggregates
 - Committing owner-local raw captures or credentials
 - Coupling to the Luna tool-continuation hardening branch
+
+## Hermetic mutation coverage
+
+The focused tests reject or distinguish: unknown→false, unknown→zero,
+negative/oversized numeric evidence, exact identity promotion from a diagnostic
+record, historical/live cohort merging, secret/path/endpoint/raw-body input,
+oversized strings/collections, and readiness-language emission.

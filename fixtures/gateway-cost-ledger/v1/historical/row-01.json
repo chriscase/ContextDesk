@@ -1,5 +1,6 @@
 {
   "schema_id": "contextdesk.gateway_cost_ledger_historical_row.v1",
+  "schema_version": 1,
   "historical_row": true,
   "documented_source": "docs/benchmarks/VERCEL_GATEWAY_DIAGNOSTIC_505C3793.md",
   "run_id": "gwdx-1786463126666-5571",
