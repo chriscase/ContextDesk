@@ -51,7 +51,7 @@ use cd_core::triage_sdk::{
 use crate::triage::compile_preflight;
 use crate::triage_production::{
     prepare_v2_contribution_runtime, AuthorizedTriageBackendV1, PreparedV2ContributionRuntimeV1,
-    TriageProductionAdapterRejectionV1,
+    TriageProductionAdapterErrorV1, TriageProductionAdapterRejectionV1,
 };
 
 /// Input for one host-resolved production run.  The packet and all identities
@@ -291,6 +291,11 @@ pub fn resolve_v2_production(
     // role. The finalizer/reviewer are intentionally removed from this
     // preparation clone: their richer V2 semantics remain owned by this
     // runner below.
+    //
+    // Fail closed: never discard a prepare rejection with `.ok()`. A default
+    // 120s contributor operation cap under a longer host deadline must surface
+    // `ContributorOperationCapUnsupported` instead of silently falling back to
+    // the generic-slot path (which cannot execute typed TimelineAnalyst roles).
     let contribution_runtime = {
         let contributor_slots = compiled
             .slots
@@ -307,43 +312,56 @@ pub fn resolve_v2_production(
                 allow_remote: false,
             })
             .collect::<Vec<_>>();
-        let contributor_policy = TriagePolicyV2 {
-            schema_id: policy.schema_id.clone(),
-            mode: policy.mode,
-            contributors: contributor_slots,
-            finalizer: None,
-            reviewer: None,
-            budget: policy.budget,
-            execution: policy.execution,
-        };
-        let contributor_preflight = TriagePolicyPreflightV2 {
-            roles: preflight
-                .roles
-                .iter()
-                .filter(|fact| matches!(fact.kind, TriageSlotKindV2::Contributor(_)))
-                .cloned()
-                .collect(),
-        };
-        let contributor_backends = backends
-            .iter()
-            .filter(|(slot_id, _)| {
-                compiled
-                    .slots
+        if contributor_slots.is_empty() {
+            None
+        } else {
+            let contributor_policy = TriagePolicyV2 {
+                schema_id: policy.schema_id.clone(),
+                mode: policy.mode,
+                contributors: contributor_slots,
+                finalizer: None,
+                reviewer: None,
+                budget: policy.budget.clone(),
+                execution: policy.execution,
+            };
+            let contributor_preflight = TriagePolicyPreflightV2 {
+                roles: preflight
+                    .roles
                     .iter()
-                    .find(|slot| slot.slot_id == **slot_id)
-                    .is_some_and(|slot| matches!(slot.kind, TriageSlotKindV2::Contributor(_)))
-            })
-            .map(|(_, backend)| backend.clone())
-            .collect::<Vec<_>>();
-        prepare_v2_contribution_runtime(
-            &contributor_policy,
-            &contributor_preflight,
-            contributor_backends,
-            host_turn_deadline_ms,
-            host_context_char_budget,
-            neighborhood,
-        )
-        .ok()
+                    .filter(|fact| matches!(fact.kind, TriageSlotKindV2::Contributor(_)))
+                    .cloned()
+                    .collect(),
+            };
+            let contributor_backends = backends
+                .iter()
+                .filter(|(slot_id, _)| {
+                    compiled
+                        .slots
+                        .iter()
+                        .find(|slot| slot.slot_id == **slot_id)
+                        .is_some_and(|slot| matches!(slot.kind, TriageSlotKindV2::Contributor(_)))
+                })
+                .map(|(_, backend)| backend.clone())
+                .collect::<Vec<_>>();
+            Some(
+                prepare_v2_contribution_runtime(
+                    &contributor_policy,
+                    &contributor_preflight,
+                    contributor_backends,
+                    host_turn_deadline_ms,
+                    host_context_char_budget,
+                    neighborhood,
+                )
+                .map_err(|error| match error {
+                    TriageProductionAdapterErrorV1::Policy(failure) => {
+                        TriageProductionRunnerError::Policy(failure)
+                    }
+                    TriageProductionAdapterErrorV1::Unsupported { category, slot_ids } => {
+                        TriageProductionRunnerError::Unsupported { category, slot_ids }
+                    }
+                })?,
+            )
+        }
     };
 
     Ok(ResolvedTriageProductionV1 {
@@ -2096,5 +2114,144 @@ mod tests {
                         && attempt.physical_provider_calls == Some(1)
             )
         }));
+    }
+
+    #[test]
+    fn contributor_operation_cap_below_host_deadline_fails_closed_instead_of_ok_none() {
+        let model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-timeline".into(),
+            model_id: "model-timeline".into(),
+        };
+        let mut policy = TriagePolicyV2 {
+            schema_id: cd_core::multi_model::triage_policy::TRIAGE_POLICY_SCHEMA_V2.into(),
+            mode: TriagePolicyMode::Enhanced,
+            contributors: vec![cd_core::multi_model::triage_policy::ContributorSlotV2 {
+                slot_id: "timeline".into(),
+                role: TriageContributorRole::TimelineAnalyst,
+                model: model.clone(),
+                requirement: RoleRequirement::Required,
+                allow_remote: false,
+            }],
+            finalizer: None,
+            reviewer: None,
+            budget: Default::default(),
+            execution: Default::default(),
+        };
+        // Mimic CLI/host default: 300s whole-turn with the stock 120s contributor
+        // operation cap still in place.
+        policy.budget.whole_turn_deadline_ms = Some(300_000);
+        let preflight = TriagePolicyPreflightV2 {
+            roles: vec![cd_core::multi_model::triage_policy::RolePreflightV2 {
+                slot_id: "timeline".into(),
+                model: model.clone(),
+                kind: TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst),
+                available: true,
+                qualification: cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+                remote: false,
+                qualification_schema_id: Some(
+                    cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_SCHEMA_V2.into(),
+                ),
+                workflow_id: Some(
+                    cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_WORKFLOW_V2.into(),
+                ),
+                protocol_fingerprint: Some("sha256:test".into()),
+            }],
+        };
+        let error = resolve_v2_production(
+            &policy,
+            &preflight,
+            vec![AuthorizedTriageBackendV1 {
+                slot_id: "timeline".into(),
+                model,
+                backend: Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
+                    "{}",
+                    Vec::new(),
+                    "stop",
+                )])),
+            }],
+            300_000,
+            100_000,
+            FastTriageNeighborhoodBudget::default(),
+        )
+        .expect_err("smaller contributor op cap must not resolve as Ok(None)");
+        match error {
+            TriageProductionRunnerError::Unsupported { category, .. } => {
+                assert_eq!(
+                    category,
+                    TriageProductionAdapterRejectionV1::ContributorOperationCapUnsupported
+                );
+            }
+            other => panic!("unexpected rejection: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_aligned_contributor_cap_keeps_typed_contribution_runtime() {
+        let model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-timeline".into(),
+            model_id: "model-timeline".into(),
+        };
+        let mut policy = TriagePolicyV2 {
+            schema_id: cd_core::multi_model::triage_policy::TRIAGE_POLICY_SCHEMA_V2.into(),
+            mode: TriagePolicyMode::Enhanced,
+            contributors: vec![cd_core::multi_model::triage_policy::ContributorSlotV2 {
+                slot_id: "timeline".into(),
+                role: TriageContributorRole::TimelineAnalyst,
+                model: model.clone(),
+                requirement: RoleRequirement::Required,
+                allow_remote: false,
+            }],
+            finalizer: None,
+            reviewer: None,
+            budget: Default::default(),
+            execution: Default::default(),
+        };
+        let remaining = 300_000;
+        policy.budget.whole_turn_deadline_ms = Some(remaining);
+        policy.budget.contributors.operation_timeout_ms = policy
+            .budget
+            .contributors
+            .operation_timeout_ms
+            .max(remaining);
+        let preflight = TriagePolicyPreflightV2 {
+            roles: vec![cd_core::multi_model::triage_policy::RolePreflightV2 {
+                slot_id: "timeline".into(),
+                model: model.clone(),
+                kind: TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst),
+                available: true,
+                qualification: cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+                remote: false,
+                qualification_schema_id: Some(
+                    cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_SCHEMA_V2.into(),
+                ),
+                workflow_id: Some(
+                    cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_WORKFLOW_V2.into(),
+                ),
+                protocol_fingerprint: Some("sha256:test".into()),
+            }],
+        };
+        let resolved = resolve_v2_production(
+            &policy,
+            &preflight,
+            vec![AuthorizedTriageBackendV1 {
+                slot_id: "timeline".into(),
+                model,
+                backend: Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
+                    "{}",
+                    Vec::new(),
+                    "stop",
+                )])),
+            }],
+            remaining,
+            100_000,
+            FastTriageNeighborhoodBudget::default(),
+        )
+        .expect("aligned caps must keep typed contribution runtime");
+        // Debug surfaces presence without exposing the private runtime handle.
+        let debug = format!("{resolved:?}");
+        assert!(
+            debug.contains("contribution_runtime: true"),
+            "typed contribution runtime must remain present: {debug}"
+        );
     }
 }

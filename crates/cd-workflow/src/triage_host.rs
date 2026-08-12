@@ -576,8 +576,34 @@ pub async fn resolve_v2_host(
     // runner starts now, so bind its compiled whole-turn budget to the actual
     // remaining allowance; otherwise an explicit original deadline would be
     // double-counted and the provider phase could outlive the request.
+    //
+    // Raise phase operation caps to at least that remaining whole-turn
+    // allowance. Default TriageBudgetV2 contributor caps are 120s; leaving
+    // them unchanged under a longer host deadline made prepare_v2 fail and
+    // (before fail-closed resolution) silently drop the typed contribution
+    // runtime.
     let mut execution_policy = policy.clone();
     execution_policy.budget.whole_turn_deadline_ms = Some(remaining_deadline_ms);
+    execution_policy.budget.contributors.operation_timeout_ms = execution_policy
+        .budget
+        .contributors
+        .operation_timeout_ms
+        .max(remaining_deadline_ms);
+    execution_policy.budget.corrections.operation_timeout_ms = execution_policy
+        .budget
+        .corrections
+        .operation_timeout_ms
+        .max(remaining_deadline_ms);
+    execution_policy.budget.finalizer.operation_timeout_ms = execution_policy
+        .budget
+        .finalizer
+        .operation_timeout_ms
+        .max(remaining_deadline_ms);
+    execution_policy.budget.reviewer.operation_timeout_ms = execution_policy
+        .budget
+        .reviewer
+        .operation_timeout_ms
+        .max(remaining_deadline_ms);
     let resolution = match resolve_v2_production(
         &execution_policy,
         preflight,
