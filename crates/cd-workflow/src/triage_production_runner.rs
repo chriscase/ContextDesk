@@ -27,14 +27,19 @@ use cd_core::fast_triage::{FastTriageNeighborhoodBudget, FastTriagePacketV1};
 use cd_core::injection::wrap_untrusted;
 use cd_core::investigation_answer::AnswerEnvelopeV1;
 use cd_core::multi_model::contribution_pipeline::{
-    run_contribution_pipeline, ContributionPipelineInputs, ContributionPipelineOutcome,
+    run_contribution_pipeline, ContributionBackendSlot, ContributionPipelineInputs,
+    ContributionPipelineOutcome, ContributionQualification,
 };
-use cd_core::multi_model::contributions::ContributionAvailability;
+use cd_core::multi_model::contributions::{
+    reconcile_contributions, ContributionAttemptV1, ContributionAvailability, ContributionIdentity,
+    ContributionRole, ContributionRoutingPlan, ContributionRoutingPolicy,
+};
 use cd_core::multi_model::triage_policy::{
     CompiledRoleSlotV2, CompiledTriagePolicyV2, ContributorSlotV2, ReviewerConditionV2,
     RoleRequirement, SlotDispositionV2, TriageContributorRole, TriagePolicyCompileFailureV2,
     TriagePolicyMode, TriagePolicyPreflightV2, TriagePolicyV2, TriageSlotKindV2,
 };
+use cd_core::multi_model::MultiModelBudget;
 use cd_core::tools::ToolSpec;
 use cd_core::triage_sdk::{
     TriageAttemptStatus, TriageContractError, TriageReconciliationV1, TriageReplayV1,
@@ -582,6 +587,11 @@ impl TriageProductionRunnerV1 {
             .collect::<Vec<_>>();
 
         let mut attempts = Vec::with_capacity(slots.len());
+        // Retain the typed contribution attempts alongside the replay-facing
+        // role attempts. The latter intentionally contains only bounded
+        // status/counts; the former is needed for deterministic reconciliation
+        // of supported claims, conflicts, and reviewer proposals.
+        let mut typed_contributions: Vec<ContributionAttemptV1> = Vec::new();
         let mut interrupted = None;
         let mut generic_provider_calls = 0u32;
         if let Some(cancel) = &input.cancel {
@@ -596,6 +606,7 @@ impl TriageProductionRunnerV1 {
                     .run_contributions(runtime, &input, started)
                     .await
                     .map_err(|_| TriageProductionRunnerError::InvalidInput("contribution_run"))?;
+                typed_contributions.extend(outcome.attempts.iter().cloned());
                 attempts.extend(contribution_attempts(
                     &contributors,
                     &outcome,
@@ -617,11 +628,7 @@ impl TriageProductionRunnerV1 {
                         _ => None,
                     });
                 }
-                reconciliation_from_attempts(
-                    &contributors,
-                    &attempts,
-                    outcome.report.escalation_recommended,
-                )
+                reconciliation_from_report(&contributors, &attempts, &outcome.report)
             } else {
                 let reason = match interrupted {
                     Some(reason) => reason,
@@ -665,7 +672,7 @@ impl TriageProductionRunnerV1 {
                 &preliminary_report,
                 input.explicit_review_requested,
             );
-            let (attempt, _) = if !needed {
+            let (attempt, reviewer_contribution) = if !needed {
                 (
                     not_admitted_attempt(&input.run_id, slot, "reviewer_not_required"),
                     None,
@@ -676,36 +683,44 @@ impl TriageProductionRunnerV1 {
                     None,
                 )
             } else {
-                self.run_generic_slot(
+                self.run_reviewer_contribution(
                     slot,
                     &input,
                     started,
-                    hooks,
                     &preliminary_report,
                     &mut interrupted,
                     &mut generic_provider_calls,
                 )
                 .await
             };
+            if let Some(contribution) = reviewer_contribution {
+                typed_contributions.push(contribution);
+            }
             attempts.push(attempt.clone());
             ledger.push(TriageRunEventPayloadV2::RoleAttempt { attempt });
         }
-        let final_report = reconciliation_from_attempts(
-            &contributors
-                .iter()
-                .chain(reviewers.iter())
-                .cloned()
-                .collect::<Vec<_>>(),
-            &attempts,
-            preliminary_report.state != "supported",
-        );
+        let non_finalizer_slots = contributors
+            .iter()
+            .chain(reviewers.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let final_report = if typed_contributions.is_empty() {
+            reconciliation_from_attempts(
+                &non_finalizer_slots,
+                &attempts,
+                preliminary_report.state != "supported",
+            )
+        } else {
+            let report = reconcile_contributions(&input.packet, &typed_contributions);
+            reconciliation_from_report(&non_finalizer_slots, &attempts, &report)
+        };
         ledger.push(TriageRunEventPayloadV2::FinalReconciliation {
             summary: final_report.clone(),
         });
 
         let mut finalizer_answer = None;
         for slot in &finalizers {
-            let eligible = finalizer_eligible(&contributors, &attempts);
+            let eligible = finalizer_eligible(&non_finalizer_slots, &attempts);
             let (attempt, response) = if !eligible {
                 (
                     not_admitted_attempt(&input.run_id, slot, "finalizer_not_eligible"),
@@ -877,6 +892,142 @@ impl TriageProductionRunnerV1 {
             &mut |event| stage_events.push(event),
         )
         .await
+    }
+
+    /// Run the conditional reviewer through the existing typed contribution
+    /// pipeline. This keeps reviewer output subject to packet/role/evidence
+    /// validation instead of treating prose as a successful generic role.
+    async fn run_reviewer_contribution(
+        &self,
+        slot: &CompiledRoleSlotV2,
+        input: &TriageProductionRunInput,
+        started: tokio::time::Instant,
+        preliminary: &TriageReconciliationV1,
+        interrupted: &mut Option<Interruption>,
+        provider_calls: &mut u32,
+    ) -> (TriageRoleAttemptV1, Option<ContributionAttemptV1>) {
+        let fail = |status: TriageAttemptStatus, code: &str| {
+            let mut attempt = not_admitted_attempt(&input.run_id, slot, code);
+            attempt.status = status;
+            attempt.terminal_disposition = Some(disposition_for(status));
+            (attempt, None)
+        };
+        let Some(backend) = self.resolution.backends.get(&slot.slot_id) else {
+            return fail(TriageAttemptStatus::Unavailable, "backend_missing");
+        };
+        if *provider_calls >= self.resolution.compiled.budget.max_provider_calls {
+            return fail(
+                TriageAttemptStatus::NotAdmitted,
+                "provider_call_budget_exhausted",
+            );
+        }
+        if input
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+        {
+            *interrupted = Some(Interruption::Cancelled);
+            return fail(TriageAttemptStatus::Cancelled, "cancelled");
+        }
+        let reviewer_context = self
+            .resolution
+            .compiled
+            .budget
+            .reviewer
+            .max_context_chars
+            .min(self.resolution.host_context_char_budget as u64);
+        let reviewer_context = usize::try_from(reviewer_context).unwrap_or(usize::MAX);
+        if reviewer_context == 0 {
+            return fail(TriageAttemptStatus::NotAdmitted, "context_budget_exhausted");
+        }
+        let plan = match ContributionRoutingPlan::new(
+            vec![ContributionRole::Reviewer],
+            ContributionRoutingPolicy {
+                max_contributors: 1,
+                max_parallel: 1,
+                max_rounds: 2,
+                max_context_chars: reviewer_context,
+                reviewer_enabled: true,
+            },
+        ) {
+            Ok(plan) => plan,
+            Err(_) => return fail(TriageAttemptStatus::Invalid, "reviewer_plan_rejected"),
+        };
+        let budget = MultiModelBudget {
+            max_total_provider_rounds: self
+                .resolution
+                .compiled
+                .budget
+                .reviewer
+                .max_provider_calls
+                .min(
+                    self.resolution
+                        .compiled
+                        .budget
+                        .max_provider_calls
+                        .saturating_sub(*provider_calls),
+                ),
+            max_semantic_corrections_per_stage: 0,
+            context_char_budget: reviewer_context,
+            deadline_ms: self.resolution.host_deadline_ms,
+            max_context_chars_total: Some(reviewer_context as u64),
+        };
+        let identity = ContributionIdentity {
+            profile_id: slot.model.profile_id.clone(),
+            model: slot.model.model_id.clone(),
+        };
+        let reviewer_slot = ContributionBackendSlot {
+            role: ContributionRole::Reviewer,
+            identity,
+            qualification: ContributionQualification::Qualified,
+            backend: backend.backend.clone(),
+        };
+        let reviewer_text = format!(
+            "{}\n\nHOST PRELIMINARY RECONCILIATION (authoritative summary):\n{}",
+            input.user_text,
+            serde_json::to_string(preliminary).unwrap_or_else(|_| "{}".into())
+        );
+        let mut stage_events = Vec::new();
+        let outcome = run_contribution_pipeline(
+            ContributionPipelineInputs {
+                user_text: &reviewer_text,
+                packet: &input.packet,
+                slots: std::slice::from_ref(&reviewer_slot),
+                budget,
+                deadline_ms: self.resolution.host_deadline_ms,
+                started_at: Some(started),
+                cancel: input.cancel.clone(),
+                plan: &plan,
+            },
+            &mut |event| stage_events.push(event),
+        )
+        .await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(_) => return fail(TriageAttemptStatus::Failed, "reviewer_pipeline_failed"),
+        };
+        *provider_calls = provider_calls.saturating_add(
+            outcome
+                .telemetry
+                .stages
+                .iter()
+                .map(|stage| stage.provider_rounds)
+                .sum::<u32>(),
+        );
+        let role_attempt = contribution_attempts(
+            std::slice::from_ref(slot),
+            &outcome,
+            &self.resolution.backends,
+        )
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| not_admitted_attempt(&input.run_id, slot, "reviewer_missing"));
+        match role_attempt.status {
+            TriageAttemptStatus::Cancelled => *interrupted = Some(Interruption::Cancelled),
+            TriageAttemptStatus::TimedOut => *interrupted = Some(Interruption::TimedOut),
+            _ => {}
+        }
+        (role_attempt, outcome.attempts.into_iter().next())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1228,6 +1379,58 @@ fn contribution_attempts(
         .collect()
 }
 
+/// Project the richer typed contribution reconciliation into the bounded SDK
+/// summary without inventing claim authority. Conflict identities are copied
+/// only when they are host-scoped candidate/contradiction ids; claim details
+/// remain in the owner-only workflow result and never become root-cause proof.
+fn reconciliation_from_report(
+    slots: &[CompiledRoleSlotV2],
+    attempts: &[TriageRoleAttemptV1],
+    report: &cd_core::multi_model::contributions::ReconciliationReportV1,
+) -> TriageReconciliationV1 {
+    let completed = attempts
+        .iter()
+        .filter(|attempt| {
+            matches!(
+                attempt.status,
+                TriageAttemptStatus::Completed | TriageAttemptStatus::Abstained
+            )
+        })
+        .collect::<Vec<_>>();
+    let models = completed
+        .iter()
+        .filter_map(|attempt| attempt.model.as_ref())
+        .collect::<BTreeSet<_>>();
+    let gateways = models
+        .iter()
+        .map(|model| model.profile_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut conflict_ids = report
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.candidate_id.clone())
+        .chain(
+            report
+                .reported_contradictions
+                .iter()
+                .map(|contradiction| contradiction.contradiction_id.clone()),
+        )
+        .collect::<Vec<_>>();
+    conflict_ids.sort();
+    conflict_ids.dedup();
+    TriageReconciliationV1 {
+        state: report.state.as_str().into(),
+        configured_role_slots: slots.len() as u32,
+        completed_role_slots: completed.len().min(u32::MAX as usize) as u32,
+        distinct_models: models.len().min(u32::MAX as usize) as u32,
+        distinct_gateways: gateways.len().min(u32::MAX as usize) as u32,
+        supported_claim_ids: Vec::new(),
+        conflict_ids,
+        gap_ids: Vec::new(),
+        root_cause_established: false,
+    }
+}
+
 fn reconciliation_from_attempts(
     slots: &[CompiledRoleSlotV2],
     attempts: &[TriageRoleAttemptV1],
@@ -1294,7 +1497,11 @@ fn finalizer_eligible(slots: &[CompiledRoleSlotV2], attempts: &[TriageRoleAttemp
                     matches!(
                         attempt.status,
                         TriageAttemptStatus::Completed | TriageAttemptStatus::Abstained
-                    )
+                    ) || (matches!(attempt.role, TriageSlotKindV2::Reviewer)
+                        && attempt
+                            .reason_codes
+                            .iter()
+                            .any(|code| code == "reviewer_not_required"))
                 })
         })
 }
@@ -1661,7 +1868,16 @@ mod tests {
                 requirement: RoleRequirement::Required,
                 allow_remote: false,
             }),
-            reviewer: None,
+            reviewer: Some(cd_core::multi_model::triage_policy::ReviewerSlotV2 {
+                slot_id: "reviewer".into(),
+                model: cd_core::model_ref::ModelRef {
+                    profile_id: "profile-reviewer".into(),
+                    model_id: "model-reviewer".into(),
+                },
+                condition: ReviewerConditionV2::ContestedOrIncomplete,
+                requirement: RoleRequirement::Optional,
+                allow_remote: false,
+            }),
             budget: Default::default(),
             execution: Default::default(),
         };
@@ -1706,6 +1922,26 @@ mod tests {
                     ),
                     protocol_fingerprint: Some("sha256:test".into()),
                 },
+                cd_core::multi_model::triage_policy::RolePreflightV2 {
+                    slot_id: "reviewer".into(),
+                    model: cd_core::model_ref::ModelRef {
+                        profile_id: "profile-reviewer".into(),
+                        model_id: "model-reviewer".into(),
+                    },
+                    kind: TriageSlotKindV2::Reviewer,
+                    available: true,
+                    qualification:
+                        cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+                    remote: false,
+                    qualification_schema_id: Some(
+                        cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_SCHEMA_V2.into(),
+                    ),
+                    workflow_id: Some(
+                        cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_WORKFLOW_V2
+                            .into(),
+                    ),
+                    protocol_fingerprint: Some("sha256:test".into()),
+                },
             ],
         };
         let resolved = resolve_v2_production(
@@ -1733,6 +1969,27 @@ mod tests {
                         "stop",
                     )])),
                 },
+                AuthorizedTriageBackendV1 {
+                    slot_id: "reviewer".into(),
+                    model: cd_core::model_ref::ModelRef {
+                        profile_id: "profile-reviewer".into(),
+                        model_id: "model-reviewer".into(),
+                    },
+                    backend: Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
+                        serde_json::json!({
+                            "schema": cd_core::multi_model::contributions::CONTRIBUTION_SCHEMA_V1,
+                            "packet_id": input().packet.packet_id(),
+                            "role": "reviewer",
+                            "abstained": true,
+                            "claims": [],
+                            "evidence_gaps": [],
+                            "contradictions": []
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        "stop",
+                    )])),
+                },
             ],
             60_000,
             100_000,
@@ -1753,5 +2010,13 @@ mod tests {
         assert_eq!(result.result.kind, TriageResultKind::GroundedFinal);
         assert!(result.result.answer.is_some());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(result.replay.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                TriageRunEventPayloadV2::RoleAttempt { attempt }
+                    if matches!(attempt.role, TriageSlotKindV2::Reviewer)
+                        && attempt.status == TriageAttemptStatus::Completed
+            )
+        }));
     }
 }
