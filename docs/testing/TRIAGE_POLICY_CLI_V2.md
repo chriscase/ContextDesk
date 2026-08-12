@@ -1,8 +1,8 @@
 # Triage Policy V2 provider-free CLI proof
 
-Status: **partial issue #872 implementation; Enhanced/Advanced CLI execution is
-wired through the trusted host resolver, with live provider readiness still
-requiring explicit preflight evidence.**
+Status: **partial issue #872 implementation; provider-free policy compilation is
+available, while live Enhanced/Advanced execution is fail-closed until a
+host-owned exact V2 role-qualification store exists.**
 
 ## Surface
 
@@ -14,7 +14,7 @@ contextdesk triage-policy store list --store FILE
 contextdesk triage-policy store save --store FILE --policy FILE --policy-id ID
 contextdesk triage-policy store select --store FILE --policy-id ID
 contextdesk triage-policy store clear --store FILE
-contextdesk triage run --request REQUEST.json --preflight PREFLIGHT.json
+contextdesk triage run --request REQUEST.json
 ```
 
 All three actions return `contextdesk.cli.triage_policy.v1` with
@@ -63,15 +63,15 @@ credentials, endpoints, provider bodies, or corpus data.
 ## Stateful V2 run
 
 `triage run` accepts one bounded `contextdesk.triage.request.v2` document. An
-Enhanced or Advanced request must include a host-authored
-`TriagePolicyPreflightV2` document with `--preflight`; omission or malformed
-preflight fails closed before a provider call. The command then uses the
-existing CLI paths, app configuration, protected-file credential plumbing,
-corpus binding, packet builder, provider backend factory, production runner,
-validation hooks, replay, and cleanup. It does not create a second HTTP client
-or a parallel triage implementation. The exact model id from each admitted
-preflight slot is passed to the backend factory rather than allowing a global
-default model to replace it.
+Enhanced or Advanced request currently fails closed with
+`triage_role_qualification_unavailable`; if `--preflight` is supplied it is
+rejected as `caller_preflight_not_authoritative`. This refusal occurs before
+ToolHost construction or credential resolution. The provider-free
+`triage-policy validate/compile` commands continue to accept explicit
+preflight JSON for simulation only. Once the dedicated host-owned V2 role
+qualification store exists, the live command will use the same trusted
+resolver as Tauri, existing protected-file plumbing, corpus binding, packet
+builder, provider factory, validation, replay, and cleanup.
 
 The output is owner-only and contains the typed V2 result plus the ordered
 replay. A grounded result reports `status: "completed"`; a host-validated
@@ -83,13 +83,12 @@ through `contextdesk chat` and the established workflow.
 ## Residuals
 
 - Automatic AppConfig migration and implicit policy selection remain deferred;
-  the policy store and preflight are explicit opt-in inputs.
-- No provider qualification evidence is gathered by this command; preflight
-  facts are explicit host input and live compatibility is not inferred.
-- Tauri/GUI live selection and server-side live execution still need to call
-  the same host resolver; the CLI path is the first product surface wired.
-- CLI output is emitted after the run. Incremental JSONL/Tauri event streaming
-  remains follow-up work, although the returned replay is the shared ordered
-  SDK event stream.
+  the policy store is an explicit opt-in input.
+- Dedicated exact role qualification is the remaining live CLI/Tauri gate;
+  generic capability qualification is never promoted to V2 authority.
+- Tauri now uses the shared resolver and emits validated events progressively;
+  the CLI remains provider-free until host qualification is available.
+- The host rejects unsupported non-empty source scopes and corpus revision
+  drift rather than silently widening the request.
 - JSONL currently uses the normal one-shot envelope because compilation does
   not stream; the future execution surface will use shared SDK run events.

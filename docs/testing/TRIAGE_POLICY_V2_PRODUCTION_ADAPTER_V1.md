@@ -1,7 +1,8 @@
 # Triage Policy V2 production adapter — contributor subset V1
 
-Status: **provider-free production-path adapter; contributor subset is wired
-through the trusted CLI host path, with broader surfaces still partial**
+Status: **provider-free production-path adapter; contributor subset and the
+shared Tauri resolver are implemented, while live execution remains
+qualification-gated**
 
 This slice bridges the exact, pure `TriagePolicyV2` compiler output to the
 existing linked-log `ContributionRuntime`. It intentionally prepares only the
@@ -36,9 +37,10 @@ The adapter does not read `AppConfig`, credentials, Keychain, protected files,
 endpoints, qualification storage, corpora, or retrieval state. A trusted Rust
 host resolves those facts first and supplies exact `RolePreflightV2` records
 plus opaque authorized backends. The compiler remains the only policy compiler.
-The first product host is the CLI `triage run --request ... --preflight ...`
-path, which performs that resolution through the existing provider and corpus
-plumbing before invoking this adapter.
+The resolver seam is shared by CLI and Tauri, but live Enhanced/Advanced
+execution is currently fail-closed until a dedicated host-owned exact V2 role
+qualification record exists. Provider-free policy validation may still use an
+explicit preflight document; that document is never live execution authority.
 
 ## Typed pre-provider refusals
 
@@ -86,13 +88,14 @@ The adapter test proves:
 
 ## Not proven / residual product blocker
 
-- Tauri, server, and GUI commands do not select this adapter yet; the CLI is the
-  first wired product surface.
-- The CLI host resolver constructs exact-role V2 preflight plus backend
-  bindings from saved/inline policy, explicit preflight evidence, credentials,
-  and provider config. Broader role support still remains outside this subset.
-- The CLI returns the owner-only V2 request/event/result replay after the run;
-  incremental progress projection remains open on other surfaces.
+- Tauri selects the shared resolver and emits validated events progressively;
+  CLI live execution remains fail-closed until host-owned role qualification is
+  available.
+- Generic capability reports cannot authorize an exact V2 role. The next
+  production step is a dedicated qualification record bound to profile,
+  endpoint fingerprint, exact catalog model, protocol, and role kind.
+- The host enforces governed corpus revision and rejects unsupported source
+  restrictions instead of silently broadening the packet.
 - A smaller per-contributor operation timeout, finalizer reserve, reviewer
   reserve/condition/requirement, timeline role, and visible optional dropout
   still require production runtime/event work.

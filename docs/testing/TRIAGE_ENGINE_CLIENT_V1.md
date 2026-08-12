@@ -31,6 +31,8 @@ models transport delivery, abort/cancel selection, and subscription behavior.
   `unsupported` error;
 - the Tauri adapter routes preflight, execution, cancellation, and replay to
   the Rust-owned host resolver and returns the same ordered event objects;
+  live events are emitted progressively from the runner, while the validated
+  replay remains authoritative;
 - owner-only terminal content and exact model identities cannot be relabelled
   share-safe;
 - the import/time conformance suite remains unchanged and green.
