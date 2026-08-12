@@ -3,7 +3,8 @@
 **Branch:** `test/triage-policy-v2-qualification-adversarial-audit-v1`
 **Base SHA:** `a05d5dcba0b9b772d7ad8d0d29140fd40dac16bc` (`integrate/triage-policy-sdk-v2`)
 **Tests content commit:** `3042c6a3a081c07d9be956d15cddf35ac98e80ec` (exact-role probe suite + cancel fix)
-**Branch tip:** `4000e0ba8f0fa72aeb96c582b67dee415a27f4c2`
+**Documentation parent commit:** `325bf4973114fd46b28cc1b4bf216f7a48255385` (on-branch ancestor; matrix + absolute tests pin)
+**Branch tip at delivery:** not self-hashed in this file — the full object id of `HEAD` after the delivery commit is recorded in `identity.log` / `delivery.txt` / `TRUE_TIP.txt` under the audit SCRATCH workspace and must match `git rev-parse HEAD` on this branch.
 **Attestation:** hermetic only — no network, credentials, Keychain, live corpus, or provider HTTP.
 
 ## Scope
