@@ -3,7 +3,8 @@
 **Branch:** `test/triage-policy-v2-qualification-adversarial-audit-v1`
 **Base SHA:** `a05d5dcba0b9b772d7ad8d0d29140fd40dac16bc` (`integrate/triage-policy-sdk-v2`)
 **Tests content commit:** `3042c6a3a081c07d9be956d15cddf35ac98e80ec` (exact-role probe suite + cancel fix)
-**Branch tip:** `5d58e1c0058d85500200ab0e64caa0bb4c645901`
+**Documentation commit:** `5d58e1c0058d85500200ab0e64caa0bb4c645901`
+**Branch tip:** `bf4fd76d4923f39743bf43acabfb7bac417e34e5`
 **Attestation:** hermetic only — no network, credentials, Keychain, live corpus, or provider HTTP.
 
 ## Scope
