@@ -1,9 +1,8 @@
 # Triage Policy V2 provider-free CLI proof
 
-Status: **partial issue #872 implementation; provider-free policy compilation
-and one-at-a-time exact-role qualification are available. Live Enhanced/
-Advanced execution remains fail-closed until every admitted slot has current
-role evidence and the corresponding production stage is wired.**
+Status: **provider-neutral policy compilation, exact-role qualification, and
+the trusted Enhanced/Advanced production runner are available. Live execution
+remains fail-closed until every admitted slot has current role evidence.**
 
 ## Surface
 
@@ -67,8 +66,8 @@ the exact catalog model id, one explicit role, and `--yes`. It uses the
 existing provider backend and synthetic packet/validator seams, makes at most
 one logical provider call, and atomically writes only the host-authored,
 secret-free result to the local role store. Slow models may use a larger
-`--deadline-ms` within the V2 global bound. Timeline and currently unsupported
-reviewer roles are recorded as unqualified without a provider call. An
+`--deadline-ms` within the V2 global bound. TimelineAnalyst and Reviewer use
+the typed contribution contract; Finalizer uses the host answer validator. An
 unqualified result is retained as negative evidence and exits with
 `not_ready`; it never silently upgrades a policy.
 
@@ -96,13 +95,13 @@ through `contextdesk chat` and the established workflow.
 
 - Automatic AppConfig migration and implicit policy selection remain deferred;
   the policy store is an explicit opt-in input.
-- Dedicated exact role qualification is available through the CLI, but final
-  reviewer/timeline execution and full canonical graph admission remain open;
-  generic capability qualification is never promoted to V2 authority.
+- Dedicated exact role qualification is available through the CLI for typed
+  contributors, Reviewer, and Finalizer; generic capability qualification is
+  never promoted to V2 authority.
 - Tauri uses the shared resolver and emits validated events progressively; its
   startup store is read-only until a matching qualification command or future
   GUI probe writer is invoked.
 - The host rejects unsupported non-empty source scopes and corpus revision
   drift rather than silently widening the request.
-- JSONL currently uses the normal one-shot envelope because compilation does
-  not stream; the future execution surface will use shared SDK run events.
+- Policy compilation JSON remains a one-shot envelope; live execution returns
+  the shared SDK replay/event stream.

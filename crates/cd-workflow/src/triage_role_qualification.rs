@@ -180,7 +180,8 @@ fn contribution_role(kind: TriageSlotKindV2) -> Option<ContributionRole> {
         TriageSlotKindV2::Contributor(TriageContributorRole::EvidenceGapFinder) => {
             Some(ContributionRole::EvidenceGap)
         }
-        TriageSlotKindV2::Finalizer | TriageSlotKindV2::Reviewer => None,
+        TriageSlotKindV2::Finalizer => None,
+        TriageSlotKindV2::Reviewer => Some(ContributionRole::Reviewer),
     }
 }
 
@@ -296,24 +297,15 @@ async fn qualify_with_backend(
     let key = probe_key(&profile_id, &base_url, &model_id, kind, &protocol);
     let packet = synthetic_packet();
 
-    if matches!(kind, TriageSlotKindV2::Reviewer) {
-        return record(
-            key,
-            RoleQualificationV2::Unqualified,
-            0,
-            "reviewer_execution_unavailable",
-        );
-    }
-
     if let Some(role) = contribution_role(kind) {
         let plan = match ContributionRoutingPlan::new(
             vec![role],
             ContributionRoutingPolicy {
                 max_contributors: 1,
                 max_parallel: 1,
-                max_rounds: 1,
+                max_rounds: 2,
                 max_context_chars: 120_000,
-                reviewer_enabled: false,
+                reviewer_enabled: true,
             },
         ) {
             Ok(plan) => plan,
@@ -474,20 +466,6 @@ pub async fn qualify_configured_role_v2(
         profile.kind,
     )
     .transport_protocol;
-    if matches!(request.kind, TriageSlotKindV2::Reviewer) {
-        return Ok(record(
-            probe_key(
-                &profile.id,
-                &profile.base_url,
-                &request.model_id,
-                request.kind,
-                &protocol,
-            ),
-            RoleQualificationV2::Unqualified,
-            0,
-            "reviewer_execution_unavailable",
-        ));
-    }
     let credentials = TurnProviderCredentialCache::new(secrets);
     let mut inputs = resolve_turn_inputs_from_profile_with_credential_cache(
         &credentials,
@@ -632,6 +610,25 @@ mod tests {
         .expect("probe");
         assert_eq!(timeline.qualification, RoleQualificationV2::Qualified);
         assert_eq!(timeline.physical_provider_calls, 1);
+
+        let reviewer = qualify_role_v2_with_backend(TriageRoleProbeBackendInput {
+            profile_id: "profile:test".into(),
+            base_url: "https://gateway.example/v1".into(),
+            model_id: "model:test".into(),
+            kind: TriageSlotKindV2::Reviewer,
+            protocol: protocol().into(),
+            deadline_ms: 5_000,
+            cancel: None,
+            backend: Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
+                valid_contribution(&synthetic_packet(), ContributionRole::Reviewer),
+                Vec::new(),
+                "stop",
+            )])),
+        })
+        .await
+        .expect("reviewer probe");
+        assert_eq!(reviewer.qualification, RoleQualificationV2::Qualified);
+        assert_eq!(reviewer.physical_provider_calls, 1);
     }
 
     #[tokio::test]

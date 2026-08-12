@@ -1,6 +1,7 @@
 # Triage Policy V2 production runner — host-neutral V1
 
-Status: **provider-neutral runner/resolver seam; not host-wired**
+Status: **provider-neutral runner/resolver wired through the trusted host;
+CLI/Tauri live execution remains exact-qualification-gated**
 
 `cd_workflow::triage_production_runner` adds a reusable asynchronous runner
 around the existing `contribution_pipeline` and `triage_production` seams. A
@@ -20,9 +21,10 @@ run_started → packet_ready → contributor attempts
 ```
 
 The runner uses `run_contribution_pipeline` for every admitted typed
-contributor, including `timeline_analyst`. Reviewer/finalizer calls use the
-same opaque `ChatBackend` binding and a host hook for validation and bounded
-correction. Whole-turn, phase, provider-call, context, cancellation,
+contributor, including `timeline_analyst`, and the conditional reviewer uses
+the same typed contribution contract. Finalizer calls use the same opaque
+`ChatBackend` binding and a host hook for validation and bounded correction.
+Whole-turn, phase, provider-call, context, cancellation,
 and operation ceilings are enforced before each call. The ledger is owner-only
 and is validated with the shared `TriageReplayV1` contract before return.
 
@@ -41,14 +43,17 @@ CARGO_TARGET_DIR=/tmp/contextdesk-triage-runner-target \
 ```
 
 The suite covers identity refusal, owner-only ledger/terminal validation,
-untrusted prompt boundaries, and same-model independence accounting. No live
-gateway, credential, filesystem, CLI, Tauri, or server path is used.
+untrusted prompt boundaries, same-model independence accounting, conditional
+reviewer execution, and typed TimelineAnalyst execution. The trusted host
+resolver and CLI/Tauri adapters are covered by their focused workflow tests;
+the replay-only server/SSE surface is covered separately. No live gateway or
+credential is used by these hermetic tests.
 
-Residual work: host adapters still need to resolve saved policy selections,
-qualification evidence, credentials, and packet construction; a concrete
-finalizer hook must project validated `AnswerEnvelopeV1`; and CLI/Tauri/server
-must opt in explicitly. This slice makes no live compatibility or release
-readiness claim.
+Residual work: policy selection remains explicit and the server endpoint is
+replay-only rather than a stateful live runner. The host still requires exact
+role qualification evidence and a configured protected-file credential before
+provider execution. This slice makes no universal live compatibility or
+release-readiness claim.
 
 Handbook impact: Triage Policy V2 remains **Partial**; this document records
 the host-neutral execution seam and its honest-partial boundary.
