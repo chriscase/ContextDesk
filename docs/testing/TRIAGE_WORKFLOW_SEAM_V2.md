@@ -64,3 +64,14 @@ Focused evidence at this checkpoint: 9 adversarial tests, 17 SDK contract tests
 7 CLI tests, and clippy with `-D warnings` for `cd-core`, `cd-workflow`, and
 `cd-cli`. These remain hermetic; no live provider or release-readiness claim is
 made.
+
+## Cross-language replay parity checkpoint
+
+At `49492c2f`, the Rust and TypeScript SDK boundaries accept the same V2 event
+vocabulary and phase rules. TypeScript now validates `preliminary_reconciliation`,
+`final_reconciliation`, and `correction`, and applies the Rust replay ordering
+rules (including the intentional cancellation-before-validation boundary).
+The contract test also fixes the qualification-binding mutation to remove a
+field rather than reassign the already-valid fixture value. Rust's focused SDK
+contract suite remains green after the cancellation parity correction. This is
+still a contract milestone, not production host wiring.

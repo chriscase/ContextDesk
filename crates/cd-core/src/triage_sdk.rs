@@ -710,8 +710,7 @@ impl TriageReplayV1 {
                 // validation checkpoint. Failed/timed-out terminals still
                 // require validation so they cannot bypass the normal
                 // host-owned result gate.
-                if !validation
-                    && !matches!(event.event, TriageRunEventPayloadV2::Cancelled { .. })
+                if !validation && !matches!(event.event, TriageRunEventPayloadV2::Cancelled { .. })
                 {
                     return Err(TriageContractError::InvalidPhaseOrder);
                 }
