@@ -23,6 +23,13 @@ Unknown schema versions fail before payload parsing. New optional fields may
 be added only without changing existing meanings; semantic changes require a
 new schema version.
 
+The public boundary is bounded before host work: 4 MiB per wire object, 64 KiB
+task text, 1 MiB inline policy, 256 source identities, 64 reason codes, 4,096
+evidence identities or replay events, a one-hour explicit deadline, and 64
+provider calls. Opaque identities are nonempty and at most 512 bytes. Inline
+policies must name `contextdesk.triage_policy.v2` both in the selector and the
+document. Rust and TypeScript reject the same overflow and schema mutations.
+
 ## Authority and privacy
 
 `ModelRef` is the exact `(profile_id, model_id)` identity returned by the

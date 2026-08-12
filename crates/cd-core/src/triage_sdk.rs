@@ -16,7 +16,7 @@ use thiserror::Error;
 use crate::extension_contract::{scan_share_safe_text, PacketPrivacyBoundary};
 use crate::investigation_answer::AnswerEnvelopeV1;
 pub use crate::model_ref::ModelRef;
-use crate::multi_model::triage_policy::TriageSlotKindV2;
+use crate::multi_model::triage_policy::{TriageSlotKindV2, TRIAGE_POLICY_SCHEMA_V2};
 
 pub const TRIAGE_REQUEST_SCHEMA_V2: &str = "contextdesk.triage.request.v2";
 pub const TRIAGE_RUN_EVENT_SCHEMA_V2: &str = "contextdesk.triage.run_event.v2";
@@ -24,6 +24,26 @@ pub const TRIAGE_RESULT_SCHEMA_V2: &str = "contextdesk.triage.result.v2";
 pub const TRIAGE_SHARE_SAFE_RESULT_SCHEMA_V2: &str = "contextdesk.triage.result_share_safe.v2";
 pub const TRIAGE_CANCELLATION_SCHEMA_V1: &str = "contextdesk.triage.cancellation.v1";
 pub const TRIAGE_REPLAY_SCHEMA_V1: &str = "contextdesk.triage.replay.v1";
+
+/// Public SDK bounds. These cap untrusted transport payloads; they are not
+/// recommended model/context defaults.
+pub const MAX_TRIAGE_WIRE_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum UTF-8 bytes accepted for a triage task.
+pub const MAX_TRIAGE_TASK_BYTES: usize = 64 * 1024;
+/// Maximum serialized bytes accepted for an inline policy document.
+pub const MAX_TRIAGE_INLINE_POLICY_BYTES: usize = 1024 * 1024;
+/// Maximum source identities accepted in one request scope.
+pub const MAX_TRIAGE_SOURCE_IDS: usize = 256;
+/// Maximum reason codes accepted in one bounded contract field.
+pub const MAX_TRIAGE_REASON_CODES: usize = 64;
+/// Maximum evidence or claim identities accepted in one bounded contract field.
+pub const MAX_TRIAGE_EVIDENCE_IDS: usize = 4096;
+/// Maximum events accepted in one deterministic replay.
+pub const MAX_TRIAGE_REPLAY_EVENTS: usize = 4096;
+/// Maximum per-request whole-turn deadline in milliseconds.
+pub const MAX_TRIAGE_REQUEST_DEADLINE_MS: u64 = 3_600_000;
+/// Maximum provider calls accepted in a per-request override.
+pub const MAX_TRIAGE_REQUEST_PROVIDER_CALLS: u32 = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,7 +61,7 @@ impl TriageScopeV1 {
         if self.corpus_revision == Some(0) {
             return Err(TriageContractError::InvalidField("corpus_revision"));
         }
-        validate_unique_ids("source_ids", &self.source_ids)
+        validate_unique_ids_bounded("source_ids", &self.source_ids, MAX_TRIAGE_SOURCE_IDS)
     }
 }
 
@@ -95,7 +115,10 @@ impl TriageRequestV2 {
         validate_opaque_id("run_id", &self.run_id)?;
         self.scope.validate()?;
         validate_opaque_id("cancellation_id", &self.cancellation_id)?;
-        if self.task.trim().is_empty() {
+        if self.task.trim().is_empty()
+            || self.task.len() > MAX_TRIAGE_TASK_BYTES
+            || self.task.contains('\0')
+        {
             return Err(TriageContractError::InvalidField("task"));
         }
         match &self.policy {
@@ -115,12 +138,28 @@ impl TriageRequestV2 {
                 schema_id,
                 document,
             } => {
-                if schema_id.trim().is_empty() || !document.is_object() {
+                let document_schema = document.get("schema_id").and_then(Value::as_str);
+                let document_bytes = serde_json::to_vec(document)
+                    .map_err(|_| TriageContractError::Serialize)?
+                    .len();
+                if schema_id != TRIAGE_POLICY_SCHEMA_V2
+                    || document_schema != Some(TRIAGE_POLICY_SCHEMA_V2)
+                    || !document.is_object()
+                    || document_bytes > MAX_TRIAGE_INLINE_POLICY_BYTES
+                {
                     return Err(TriageContractError::InvalidField("inline_policy"));
                 }
             }
         }
-        if self.overrides.deadline_ms == Some(0) || self.overrides.max_provider_calls == Some(0) {
+        if self
+            .overrides
+            .deadline_ms
+            .is_some_and(|value| value == 0 || value > MAX_TRIAGE_REQUEST_DEADLINE_MS)
+            || self
+                .overrides
+                .max_provider_calls
+                .is_some_and(|value| value == 0 || value > MAX_TRIAGE_REQUEST_PROVIDER_CALLS)
+        {
             return Err(TriageContractError::InvalidField("overrides"));
         }
         Ok(())
@@ -196,9 +235,13 @@ impl TriageReconciliationV1 {
         {
             return Err(TriageContractError::InvalidField("reconciliation_counts"));
         }
-        validate_unique_ids("supported_claim_ids", &self.supported_claim_ids)?;
-        validate_unique_ids("conflict_ids", &self.conflict_ids)?;
-        validate_unique_ids("gap_ids", &self.gap_ids)
+        validate_unique_ids_bounded(
+            "supported_claim_ids",
+            &self.supported_claim_ids,
+            MAX_TRIAGE_EVIDENCE_IDS,
+        )?;
+        validate_unique_ids_bounded("conflict_ids", &self.conflict_ids, MAX_TRIAGE_EVIDENCE_IDS)?;
+        validate_unique_ids_bounded("gap_ids", &self.gap_ids, MAX_TRIAGE_EVIDENCE_IDS)
     }
 }
 
@@ -242,7 +285,11 @@ impl TriageResultV2 {
         validate_opaque_id("run_id", &self.run_id)?;
         validate_opaque_id("packet_id", &self.packet_id)?;
         self.reconciliation.validate()?;
-        validate_unique_ids("accepted_evidence_ids", &self.accepted_evidence_ids)?;
+        validate_unique_ids_bounded(
+            "accepted_evidence_ids",
+            &self.accepted_evidence_ids,
+            MAX_TRIAGE_EVIDENCE_IDS,
+        )?;
         validate_unique_reason_codes(&self.reason_codes)?;
         if self.reconciliation.root_cause_established && self.answer.is_none() {
             return Err(TriageContractError::InvalidField("answer"));
@@ -280,7 +327,13 @@ impl TriageResultV2 {
                         return Err(TriageContractError::InvalidField("partial_root_cause"));
                     }
                 }
-                Ok(())
+                let encoded =
+                    serde_json::to_vec(self).map_err(|_| TriageContractError::Serialize)?;
+                if encoded.len() > MAX_TRIAGE_WIRE_BYTES {
+                    Err(TriageContractError::PayloadTooLarge)
+                } else {
+                    Ok(())
+                }
             }
         }
     }
@@ -318,7 +371,11 @@ impl ShareSafeTriageResultV2 {
         validate_opaque_id("run_id", &self.run_id)?;
         validate_opaque_id("packet_id", &self.packet_id)?;
         self.reconciliation.validate()?;
-        validate_unique_ids("accepted_evidence_ids", &self.accepted_evidence_ids)?;
+        validate_unique_ids_bounded(
+            "accepted_evidence_ids",
+            &self.accepted_evidence_ids,
+            MAX_TRIAGE_EVIDENCE_IDS,
+        )?;
         validate_unique_reason_codes(&self.reason_codes)?;
         let encoded = serde_json::to_string(self).map_err(|_| TriageContractError::Serialize)?;
         if scan_share_safe_text(&encoded).is_empty() {
@@ -515,6 +572,9 @@ impl TriageReplayV1 {
         if self.events.is_empty() {
             return Err(TriageContractError::EmptyReplay);
         }
+        if self.events.len() > MAX_TRIAGE_REPLAY_EVENTS {
+            return Err(TriageContractError::PayloadTooLarge);
+        }
         let Some(TriageRunEventV2 {
             event:
                 TriageRunEventPayloadV2::RunStarted {
@@ -586,6 +646,9 @@ fn parse_versioned<T: for<'de> Deserialize<'de>>(
     raw: &str,
     expected: &'static str,
 ) -> Result<T, TriageContractError> {
+    if raw.len() > MAX_TRIAGE_WIRE_BYTES {
+        return Err(TriageContractError::PayloadTooLarge);
+    }
     let header: Value = serde_json::from_str(raw).map_err(|_| TriageContractError::Parse)?;
     let got = header
         .get("schema_id")
@@ -608,6 +671,7 @@ fn expect_schema(got: &str, expected: &'static str) -> Result<(), TriageContract
 
 fn validate_opaque_id(field: &'static str, value: &str) -> Result<(), TriageContractError> {
     if value.trim().is_empty()
+        || value.len() > 512
         || value.contains('/')
         || value.contains('\\')
         || value.contains("://")
@@ -620,6 +684,9 @@ fn validate_opaque_id(field: &'static str, value: &str) -> Result<(), TriageCont
 }
 
 pub fn validate_unique_reason_codes(codes: &[String]) -> Result<(), TriageContractError> {
+    if codes.len() > MAX_TRIAGE_REASON_CODES {
+        return Err(TriageContractError::PayloadTooLarge);
+    }
     let mut unique = BTreeSet::new();
     if codes
         .iter()
@@ -641,6 +708,17 @@ fn validate_unique_ids(field: &'static str, ids: &[String]) -> Result<(), Triage
     } else {
         Err(TriageContractError::InvalidField(field))
     }
+}
+
+fn validate_unique_ids_bounded(
+    field: &'static str,
+    ids: &[String],
+    max: usize,
+) -> Result<(), TriageContractError> {
+    if ids.len() > max {
+        return Err(TriageContractError::PayloadTooLarge);
+    }
+    validate_unique_ids(field, ids)
 }
 
 fn validate_terminal_partial(
@@ -688,4 +766,6 @@ pub enum TriageContractError {
     PrivacyLeak,
     #[error("triage contract serialization failed")]
     Serialize,
+    #[error("triage contract payload exceeds its public bound")]
+    PayloadTooLarge,
 }

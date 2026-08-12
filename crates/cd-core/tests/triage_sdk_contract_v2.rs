@@ -385,6 +385,81 @@ fn scope_revision_and_source_id_set_fail_closed() {
 }
 
 #[test]
+fn public_request_and_replay_bounds_fail_before_host_work() {
+    let mut oversized_task = request();
+    oversized_task.task = "x".repeat(MAX_TRIAGE_TASK_BYTES + 1);
+    assert_eq!(
+        oversized_task.validate(),
+        Err(TriageContractError::InvalidField("task"))
+    );
+
+    let mut too_many_sources = request();
+    too_many_sources.scope.source_ids = (0..=MAX_TRIAGE_SOURCE_IDS)
+        .map(|index| format!("source:{index}"))
+        .collect();
+    assert_eq!(
+        too_many_sources.validate(),
+        Err(TriageContractError::PayloadTooLarge)
+    );
+
+    let mut excessive_override = request();
+    excessive_override.overrides.max_provider_calls = Some(MAX_TRIAGE_REQUEST_PROVIDER_CALLS + 1);
+    assert_eq!(
+        excessive_override.validate(),
+        Err(TriageContractError::InvalidField("overrides"))
+    );
+
+    let oversized_wire = format!(
+        "{{\"schema_id\":\"{}\",\"padding\":\"{}\"}}",
+        TRIAGE_REQUEST_SCHEMA_V2,
+        "x".repeat(MAX_TRIAGE_WIRE_BYTES)
+    );
+    assert_eq!(
+        parse_request_v2(&oversized_wire),
+        Err(TriageContractError::PayloadTooLarge)
+    );
+
+    let mut too_many_events = replay();
+    too_many_events.events = (0..=MAX_TRIAGE_REPLAY_EVENTS)
+        .map(|index| {
+            event(
+                index as u64,
+                TriageRunEventPayloadV2::Validation {
+                    passed: false,
+                    reason_codes: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    assert_eq!(
+        too_many_events.validate(),
+        Err(TriageContractError::PayloadTooLarge)
+    );
+}
+
+#[test]
+fn inline_policy_requires_exact_v2_schema_and_a_bounded_document() {
+    let mut inline = request();
+    inline.policy = TriagePolicySelectionV2::Inline {
+        schema_id: cd_core::multi_model::triage_policy::TRIAGE_POLICY_SCHEMA_V2.into(),
+        document: serde_json::json!({
+            "schema_id": cd_core::multi_model::triage_policy::TRIAGE_POLICY_SCHEMA_V2,
+            "mode": "standard"
+        }),
+    };
+    inline.validate().unwrap();
+
+    let TriagePolicySelectionV2::Inline { schema_id, .. } = &mut inline.policy else {
+        unreachable!()
+    };
+    *schema_id = "contextdesk.triage_policy.v999".into();
+    assert_eq!(
+        inline.validate(),
+        Err(TriageContractError::InvalidField("inline_policy"))
+    );
+}
+
+#[test]
 fn failure_timeout_and_cancel_terminals_preserve_an_honest_partial() {
     let partial = Box::new(partial_result());
     for terminal in [

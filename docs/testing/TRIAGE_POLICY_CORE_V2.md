@@ -16,6 +16,9 @@ contract and compiler:
 - Whole-turn, provider-call, contributor, semantic-correction, finalizer, and
   reviewer budgets have distinct names and validation.
 - V2 execution is sequential only.
+- Public policy input is capped at 32 configured/preflight slots, 64 total
+  provider calls, 4 million model-facing characters, and a one-hour deadline;
+  terminal phases remain one call each.
 - Same-model/multi-role assignments collapse into one independence group while
   role, exact-model, catalog-model, and gateway counts remain separate.
 - Compiler failures carry only stable categories and slot ids. Contracts do not
@@ -38,7 +41,7 @@ The adversarial tests cover missing/stale/failed qualification, egress denial,
 required and optional dropout, duplicate and path-shaped slot ids, duplicate
 preflight facts, unknown fields, unsupported parallel execution, overcommitted
 budgets, terminal reserve exhaustion, exact namespaced model ids, and
-same-model false-consensus accounting.
+same-model false-consensus accounting, plus oversized policy/budget refusal.
 
 ## What this slice does not prove
 

@@ -10,6 +10,19 @@ export const TRIAGE_CANCELLATION_SCHEMA_V1 =
   "contextdesk.triage.cancellation.v1" as const;
 export const COMPILED_TRIAGE_POLICY_SCHEMA_V2 =
   "contextdesk.triage_policy.compiled.v2" as const;
+export const TRIAGE_POLICY_SCHEMA_V2 = "contextdesk.triage_policy.v2" as const;
+
+const MAX_WIRE_BYTES = 4 * 1024 * 1024;
+const MAX_TASK_BYTES = 64 * 1024;
+const MAX_INLINE_POLICY_BYTES = 1024 * 1024;
+const MAX_SOURCE_IDS = 256;
+const MAX_REASON_CODES = 64;
+const MAX_EVIDENCE_IDS = 4096;
+const MAX_REPLAY_EVENTS = 4096;
+const MAX_POLICY_SLOTS = 32;
+const MAX_DEADLINE_MS = 3_600_000;
+const MAX_PROVIDER_CALLS = 64;
+const encoder = new TextEncoder();
 
 export type TriageRequestV2 = Record<string, unknown> & {
   schema_id: typeof TRIAGE_REQUEST_SCHEMA_V2;
@@ -45,10 +58,67 @@ export type CompiledTriagePolicyV2 = Record<string, unknown> & {
   slots: Record<string, unknown>[];
 };
 
-const modelRef = f.obj({
-  profile_id: f.req(f.str),
-  model_id: f.req(f.str),
-});
+function wireBytes(path: string, value: unknown): number {
+  try {
+    return encoder.encode(JSON.stringify(value)).byteLength;
+  } catch {
+    throw new ContractViolation(path, "value is not JSON serializable");
+  }
+}
+
+function boundedOpaque(path: string, value: unknown): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    encoder.encode(value).byteLength > 512 ||
+    value.includes("/") ||
+    value.includes("\\") ||
+    value.includes("://") ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  )
+    throw new ContractViolation(path, "invalid bounded opaque identity");
+}
+
+function boundedUniqueStrings(
+  path: string,
+  value: unknown,
+  max: number,
+): asserts value is string[] {
+  if (!Array.isArray(value) || value.length > max)
+    throw new ContractViolation(path, "array exceeds its public bound");
+  const seen = new Set<string>();
+  value.forEach((entry, index) => {
+    boundedOpaque(`${path}[${index}]`, entry);
+    if (seen.has(entry)) throw new ContractViolation(path, "duplicate identity");
+    seen.add(entry);
+  });
+}
+
+function validModelRef(value: unknown): boolean {
+  try {
+    const row = objectValue("model", value);
+    checkObject("model", {
+      profile_id: f.req(f.str),
+      model_id: f.req(f.str),
+    }, row);
+    boundedOpaque("model.profile_id", row.profile_id);
+    if (encoder.encode(row.profile_id as string).byteLength > 256) return false;
+    const modelId = row.model_id;
+    if (
+      typeof modelId !== "string" ||
+      modelId.trim().length === 0 ||
+      encoder.encode(modelId).byteLength > 512 ||
+      modelId.includes("\\") ||
+      modelId.includes("://") ||
+      /[\u0000-\u001f\u007f]/u.test(modelId)
+    ) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const modelRef = f.pred("bounded exact model reference", validModelRef);
 
 const reconciliation = f.obj({
   state: f.req(f.str),
@@ -85,6 +155,7 @@ const rejectionCategory = f.en(
   "standard_finalizer_required",
   "empty_policy",
   "invalid_budget",
+  "policy_limit_exceeded",
   "role_unavailable",
   "qualification_unavailable",
   "egress_denied",
@@ -146,6 +217,10 @@ function checkPolicy(path: string, value: unknown): void {
       },
       value,
     );
+    const row = value as Record<string, unknown>;
+    boundedOpaque(`${path}.policy_id`, row.policy_id);
+    if (row.policy_revision === 0)
+      throw new ContractViolation(`${path}.policy_revision`, "must be positive");
   } else if (kind === "inline") {
     checkObject(
       path,
@@ -156,6 +231,14 @@ function checkPolicy(path: string, value: unknown): void {
       },
       value,
     );
+    const row = value as Record<string, unknown>;
+    const document = objectValue(`${path}.document`, row.document);
+    if (
+      row.schema_id !== TRIAGE_POLICY_SCHEMA_V2 ||
+      document.schema_id !== TRIAGE_POLICY_SCHEMA_V2 ||
+      wireBytes(`${path}.document`, document) > MAX_INLINE_POLICY_BYTES
+    )
+      throw new ContractViolation(path, "invalid or oversized inline policy");
   } else {
     throw new ContractViolation(`${path}.kind`, "unknown policy kind");
   }
@@ -194,7 +277,34 @@ export function parseTriageRequestV2(value: unknown): TriageRequestV2 {
     },
     value,
   );
-  return value as TriageRequestV2;
+  if (wireBytes("request", value) > MAX_WIRE_BYTES)
+    throw new ContractViolation("request", "payload exceeds its public bound");
+  const request = value as TriageRequestV2;
+  boundedOpaque("request.run_id", request.run_id);
+  boundedOpaque("request.cancellation_id", request.cancellation_id);
+  if (
+    request.task.trim().length === 0 ||
+    encoder.encode(request.task).byteLength > MAX_TASK_BYTES ||
+    request.task.includes("\0")
+  ) throw new ContractViolation("request.task", "invalid or oversized task");
+  const scope = objectValue("request.scope", request.scope);
+  boundedOpaque("request.scope.corpus_id", scope.corpus_id);
+  if (scope.corpus_revision === 0)
+    throw new ContractViolation("request.scope.corpus_revision", "must be positive");
+  boundedUniqueStrings(
+    "request.scope.source_ids",
+    scope.source_ids ?? [],
+    MAX_SOURCE_IDS,
+  );
+  checkPolicy("request.policy", request.policy);
+  const overrides = objectValue("request.overrides", request.overrides);
+  const deadline = overrides.deadline_ms;
+  const calls = overrides.max_provider_calls;
+  if (
+    (typeof deadline === "number" && (deadline === 0 || deadline > MAX_DEADLINE_MS)) ||
+    (typeof calls === "number" && (calls === 0 || calls > MAX_PROVIDER_CALLS))
+  ) throw new ContractViolation("request.overrides", "override exceeds public bounds");
+  return request;
 }
 
 export function parseTriageCancellationV1(value: unknown): TriageCancellationV1 {
@@ -207,7 +317,12 @@ export function parseTriageCancellationV1(value: unknown): TriageCancellationV1 
     },
     value,
   );
-  return value as TriageCancellationV1;
+  if (wireBytes("cancellation", value) > MAX_WIRE_BYTES)
+    throw new ContractViolation("cancellation", "payload exceeds its public bound");
+  const cancellation = value as TriageCancellationV1;
+  boundedOpaque("cancellation.run_id", cancellation.run_id);
+  boundedOpaque("cancellation.cancellation_id", cancellation.cancellation_id);
+  return cancellation;
 }
 
 export function parseCompiledTriagePolicyV2(
@@ -250,7 +365,34 @@ export function parseCompiledTriagePolicyV2(
     },
     value,
   );
-  return value as CompiledTriagePolicyV2;
+  if (wireBytes("compiled_policy", value) > MAX_WIRE_BYTES)
+    throw new ContractViolation("compiled_policy", "payload exceeds its public bound");
+  const compiled = value as CompiledTriagePolicyV2;
+  if (compiled.slots.length > MAX_POLICY_SLOTS)
+    throw new ContractViolation("compiled_policy.slots", "too many slots");
+  const row = value as Record<string, unknown>;
+  const groups = row.independence_groups as Record<string, unknown>[];
+  if (groups.length > MAX_POLICY_SLOTS)
+    throw new ContractViolation("compiled_policy.independence_groups", "too many groups");
+  compiled.slots.forEach((candidate, index) => {
+    const slot = candidate as Record<string, unknown>;
+    boundedOpaque(`compiled_policy.slots[${index}].slot_id`, slot.slot_id);
+    if (!validModelRef(slot.model))
+      throw new ContractViolation(`compiled_policy.slots[${index}].model`, "invalid model");
+    const rejections = slot.rejections as unknown[];
+    if (rejections.length > MAX_REASON_CODES)
+      throw new ContractViolation(`compiled_policy.slots[${index}].rejections`, "too many reasons");
+  });
+  groups.forEach((candidate, index) => {
+    if (!validModelRef(candidate.model))
+      throw new ContractViolation(`compiled_policy.independence_groups[${index}].model`, "invalid model");
+    boundedUniqueStrings(
+      `compiled_policy.independence_groups[${index}].slot_ids`,
+      candidate.slot_ids,
+      MAX_POLICY_SLOTS,
+    );
+  });
+  return compiled;
 }
 
 function checkAttempt(path: string, value: unknown): void {
@@ -280,6 +422,42 @@ function checkAttempt(path: string, value: unknown): void {
     },
     value,
   );
+  const attempt = value as Record<string, unknown>;
+  boundedOpaque(`${path}.attempt_id`, attempt.attempt_id);
+  boundedOpaque(`${path}.role_slot_id`, attempt.role_slot_id);
+  if (attempt.model !== undefined && !validModelRef(attempt.model))
+    throw new ContractViolation(`${path}.model`, "invalid model reference");
+  boundedUniqueStrings(
+    `${path}.reason_codes`,
+    attempt.reason_codes ?? [],
+    MAX_REASON_CODES,
+  );
+}
+
+function checkReconciliation(path: string, value: unknown): void {
+  const row = objectValue(path, value);
+  boundedOpaque(`${path}.state`, row.state);
+  const configured = row.configured_role_slots as number;
+  const completed = row.completed_role_slots as number;
+  const models = row.distinct_models as number;
+  const gateways = row.distinct_gateways as number;
+  if (completed > configured || models > completed || gateways > models)
+    throw new ContractViolation(path, "invalid reconciliation counts");
+  boundedUniqueStrings(
+    `${path}.supported_claim_ids`,
+    row.supported_claim_ids ?? [],
+    MAX_EVIDENCE_IDS,
+  );
+  boundedUniqueStrings(
+    `${path}.conflict_ids`,
+    row.conflict_ids ?? [],
+    MAX_EVIDENCE_IDS,
+  );
+  boundedUniqueStrings(
+    `${path}.gap_ids`,
+    row.gap_ids ?? [],
+    MAX_EVIDENCE_IDS,
+  );
 }
 
 function checkResult(path: string, value: unknown): void {
@@ -298,6 +476,33 @@ function checkResult(path: string, value: unknown): void {
     },
     value,
   );
+  if (wireBytes(path, value) > MAX_WIRE_BYTES)
+    throw new ContractViolation(path, "result exceeds its public bound");
+  const result = value as Record<string, unknown>;
+  boundedOpaque(`${path}.run_id`, result.run_id);
+  boundedOpaque(`${path}.packet_id`, result.packet_id);
+  checkReconciliation(`${path}.reconciliation`, result.reconciliation);
+  boundedUniqueStrings(
+    `${path}.accepted_evidence_ids`,
+    result.accepted_evidence_ids ?? [],
+    MAX_EVIDENCE_IDS,
+  );
+  boundedUniqueStrings(
+    `${path}.reason_codes`,
+    result.reason_codes ?? [],
+    MAX_REASON_CODES,
+  );
+  const reconciliationRow = result.reconciliation as Record<string, unknown>;
+  if (
+    result.kind === "grounded_final" &&
+    (result.answer === undefined || result.validation_state !== "passed")
+  ) throw new ContractViolation(path, "grounded final requires a passed answer");
+  if (
+    result.kind === "honest_partial" &&
+    (result.validation_state === "passed" || reconciliationRow.root_cause_established === true)
+  ) throw new ContractViolation(path, "partial cannot establish root cause");
+  if (reconciliationRow.root_cause_established === true && result.answer === undefined)
+    throw new ContractViolation(path, "established root cause requires an answer");
 }
 
 export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
@@ -312,7 +517,10 @@ export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
     },
     value,
   );
+  if (wireBytes("event", value) > MAX_WIRE_BYTES)
+    throw new ContractViolation("event", "payload exceeds its public bound");
   const outer = value as TriageRunEventV2;
+  boundedOpaque("event.run_id", outer.run_id);
   const payload = objectValue("event.event", outer.event);
   switch (payload.kind) {
     case "run_started":
@@ -321,6 +529,8 @@ export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
         request_fingerprint: f.req(f.str),
         policy_fingerprint: f.req(f.str),
       }, payload);
+      boundedOpaque("event.event.request_fingerprint", payload.request_fingerprint);
+      boundedOpaque("event.event.policy_fingerprint", payload.policy_fingerprint);
       break;
     case "packet_ready":
       checkObject("event.event", {
@@ -329,6 +539,8 @@ export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
         packet_digest: f.req(f.str),
         evidence_count: f.req(f.u64),
       }, payload);
+      boundedOpaque("event.event.packet_id", payload.packet_id);
+      boundedOpaque("event.event.packet_digest", payload.packet_digest);
       break;
     case "role_attempt":
       checkObject("event.event", {
@@ -343,6 +555,7 @@ export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
         kind: f.req(f.en("reconciliation")),
         summary: f.req(reconciliation),
       }, payload);
+      checkReconciliation("event.event.summary", payload.summary);
       break;
     case "validation":
       checkObject("event.event", {
@@ -350,6 +563,11 @@ export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
         passed: f.req(f.bool),
         reason_codes: f.opt(f.arr(f.str)),
       }, payload);
+      boundedUniqueStrings(
+        "event.event.reason_codes",
+        payload.reason_codes ?? [],
+        MAX_REASON_CODES,
+      );
       break;
     case "completed":
       checkObject("event.event", {
@@ -367,6 +585,7 @@ export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
           try { checkResult("event.event.partial_result", candidate); return true; } catch { return false; }
         })),
       }, payload);
+      boundedOpaque("event.event.category", payload.category);
       break;
     case "timed_out":
       checkObject("event.event", {
@@ -376,6 +595,7 @@ export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
           try { checkResult("event.event.partial_result", candidate); return true; } catch { return false; }
         })),
       }, payload);
+      boundedOpaque("event.event.category", payload.category);
       break;
     case "cancelled":
       checkObject("event.event", {
@@ -385,6 +605,7 @@ export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
           try { checkResult("event.event.partial_result", candidate); return true; } catch { return false; }
         })),
       }, payload);
+      boundedOpaque("event.event.cancellation_id", payload.cancellation_id);
       break;
     default:
       throw new ContractViolation("event.event.kind", "unknown event kind");
@@ -438,7 +659,13 @@ export function parseTriageReplayV1(value: unknown): TriageReplayV1 {
     },
     value,
   );
+  if (wireBytes("replay", value) > MAX_WIRE_BYTES)
+    throw new ContractViolation("replay", "payload exceeds its public bound");
   const replay = value as TriageReplayV1;
+  boundedOpaque("replay.run_id", replay.run_id);
+  boundedOpaque("replay.request_fingerprint", replay.request_fingerprint);
+  if (replay.events.length > MAX_REPLAY_EVENTS)
+    throw new ContractViolation("replay.events", "too many events");
   const events = replay.events.map(parseTriageRunEventV2);
   const first = events[0];
   if (

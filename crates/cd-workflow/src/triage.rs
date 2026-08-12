@@ -626,6 +626,7 @@ fn rejection_code(category: PolicyRejectionCategoryV2) -> &'static str {
         PolicyRejectionCategoryV2::StandardFinalizerRequired => "standard_finalizer_required",
         PolicyRejectionCategoryV2::EmptyPolicy => "empty_policy",
         PolicyRejectionCategoryV2::InvalidBudget => "invalid_budget",
+        PolicyRejectionCategoryV2::PolicyLimitExceeded => "policy_limit_exceeded",
         PolicyRejectionCategoryV2::RoleUnavailable => "role_unavailable",
         PolicyRejectionCategoryV2::QualificationUnavailable => "qualification_unavailable",
         PolicyRejectionCategoryV2::EgressDenied => "egress_denied",

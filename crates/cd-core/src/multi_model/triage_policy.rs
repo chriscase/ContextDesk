@@ -19,6 +19,16 @@ pub const TRIAGE_POLICY_SCHEMA_V2: &str = "contextdesk.triage_policy.v2";
 /// Stable schema identifier for compiled policy plans.
 pub const COMPILED_TRIAGE_POLICY_SCHEMA_V2: &str = "contextdesk.triage_policy.compiled.v2";
 
+/// Public-policy bounds. These are denial-of-service and operator-error
+/// ceilings, not recommended runtime defaults.
+pub const MAX_TRIAGE_POLICY_SLOTS_V2: usize = 32;
+/// Maximum provider calls named by one V2 policy.
+pub const MAX_TRIAGE_PROVIDER_CALLS_V2: u32 = 64;
+/// Maximum total model-facing characters named by one V2 policy.
+pub const MAX_TRIAGE_CONTEXT_CHARS_V2: u64 = 4_000_000;
+/// Maximum explicit deadline or phase timeout in milliseconds.
+pub const MAX_TRIAGE_DEADLINE_MS_V2: u64 = 3_600_000;
+
 /// Product disclosure level. All modes use the same compiler and authority
 /// boundary; this value changes configuration complexity, not trust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -328,6 +338,8 @@ pub enum PolicyRejectionCategoryV2 {
     EmptyPolicy,
     /// A budget is zero or cannot fit configured phases.
     InvalidBudget,
+    /// The policy or supplied preflight exceeds a public contract bound.
+    PolicyLimitExceeded,
     /// The host has no current runtime for the configured exact model.
     RoleUnavailable,
     /// Exact workflow/role qualification is absent, stale, or failed.
@@ -512,6 +524,25 @@ pub fn compile_triage_policy_v2(
     }
 
     validate_budget(policy, &mut rejections);
+
+    let configured_slot_count = policy
+        .contributors
+        .len()
+        .saturating_add(usize::from(policy.finalizer.is_some()))
+        .saturating_add(usize::from(policy.reviewer.is_some()));
+    if configured_slot_count > MAX_TRIAGE_POLICY_SLOTS_V2
+        || preflight.roles.len() > MAX_TRIAGE_POLICY_SLOTS_V2
+    {
+        reject(
+            &mut rejections,
+            None,
+            PolicyRejectionCategoryV2::PolicyLimitExceeded,
+        );
+        return Err(TriagePolicyCompileFailureV2 {
+            rejections,
+            slots: Vec::new(),
+        });
+    }
 
     let inputs = slot_inputs(policy);
     let mut seen = BTreeSet::new();
@@ -749,7 +780,26 @@ fn validate_budget(policy: &TriagePolicyV2, rejections: &mut Vec<PolicyRejection
     });
 
     let invalid = budget.max_provider_calls == 0
+        || budget.max_provider_calls > MAX_TRIAGE_PROVIDER_CALLS_V2
         || budget.max_context_chars == 0
+        || budget.max_context_chars > MAX_TRIAGE_CONTEXT_CHARS_V2
+        || budget
+            .whole_turn_deadline_ms
+            .is_some_and(|deadline| deadline == 0 || deadline > MAX_TRIAGE_DEADLINE_MS_V2)
+        || budget.contributors.max_provider_calls > MAX_TRIAGE_PROVIDER_CALLS_V2
+        || budget.contributors.operation_timeout_ms > MAX_TRIAGE_DEADLINE_MS_V2
+        || budget.contributors.max_context_chars > MAX_TRIAGE_CONTEXT_CHARS_V2
+        || budget.corrections.max_provider_calls > MAX_TRIAGE_PROVIDER_CALLS_V2
+        || budget.corrections.operation_timeout_ms > MAX_TRIAGE_DEADLINE_MS_V2
+        || budget.corrections.max_context_chars > MAX_TRIAGE_CONTEXT_CHARS_V2
+        || budget.finalizer.max_provider_calls > 1
+        || budget.finalizer.reserve_ms > MAX_TRIAGE_DEADLINE_MS_V2
+        || budget.finalizer.operation_timeout_ms > MAX_TRIAGE_DEADLINE_MS_V2
+        || budget.finalizer.max_context_chars > MAX_TRIAGE_CONTEXT_CHARS_V2
+        || budget.reviewer.max_provider_calls > 1
+        || budget.reviewer.reserve_ms > MAX_TRIAGE_DEADLINE_MS_V2
+        || budget.reviewer.operation_timeout_ms > MAX_TRIAGE_DEADLINE_MS_V2
+        || budget.reviewer.max_context_chars > MAX_TRIAGE_CONTEXT_CHARS_V2
         || (!policy.contributors.is_empty()
             && (budget.contributors.max_provider_calls == 0
                 || budget.contributors.operation_timeout_ms == 0
@@ -1303,6 +1353,33 @@ mod tests {
                 .iter()
                 .any(|rejection| rejection.category == PolicyRejectionCategoryV2::EmptyPolicy));
         }
+    }
+
+    #[test]
+    fn public_policy_slot_and_budget_bounds_fail_closed() {
+        let mut oversized = enhanced();
+        let template = oversized.contributors[0].clone();
+        oversized.contributors = (0..=MAX_TRIAGE_POLICY_SLOTS_V2)
+            .map(|index| ContributorSlotV2 {
+                slot_id: format!("slot-{index}"),
+                ..template.clone()
+            })
+            .collect();
+        let failure =
+            compile_triage_policy_v2(&oversized, &facts(&oversized)).expect_err("oversized policy");
+        assert!(failure.slots.is_empty());
+        assert!(failure.rejections.iter().any(|rejection| {
+            rejection.category == PolicyRejectionCategoryV2::PolicyLimitExceeded
+        }));
+
+        let mut excessive_budget = enhanced();
+        excessive_budget.budget.max_provider_calls = MAX_TRIAGE_PROVIDER_CALLS_V2 + 1;
+        let failure = compile_triage_policy_v2(&excessive_budget, &facts(&excessive_budget))
+            .expect_err("excessive budget");
+        assert!(failure
+            .rejections
+            .iter()
+            .any(|rejection| rejection.category == PolicyRejectionCategoryV2::InvalidBudget));
     }
 
     #[test]

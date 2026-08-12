@@ -44,4 +44,52 @@ describe("Rust-generated triage SDK v2 contracts", () => {
     (replay.events[0].event as Record<string, unknown>).kind = "future_kind";
     expect(() => parseTriageReplayV1(replay)).toThrow();
   });
+
+  it("rejects oversized requests, identity sets, and replay streams", () => {
+    const request = load("request.standard.json") as Record<string, unknown>;
+    request.task = "x".repeat(64 * 1024 + 1);
+    expect(() => parseTriageRequestV2(request)).toThrow();
+
+    const tooManySources = load("request.standard.json") as Record<string, unknown>;
+    (tooManySources.scope as Record<string, unknown>).source_ids = Array.from(
+      { length: 257 },
+      (_, index) => `source:${index}`,
+    );
+    expect(() => parseTriageRequestV2(tooManySources)).toThrow();
+
+    const replay = load("replay.partial.json") as Record<string, unknown>;
+    replay.events = Array.from({ length: 4097 }, (_, index) => ({
+      schema_id: "contextdesk.triage.run_event.v2",
+      run_id: "run:golden:01",
+      sequence: index,
+      privacy: "owner_only",
+      event: { kind: "validation", passed: false },
+    }));
+    expect(() => parseTriageReplayV1(replay)).toThrow();
+  });
+
+  it("rejects non-exact inline-policy schemas and excessive overrides", () => {
+    const request = load("request.standard.json") as Record<string, unknown>;
+    request.policy = {
+      kind: "inline",
+      schema_id: "contextdesk.triage_policy.v999",
+      document: {
+        schema_id: "contextdesk.triage_policy.v999",
+        mode: "standard",
+      },
+    };
+    expect(() => parseTriageRequestV2(request)).toThrow();
+
+    const override = load("request.standard.json") as Record<string, unknown>;
+    override.overrides = { deadline_ms: 3_600_001, max_provider_calls: 65 };
+    expect(() => parseTriageRequestV2(override)).toThrow();
+  });
+
+  it("keeps ModelRef profile bounds in parity with Rust", () => {
+    const compiled = load("policy-preflight.standard.json") as {
+      slots: Array<{ model: { profile_id: string } }>;
+    };
+    compiled.slots[0].model.profile_id = "p".repeat(257);
+    expect(() => parseCompiledTriagePolicyV2(compiled)).toThrow();
+  });
 });
