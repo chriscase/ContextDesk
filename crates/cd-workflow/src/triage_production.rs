@@ -185,6 +185,20 @@ pub struct PreparedV2ContributionRuntimeV1 {
     pub bindings: Vec<V2ContributionSlotBindingV1>,
 }
 
+/// What the caller's event projection can represent for one prepared run.
+///
+/// The established production contribution event stream cannot show a
+/// configured-but-not-admitted slot, so the plain adapter refuses degraded
+/// optional slots. A caller that owns a V2 event ledger emitting one explicit
+/// `role_attempt` for every configured slot — dropout included — may declare
+/// that here and keep visibly degraded optional slots inert instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct V2ProjectionCapabilitiesV1 {
+    /// The caller accounts every configured slot, including optional dropout,
+    /// in its own explicit V2 event stream.
+    pub represents_optional_dropout: bool,
+}
+
 /// Compile and adapt the exact V2 contributor-only subset to the established
 /// production contribution runtime.
 ///
@@ -200,6 +214,34 @@ pub fn prepare_v2_contribution_runtime(
     host_turn_deadline_ms: u64,
     host_context_char_budget: usize,
     neighborhood: FastTriageNeighborhoodBudget,
+) -> Result<PreparedV2ContributionRuntimeV1, TriageProductionAdapterErrorV1> {
+    prepare_v2_contribution_runtime_with_projection(
+        policy,
+        preflight,
+        authorized_backends,
+        host_turn_deadline_ms,
+        host_context_char_budget,
+        neighborhood,
+        V2ProjectionCapabilitiesV1::default(),
+    )
+}
+
+/// [`prepare_v2_contribution_runtime`] with explicit projection capabilities.
+///
+/// With `represents_optional_dropout`, an optional slot the pure compiler
+/// degraded stays configured-and-inert: it receives no backend and never
+/// runs, and the caller's ledger must account it as an explicit non-admitted
+/// role attempt. Admitted slots keep the exact same contributor-only subset
+/// rules in every mode.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_v2_contribution_runtime_with_projection(
+    policy: &TriagePolicyV2,
+    preflight: &TriagePolicyPreflightV2,
+    authorized_backends: Vec<AuthorizedTriageBackendV1>,
+    host_turn_deadline_ms: u64,
+    host_context_char_budget: usize,
+    neighborhood: FastTriageNeighborhoodBudget,
+    projection: V2ProjectionCapabilitiesV1,
 ) -> Result<PreparedV2ContributionRuntimeV1, TriageProductionAdapterErrorV1> {
     let compiled =
         compile_preflight(policy, preflight).map_err(TriageProductionAdapterErrorV1::Policy)?;
@@ -245,16 +287,21 @@ pub fn prepare_v2_contribution_runtime(
         .filter(|slot| slot.disposition != SlotDispositionV2::Admitted)
         .map(|slot| slot.slot_id.clone())
         .collect::<Vec<_>>();
-    if !degraded.is_empty() {
+    if !degraded.is_empty() && !projection.represents_optional_dropout {
         return Err(TriageProductionAdapterErrorV1::unsupported(
             TriageProductionAdapterRejectionV1::DegradedSlotUnsupported,
             degraded,
         ));
     }
 
+    // Kind-based refusals apply to slots that could actually run. A degraded
+    // optional slot under a dropout-capable projection is configured-and-inert;
+    // it never executes, so only admitted slots are checked here.
+    let admitted = |slot: &&CompiledRoleSlotV2| slot.disposition == SlotDispositionV2::Admitted;
     let unsupported_timeline = compiled
         .slots
         .iter()
+        .filter(admitted)
         .filter(|slot| {
             matches!(
                 slot.kind,
@@ -269,7 +316,7 @@ pub fn prepare_v2_contribution_runtime(
             unsupported_timeline,
         ));
     }
-    let finalizers = slot_ids_of_kind(&compiled, |kind| {
+    let finalizers = admitted_slot_ids_of_kind(&compiled, |kind| {
         matches!(kind, TriageSlotKindV2::Finalizer)
     });
     if !finalizers.is_empty() {
@@ -278,7 +325,8 @@ pub fn prepare_v2_contribution_runtime(
             finalizers,
         ));
     }
-    let reviewers = slot_ids_of_kind(&compiled, |kind| matches!(kind, TriageSlotKindV2::Reviewer));
+    let reviewers =
+        admitted_slot_ids_of_kind(&compiled, |kind| matches!(kind, TriageSlotKindV2::Reviewer));
     if !reviewers.is_empty() {
         // Even the superficially similar contested/incomplete reviewer is
         // rejected: V2 has explicit requirement and reserve semantics the
@@ -292,6 +340,7 @@ pub fn prepare_v2_contribution_runtime(
     let contributor_slots = compiled
         .slots
         .iter()
+        .filter(admitted)
         .filter(|slot| matches!(slot.kind, TriageSlotKindV2::Contributor(_)))
         .collect::<Vec<_>>();
     if contributor_slots.is_empty() {
@@ -408,6 +457,7 @@ pub fn prepare_v2_contribution_runtime(
             max_context_chars_total: Some(total_context),
         },
         neighborhood,
+        policy_binding: None,
     };
 
     Ok(PreparedV2ContributionRuntimeV1 {
@@ -431,6 +481,18 @@ fn slot_ids_of_kind(
         .slots
         .iter()
         .filter(|slot| predicate(slot.kind))
+        .map(|slot| slot.slot_id.clone())
+        .collect()
+}
+
+fn admitted_slot_ids_of_kind(
+    compiled: &CompiledTriagePolicyV2,
+    predicate: impl Fn(TriageSlotKindV2) -> bool,
+) -> Vec<String> {
+    compiled
+        .slots
+        .iter()
+        .filter(|slot| slot.disposition == SlotDispositionV2::Admitted && predicate(slot.kind))
         .map(|slot| slot.slot_id.clone())
         .collect()
 }

@@ -616,7 +616,7 @@ fn terminal_kind(
     Terminal::Completed
 }
 
-fn rejection_code(category: PolicyRejectionCategoryV2) -> &'static str {
+pub(crate) fn rejection_code(category: PolicyRejectionCategoryV2) -> &'static str {
     match category {
         PolicyRejectionCategoryV2::SchemaMismatch => "schema_mismatch",
         PolicyRejectionCategoryV2::InvalidSlotId => "invalid_slot_id",

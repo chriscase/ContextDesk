@@ -1,0 +1,214 @@
+{
+  "schema_id": "contextdesk.triage.replay.v1",
+  "run_id": "run-fixture-1",
+  "request_fingerprint": "sha256:fixture-request",
+  "events": [
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run-fixture-1",
+      "sequence": 0,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "run_started",
+        "request_fingerprint": "sha256:fixture-request",
+        "policy_fingerprint": "sha256:fixture-policy"
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run-fixture-1",
+      "sequence": 1,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "packet_ready",
+        "packet_id": "c1935c978ef920021861c51b28d7f4621a80ad2a7b705d7d3a192b23d4489799",
+        "packet_digest": "sha256:b231e4f8e3371b4de04362f62a763d4168ff356e898b538e64d88e289b7833ae",
+        "evidence_count": 1
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run-fixture-1",
+      "sequence": 2,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "role_attempt",
+        "attempt": {
+          "attempt_id": "attempt:run-fixture-1:slot-0",
+          "role_slot_id": "slot-0",
+          "role": {
+            "contributor": "observation_extractor"
+          },
+          "model": {
+            "profile_id": "profile-0",
+            "model_id": "openai/model-0"
+          },
+          "status": "completed",
+          "elapsed_ms": 0,
+          "input_chars": 2204,
+          "output_chars": 298
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run-fixture-1",
+      "sequence": 3,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "role_attempt",
+        "attempt": {
+          "attempt_id": "attempt:run-fixture-1:slot-1",
+          "role_slot_id": "slot-1",
+          "role": {
+            "contributor": "causal_proposer"
+          },
+          "model": {
+            "profile_id": "profile-1",
+            "model_id": "openai/model-1"
+          },
+          "status": "completed",
+          "elapsed_ms": 0,
+          "input_chars": 2223,
+          "output_chars": 295
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run-fixture-1",
+      "sequence": 4,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "reconciliation",
+        "summary": {
+          "state": "supported",
+          "configured_role_slots": 2,
+          "completed_role_slots": 2,
+          "distinct_models": 2,
+          "distinct_gateways": 2,
+          "supported_claim_ids": [
+            "candidate-a"
+          ],
+          "root_cause_established": false
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run-fixture-1",
+      "sequence": 5,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "validation",
+        "passed": true
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run-fixture-1",
+      "sequence": 6,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "completed",
+        "result": {
+          "schema_id": "contextdesk.triage.result.v2",
+          "run_id": "run-fixture-1",
+          "kind": "grounded_final",
+          "validation_state": "passed",
+          "packet_id": "c1935c978ef920021861c51b28d7f4621a80ad2a7b705d7d3a192b23d4489799",
+          "reconciliation": {
+            "state": "supported",
+            "configured_role_slots": 2,
+            "completed_role_slots": 2,
+            "distinct_models": 2,
+            "distinct_gateways": 2,
+            "supported_claim_ids": [
+              "candidate-a"
+            ],
+            "root_cause_established": false
+          },
+          "answer": {
+            "binding": {
+              "session_id": "session",
+              "turn_id": "turn",
+              "corpus_id": "corpus",
+              "revision": {
+                "event_revision": 1,
+                "template_analysis_revision": 2,
+                "suppression_revision": 3
+              },
+              "ledger_digest": "1e4e4b03eb4a1d1e1e8d8d6f0bf31f9b924ce4010eba36cc9ef936d7bafa63c7"
+            },
+            "evidence": [
+              {
+                "evidence_id": "opaque-a",
+                "candidate_id": "candidate-a",
+                "source_label": "service.log",
+                "locator": "seq=10",
+                "corpus_id": "corpus",
+                "revision": {
+                  "event_revision": 1,
+                  "template_analysis_revision": 2,
+                  "suppression_revision": 3
+                },
+                "role": "cause",
+                "content": "bounded host evidence"
+              }
+            ],
+            "answer": {
+              "schema": "contextdesk.investigation_answer.v1",
+              "candidates": [
+                {
+                  "candidate_id": "candidate-a",
+                  "claims": [
+                    {
+                      "claim_id": "reconciled-0",
+                      "claim_kind": "observation",
+                      "text": "observed",
+                      "candidate_id": "candidate-a",
+                      "evidence_ids": [
+                        "opaque-a"
+                      ],
+                      "status": "supported"
+                    },
+                    {
+                      "claim_id": "reconciled-1",
+                      "claim_kind": "causal_candidate",
+                      "text": "possible",
+                      "candidate_id": "candidate-a",
+                      "evidence_ids": [
+                        "opaque-a"
+                      ],
+                      "status": "supported"
+                    }
+                  ]
+                }
+              ],
+              "canonical_citations": [
+                {
+                  "evidence_id": "opaque-a",
+                  "candidate_id": "candidate-a",
+                  "source_label": "service.log",
+                  "locator": "seq=10",
+                  "corpus_id": "corpus",
+                  "revision": {
+                    "event_revision": 1,
+                    "template_analysis_revision": 2,
+                    "suppression_revision": 3
+                  },
+                  "content": "bounded host evidence"
+                }
+              ],
+              "root_cause_established": false
+            },
+            "semantic_attempts": 0
+          },
+          "accepted_evidence_ids": [
+            "opaque-a"
+          ]
+        }
+      }
+    }
+  ]
+}

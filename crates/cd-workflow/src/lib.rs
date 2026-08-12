@@ -34,6 +34,9 @@ pub mod triage;
 /// Trusted-host, default-off adapter for the currently supported V2
 /// contributor-only production subset.
 pub mod triage_production;
+/// Production Triage Policy V2 runner: host-neutral resolver, event ledger,
+/// and linked-turn execution facade shared by CLI, desktop, and server hosts.
+pub mod triage_run;
 pub mod turn;
 
 /// Re-export core context plan types at the shared workflow boundary.
