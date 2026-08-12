@@ -593,7 +593,7 @@ impl TriageProductionRunnerV1 {
             }
         } else {
             for slot in &contributors {
-                let attempt = self
+                let (attempt, _) = self
                     .run_generic_slot(
                         slot,
                         &input,
@@ -624,10 +624,16 @@ impl TriageProductionRunnerV1 {
                 &preliminary_report,
                 input.explicit_review_requested,
             );
-            let attempt = if !needed {
-                not_admitted_attempt(&input.run_id, slot, "reviewer_not_required")
+            let (attempt, _) = if !needed {
+                (
+                    not_admitted_attempt(&input.run_id, slot, "reviewer_not_required"),
+                    None,
+                )
             } else if interrupted.is_some() {
-                not_run_attempt(&input.run_id, slot, interrupted.expect("set above"))
+                (
+                    not_run_attempt(&input.run_id, slot, interrupted.expect("set above")),
+                    None,
+                )
             } else {
                 self.run_generic_slot(
                     slot,
@@ -656,12 +662,19 @@ impl TriageProductionRunnerV1 {
             summary: final_report.clone(),
         });
 
+        let mut finalizer_answer = None;
         for slot in &finalizers {
             let eligible = finalizer_eligible(&contributors, &attempts);
-            let attempt = if !eligible {
-                not_admitted_attempt(&input.run_id, slot, "finalizer_not_eligible")
+            let (attempt, response) = if !eligible {
+                (
+                    not_admitted_attempt(&input.run_id, slot, "finalizer_not_eligible"),
+                    None,
+                )
             } else if interrupted.is_some() {
-                not_run_attempt(&input.run_id, slot, interrupted.expect("set above"))
+                (
+                    not_run_attempt(&input.run_id, slot, interrupted.expect("set above")),
+                    None,
+                )
             } else {
                 self.run_generic_slot(
                     slot,
@@ -674,6 +687,13 @@ impl TriageProductionRunnerV1 {
                 )
                 .await
             };
+            if attempt.status == TriageAttemptStatus::Completed {
+                if let Some(response) = response.as_ref() {
+                    finalizer_answer = hooks
+                        .finalize(slot, response, &input.packet, &final_report)
+                        .await;
+                }
+            }
             attempts.push(attempt.clone());
             ledger.push(TriageRunEventPayloadV2::RoleAttempt { attempt });
         }
@@ -724,19 +744,36 @@ impl TriageProductionRunnerV1 {
                 vec!["no_correction_requested".into()]
             },
         });
+        let grounded_final = validation_passed && finalizer_answer.is_some();
+        let accepted_evidence_ids = finalizer_answer
+            .as_ref()
+            .map(|answer| {
+                answer
+                    .evidence
+                    .iter()
+                    .map(|entry| entry.evidence_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let result = TriageResultV2 {
             schema_id: TRIAGE_RESULT_SCHEMA_V2.into(),
             run_id: input.run_id.clone(),
-            kind: TriageResultKind::HonestPartial,
-            validation_state: if validation_passed {
+            kind: if grounded_final {
+                TriageResultKind::GroundedFinal
+            } else {
+                TriageResultKind::HonestPartial
+            },
+            validation_state: if grounded_final {
+                TriageValidationState::Passed
+            } else if validation_passed {
                 TriageValidationState::Partial
             } else {
                 TriageValidationState::Failed
             },
             packet_id: input.packet.packet_id().into(),
             reconciliation: final_report,
-            answer: None,
-            accepted_evidence_ids: Vec::new(),
+            answer: finalizer_answer,
+            accepted_evidence_ids,
             reason_codes,
         };
         let terminal = if let Some(interruption) = interrupted {
@@ -803,7 +840,7 @@ impl TriageProductionRunnerV1 {
         reconciliation: &TriageReconciliationV1,
         interrupted: &mut Option<Interruption>,
         provider_calls: &mut u32,
-    ) -> TriageRoleAttemptV1 {
+    ) -> (TriageRoleAttemptV1, Option<ChatCompletion>) {
         let fail = |status, code: &str| TriageRoleAttemptV1 {
             attempt_id: format!("attempt:{}:{}", input.run_id, slot.slot_id),
             role_slot_id: slot.slot_id.clone(),
@@ -819,35 +856,47 @@ impl TriageProductionRunnerV1 {
             terminal_disposition: Some(disposition_for(status)),
         };
         if slot.disposition != SlotDispositionV2::Admitted {
-            return fail(
-                TriageAttemptStatus::NotAdmitted,
-                "policy_preflight_rejected",
+            return (
+                fail(
+                    TriageAttemptStatus::NotAdmitted,
+                    "policy_preflight_rejected",
+                ),
+                None,
             );
         }
         if let Some(cancel) = &input.cancel {
             if cancel.load(Ordering::SeqCst) {
                 *interrupted = Some(Interruption::Cancelled);
-                return fail(TriageAttemptStatus::Cancelled, "cancelled");
+                return (fail(TriageAttemptStatus::Cancelled, "cancelled"), None);
             }
         }
         let elapsed = started.elapsed();
         if elapsed >= Duration::from_millis(self.resolution.host_deadline_ms) {
             *interrupted = Some(Interruption::TimedOut);
-            return fail(TriageAttemptStatus::TimedOut, "deadline");
+            return (fail(TriageAttemptStatus::TimedOut, "deadline"), None);
         }
         let Some(backend) = self.resolution.backends.get(&slot.slot_id) else {
-            return fail(TriageAttemptStatus::Unavailable, "backend_missing");
+            return (
+                fail(TriageAttemptStatus::Unavailable, "backend_missing"),
+                None,
+            );
         };
         if *provider_calls >= self.resolution.compiled.budget.max_provider_calls {
-            return fail(
-                TriageAttemptStatus::NotAdmitted,
-                "provider_call_budget_exhausted",
+            return (
+                fail(
+                    TriageAttemptStatus::NotAdmitted,
+                    "provider_call_budget_exhausted",
+                ),
+                None,
             );
         }
         let messages = role_messages(&input.user_text, &input.packet, slot.kind);
         let input_chars = estimate_context_chars(&messages) as u64;
         if input_chars > self.resolution.host_context_char_budget as u64 {
-            return fail(TriageAttemptStatus::NotAdmitted, "context_budget_exhausted");
+            return (
+                fail(TriageAttemptStatus::NotAdmitted, "context_budget_exhausted"),
+                None,
+            );
         }
         let remaining =
             Duration::from_millis(self.resolution.host_deadline_ms).saturating_sub(elapsed);
@@ -891,10 +940,10 @@ impl TriageProductionRunnerV1 {
         *provider_calls = (*provider_calls).saturating_add(1);
         let response = match completion {
             Ok(Ok(response)) => response,
-            Ok(Err(_)) => return fail(TriageAttemptStatus::Failed, "provider_failed"),
+            Ok(Err(_)) => return (fail(TriageAttemptStatus::Failed, "provider_failed"), None),
             Err(_) => {
                 *interrupted = Some(Interruption::TimedOut);
-                return fail(TriageAttemptStatus::TimedOut, "deadline");
+                return (fail(TriageAttemptStatus::TimedOut, "deadline"), None);
             }
         };
         let response = if streamed.trim().is_empty() {
@@ -908,6 +957,7 @@ impl TriageProductionRunnerV1 {
         let mut physical_calls = 1u32;
         let mut corrections = 0u32;
         let mut total_input = input_chars;
+        let mut accepted_response = response.clone();
         let mut decision = hooks
             .validate(slot, &response, &input.packet, reconciliation)
             .await;
@@ -942,21 +992,26 @@ impl TriageProductionRunnerV1 {
                                 .corrections
                                 .max_provider_calls
                     {
-                        return TriageRoleAttemptV1 {
-                            attempt_id: format!("attempt:{}:{}", input.run_id, slot.slot_id),
-                            role_slot_id: slot.slot_id.clone(),
-                            role: slot.kind,
-                            model: Some(slot.model.clone()),
-                            status: TriageAttemptStatus::Invalid,
-                            reason_codes: vec!["correction_provider_call_budget_exhausted".into()],
-                            elapsed_ms: started_call.elapsed().as_millis().min(u64::MAX as u128)
-                                as u64,
-                            input_chars: total_input,
-                            output_chars: response.content.chars().count() as u64,
-                            physical_provider_calls: Some(physical_calls),
-                            semantic_corrections: Some(0),
-                            terminal_disposition: Some(TriageTerminalDispositionV1::Invalid),
-                        };
+                        return (
+                            TriageRoleAttemptV1 {
+                                attempt_id: format!("attempt:{}:{}", input.run_id, slot.slot_id),
+                                role_slot_id: slot.slot_id.clone(),
+                                role: slot.kind,
+                                model: Some(slot.model.clone()),
+                                status: TriageAttemptStatus::Invalid,
+                                reason_codes: vec![
+                                    "correction_provider_call_budget_exhausted".into()
+                                ],
+                                elapsed_ms: started_call.elapsed().as_millis().min(u64::MAX as u128)
+                                    as u64,
+                                input_chars: total_input,
+                                output_chars: response.content.chars().count() as u64,
+                                physical_provider_calls: Some(physical_calls),
+                                semantic_corrections: Some(0),
+                                terminal_disposition: Some(TriageTerminalDispositionV1::Invalid),
+                            },
+                            None,
+                        );
                     }
                     let mut corrected_stream = String::new();
                     let mut on_corrected = |text: String| corrected_stream.push_str(&text);
@@ -983,6 +1038,7 @@ impl TriageProductionRunnerV1 {
                                 ..corrected
                             }
                         };
+                        accepted_response = corrected.clone();
                         decision = hooks
                             .validate(slot, &corrected, &input.packet, reconciliation)
                             .await;
@@ -999,20 +1055,27 @@ impl TriageProductionRunnerV1 {
         if reason_codes.is_empty() && status == TriageAttemptStatus::Completed {
             reason_codes.push("host_validated".into());
         }
-        TriageRoleAttemptV1 {
-            attempt_id: format!("attempt:{}:{}", input.run_id, slot.slot_id),
-            role_slot_id: slot.slot_id.clone(),
-            role: slot.kind,
-            model: Some(slot.model.clone()),
-            status,
-            reason_codes,
-            elapsed_ms: started_call.elapsed().as_millis().min(u64::MAX as u128) as u64,
-            input_chars: total_input,
-            output_chars: response.content.chars().count() as u64,
-            physical_provider_calls: Some(physical_calls),
-            semantic_corrections: Some(corrections),
-            terminal_disposition: Some(disposition_for(status)),
-        }
+        (
+            TriageRoleAttemptV1 {
+                attempt_id: format!("attempt:{}:{}", input.run_id, slot.slot_id),
+                role_slot_id: slot.slot_id.clone(),
+                role: slot.kind,
+                model: Some(slot.model.clone()),
+                status,
+                reason_codes,
+                elapsed_ms: started_call.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                input_chars: total_input,
+                output_chars: accepted_response.content.chars().count() as u64,
+                physical_provider_calls: Some(physical_calls),
+                semantic_corrections: Some(corrections),
+                terminal_disposition: Some(disposition_for(status)),
+            },
+            if status == TriageAttemptStatus::Completed {
+                Some(accepted_response)
+            } else {
+                None
+            },
+        )
     }
 }
 
@@ -1240,9 +1303,15 @@ fn not_run_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use cd_core::agent::ScriptedBackend;
+    use cd_core::chat::ChatCompletion;
     use cd_core::investigation_answer::{
-        AnswerBindingV1, EvidenceRole, HostEvidenceEntry, HostEvidenceLedger, LogSnapshotRevisionV1,
+        AnswerBindingV1, EvidenceRole, HostEvidenceEntry, HostEvidenceLedger,
+        InvestigationAnswerV1, LogSnapshotRevisionV1, SCHEMA_V1,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn packet() -> FastTriagePacketV1 {
         let revision = LogSnapshotRevisionV1 {
@@ -1429,5 +1498,184 @@ mod tests {
         assert_eq!(summary.completed_role_slots, 2);
         assert_eq!(summary.distinct_models, 1);
         assert_eq!(summary.distinct_gateways, 1);
+    }
+
+    #[derive(Clone)]
+    struct FinalizerHook {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl TriageProductionHooks for FinalizerHook {
+        async fn validate(
+            &self,
+            _slot: &CompiledRoleSlotV2,
+            _response: &ChatCompletion,
+            _packet: &FastTriagePacketV1,
+            _reconciliation: &TriageReconciliationV1,
+        ) -> TriageValidationDecision {
+            TriageValidationDecision::accepted()
+        }
+
+        async fn correction_messages(
+            &self,
+            _slot: &CompiledRoleSlotV2,
+            _response: &ChatCompletion,
+            _reason_codes: &[String],
+            _packet: &FastTriagePacketV1,
+            _reconciliation: &TriageReconciliationV1,
+        ) -> Option<Vec<ChatMessage>> {
+            None
+        }
+
+        async fn finalize(
+            &self,
+            _slot: &CompiledRoleSlotV2,
+            _response: &ChatCompletion,
+            _packet: &FastTriagePacketV1,
+            _reconciliation: &TriageReconciliationV1,
+        ) -> Option<AnswerEnvelopeV1> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Some(AnswerEnvelopeV1 {
+                binding: AnswerBindingV1 {
+                    session_id: "session".into(),
+                    turn_id: "turn".into(),
+                    corpus_id: "corpus".into(),
+                    revision: LogSnapshotRevisionV1 {
+                        event_revision: 1,
+                        template_analysis_revision: 1,
+                        suppression_revision: 1,
+                    },
+                    ledger_digest: "digest".into(),
+                },
+                evidence: Vec::new(),
+                answer: InvestigationAnswerV1 {
+                    schema: SCHEMA_V1.into(),
+                    candidates: Vec::new(),
+                    canonical_citations: Vec::new(),
+                    root_cause_established: false,
+                },
+                semantic_attempts: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_finalizer_becomes_grounded_final_once() {
+        let model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-finalizer".into(),
+            model_id: "model-finalizer".into(),
+        };
+        let policy = TriagePolicyV2 {
+            schema_id: cd_core::multi_model::triage_policy::TRIAGE_POLICY_SCHEMA_V2.into(),
+            mode: TriagePolicyMode::Enhanced,
+            contributors: vec![cd_core::multi_model::triage_policy::ContributorSlotV2 {
+                slot_id: "observe".into(),
+                role: TriageContributorRole::ObservationExtractor,
+                model: cd_core::model_ref::ModelRef {
+                    profile_id: "profile-observe".into(),
+                    model_id: "model-observe".into(),
+                },
+                requirement: RoleRequirement::Optional,
+                allow_remote: false,
+            }],
+            finalizer: Some(cd_core::multi_model::triage_policy::FinalizerSlotV2 {
+                slot_id: "finalizer".into(),
+                model: model.clone(),
+                requirement: RoleRequirement::Required,
+                allow_remote: false,
+            }),
+            reviewer: None,
+            budget: Default::default(),
+            execution: Default::default(),
+        };
+        let preflight = TriagePolicyPreflightV2 {
+            roles: vec![
+                cd_core::multi_model::triage_policy::RolePreflightV2 {
+                    slot_id: "observe".into(),
+                    model: cd_core::model_ref::ModelRef {
+                        profile_id: "profile-observe".into(),
+                        model_id: "model-observe".into(),
+                    },
+                    kind: TriageSlotKindV2::Contributor(
+                        TriageContributorRole::ObservationExtractor,
+                    ),
+                    available: true,
+                    qualification:
+                        cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+                    remote: false,
+                    qualification_schema_id: Some(
+                        cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_SCHEMA_V2.into(),
+                    ),
+                    workflow_id: Some(
+                        cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_WORKFLOW_V2
+                            .into(),
+                    ),
+                    protocol_fingerprint: Some("sha256:test".into()),
+                },
+                cd_core::multi_model::triage_policy::RolePreflightV2 {
+                    slot_id: "finalizer".into(),
+                    model: model.clone(),
+                    kind: TriageSlotKindV2::Finalizer,
+                    available: true,
+                    qualification:
+                        cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+                    remote: false,
+                    qualification_schema_id: Some(
+                        cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_SCHEMA_V2.into(),
+                    ),
+                    workflow_id: Some(
+                        cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_WORKFLOW_V2
+                            .into(),
+                    ),
+                    protocol_fingerprint: Some("sha256:test".into()),
+                },
+            ],
+        };
+        let resolved = resolve_v2_production(
+            &policy,
+            &preflight,
+            vec![
+                AuthorizedTriageBackendV1 {
+                    slot_id: "observe".into(),
+                    model: cd_core::model_ref::ModelRef {
+                        profile_id: "profile-observe".into(),
+                        model_id: "model-observe".into(),
+                    },
+                    backend: Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
+                        "{}",
+                        Vec::new(),
+                        "stop",
+                    )])),
+                },
+                AuthorizedTriageBackendV1 {
+                    slot_id: "finalizer".into(),
+                    model,
+                    backend: Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
+                        "{}",
+                        Vec::new(),
+                        "stop",
+                    )])),
+                },
+            ],
+            60_000,
+            100_000,
+            FastTriageNeighborhoodBudget::default(),
+        )
+        .expect("finalizer resolves");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let result = TriageProductionRunnerV1::new(resolved)
+            .run(
+                input(),
+                &FinalizerHook {
+                    calls: Arc::clone(&calls),
+                },
+            )
+            .await
+            .expect("runner succeeds");
+        assert!(result.completed);
+        assert_eq!(result.result.kind, TriageResultKind::GroundedFinal);
+        assert!(result.result.answer.is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
