@@ -2,7 +2,7 @@
 
 **Branch:** `test/triage-policy-v2-adversarial-audit-v1`  
 **Base SHA:** `2ba4a08dcca0feaaefe65eb89614103fb06ad294`  
-**Audit HEAD (branch tip):**  (verify with 0d7c1808cd16a0d348c48efd500c0334aaf358bf on this branch)
+**Audit HEAD (branch tip):** `git rev-parse HEAD` on branch `test/triage-policy-v2-adversarial-audit-v1` (authoritative). Skeptic-close-out content commit (M5 context, M14 overflow, M16 garbage body): `d24620988c4369c8e074a48a6d35919b10d2f301`.
 **Attestation:** hermetic only — no live gateways, credentials, Keychain, or network provider I/O.
 
 ## Scope
