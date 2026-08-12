@@ -130,6 +130,16 @@ describe("tauri engine adapter conformance", () => {
 });
 
 describe("tauri engine adapter mapping", () => {
+  it("reports triage unsupported until a production host command is wired", async () => {
+    const transport = createFakeTransport();
+    const client = createTauriEngineClient(transport);
+    expect(client.triage.capability.supported).toBe(false);
+    await expect(client.triage.preflight({} as never)).rejects.toMatchObject({
+      name: "EngineError",
+      code: "unsupported",
+    });
+  });
+
   it("classifies host string rejections into EngineError codes", async () => {
     const transport: TauriTransport = {
       invoke: async () => {

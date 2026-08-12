@@ -7,7 +7,15 @@
  * `@contextdesk/contracts` wherever a frozen contract exists so a drifting
  * host surfaces as a `ContractViolation`, not a silent mismatch.
  */
-import type { WireImportPreviewPlan, WireProcessProgress } from "@contextdesk/contracts";
+import type {
+  CompiledTriagePolicyV2,
+  TriageCancellationV1,
+  TriageReplayV1,
+  TriageRequestV2,
+  TriageRunEventV2,
+  WireImportPreviewPlan,
+  WireProcessProgress,
+} from "@contextdesk/contracts";
 
 /** Stable classification of an engine failure for UI branching. */
 export type EngineErrorCode =
@@ -17,6 +25,8 @@ export type EngineErrorCode =
   | "conflict"
   /** The request itself is not runnable (for example zero importable sources). */
   | "invalid"
+  /** The adapter intentionally does not expose this optional capability. */
+  | "unsupported"
   /** Anything else the engine reported. The raw message is preserved. */
   | "failed";
 
@@ -46,6 +56,9 @@ export function classifyEngineMessage(message: string): EngineErrorCode {
     lower.includes("import plan")
   ) {
     return "invalid";
+  }
+  if (lower.includes("not support") || lower.includes("not wired")) {
+    return "unsupported";
   }
   return "failed";
 }
@@ -228,9 +241,54 @@ export interface EngineEvents {
   onProcessProgress(listener: (progress: WireProcessProgress) => void): Unsubscribe;
 }
 
+/** Whether this adapter can currently expose the optional triage namespace. */
+export type TriageAdapterCapability =
+  | { supported: true }
+  | { supported: false; reason: string };
+
+/** Per-run delivery controls. They do not alter policy or host truth. */
+export type TriageRunOptions = {
+  /** Standard cancellation signal; abort never becomes a successful result. */
+  signal?: AbortSignal;
+  /** Ordered projection of the exact shared host event stream. */
+  onEvent?: (event: TriageRunEventV2) => void;
+};
+
+/** Optional provider-neutral triage surface over the shared V2 contracts. */
+export interface TriageService {
+  /** Explicit feature status; callers never discover support by exception. */
+  readonly capability: TriageAdapterCapability;
+  /** Ask the host to compile/preflight; TypeScript never recompiles policy. */
+  preflight(request: TriageRequestV2): Promise<CompiledTriagePolicyV2>;
+  /** Execute the host path and return its one authoritative terminal event. */
+  run(request: TriageRequestV2, options?: TriageRunOptions): Promise<TriageRunEventV2>;
+  /** Consume a host-authored replay through the same ordered event boundary. */
+  replay(replay: TriageReplayV1, options?: TriageRunOptions): Promise<TriageRunEventV2>;
+  /** Request cancellation by exact run/cancellation identity. */
+  cancel(request: TriageCancellationV1): Promise<boolean>;
+  /** Subscribe to the same events delivered to per-run listeners. */
+  onRunEvent(listener: (event: TriageRunEventV2) => void): Unsubscribe;
+}
+
+/** Fail-closed triage surface for adapters whose production host is not wired. */
+export function unsupportedTriageService(reason: string): TriageService {
+  const unsupported = async (): Promise<never> => {
+    throw new EngineError("unsupported", reason);
+  };
+  return {
+    capability: { supported: false, reason },
+    preflight: unsupported,
+    run: unsupported,
+    replay: unsupported,
+    cancel: unsupported,
+    onRunEvent: () => () => undefined,
+  };
+}
+
 /** The transport-neutral engine client the import flow consumes. */
 export interface EngineClient {
   import: ImportService;
   time: TimeService;
   events: EngineEvents;
+  triage: TriageService;
 }

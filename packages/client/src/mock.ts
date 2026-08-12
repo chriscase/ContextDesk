@@ -8,7 +8,17 @@
  * preview tokens) with the core's own message shapes, so UI code exercised
  * against it meets the real engine's edges.
  */
-import type { WireImportPreviewPlan, WireImportPreviewReport, WireProcessProgress } from "@contextdesk/contracts";
+import {
+  parseCompiledTriagePolicyV2,
+  parseTriageCancellationV1,
+  parseTriageReplayV1,
+  parseTriageRequestV2,
+  type CompiledTriagePolicyV2,
+  type TriageReplayV1,
+  type WireImportPreviewPlan,
+  type WireImportPreviewReport,
+  type WireProcessProgress,
+} from "@contextdesk/contracts";
 import {
   EngineError,
   type EngineClient,
@@ -18,6 +28,8 @@ import {
   type TimezoneApplyRequest,
   type TimezonePreview,
   type TimezoneState,
+  type TriageRunOptions,
+  type TriageService,
   type Unsubscribe,
 } from "./engine";
 
@@ -39,6 +51,20 @@ export type MockScenario = {
    * exactly as the real engine ignores it.
    */
   parkBeforeCompletion?: boolean;
+  /** Optional host-shaped triage script. Absence means explicitly unsupported. */
+  triage?: MockTriageScenario;
+};
+
+/** Rust-contract-shaped provider-free triage responses for deterministic tests. */
+export type MockTriageScenario = {
+  /** Exact host preflight result; the mock never recompiles it. */
+  preflight: CompiledTriagePolicyV2;
+  /** Exact normal run replay. */
+  replay: TriageReplayV1;
+  /** Exact cancellation replay used when abort/cancel wins. */
+  cancelledReplay?: TriageReplayV1;
+  /** Park a run before event delivery until `flush()` or `cancel()` is called. */
+  manualFlush?: boolean;
 };
 
 /** The default deterministic preview: one of every ledger state. */
@@ -173,6 +199,11 @@ export class MockEngineClient implements EngineClient {
   #cancelRequested = false;
   #failNextRun: string | undefined;
   #pendingFlush: (() => void)[] = [];
+  #triageScenario: MockTriageScenario | undefined;
+  #triageListeners = new Set<(event: TriageReplayV1["events"][number]) => void>();
+  #triageRunning: { runId: string; cancellationId: string } | undefined;
+  #triageCancelRequested = false;
+  readonly triage: TriageService;
   /** Mutable timezone corpus states keyed by corpus id. */
   #corpora = new Map<
     string,
@@ -183,6 +214,19 @@ export class MockEngineClient implements EngineClient {
     this.#scenario = scenario;
     this.#preview = scenario.preview ?? defaultMockPreview();
     this.#failNextRun = scenario.failNextRun;
+    this.#triageScenario = scenario.triage
+      ? {
+          preflight: parseCompiledTriagePolicyV2(
+            structuredClone(scenario.triage.preflight),
+          ),
+          replay: parseTriageReplayV1(structuredClone(scenario.triage.replay)),
+          cancelledReplay: scenario.triage.cancelledReplay
+            ? parseTriageReplayV1(structuredClone(scenario.triage.cancelledReplay))
+            : undefined,
+          manualFlush: scenario.triage.manualFlush,
+        }
+      : undefined;
+    this.triage = this.#createTriageService();
   }
 
   /** Resolve any operation parked by `manualFlush`. */
@@ -514,6 +558,89 @@ export class MockEngineClient implements EngineClient {
       return () => this.#listeners.delete(listener);
     },
   };
+
+  #createTriageService(): TriageService {
+    const unsupported = (): never => {
+      throw new EngineError("unsupported", "triage capability is not configured for this adapter");
+    };
+    return {
+      capability: this.#triageScenario
+        ? { supported: true }
+        : { supported: false, reason: "triage capability is not configured for this adapter" },
+      preflight: async (request) => {
+        parseTriageRequestV2(structuredClone(request));
+        const scenario = this.#triageScenario ?? unsupported();
+        return structuredClone(scenario.preflight);
+      },
+      run: async (request, options = {}) => {
+        const parsedRequest = parseTriageRequestV2(structuredClone(request));
+        const scenario = this.#triageScenario ?? unsupported();
+        if (this.#triageRunning) {
+          throw new EngineError("conflict", "a triage run is already running");
+        }
+        if (scenario.replay.run_id !== parsedRequest.run_id) {
+          throw new EngineError("conflict", "triage replay run identity does not match request");
+        }
+        this.#triageRunning = {
+          runId: parsedRequest.run_id,
+          cancellationId: parsedRequest.cancellation_id,
+        };
+        this.#triageCancelRequested = options.signal?.aborted ?? false;
+        const abort = () => {
+          this.#triageCancelRequested = true;
+          this.flush();
+        };
+        options.signal?.addEventListener("abort", abort, { once: true });
+        try {
+          if (scenario.manualFlush) await this.#parkAlways();
+          const selected = this.#triageCancelRequested
+            ? scenario.cancelledReplay ?? unsupported()
+            : scenario.replay;
+          return this.#consumeTriageReplay(selected, options);
+        } finally {
+          options.signal?.removeEventListener("abort", abort);
+          this.#triageRunning = undefined;
+          this.#triageCancelRequested = false;
+        }
+      },
+      replay: async (replay, options = {}) => {
+        if (options.signal?.aborted) {
+          throw new EngineError("cancelled", "triage replay consumption cancelled");
+        }
+        return this.#consumeTriageReplay(replay, options);
+      },
+      cancel: async (request) => {
+        const parsed = parseTriageCancellationV1(structuredClone(request));
+        const active = this.#triageRunning;
+        if (
+          !active ||
+          active.runId !== parsed.run_id ||
+          active.cancellationId !== parsed.cancellation_id
+        ) {
+          return false;
+        }
+        this.#triageCancelRequested = true;
+        this.flush();
+        return true;
+      },
+      onRunEvent: (listener) => {
+        this.#triageListeners.add(listener);
+        return () => this.#triageListeners.delete(listener);
+      },
+    };
+  }
+
+  #consumeTriageReplay(
+    replay: TriageReplayV1,
+    options: TriageRunOptions,
+  ): TriageReplayV1["events"][number] {
+    const parsed = parseTriageReplayV1(structuredClone(replay));
+    for (const event of parsed.events) {
+      options.onEvent?.(event);
+      for (const listener of this.#triageListeners) listener(event);
+    }
+    return parsed.events[parsed.events.length - 1]!;
+  }
 
   #corpus(corpusId: string): {
     revision: number;

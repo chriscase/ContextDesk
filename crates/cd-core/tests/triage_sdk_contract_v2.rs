@@ -6,7 +6,10 @@ use cd_core::investigation_answer::{
     AnswerBindingV1, AnswerEnvelopeV1, EvidenceRole, HostEvidenceEntry, InvestigationAnswerV1,
     LogSnapshotRevisionV1, SCHEMA_V1,
 };
-use cd_core::multi_model::triage_policy::{TriageContributorRole, TriageSlotKindV2};
+use cd_core::multi_model::triage_policy::{
+    compile_triage_policy_v2, RolePreflightV2, RoleQualificationV2, TriageContributorRole,
+    TriagePolicyPreflightV2, TriagePolicyV2, TriageSlotKindV2,
+};
 use cd_core::triage_sdk::*;
 
 fn fixtures_dir() -> PathBuf {
@@ -173,6 +176,49 @@ fn replay() -> TriageReplayV1 {
     }
 }
 
+fn cancelled_replay() -> TriageReplayV1 {
+    let mut replay = replay();
+    replay.events.truncate(4);
+    replay.events.push(event(
+        4,
+        TriageRunEventPayloadV2::Cancelled {
+            cancellation_id: "cancel:golden:01".into(),
+            partial_result: Some(Box::new(partial_result())),
+        },
+    ));
+    replay
+}
+
+fn compiled_standard_policy() -> cd_core::multi_model::triage_policy::CompiledTriagePolicyV2 {
+    let model = ModelRef {
+        profile_id: "profile:primary".into(),
+        model_id: "model:catalog:exact".into(),
+    };
+    let policy = TriagePolicyV2::standard(model.clone(), false);
+    compile_triage_policy_v2(
+        &policy,
+        &TriagePolicyPreflightV2 {
+            roles: vec![RolePreflightV2 {
+                slot_id: "standard-finalizer".into(),
+                model,
+                kind: TriageSlotKindV2::Finalizer,
+                available: true,
+                qualification: RoleQualificationV2::Qualified,
+                remote: false,
+            }],
+        },
+    )
+    .expect("standard fixture compiles")
+}
+
+fn cancellation() -> TriageCancellationV1 {
+    TriageCancellationV1 {
+        schema_id: TRIAGE_CANCELLATION_SCHEMA_V1.into(),
+        run_id: "run:golden:01".into(),
+        cancellation_id: "cancel:golden:01".into(),
+    }
+}
+
 #[test]
 fn request_and_replay_goldens_are_exact_rust_serializations() {
     request().validate().unwrap();
@@ -182,6 +228,14 @@ fn request_and_replay_goldens_are_exact_rust_serializations() {
         .expect("committed request golden");
     let expected_replay = fs::read_to_string(fixtures_dir().join("replay.partial.json"))
         .expect("committed replay golden");
+    let expected_cancelled =
+        fs::read_to_string(fixtures_dir().join("replay.cancelled-partial.json"))
+            .expect("committed cancelled replay golden");
+    let expected_preflight =
+        fs::read_to_string(fixtures_dir().join("policy-preflight.standard.json"))
+            .expect("committed preflight golden");
+    let expected_cancellation = fs::read_to_string(fixtures_dir().join("cancellation.json"))
+        .expect("committed cancellation golden");
     assert_eq!(
         format!("{}\n", serde_json::to_string_pretty(&request()).unwrap()),
         expected_request
@@ -189,6 +243,27 @@ fn request_and_replay_goldens_are_exact_rust_serializations() {
     assert_eq!(
         format!("{}\n", serde_json::to_string_pretty(&replay()).unwrap()),
         expected_replay
+    );
+    assert_eq!(
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&cancelled_replay()).unwrap()
+        ),
+        expected_cancelled
+    );
+    assert_eq!(
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&compiled_standard_policy()).unwrap()
+        ),
+        expected_preflight
+    );
+    assert_eq!(
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&cancellation()).unwrap()
+        ),
+        expected_cancellation
     );
 }
 
@@ -486,6 +561,30 @@ fn regenerate_goldens() {
     fs::write(
         fixtures_dir().join("replay.partial.json"),
         format!("{}\n", serde_json::to_string_pretty(&replay()).unwrap()),
+    )
+    .unwrap();
+    fs::write(
+        fixtures_dir().join("replay.cancelled-partial.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&cancelled_replay()).unwrap()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        fixtures_dir().join("policy-preflight.standard.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&compiled_standard_policy()).unwrap()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        fixtures_dir().join("cancellation.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&cancellation()).unwrap()
+        ),
     )
     .unwrap();
 

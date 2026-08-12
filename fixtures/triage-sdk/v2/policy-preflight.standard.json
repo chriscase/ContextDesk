@@ -1,0 +1,63 @@
+{
+  "schema_id": "contextdesk.triage_policy.compiled.v2",
+  "mode": "standard",
+  "slots": [
+    {
+      "slot_id": "standard-finalizer",
+      "kind": "finalizer",
+      "model": {
+        "profile_id": "profile:primary",
+        "model_id": "model:catalog:exact"
+      },
+      "requirement": "required",
+      "disposition": "admitted",
+      "rejections": []
+    }
+  ],
+  "independence_groups": [
+    {
+      "model": {
+        "profile_id": "profile:primary",
+        "model_id": "model:catalog:exact"
+      },
+      "slot_ids": [
+        "standard-finalizer"
+      ]
+    }
+  ],
+  "independence_counts": {
+    "role_slots": 1,
+    "distinct_model_refs": 1,
+    "distinct_model_ids": 1,
+    "distinct_gateways": 1
+  },
+  "budget": {
+    "whole_turn_deadline_ms": null,
+    "max_provider_calls": 12,
+    "max_context_chars": 600000,
+    "contributors": {
+      "max_provider_calls": 4,
+      "operation_timeout_ms": 120000,
+      "max_context_chars": 240000
+    },
+    "corrections": {
+      "max_per_stage": 1,
+      "max_provider_calls": 4,
+      "operation_timeout_ms": 120000,
+      "max_context_chars": 120000
+    },
+    "finalizer": {
+      "max_provider_calls": 1,
+      "reserve_ms": 120000,
+      "operation_timeout_ms": 120000,
+      "max_context_chars": 120000
+    },
+    "reviewer": {
+      "max_provider_calls": 1,
+      "reserve_ms": 120000,
+      "operation_timeout_ms": 120000,
+      "max_context_chars": 120000
+    }
+  },
+  "execution": "sequential"
+}

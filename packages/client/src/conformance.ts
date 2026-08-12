@@ -9,7 +9,13 @@
  * honesty, cancellation, and atomic stale-guarded timezone application.
  */
 import { parseImportPreviewPlan } from "@contextdesk/contracts";
-import type { WireProcessProgress } from "@contextdesk/contracts";
+import type {
+  CompiledTriagePolicyV2,
+  TriageCancellationV1,
+  TriageReplayV1,
+  TriageRequestV2,
+  WireProcessProgress,
+} from "@contextdesk/contracts";
 import { EngineError, type EngineClient } from "./engine";
 
 /** One named conformance check. */
@@ -253,6 +259,132 @@ export function engineClientConformance(harness: ConformanceHarness): Conformanc
           Object.keys(cleared.declarations).length === 0,
           "declarations cleared after undo",
         );
+      },
+    },
+  ];
+}
+
+/** Inputs for the optional triage adapter conformance suite. */
+export type TriageConformanceHarness = {
+  /** Fresh supported adapter with the exact scripted host responses. */
+  createClient: () => EngineClient;
+  /** Same adapter, parked before delivery so exact cancellation can win. */
+  createCancellableClient: () => EngineClient;
+  /** Fresh adapter that explicitly reports the namespace unsupported. */
+  createUnsupportedClient: () => EngineClient;
+  request: TriageRequestV2;
+  preflight: CompiledTriagePolicyV2;
+  replay: TriageReplayV1;
+  cancelledReplay: TriageReplayV1;
+  cancellation: TriageCancellationV1;
+};
+
+function terminalKind(replay: TriageReplayV1): unknown {
+  return replay.events.at(-1)?.event.kind;
+}
+
+/** Provider-free conformance for policy-preflight and ordered run/replay adapters. */
+export function triageClientConformance(
+  harness: TriageConformanceHarness,
+): ConformanceCheck[] {
+  return [
+    {
+      name: "triage capability and preflight return the exact host plan",
+      run: async () => {
+        const client = harness.createClient();
+        assert(client.triage.capability.supported, "triage capability is explicit");
+        const plan = await client.triage.preflight(harness.request);
+        assert(
+          JSON.stringify(plan) === JSON.stringify(harness.preflight),
+          "preflight is the host response, not a TypeScript recompilation",
+        );
+      },
+    },
+    {
+      name: "triage run emits ordered shared events and an honest partial terminal",
+      run: async () => {
+        const client = harness.createClient();
+        const direct: TriageReplayV1["events"] = [];
+        const subscribed: TriageReplayV1["events"] = [];
+        client.triage.onRunEvent((event) => subscribed.push(event));
+        const terminal = await client.triage.run(harness.request, {
+          onEvent: (event) => direct.push(event),
+        });
+        assert(JSON.stringify(direct) === JSON.stringify(harness.replay.events), "run order");
+        assert(JSON.stringify(subscribed) === JSON.stringify(direct), "one shared event stream");
+        assert(terminal === direct.at(-1), "returned terminal is the emitted terminal object");
+        assert(terminalKind(harness.replay) === "completed", "normal fixture completes");
+        const result = terminal.event.result as Record<string, unknown>;
+        assert(result.kind === "honest_partial", "partial is not promoted to final");
+      },
+    },
+    {
+      name: "triage replay consumes the same bytes without reordering",
+      run: async () => {
+        const client = harness.createClient();
+        const events: TriageReplayV1["events"] = [];
+        const terminal = await client.triage.replay(harness.replay, {
+          onEvent: (event) => events.push(event),
+        });
+        assert(JSON.stringify(events) === JSON.stringify(harness.replay.events), "replay order");
+        assert(terminal.sequence === events.length - 1, "terminal sequence is last");
+      },
+    },
+    {
+      name: "pre-abort and active cancel retain the host-authored partial terminal",
+      run: async () => {
+        const aborted = harness.createClient();
+        const controller = new AbortController();
+        controller.abort();
+        const abortEvents: TriageReplayV1["events"] = [];
+        const abortTerminal = await aborted.triage.run(harness.request, {
+          signal: controller.signal,
+          onEvent: (event) => abortEvents.push(event),
+        });
+        assert(abortTerminal.event.kind === "cancelled", "abort terminal is cancelled");
+        assert(
+          (abortTerminal.event.partial_result as Record<string, unknown>).kind ===
+            "honest_partial",
+          "abort preserves honest partial",
+        );
+
+        const active = harness.createCancellableClient();
+        const running = active.triage.run(harness.request);
+        assert(await active.triage.cancel(harness.cancellation), "exact active cancel accepted");
+        const cancelTerminal = await running;
+        assert(cancelTerminal.event.kind === "cancelled", "active cancel terminal");
+        assert(
+          JSON.stringify(cancelTerminal) ===
+            JSON.stringify(harness.cancelledReplay.events.at(-1)),
+          "cancel terminal is host-authored fixture",
+        );
+      },
+    },
+    {
+      name: "unsupported triage is visible and fails with a typed error",
+      run: async () => {
+        const client = harness.createUnsupportedClient();
+        assert(!client.triage.capability.supported, "unsupported status is explicit");
+        await expectEngineError(
+          client.triage.preflight(harness.request),
+          "unsupported",
+          "unsupported triage preflight",
+        );
+      },
+    },
+    {
+      name: "owner-only terminal content cannot be relabelled share-safe",
+      run: async () => {
+        const client = harness.createClient();
+        const forged = structuredClone(harness.replay);
+        forged.events[forged.events.length - 1]!.privacy = "share_safe";
+        let rejected = false;
+        try {
+          await client.triage.replay(forged);
+        } catch {
+          rejected = true;
+        }
+        assert(rejected, "privacy relabel is rejected before delivery");
       },
     },
   ];

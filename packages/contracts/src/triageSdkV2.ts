@@ -6,10 +6,17 @@ export const TRIAGE_RUN_EVENT_SCHEMA_V2 =
   "contextdesk.triage.run_event.v2" as const;
 export const TRIAGE_RESULT_SCHEMA_V2 = "contextdesk.triage.result.v2" as const;
 export const TRIAGE_REPLAY_SCHEMA_V1 = "contextdesk.triage.replay.v1" as const;
+export const TRIAGE_CANCELLATION_SCHEMA_V1 =
+  "contextdesk.triage.cancellation.v1" as const;
+export const COMPILED_TRIAGE_POLICY_SCHEMA_V2 =
+  "contextdesk.triage_policy.compiled.v2" as const;
 
 export type TriageRequestV2 = Record<string, unknown> & {
   schema_id: typeof TRIAGE_REQUEST_SCHEMA_V2;
   run_id: string;
+  privacy: "owner_only";
+  task: string;
+  cancellation_id: string;
 };
 
 export type TriageRunEventV2 = Record<string, unknown> & {
@@ -24,6 +31,18 @@ export type TriageReplayV1 = Record<string, unknown> & {
   run_id: string;
   request_fingerprint: string;
   events: TriageRunEventV2[];
+};
+
+export type TriageCancellationV1 = {
+  schema_id: typeof TRIAGE_CANCELLATION_SCHEMA_V1;
+  run_id: string;
+  cancellation_id: string;
+};
+
+export type CompiledTriagePolicyV2 = Record<string, unknown> & {
+  schema_id: typeof COMPILED_TRIAGE_POLICY_SCHEMA_V2;
+  mode: "standard" | "enhanced" | "advanced";
+  slots: Record<string, unknown>[];
 };
 
 const modelRef = f.obj({
@@ -55,6 +74,54 @@ const triageSlotKind = f.pred("typed triage slot kind", (value) => {
     "contradiction_checker",
     "evidence_gap_finder",
   ].includes((value as Record<string, unknown>).contributor as string);
+});
+
+const rejectionCategory = f.en(
+  "schema_mismatch",
+  "invalid_slot_id",
+  "duplicate_slot_id",
+  "invalid_model_ref",
+  "standard_mode_expanded",
+  "standard_finalizer_required",
+  "empty_policy",
+  "invalid_budget",
+  "role_unavailable",
+  "qualification_unavailable",
+  "egress_denied",
+  "unknown_preflight_slot",
+  "duplicate_preflight_slot",
+  "preflight_binding_mismatch",
+  "provider_call_budget_insufficient",
+);
+
+const contributorBudget = f.obj({
+  max_provider_calls: f.req(f.u64),
+  operation_timeout_ms: f.req(f.u64),
+  max_context_chars: f.req(f.u64),
+});
+
+const correctionBudget = f.obj({
+  max_per_stage: f.req(f.u64),
+  max_provider_calls: f.req(f.u64),
+  operation_timeout_ms: f.req(f.u64),
+  max_context_chars: f.req(f.u64),
+});
+
+const terminalBudget = f.obj({
+  max_provider_calls: f.req(f.u64),
+  reserve_ms: f.req(f.u64),
+  operation_timeout_ms: f.req(f.u64),
+  max_context_chars: f.req(f.u64),
+});
+
+const triageBudget = f.obj({
+  whole_turn_deadline_ms: f.nul(f.u64),
+  max_provider_calls: f.req(f.u64),
+  max_context_chars: f.req(f.u64),
+  contributors: f.req(contributorBudget),
+  corrections: f.req(correctionBudget),
+  finalizer: f.req(terminalBudget),
+  reviewer: f.req(terminalBudget),
 });
 
 function objectValue(path: string, value: unknown): Record<string, unknown> {
@@ -128,6 +195,62 @@ export function parseTriageRequestV2(value: unknown): TriageRequestV2 {
     value,
   );
   return value as TriageRequestV2;
+}
+
+export function parseTriageCancellationV1(value: unknown): TriageCancellationV1 {
+  checkObject(
+    "cancellation",
+    {
+      schema_id: f.req(f.en(TRIAGE_CANCELLATION_SCHEMA_V1)),
+      run_id: f.req(f.str),
+      cancellation_id: f.req(f.str),
+    },
+    value,
+  );
+  return value as TriageCancellationV1;
+}
+
+export function parseCompiledTriagePolicyV2(
+  value: unknown,
+): CompiledTriagePolicyV2 {
+  const slot = f.obj({
+    slot_id: f.req(f.str),
+    kind: f.req(triageSlotKind),
+    model: f.req(modelRef),
+    requirement: f.req(f.en("required", "optional")),
+    disposition: f.req(
+      f.en("admitted", "optional_degraded", "required_rejected"),
+    ),
+    rejections: f.req(f.arr(rejectionCategory)),
+  });
+  checkObject(
+    "compiled_policy",
+    {
+      schema_id: f.req(f.en(COMPILED_TRIAGE_POLICY_SCHEMA_V2)),
+      mode: f.req(f.en("standard", "enhanced", "advanced")),
+      slots: f.req(f.arr(slot)),
+      independence_groups: f.req(
+        f.arr(
+          f.obj({
+            model: f.req(modelRef),
+            slot_ids: f.req(f.arr(f.str)),
+          }),
+        ),
+      ),
+      independence_counts: f.req(
+        f.obj({
+          role_slots: f.req(f.u64),
+          distinct_model_refs: f.req(f.u64),
+          distinct_model_ids: f.req(f.u64),
+          distinct_gateways: f.req(f.u64),
+        }),
+      ),
+      budget: f.req(triageBudget),
+      execution: f.req(f.en("sequential")),
+    },
+    value,
+  );
+  return value as CompiledTriagePolicyV2;
 }
 
 function checkAttempt(path: string, value: unknown): void {
@@ -265,6 +388,41 @@ export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
       break;
     default:
       throw new ContractViolation("event.event.kind", "unknown event kind");
+  }
+  if (payload.kind === "completed") {
+    const result = payload.result as Record<string, unknown>;
+    if (result.run_id !== outer.run_id)
+      throw new ContractViolation("event.event.result.run_id", "run identity mismatch");
+  }
+  if (["failed", "timed_out", "cancelled"].includes(payload.kind as string)) {
+    const partial = payload.partial_result as Record<string, unknown> | undefined;
+    if (partial !== undefined) {
+      if (partial.run_id !== outer.run_id)
+        throw new ContractViolation(
+          "event.event.partial_result.run_id",
+          "run identity mismatch",
+        );
+      if (partial.kind !== "honest_partial")
+        throw new ContractViolation(
+          "event.event.partial_result.kind",
+          "terminal fallback must be honest_partial",
+        );
+    }
+  }
+  if (outer.privacy === "share_safe") {
+    if (payload.kind === "completed" || payload.partial_result !== undefined)
+      throw new ContractViolation(
+        "event.privacy",
+        "owner-only terminal content declared share_safe",
+      );
+    if (
+      payload.kind === "role_attempt" &&
+      (payload.attempt as Record<string, unknown>).model !== undefined
+    )
+      throw new ContractViolation(
+        "event.privacy",
+        "exact model identity declared share_safe",
+      );
   }
   return outer;
 }

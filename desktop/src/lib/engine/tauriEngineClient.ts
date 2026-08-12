@@ -12,6 +12,7 @@ import type { WireImportPreviewPlan, WireProcessProgress } from "@contextdesk/co
 import {
   EngineError,
   classifyEngineMessage,
+  unsupportedTriageService,
   type EngineClient,
   type EventRevisionReport,
   type ImportRunReport,
@@ -133,5 +134,11 @@ export function createTauriEngineClient(
         };
       },
     },
+    // Provider-free contracts exist, but no production Tauri command is
+    // shipped yet. Keep this explicit and fail closed rather than inventing a
+    // renderer-side compiler or silently bypassing the trusted host.
+    triage: unsupportedTriageService(
+      "triage namespace is not wired to the production Tauri host",
+    ),
   };
 }

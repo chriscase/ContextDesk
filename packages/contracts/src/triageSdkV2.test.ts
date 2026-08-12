@@ -2,7 +2,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { parseTriageReplayV1, parseTriageRequestV2 } from "./triageSdkV2";
+import {
+  parseCompiledTriagePolicyV2,
+  parseTriageCancellationV1,
+  parseTriageReplayV1,
+  parseTriageRequestV2,
+} from "./triageSdkV2";
 
 const fixtureDir = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -16,6 +21,9 @@ describe("Rust-generated triage SDK v2 contracts", () => {
   it("accepts the exact request and ordered replay goldens", () => {
     expect(parseTriageRequestV2(load("request.standard.json")).run_id).toBe("run:golden:01");
     expect(parseTriageReplayV1(load("replay.partial.json")).events).toHaveLength(6);
+    expect(parseTriageReplayV1(load("replay.cancelled-partial.json")).events).toHaveLength(5);
+    expect(parseCompiledTriagePolicyV2(load("policy-preflight.standard.json")).slots).toHaveLength(1);
+    expect(parseTriageCancellationV1(load("cancellation.json")).run_id).toBe("run:golden:01");
   });
 
   it.each([
