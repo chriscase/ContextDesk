@@ -1406,15 +1406,80 @@ impl TriageProductionRunnerV1 {
                     )
                     .await;
                     *provider_calls = (*provider_calls).saturating_add(1);
-                    if let Ok(Ok(corrected)) = correction {
+                    let correction = match correction {
+                        Ok(Ok(corrected)) => corrected,
+                        Ok(Err(_)) => {
+                            if let Some(reason) =
+                                host_interruption(input, started, self.resolution.host_deadline_ms)
+                            {
+                                *interrupted = Some(reason);
+                                return (
+                                    fail_with_calls(
+                                        match reason {
+                                            Interruption::Cancelled => {
+                                                TriageAttemptStatus::Cancelled
+                                            }
+                                            Interruption::TimedOut => TriageAttemptStatus::TimedOut,
+                                        },
+                                        match reason {
+                                            Interruption::Cancelled => "cancelled",
+                                            Interruption::TimedOut => "deadline",
+                                        },
+                                        physical_calls,
+                                    ),
+                                    None,
+                                );
+                            }
+                            return (
+                                fail_with_calls(
+                                    TriageAttemptStatus::Failed,
+                                    "correction_provider_failed",
+                                    physical_calls,
+                                ),
+                                None,
+                            );
+                        }
+                        Err(_) => {
+                            if let Some(reason) =
+                                host_interruption(input, started, self.resolution.host_deadline_ms)
+                            {
+                                *interrupted = Some(reason);
+                                return (
+                                    fail_with_calls(
+                                        match reason {
+                                            Interruption::Cancelled => {
+                                                TriageAttemptStatus::Cancelled
+                                            }
+                                            Interruption::TimedOut => TriageAttemptStatus::TimedOut,
+                                        },
+                                        match reason {
+                                            Interruption::Cancelled => "cancelled",
+                                            Interruption::TimedOut => "deadline",
+                                        },
+                                        physical_calls,
+                                    ),
+                                    None,
+                                );
+                            }
+                            return (
+                                fail_with_calls(
+                                    TriageAttemptStatus::TimedOut,
+                                    "correction_deadline",
+                                    physical_calls,
+                                ),
+                                None,
+                            );
+                        }
+                    };
+                    {
                         corrections = 1;
                         total_input = total_input.saturating_add(correction_chars);
                         let corrected = if corrected_stream.trim().is_empty() {
-                            corrected
+                            correction
                         } else {
                             ChatCompletion {
                                 content: corrected_stream,
-                                ..corrected
+                                ..correction
                             }
                         };
                         accepted_response = corrected.clone();
