@@ -177,10 +177,13 @@ async fn wait_for_cancel(cancel: Arc<AtomicBool>) {
     }
 }
 
-/// A conservative production hook: contributor/reviewer responses must be
-/// non-empty, while only a finalizer may create an authoritative answer
-/// envelope.  The envelope is derived from the immutable packet ledger; model
-/// text never supplies evidence metadata or authority.
+/// A conservative production hook: only a finalizer may create an
+/// authoritative answer envelope.  Contributor slots are validated by the
+/// typed contribution pipeline before this hook is reached.  Reviewer and
+/// other generic slots have no equivalent typed validator yet, so they fail
+/// closed instead of treating non-empty prose as an accepted contribution.
+/// The envelope is derived from the immutable packet ledger; model text never
+/// supplies evidence metadata or authority.
 #[derive(Debug, Default)]
 pub struct HostValidatedAnswerHooks {
     accepted: Mutex<std::collections::BTreeMap<String, AnswerEnvelopeV1>>,
@@ -196,13 +199,9 @@ impl TriageProductionHooks for HostValidatedAnswerHooks {
         _reconciliation: &cd_core::triage_sdk::TriageReconciliationV1,
     ) -> crate::triage_production_runner::TriageValidationDecision {
         if !matches!(slot.kind, TriageSlotKindV2::Finalizer) {
-            return if response.content.trim().is_empty() {
-                crate::triage_production_runner::TriageValidationDecision::rejected(
-                    "empty_terminal_answer",
-                )
-            } else {
-                crate::triage_production_runner::TriageValidationDecision::accepted()
-            };
+            return crate::triage_production_runner::TriageValidationDecision::rejected(
+                "typed_role_proposal_required",
+            );
         }
         let prepared = match cd_core::linked_triage_contract::preparation_for_host_validation(
             &response.content,
@@ -698,5 +697,30 @@ mod tests {
             .await;
         assert!(!decision.accepted);
         assert_eq!(decision.reason_codes, vec!["unknown_evidence"]);
+    }
+
+    #[tokio::test]
+    async fn generic_non_finalizer_hook_fails_closed() {
+        let hooks = HostValidatedAnswerHooks::default();
+        let response = ChatCompletion::from_parts("ordinary reviewer prose", Vec::new(), "stop");
+        let slot = CompiledRoleSlotV2 {
+            slot_id: "reviewer".into(),
+            kind: TriageSlotKindV2::Reviewer,
+            model: ModelRef {
+                profile_id: "profile:test".into(),
+                model_id: "model:test".into(),
+            },
+            requirement: RoleRequirement::Optional,
+            disposition: SlotDispositionV2::Admitted,
+            rejections: Vec::new(),
+            qualification_schema_id: None,
+            workflow_id: None,
+            protocol_fingerprint: None,
+        };
+        let decision = hooks
+            .validate(&slot, &response, &packet(), &reconciliation())
+            .await;
+        assert!(!decision.accepted);
+        assert_eq!(decision.reason_codes, vec!["typed_role_proposal_required"]);
     }
 }
