@@ -612,6 +612,33 @@ impl TriageReplayV1 {
     }
 }
 
+/// Deterministic content fingerprint of one validated request, suitable for
+/// `run_started.request_fingerprint` and replay identity. The digest is over
+/// the canonical serde serialization, so equal requests always agree and any
+/// field change (task, scope, policy selection, overrides) changes it.
+pub fn request_fingerprint_v2(request: &TriageRequestV2) -> Result<String, TriageContractError> {
+    fingerprint("triage-request-v2", request)
+}
+
+/// Deterministic content fingerprint of one policy document, suitable for
+/// `run_started.policy_fingerprint`. This identifies the authored policy; it
+/// is not qualification, availability, or readiness evidence.
+pub fn policy_fingerprint_v2(
+    policy: &crate::multi_model::triage_policy::TriagePolicyV2,
+) -> Result<String, TriageContractError> {
+    fingerprint("triage-policy-v2", policy)
+}
+
+fn fingerprint<T: Serialize>(label: &str, value: &T) -> Result<String, TriageContractError> {
+    use sha2::{Digest, Sha256};
+    let encoded = serde_json::to_vec(value).map_err(|_| TriageContractError::Serialize)?;
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(&encoded);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
 pub fn parse_request_v2(raw: &str) -> Result<TriageRequestV2, TriageContractError> {
     let value: TriageRequestV2 = parse_versioned(raw, TRIAGE_REQUEST_SCHEMA_V2)?;
     value.validate()?;

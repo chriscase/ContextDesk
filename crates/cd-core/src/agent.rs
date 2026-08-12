@@ -217,6 +217,30 @@ pub struct ContributionRuntime {
     pub budget: crate::multi_model::MultiModelBudget,
     /// Bounded neighborhood expansion used while assembling the packet.
     pub neighborhood: crate::fast_triage::FastTriageNeighborhoodBudget,
+    /// Present only when a compiled triage policy owns this run. `None` (the
+    /// default) keeps the established opt-in contribution route byte-identical.
+    pub policy_binding: Option<ContributionPolicyBindingV1>,
+}
+
+/// Policy-bound execution hooks for the opt-in contribution route.
+///
+/// Present only when a compiled Triage Policy V2 run owns the runtime. The
+/// typed observer receives packet, stage, outcome, and refusal facts for the
+/// shared host-neutral event ledger, and the route becomes strict: a task,
+/// brief, or packet that cannot reach the bounded contribution branch
+/// terminates the turn with a typed refusal instead of falling through to a
+/// provider path the compiled policy never admitted.
+#[derive(Clone)]
+pub struct ContributionPolicyBindingV1 {
+    /// Typed observer for the host-neutral event ledger.
+    pub observer: std::sync::Arc<dyn crate::multi_model::ContributionRunObserverV1>,
+}
+
+impl std::fmt::Debug for ContributionPolicyBindingV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContributionPolicyBindingV1")
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for ContributionRuntime {
@@ -4116,6 +4140,34 @@ fn terminal_cancel(mut out: EventCollector<'_>) -> CoreResult<Vec<StreamEvent>> 
     Ok(out.into_events())
 }
 
+/// Terminal for a policy-bound contribution turn that cannot reach the
+/// bounded contribution branch. A compiled triage policy admits specific
+/// provider calls only; falling through to the established provider paths
+/// would call a model the policy never named, so the turn stops here with a
+/// typed, content-free refusal before any such call.
+fn terminal_policy_route_refused(
+    mut out: EventCollector<'_>,
+    mut trail: Vec<String>,
+    binding: &ContributionPolicyBindingV1,
+    refusal: crate::multi_model::ContributionRouteRefusalV1,
+) -> CoreResult<Vec<StreamEvent>> {
+    binding.observer.route_refused(refusal);
+    trail.push(format!("triage_policy_route_refused:{}", refusal.as_str()));
+    out.push(StreamEvent::Error {
+        code: "triage_policy_route_refused".into(),
+        message: format!(
+            "This policy-bound triage run stopped before reaching the bounded contribution \
+             route ({}). No provider outside the compiled policy was called for this turn.",
+            refusal.as_str()
+        ),
+    });
+    out.push(StreamEvent::SearchTrail { steps: trail });
+    out.push(StreamEvent::TurnCompleted {
+        reason: "triage_policy_route_refused".into(),
+    });
+    Ok(out.into_events())
+}
+
 fn terminal_linked_provider_failure(
     mut out: EventCollector<'_>,
     trail: &mut Vec<String>,
@@ -4809,6 +4861,23 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             }
         ),
     ];
+    // A policy-bound contribution runtime may run only inside the linked
+    // broad-triage seam. Any other route would call the host's default model,
+    // which the compiled policy never admitted, so refuse before provider work.
+    if !linked_broad_triage {
+        if let Some(binding) = opts
+            .contribution_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.policy_binding.as_ref())
+        {
+            return terminal_policy_route_refused(
+                out,
+                trail,
+                binding,
+                crate::multi_model::ContributionRouteRefusalV1::NotBroadTriage,
+            );
+        }
+    }
     if linked_turn {
         trail.push("linked_log_required_cross_source_reads".into());
         if host.log_only_tool_surface() {
@@ -5151,6 +5220,17 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                     candidate_id: None,
                                 });
                                 trail.push("contributions:host_packet_invalid".into());
+                                if let Some(binding) = runtime.policy_binding.as_ref() {
+                                    // A policy-bound run must not continue to
+                                    // the established provider paths after its
+                                    // packet failed; stop with a typed refusal.
+                                    return terminal_policy_route_refused(
+                                        out,
+                                        trail,
+                                        binding,
+                                        crate::multi_model::ContributionRouteRefusalV1::PacketInvalid,
+                                    );
+                                }
                                 // The production runtime is opt-in. A host
                                 // packet failure must never become a model
                                 // claim or silently switch providers.
@@ -5158,9 +5238,13 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                             }
                         };
                         if let Some(packet) = packet {
+                            if let Some(binding) = runtime.policy_binding.as_ref() {
+                                binding.observer.packet_ready(&packet);
+                            }
+                            let stage_observer = runtime.policy_binding.clone();
                             let mut budget = runtime.budget;
                             budget.context_char_budget = opts.effective_context_char_budget();
-                            let contribution_outcome =
+                            let contribution_result =
                                 crate::multi_model::run_contribution_pipeline(
                                     crate::multi_model::ContributionPipelineInputs {
                                         user_text,
@@ -5173,6 +5257,9 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                         plan: &runtime.plan,
                                     },
                                     &mut |event| {
+                                        if let Some(binding) = stage_observer.as_ref() {
+                                            binding.observer.stage(&event);
+                                        }
                                         out.push(StreamEvent::MultiModelStage {
                                             stage: event.role.as_str().into(),
                                             phase: if event.started {
@@ -5189,7 +5276,21 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                                         });
                                     },
                                 )
-                                .await?;
+                                .await;
+                            let contribution_outcome = match contribution_result {
+                                Ok(outcome) => outcome,
+                                Err(error) => {
+                                    if let Some(binding) = runtime.policy_binding.as_ref() {
+                                        binding.observer.route_refused(
+                                            crate::multi_model::ContributionRouteRefusalV1::PipelineFailed,
+                                        );
+                                    }
+                                    return Err(error);
+                                }
+                            };
+                            if let Some(binding) = runtime.policy_binding.as_ref() {
+                                binding.observer.outcome(&contribution_outcome);
+                            }
                             let state = contribution_outcome.report.state.as_str();
                             trail.push(format!(
                                 "contributions:state={state},stages={}",
@@ -5656,6 +5757,26 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                 });
             }
         }
+    }
+
+    // Catch-all for policy-bound runs: reaching the staged provider loop
+    // means the bounded contribution branch was never entered (missing,
+    // incomplete, or failed deterministic brief). The loop below would call
+    // the host's default model, which the compiled policy never admitted.
+    if let Some(binding) = opts
+        .contribution_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.policy_binding.as_ref())
+    {
+        if cancelled(opts) {
+            return terminal_cancel(out);
+        }
+        return terminal_policy_route_refused(
+            out,
+            trail,
+            binding,
+            crate::multi_model::ContributionRouteRefusalV1::BriefUnavailable,
+        );
     }
 
     for round in 0..opts.max_rounds {
@@ -11656,6 +11777,7 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
                 ..Default::default()
             },
             neighborhood: crate::fast_triage::FastTriageNeighborhoodBudget::default(),
+            policy_binding: None,
         }
     }
 
@@ -12182,6 +12304,178 @@ omitted_blocks={} omitted_chars={} used={} useful_headroom={} id_in={} id_out={}
         assert!(events
             .iter()
             .any(|event| matches!(event, StreamEvent::InvestigationAnswer { envelope } if !envelope.answer.root_cause_established)));
+        assert!(events.iter().any(|event| {
+            matches!(event, StreamEvent::TurnCompleted { reason } if reason == "stop")
+        }));
+    }
+
+    #[derive(Default)]
+    struct RecordingContributionObserver {
+        packets: std::sync::atomic::AtomicUsize,
+        stages: std::sync::atomic::AtomicUsize,
+        outcomes: std::sync::atomic::AtomicUsize,
+        refusals: std::sync::Mutex<Vec<crate::multi_model::ContributionRouteRefusalV1>>,
+    }
+
+    impl crate::multi_model::ContributionRunObserverV1 for RecordingContributionObserver {
+        fn packet_ready(&self, _packet: &crate::fast_triage::FastTriagePacketV1) {
+            self.packets
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn stage(&self, _event: &crate::multi_model::ContributionStageEvent) {
+            self.stages
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn outcome(&self, _outcome: &crate::multi_model::ContributionPipelineOutcome) {
+            self.outcomes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn route_refused(&self, refusal: crate::multi_model::ContributionRouteRefusalV1) {
+            self.refusals
+                .lock()
+                .expect("observer refusal lock")
+                .push(refusal);
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_bound_contribution_refuses_focused_route_before_any_provider_call() {
+        let (_dir, mut host, context) = linked_multi_candidate_fixture();
+        let contributor = std::sync::Arc::new(ContributionAbstainBackend {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let observer = std::sync::Arc::new(RecordingContributionObserver::default());
+        let mut runtime = contribution_runtime(vec![
+            (
+                "fast-a",
+                contributor.clone() as std::sync::Arc<dyn ChatBackend>,
+            ),
+            (
+                "fast-b",
+                contributor.clone() as std::sync::Arc<dyn ChatBackend>,
+            ),
+        ]);
+        runtime.policy_binding = Some(ContributionPolicyBindingV1 {
+            observer: observer.clone(),
+        });
+        let mut history = Vec::new();
+        let events = run_agent_turn(
+            &NeverCompletesBackend,
+            &mut host,
+            // A focused cue routes to grounded QA, which would call the
+            // host's default model — a policy-bound run must refuse instead.
+            "show me trace id 12345 in these logs",
+            &mut history,
+            &AgentOptions {
+                session_id: "policy-bound-refusal".into(),
+                model: Some("main-model".into()),
+                provider_profile_id: Some("main-profile".into()),
+                log_explorer_context: Some(context),
+                contribution_runtime: Some(runtime),
+                max_rounds: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("refusal is a typed terminal, not an error");
+
+        assert_eq!(
+            contributor.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no contributor call may happen outside the contribution branch"
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::Error { code, .. } if code == "triage_policy_route_refused"
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::TurnCompleted { reason } if reason == "triage_policy_route_refused"
+            )
+        }));
+        assert_eq!(
+            observer
+                .refusals
+                .lock()
+                .expect("observer refusal lock")
+                .as_slice(),
+            &[crate::multi_model::ContributionRouteRefusalV1::NotBroadTriage]
+        );
+        assert_eq!(
+            observer.packets.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_bound_contribution_observes_packet_stages_and_outcome() {
+        let (_dir, mut host, context) = linked_multi_candidate_fixture();
+        let contributor = std::sync::Arc::new(ContributionAbstainBackend {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let observer = std::sync::Arc::new(RecordingContributionObserver::default());
+        let mut runtime = contribution_runtime(vec![
+            (
+                "fast-a",
+                contributor.clone() as std::sync::Arc<dyn ChatBackend>,
+            ),
+            (
+                "fast-b",
+                contributor.clone() as std::sync::Arc<dyn ChatBackend>,
+            ),
+        ]);
+        runtime.policy_binding = Some(ContributionPolicyBindingV1 {
+            observer: observer.clone(),
+        });
+        let mut history = Vec::new();
+        let events = run_agent_turn(
+            &NeverCompletesBackend,
+            &mut host,
+            "What problems do you see in these logs?",
+            &mut history,
+            &AgentOptions {
+                session_id: "policy-bound-observed".into(),
+                model: Some("main-model".into()),
+                provider_profile_id: Some("main-profile".into()),
+                log_explorer_context: Some(context),
+                contribution_runtime: Some(runtime),
+                max_rounds: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("policy-bound contribution route returns the host answer");
+
+        assert_eq!(
+            contributor.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(
+            observer.packets.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one immutable packet is observed"
+        );
+        assert_eq!(
+            observer.stages.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "two slots each observe one started and one finished stage"
+        );
+        assert_eq!(
+            observer.outcomes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the typed outcome is observed exactly once"
+        );
+        assert!(observer
+            .refusals
+            .lock()
+            .expect("observer refusal lock")
+            .is_empty());
         assert!(events.iter().any(|event| {
             matches!(event, StreamEvent::TurnCompleted { reason } if reason == "stop")
         }));

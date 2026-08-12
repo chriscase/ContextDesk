@@ -117,6 +117,10 @@ pub struct ContributionStageTelemetry {
     pub provider_rounds: u32,
     /// Model-facing characters sent.
     pub context_chars_sent: u64,
+    /// Response characters received before validation. Zero when no provider
+    /// call was sent or the transport returned nothing.
+    #[serde(default)]
+    pub output_chars: u64,
     /// Explicit result.
     pub outcome: ContributionAvailability,
     /// Host-authored actionable reason for a non-completed stage.
@@ -151,6 +155,56 @@ pub struct ContributionPipelineOutcome {
     pub content: String,
     /// Share-safe telemetry.
     pub telemetry: ContributionPipelineTelemetry,
+}
+
+/// Content-free reason a policy-bound contribution route stopped before it
+/// could produce a typed pipeline outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContributionRouteRefusalV1 {
+    /// The deterministic linked-turn route classified the task as focused
+    /// rather than broad triage, so the bounded contribution branch is never
+    /// reached. A policy-bound run refuses instead of falling through to a
+    /// provider path the compiled policy did not admit.
+    NotBroadTriage,
+    /// The deterministic corpus brief was unavailable, incomplete, or
+    /// truncated, so the bounded contribution branch cannot be entered.
+    BriefUnavailable,
+    /// Host packet validation failed after the brief was assembled.
+    PacketInvalid,
+    /// The admitted pipeline failed without producing a typed outcome.
+    PipelineFailed,
+}
+
+impl ContributionRouteRefusalV1 {
+    /// Stable machine label for trails, ledgers, and diagnostics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotBroadTriage => "not_broad_triage",
+            Self::BriefUnavailable => "brief_unavailable",
+            Self::PacketInvalid => "packet_invalid",
+            Self::PipelineFailed => "pipeline_failed",
+        }
+    }
+}
+
+/// Typed, host-neutral observer of one policy-bound contribution run.
+///
+/// The observer receives exactly the host-authored facts this pipeline and
+/// the linked-turn seam already produce — packet identity, typed stage
+/// events, the final typed outcome, or a typed refusal — so a policy
+/// projector (for example the Triage Policy V2 event ledger) can account the
+/// run without parsing rendered stream text or reconstructing identity from
+/// model output. Observation is synchronous and infallible: it must never
+/// change run behavior, budgets, or ordering.
+pub trait ContributionRunObserverV1: Send + Sync {
+    /// The immutable host packet was assembled and admitted for this run.
+    fn packet_ready(&self, packet: &FastTriagePacketV1);
+    /// One bounded stage started (`started == true`) or finished.
+    fn stage(&self, event: &ContributionStageEvent);
+    /// The pipeline completed with typed attempts and a reconciliation report.
+    fn outcome(&self, outcome: &ContributionPipelineOutcome);
+    /// The route stopped before a typed outcome existed.
+    fn route_refused(&self, refusal: ContributionRouteRefusalV1);
 }
 
 fn flat_plan(total_ms: u64) -> TurnDeadlinePlan {
@@ -364,6 +418,7 @@ struct SlotExecution {
     degradation: Option<ContributionDegradationReason>,
     provider_rounds: u32,
     context_chars_sent: u64,
+    output_chars: u64,
     attempt: Option<ContributionAttemptV1>,
 }
 
@@ -420,6 +475,7 @@ async fn execute_slot(
     let messages = messages_for(user_text, packet, slot.role);
     let chars = crate::agent::estimate_context_chars(&messages) as u64;
     let mut sent = false;
+    let mut output_chars = 0u64;
     let (availability, degradation, attempt) =
         if slot.qualification != ContributionQualification::Qualified {
             (
@@ -481,6 +537,7 @@ async fn execute_slot(
                     } else {
                         buffered
                     };
+                    output_chars = body.chars().count() as u64;
                     match super::contributions::validate_contribution(
                         &body,
                         packet,
@@ -531,10 +588,12 @@ async fn execute_slot(
         degradation,
         provider_rounds: u32::from(sent),
         context_chars_sent: if sent { chars } else { 0 },
+        output_chars: if sent { output_chars } else { 0 },
         attempt,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_terminal(
     stages: &mut Vec<ContributionStageTelemetry>,
     on_stage: &mut (dyn FnMut(ContributionStageEvent) + Send),
@@ -543,6 +602,7 @@ fn emit_terminal(
     degradation: Option<ContributionDegradationReason>,
     provider_rounds: u32,
     context_chars_sent: u64,
+    output_chars: u64,
 ) {
     stages.push(ContributionStageTelemetry {
         role: slot.role,
@@ -551,6 +611,7 @@ fn emit_terminal(
         qualification: slot.qualification,
         provider_rounds,
         context_chars_sent,
+        output_chars,
         outcome: availability,
         degradation,
     });
@@ -632,6 +693,7 @@ pub async fn run_contribution_pipeline(
             execution.degradation,
             execution.provider_rounds,
             execution.context_chars_sent,
+            execution.output_chars,
         );
         if matches!(
             execution.availability,
@@ -661,6 +723,7 @@ pub async fn run_contribution_pipeline(
                 slot,
                 availability,
                 Some(degradation),
+                0,
                 0,
                 0,
             );
@@ -712,6 +775,7 @@ pub async fn run_contribution_pipeline(
                     degradation: Some(degradation),
                     provider_rounds: 0,
                     context_chars_sent: 0,
+                    output_chars: 0,
                     attempt: None,
                 }
             } else {
@@ -743,6 +807,7 @@ pub async fn run_contribution_pipeline(
                 execution.degradation,
                 execution.provider_rounds,
                 execution.context_chars_sent,
+                execution.output_chars,
             );
             report = reconcile_contributions(inputs.packet, &attempts);
         }

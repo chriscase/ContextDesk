@@ -299,6 +299,7 @@ pub async fn resolve_contribution_runtime(
             plan,
             budget,
             neighborhood: settings.neighborhood,
+            policy_binding: None,
         }),
         entry_degradation: None,
     }
