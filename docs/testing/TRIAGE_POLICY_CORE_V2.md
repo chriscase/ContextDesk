@@ -1,7 +1,7 @@
 # Triage Policy V2 pure-core foundation
 
-Status: **partial implementation for issue #872; no runtime provider path is
-wired by this change.**
+Status: **provider-neutral policy contract with a production runner seam; host
+adapters remain qualification-gated.**
 
 ## What this slice proves
 
@@ -47,11 +47,14 @@ same-model false-consensus accounting, plus oversized policy/budget refusal.
 
 - No provider, gateway, credential, filesystem, CLI, GUI, Tauri, or server path
   calls this compiler yet.
-- It does not execute finalization or conditional review.
+- It does not execute finalization or conditional review in this pure-core
+  module; the workflow runner owns those phases.
 - It does not change legacy single/review/contribution behavior or persisted
   configuration.
-- It does not prove cancellation, replay, event parity, TypeScript parity, or
-  live model usefulness.
+- The provider-neutral workflow runner now executes a typed
+  `timeline_analyst` contributor through the existing contribution pipeline;
+  this core document does not claim host/CLI/GUI live readiness.
+- It does not prove live model usefulness.
 - It does not implement retrieval policy, parallelism, adaptive routing, or
   automatic model selection.
 

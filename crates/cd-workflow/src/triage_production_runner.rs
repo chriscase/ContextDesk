@@ -36,8 +36,8 @@ use cd_core::multi_model::contributions::{
 };
 use cd_core::multi_model::triage_policy::{
     CompiledRoleSlotV2, CompiledTriagePolicyV2, ContributorSlotV2, ReviewerConditionV2,
-    RoleRequirement, SlotDispositionV2, TriageContributorRole, TriagePolicyCompileFailureV2,
-    TriagePolicyMode, TriagePolicyPreflightV2, TriagePolicyV2, TriageSlotKindV2,
+    RoleRequirement, SlotDispositionV2, TriagePolicyCompileFailureV2, TriagePolicyMode,
+    TriagePolicyPreflightV2, TriagePolicyV2, TriageSlotKindV2,
 };
 use cd_core::multi_model::MultiModelBudget;
 use cd_core::tools::ToolSpec;
@@ -287,16 +287,11 @@ pub fn resolve_v2_production(
         }
     }
 
-    // Use the established contribution pipeline whenever every contributor
-    // role has an exact V1 mapping.  The finalizer/reviewer are intentionally
-    // removed from this preparation clone: their richer V2 semantics remain
-    // owned by this runner below.
-    let contribution_runtime = if compiled.slots.iter().all(|slot| {
-        !matches!(
-            slot.kind,
-            TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst)
-        )
-    }) {
+    // Use the established contribution pipeline for every typed contributor
+    // role. The finalizer/reviewer are intentionally removed from this
+    // preparation clone: their richer V2 semantics remain owned by this
+    // runner below.
+    let contribution_runtime = {
         let contributor_slots = compiled
             .slots
             .iter()
@@ -349,8 +344,6 @@ pub fn resolve_v2_production(
             neighborhood,
         )
         .ok()
-    } else {
-        None
     };
 
     Ok(ResolvedTriageProductionV1 {
@@ -1566,6 +1559,7 @@ mod tests {
         AnswerBindingV1, EvidenceRole, HostEvidenceEntry, HostEvidenceLedger,
         InvestigationAnswerV1, LogSnapshotRevisionV1, SCHEMA_V1,
     };
+    use cd_core::multi_model::TriageContributorRole;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -2016,6 +2010,90 @@ mod tests {
                 TriageRunEventPayloadV2::RoleAttempt { attempt }
                     if matches!(attempt.role, TriageSlotKindV2::Reviewer)
                         && attempt.status == TriageAttemptStatus::Completed
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn timeline_analyst_runs_through_production_contribution_runtime() {
+        let model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-timeline".into(),
+            model_id: "model-timeline".into(),
+        };
+        let policy = TriagePolicyV2 {
+            schema_id: cd_core::multi_model::triage_policy::TRIAGE_POLICY_SCHEMA_V2.into(),
+            mode: TriagePolicyMode::Enhanced,
+            contributors: vec![cd_core::multi_model::triage_policy::ContributorSlotV2 {
+                slot_id: "timeline".into(),
+                role: TriageContributorRole::TimelineAnalyst,
+                model: model.clone(),
+                requirement: RoleRequirement::Required,
+                allow_remote: false,
+            }],
+            finalizer: None,
+            reviewer: None,
+            budget: Default::default(),
+            execution: Default::default(),
+        };
+        let preflight = TriagePolicyPreflightV2 {
+            roles: vec![cd_core::multi_model::triage_policy::RolePreflightV2 {
+                slot_id: "timeline".into(),
+                model: model.clone(),
+                kind: TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst),
+                available: true,
+                qualification: cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+                remote: false,
+                qualification_schema_id: Some(
+                    cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_SCHEMA_V2.into(),
+                ),
+                workflow_id: Some(
+                    cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_WORKFLOW_V2.into(),
+                ),
+                protocol_fingerprint: Some("sha256:test".into()),
+            }],
+        };
+        let response = serde_json::json!({
+            "schema": cd_core::multi_model::contributions::CONTRIBUTION_SCHEMA_V1,
+            "packet_id": input().packet.packet_id(),
+            "role": "timeline_analyst",
+            "abstained": true,
+            "claims": [],
+            "evidence_gaps": [],
+            "contradictions": []
+        })
+        .to_string();
+        let resolved = resolve_v2_production(
+            &policy,
+            &preflight,
+            vec![AuthorizedTriageBackendV1 {
+                slot_id: "timeline".into(),
+                model,
+                backend: Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
+                    response,
+                    Vec::new(),
+                    "stop",
+                )])),
+            }],
+            60_000,
+            100_000,
+            FastTriageNeighborhoodBudget::default(),
+        )
+        .expect("timeline role resolves");
+        let result = TriageProductionRunnerV1::new(resolved)
+            .run(input(), &RejectingTriageProductionHooks)
+            .await
+            .expect("timeline runner succeeds");
+        assert!(result.completed);
+        assert_eq!(result.result.kind, TriageResultKind::HonestPartial);
+        assert!(result.replay.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                TriageRunEventPayloadV2::RoleAttempt { attempt }
+                    if matches!(
+                        attempt.role,
+                        TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst)
+                    ) && attempt.status == TriageAttemptStatus::Completed
+                        && attempt.physical_provider_calls == Some(1)
             )
         }));
     }

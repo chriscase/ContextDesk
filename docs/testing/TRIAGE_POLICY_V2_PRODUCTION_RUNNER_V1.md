@@ -19,10 +19,10 @@ run_started → packet_ready → contributor attempts
   → validation → correction checkpoint → one terminal
 ```
 
-The runner uses `run_contribution_pipeline` for contributor roles that fit the
-existing validated contribution contract. Timeline/reviewer/finalizer calls
-use the same opaque `ChatBackend` binding and a host hook for validation and
-bounded correction. Whole-turn, phase, provider-call, context, cancellation,
+The runner uses `run_contribution_pipeline` for every admitted typed
+contributor, including `timeline_analyst`. Reviewer/finalizer calls use the
+same opaque `ChatBackend` binding and a host hook for validation and bounded
+correction. Whole-turn, phase, provider-call, context, cancellation,
 and operation ceilings are enforced before each call. The ledger is owner-only
 and is validated with the shared `TriageReplayV1` contract before return.
 

@@ -30,6 +30,9 @@ pub const CONTRIBUTION_SCHEMA_V1: &str = "contextdesk.multi_model.contribution.v
 pub enum ContributionRole {
     /// Extracts host-grounded observations.
     ObservationExtractor,
+    /// Analyzes host-provided chronology without changing host ordinals or
+    /// assigning causal authority.
+    TimelineAnalyst,
     /// Proposes symptoms, causal candidates, and competing explanations.
     CausalProposer,
     /// Checks disagreement, contradictions, and whether to abstain.
@@ -45,6 +48,7 @@ impl ContributionRole {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ObservationExtractor => "observation_extractor",
+            Self::TimelineAnalyst => "timeline_analyst",
             Self::CausalProposer => "causal_proposer",
             Self::ContradictionChecker => "contradiction_checker",
             Self::EvidenceGap => "evidence_gap",
@@ -536,7 +540,9 @@ fn safe_label(value: &str) -> bool {
 
 fn role_allows(role: ContributionRole, kind: ContributionClaimKind) -> bool {
     match role {
-        ContributionRole::ObservationExtractor => kind == ContributionClaimKind::Observation,
+        ContributionRole::ObservationExtractor | ContributionRole::TimelineAnalyst => {
+            kind == ContributionClaimKind::Observation
+        }
         ContributionRole::CausalProposer => matches!(
             kind,
             ContributionClaimKind::Symptom
@@ -1355,6 +1361,52 @@ mod tests {
                 &packet,
                 identity("m"),
                 ContributionRole::CausalProposer
+            ),
+            Err(ContributionValidationError::RoleMismatch)
+        );
+    }
+
+    #[test]
+    fn timeline_analyst_is_typed_and_cannot_assign_causal_roles() {
+        let packet = packet();
+        let observation = proposal(
+            &packet,
+            ContributionRole::TimelineAnalyst,
+            json!([{
+                "claim_id": "timeline-observation",
+                "candidate_id": "candidate-a",
+                "kind": "observation",
+                "text": "host ordinal preserved",
+                "evidence_ids": ["opaque-a"]
+            }]),
+        );
+        let validated = validate_contribution(
+            &observation,
+            &packet,
+            identity("timeline-model"),
+            ContributionRole::TimelineAnalyst,
+        )
+        .expect("timeline observations use the typed contribution contract");
+        assert_eq!(validated.role, ContributionRole::TimelineAnalyst);
+        assert_eq!(validated.claims.len(), 1);
+
+        let causal = proposal(
+            &packet,
+            ContributionRole::TimelineAnalyst,
+            json!([{
+                "claim_id": "timeline-cause",
+                "candidate_id": "candidate-a",
+                "kind": "causal_candidate",
+                "text": "must be rejected",
+                "evidence_ids": ["opaque-a"]
+            }]),
+        );
+        assert_eq!(
+            validate_contribution(
+                &causal,
+                &packet,
+                identity("timeline-model"),
+                ContributionRole::TimelineAnalyst,
             ),
             Err(ContributionValidationError::RoleMismatch)
         );

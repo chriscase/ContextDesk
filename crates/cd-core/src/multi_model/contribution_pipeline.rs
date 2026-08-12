@@ -168,6 +168,9 @@ fn role_contract(role: ContributionRole) -> &'static str {
         ContributionRole::ObservationExtractor => {
             "Return observations only; do not propose symptoms or causal roles."
         }
+        ContributionRole::TimelineAnalyst => {
+            "Return chronology-grounded observations only; cite exact host evidence ids, preserve host ordinals, and never infer causal roles."
+        }
         ContributionRole::CausalProposer => {
             "Return symptoms, causal_candidates, or competing_explanations only; never initiating_cause."
         }

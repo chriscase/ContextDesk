@@ -1,8 +1,8 @@
 # Triage Policy V2 production adapter — contributor subset V1
 
-Status: **provider-free production-path adapter; contributor subset and the
-shared Tauri resolver are implemented, while live execution remains
-qualification-gated**
+Status: **provider-free production-path adapter; typed contributors (including
+`timeline_analyst`) and the shared host resolver are implemented, while live
+execution remains qualification-gated**
 
 This slice bridges the exact, pure `TriagePolicyV2` compiler output to the
 existing linked-log `ContributionRuntime`. It intentionally prepares only the
@@ -13,8 +13,8 @@ to support a richer V2 contract.
 
 - policy mode is `enhanced` or `advanced`;
 - at least one contributor is configured and every configured slot is admitted;
-- contributor roles are `observation_extractor`, `causal_proposer`,
-  `contradiction_checker`, or `evidence_gap_finder`;
+- contributor roles are `observation_extractor`, `timeline_analyst`,
+  `causal_proposer`, `contradiction_checker`, or `evidence_gap_finder`;
 - the trusted Rust host supplies one already-authorized production backend for
   every exact `(slot_id, profile_id, model_id)` binding;
 - V2 and the host resolve the same finite whole-turn deadline;
@@ -48,7 +48,7 @@ The adapter returns a content-free category and inert slot ids before it can
 return any runnable backend when it sees:
 
 - Standard mode (the established single-model path remains authoritative);
-- a timeline analyst, finalizer, or reviewer;
+- a finalizer or reviewer (timeline analysis is now a typed contributor);
 - an optional role dropout the current production event stream could omit;
 - a missing, duplicate, extra, or exact-identity-mismatched backend;
 - a host/V2 whole-turn deadline mismatch;
@@ -83,8 +83,9 @@ The adapter test proves:
    non-root answer rendering are reused;
 3. the existing cooperative cancellation signal prevents every provider call
    and accounts every remaining role as cancelled;
-4. Standard, timeline, finalizer, reviewer, optional-dropout, identity, and
-   deadline mismatches refuse before a runtime is returned.
+4. Standard, finalizer, reviewer, optional-dropout, identity, and deadline
+   mismatches refuse before a runtime is returned; a qualified timeline role
+   is admitted and remains typed throughout the runtime binding.
 
 ## Not proven / residual product blocker
 
@@ -97,8 +98,8 @@ The adapter test proves:
 - The host enforces governed corpus revision and rejects unsupported source
   restrictions instead of silently broadening the packet.
 - A smaller per-contributor operation timeout, finalizer reserve, reviewer
-  reserve/condition/requirement, timeline role, and visible optional dropout
-  still require production runtime/event work.
+  reserve/condition/requirement, and visible optional dropout still require
+  additional host/runtime coverage.
 - No provider, gateway, credential store, live corpus, or network was used.
 - This does not establish live compatibility, usefulness, cost, release
   readiness, or full Triage Policy V2 execution.

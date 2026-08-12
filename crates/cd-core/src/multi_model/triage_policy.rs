@@ -1032,6 +1032,7 @@ pub fn migrate_resolved_legacy_policy_v1(input: LegacyResolvedTriagePolicyV1) ->
         }
         let role = match legacy.role {
             ContributionRole::ObservationExtractor => TriageContributorRole::ObservationExtractor,
+            ContributionRole::TimelineAnalyst => TriageContributorRole::TimelineAnalyst,
             ContributionRole::CausalProposer => TriageContributorRole::CausalProposer,
             ContributionRole::ContradictionChecker => TriageContributorRole::ContradictionChecker,
             ContributionRole::EvidenceGap => TriageContributorRole::EvidenceGapFinder,

@@ -168,6 +168,9 @@ fn contribution_role(kind: TriageSlotKindV2) -> Option<ContributionRole> {
         TriageSlotKindV2::Contributor(TriageContributorRole::ObservationExtractor) => {
             Some(ContributionRole::ObservationExtractor)
         }
+        TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst) => {
+            Some(ContributionRole::TimelineAnalyst)
+        }
         TriageSlotKindV2::Contributor(TriageContributorRole::CausalProposer) => {
             Some(ContributionRole::CausalProposer)
         }
@@ -177,9 +180,7 @@ fn contribution_role(kind: TriageSlotKindV2) -> Option<ContributionRole> {
         TriageSlotKindV2::Contributor(TriageContributorRole::EvidenceGapFinder) => {
             Some(ContributionRole::EvidenceGap)
         }
-        TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst)
-        | TriageSlotKindV2::Finalizer
-        | TriageSlotKindV2::Reviewer => None,
+        TriageSlotKindV2::Finalizer | TriageSlotKindV2::Reviewer => None,
     }
 }
 
@@ -295,17 +296,6 @@ async fn qualify_with_backend(
     let key = probe_key(&profile_id, &base_url, &model_id, kind, &protocol);
     let packet = synthetic_packet();
 
-    if matches!(
-        kind,
-        TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst)
-    ) {
-        return record(
-            key,
-            RoleQualificationV2::Unqualified,
-            0,
-            "timeline_role_unsupported",
-        );
-    }
     if matches!(kind, TriageSlotKindV2::Reviewer) {
         return record(
             key,
@@ -484,11 +474,7 @@ pub async fn qualify_configured_role_v2(
         profile.kind,
     )
     .transport_protocol;
-    if matches!(
-        request.kind,
-        TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst)
-            | TriageSlotKindV2::Reviewer
-    ) {
+    if matches!(request.kind, TriageSlotKindV2::Reviewer) {
         return Ok(record(
             probe_key(
                 &profile.id,
@@ -499,11 +485,7 @@ pub async fn qualify_configured_role_v2(
             ),
             RoleQualificationV2::Unqualified,
             0,
-            if matches!(request.kind, TriageSlotKindV2::Reviewer) {
-                "reviewer_execution_unavailable"
-            } else {
-                "timeline_role_unsupported"
-            },
+            "reviewer_execution_unavailable",
         ));
     }
     let credentials = TurnProviderCredentialCache::new(secrets);
@@ -640,12 +622,16 @@ mod tests {
             protocol: protocol().into(),
             deadline_ms: 5_000,
             cancel: None,
-            backend: Arc::new(ScriptedBackend::new(Vec::new())),
+            backend: Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
+                valid_contribution(&synthetic_packet(), ContributionRole::TimelineAnalyst),
+                Vec::new(),
+                "stop",
+            )])),
         })
         .await
         .expect("probe");
-        assert_eq!(timeline.qualification, RoleQualificationV2::Unqualified);
-        assert_eq!(timeline.physical_provider_calls, 0);
+        assert_eq!(timeline.qualification, RoleQualificationV2::Qualified);
+        assert_eq!(timeline.physical_provider_calls, 1);
     }
 
     #[tokio::test]

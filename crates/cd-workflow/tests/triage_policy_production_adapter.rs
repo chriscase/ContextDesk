@@ -343,7 +343,7 @@ async fn existing_cancellation_stops_every_adapter_backend_before_io() {
 }
 
 #[test]
-fn standard_and_unsupported_v2_semantics_never_return_a_runtime() {
+fn standard_stays_separate_and_timeline_is_typed_in_the_v2_runtime() {
     let standard = TriagePolicyV2::standard(model("primary", "openai/model"), false);
     let error = prepare_v2_contribution_runtime(
         &standard,
@@ -360,7 +360,7 @@ fn standard_and_unsupported_v2_semantics_never_return_a_runtime() {
     );
 
     let timeline = policy(&[TriageContributorRole::TimelineAnalyst]);
-    let error = prepare_v2_contribution_runtime(
+    let prepared = prepare_v2_contribution_runtime(
         &timeline,
         &preflight(&timeline),
         vec![empty_backend(&timeline.contributors[0])],
@@ -368,10 +368,10 @@ fn standard_and_unsupported_v2_semantics_never_return_a_runtime() {
         100_000,
         Default::default(),
     )
-    .expect_err("timeline role is not silently aliased");
+    .expect("timeline role is admitted through the typed contribution runtime");
     assert_eq!(
-        category(error),
-        TriageProductionAdapterRejectionV1::TimelineAnalystUnsupported
+        prepared.runtime.slots[0].role,
+        cd_core::multi_model::ContributionRole::TimelineAnalyst
     );
 
     let mut finalizer = policy(&[TriageContributorRole::ObservationExtractor]);

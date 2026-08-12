@@ -62,8 +62,6 @@ pub enum TriageProductionAdapterRejectionV1 {
     StandardUsesEstablishedPath,
     /// This slice requires at least one admitted contributor.
     NoAdmittedContributors,
-    /// The legacy contribution schema has no timeline-analyst role.
-    TimelineAnalystUnsupported,
     /// The legacy contribution route has no separately qualified finalizer.
     FinalizerUnsupported,
     /// V2 reviewer condition/requirement/reserve semantics are not equivalent.
@@ -97,7 +95,6 @@ impl TriageProductionAdapterRejectionV1 {
         match self {
             Self::StandardUsesEstablishedPath => "standard_uses_established_path",
             Self::NoAdmittedContributors => "no_admitted_contributors",
-            Self::TimelineAnalystUnsupported => "timeline_analyst_unsupported",
             Self::FinalizerUnsupported => "finalizer_unsupported",
             Self::ReviewerUnsupported => "reviewer_unsupported",
             Self::DegradedSlotUnsupported => "degraded_slot_unsupported",
@@ -252,23 +249,6 @@ pub fn prepare_v2_contribution_runtime(
         ));
     }
 
-    let unsupported_timeline = compiled
-        .slots
-        .iter()
-        .filter(|slot| {
-            matches!(
-                slot.kind,
-                TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst)
-            )
-        })
-        .map(|slot| slot.slot_id.clone())
-        .collect::<Vec<_>>();
-    if !unsupported_timeline.is_empty() {
-        return Err(TriageProductionAdapterErrorV1::unsupported(
-            TriageProductionAdapterRejectionV1::TimelineAnalystUnsupported,
-            unsupported_timeline,
-        ));
-    }
     let finalizers = slot_ids_of_kind(&compiled, |kind| {
         matches!(kind, TriageSlotKindV2::Finalizer)
     });
@@ -440,6 +420,9 @@ fn production_role(slot: &CompiledRoleSlotV2) -> ContributionRole {
         TriageSlotKindV2::Contributor(TriageContributorRole::ObservationExtractor) => {
             ContributionRole::ObservationExtractor
         }
+        TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst) => {
+            ContributionRole::TimelineAnalyst
+        }
         TriageSlotKindV2::Contributor(TriageContributorRole::CausalProposer) => {
             ContributionRole::CausalProposer
         }
@@ -449,9 +432,7 @@ fn production_role(slot: &CompiledRoleSlotV2) -> ContributionRole {
         TriageSlotKindV2::Contributor(TriageContributorRole::EvidenceGapFinder) => {
             ContributionRole::EvidenceGap
         }
-        TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst)
-        | TriageSlotKindV2::Finalizer
-        | TriageSlotKindV2::Reviewer => {
+        TriageSlotKindV2::Finalizer | TriageSlotKindV2::Reviewer => {
             unreachable!("unsupported slot kinds are rejected before mapping")
         }
     }
