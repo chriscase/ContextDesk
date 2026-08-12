@@ -88,6 +88,8 @@ pub enum ContributionAvailability {
     Completed,
     /// No backend was configured for this role.
     Unavailable,
+    /// The configured slot was intentionally not admitted to this phase.
+    NotAdmitted,
     /// The bounded call exceeded its deadline.
     TimedOut,
     /// The turn was cancelled before completion.
@@ -104,6 +106,7 @@ impl ContributionAvailability {
         match self {
             Self::Completed => "completed",
             Self::Unavailable => "unavailable",
+            Self::NotAdmitted => "not_admitted",
             Self::TimedOut => "timed_out",
             Self::Cancelled => "cancelled",
             Self::Malformed => "malformed",
@@ -136,6 +139,10 @@ pub enum ContributionDegradationReason {
     ProviderFailed,
     /// The provider response failed host validation.
     MalformedProposal,
+    /// The deterministic first phase did not recommend reviewer escalation.
+    ReviewerNotRequired,
+    /// The optional reviewer phase was disabled by the route's phase allowance.
+    ReviewerPhaseDisabled,
 }
 
 impl ContributionDegradationReason {
@@ -150,6 +157,8 @@ impl ContributionDegradationReason {
             Self::Deadline => "deadline",
             Self::ProviderFailed => "provider_failed",
             Self::MalformedProposal => "malformed_proposal",
+            Self::ReviewerNotRequired => "reviewer_not_required",
+            Self::ReviewerPhaseDisabled => "reviewer_phase_disabled",
         }
     }
 
@@ -177,6 +186,12 @@ impl ContributionDegradationReason {
             Self::MalformedProposal => {
                 "contributor proposal failed host validation; deterministic host floor retained"
             }
+            Self::ReviewerNotRequired => {
+                "deterministic reconciliation did not recommend reviewer escalation"
+            }
+            Self::ReviewerPhaseDisabled => {
+                "optional reviewer phase is disabled by the host routing policy"
+            }
         }
     }
 }
@@ -190,7 +205,10 @@ pub struct ContributionRoutingPolicy {
     pub max_contributors: usize,
     /// Maximum calls allowed to run concurrently.
     pub max_parallel: usize,
-    /// Maximum bounded rounds (initial contributions plus one reviewer round).
+    /// Maximum phase allowance: `1` admits the initial contributor phase;
+    /// `2` also permits the conditional reviewer phase. This is not a
+    /// provider-call cap; `MultiModelBudget::max_total_provider_rounds` owns
+    /// that ceiling.
     pub max_rounds: u8,
     /// Maximum host packet/context characters assigned to the route.
     pub max_context_chars: usize,
@@ -236,6 +254,10 @@ pub enum ContributionRoutingError {
     NoContextBudget,
     /// Reviewer was requested while policy forbids it.
     ReviewerDisabled,
+    /// More than one reviewer slot was requested.
+    MultipleReviewers,
+    /// The single reviewer slot must be the final plan slot.
+    ReviewerNotFinal,
 }
 
 impl ContributionRoutingError {
@@ -248,6 +270,8 @@ impl ContributionRoutingError {
             Self::NoRounds => "no_rounds",
             Self::NoContextBudget => "no_context_budget",
             Self::ReviewerDisabled => "reviewer_disabled",
+            Self::MultipleReviewers => "multiple_reviewers",
+            Self::ReviewerNotFinal => "reviewer_not_final",
         }
     }
 }
@@ -273,7 +297,17 @@ impl ContributionRoutingPlan {
         if policy.max_context_chars == 0 {
             return Err(ContributionRoutingError::NoContextBudget);
         }
-        if roles.contains(&ContributionRole::Reviewer) && !policy.reviewer_enabled {
+        let reviewer_count = roles
+            .iter()
+            .filter(|role| **role == ContributionRole::Reviewer)
+            .count();
+        if reviewer_count > 1 {
+            return Err(ContributionRoutingError::MultipleReviewers);
+        }
+        if reviewer_count == 1 && roles.last() != Some(&ContributionRole::Reviewer) {
+            return Err(ContributionRoutingError::ReviewerNotFinal);
+        }
+        if reviewer_count == 1 && !policy.reviewer_enabled {
             return Err(ContributionRoutingError::ReviewerDisabled);
         }
         Ok(Self { roles, policy })
@@ -967,9 +1001,12 @@ pub fn reconcile_contributions(
         })
         .collect::<Vec<_>>();
 
-    let has_dropout = attempts
-        .iter()
-        .any(|attempt| attempt.availability != ContributionAvailability::Completed);
+    let has_dropout = attempts.iter().any(|attempt| {
+        !matches!(
+            attempt.availability,
+            ContributionAvailability::Completed | ContributionAvailability::NotAdmitted
+        )
+    });
     reported_contradictions.sort_by(|a, b| {
         (
             &a.candidate_a,
@@ -1555,6 +1592,27 @@ mod tests {
                 }
             ),
             Err(ContributionRoutingError::TooMuchParallelism)
+        );
+        assert_eq!(
+            ContributionRoutingPlan::new(
+                vec![
+                    ContributionRole::Reviewer,
+                    ContributionRole::ObservationExtractor
+                ],
+                ContributionRoutingPolicy::default(),
+            ),
+            Err(ContributionRoutingError::ReviewerNotFinal)
+        );
+        assert_eq!(
+            ContributionRoutingPlan::new(
+                vec![
+                    ContributionRole::ObservationExtractor,
+                    ContributionRole::Reviewer,
+                    ContributionRole::Reviewer
+                ],
+                ContributionRoutingPolicy::default(),
+            ),
+            Err(ContributionRoutingError::MultipleReviewers)
         );
     }
 
