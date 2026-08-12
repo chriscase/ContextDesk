@@ -785,6 +785,19 @@ impl TriageProductionRunnerV1 {
             ledger.push(TriageRunEventPayloadV2::RoleAttempt { attempt });
         }
 
+        // Re-check after all role/finalizer hooks and reconciliation work. A
+        // cancellation or deadline can arrive after the finalizer's own
+        // post-hook check but before terminal construction; it must still
+        // invalidate any otherwise-eligible answer.
+        if interrupted.is_none() {
+            if let Some(reason) =
+                host_interruption(&input, started, self.resolution.host_deadline_ms)
+            {
+                interrupted = Some(reason);
+                finalizer_answer = None;
+            }
+        }
+
         let reason_codes = attempts
             .iter()
             .flat_map(|attempt| attempt.reason_codes.iter().cloned())
@@ -850,7 +863,7 @@ impl TriageProductionRunnerV1 {
                     .collect()
             })
             .unwrap_or_default();
-        let result = TriageResultV2 {
+        let mut result = TriageResultV2 {
             schema_id: TRIAGE_RESULT_SCHEMA_V2.into(),
             run_id: input.run_id.clone(),
             kind: if grounded_final {
@@ -871,6 +884,22 @@ impl TriageProductionRunnerV1 {
             accepted_evidence_ids,
             reason_codes,
         };
+        // Keep the terminal payload honest even when interruption becomes
+        // observable in the narrow interval after result assembly.
+        if let Some(reason) = host_interruption(&input, started, self.resolution.host_deadline_ms) {
+            interrupted = Some(reason);
+            result.kind = TriageResultKind::HonestPartial;
+            result.validation_state = TriageValidationState::Failed;
+            result.answer = None;
+            result.accepted_evidence_ids.clear();
+            let code = match reason {
+                Interruption::Cancelled => "cancelled",
+                Interruption::TimedOut => "deadline",
+            };
+            if !result.reason_codes.iter().any(|existing| existing == code) {
+                result.reason_codes.push(code.into());
+            }
+        }
         let terminal = if let Some(interruption) = interrupted {
             match interruption {
                 Interruption::Cancelled => TriageRunEventPayloadV2::Cancelled {
