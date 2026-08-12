@@ -4,6 +4,7 @@ mod jira;
 mod telegram;
 mod watchers;
 
+use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -29,6 +30,7 @@ use cd_core::research::{
 use cd_core::ssrf::SystemResolver;
 use cd_core::tool_host::ToolHost;
 use cd_core::tools::ToolSideEffect;
+use cd_core::triage_sdk::{TriageReplayV1, TriageRunEventV2, MAX_TRIAGE_WIRE_BYTES};
 use cd_core::workspace::Workspace;
 use clap::Parser;
 use futures_util::stream::Stream;
@@ -1240,6 +1242,131 @@ async fn research_sse(
         },
     );
 
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Owner-authored, already-completed V2 replay request.
+///
+/// This is deliberately separate from a production triage execution route:
+/// the headless server may validate and display the shared SDK event contract
+/// without discovering a provider, resolving credentials, or constructing a
+/// corpus/evidence packet.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TriageReplayBody {
+    workspace_id: String,
+    replay: TriageReplayV1,
+}
+
+/// Content-free error envelope for the replay surface. In particular, do not
+/// echo an invalid owner-only replay (which can contain an answer envelope).
+#[derive(Serialize)]
+struct TriageReplayErrorV1 {
+    schema_id: &'static str,
+    ok: bool,
+    code: &'static str,
+}
+
+struct TriageReplayHttpError {
+    status: StatusCode,
+    code: &'static str,
+}
+
+impl TriageReplayHttpError {
+    fn new(status: StatusCode, code: &'static str) -> Self {
+        Self { status, code }
+    }
+
+    fn authorization(status: StatusCode) -> Self {
+        let code = match status {
+            StatusCode::UNAUTHORIZED => "unauthorized",
+            StatusCode::FORBIDDEN => "forbidden",
+            _ => "authorization_failed",
+        };
+        Self::new(status, code)
+    }
+}
+
+impl IntoResponse for TriageReplayHttpError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            self.status,
+            Json(TriageReplayErrorV1 {
+                schema_id: "contextdesk.triage.replay_error.v1",
+                ok: false,
+                code: self.code,
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// Convert one shared SDK event into an SSE frame without adding a second
+/// event dialect. The event data remains exactly `TriageRunEventV2` JSON.
+fn triage_run_event_to_sse(event: TriageRunEventV2) -> Event {
+    let sequence = event.sequence.to_string();
+    let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".into());
+    Event::default()
+        .event("triage_run_event")
+        .id(sequence)
+        .data(data)
+}
+
+/// Replay a host-authored, already validated V2 event stream.
+///
+/// No provider, credential reference, corpus path, or HTTP client is touched
+/// here. `TriageReplayV1::validate` is run before a stream is created, and its
+/// bounded event limit makes the resulting in-memory iterator bounded too.
+async fn triage_replay_sse(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, TriageReplayHttpError> {
+    // `RequestBodyLimitLayer` imposes the server-wide transport cap; retain
+    // the SDK cap as a second, explicit contract boundary for this endpoint.
+    if body.len() > MAX_TRIAGE_WIRE_BYTES {
+        return Err(TriageReplayHttpError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+        ));
+    }
+    let request: TriageReplayBody = serde_json::from_slice(&body)
+        .map_err(|_| TriageReplayHttpError::new(StatusCode::BAD_REQUEST, "invalid_request"))?;
+    if request.workspace_id.trim().is_empty() || request.workspace_id.len() > 512 {
+        return Err(TriageReplayHttpError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_workspace",
+        ));
+    }
+
+    authorize(&headers, &state, &request.workspace_id)
+        .map_err(TriageReplayHttpError::authorization)?;
+    {
+        let workspaces = state.workspaces.lock().map_err(|_| {
+            TriageReplayHttpError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal")
+        })?;
+        if !workspaces.contains_key(&request.workspace_id) {
+            return Err(TriageReplayHttpError::new(
+                StatusCode::NOT_FOUND,
+                "workspace_not_found",
+            ));
+        }
+    }
+    request
+        .replay
+        .validate()
+        .map_err(|_| TriageReplayHttpError::new(StatusCode::BAD_REQUEST, "invalid_replay"))?;
+
+    // An owned iterator is intentionally used instead of spawning a task or
+    // opening a channel: every event is validated before first byte egress and
+    // the stream cannot trigger provider work after the request has returned.
+    let stream = futures_util::stream::iter(
+        request
+            .replay
+            .events
+            .into_iter()
+            .map(|event| Ok::<_, Infallible>(triage_run_event_to_sse(event))),
+    );
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
@@ -3089,6 +3216,9 @@ fn build_app(state: AppState) -> Router {
         .route("/v1/memory/list", post(list_memory))
         .route("/v1/research", post(research))
         .route("/v1/research/stream", get(research_sse))
+        // Replay-only V2 surface. It streams a host-authored, prevalidated
+        // SDK ledger and does not execute a triage provider turn.
+        .route("/v1/triage/replay", post(triage_replay_sse))
         .route("/v1/session/prompt", post(session_prompt))
         .route("/v1/permission/respond", post(permission_respond))
         .route("/v1/sync/membership", get(sync_membership))
@@ -3635,6 +3765,208 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn replay_fixture() -> TriageReplayV1 {
+        use cd_core::extension_contract::PacketPrivacyBoundary;
+        use cd_core::multi_model::triage_policy::TriageSlotKindV2;
+        use cd_core::triage_sdk::{
+            TriageAttemptStatus, TriageReconciliationV1, TriageResultKind, TriageResultV2,
+            TriageRunEventPayloadV2, TriageTerminalDispositionV1, TriageValidationState,
+            TRIAGE_REPLAY_SCHEMA_V1, TRIAGE_RESULT_SCHEMA_V2, TRIAGE_RUN_EVENT_SCHEMA_V2,
+        };
+
+        let summary = TriageReconciliationV1 {
+            state: "partial".into(),
+            configured_role_slots: 1,
+            completed_role_slots: 1,
+            distinct_models: 0,
+            distinct_gateways: 0,
+            supported_claim_ids: vec![],
+            conflict_ids: vec![],
+            gap_ids: vec!["insufficient_evidence".into()],
+            root_cause_established: false,
+        };
+        let result = TriageResultV2 {
+            schema_id: TRIAGE_RESULT_SCHEMA_V2.into(),
+            run_id: "run-replay-1".into(),
+            kind: TriageResultKind::HonestPartial,
+            validation_state: TriageValidationState::Partial,
+            packet_id: "packet-1".into(),
+            reconciliation: summary.clone(),
+            answer: None,
+            accepted_evidence_ids: vec![],
+            reason_codes: vec!["insufficient_evidence".into()],
+        };
+        let event = |sequence, event| TriageRunEventV2 {
+            schema_id: TRIAGE_RUN_EVENT_SCHEMA_V2.into(),
+            run_id: "run-replay-1".into(),
+            sequence,
+            privacy: PacketPrivacyBoundary::OwnerOnly,
+            event,
+        };
+        TriageReplayV1 {
+            schema_id: TRIAGE_REPLAY_SCHEMA_V1.into(),
+            run_id: "run-replay-1".into(),
+            request_fingerprint: "request-1".into(),
+            events: vec![
+                event(
+                    0,
+                    TriageRunEventPayloadV2::RunStarted {
+                        request_fingerprint: "request-1".into(),
+                        policy_fingerprint: "policy-1".into(),
+                    },
+                ),
+                event(
+                    1,
+                    TriageRunEventPayloadV2::PacketReady {
+                        packet_id: "packet-1".into(),
+                        packet_digest: "digest-1".into(),
+                        evidence_count: 0,
+                    },
+                ),
+                event(
+                    2,
+                    TriageRunEventPayloadV2::RoleAttempt {
+                        attempt: cd_core::triage_sdk::TriageRoleAttemptV1 {
+                            attempt_id: "attempt-finalizer-1".into(),
+                            role_slot_id: "slot-finalizer-1".into(),
+                            role: TriageSlotKindV2::Finalizer,
+                            model: None,
+                            status: TriageAttemptStatus::Completed,
+                            reason_codes: vec![],
+                            elapsed_ms: 0,
+                            input_chars: 0,
+                            output_chars: 0,
+                            physical_provider_calls: Some(0),
+                            semantic_corrections: Some(0),
+                            terminal_disposition: Some(TriageTerminalDispositionV1::Completed),
+                        },
+                    },
+                ),
+                event(
+                    3,
+                    TriageRunEventPayloadV2::Reconciliation {
+                        summary: summary.clone(),
+                    },
+                ),
+                event(
+                    4,
+                    TriageRunEventPayloadV2::Validation {
+                        passed: false,
+                        reason_codes: vec!["insufficient_evidence".into()],
+                    },
+                ),
+                event(
+                    5,
+                    TriageRunEventPayloadV2::Correction {
+                        applied: false,
+                        reason_codes: vec!["correction_unavailable".into()],
+                    },
+                ),
+                event(
+                    6,
+                    TriageRunEventPayloadV2::Completed {
+                        result: Box::new(result),
+                    },
+                ),
+            ],
+        }
+    }
+
+    fn triage_replay_request(
+        key: &str,
+        workspace_id: &str,
+        replay: &TriageReplayV1,
+    ) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/triage/replay")
+            .header("authorization", format!("Bearer {key}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "replay": replay,
+                }))
+                .unwrap(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn triage_replay_sse_authorizes_then_preserves_shared_event_order() {
+        use http_body_util::BodyExt;
+
+        let dir = tempdir().unwrap();
+        let app = build_app(test_state(
+            dir.path().to_path_buf(),
+            &[("key-a", "ws-a"), ("key-b", "ws-b")],
+        ));
+        let replay = replay_fixture();
+
+        let response = app
+            .clone()
+            .oneshot(triage_replay_request("key-a", "ws-a", &replay))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response
+            .headers()
+            .get("content-type")
+            .and_then(|header| header.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream")));
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(
+            text.matches("event: triage_run_event").count(),
+            replay.events.len()
+        );
+        let streamed = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|json| serde_json::from_str::<TriageRunEventV2>(json).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(streamed, replay.events);
+
+        let denied = app
+            .oneshot(triage_replay_request("key-a", "ws-b", &replay))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let denied_json = json_body(denied).await;
+        assert_eq!(
+            denied_json["schema_id"],
+            "contextdesk.triage.replay_error.v1"
+        );
+        assert_eq!(denied_json["code"], "forbidden");
+    }
+
+    #[tokio::test]
+    async fn triage_replay_rejects_invalid_ledgers_without_echoing_owner_content() {
+        let dir = tempdir().unwrap();
+        let app = build_app(test_state(dir.path().to_path_buf(), &[("key-a", "ws-a")]));
+        let mut replay = replay_fixture();
+        replay.events[3].sequence = 99;
+        let owner_only_marker = "vck_owner_only_marker_must_not_echo";
+        replay.events[0].event = cd_core::triage_sdk::TriageRunEventPayloadV2::RunStarted {
+            request_fingerprint: owner_only_marker.into(),
+            policy_fingerprint: "policy-1".into(),
+        };
+        replay.request_fingerprint = owner_only_marker.into();
+
+        let response = app
+            .oneshot(triage_replay_request("key-a", "ws-a", &replay))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(response).await;
+        assert_eq!(body["schema_id"], "contextdesk.triage.replay_error.v1");
+        assert_eq!(body["code"], "invalid_replay");
+        assert!(
+            !body.to_string().contains(owner_only_marker),
+            "invalid replay details must never be echoed: {body}"
+        );
     }
 
     fn sync_apply_req(key: &str, workspace_id: &str, mutation: SyncMutation) -> Request<Body> {
