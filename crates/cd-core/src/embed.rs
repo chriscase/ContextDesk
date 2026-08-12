@@ -189,6 +189,8 @@ fn apply_openai_embedding_path(endpoint: &mut reqwest::Url) {
     let base_path = endpoint.path().trim_end_matches('/');
     let embedding_path = if base_path.is_empty() {
         "/v1/embeddings".to_string()
+    } else if base_path.ends_with("/embeddings") {
+        base_path.to_string()
     } else if base_path.ends_with("/v1") || base_path.contains("/v1/") {
         format!("{base_path}/embeddings")
     } else {
@@ -770,9 +772,9 @@ impl std::fmt::Debug for OpenAiCompatibleEmbedBackend {
 }
 
 impl OpenAiCompatibleEmbedBackend {
-    /// Build against `base_url` (scheme+host+port, optional `/v1` prefix).
-    /// The embeddings path is appended without dropping a trailing path
-    /// segment. URL is SSRF-vetted.
+    /// Build against `base_url` (scheme+host+port, with an optional path
+    /// prefix). The embeddings path is appended using the shared route
+    /// normalizer so production and qualification agree. URL is SSRF-vetted.
     pub fn new(
         base_url: &str,
         model: impl Into<String>,
@@ -789,22 +791,10 @@ impl OpenAiCompatibleEmbedBackend {
         )
         .map_err(|e| CoreError::Message(format!("embed endpoint SSRF: {e}")))?;
         let mut endpoint = url;
-        let base_path = endpoint.path().trim_end_matches('/');
-        // Preserve `/v1` when present; otherwise append `/v1/embeddings`.
-        let embed_path = if base_path.ends_with("/v1") || base_path.ends_with("/embeddings") {
-            if base_path.ends_with("/embeddings") {
-                base_path.to_string()
-            } else {
-                format!("{base_path}/embeddings")
-            }
-        } else if base_path.is_empty() {
-            "/v1/embeddings".to_string()
-        } else {
-            format!("{base_path}/v1/embeddings")
-        };
-        endpoint.set_path(&embed_path);
-        endpoint.set_query(None);
-        endpoint.set_fragment(None);
+        // Keep the production adapter and the shared qualification/fingerprint
+        // adapter on one path-normalization contract. In particular,
+        // `/gateway/v1/foo` means `/gateway/v1/foo/embeddings` everywhere.
+        apply_openai_embedding_path(&mut endpoint);
         Ok(Self {
             client,
             endpoint,

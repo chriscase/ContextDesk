@@ -359,30 +359,31 @@ pub fn plan_diagnostic(
                 detail: "no reranker role is enabled; this lane cannot run".into(),
             });
         }
-        // Dialects are mandatory for the diagnostic on BOTH roles. A parser
-        // chosen from a URL or a model name is a guess, and a benchmark built
-        // on a guessed parser measures the guess.
-        if lane.uses_embedder()
-            && embedding.is_some_and(|role| role.dialect.as_deref().unwrap_or("").trim().is_empty())
-        {
-            blocked.push(BlockedLane {
-                lane: lane.as_str().into(),
-                code: "embedding_dialect_not_explicit".into(),
-                detail: "the embedding role has no explicit dialect; a diagnostic never infers a \
-                         parser from an endpoint or a model name"
-                    .into(),
-            });
+        // A parser chosen from a URL or a model name is a guess, and a
+        // benchmark built on a guessed parser measures the guess. The shared
+        // role resolvers accept either the legacy string selector or the typed
+        // selector, but reject unknown values before any credential is read.
+        if lane.uses_embedder() {
+            if let Some(role) = embedding {
+                if let Err(error) = crate::retrieval::resolved_embedding_dialect(role) {
+                    blocked.push(BlockedLane {
+                        lane: lane.as_str().into(),
+                        code: "embedding_dialect_invalid".into(),
+                        detail: error.to_string(),
+                    });
+                }
+            }
         }
-        if lane.uses_reranker()
-            && reranker.is_some_and(|role| role.dialect.as_deref().unwrap_or("").trim().is_empty())
-        {
-            blocked.push(BlockedLane {
-                lane: lane.as_str().into(),
-                code: "rerank_dialect_not_explicit".into(),
-                detail: "the reranker role has no explicit dialect; a diagnostic never infers a \
-                         parser from an endpoint or a model name"
-                    .into(),
-            });
+        if lane.uses_reranker() {
+            if let Some(role) = reranker {
+                if let Err(error) = crate::retrieval::resolved_rerank_dialect_label(role) {
+                    blocked.push(BlockedLane {
+                        lane: lane.as_str().into(),
+                        code: "rerank_dialect_invalid".into(),
+                        detail: error.to_string(),
+                    });
+                }
+            }
         }
         // Egress consent covers BOTH roles. A remote reranker receives the
         // candidate documents themselves, so a rerank lane leaks at least as
@@ -460,9 +461,11 @@ pub fn plan_diagnostic(
             .collect(),
         budgets,
         embedder_model: embedding.map(|role| role.model.clone()),
-        embedder_dialect: embedding.and_then(|role| role.dialect.clone()),
+        embedder_dialect: embedding
+            .and_then(|role| crate::retrieval::resolved_embedding_dialect(role).ok()),
         reranker_model: reranker.map(|role| role.model.clone()),
-        reranker_dialect: reranker.and_then(|role| role.dialect.clone()),
+        reranker_dialect: reranker
+            .and_then(|role| crate::retrieval::resolved_rerank_dialect_label(role).ok()),
         requires_egress_consent,
         egress_acknowledged: request.egress_acknowledged,
         reanalysis,
@@ -485,10 +488,8 @@ pub fn plan_diagnostic(
 /// is used and the space stays `unclassified`; the diagnostic blocks such a
 /// lane before it can be measured.
 pub fn configured_embedding_space(role: &RetrievalRoleModel) -> EmbeddingSpaceIdentity {
-    let dialect = role
-        .dialect
-        .clone()
-        .unwrap_or_else(|| "unclassified".into());
+    let dialect = crate::retrieval::resolved_embedding_dialect(role)
+        .unwrap_or_else(|_| "unclassified".into());
     let endpoint = cd_core::embed::embedding_endpoint_for_dialect(&role.base_url, &dialect)
         .unwrap_or_else(|| role.base_url.clone());
     EmbeddingSpaceIdentity::new(

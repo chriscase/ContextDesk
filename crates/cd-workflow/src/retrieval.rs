@@ -34,7 +34,8 @@ use cd_core::memory::embed_blocking;
 use cd_core::process_progress::CancelFlag;
 use cd_core::rerank::{
     rerank_blocking, resolve_rerank_dialect, validate_rerank_scores, HttpRerankBackend,
-    RerankBackend, RerankDialect, RERANK_DIALECT_VERCEL_V4, SUPPORTED_RERANK_DIALECTS,
+    RerankBackend, RerankDialect, RERANK_DIALECT_TEI_V1, RERANK_DIALECT_VERCEL_V4,
+    SUPPORTED_RERANK_DIALECTS,
 };
 
 /// Wire schema identity for [`RetrievalStatusReport`].
@@ -189,31 +190,67 @@ fn assert_retrieval_egress_allowed(role: &RetrievalRoleModel) -> CoreResult<()> 
     Ok(())
 }
 
-/// Build the configured embedding backend through an explicit wire dialect.
-/// Legacy roles without a dialect retain the local Ollama default only for
-/// the conventional Ollama port; every other endpoint uses the generic
-/// OpenAI `/v1/embeddings` contract. Model names never select behavior.
+/// Resolve the one embedding wire selector used by factories, diagnostics,
+/// re-analysis planning, and space identity.
+///
+/// `dialect` predates the typed `embed_wire` field and remains the canonical
+/// selector when it is present. This is intentional: serde cannot distinguish
+/// an omitted typed field from its OpenAI-compatible default, so rejecting a
+/// legacy Ollama dialect as a conflict would break existing configurations.
+/// When the legacy selector is absent, the typed field supplies the selector.
+/// No URL or model-name inference is performed.
+pub fn resolved_embedding_dialect(role: &RetrievalRoleModel) -> CoreResult<String> {
+    if let Some(dialect) = role.dialect.as_deref() {
+        let dialect = dialect.trim();
+        return match dialect {
+            "ollama_embeddings" | "openai_embeddings" | "vercel_v4_embeddings" => {
+                Ok(dialect.to_string())
+            }
+            unsupported => Err(cd_core::error::CoreError::Config(format!(
+                "unsupported embedding dialect '{unsupported}'; use ollama_embeddings, openai_embeddings, or vercel_v4_embeddings"
+            ))),
+        };
+    }
+    Ok(match role.embed_wire {
+        EmbedWireKind::OpenAiCompatible => "openai_embeddings",
+        EmbedWireKind::Ollama => "ollama_embeddings",
+    }
+    .into())
+}
+
+/// Resolve the one reranker wire selector used by factories and diagnostics.
+///
+/// As with [`resolved_embedding_dialect`], a present legacy string is
+/// canonical for backwards compatibility; otherwise the typed field supplies
+/// the registered TEI/Cohere contract. The returned label is the wire label,
+/// not the internal `RerankDialect` enum name.
+pub fn resolved_rerank_dialect_label(role: &RetrievalRoleModel) -> CoreResult<String> {
+    if let Some(dialect) = role.dialect.as_deref() {
+        let dialect = dialect.trim();
+        return if SUPPORTED_RERANK_DIALECTS.contains(&dialect) {
+            Ok(dialect.to_string())
+        } else {
+            Err(cd_core::error::CoreError::Config(format!(
+                "unsupported reranker dialect '{dialect}'; use {}",
+                SUPPORTED_RERANK_DIALECTS.join(" or ")
+            )))
+        };
+    }
+    Ok(match role.rerank_dialect {
+        RerankDialect::TeiCohere => RERANK_DIALECT_TEI_V1,
+    }
+    .into())
+}
+
+/// Build the configured embedding backend through the resolved explicit wire
+/// dialect. Model names and URL shapes never select behavior.
 pub fn build_embedding_backend(
     role: &RetrievalRoleModel,
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn EmbedBackend>> {
     assert_retrieval_egress_allowed(role)?;
-    let dialect = role.dialect.as_deref();
-    if dialect.is_none() {
-        return match role.embed_wire {
-            EmbedWireKind::OpenAiCompatible => Ok(Arc::new(OpenAiCompatibleEmbedBackend::new(
-                &role.base_url,
-                role.model.clone(),
-                bearer_for(role, secrets),
-            )?)),
-            EmbedWireKind::Ollama => {
-                let client = cd_core::chat::OllamaClient::new(&role.base_url, &role.model)?;
-                Ok(Arc::new(OllamaEmbedBackend::new(client)))
-            }
-        };
-    }
-    let dialect = dialect.unwrap_or_default();
-    match dialect {
+    let dialect = resolved_embedding_dialect(role)?;
+    match dialect.as_str() {
         "ollama_embeddings" => {
             let client = cd_core::chat::OllamaClient::new(&role.base_url, &role.model)?;
             Ok(Arc::new(OllamaEmbedBackend::new(client)))
@@ -237,7 +274,7 @@ pub fn build_embedding_backend(
             )?))
         }
         unsupported => Err(cd_core::error::CoreError::Config(format!(
-            "unsupported embedding dialect '{unsupported}'; use ollama_embeddings, openai_embeddings, or vercel_v4_embeddings"
+            "unsupported resolved embedding dialect '{unsupported}'"
         ))),
     }
 }
@@ -255,9 +292,9 @@ pub fn build_rerank_backend(
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn RerankBackend>> {
     assert_retrieval_egress_allowed(role)?;
-    let dialect = role.dialect.as_deref().map(str::trim);
+    let dialect = resolved_rerank_dialect_label(role)?;
     let bearer = bearer_for(role, secrets);
-    if dialect == Some(RERANK_DIALECT_VERCEL_V4) {
+    if dialect == RERANK_DIALECT_VERCEL_V4 {
         if !cd_core::discovery::is_vercel_ai_gateway(&role.base_url) {
             return Err(cd_core::error::CoreError::Config(
                 "vercel_v4_rerank_v1 requires the ai-gateway.vercel.sh host".into(),
@@ -271,25 +308,12 @@ pub fn build_rerank_backend(
                 &cd_core::ssrf::SsrfPolicy::default(),
             )?,
         ))
-    } else if let Some(dialect) = dialect {
-        if !SUPPORTED_RERANK_DIALECTS.contains(&dialect) {
-            return Err(cd_core::error::CoreError::Config(format!(
-                "unsupported reranker dialect '{dialect}'; use {}",
-                SUPPORTED_RERANK_DIALECTS.join(" or ")
-            )));
-        }
-        Ok(Arc::new(HttpRerankBackend::with_dialect(
-            &role.base_url,
-            role.model.clone(),
-            bearer,
-            RerankDialect::TeiCohere,
-        )?))
     } else {
         Ok(Arc::new(HttpRerankBackend::with_dialect(
             &role.base_url,
             role.model.clone(),
             bearer,
-            resolve_rerank_dialect(Some(role.rerank_dialect)),
+            RerankDialect::TeiCohere,
         )?))
     }
 }
@@ -788,6 +812,84 @@ mod tests {
         assert_eq!(
             bearer_for(&role, Some(&secrets)).as_deref(),
             Some("not-printed")
+        );
+    }
+
+    #[test]
+    fn typed_only_role_selectors_are_shared_with_diagnostic_space_identity() {
+        let embedding = RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:9/gateway/v1/foo".into(),
+            model: "bge-m3".into(),
+            dialect: None,
+            allow_remote: false,
+            api_key_ref: None,
+            embed_wire: EmbedWireKind::OpenAiCompatible,
+            rerank_dialect: RerankDialect::TeiCohere,
+        };
+        assert_eq!(
+            resolved_embedding_dialect(&embedding).unwrap(),
+            "openai_embeddings"
+        );
+        let configured = crate::retrieval_diagnostic::configured_embedding_space(&embedding);
+        assert_eq!(configured.dialect, "openai_embeddings");
+        assert_eq!(
+            configured.endpoint_fingerprint,
+            cd_core::capability_qualification::fingerprint_endpoint(
+                "http://127.0.0.1:9/gateway/v1/foo/embeddings"
+            )
+        );
+
+        let reranker = RetrievalRoleModel {
+            model: "qwen3-reranker-0.6b".into(),
+            ..embedding.clone()
+        };
+        assert_eq!(
+            resolved_rerank_dialect_label(&reranker).unwrap(),
+            cd_core::rerank::RERANK_DIALECT_TEI_V1
+        );
+    }
+
+    #[test]
+    fn legacy_string_selector_is_the_single_canonical_selector_when_present() {
+        let role = RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:9".into(),
+            model: "bge-m3".into(),
+            dialect: Some("ollama_embeddings".into()),
+            allow_remote: false,
+            api_key_ref: None,
+            // The typed default is OpenAI, but the explicit legacy selector
+            // remains authoritative for old saved configurations.
+            embed_wire: EmbedWireKind::OpenAiCompatible,
+            rerank_dialect: RerankDialect::TeiCohere,
+        };
+        assert_eq!(
+            resolved_embedding_dialect(&role).unwrap(),
+            "ollama_embeddings"
+        );
+        assert_eq!(
+            crate::retrieval_diagnostic::configured_embedding_space(&role).dialect,
+            "ollama_embeddings"
+        );
+    }
+
+    #[test]
+    fn openai_path_prefix_is_normalized_once_for_production_backend() {
+        let backend =
+            OpenAiCompatibleEmbedBackend::new("http://127.0.0.1:9/gateway/v1/foo", "bge-m3", None)
+                .unwrap();
+        assert_eq!(
+            backend.endpoint_url(),
+            "http://127.0.0.1:9/gateway/v1/foo/embeddings"
+        );
+        assert_eq!(
+            cd_core::embed::embedding_endpoint_for_dialect(
+                "http://127.0.0.1:9/gateway/v1/foo",
+                "openai_embeddings"
+            )
+            .as_deref(),
+            Some("http://127.0.0.1:9/gateway/v1/foo/embeddings")
         );
     }
 

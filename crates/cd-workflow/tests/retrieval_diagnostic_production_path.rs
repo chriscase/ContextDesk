@@ -576,23 +576,20 @@ async fn an_absent_reranker_blocks_only_the_rerank_lanes_and_keeps_the_baseline(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_rerank_role_without_an_explicit_dialect_blocks_before_any_provider_work() {
+async fn a_rerank_role_uses_the_typed_dialect_when_legacy_selector_is_absent() {
     let fixture = fixture().await;
     let mut config = fixture.config.clone();
     config.retrieval.reranker.as_mut().expect("role").dialect = None;
 
     let request = DiagnosticRequest::new(fixture.corpus_id.clone(), vec![query()]);
     let plan = plan_diagnostic(&fixture.cache_root, &request, &config).expect("plan");
-    let blocked: Vec<&str> = plan
+    assert!(!plan
         .blocked_lanes
         .iter()
-        .filter(|blocked| blocked.code == "rerank_dialect_not_explicit")
-        .map(|blocked| blocked.lane.as_str())
-        .collect();
+        .any(|blocked| blocked.code == "rerank_dialect_invalid"));
     assert_eq!(
-        blocked.len(),
-        3,
-        "exactly the three rerank lanes: {blocked:?}"
+        plan.reranker_dialect.as_deref(),
+        Some(cd_core::rerank::RERANK_DIALECT_TEI_V1)
     );
     assert_eq!(
         fixture.gateway.request_count(),
