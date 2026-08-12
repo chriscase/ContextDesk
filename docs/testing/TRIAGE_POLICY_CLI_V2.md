@@ -1,8 +1,9 @@
 # Triage Policy V2 provider-free CLI proof
 
-Status: **partial issue #872 implementation; provider-free policy compilation is
-available, while live Enhanced/Advanced execution is fail-closed until a
-host-owned exact V2 role-qualification store exists.**
+Status: **partial issue #872 implementation; provider-free policy compilation
+and one-at-a-time exact-role qualification are available. Live Enhanced/
+Advanced execution remains fail-closed until every admitted slot has current
+role evidence and the corresponding production stage is wired.**
 
 ## Surface
 
@@ -14,6 +15,7 @@ contextdesk triage-policy store list --store FILE
 contextdesk triage-policy store save --store FILE --policy FILE --policy-id ID
 contextdesk triage-policy store select --store FILE --policy-id ID
 contextdesk triage-policy store clear --store FILE
+contextdesk triage-policy qualify --profile PROFILE --model MODEL --role ROLE --yes
 contextdesk triage run --request REQUEST.json
 ```
 
@@ -60,18 +62,28 @@ explicit reversible selection changes; no selection means Standard remains the
 safe default. Store output contains policy ids and revisions only, never
 credentials, endpoints, provider bodies, or corpus data.
 
+`qualify` is the stateful exception: it requires an exact configured profile,
+the exact catalog model id, one explicit role, and `--yes`. It uses the
+existing provider backend and synthetic packet/validator seams, makes at most
+one logical provider call, and atomically writes only the host-authored,
+secret-free result to the local role store. Slow models may use a larger
+`--deadline-ms` within the V2 global bound. Timeline and currently unsupported
+reviewer roles are recorded as unqualified without a provider call. An
+unqualified result is retained as negative evidence and exits with
+`not_ready`; it never silently upgrades a policy.
+
 ## Stateful V2 run
 
 `triage run` accepts one bounded `contextdesk.triage.request.v2` document. An
-Enhanced or Advanced request currently fails closed with
-`triage_role_qualification_unavailable`; if `--preflight` is supplied it is
-rejected as `caller_preflight_not_authoritative`. This refusal occurs before
-ToolHost construction or credential resolution. The provider-free
+Enhanced or Advanced request fails closed with
+`triage_role_qualification_unavailable` until the exact role records required
+by the compiled policy exist; if `--preflight` is supplied it is rejected as
+`caller_preflight_not_authoritative`. This refusal occurs before ToolHost
+construction or credential resolution. The provider-free
 `triage-policy validate/compile` commands continue to accept explicit
-preflight JSON for simulation only. Once the dedicated host-owned V2 role
-qualification store exists, the live command will use the same trusted
-resolver as Tauri, existing protected-file plumbing, corpus binding, packet
-builder, provider factory, validation, replay, and cleanup.
+preflight JSON for simulation only. The live command and Tauri now use the
+same trusted resolver, existing protected-file plumbing, corpus binding,
+packet builder, provider factory, validation, replay, and cleanup.
 
 The output is owner-only and contains the typed V2 result plus the ordered
 replay. A grounded result reports `status: "completed"`; a host-validated
@@ -84,10 +96,12 @@ through `contextdesk chat` and the established workflow.
 
 - Automatic AppConfig migration and implicit policy selection remain deferred;
   the policy store is an explicit opt-in input.
-- Dedicated exact role qualification is the remaining live CLI/Tauri gate;
+- Dedicated exact role qualification is available through the CLI, but final
+  reviewer/timeline execution and full canonical graph admission remain open;
   generic capability qualification is never promoted to V2 authority.
-- Tauri now uses the shared resolver and emits validated events progressively;
-  the CLI remains provider-free until host qualification is available.
+- Tauri uses the shared resolver and emits validated events progressively; its
+  startup store is read-only until a matching qualification command or future
+  GUI probe writer is invoked.
 - The host rejects unsupported non-empty source scopes and corpus revision
   drift rather than silently widening the request.
 - JSONL currently uses the normal one-shot envelope because compilation does

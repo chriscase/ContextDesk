@@ -165,6 +165,9 @@ async fn run_state_free(cli: &Cli) -> Option<i32> {
                 .map(|_| ExitCategory::NotReady);
             Some(emit_completed(format, color, "eval", result, verdict))
         }
+        Command::TriagePolicy {
+            action: cli::TriagePolicyAction::Qualify(_),
+        } => None,
         Command::TriagePolicy { action } => {
             let result = commands::triage_policy::run(action);
             let verdict = result
@@ -216,11 +219,29 @@ async fn dispatch(
             }
             emit(format, resolved.color.value, "import", result)
         }
-        Command::Normalize(_)
-        | Command::Normalized { .. }
-        | Command::Eval { .. }
-        | Command::TriagePolicy { .. } => {
+        Command::Normalize(_) | Command::Normalized { .. } | Command::Eval { .. } => {
             unreachable!("state-free commands return before stateful dispatch")
+        }
+        Command::TriagePolicy {
+            action: cli::TriagePolicyAction::Qualify(args),
+        } => {
+            let secrets = adapters::secret_store();
+            let result = commands::triage_policy::qualify(args, paths, app_cfg, &secrets).await;
+            let verdict = result
+                .as_ref()
+                .ok()
+                .filter(|output| !output.accepted())
+                .map(|_| ExitCategory::NotReady);
+            emit_completed(
+                format,
+                resolved.color.value,
+                "triage_policy",
+                result,
+                verdict,
+            )
+        }
+        Command::TriagePolicy { .. } => {
+            unreachable!("provider-free triage policy commands return before stateful dispatch")
         }
         Command::Triage { action } => {
             let secrets = adapters::secret_store();

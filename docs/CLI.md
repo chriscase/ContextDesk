@@ -76,6 +76,7 @@ metacharacters literal. If a question begins with a command name such as
 | `exception-episodes [corpus-id]` | Deterministic exception episode correlation (occurrence vs raw records; no provider). |
 | `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
 | `triage-policy validate\|compile\|example` | Offline, owner-only Triage Policy V2 validation over explicit policy/preflight JSON files. Retains exact profile/model identities; does not read AppConfig, credentials, Keychain, discovery state, or a corpus, and never contacts a provider. |
+| `triage-policy qualify` | One explicit, bounded synthetic role probe through the production backend; atomically saves host-owned exact-role evidence and never infers compatibility from a model name. |
 | `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
 | `gateway ledger` | Offline cost/reliability comparison over share-safe diagnostic bundles and documented historical rows. Never makes live calls; never emits readiness claims from aggregates. See [Gateway cost/reliability ledger](benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md). |
 
@@ -295,6 +296,7 @@ any provider operation:
 contextdesk triage-policy example
 contextdesk triage-policy validate --policy policy.json --preflight preflight.json
 contextdesk triage-policy compile --policy policy.json --preflight preflight.json --json
+contextdesk triage-policy qualify --profile work --model exact-model-id --role observation-extractor --yes
 ```
 
 `validate` reports every configured slot as admitted, optionally degraded, or
@@ -316,6 +318,12 @@ model each role would use.
 Standard remains the permanent simple one-model default. Enhanced and Advanced
 use the same contract with progressively visible roles, budgets, qualification,
 and egress choices; this CLI does not silently select or substitute a model.
+`qualify` is the explicit stateful probe: it makes one bounded synthetic
+request through the production backend, validates the exact packet/role
+contract, and stores the result in the local role-qualification store. Use the
+exact catalog id returned by discovery; no model-name inference occurs. Pass a
+larger `--deadline-ms` for slow gateways. A failed or unsupported probe is
+saved as negative evidence and never authorizes a live policy.
 
 ## Gateway diagnostics (`contextdesk gateway diagnose`)
 

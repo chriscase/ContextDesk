@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use crate::cli::{
     TriagePolicyAction, TriagePolicyFileArgs, TriagePolicyStoreAction, TriagePolicyStoreFileArgs,
-    TriagePolicyStoreSaveArgs, TriagePolicyStoreSelectArgs,
+    TriagePolicyStoreSaveArgs, TriagePolicyStoreSelectArgs, TriageRoleQualificationArgs,
 };
 use crate::envelope::{CliError, CliResult, Render};
 
@@ -92,6 +92,73 @@ pub struct TriagePolicyCommandOutput {
     pub saved_revision: Option<u64>,
     /// Explicit proof that this command did not evaluate a provider.
     pub offline: OfflinePolicyEvidence,
+}
+
+/// Result of one live exact-role qualification.  This is owner-local because
+/// it names the selected profile/model, but it never contains an endpoint,
+/// credential reference, or provider response body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TriageRoleQualificationCommandOutput {
+    /// CLI payload schema.
+    pub schema_id: &'static str,
+    /// Stable action name.
+    pub action: &'static str,
+    /// Whether the exact role contract qualified.
+    pub accepted: bool,
+    /// Exact profile identity selected by the owner.
+    pub profile_id: String,
+    /// Exact catalog model id selected by the owner.
+    pub model_id: String,
+    /// Exact role kind.
+    pub role: TriageSlotKindV2,
+    /// Current qualification verdict.
+    pub qualification: cd_core::multi_model::triage_policy::RoleQualificationV2,
+    /// Provider operations actually sent by the synthetic probe.
+    pub physical_provider_calls: u32,
+    /// Semantic correction operations (zero in this v1 probe).
+    pub semantic_corrections: u32,
+    /// Host-authored bounded reason.
+    pub reason: String,
+    /// Whether the record was atomically written to the local store.
+    pub store_written: bool,
+    /// Whether the selected role required an attempted provider exchange.
+    pub network: bool,
+    /// Whether a configured credential reference was eligible to be read.
+    pub credentials_read: bool,
+    /// Output remains owner-only.
+    pub privacy: &'static str,
+}
+
+impl TriageRoleQualificationCommandOutput {
+    /// Whether this command produced a positive readiness fact.
+    pub fn accepted(&self) -> bool {
+        self.accepted
+    }
+}
+
+impl Render for TriageRoleQualificationCommandOutput {
+    fn render_text(&self) -> String {
+        let qualification =
+            serde_json::to_string(&self.qualification).unwrap_or_else(|_| "unknown".into());
+        format!(
+            "Triage role qualification\n\n  Status:       {}\n  Profile:      {}\n  Model:        {}\n  Role:         {:?}\n  Qualification: {}\n  Provider calls: {}\n  Corrections:  {}\n  Reason:       {}\n  Store:        {}\n\n  Network:      {}\n  Credentials:  {}\n  Privacy:      owner-only\n",
+            if self.accepted { "QUALIFIED" } else { "NOT QUALIFIED" },
+            self.profile_id,
+            self.model_id,
+            self.role,
+            qualification,
+            self.physical_provider_calls,
+            self.semantic_corrections,
+            self.reason,
+            if self.store_written { "updated" } else { "not written" },
+            if self.network { "yes" } else { "no" },
+            if self.credentials_read { "attempted" } else { "no" },
+        )
+    }
+
+    fn render_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("role qualification output is serializable")
+    }
 }
 
 impl TriagePolicyCommandOutput {
@@ -214,7 +281,88 @@ pub fn run(action: &TriagePolicyAction) -> CliResult<TriagePolicyCommandOutput> 
         TriagePolicyAction::Compile(args) => evaluate("compile", args, true),
         TriagePolicyAction::Example => Ok(example()),
         TriagePolicyAction::Store { action } => run_store(action),
+        TriagePolicyAction::Qualify(_) => Err(CliError::internal(
+            "live role qualification must use stateful dispatch",
+        )),
     }
+}
+
+/// Run one live role qualification through the existing provider/backend
+/// factory and atomically publish the host-authored result.
+pub async fn qualify(
+    args: &TriageRoleQualificationArgs,
+    paths: &crate::adapters::Paths,
+    cfg: &cd_core::config::AppConfig,
+    secrets: &dyn cd_core::keychain_store::SecretStore,
+) -> CliResult<TriageRoleQualificationCommandOutput> {
+    if !args.yes {
+        return Err(CliError::user(
+            "triage role qualification makes one bounded provider request; pass --yes to confirm",
+        ));
+    }
+    if args.profile.trim().is_empty() || args.model.trim().is_empty() {
+        return Err(CliError::user(
+            "--profile and --model must be non-empty exact identities",
+        ));
+    }
+    let kind = args.role.kind();
+    let profile = cfg
+        .providers
+        .profiles
+        .iter()
+        .find(|profile| profile.id == args.profile)
+        .ok_or_else(|| CliError::user("provider profile was not found"))?;
+    let store_path =
+        cd_core::triage_role_qualification::triage_role_qualification_store_path(&paths.config_dir);
+    let mut store =
+        cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(&store_path)
+            .map_err(|_| CliError::user("triage role qualification store is unavailable"))?;
+    let record = cd_workflow::triage_role_qualification::qualify_configured_role_v2(
+        cfg,
+        secrets,
+        &cd_workflow::triage_role_qualification::TriageRoleProbeRequest {
+            profile_id: args.profile.clone(),
+            model_id: args.model.clone(),
+            kind,
+            deadline_ms: args.deadline_ms,
+        },
+        None,
+    )
+    .await
+    .map_err(|error| CliError::user(error.to_string()))?;
+    let qualification = record.qualification;
+    let physical_provider_calls = record.physical_provider_calls;
+    let semantic_corrections = record.semantic_corrections;
+    let reason = record.reason.clone();
+    store
+        .put(record)
+        .map_err(|_| CliError::user("triage role qualification record was rejected"))?;
+    store
+        .save(&store_path)
+        .map_err(|_| CliError::user("triage role qualification store could not be published"))?;
+    let needs_provider = !matches!(
+        kind,
+        TriageSlotKindV2::Contributor(
+            cd_core::multi_model::triage_policy::TriageContributorRole::TimelineAnalyst
+        ) | TriageSlotKindV2::Reviewer
+    );
+    Ok(TriageRoleQualificationCommandOutput {
+        schema_id: "contextdesk.cli.triage_role_qualification.v1",
+        action: "qualify",
+        accepted: qualification
+            == cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+        profile_id: args.profile.clone(),
+        model_id: args.model.clone(),
+        role: kind,
+        qualification,
+        physical_provider_calls,
+        semantic_corrections,
+        reason,
+        store_written: true,
+        network: needs_provider,
+        credentials_read: needs_provider && profile.api_key_ref.is_some(),
+        privacy: "owner_only",
+    })
 }
 
 fn run_store(action: &TriagePolicyStoreAction) -> CliResult<TriagePolicyCommandOutput> {

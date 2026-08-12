@@ -183,9 +183,8 @@ pub enum Command {
         #[command(subcommand)]
         action: EvalAction,
     },
-    /// Validate or compile an explicit Triage Policy V2 entirely offline.
-    /// Reads only the two named JSON files; never reads app config,
-    /// credentials, Keychain, a model catalog, or a corpus.
+    /// Validate/compile an explicit Triage Policy V2 offline, or qualify one
+    /// exact role against the configured gateway.
     TriagePolicy {
         #[command(subcommand)]
         action: TriagePolicyAction,
@@ -303,6 +302,61 @@ pub enum TriagePolicyAction {
         #[command(subcommand)]
         action: TriagePolicyStoreAction,
     },
+    /// Run one synthetic exact-role qualification against the configured
+    /// gateway and save the host-authored result to the local role store.
+    Qualify(TriageRoleQualificationArgs),
+}
+
+/// Explicit selection for one Triage Policy V2 role qualification probe.
+#[derive(Debug, Clone, clap::Args)]
+pub struct TriageRoleQualificationArgs {
+    /// Exact configured provider profile id.
+    #[arg(long, required = true)]
+    pub profile: String,
+    /// Exact catalog model id; no name shortening or inference is performed.
+    #[arg(long, required = true)]
+    pub model: String,
+    /// Exact V2 role contract to probe.
+    #[arg(long, value_enum)]
+    pub role: TriageRoleQualificationRole,
+    /// Whole synthetic probe deadline in milliseconds.
+    #[arg(long, default_value_t = 300_000)]
+    pub deadline_ms: u64,
+    /// Confirm that this command will make one bounded provider request (when
+    /// the selected role is implemented) and update local evidence.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+/// CLI spelling of the exact V2 role kinds.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum TriageRoleQualificationRole {
+    ObservationExtractor,
+    TimelineAnalyst,
+    CausalProposer,
+    ContradictionChecker,
+    EvidenceGapFinder,
+    Finalizer,
+    Reviewer,
+}
+
+impl TriageRoleQualificationRole {
+    /// Convert the user selection to the provider-neutral policy kind.
+    pub fn kind(self) -> cd_core::multi_model::triage_policy::TriageSlotKindV2 {
+        use cd_core::multi_model::triage_policy::{
+            TriageContributorRole as C, TriageSlotKindV2 as K,
+        };
+        match self {
+            Self::ObservationExtractor => K::Contributor(C::ObservationExtractor),
+            Self::TimelineAnalyst => K::Contributor(C::TimelineAnalyst),
+            Self::CausalProposer => K::Contributor(C::CausalProposer),
+            Self::ContradictionChecker => K::Contributor(C::ContradictionChecker),
+            Self::EvidenceGapFinder => K::Contributor(C::EvidenceGapFinder),
+            Self::Finalizer => K::Finalizer,
+            Self::Reviewer => K::Reviewer,
+        }
+    }
 }
 
 /// Provider-neutral Triage SDK actions.
