@@ -297,6 +297,17 @@ async fn qualify_with_backend(
     let key = probe_key(&profile_id, &base_url, &model_id, kind, &protocol);
     let packet = synthetic_packet();
 
+    // A pre-cancelled qualification request must not construct a successful
+    // record or spend a provider call.  Contributors already enforce this in
+    // the shared pipeline; keep the finalizer path subject to the same host
+    // cancellation boundary.
+    if cancel
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    {
+        return record(key, RoleQualificationV2::Unqualified, 0, "cancelled");
+    }
+
     if let Some(role) = contribution_role(kind) {
         let plan = match ContributionRoutingPlan::new(
             vec![role],
@@ -396,9 +407,14 @@ async fn qualify_with_backend(
         "Return exactly one JSON object with schema \"{}\". Use every literal candidate/evidence id from the host packet and no host-owned fields. Do not establish a root cause.",
         SCHEMA_V1
     );
-    let response = match complete_once(&*backend, &messages, deadline_ms, None).await {
+    // Use the same cooperative cancellation signal for finalizer probes as for
+    // contribution probes.  A cancelled probe must never mint qualification.
+    let response = match complete_once(&*backend, &messages, deadline_ms, cancel).await {
         Ok(response) => response,
-        Err(reason) => return record(key, RoleQualificationV2::Unqualified, 1, reason),
+        Err(reason) => {
+            let calls = if reason == "cancelled" { 0 } else { 1 };
+            return record(key, RoleQualificationV2::Unqualified, calls, reason);
+        }
     };
     let hooks = HostValidatedAnswerHooks::default();
     let decision: TriageValidationDecision = hooks
@@ -653,5 +669,31 @@ mod tests {
         .expect("probe");
         assert_eq!(record.qualification, RoleQualificationV2::Qualified);
         assert_eq!(record.physical_provider_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_finalizer_probe_never_qualifies_or_credits_call() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let packet = synthetic_packet();
+        let backend = Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
+            valid_finalizer(&packet),
+            Vec::new(),
+            "stop",
+        )]));
+        let record = qualify_role_v2_with_backend(TriageRoleProbeBackendInput {
+            profile_id: "profile:test".into(),
+            base_url: "https://gateway.example/v1".into(),
+            model_id: "model:test".into(),
+            kind: TriageSlotKindV2::Finalizer,
+            protocol: protocol().into(),
+            deadline_ms: 5_000,
+            cancel: Some(cancel),
+            backend,
+        })
+        .await
+        .expect("probe");
+        assert_eq!(record.qualification, RoleQualificationV2::Unqualified);
+        assert_eq!(record.physical_provider_calls, 0);
+        assert_eq!(record.reason, "cancelled");
     }
 }
