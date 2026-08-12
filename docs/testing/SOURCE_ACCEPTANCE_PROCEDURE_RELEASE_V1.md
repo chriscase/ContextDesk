@@ -10,7 +10,7 @@ The exact tested source/build SHA above is the identity that must be fetched, bu
 verified. Do not substitute an older baseline, a moving branch tip, or an
 unrelated local checkout. The bounded Vercel evidence for this exact runtime is
 recorded in
-`docs/testing/VERCEL_DEEPSEEK_DIAGNOSTIC_2026-08-12_RELEASE_01BA43FE.md`.
+`docs/testing/VERCEL_DEEPSEEK_DIAGNOSTIC_2026-08-12_RELEASE_A3A5263E.md`.
 It is useful transport/product-path evidence, but it is not an employer-gateway
 compatibility claim. The preceding `01ba43fe` Vercel run remains historical
 context only because this release adds cancellation hardening after that run.
