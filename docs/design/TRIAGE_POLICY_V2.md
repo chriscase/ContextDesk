@@ -192,10 +192,18 @@ the existing immutable host packet, provider backends, cancellation, budgets,
 stage events, validation, reconciliation, renderer, and cleanup.
 
 It refuses Standard (which stays on the established single-model route),
-timeline analysis, a finalizer, a reviewer, visible optional-role dropout, or
-deadline semantics the established route cannot enforce. It is not selected by
-CLI or Tauri yet. See
+timeline analysis, a finalizer, a reviewer, or deadline semantics the
+established route cannot enforce. See
 [`TRIAGE_POLICY_V2_PRODUCTION_ADAPTER_V1.md`](../testing/TRIAGE_POLICY_V2_PRODUCTION_ADAPTER_V1.md).
+
+A host-neutral runner now layers on that adapter: a resolver derives exact
+preflight facts and authorized backends from saved configuration and
+qualification evidence, a typed event ledger projects the production run into
+the owner-only `TriageRunEventV2` replay (with a validated share-safe
+projection and visible optional-role dropout), and the CLI selects the whole
+path via `contextdesk triage-policy run`. Tauri and HTTP/SSE hosts can call
+the same facade but are not wired yet. See
+[`TRIAGE_POLICY_V2_PRODUCTION_RUNNER_V1.md`](../testing/TRIAGE_POLICY_V2_PRODUCTION_RUNNER_V1.md).
 
 ## Release proof
 

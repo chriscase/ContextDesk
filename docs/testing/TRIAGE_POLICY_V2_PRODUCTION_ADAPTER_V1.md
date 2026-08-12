@@ -82,17 +82,26 @@ The adapter test proves:
 
 ## Not proven / residual product blocker
 
-- No CLI, Tauri, server, or SDK command selects this adapter yet.
-- No host resolver yet constructs exact-role V2 preflight plus backend bindings
-  from saved policy, qualification evidence, credentials, and provider config.
-- The owner-only V2 request/event/result stream is not projected from the
-  existing production contribution events.
+- ~~No CLI, Tauri, server, or SDK command selects this adapter yet.~~ The CLI
+  (`contextdesk triage-policy run`) and the shared workflow facade now select
+  it — see
+  [`TRIAGE_POLICY_V2_PRODUCTION_RUNNER_V1.md`](TRIAGE_POLICY_V2_PRODUCTION_RUNNER_V1.md).
+  Tauri and cd-server callers remain unwired.
+- ~~No host resolver yet constructs exact-role V2 preflight plus backend
+  bindings.~~ `cd_workflow::triage_run::resolve_triage_policy_v2` now does,
+  from AppConfig, the qualification store, and cached credentials.
+- ~~The owner-only V2 request/event/result stream is not projected from the
+  existing production contribution events.~~ `TriageRunLedgerV1` now projects
+  it from the typed observer seam; visible optional dropout is supported via
+  `prepare_v2_contribution_runtime_with_projection`.
 - A smaller per-contributor operation timeout, finalizer reserve, reviewer
-  reserve/condition/requirement, timeline role, and visible optional dropout
-  still require production runtime/event work.
+  reserve/condition/requirement, and the timeline role still require
+  production runtime/event work; admitted slots of those kinds keep their
+  typed refusals.
 - No provider, gateway, credential store, live corpus, or network was used.
 - This does not establish live compatibility, usefulness, cost, release
   readiness, or full Triage Policy V2 execution.
 
 Handbook impact: the Triage Policy V2 row remains **Partial** and now records
-the exact contributor-only production overlap and its typed refusals.
+the exact contributor-only production overlap, its typed refusals, and the
+runner/resolver/ledger wiring layered on top.

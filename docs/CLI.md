@@ -76,6 +76,7 @@ metacharacters literal. If a question begins with a command name such as
 | `exception-episodes [corpus-id]` | Deterministic exception episode correlation (occurrence vs raw records; no provider). |
 | `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
 | `triage-policy validate\|compile\|example` | Offline, owner-only Triage Policy V2 validation over explicit policy/preflight JSON files. Retains exact profile/model identities; does not read AppConfig, credentials, Keychain, discovery state, or a corpus, and never contacts a provider. |
+| `triage-policy run` | Production contributor-subset run of one Enhanced/Advanced policy against a linked corpus: resolves preflight facts and authorized backends from AppConfig plus qualification evidence, executes the shared linked contribution path, and emits the owner-only `TriageRunEventV2` replay (optionally to `--events-out` JSONL and a `--share-safe-out` projection). Standard refuses toward the established chat path. |
 | `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
 | `gateway ledger` | Offline cost/reliability comparison over share-safe diagnostic bundles and documented historical rows. Never makes live calls; never emits readiness claims from aggregates. See [Gateway cost/reliability ledger](benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md). |
 
@@ -316,6 +317,28 @@ model each role would use.
 Standard remains the permanent simple one-model default. Enhanced and Advanced
 use the same contract with progressively visible roles, budgets, qualification,
 and egress choices; this CLI does not silently select or substitute a model.
+
+`run` is the stateful production caller for the currently supported
+contributor-only subset:
+
+```bash
+contextdesk triage-policy run --policy policy.json --corpus my-corpus \
+  --task "What initiated the incident?" --events-out replay.jsonl --json
+```
+
+It resolves exact per-slot preflight facts (availability, measured
+JSON-proposal qualification, egress) from AppConfig and the qualification
+store, authorizes backends for exactly the admitted contributor slots, runs
+the established linked contribution turn under the policy's whole-turn
+deadline, and reports the shared V2 event ledger: one `role_attempt` per
+configured slot (dropout included), a reconciliation summary with separate
+role/model/gateway counts, host validation, and exactly one terminal.
+`--deadline-ms` / `--max-provider-calls` may narrow but never extend the
+policy's own bounds. A policy the resolver or adapter cannot honor refuses
+with a typed category and exit code 8 before any provider call; a completed
+grounded run exits 0. Standard-mode policies refuse
+(`standard_uses_established_path`) — plain `contextdesk chat` remains the
+Standard route.
 
 ## Gateway diagnostics (`contextdesk gateway diagnose`)
 
