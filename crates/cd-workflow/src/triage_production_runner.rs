@@ -1321,6 +1321,76 @@ mod tests {
     }
 
     #[test]
+    fn ledger_accepts_canonical_contributor_reconciliation_terminal_order() {
+        let mut ledger = TriageProductionEventLedgerV1::new(&input()).expect("prelude");
+        let model = cd_core::model_ref::ModelRef {
+            profile_id: "profile".into(),
+            model_id: "model".into(),
+        };
+        let attempt = TriageRoleAttemptV1 {
+            attempt_id: "attempt:run-1:observe".into(),
+            role_slot_id: "observe".into(),
+            role: TriageSlotKindV2::Contributor(TriageContributorRole::ObservationExtractor),
+            model: Some(model),
+            status: TriageAttemptStatus::Completed,
+            reason_codes: Vec::new(),
+            elapsed_ms: 1,
+            input_chars: 1,
+            output_chars: 1,
+            physical_provider_calls: Some(1),
+            semantic_corrections: Some(0),
+            terminal_disposition: Some(TriageTerminalDispositionV1::Completed),
+        };
+        let summary = TriageReconciliationV1 {
+            state: "supported".into(),
+            configured_role_slots: 1,
+            completed_role_slots: 1,
+            distinct_models: 1,
+            distinct_gateways: 1,
+            supported_claim_ids: Vec::new(),
+            conflict_ids: Vec::new(),
+            gap_ids: Vec::new(),
+            root_cause_established: false,
+        };
+        ledger.push(TriageRunEventPayloadV2::RoleAttempt { attempt });
+        ledger.push(TriageRunEventPayloadV2::PreliminaryReconciliation {
+            summary: summary.clone(),
+        });
+        ledger.push(TriageRunEventPayloadV2::FinalReconciliation {
+            summary: summary.clone(),
+        });
+        ledger.push(TriageRunEventPayloadV2::Validation {
+            passed: false,
+            reason_codes: vec!["host_validation_unconfigured".into()],
+        });
+        ledger.push(TriageRunEventPayloadV2::Correction {
+            applied: false,
+            reason_codes: vec!["no_correction_requested".into()],
+        });
+        let result = TriageResultV2 {
+            schema_id: TRIAGE_RESULT_SCHEMA_V2.into(),
+            run_id: "run-1".into(),
+            kind: TriageResultKind::HonestPartial,
+            validation_state: TriageValidationState::Failed,
+            packet_id: input().packet.packet_id().into(),
+            reconciliation: summary,
+            answer: None,
+            accepted_evidence_ids: Vec::new(),
+            reason_codes: vec!["host_validation_unconfigured".into()],
+        };
+        ledger.push(TriageRunEventPayloadV2::Failed {
+            category: "required_role_failed".into(),
+            partial_result: Some(Box::new(result)),
+        });
+        let replay = ledger.finish().expect("canonical replay");
+        assert_eq!(replay.events.len(), 8);
+        assert!(replay
+            .events
+            .last()
+            .is_some_and(|event| event.event.is_terminal()));
+    }
+
+    #[test]
     fn reconciliation_counts_same_model_once() {
         let slot_a = CompiledRoleSlotV2 {
             slot_id: "a".into(),
