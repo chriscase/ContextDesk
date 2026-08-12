@@ -110,6 +110,8 @@ pub mod ssrf;
 pub mod text;
 pub mod tool_host;
 pub mod tools;
+/// Revisioned, non-secret storage for opt-in Triage Policy V2 documents.
+pub mod triage_policy_store;
 /// Hermetic broad-triage quality contract and structured rubric.
 pub mod triage_quality;
 /// Versioned, host-neutral SDK request, event, result, cancellation, and replay contracts.
