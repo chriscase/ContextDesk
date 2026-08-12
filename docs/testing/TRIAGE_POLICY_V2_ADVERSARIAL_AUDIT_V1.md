@@ -2,7 +2,7 @@
 
 **Branch:** `test/triage-policy-v2-adversarial-audit-v1`  
 **Base SHA:** `2ba4a08dcca0feaaefe65eb89614103fb06ad294`  
-**Audit HEAD:** `3a60cdc764cd2aa581ca58cf9d49d59a9751a06e`  
+**Audit HEAD:** `db0419261239880473379bb70a705d7d32a74517`  
 **Attestation:** hermetic only — no live gateways, credentials, Keychain, or network provider I/O.
 
 ## Scope
