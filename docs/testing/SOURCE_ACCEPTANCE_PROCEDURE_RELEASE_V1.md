@@ -4,16 +4,16 @@ Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
 - branch: `integrate/triage-policy-sdk-v2`
-- exact tested source/build SHA: `a3a5263e408c8c1cd3030f470be690e334f1adad`
+- exact tested source/build SHA: `c6cad48347cf8d85bbf358b2dfb7da45cf5cdfba`
 
 The exact tested source/build SHA above is the identity that must be fetched, built, and
 verified. Do not substitute an older baseline, a moving branch tip, or an
-unrelated local checkout. The bounded Vercel evidence for this exact runtime is
-recorded in
-`docs/testing/VERCEL_DEEPSEEK_DIAGNOSTIC_2026-08-12_RELEASE_A3A5263E.md`.
-It is useful transport/product-path evidence, but it is not an employer-gateway
-compatibility claim. The preceding `01ba43fe` Vercel run remains historical
-context only because this release adds cancellation hardening after that run.
+unrelated local checkout. There is not yet live Vercel evidence for this exact
+runtime. The prior report
+`docs/testing/VERCEL_DEEPSEEK_DIAGNOSTIC_2026-08-12_RELEASE_A3A5263E.md`
+is historical evidence for the preceding code SHA only; it is useful
+transport/product-path evidence, but it is not an employer-gateway
+compatibility claim or evidence for this exact runtime.
 Earlier `188e20a9ff35`, `601964de`, and `da231830` runs are also historical
 context only.
 
@@ -21,7 +21,9 @@ This pin supersedes earlier acceptance inputs. Since those older pins, the
 release has added the typed Triage Policy V2 graph and host resolver, shared
 CLI/Tauri/TypeScript SDK seams, chat-contract v4 transport/mode identity and
 fail-closed qualification, bounded deadline controls, production embedding and
-rerank adapters, and the protected-file gateway diagnostic plumbing. Historical
+rerank adapters, and the protected-file gateway diagnostic plumbing. This source
+also fails closed when typed-contribution runtime preparation rejects instead of
+silently falling back to a generic role path. Historical
 live-provider reports for older SHAs are not evidence for this exact release.
 
 This is the source-build path for a separate company machine. It does not
