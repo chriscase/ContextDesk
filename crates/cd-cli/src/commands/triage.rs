@@ -199,13 +199,13 @@ pub async fn run_stateful(
             saved.policy.clone()
         }
     };
-    let preflight_path = args
-        .preflight
-        .as_deref()
-        .ok_or_else(|| CliError::user("Enhanced/Advanced triage requires --preflight FILE"))?;
-    let preflight_raw = read_bounded_file(preflight_path, 2 * 1024 * 1024)?;
-    let preflight: TriagePolicyPreflightV2 = serde_json::from_slice(&preflight_raw)
-        .map_err(|_| CliError::user("triage preflight could not be decoded"))?;
+    // A caller-supplied preflight is useful for provider-free policy
+    // simulation, but cannot authorize a live run: the CLI cannot prove who
+    // authored it or that its qualification/egress facts came from this
+    // host. Keep the refusal before ToolHost construction and credential
+    // resolution. A future dedicated V2 role-qualification store will supply
+    // host-derived facts here, shared with Tauri.
+    let preflight = load_live_v2_preflight(args)?;
 
     if let Some(deadline_ms) = request.overrides.deadline_ms {
         policy.budget.whole_turn_deadline_ms = Some(deadline_ms);
@@ -303,6 +303,18 @@ pub async fn run_stateful(
     })
 }
 
+/// Resolve live V2 qualification from host-owned evidence only. Until the
+/// dedicated role-qualification store is implemented, execution is
+/// deliberately unavailable; arbitrary `--preflight` JSON must never become
+/// provider or egress authority.
+fn load_live_v2_preflight(args: &TriageRunArgs) -> CliResult<TriagePolicyPreflightV2> {
+    if args.preflight.is_some() {
+        Err(CliError::user("caller_preflight_not_authoritative"))
+    } else {
+        Err(CliError::user("triage_role_qualification_unavailable"))
+    }
+}
+
 #[cfg(test)]
 fn run_request(args: &TriageRunArgs) -> CliResult<TriageRunOutput> {
     let request = read_request(&args.request)?;
@@ -335,17 +347,6 @@ fn unsupported_result_with_reason(request: TriageRequestV2, reason: &str) -> Tri
         result: None,
         evidence: TriageRunEvidence::default(),
     }
-}
-
-fn read_bounded_file(path: &Path, max_bytes: usize) -> CliResult<Vec<u8>> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|_| CliError::user("triage preflight file could not be read"))?;
-    if !metadata.is_file() || metadata.len() > max_bytes as u64 {
-        return Err(CliError::user(
-            "triage preflight file is not a bounded regular file",
-        ));
-    }
-    std::fs::read(path).map_err(|_| CliError::user("triage preflight file could not be read"))
 }
 
 fn fingerprint_bytes(bytes: &[u8]) -> String {

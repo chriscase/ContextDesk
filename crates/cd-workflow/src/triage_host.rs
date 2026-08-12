@@ -97,6 +97,77 @@ fn validate_requested_scope(
     Ok(())
 }
 
+fn validate_preflight_profile_bindings(
+    cfg: &AppConfig,
+    preflight: &TriagePolicyPreflightV2,
+) -> Result<(), TriageHostError> {
+    for fact in &preflight.roles {
+        let profile = cfg
+            .providers
+            .profiles
+            .iter()
+            .find(|profile| profile.id == fact.model.profile_id);
+        let expected_remote = profile.is_some_and(|profile| !profile.local_only);
+        if fact.remote != expected_remote {
+            return Err(TriageHostError::Profile(
+                "preflight_egress_binding_mismatch".into(),
+            ));
+        }
+        if fact.available && profile.is_none() {
+            return Err(TriageHostError::Profile(
+                "preflight_profile_unavailable".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn slot_allows_remote(policy: &TriagePolicyV2, slot_id: &str) -> bool {
+    policy
+        .contributors
+        .iter()
+        .find(|slot| slot.slot_id == slot_id)
+        .map(|slot| slot.allow_remote)
+        .or_else(|| {
+            policy
+                .finalizer
+                .as_ref()
+                .filter(|slot| slot.slot_id == slot_id)
+                .map(|slot| slot.allow_remote)
+        })
+        .or_else(|| {
+            policy
+                .reviewer
+                .as_ref()
+                .filter(|slot| slot.slot_id == slot_id)
+                .map(|slot| slot.allow_remote)
+        })
+        .unwrap_or(false)
+}
+
+fn validate_runtime_egress(
+    cfg: &AppConfig,
+    policy: &TriagePolicyV2,
+    compiled: &CompiledTriagePolicyV2,
+) -> Result<(), TriageHostError> {
+    for slot in compiled
+        .slots
+        .iter()
+        .filter(|slot| slot.disposition == SlotDispositionV2::Admitted)
+    {
+        let profile = cfg
+            .providers
+            .profiles
+            .iter()
+            .find(|profile| profile.id == slot.model.profile_id)
+            .ok_or_else(|| TriageHostError::Profile("provider_profile_unavailable".into()))?;
+        if !profile.local_only && !slot_allows_remote(policy, &slot.slot_id) {
+            return Err(TriageHostError::Profile("egress_denied".into()));
+        }
+    }
+    Ok(())
+}
+
 async fn wait_for_cancel(cancel: Arc<AtomicBool>) {
     loop {
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
@@ -233,8 +304,10 @@ pub async fn resolve_v2_host(
     preflight: &TriagePolicyPreflightV2,
     input: &TriageHostRunInput,
 ) -> Result<ResolvedTriageHostV1, TriageHostError> {
+    validate_preflight_profile_bindings(cfg, preflight)?;
     let compiled = compile_preflight(policy, preflight)
         .map_err(|_| TriageHostError::Policy("policy_preflight_rejected".into()))?;
+    validate_runtime_egress(cfg, policy, &compiled)?;
     if compiled.mode == cd_core::multi_model::triage_policy::TriagePolicyMode::Standard {
         return Err(TriageHostError::Runner(
             TriageProductionRunnerError::Unsupported {
@@ -444,9 +517,13 @@ pub async fn run_v2_host<H: TriageProductionHooks + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cd_core::config::AppConfig;
     use cd_core::investigation_answer::{EvidenceRole, HostEvidenceEntry, HostEvidenceLedger};
     use cd_core::model_ref::ModelRef;
-    use cd_core::multi_model::triage_policy::{RoleRequirement, TriageSlotKindV2};
+    use cd_core::multi_model::triage_policy::{
+        RolePreflightV2, RoleQualificationV2, RoleRequirement, TriageSlotKindV2,
+    };
+    use cd_core::providers::ProviderProfile;
     use cd_core::triage_sdk::TriageReconciliationV1;
 
     #[test]
@@ -465,6 +542,34 @@ mod tests {
             validate_requested_scope(None, &["source-a".into()], 7),
             Err("source_scope_not_supported_by_v2_packet_builder")
         );
+    }
+
+    #[test]
+    fn preflight_egress_must_match_profile_local_only_policy() {
+        let mut cfg = AppConfig::default();
+        let mut profile = ProviderProfile::ollama_local();
+        profile.id = "profile:test".into();
+        cfg.providers.profiles.push(profile);
+        let fact = RolePreflightV2 {
+            slot_id: "finalizer".into(),
+            model: ModelRef {
+                profile_id: "profile:test".into(),
+                model_id: "model:test".into(),
+            },
+            kind: TriageSlotKindV2::Finalizer,
+            available: true,
+            qualification: RoleQualificationV2::Unverified,
+            remote: true,
+            qualification_schema_id: None,
+            workflow_id: None,
+            protocol_fingerprint: None,
+        };
+        let error = validate_preflight_profile_bindings(
+            &cfg,
+            &TriagePolicyPreflightV2 { roles: vec![fact] },
+        )
+        .expect_err("forged remote fact");
+        assert!(matches!(error, TriageHostError::Profile(_)));
     }
 
     fn packet() -> FastTriagePacketV1 {
