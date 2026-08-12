@@ -157,7 +157,6 @@ impl TriageRoleAttemptV1 {
             "timeline_analyst",
             "causal_proposer",
             "contradiction_checker",
-            "evidence_gap",
             "evidence_gap_finder",
             "finalizer",
             "reviewer",
