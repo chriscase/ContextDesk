@@ -10220,14 +10220,10 @@ fn triage_preflight_for_policy(
     cfg: &AppConfig,
     policy: &cd_core::multi_model::triage_policy::TriagePolicyV2,
 ) -> cd_core::multi_model::triage_policy::TriagePolicyPreflightV2 {
-    use cd_core::capability_qualification::{
-        capability_contract_verdict, CapabilityContract, ContractVerdict, QualificationKey,
-    };
+    use cd_core::capability_qualification::QualificationKey;
     use cd_core::multi_model::triage_policy::{
         RolePreflightV2, RoleQualificationV2, TriagePolicyMode,
-        TriageSlotKindV2, TRIAGE_QUALIFICATION_SCHEMA_V2, TRIAGE_QUALIFICATION_WORKFLOW_V2,
     };
-    use sha2::Digest;
 
     let mut store = state.qualification_store.lock().expect("qualification_store");
     let roles = triage_policy_slots(policy)
@@ -10239,11 +10235,15 @@ fn triage_preflight_for_policy(
                 .iter()
                 .find(|profile| profile.id == model.profile_id);
             let available = profile.is_some();
-            let remote = profile.is_some_and(|profile| !matches!(profile.kind, ProviderKind::Ollama));
+            // Egress is a profile policy, not a provider-kind heuristic.  A
+            // non-Ollama profile may still be explicitly local-only, while a
+            // custom local gateway must not be treated as remote merely
+            // because its protocol kind is OpenAI-compatible.
+            let remote = profile.is_some_and(|profile| !profile.local_only);
             let mut qualification = RoleQualificationV2::Unverified;
-            let mut qualification_schema_id = None;
-            let mut workflow_id = None;
-            let mut protocol_fingerprint = None;
+            let qualification_schema_id = None;
+            let workflow_id = None;
+            let protocol_fingerprint = None;
 
             if let Some(profile) = profile {
                 let key = QualificationKey::with_provider_kind(
@@ -10258,25 +10258,17 @@ fn triage_preflight_for_policy(
                     // preflight may omit the richer V2 qualification stamp.
                     qualification = RoleQualificationV2::Qualified;
                 } else if let Some(report) = report.as_ref().filter(|report| report.key == key) {
-                    let contract = if matches!(kind, TriageSlotKindV2::Reviewer) {
-                        CapabilityContract::Generation
+                    // Generic capability qualification is intentionally not
+                    // promoted to a Triage Policy V2 role qualification.  A
+                    // generation/JSON-proposal pass proves a transport
+                    // capability, not the exact role workflow, packet
+                    // contract, or host validator.  Until a dedicated V2
+                    // qualification report exists, remain fail-closed.
+                    qualification = if report.stale {
+                        RoleQualificationV2::Stale
                     } else {
-                        CapabilityContract::JsonProposal
+                        RoleQualificationV2::Unverified
                     };
-                    qualification = match capability_contract_verdict(Some(report), contract) {
-                        ContractVerdict::Qualified => RoleQualificationV2::Qualified,
-                        ContractVerdict::Unqualified => RoleQualificationV2::Unqualified,
-                        ContractVerdict::Inconclusive if report.stale => RoleQualificationV2::Stale,
-                        ContractVerdict::Inconclusive => RoleQualificationV2::Unverified,
-                    };
-                    if qualification == RoleQualificationV2::Qualified {
-                        qualification_schema_id = Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into());
-                        workflow_id = Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into());
-                        protocol_fingerprint = Some(format!(
-                            "sha256:{:x}",
-                            sha2::Sha256::digest(report.key.storage_id().as_bytes())
-                        ));
-                    }
                 }
             }
 
