@@ -4,7 +4,7 @@ Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
 - branch: `integrate/triage-policy-sdk-v2`
-- exact tested source/build SHA: `c6cad48347cf8d85bbf358b2dfb7da45cf5cdfba`
+- exact tested source/build SHA: `87af3e8e72aa99630a734711965e867b746e22ca`
 
 The exact tested source/build SHA above is the identity that must be fetched, built, and
 verified. Do not substitute an older baseline, a moving branch tip, or an

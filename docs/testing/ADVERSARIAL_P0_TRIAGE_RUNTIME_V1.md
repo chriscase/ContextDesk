@@ -1,6 +1,6 @@
 # Adversarial triage-runtime hardening — P0 fix
 
-**Code SHA:** `c6cad48347cf8d85bbf358b2dfb7da45cf5cdfba`  
+**Code SHA:** `87af3e8e72aa99630a734711965e867b746e22ca`
 **Branch:** `integrate/triage-policy-sdk-v2`  
 **Scope:** provider-free production-path hardening; no live compatibility claim
 
@@ -34,14 +34,16 @@ The full workspace and a new exact-SHA live Vercel diagnostic remain required
 before acceptance. The earlier Vercel report is historical for the preceding
 code SHA.
 
-## Remaining adversarial follow-ups
+## Follow-up status
 
-- propagate cancellation into diagnostic qualification work and prove cleanup
-  does not race an abandoned blocking task;
-- add post-hook deadline/cancellation checks at the generic runner boundary;
-- ensure role qualification and call-credit telemetry remain consistent on late
-  cancellation and correction timeout;
-- make Ollama's production factory use its timeout-aware constructor;
-- preserve share-safe output when reporting artifact paths;
-- update/verify role telemetry dialect fields if they are part of the public
-  contract.
+The first five lifecycle/authority follow-ups are now implemented and covered
+by focused tests: qualification cancellation is joined before cleanup, stalled
+non-stream requests observe the cooperative token, generic hooks are checked
+again after return, finalizer envelopes are independently bound to the host
+ledger, and share-safe artifact references are relative rather than absolute.
+
+Still open before a broad release claim: the provider-factory audit must cover
+every optional transport (notably Ollama and embedding/rerank adapters) with
+the same host-owned timeout, and a fresh exact-runtime live gateway diagnostic
+must be run. These are bounded residuals, not evidence that the primary
+OpenAI-compatible path is unusable.
