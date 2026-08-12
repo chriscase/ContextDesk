@@ -13,7 +13,7 @@ filesystem.
 | Schema | Purpose |
 | --- | --- |
 | `contextdesk.triage.request.v2` | task, governed scope, exact policy selection, overrides, cancellation identity |
-| `contextdesk.triage.run_event.v2` | ordered progress, role attempt, reconciliation, validation, and terminal event |
+| `contextdesk.triage.run_event.v2` | ordered progress, role attempt, phase-specific reconciliation, validation, bounded correction, and terminal event |
 | `contextdesk.triage.result.v2` | authoritative grounded final or honest partial result |
 | `contextdesk.triage.result_share_safe.v2` | metadata-only projection with no answer content or exact model identity |
 | `contextdesk.triage.cancellation.v1` | identity-only cancellation request |
@@ -61,8 +61,18 @@ infer authoritative events from displayed prose.
 
 Role attempts use Triage Policy V2's shared `TriageSlotKindV2` directly. A
 contributor carries the closed typed contributor role, while finalizer and
-reviewer remain distinct phases. Legacy aliases and unknown V2 roles fail
-closed during deserialization.
+reviewer remain distinct phases. The host-neutral mock graph emits
+`preliminary_reconciliation` after contributors and `final_reconciliation`
+after the conditional reviewer, then places the finalizer, host validation,
+and one bounded `correction` checkpoint before the terminal. Standard mode may
+continue to use the legacy single-finalizer sequence for byte/behavior
+compatibility. Legacy aliases and unknown V2 roles fail closed during
+deserialization.
+
+The correction event is a host checkpoint, not model output: the current mock
+runner reports `applied: false` because no correction backend is wired. The
+production adapter is currently contributor-only and default-off; CLI/Tauri do
+not execute this V2 graph yet.
 
 ## Qualification binding and physical accounting
 

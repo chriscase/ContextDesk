@@ -475,8 +475,26 @@ pub enum TriageRunEventPayloadV2 {
     Reconciliation {
         summary: TriageReconciliationV1,
     },
+    /// Contributor-only reconciliation. This event is emitted before a
+    /// conditional reviewer/challenger can be admitted.
+    PreliminaryReconciliation {
+        summary: TriageReconciliationV1,
+    },
+    /// Reconciliation after the optional reviewer/challenger phase and before
+    /// a finalizer can draft an answer.
+    FinalReconciliation {
+        summary: TriageReconciliationV1,
+    },
     Validation {
         passed: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reason_codes: Vec<String>,
+    },
+    /// Host-bounded semantic correction checkpoint. The mock seam records
+    /// whether a correction backend was available without carrying model
+    /// text or provider details.
+    Correction {
+        applied: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         reason_codes: Vec<String>,
     },
@@ -543,8 +561,13 @@ impl TriageRunEventV2 {
                 validate_opaque_id("packet_digest", packet_digest)?;
             }
             TriageRunEventPayloadV2::RoleAttempt { attempt } => attempt.validate()?,
-            TriageRunEventPayloadV2::Reconciliation { summary } => summary.validate()?,
+            TriageRunEventPayloadV2::Reconciliation { summary }
+            | TriageRunEventPayloadV2::PreliminaryReconciliation { summary }
+            | TriageRunEventPayloadV2::FinalReconciliation { summary } => summary.validate()?,
             TriageRunEventPayloadV2::Validation { reason_codes, .. } => {
+                validate_unique_reason_codes(reason_codes)?;
+            }
+            TriageRunEventPayloadV2::Correction { reason_codes, .. } => {
                 validate_unique_reason_codes(reason_codes)?;
             }
             TriageRunEventPayloadV2::Failed {

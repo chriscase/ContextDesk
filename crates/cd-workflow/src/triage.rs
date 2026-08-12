@@ -297,61 +297,164 @@ where
         } else {
             None
         };
-        for (index, slot) in slots.iter().enumerate() {
-            let outcome = if compiled.is_err() {
-                MockRoleOutcome::NotAdmitted {
-                    reason_codes: vec!["policy_preflight_rejected".into()],
-                }
-            } else if slot.disposition != SlotDispositionV2::Admitted {
-                MockRoleOutcome::NotAdmitted {
-                    reason_codes: slot
-                        .rejections
-                        .iter()
-                        .map(|category| rejection_code(*category).into())
-                        .collect(),
-                }
-            } else if let Some(reason) = interruption {
-                reason.outcome()
-            } else if input.control.cancel_at_slot == Some(index) {
-                interruption = Some(Interruption::Cancelled);
-                Interruption::Cancelled.outcome()
-            } else if input.control.timeout_at_slot == Some(index) {
-                interruption = Some(Interruption::TimedOut);
-                Interruption::TimedOut.outcome()
-            } else if is_reviewer(slot)
-                && !reviewer_needed_for_slot(
+        // Standard intentionally retains the established event graph. It has
+        // one finalizer slot and no V2 multi-phase orchestration, so changing
+        // its replay would be a product behavior change for the default mode.
+        if policy.mode == cd_core::multi_model::triage_policy::TriagePolicyMode::Standard {
+            for slot in &slots {
+                run_scripted_slot(
+                    self,
                     slot,
                     policy,
-                    &attempts,
-                    input.control.explicit_review_requested,
-                )
-            {
-                MockRoleOutcome::NotAdmitted {
-                    reason_codes: vec!["reviewer_not_required".into()],
-                }
-            } else {
-                self.executor.outcome(slot)
-            };
-            let attempt = role_attempt(&input.run_id, slot, outcome);
+                    &compiled,
+                    input,
+                    &mut interruption,
+                    &mut attempts,
+                    &mut events,
+                    None,
+                );
+            }
+            let summary = reconciliation(&slots, &attempts);
             events.push(event(
                 &input.run_id,
                 events.len() as u64,
-                TriageRunEventPayloadV2::RoleAttempt {
-                    attempt: attempt.clone(),
+                TriageRunEventPayloadV2::Reconciliation {
+                    summary: summary.clone(),
                 },
             ));
-            attempts.push(attempt);
+            let terminal = terminal_kind(&compiled, &slots, &attempts, interruption);
+            let mut reason_codes = attempts
+                .iter()
+                .flat_map(|attempt| attempt.reason_codes.iter().cloned())
+                .collect::<Vec<_>>();
+            if compiled.is_err() {
+                reason_codes.push("policy_preflight_rejected".into());
+            }
+            if reason_codes.is_empty() {
+                reason_codes.push("mock_no_authoritative_answer".into());
+            }
+            let reason_codes = unique_codes(reason_codes);
+            let validation_passed = false;
+            events.push(event(
+                &input.run_id,
+                events.len() as u64,
+                TriageRunEventPayloadV2::Validation {
+                    passed: validation_passed,
+                    reason_codes: reason_codes.clone(),
+                },
+            ));
+            let result = partial_result(
+                &input.run_id,
+                &input.packet.packet_id,
+                summary,
+                &attempts,
+                &reason_codes,
+                terminal == Terminal::Completed,
+            );
+            events.push(event(
+                &input.run_id,
+                events.len() as u64,
+                terminal.payload(result, &input.cancellation_id),
+            ));
+            return finish_replay(input, compiled, events);
         }
 
-        let summary = reconciliation(&slots, &attempts);
+        // Enhanced/Advanced use an explicit phase graph. Slots are grouped by
+        // phase rather than policy storage order so a finalizer can never run
+        // before the reviewer/challenger has seen the preliminary merge.
+        let contributor_slots = slots
+            .iter()
+            .filter(|slot| matches!(slot.kind, TriageSlotKindV2::Contributor(_)))
+            .cloned()
+            .collect::<Vec<_>>();
+        let reviewer_slots = slots
+            .iter()
+            .filter(|slot| is_reviewer(slot))
+            .cloned()
+            .collect::<Vec<_>>();
+        let finalizer_slots = slots
+            .iter()
+            .filter(|slot| matches!(slot.kind, TriageSlotKindV2::Finalizer))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut execution_slots = contributor_slots.clone();
+        execution_slots.extend(reviewer_slots.iter().cloned());
+        execution_slots.extend(finalizer_slots.iter().cloned());
+
+        for slot in &contributor_slots {
+            run_scripted_slot(
+                self,
+                slot,
+                policy,
+                &compiled,
+                input,
+                &mut interruption,
+                &mut attempts,
+                &mut events,
+                None,
+            );
+        }
+        let preliminary_attempts = attempts.clone();
+        let preliminary_summary = reconciliation(&contributor_slots, &preliminary_attempts);
         events.push(event(
             &input.run_id,
             events.len() as u64,
-            TriageRunEventPayloadV2::Reconciliation {
-                summary: summary.clone(),
+            TriageRunEventPayloadV2::PreliminaryReconciliation {
+                summary: preliminary_summary,
             },
         ));
-        let terminal = terminal_kind(&compiled, &slots, &attempts, interruption);
+
+        for slot in &reviewer_slots {
+            let needed = reviewer_needed_for_slot(
+                slot,
+                policy,
+                &attempts,
+                input.control.explicit_review_requested,
+            );
+            run_scripted_slot(
+                self,
+                slot,
+                policy,
+                &compiled,
+                input,
+                &mut interruption,
+                &mut attempts,
+                &mut events,
+                (!needed).then_some("reviewer_not_required"),
+            );
+        }
+
+        let final_reconciliation_slots = contributor_slots
+            .iter()
+            .chain(reviewer_slots.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let final_reconciliation_attempts = attempts.clone();
+        let final_summary =
+            reconciliation(&final_reconciliation_slots, &final_reconciliation_attempts);
+        events.push(event(
+            &input.run_id,
+            events.len() as u64,
+            TriageRunEventPayloadV2::FinalReconciliation {
+                summary: final_summary.clone(),
+            },
+        ));
+
+        for slot in &finalizer_slots {
+            run_scripted_slot(
+                self,
+                slot,
+                policy,
+                &compiled,
+                input,
+                &mut interruption,
+                &mut attempts,
+                &mut events,
+                None,
+            );
+        }
+
+        let terminal = terminal_kind(&compiled, &execution_slots, &attempts, interruption);
         let mut reason_codes = attempts
             .iter()
             .flat_map(|attempt| attempt.reason_codes.iter().cloned())
@@ -362,6 +465,7 @@ where
         if reason_codes.is_empty() {
             reason_codes.push("mock_no_authoritative_answer".into());
         }
+        reason_codes.push("mock_correction_not_wired".into());
         let reason_codes = unique_codes(reason_codes);
         let validation_passed = false;
         events.push(event(
@@ -375,24 +479,28 @@ where
         let result = partial_result(
             &input.run_id,
             &input.packet.packet_id,
-            summary,
+            final_summary,
             &attempts,
             &reason_codes,
             terminal == Terminal::Completed,
         );
+        // The provider-neutral runner has no correction backend. Still emit
+        // the bounded checkpoint so consumers cannot mistake validation for
+        // the terminal boundary or infer an unbounded retry loop.
+        events.push(event(
+            &input.run_id,
+            events.len() as u64,
+            TriageRunEventPayloadV2::Correction {
+                applied: false,
+                reason_codes: vec!["mock_correction_not_wired".into()],
+            },
+        ));
         events.push(event(
             &input.run_id,
             events.len() as u64,
             terminal.payload(result, &input.cancellation_id),
         ));
-        let replay = TriageReplayV1 {
-            schema_id: TRIAGE_REPLAY_SCHEMA_V1.into(),
-            run_id: input.run_id.clone(),
-            request_fingerprint: input.request_fingerprint.clone(),
-            events,
-        };
-        replay.validate()?;
-        Ok(MockRunResult { compiled, replay })
+        finish_replay(input, compiled, events)
     }
 
     /// Execute the same deterministic run and return only its validated
@@ -425,6 +533,79 @@ impl Interruption {
             },
         }
     }
+}
+
+/// Execute one slot at the runner's current graph position. The helper keeps
+/// cancellation/deadline accounting independent from role kind and records an
+/// explicit attempt for every configured slot, including a conditional
+/// reviewer that was not needed.
+fn run_scripted_slot<E>(
+    runner: &MockTriageRunner<E>,
+    slot: &CompiledRoleSlotV2,
+    _policy: &TriagePolicyV2,
+    compiled: &Result<CompiledTriagePolicyV2, TriagePolicyCompileFailureV2>,
+    input: &MockRunInput,
+    interruption: &mut Option<Interruption>,
+    attempts: &mut Vec<TriageRoleAttemptV1>,
+    events: &mut Vec<TriageRunEventV2>,
+    skip_reason: Option<&str>,
+) -> TriageRoleAttemptV1
+where
+    E: TriageRoleExecutor,
+{
+    let index = attempts.len();
+    let outcome = if compiled.is_err() {
+        MockRoleOutcome::NotAdmitted {
+            reason_codes: vec!["policy_preflight_rejected".into()],
+        }
+    } else if slot.disposition != SlotDispositionV2::Admitted {
+        MockRoleOutcome::NotAdmitted {
+            reason_codes: slot
+                .rejections
+                .iter()
+                .map(|category| rejection_code(*category).into())
+                .collect(),
+        }
+    } else if let Some(reason) = *interruption {
+        reason.outcome()
+    } else if input.control.cancel_at_slot == Some(index) {
+        *interruption = Some(Interruption::Cancelled);
+        Interruption::Cancelled.outcome()
+    } else if input.control.timeout_at_slot == Some(index) {
+        *interruption = Some(Interruption::TimedOut);
+        Interruption::TimedOut.outcome()
+    } else if let Some(reason) = skip_reason {
+        MockRoleOutcome::NotAdmitted {
+            reason_codes: vec![reason.into()],
+        }
+    } else {
+        runner.executor.outcome(slot)
+    };
+    let attempt = role_attempt(&input.run_id, slot, outcome);
+    events.push(event(
+        &input.run_id,
+        events.len() as u64,
+        TriageRunEventPayloadV2::RoleAttempt {
+            attempt: attempt.clone(),
+        },
+    ));
+    attempts.push(attempt.clone());
+    attempt
+}
+
+fn finish_replay(
+    input: &MockRunInput,
+    compiled: Result<CompiledTriagePolicyV2, TriagePolicyCompileFailureV2>,
+    events: Vec<TriageRunEventV2>,
+) -> Result<MockRunResult, TriageContractError> {
+    let replay = TriageReplayV1 {
+        schema_id: TRIAGE_REPLAY_SCHEMA_V1.into(),
+        run_id: input.run_id.clone(),
+        request_fingerprint: input.request_fingerprint.clone(),
+        events,
+    };
+    replay.validate()?;
+    Ok(MockRunResult { compiled, replay })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -632,6 +813,12 @@ fn terminal_kind(
             TriageAttemptStatus::Cancelled => return Terminal::Cancelled,
             TriageAttemptStatus::TimedOut => return Terminal::TimedOut,
             TriageAttemptStatus::Completed | TriageAttemptStatus::Abstained => {}
+            TriageAttemptStatus::NotAdmitted
+                if is_reviewer(slot)
+                    && attempt
+                        .reason_codes
+                        .iter()
+                        .any(|reason| reason == "reviewer_not_required") => {}
             TriageAttemptStatus::Invalid
             | TriageAttemptStatus::Unavailable
             | TriageAttemptStatus::Failed
@@ -810,8 +997,8 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(attempts[2].status, TriageAttemptStatus::NotAdmitted);
-        assert!(attempts[2]
+        assert_eq!(attempts[1].status, TriageAttemptStatus::NotAdmitted);
+        assert!(attempts[1]
             .reason_codes
             .contains(&"reviewer_not_required".into()));
     }
@@ -824,27 +1011,203 @@ mod tests {
         let result = MockTriageRunner::new(script)
             .run(&policy(), &preflight(&policy()), &input())
             .unwrap();
+        let kinds = result
+            .replay
+            .events
+            .iter()
+            .map(|event| &event.event)
+            .collect::<Vec<_>>();
         assert!(matches!(
-            result.replay.events[2].event,
+            kinds[2],
             TriageRunEventPayloadV2::RoleAttempt { .. }
         ));
         assert!(matches!(
-            result.replay.events[3].event,
+            kinds[3],
+            TriageRunEventPayloadV2::PreliminaryReconciliation { .. }
+        ));
+        assert!(matches!(
+            kinds[4],
             TriageRunEventPayloadV2::RoleAttempt { .. }
         ));
         assert!(matches!(
-            result.replay.events[4].event,
+            kinds[5],
+            TriageRunEventPayloadV2::FinalReconciliation { .. }
+        ));
+        assert!(matches!(
+            kinds[6],
             TriageRunEventPayloadV2::RoleAttempt { .. }
         ));
         assert!(matches!(
-            result.replay.events[5].event,
+            kinds[7],
+            TriageRunEventPayloadV2::Validation { .. }
+        ));
+        assert!(matches!(
+            kinds[8],
+            TriageRunEventPayloadV2::Correction { .. }
+        ));
+        assert!(kinds[9].is_terminal());
+    }
+
+    #[test]
+    fn canonical_graph_reconciles_before_reviewer_and_finalizer() {
+        let mut policy = policy();
+        policy.reviewer.as_mut().unwrap().condition = ReviewerConditionV2::ExplicitRequest;
+        let script = MockRoleScript::new()
+            .with_outcome("observe", MockRoleOutcome::completed())
+            .with_outcome("review", MockRoleOutcome::completed())
+            .with_outcome("finalize", MockRoleOutcome::completed());
+        let mut input = input();
+        input.control.explicit_review_requested = true;
+        let result = MockTriageRunner::new(script)
+            .run(&policy, &preflight(&policy), &input)
+            .expect("canonical replay");
+        result.validate().unwrap();
+
+        let events = &result.replay.events;
+        let attempts = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                TriageRunEventPayloadV2::RoleAttempt { attempt } => Some(attempt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| attempt.role_slot_id.as_str())
+                .collect::<Vec<_>>(),
+            ["observe", "review", "finalize"]
+        );
+        let preliminary = events
+            .iter()
+            .find_map(|event| match &event.event {
+                TriageRunEventPayloadV2::PreliminaryReconciliation { summary } => Some(summary),
+                _ => None,
+            })
+            .expect("preliminary reconciliation");
+        assert_eq!(preliminary.configured_role_slots, 1);
+        assert_eq!(preliminary.completed_role_slots, 1);
+        let final_summary = events
+            .iter()
+            .find_map(|event| match &event.event {
+                TriageRunEventPayloadV2::FinalReconciliation { summary } => Some(summary),
+                _ => None,
+            })
+            .expect("final reconciliation");
+        assert_eq!(final_summary.configured_role_slots, 2);
+        assert_eq!(final_summary.completed_role_slots, 2);
+        assert_eq!(final_summary.distinct_models, 2);
+
+        let final_reconciliation_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.event,
+                    TriageRunEventPayloadV2::FinalReconciliation { .. }
+                )
+            })
+            .unwrap();
+        let finalizer_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.event,
+                    TriageRunEventPayloadV2::RoleAttempt { ref attempt }
+                        if attempt.role_slot_id == "finalize"
+                )
+            })
+            .unwrap();
+        let validation_index = events
+            .iter()
+            .position(|event| matches!(event.event, TriageRunEventPayloadV2::Validation { .. }))
+            .unwrap();
+        let correction_index = events
+            .iter()
+            .position(|event| matches!(event.event, TriageRunEventPayloadV2::Correction { .. }))
+            .unwrap();
+        assert!(final_reconciliation_index < finalizer_index);
+        assert!(finalizer_index < validation_index);
+        assert!(validation_index < correction_index);
+        assert!(correction_index + 1 == events.len() - 1);
+    }
+
+    #[test]
+    fn standard_graph_retains_legacy_single_finalizer_sequence() {
+        let policy = TriagePolicyV2::standard(model("gateway-a", "model-a"), false);
+        let preflight = TriagePolicyPreflightV2 {
+            roles: vec![RolePreflightV2 {
+                slot_id: "standard-finalizer".into(),
+                model: model("gateway-a", "model-a"),
+                kind: TriageSlotKindV2::Finalizer,
+                available: true,
+                qualification: RoleQualificationV2::Qualified,
+                remote: false,
+            }],
+        };
+        let input = input();
+        let result = MockTriageRunner::new(
+            MockRoleScript::new().with_outcome("standard-finalizer", MockRoleOutcome::completed()),
+        )
+        .run(&policy, &preflight, &input)
+        .expect("standard replay");
+        result.validate().unwrap();
+        let kinds = result
+            .replay
+            .events
+            .iter()
+            .map(|event| &event.event)
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            kinds[2],
+            TriageRunEventPayloadV2::RoleAttempt { .. }
+        ));
+        assert!(matches!(
+            kinds[3],
             TriageRunEventPayloadV2::Reconciliation { .. }
         ));
         assert!(matches!(
-            result.replay.events[6].event,
+            kinds[4],
             TriageRunEventPayloadV2::Validation { .. }
         ));
-        assert!(result.replay.events[7].event.is_terminal());
+        assert!(kinds[5].is_terminal());
+        assert!(!kinds.iter().any(|event| {
+            matches!(
+                *event,
+                TriageRunEventPayloadV2::PreliminaryReconciliation { .. }
+                    | TriageRunEventPayloadV2::FinalReconciliation { .. }
+                    | TriageRunEventPayloadV2::Correction { .. }
+            )
+        }));
+    }
+
+    #[test]
+    fn same_model_roles_are_one_reconciliation_model() {
+        let mut policy = policy();
+        policy.contributors[0].model = model("gateway-a", "shared-model");
+        policy.finalizer.as_mut().unwrap().model = model("gateway-a", "shared-model");
+        policy.reviewer.as_mut().unwrap().model = model("gateway-a", "shared-model");
+        policy.reviewer.as_mut().unwrap().condition = ReviewerConditionV2::ExplicitRequest;
+        let script = MockRoleScript::new()
+            .with_outcome("observe", MockRoleOutcome::completed())
+            .with_outcome("review", MockRoleOutcome::completed())
+            .with_outcome("finalize", MockRoleOutcome::completed());
+        let mut input = input();
+        input.control.explicit_review_requested = true;
+        let result = MockTriageRunner::new(script)
+            .run(&policy, &preflight(&policy), &input)
+            .expect("same-model replay");
+        let summary = result
+            .replay
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                TriageRunEventPayloadV2::FinalReconciliation { summary } => Some(summary),
+                _ => None,
+            })
+            .expect("final reconciliation");
+        assert_eq!(summary.completed_role_slots, 2);
+        assert_eq!(summary.distinct_models, 1);
+        assert_eq!(summary.distinct_gateways, 1);
     }
 
     #[test]
@@ -896,7 +1259,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert!(no_request_attempts[2]
+        assert!(no_request_attempts[1]
             .reason_codes
             .contains(&"reviewer_not_required".into()));
 
@@ -913,7 +1276,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert!(requested_attempts[2]
+        assert!(requested_attempts[1]
             .reason_codes
             .contains(&"mock_outcome_missing".into()));
     }
