@@ -900,6 +900,29 @@ impl TriageProductionRunnerV1 {
                 result.reason_codes.push(code.into());
             }
         }
+        // Terminal commit is the runner's cancellation linearization point:
+        // perform one final non-awaiting observation immediately before
+        // selecting/publishing the terminal event. A cancellation observed
+        // here can never be represented as Completed; a request arriving
+        // after this point is ordered after the already-committed result.
+        if interrupted.is_none() {
+            if let Some(reason) =
+                host_interruption(&input, started, self.resolution.host_deadline_ms)
+            {
+                interrupted = Some(reason);
+                result.kind = TriageResultKind::HonestPartial;
+                result.validation_state = TriageValidationState::Failed;
+                result.answer = None;
+                result.accepted_evidence_ids.clear();
+                let code = match reason {
+                    Interruption::Cancelled => "cancelled",
+                    Interruption::TimedOut => "deadline",
+                };
+                if !result.reason_codes.iter().any(|existing| existing == code) {
+                    result.reason_codes.push(code.into());
+                }
+            }
+        }
         let terminal = if let Some(interruption) = interrupted {
             match interruption {
                 Interruption::Cancelled => TriageRunEventPayloadV2::Cancelled {
