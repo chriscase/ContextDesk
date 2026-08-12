@@ -5,7 +5,6 @@
 //! ([`crate::capability_qualification`]).
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 /// Wire schema id for a role-capability descriptor.
 pub const ROLE_CAPABILITY_SCHEMA_V1: &str = "contextdesk.extension.role_capability.v1";
@@ -18,8 +17,10 @@ pub enum ExtensionRole {
     TimelineAnalyst,
     EvidenceGapFinder,
     ContradictionChecker,
-    /// Synthesizer / reviewer (host still validates).
-    SynthesizerReviewer,
+    /// Final answer drafter. It never reviews its own output.
+    Finalizer,
+    /// Conditional reviewer for a contested or policy-selected result.
+    Reviewer,
     Embedding,
     Reranker,
 }
@@ -31,7 +32,8 @@ impl ExtensionRole {
             Self::TimelineAnalyst => "timeline_analyst",
             Self::EvidenceGapFinder => "evidence_gap_finder",
             Self::ContradictionChecker => "contradiction_checker",
-            Self::SynthesizerReviewer => "synthesizer_reviewer",
+            Self::Finalizer => "finalizer",
+            Self::Reviewer => "reviewer",
             Self::Embedding => "embedding",
             Self::Reranker => "reranker",
         }
@@ -43,7 +45,8 @@ impl ExtensionRole {
             "timeline_analyst" => Some(Self::TimelineAnalyst),
             "evidence_gap_finder" => Some(Self::EvidenceGapFinder),
             "contradiction_checker" => Some(Self::ContradictionChecker),
-            "synthesizer_reviewer" | "reviewer" => Some(Self::SynthesizerReviewer),
+            "finalizer" => Some(Self::Finalizer),
+            "reviewer" => Some(Self::Reviewer),
             "embedding" => Some(Self::Embedding),
             "reranker" => Some(Self::Reranker),
             _ => None,
@@ -57,7 +60,8 @@ impl ExtensionRole {
             Self::TimelineAnalyst,
             Self::EvidenceGapFinder,
             Self::ContradictionChecker,
-            Self::SynthesizerReviewer,
+            Self::Finalizer,
+            Self::Reviewer,
             Self::Embedding,
             Self::Reranker,
         ]
@@ -141,7 +145,7 @@ impl RoleCapabilityV1 {
                 requires_measured_qualification: true,
                 notes: None,
             },
-            ExtensionRole::SynthesizerReviewer => Self {
+            ExtensionRole::Finalizer => Self {
                 schema_id: ROLE_CAPABILITY_SCHEMA_V1.into(),
                 role,
                 required_capabilities: vec![
@@ -161,7 +165,22 @@ impl RoleCapabilityV1 {
                     "establish_root_without_host_cause_role".into(),
                 ],
                 requires_measured_qualification: true,
-                notes: Some("Union of bounded proposals; host validator remains authority".into()),
+                notes: Some(
+                    "Drafts from accepted reconciliation; host validator remains authority".into(),
+                ),
+            },
+            ExtensionRole::Reviewer => Self {
+                schema_id: ROLE_CAPABILITY_SCHEMA_V1.into(),
+                role,
+                required_capabilities: vec!["plain_chat".into(), "prompted_json".into()],
+                may_propose: vec!["contradictions".into(), "missing_evidence".into()],
+                may_not: vec![
+                    "override_host_validation".into(),
+                    "silent_provider_switch".into(),
+                    "establish_root_without_host_cause_role".into(),
+                ],
+                requires_measured_qualification: true,
+                notes: Some("Conditional, explicitly authorized review only".into()),
             },
             ExtensionRole::Embedding => Self {
                 schema_id: ROLE_CAPABILITY_SCHEMA_V1.into(),
@@ -200,16 +219,28 @@ impl RoleCapabilityV1 {
                 got: self.schema_id.clone(),
             });
         }
-        // Model names must not appear as capability tokens.
-        let forbidden_as_capability = ["gpt", "claude", "gemini", "deepseek", "qwen", "llama"];
+        // Capability tokens use a closed protocol/workflow vocabulary. This
+        // rejects product names without relying on an incomplete denylist.
+        let allowed_capabilities = [
+            "plain_chat",
+            "prompted_json",
+            "json_object",
+            "json_schema",
+            "json_schema_strict",
+            "forced_tool",
+            "tool_continuation",
+            "streaming",
+            "cancellation",
+            "embeddings",
+            "reranking",
+            "reasoning_effort",
+            "deadline",
+        ];
         for cap in &self.required_capabilities {
-            let lower = cap.to_ascii_lowercase();
-            for needle in forbidden_as_capability {
-                if lower.contains(needle) {
-                    return Err(super::ExtensionContractError::ModelNameAsCompatibility {
-                        token: cap.clone(),
-                    });
-                }
+            if !allowed_capabilities.contains(&cap.as_str()) {
+                return Err(super::ExtensionContractError::ModelNameAsCompatibility {
+                    token: cap.clone(),
+                });
             }
         }
         if let Some(notes) = &self.notes {
@@ -226,14 +257,14 @@ impl RoleCapabilityV1 {
             ExtensionRole::ObservationExtractor
                 | ExtensionRole::TimelineAnalyst
                 | ExtensionRole::ContradictionChecker
-                | ExtensionRole::SynthesizerReviewer
+                | ExtensionRole::Finalizer
+                | ExtensionRole::Reviewer
         ) && self.may_not.is_empty()
         {
             return Err(super::ExtensionContractError::RoleProhibitionsMissing {
                 role: self.role.as_str().into(),
             });
         }
-        let _ = BTreeSet::<String>::new();
         Ok(())
     }
 }

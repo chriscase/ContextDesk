@@ -72,9 +72,9 @@ pub struct RetrievalProvenanceV1 {
     /// Endpoint fingerprint only (never URL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_fingerprint: Option<String>,
-    /// Exact model id string as configured (not a compatibility claim).
+    /// Share-safe model pseudonym/fingerprint, never a private catalog id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
+    pub model_fingerprint: Option<String>,
     /// Measured dimensions when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
@@ -236,6 +236,31 @@ impl EvidencePacketV1 {
                 return Err(super::ExtensionContractError::PrivacyLeak {
                     findings: findings.into_iter().map(|f| f.to_string()).collect(),
                 });
+            }
+            for (field, value) in [
+                (
+                    "endpoint_fingerprint",
+                    self.retrieval.endpoint_fingerprint.as_deref(),
+                ),
+                (
+                    "model_fingerprint",
+                    self.retrieval.model_fingerprint.as_deref(),
+                ),
+            ] {
+                if let Some(value) = value {
+                    if value.trim().is_empty()
+                        || value.len() > 256
+                        || value.contains('/')
+                        || value.contains('\\')
+                        || value.contains("://")
+                        || value.chars().any(char::is_control)
+                    {
+                        return Err(super::ExtensionContractError::MalformedIdentity {
+                            field: field.into(),
+                            reason: "share-safe fingerprints must be opaque".into(),
+                        });
+                    }
+                }
             }
         }
         Ok(())

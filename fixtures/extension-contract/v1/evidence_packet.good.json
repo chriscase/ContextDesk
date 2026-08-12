@@ -41,7 +41,7 @@
     "mode": "keyword",
     "embedding_space_schema_id": null,
     "endpoint_fingerprint": null,
-    "model_id": null,
+    "model_fingerprint": null,
     "dimensions": null,
     "dialect": null
   },

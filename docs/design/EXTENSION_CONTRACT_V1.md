@@ -76,7 +76,8 @@ cannot mint or rewrite them.
 | `timeline_analyst` | observations, timeline notes | promote independent → chain |
 | `evidence_gap_finder` | missing_evidence | cite absent ids |
 | `contradiction_checker` | contradictions, competing explanations | merge candidates |
-| `synthesizer_reviewer` | union of bounded sections | override host validation |
+| `finalizer` | draft from accepted reconciliation | review itself; override host validation |
+| `reviewer` | contradictions and gaps when conditionally admitted | silently switch provider; override host validation |
 | `embedding` | vector scores | cross-space compare; model-name compatibility |
 | `reranker` | permutations | drop evidence; model-name compatibility |
 

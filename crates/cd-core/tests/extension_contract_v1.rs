@@ -94,9 +94,44 @@ fn mutation_model_name_as_capability_fails_closed() {
 }
 
 #[test]
+fn unknown_capability_tokens_fail_closed_without_a_model_name_denylist() {
+    let mut cap = RoleCapabilityV1::builtin(ExtensionRole::ObservationExtractor);
+    cap.required_capabilities = vec!["future_product_123".into()];
+    assert!(matches!(
+        cap.validate(),
+        Err(ExtensionContractError::ModelNameAsCompatibility { .. })
+    ));
+}
+
+#[test]
+fn finalizer_and_reviewer_are_distinct_roles() {
+    assert_ne!(ExtensionRole::Finalizer, ExtensionRole::Reviewer);
+    assert_eq!(
+        ExtensionRole::parse("finalizer"),
+        Some(ExtensionRole::Finalizer)
+    );
+    assert_eq!(
+        ExtensionRole::parse("reviewer"),
+        Some(ExtensionRole::Reviewer)
+    );
+    assert_eq!(ExtensionRole::parse("synthesizer_reviewer"), None);
+}
+
+#[test]
 fn outcomes_supported_and_budget_exhausted() {
     validate_role_outcome_json(&fixture("outcome.supported.json")).unwrap();
     validate_role_outcome_json(&fixture("outcome.budget_exhausted.json")).unwrap();
+}
+
+#[test]
+fn outcome_reason_codes_are_unique_and_content_free() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fixture("outcome.supported.json")).unwrap();
+    value["reason_codes"] = serde_json::json!(["same", "same"]);
+    assert!(matches!(
+        validate_role_outcome_json(&value.to_string()),
+        Err(ExtensionContractError::MalformedIdentity { .. })
+    ));
 }
 
 #[test]

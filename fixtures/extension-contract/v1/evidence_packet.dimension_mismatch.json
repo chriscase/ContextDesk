@@ -19,7 +19,7 @@
   "retrieval": {
     "mode": "embedding",
     "dimensions": 1024,
-    "model_id": "configured-model-id",
+    "model_fingerprint": "model-fingerprint-01",
     "dialect": null
   }
 }

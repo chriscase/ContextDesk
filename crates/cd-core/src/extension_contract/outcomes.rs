@@ -3,6 +3,7 @@
 //! Aligns with multi-model reconciliation states without replacing them.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// Wire schema id for a single role outcome record.
 pub const ROLE_OUTCOME_SCHEMA_V1: &str = "contextdesk.extension.role_outcome.v1";
@@ -102,6 +103,21 @@ impl RoleOutcomeV1 {
                 role: self.role.clone(),
             });
         }
+        let mut reason_codes = BTreeSet::new();
+        if self.reason_codes.iter().any(|code| {
+            code.trim().is_empty()
+                || code.len() > 128
+                || code.contains('/')
+                || code.contains('\\')
+                || code.contains("://")
+                || code.chars().any(char::is_control)
+                || !reason_codes.insert(code)
+        }) {
+            return Err(super::ExtensionContractError::MalformedIdentity {
+                field: "reason_codes".into(),
+                reason: "codes must be unique and content-free".into(),
+            });
+        }
         // Only deterministic host path may claim root cause established;
         // extension outcomes default false. True is reserved for host validator
         // mapping — fail closed if a pure extension fixture claims true without
@@ -113,12 +129,6 @@ impl RoleOutcomeV1 {
                 .any(|c| c == "host_cause_role_validated")
         {
             return Err(super::ExtensionContractError::RootCauseWithoutHostAuthority);
-        }
-        // Budget exhaustion must not pretend support.
-        if self.state == RoleOutcomeState::BudgetExhausted
-            && self.state == RoleOutcomeState::Supported
-        {
-            unreachable!();
         }
         if matches!(
             self.state,

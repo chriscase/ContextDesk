@@ -1,6 +1,6 @@
 {
   "schema_id": "contextdesk.extension.role_outcome.v1",
-  "role": "synthesizer_reviewer",
+  "role": "finalizer",
   "state": "budget_exhausted",
   "packet_id": "pkt-synthetic-001",
   "corroboration_count": 0,
