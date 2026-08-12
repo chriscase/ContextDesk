@@ -1134,7 +1134,7 @@ enum Interruption {
     TimedOut,
 }
 
-fn role_messages(
+pub(crate) fn role_messages(
     user_text: &str,
     packet: &FastTriagePacketV1,
     kind: TriageSlotKindV2,

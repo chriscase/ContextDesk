@@ -38,6 +38,9 @@ pub mod triage_host;
 pub mod triage_production;
 /// Host-neutral asynchronous runner for the canonical Triage Policy V2 graph.
 pub mod triage_production_runner;
+/// Host-neutral exact-role qualification using the production backend and
+/// packet/validator seams.
+pub mod triage_role_qualification;
 pub mod turn;
 
 /// Re-export core context plan types at the shared workflow boundary.
