@@ -1,6 +1,6 @@
 # Adversarial triage-runtime hardening — P0 fix
 
-**Code SHA:** `84d91b083d35a1c4d095bf44facb72ba29b831b1`
+**Code SHA:** `07c457cb3f3261f6c6e4d6f556b9de2447f342b0`
 **Branch:** `integrate/triage-policy-sdk-v2`  
 **Scope:** provider-free production-path hardening; no live compatibility claim
 
@@ -52,7 +52,8 @@ until the factory exposes an async cancellation contract; it now fails closed
 before and after setup rather than handing a stale budget to the runner. A
 fresh exact-runtime live gateway diagnostic must still be run. These setup and
 live-provider checks are not evidence that the primary OpenAI-compatible path
-is unusable. Exact-role finalizer probes now credit a dispatched-or-raced
+is unusable. CLI and desktop configured retrieval roles now share the same
+explicit-vs-adaptive timeout selection. Exact-role finalizer probes now credit a dispatched-or-raced
 operation conservatively and recheck cancellation before publishing
 qualification; generic provider attempts credit failed/timeout operations
 before returning their bounded attempt record.
