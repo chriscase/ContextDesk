@@ -14,7 +14,6 @@ use cd_core::multi_model::triage_policy::{
     compile_triage_policy_v2, CompiledRoleSlotV2, CompiledTriagePolicyV2,
     PolicyRejectionCategoryV2, ReviewerConditionV2, RoleRequirement, SlotDispositionV2,
     TriagePolicyCompileFailureV2, TriagePolicyPreflightV2, TriagePolicyV2, TriageSlotKindV2,
-    TRIAGE_QUALIFICATION_SCHEMA_V2, TRIAGE_QUALIFICATION_WORKFLOW_V2,
 };
 use cd_core::triage_sdk::{
     TriageAttemptStatus, TriageContractError, TriageReconciliationV1, TriageReplayV1,
