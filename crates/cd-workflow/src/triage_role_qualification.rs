@@ -377,7 +377,7 @@ async fn qualify_with_backend(
                 budget: budget(deadline_ms),
                 deadline_ms,
                 started_at: None,
-                cancel,
+                cancel: cancel.clone(),
                 plan: &plan,
             },
             &mut |event| events.push(event),
@@ -397,6 +397,12 @@ async fn qualify_with_backend(
             .first()
             .map(|stage| stage.provider_rounds)
             .unwrap_or(0);
+        if cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
+            return record(key, RoleQualificationV2::Unqualified, calls, "cancelled");
+        }
         let attempt = outcome.attempts.first();
         let completed = attempt.is_some_and(|attempt| {
             attempt.availability
@@ -508,6 +514,7 @@ pub async fn qualify_configured_role_v2(
     if request.deadline_ms == 0 || request.deadline_ms > MAX_TRIAGE_DEADLINE_MS_V2 {
         return Err(TriageRoleProbeError::InvalidRequest("deadline_ms"));
     }
+    let operation_started = tokio::time::Instant::now();
     let profile = resolve_provider_profile(cfg, Some(&request.profile_id))
         .map_err(|_| TriageRoleProbeError::ProfileUnavailable)?;
     let protocol = QualificationKey::with_provider_kind(
@@ -524,16 +531,29 @@ pub async fn qualify_configured_role_v2(
         profile.clone(),
         Some(&request.model_id),
     );
-    inputs.deadline_plan.total_ms = request.deadline_ms;
+    let remaining_after_inputs =
+        Duration::from_millis(request.deadline_ms).saturating_sub(operation_started.elapsed());
+    let remaining_after_inputs_ms = remaining_after_inputs.as_millis().min(u64::MAX as u128) as u64;
+    if remaining_after_inputs_ms == 0 {
+        return Err(TriageRoleProbeError::ProbeFailed);
+    }
+    inputs.deadline_plan.total_ms = remaining_after_inputs_ms;
     let backend =
-        build_probe_backend_with_budget(&inputs, request.deadline_ms, cancel.clone()).await?;
+        build_probe_backend_with_budget(&inputs, remaining_after_inputs_ms, cancel.clone()).await?;
+    let remaining_after_backend =
+        Duration::from_millis(request.deadline_ms).saturating_sub(operation_started.elapsed());
+    let remaining_after_backend_ms =
+        remaining_after_backend.as_millis().min(u64::MAX as u128) as u64;
+    if remaining_after_backend_ms == 0 {
+        return Err(TriageRoleProbeError::ProbeFailed);
+    }
     qualify_role_v2_with_backend(TriageRoleProbeBackendInput {
         profile_id: profile.id.clone(),
         base_url: profile.base_url.clone(),
         model_id: request.model_id.clone(),
         kind: request.kind,
         protocol,
-        deadline_ms: request.deadline_ms,
+        deadline_ms: remaining_after_backend_ms,
         cancel,
         backend: Arc::from(backend),
     })

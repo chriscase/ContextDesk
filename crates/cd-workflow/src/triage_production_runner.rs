@@ -1246,6 +1246,9 @@ impl TriageProductionRunnerV1 {
                 ..response
             }
         };
+        // The initial request has already been dispatched.  Keep this count
+        // alive through every post-call hook so cancellation/deadline exits
+        // cannot erase a physical provider attempt from the ledger.
         let mut physical_calls = 1u32;
         let mut corrections = 0u32;
         let mut total_input = input_chars;
@@ -1256,7 +1259,7 @@ impl TriageProductionRunnerV1 {
         if let Some(reason) = host_interruption(input, started, self.resolution.host_deadline_ms) {
             *interrupted = Some(reason);
             return (
-                fail(
+                fail_with_calls(
                     match reason {
                         Interruption::Cancelled => TriageAttemptStatus::Cancelled,
                         Interruption::TimedOut => TriageAttemptStatus::TimedOut,
@@ -1265,6 +1268,7 @@ impl TriageProductionRunnerV1 {
                         Interruption::Cancelled => "cancelled",
                         Interruption::TimedOut => "deadline",
                     },
+                    physical_calls,
                 ),
                 None,
             );
@@ -1284,7 +1288,7 @@ impl TriageProductionRunnerV1 {
             {
                 *interrupted = Some(reason);
                 return (
-                    fail(
+                    fail_with_calls(
                         match reason {
                             Interruption::Cancelled => TriageAttemptStatus::Cancelled,
                             Interruption::TimedOut => TriageAttemptStatus::TimedOut,
@@ -1293,6 +1297,7 @@ impl TriageProductionRunnerV1 {
                             Interruption::Cancelled => "cancelled",
                             Interruption::TimedOut => "deadline",
                         },
+                        physical_calls,
                     ),
                     None,
                 );
@@ -1310,7 +1315,7 @@ impl TriageProductionRunnerV1 {
                         <= self.resolution.compiled.budget.max_context_chars;
                 if correction_allowed {
                     if *provider_calls >= self.resolution.compiled.budget.max_provider_calls
-                        || *provider_calls
+                        || corrections
                             >= self
                                 .resolution
                                 .compiled
@@ -1345,9 +1350,32 @@ impl TriageProductionRunnerV1 {
                     // awaiting it. A cancellation, timeout, refusal, or
                     // malformed response cannot erase a provider call from
                     // replay accounting.
+                    let correction_remaining =
+                        Duration::from_millis(self.resolution.host_deadline_ms)
+                            .saturating_sub(started.elapsed());
+                    let correction_operation = Duration::from_millis(
+                        self.resolution
+                            .compiled
+                            .budget
+                            .corrections
+                            .operation_timeout_ms
+                            .max(1),
+                    );
+                    let correction_timeout = correction_remaining.min(correction_operation);
+                    if correction_timeout.is_zero() {
+                        *interrupted = Some(Interruption::TimedOut);
+                        return (
+                            fail_with_calls(
+                                TriageAttemptStatus::TimedOut,
+                                "deadline",
+                                physical_calls,
+                            ),
+                            None,
+                        );
+                    }
                     physical_calls = physical_calls.saturating_add(1);
                     let correction = tokio::time::timeout(
-                        timeout,
+                        correction_timeout,
                         backend.backend.complete_streaming(
                             &correction_messages,
                             &[] as &[ToolSpec],
@@ -1377,7 +1405,7 @@ impl TriageProductionRunnerV1 {
                         {
                             *interrupted = Some(reason);
                             return (
-                                fail(
+                                fail_with_calls(
                                     match reason {
                                         Interruption::Cancelled => TriageAttemptStatus::Cancelled,
                                         Interruption::TimedOut => TriageAttemptStatus::TimedOut,
@@ -1386,6 +1414,7 @@ impl TriageProductionRunnerV1 {
                                         Interruption::Cancelled => "cancelled",
                                         Interruption::TimedOut => "deadline",
                                     },
+                                    physical_calls,
                                 ),
                                 None,
                             );
