@@ -2,7 +2,7 @@
 
 **Branch:** `test/triage-policy-v2-adversarial-audit-v1`  
 **Base SHA:** `2ba4a08dcca0feaaefe65eb89614103fb06ad294`  
-**Audit HEAD:** `db0419261239880473379bb70a705d7d32a74517`  
+**Audit HEAD (branch tip):**  (verify with 0d7c1808cd16a0d348c48efd500c0334aaf358bf on this branch)
 **Attestation:** hermetic only — no live gateways, credentials, Keychain, or network provider I/O.
 
 ## Scope
@@ -44,7 +44,7 @@ Design order:
 | M2 | Stale/mismatched qualification; hidden model sub | compiler preflight binding | `PreflightBindingMismatch` / `QualificationUnavailable` | **Pass** (`m2_*`) |
 | M3 | Required-role failure → silent success | compiler | compile Err + `RequiredRejected` | **Pass** (`m3_*`) |
 | M4 | Optional dropout erased | compiler | `OptionalDegraded` retained | **Pass** (`m4_*`) |
-| M5 | Phase/call/reserve oversubscription | compiler budget | `ProviderCallBudgetInsufficient` / `InvalidBudget` | **Pass** (`m5_*`) |
+| M5 | Phase/call/**context**/reserve oversubscription | compiler budget | `ProviderCallBudgetInsufficient` / `InvalidBudget` (includes `phase_chars > max_context_chars`) | **Pass** (`m5_*`) |
 | M6 | Reviewer before recon / without escalation | `run_contribution_pipeline` | `NotAdmitted` + `ReviewerNotRequired`; no provider start | **Pass** (`m6_*`) |
 | M7 | Reviewer not final plan slot | `ContributionRoutingPlan::new` | `ReviewerNotFinal` | **Pass** (`m7_*`) |
 | M8 | Unqualified slot → success | pipeline qualification gate | `Unavailable` + 0 provider rounds | **Pass** (`m8_*`) |
@@ -53,8 +53,9 @@ Design order:
 | M11 | Reordered / post-terminal events | `TriageReplayV1::validate` | `NonContiguousSequence` / `EventAfterTerminal` | **Pass** (`m11_*`) |
 | M12 | Missing / multi terminal | replay | `TerminalCount(0)` | **Pass** (`m12_*`) |
 | M13 | Owner-only leak into share-safe | event validate | `PrivacyLeak` for Completed + model under ShareSafe | **Pass** (`m13_*`) |
-| M14 | Reason-code duplicates / overflow | result / share-safe validate | reject duplicates | **Pass** (`m14_*`) |
+| M14 | Reason-code **duplicates and overflow** (`>MAX_TRIAGE_REASON_CODES` = 64) | result / share-safe validate | `InvalidField("reason_codes")` / `PayloadTooLarge` | **Pass** (`m14_*`) |
 | M15 | Malformed path-shaped attempt ids | `TriageRoleAttemptV1::validate` | reject | **Pass** (`m15_*`) |
+| M16 | Malformed cheap-model / garbage provider body | `run_contribution_pipeline` + `ScriptedBackend` | `Malformed` + `MalformedProposal`; host floor; no root cause | **Pass** (`m16_*`) |
 | Graph | Ordered contributors → host answer | pipeline | starts + attempts; no fabricated root cause | **Pass** (`ordered_contributor_graph_*`) |
 | M-A1 | Finalizer approximated in production | `prepare_v2_contribution_runtime` | `FinalizerUnsupported` | **Pass** (`ma1_*`) |
 | M-A2 | Reviewer approximated in production | adapter | `ReviewerUnsupported` | **Pass** (`ma2_*`) |
@@ -77,7 +78,7 @@ No production bypass was proven that required a code fix on this base. Each muta
 
 ```bash
 cargo test -p cd-core --test triage_policy_v2_adversarial_audit -- --nocapture
-# 16 passed
+# 17 passed
 
 cargo test -p cd-workflow --test triage_policy_v2_adversarial_audit -- --nocapture
 # 5 passed
@@ -90,9 +91,9 @@ cargo test -p cd-workflow --test triage_policy_production_adapter -- --nocapture
 
 | Suite | Count |
 | --- | --- |
-| `triage_policy_v2_adversarial_audit` (cd-core) | **16** |
+| `triage_policy_v2_adversarial_audit` (cd-core) | **17** |
 | `triage_policy_v2_adversarial_audit` (cd-workflow) | **5** |
-| **New audit total** | **21** |
+| **New audit total** | **22** |
 
 ## Files
 

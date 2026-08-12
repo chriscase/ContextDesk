@@ -34,8 +34,8 @@ use cd_core::multi_model::{
 use cd_core::triage_sdk::{
     ShareSafeTriageResultV2, TriageAttemptStatus, TriageContractError, TriageReconciliationV1,
     TriageReplayV1, TriageResultKind, TriageResultV2, TriageRoleAttemptV1, TriageRunEventPayloadV2,
-    TriageRunEventV2, TriageValidationState, TRIAGE_REPLAY_SCHEMA_V1, TRIAGE_RESULT_SCHEMA_V2,
-    TRIAGE_RUN_EVENT_SCHEMA_V2, TRIAGE_SHARE_SAFE_RESULT_SCHEMA_V2,
+    TriageRunEventV2, TriageValidationState, MAX_TRIAGE_REASON_CODES, TRIAGE_REPLAY_SCHEMA_V1,
+    TRIAGE_RESULT_SCHEMA_V2, TRIAGE_RUN_EVENT_SCHEMA_V2, TRIAGE_SHARE_SAFE_RESULT_SCHEMA_V2,
 };
 use serde_json::json;
 
@@ -339,6 +339,26 @@ fn m5_budget_oversubscription_fails_closed() {
         .rejections
         .iter()
         .any(|r| r.category == PolicyRejectionCategoryV2::InvalidBudget));
+
+    // Context-char oversubscription: phase char sum exceeds whole-turn ceiling.
+    // validate_budget rejects when phase_chars > budget.max_context_chars.
+    let mut policy = enhanced_two_contributors_same_model();
+    policy.budget.max_context_chars = 100_000;
+    policy.budget.contributors.max_context_chars = 80_000;
+    policy.budget.corrections.max_context_chars = 40_000; // 80k+40k+finalizer > 100k
+                                                          // Finalizer is present with default max_context_chars; keep it positive so
+                                                          // the invalid path is oversubscription, not zero terminal chars.
+    policy.budget.finalizer.max_context_chars = 10_000;
+    policy.budget.finalizer.max_provider_calls = 1;
+    policy.budget.finalizer.operation_timeout_ms = 30_000;
+    let failure = compile_triage_policy_v2(&policy, &facts(&policy)).expect_err("context oversub");
+    assert!(
+        failure
+            .rejections
+            .iter()
+            .any(|r| r.category == PolicyRejectionCategoryV2::InvalidBudget),
+        "phase context chars exceeding whole-turn max must fail closed: {failure:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -802,12 +822,15 @@ fn m13_share_safe_refuses_owner_only_payloads_and_model_identity() {
     ));
 }
 
-/// M14: reason-code duplicates fail closed at validation.
+/// M14: reason-code duplicates **and** overflow (>MAX_TRIAGE_REASON_CODES) fail closed.
 #[test]
-fn m14_reason_code_duplicates_fail_closed() {
+fn m14_reason_code_duplicates_and_overflow_fail_closed() {
     let mut result = partial_result();
     result.reason_codes = vec!["a".into(), "a".into()];
-    assert!(result.validate().is_err());
+    assert!(matches!(
+        result.validate(),
+        Err(TriageContractError::InvalidField("reason_codes"))
+    ));
 
     let mut share = ShareSafeTriageResultV2 {
         schema_id: TRIAGE_SHARE_SAFE_RESULT_SCHEMA_V2.into(),
@@ -819,9 +842,27 @@ fn m14_reason_code_duplicates_fail_closed() {
         accepted_evidence_ids: vec!["evidence:01".into()],
         reason_codes: vec!["dup".into(), "dup".into()],
     };
-    assert!(share.validate().is_err());
-    // silence unused_mut if share is only validated
-    let _ = &mut share;
+    assert!(matches!(
+        share.validate(),
+        Err(TriageContractError::InvalidField("reason_codes"))
+    ));
+
+    // Overflow: more than MAX_TRIAGE_REASON_CODES (64) unique opaque codes.
+    let overflow: Vec<String> = (0..=MAX_TRIAGE_REASON_CODES)
+        .map(|i| format!("code:{i}"))
+        .collect();
+    assert_eq!(overflow.len(), MAX_TRIAGE_REASON_CODES + 1);
+    let mut result = partial_result();
+    result.reason_codes = overflow.clone();
+    assert!(
+        matches!(result.validate(), Err(TriageContractError::PayloadTooLarge)),
+        "result reason-code overflow must be PayloadTooLarge"
+    );
+    share.reason_codes = overflow;
+    assert!(
+        matches!(share.validate(), Err(TriageContractError::PayloadTooLarge)),
+        "share-safe reason-code overflow must be PayloadTooLarge"
+    );
 }
 
 /// M15: malformed path-shaped slot / attempt ids fail closed.
@@ -839,6 +880,58 @@ fn m15_malformed_role_attempt_ids_fail_closed() {
         output_chars: 0,
     };
     assert!(attempt.validate().is_err());
+}
+
+/// M16: malformed cheap-model / garbage provider body is explicit Malformed, not success.
+#[tokio::test]
+async fn m16_malformed_cheap_model_garbage_body_is_not_success() {
+    let pkt = packet();
+    let garbage = slot(
+        ContributionRole::CausalProposer,
+        "cheap-sloppy",
+        ContributionQualification::Qualified,
+        ScriptedBackend::new(vec![ChatCompletion::from_parts(
+            "not json at all — garbage cheap-model output",
+            vec![],
+            "stop",
+        )]),
+    );
+    let plan =
+        ContributionRoutingPlan::new(vec![ContributionRole::CausalProposer], Default::default())
+            .unwrap();
+    let outcome = run_contribution_pipeline(
+        ContributionPipelineInputs {
+            user_text: "why?",
+            packet: &pkt,
+            slots: &[garbage],
+            budget: budget(),
+            deadline_ms: 10_000,
+            started_at: None,
+            cancel: None,
+            plan: &plan,
+        },
+        &mut |_| {},
+    )
+    .await
+    .expect("host still returns an answer floor");
+    assert_eq!(outcome.attempts.len(), 1);
+    assert_eq!(
+        outcome.attempts[0].availability,
+        ContributionAvailability::Malformed
+    );
+    assert!(outcome.attempts[0].contribution.is_none());
+    assert_eq!(
+        outcome.telemetry.stages[0].degradation,
+        Some(ContributionDegradationReason::MalformedProposal)
+    );
+    assert!(!outcome.envelope.answer.root_cause_established);
+    assert!(
+        outcome.content.contains("Root cause established: no")
+            || outcome.content.contains("Deterministic host baseline")
+            || outcome.content.contains("Host"),
+        "must keep host floor after garbage body: {}",
+        outcome.content
+    );
 }
 
 /// Ordered graph progress on the contribution path: starts → attempts → host answer.
