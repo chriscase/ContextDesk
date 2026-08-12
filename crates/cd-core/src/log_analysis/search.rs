@@ -278,6 +278,29 @@ pub fn search_logs_with_excluded_templates_and_rerank(
     rerank: Option<&dyn RerankBackend>,
     rerank_timeout_ms: u64,
 ) -> CoreResult<Vec<SearchHit>> {
+    search_logs_with_excluded_templates_and_timeouts(
+        corpus,
+        q,
+        embed,
+        excluded_template_ids,
+        rerank,
+        5_000,
+        rerank_timeout_ms,
+    )
+}
+
+/// Hybrid log search with caller-owned embedding and reranking transport
+/// ceilings. The legacy entry point retains its standalone 5-second embedding
+/// default; turn-owned hosts pass their effective whole-turn budget here.
+pub fn search_logs_with_excluded_templates_and_timeouts(
+    corpus: &LogCorpus,
+    q: &SearchLogsQuery,
+    embed: Option<&dyn EmbedBackend>,
+    excluded_template_ids: &[u64],
+    rerank: Option<&dyn RerankBackend>,
+    embed_timeout_ms: u64,
+    rerank_timeout_ms: u64,
+) -> CoreResult<Vec<SearchHit>> {
     let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
     // A configured model does not make a keyword-only corpus semantic. Require
     // an explicit semantic request, one measured non-zero dimension count, an
@@ -436,7 +459,7 @@ pub fn search_logs_with_excluded_templates_and_rerank(
     let mut sem_scores: std::collections::HashMap<u64, f32> = std::collections::HashMap::new();
     if q.semantic {
         if let (Some(backend), Some(query)) = (embed, q.query.as_deref()) {
-            if let Some(qvec) = embed_blocking(backend, query, 5_000) {
+            if let Some(qvec) = embed_blocking(backend, query, embed_timeout_ms.max(1)) {
                 if embedding_status.embedded_dims == u32::try_from(qvec.len()).ok() {
                     let ranked = corpus.search_templates(
                         &qvec,

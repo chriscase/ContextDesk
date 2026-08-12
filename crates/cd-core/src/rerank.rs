@@ -356,13 +356,31 @@ impl VercelV4RerankBackend {
         bearer: Option<String>,
         policy: &crate::ssrf::SsrfPolicy,
     ) -> CoreResult<Self> {
-        let resolver = crate::ssrf::SystemResolver;
-        let (mut endpoint, client) = crate::ssrf::build_pinned_client_for_url(
+        Self::new_with_policy_and_timeout(
             base_url,
+            model,
+            bearer,
             policy,
-            &resolver,
             std::time::Duration::from_millis(RERANK_DEFAULT_TIMEOUT_MS),
-        )?;
+        )
+    }
+
+    /// Build with a caller-owned whole-request transport timeout.
+    pub fn new_with_policy_and_timeout(
+        base_url: &str,
+        model: impl Into<String>,
+        bearer: Option<String>,
+        policy: &crate::ssrf::SsrfPolicy,
+        request_timeout: std::time::Duration,
+    ) -> CoreResult<Self> {
+        if request_timeout.is_zero() {
+            return Err(CoreError::Config(
+                "rerank request timeout must be greater than zero".into(),
+            ));
+        }
+        let resolver = crate::ssrf::SystemResolver;
+        let (mut endpoint, client) =
+            crate::ssrf::build_pinned_client_for_url(base_url, policy, &resolver, request_timeout)?;
         endpoint.set_path(VERCEL_V4_RERANK_PATH);
         endpoint.set_query(None);
         endpoint.set_fragment(None);
@@ -464,13 +482,31 @@ impl HttpRerankBackend {
         bearer: Option<String>,
         policy: &crate::ssrf::SsrfPolicy,
     ) -> CoreResult<Self> {
-        let resolver = crate::ssrf::SystemResolver;
-        let (url, client) = crate::ssrf::build_pinned_client_for_url(
+        Self::new_with_policy_and_timeout(
             base_url,
+            model,
+            bearer,
             policy,
-            &resolver,
             std::time::Duration::from_millis(RERANK_DEFAULT_TIMEOUT_MS),
-        )?;
+        )
+    }
+
+    /// Build with a caller-owned whole-request transport timeout.
+    pub fn new_with_policy_and_timeout(
+        base_url: &str,
+        model: impl Into<String>,
+        bearer: Option<String>,
+        policy: &crate::ssrf::SsrfPolicy,
+        request_timeout: std::time::Duration,
+    ) -> CoreResult<Self> {
+        if request_timeout.is_zero() {
+            return Err(CoreError::Config(
+                "rerank request timeout must be greater than zero".into(),
+            ));
+        }
+        let resolver = crate::ssrf::SystemResolver;
+        let (url, client) =
+            crate::ssrf::build_pinned_client_for_url(base_url, policy, &resolver, request_timeout)?;
         // Preserve an operator-supplied path prefix such as `/v1` regardless
         // of whether the base URL has a trailing slash. `Url::join("rerank")`
         // treats a slash-less final segment as a file and would silently drop
@@ -496,6 +532,25 @@ impl HttpRerankBackend {
         dialect: RerankDialect,
     ) -> CoreResult<Self> {
         let mut backend = Self::new(base_url, model, bearer)?;
+        backend.dialect = dialect;
+        Ok(backend)
+    }
+
+    /// Build with an explicit response dialect and caller-owned timeout.
+    pub fn with_dialect_and_timeout(
+        base_url: &str,
+        model: impl Into<String>,
+        bearer: Option<String>,
+        dialect: RerankDialect,
+        request_timeout: std::time::Duration,
+    ) -> CoreResult<Self> {
+        let mut backend = Self::new_with_policy_and_timeout(
+            base_url,
+            model,
+            bearer,
+            &crate::ssrf::SsrfPolicy::default(),
+            request_timeout,
+        )?;
         backend.dialect = dialect;
         Ok(backend)
     }
@@ -718,6 +773,27 @@ impl RerankBackend for ScriptedRerankBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_timeout_overrides_reject_zero_without_network() {
+        let policy = crate::ssrf::SsrfPolicy::default();
+        assert!(HttpRerankBackend::with_dialect_and_timeout(
+            "http://127.0.0.1:9",
+            "reranker",
+            None,
+            RerankDialect::TeiCohere,
+            std::time::Duration::ZERO,
+        )
+        .is_err());
+        assert!(VercelV4RerankBackend::new_with_policy_and_timeout(
+            "http://127.0.0.1:9",
+            "reranker",
+            None,
+            &policy,
+            std::time::Duration::ZERO,
+        )
+        .is_err());
+    }
 
     #[tokio::test]
     async fn scripted_rerank_is_deterministic_and_bounded() {

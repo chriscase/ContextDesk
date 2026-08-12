@@ -5582,13 +5582,14 @@ impl ToolHost {
                     .min(crate::log_analysis::search::MAX_SEARCH_CANDIDATE_K),
             );
         }
-        let hits = crate::log_analysis::search::search_logs_with_excluded_templates_and_rerank(
+        let hits = crate::log_analysis::search::search_logs_with_excluded_templates_and_timeouts(
             &corpus,
             &q,
             self.log_embed_backend().as_deref(),
             &suppression.excluded_template_ids,
             rerank_backend.as_deref(),
-            crate::rerank::RERANK_DEFAULT_TIMEOUT_MS,
+            self.router_budget.deadline_ms,
+            self.router_budget.deadline_ms,
         )?;
         let evidence = hits
             .iter()

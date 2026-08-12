@@ -1257,13 +1257,31 @@ pub struct OllamaClient {
 impl OllamaClient {
     /// Create with SSRF policy (loopback allowed by default).
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> CoreResult<Self> {
+        Self::new_with_timeout(base_url, model, std::time::Duration::from_secs(120))
+    }
+
+    /// Create with a caller-owned whole-request transport timeout.
+    ///
+    /// Standalone discovery/probe callers should continue to use [`Self::new`];
+    /// turn-owned provider resolution passes its effective deadline here so a
+    /// local Ollama server is not cut off by the legacy 120-second default.
+    pub fn new_with_timeout(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        request_timeout: std::time::Duration,
+    ) -> CoreResult<Self> {
+        if request_timeout.is_zero() {
+            return Err(CoreError::Config(
+                "provider request timeout must be greater than zero".into(),
+            ));
+        }
         let base_url = base_url.into();
         // Loopback Ollama: pin with default policy (allow_loopback).
         let (url, http) = build_pinned_client_for_url(
             &base_url,
             &SsrfPolicy::default(),
             &SystemResolver,
-            std::time::Duration::from_secs(120),
+            request_timeout,
         )?;
         Ok(Self {
             http,
@@ -2135,6 +2153,16 @@ impl AnthropicClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ollama_transport_timeout_rejects_zero_without_network() {
+        assert!(OllamaClient::new_with_timeout(
+            "http://127.0.0.1:11434",
+            "mistral",
+            Duration::ZERO,
+        )
+        .is_err());
+    }
 
     #[test]
     fn openai_429_delay_honors_bounded_retry_after_and_conservative_fallback() {

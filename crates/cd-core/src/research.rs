@@ -704,7 +704,11 @@ pub async fn backend_for_with_timeout_and_effort(
 
     match profile.kind {
         ProviderKind::Ollama => {
-            let client = OllamaClient::new(&profile.base_url, &profile.chat_model)?;
+            let client = OllamaClient::new_with_timeout(
+                &profile.base_url,
+                &profile.chat_model,
+                request_timeout,
+            )?;
             Ok(Box::new(OllamaBackend(client)))
         }
         ProviderKind::OpenAiCompatible => {

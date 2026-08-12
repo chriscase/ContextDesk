@@ -248,30 +248,87 @@ pub fn build_embedding_backend(
     role: &RetrievalRoleModel,
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn EmbedBackend>> {
+    build_embedding_backend_with_optional_timeout(role, secrets, None)
+}
+
+/// Build an embedding backend with a turn-owned whole-request timeout.
+///
+/// The timeout is transport-only; retrieval still applies its own bounded
+/// stage race. Existing standalone callers should use
+/// [`build_embedding_backend`], which retains each adapter's historical
+/// default.
+pub fn build_embedding_backend_with_timeout(
+    role: &RetrievalRoleModel,
+    secrets: Option<&dyn SecretStore>,
+    timeout_ms: u64,
+) -> CoreResult<Arc<dyn EmbedBackend>> {
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    if timeout.is_zero() {
+        return Err(cd_core::error::CoreError::Config(
+            "embedding request timeout must be greater than zero".into(),
+        ));
+    }
+    build_embedding_backend_with_optional_timeout(role, secrets, Some(timeout))
+}
+
+fn build_embedding_backend_with_optional_timeout(
+    role: &RetrievalRoleModel,
+    secrets: Option<&dyn SecretStore>,
+    timeout: Option<std::time::Duration>,
+) -> CoreResult<Arc<dyn EmbedBackend>> {
     assert_retrieval_egress_allowed(role)?;
     let dialect = resolved_embedding_dialect(role)?;
     match dialect.as_str() {
         "ollama_embeddings" => {
-            let client = cd_core::chat::OllamaClient::new(&role.base_url, &role.model)?;
+            let client = match timeout {
+                Some(timeout) => cd_core::chat::OllamaClient::new_with_timeout(
+                    &role.base_url,
+                    &role.model,
+                    timeout,
+                )?,
+                None => cd_core::chat::OllamaClient::new(&role.base_url, &role.model)?,
+            };
             Ok(Arc::new(OllamaEmbedBackend::new(client)))
         }
-        "openai_embeddings" => Ok(Arc::new(OpenAiCompatibleEmbedBackend::new(
-            &role.base_url,
-            role.model.clone(),
-            bearer_for(role, secrets),
-        )?)),
+        "openai_embeddings" => {
+            let bearer = bearer_for(role, secrets);
+            let backend = match timeout {
+                Some(timeout) => OpenAiCompatibleEmbedBackend::new_with_policy_and_timeout(
+                    &role.base_url,
+                    role.model.clone(),
+                    bearer,
+                    &cd_core::ssrf::SsrfPolicy::default(),
+                    timeout,
+                )?,
+                None => {
+                    OpenAiCompatibleEmbedBackend::new(&role.base_url, role.model.clone(), bearer)?
+                }
+            };
+            Ok(Arc::new(backend))
+        }
         "vercel_v4_embeddings" => {
             if !cd_core::discovery::is_vercel_ai_gateway(&role.base_url) {
                 return Err(cd_core::error::CoreError::Config(
                     "vercel_v4_embeddings requires the ai-gateway.vercel.sh host".into(),
                 ));
             }
-            Ok(Arc::new(VercelV4EmbedBackend::new_with_policy(
-                &role.base_url,
-                role.model.clone(),
-                bearer_for(role, secrets),
-                &cd_core::ssrf::SsrfPolicy::default(),
-            )?))
+            let bearer = bearer_for(role, secrets);
+            let backend = match timeout {
+                Some(timeout) => VercelV4EmbedBackend::new_with_policy_and_timeout(
+                    &role.base_url,
+                    role.model.clone(),
+                    bearer,
+                    &cd_core::ssrf::SsrfPolicy::default(),
+                    timeout,
+                )?,
+                None => VercelV4EmbedBackend::new_with_policy(
+                    &role.base_url,
+                    role.model.clone(),
+                    bearer,
+                    &cd_core::ssrf::SsrfPolicy::default(),
+                )?,
+            };
+            Ok(Arc::new(backend))
         }
         unsupported => Err(cd_core::error::CoreError::Config(format!(
             "unsupported resolved embedding dialect '{unsupported}'"
@@ -291,6 +348,31 @@ pub fn build_rerank_backend(
     role: &RetrievalRoleModel,
     secrets: Option<&dyn SecretStore>,
 ) -> CoreResult<Arc<dyn RerankBackend>> {
+    build_rerank_backend_with_optional_timeout(role, secrets, None)
+}
+
+/// Build a reranker with a turn-owned whole-request timeout. Standalone
+/// callers should use [`build_rerank_backend`] to retain the historical
+/// adapter default.
+pub fn build_rerank_backend_with_timeout(
+    role: &RetrievalRoleModel,
+    secrets: Option<&dyn SecretStore>,
+    timeout_ms: u64,
+) -> CoreResult<Arc<dyn RerankBackend>> {
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    if timeout.is_zero() {
+        return Err(cd_core::error::CoreError::Config(
+            "rerank request timeout must be greater than zero".into(),
+        ));
+    }
+    build_rerank_backend_with_optional_timeout(role, secrets, Some(timeout))
+}
+
+fn build_rerank_backend_with_optional_timeout(
+    role: &RetrievalRoleModel,
+    secrets: Option<&dyn SecretStore>,
+    timeout: Option<std::time::Duration>,
+) -> CoreResult<Arc<dyn RerankBackend>> {
     assert_retrieval_egress_allowed(role)?;
     let dialect = resolved_rerank_dialect_label(role)?;
     let bearer = bearer_for(role, secrets);
@@ -300,21 +382,39 @@ pub fn build_rerank_backend(
                 "vercel_v4_rerank_v1 requires the ai-gateway.vercel.sh host".into(),
             ));
         }
-        Ok(Arc::new(
-            cd_core::rerank::VercelV4RerankBackend::new_with_policy(
+        let backend = match timeout {
+            Some(timeout) => cd_core::rerank::VercelV4RerankBackend::new_with_policy_and_timeout(
+                &role.base_url,
+                role.model.clone(),
+                bearer,
+                &cd_core::ssrf::SsrfPolicy::default(),
+                timeout,
+            )?,
+            None => cd_core::rerank::VercelV4RerankBackend::new_with_policy(
                 &role.base_url,
                 role.model.clone(),
                 bearer,
                 &cd_core::ssrf::SsrfPolicy::default(),
             )?,
-        ))
+        };
+        Ok(Arc::new(backend))
     } else {
-        Ok(Arc::new(HttpRerankBackend::with_dialect(
-            &role.base_url,
-            role.model.clone(),
-            bearer,
-            RerankDialect::TeiCohere,
-        )?))
+        let backend = match timeout {
+            Some(timeout) => HttpRerankBackend::with_dialect_and_timeout(
+                &role.base_url,
+                role.model.clone(),
+                bearer,
+                RerankDialect::TeiCohere,
+                timeout,
+            )?,
+            None => HttpRerankBackend::with_dialect(
+                &role.base_url,
+                role.model.clone(),
+                bearer,
+                RerankDialect::TeiCohere,
+            )?,
+        };
+        Ok(Arc::new(backend))
     }
 }
 
@@ -813,6 +913,22 @@ mod tests {
             bearer_for(&role, Some(&secrets)).as_deref(),
             Some("not-printed")
         );
+    }
+
+    #[test]
+    fn turn_owned_retrieval_timeouts_reject_zero_before_provider_access() {
+        let embedding = RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:9".into(),
+            model: "bge-m3".into(),
+            dialect: Some("openai_embeddings".into()),
+            allow_remote: false,
+            api_key_ref: None,
+            embed_wire: EmbedWireKind::OpenAiCompatible,
+            rerank_dialect: RerankDialect::TeiCohere,
+        };
+        assert!(build_embedding_backend_with_timeout(&embedding, None, 0).is_err());
+        assert!(build_rerank_backend_with_timeout(&reranker_role(None), None, 0).is_err());
     }
 
     #[test]
