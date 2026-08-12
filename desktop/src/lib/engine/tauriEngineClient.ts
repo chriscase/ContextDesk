@@ -8,15 +8,26 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { WireImportPreviewPlan, WireProcessProgress } from "@contextdesk/contracts";
+import {
+  parseTriageReplayV1,
+  parseTriageRunEventV2,
+  type TriageCancellationV1,
+  type TriageReplayV1,
+  type TriageRequestV2,
+  type TriageRunEventV2,
+  type WireImportPreviewPlan,
+  type WireProcessProgress,
+  type CompiledTriagePolicyV2,
+} from "@contextdesk/contracts";
 import {
   EngineError,
   classifyEngineMessage,
-  unsupportedTriageService,
   type EngineClient,
   type EventRevisionReport,
   type ImportRunReport,
   type ImportRunRequest,
+  type TriageRunOptions,
+  type TriageService,
   type TimezoneApplyRequest,
   type TimezonePreview,
   type TimezoneState,
@@ -57,6 +68,120 @@ async function call<T>(
   } catch (error) {
     throw toEngineError(error);
   }
+}
+
+function parseTriageReplay(value: unknown): TriageReplayV1 {
+  try {
+    return parseTriageReplayV1(structuredClone(value));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new EngineError("invalid", `invalid triage replay: ${message}`);
+  }
+}
+
+function parseTriageEvent(value: unknown): TriageRunEventV2 {
+  try {
+    return parseTriageRunEventV2(structuredClone(value));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new EngineError("failed", `invalid triage event from host: ${message}`);
+  }
+}
+
+/**
+ * Provider-free Tauri replay adapter.
+ *
+ * The native command validates and emits the host-authored replay; this
+ * adapter only forwards the ordered `TriageRunEventV2` stream. Live policy
+ * compilation/run/cancellation stay explicitly unsupported until a trusted
+ * host runner is wired.
+ */
+function createTauriTriageService(transport: TauriTransport): TriageService {
+  const listeners = new Set<(event: TriageRunEventV2) => void>();
+  let globalUnlisten: (() => void) | null = null;
+  let globalListenPending: Promise<void> | null = null;
+
+  const ensureGlobalListener = async (): Promise<void> => {
+    if (globalUnlisten || globalListenPending) {
+      return globalListenPending ?? Promise.resolve();
+    }
+    globalListenPending = transport
+      .listen("triage-run-event", (event) => {
+        const parsed = parseTriageEvent(event.payload);
+        for (const listener of listeners) listener(parsed);
+      })
+      .then((stop) => {
+        globalUnlisten = stop;
+      })
+      .finally(() => {
+        globalListenPending = null;
+      });
+    return globalListenPending;
+  };
+
+  const unsupported = async (): Promise<never> => {
+    throw new EngineError(
+      "unsupported",
+      "triage policy compilation and live execution are not wired to the production Tauri host",
+    );
+  };
+
+  return {
+    // Replay is a deliberately narrower capability than live triage. Callers
+    // can render/inspect host-authored streams without assuming a provider
+    // runner exists in this host build.
+    capability: {
+      supported: false,
+      replay: true,
+      reason:
+        "live triage policy compilation and execution are not wired to the production Tauri host",
+    },
+    preflight: unsupported as (request: TriageRequestV2) => Promise<CompiledTriagePolicyV2>,
+    run: unsupported as (
+      request: TriageRequestV2,
+      options?: TriageRunOptions,
+    ) => Promise<TriageRunEventV2>,
+    replay: async (replay, options = {}) => {
+      const parsedReplay = parseTriageReplay(replay);
+      if (options.signal?.aborted) {
+        throw new EngineError("cancelled", "triage replay consumption cancelled");
+      }
+      const delivered = new Set<number>();
+      let stop: (() => void) | undefined;
+      const runListener = await transport.listen("triage-run-event", (event) => {
+        const parsed = parseTriageEvent(event.payload);
+        if (parsed.run_id !== parsedReplay.run_id || delivered.has(parsed.sequence)) return;
+        delivered.add(parsed.sequence);
+        options.onEvent?.(parsed);
+      });
+      stop = runListener;
+      try {
+        const terminal = parseTriageEvent(
+          await call<TriageRunEventV2>(transport, "triage_replay", {
+            replay: parsedReplay,
+          }),
+        );
+        if (terminal.run_id !== parsedReplay.run_id) {
+          throw new EngineError("failed", "triage replay terminal run identity mismatch");
+        }
+        return terminal;
+      } finally {
+        stop?.();
+      }
+    },
+    cancel: async (_request: TriageCancellationV1): Promise<never> => unsupported(),
+    onRunEvent: (listener) => {
+      listeners.add(listener);
+      void ensureGlobalListener();
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0 && globalUnlisten) {
+          globalUnlisten();
+          globalUnlisten = null;
+        }
+      };
+    },
+  };
 }
 
 /** Host ingest report shape (subset the flow consumes; camelCase wire). */
@@ -134,11 +259,6 @@ export function createTauriEngineClient(
         };
       },
     },
-    // Provider-free contracts exist, but no production Tauri command is
-    // shipped yet. Keep this explicit and fail closed rather than inventing a
-    // renderer-side compiler or silently bypassing the trusted host.
-    triage: unsupportedTriageService(
-      "triage namespace is not wired to the production Tauri host",
-    ),
+    triage: createTauriTriageService(transport),
   };
 }

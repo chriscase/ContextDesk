@@ -565,8 +565,12 @@ export class MockEngineClient implements EngineClient {
     };
     return {
       capability: this.#triageScenario
-        ? { supported: true }
-        : { supported: false, reason: "triage capability is not configured for this adapter" },
+        ? { supported: true, replay: true }
+        : {
+            supported: false,
+            reason: "triage capability is not configured for this adapter",
+            replay: false,
+          },
       preflight: async (request) => {
         parseTriageRequestV2(structuredClone(request));
         const scenario = this.#triageScenario ?? unsupported();

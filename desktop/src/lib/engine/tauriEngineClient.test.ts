@@ -10,6 +10,9 @@
  * src-tauri source-contract tests that pin the command wiring.
  */
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => {
@@ -27,8 +30,18 @@ import {
   defaultMockPreview,
   engineClientConformance,
 } from "@contextdesk/client";
+import { parseTriageReplayV1 } from "@contextdesk/contracts";
 import type { TimezoneDeclaration } from "@contextdesk/client";
 import { createTauriEngineClient, type TauriTransport } from "./tauriEngineClient";
+
+const TRIAGE_FIXTURE_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..", "..", "..", "..", "fixtures", "triage-sdk", "v2",
+);
+const loadTriageReplay = () =>
+  parseTriageReplayV1(
+    JSON.parse(readFileSync(join(TRIAGE_FIXTURE_DIR, "replay.partial.json"), "utf8")),
+  );
 
 const IMPORTABLE_LOG_IDENTITIES = [
   "api/api-gateway.log",
@@ -46,6 +59,7 @@ const IMPORTABLE_LOG_IDENTITIES = [
 function createFakeTransport(): TauriTransport {
   const model = createMockEngineClient();
   const progressListeners = new Set<(event: { payload: unknown }) => void>();
+  const triageListeners = new Set<(event: { payload: unknown }) => void>();
   model.events.onProcessProgress((progress) => {
     for (const listener of progressListeners) listener({ payload: progress });
   });
@@ -76,6 +90,13 @@ function createFakeTransport(): TauriTransport {
           ) as Promise<T>;
         case "cancel_log_ingest":
           return rethrowAsHostString(model.import.cancel()) as Promise<T>;
+        case "triage_replay": {
+          const replay = parseTriageReplayV1(structuredClone(args!.replay));
+          for (const event of replay.events) {
+            for (const listener of triageListeners) listener({ payload: event });
+          }
+          return replay.events.at(-1)! as T;
+        }
         case "log_load_timezone_state":
           return rethrowAsHostString(
             model.time.state(args!.corpusId as string),
@@ -106,6 +127,10 @@ function createFakeTransport(): TauriTransport {
       }
     },
     listen: async (event, handler) => {
+      if (event === "triage-run-event") {
+        triageListeners.add(handler);
+        return () => triageListeners.delete(handler);
+      }
       if (event !== "process-progress") throw new Error(`unexpected event: ${event}`);
       progressListeners.add(handler);
       return () => progressListeners.delete(handler);
@@ -138,6 +163,39 @@ describe("tauri engine adapter mapping", () => {
       name: "EngineError",
       code: "unsupported",
     });
+  });
+
+  it("accepts a host-authored replay and forwards the shared event stream", async () => {
+    const transport = createFakeTransport();
+    const client = createTauriEngineClient(transport);
+    const replay = loadTriageReplay();
+    const subscribed: unknown[] = [];
+    const delivered: unknown[] = [];
+    client.triage.onRunEvent((event) => subscribed.push(event));
+    const terminal = await client.triage.replay(replay, {
+      onEvent: (event) => delivered.push(event),
+    });
+    expect(client.triage.capability).toMatchObject({ supported: false, replay: true });
+    expect(delivered).toEqual(replay.events);
+    expect(subscribed).toEqual(replay.events);
+    expect(terminal).toEqual(replay.events.at(-1));
+  });
+
+  it("rejects malformed replay before invoking the Tauri command", async () => {
+    let invoked = false;
+    const transport: TauriTransport = {
+      invoke: async () => {
+        invoked = true;
+        throw "unreachable";
+      },
+      listen: async () => () => {},
+    };
+    const client = createTauriEngineClient(transport);
+    await expect(client.triage.replay({} as never)).rejects.toMatchObject({
+      name: "EngineError",
+      code: "invalid",
+    });
+    expect(invoked).toBe(false);
   });
 
   it("classifies host string rejections into EngineError codes", async () => {

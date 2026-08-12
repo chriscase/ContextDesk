@@ -57,7 +57,12 @@ export function classifyEngineMessage(message: string): EngineErrorCode {
   ) {
     return "invalid";
   }
-  if (lower.includes("not support") || lower.includes("not wired")) {
+  if (
+    lower.includes("not support") ||
+    lower.includes("not wired") ||
+    lower.includes("unknown command") ||
+    lower.includes("no such command")
+  ) {
     return "unsupported";
   }
   return "failed";
@@ -243,8 +248,8 @@ export interface EngineEvents {
 
 /** Whether this adapter can currently expose the optional triage namespace. */
 export type TriageAdapterCapability =
-  | { supported: true }
-  | { supported: false; reason: string };
+  | { supported: true; replay: boolean }
+  | { supported: false; reason: string; replay: boolean };
 
 /** Per-run delivery controls. They do not alter policy or host truth. */
 export type TriageRunOptions = {
@@ -270,13 +275,18 @@ export interface TriageService {
   onRunEvent(listener: (event: TriageRunEventV2) => void): Unsubscribe;
 }
 
-/** Fail-closed triage surface for adapters whose production host is not wired. */
+/**
+ * Fail-closed triage surface for adapters whose production host is not wired.
+ *
+ * `replay` is explicit because a host may safely expose consumption of a
+ * host-authored replay while keeping live policy compilation/run unsupported.
+ */
 export function unsupportedTriageService(reason: string): TriageService {
   const unsupported = async (): Promise<never> => {
     throw new EngineError("unsupported", reason);
   };
   return {
-    capability: { supported: false, reason },
+    capability: { supported: false, reason, replay: false },
     preflight: unsupported,
     run: unsupported,
     replay: unsupported,

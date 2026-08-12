@@ -10124,6 +10124,34 @@ async fn install_demo_log_corpus(
     Ok(result)
 }
 
+/// Consume a host-authored triage replay without executing providers.
+///
+/// The replay validator is Rust-owned and the exact V2 events are emitted on
+/// one shared Tauri stream. Live policy compilation/execution remains a
+/// separate, explicitly unsupported capability until a trusted runner is
+/// wired; this command is intentionally replay-only.
+#[tauri::command]
+async fn triage_replay(
+    app: tauri::AppHandle,
+    replay: serde_json::Value,
+) -> Result<cd_core::triage_sdk::TriageRunEventV2, String> {
+    let replay: cd_core::triage_sdk::TriageReplayV1 =
+        serde_json::from_value(replay).map_err(|error| format!("invalid triage replay: {error}"))?;
+    replay
+        .validate()
+        .map_err(|error| format!("invalid triage replay: {error}"))?;
+    let terminal = replay
+        .events
+        .last()
+        .cloned()
+        .ok_or_else(|| "invalid triage replay: replay is empty".to_string())?;
+    for event in &replay.events {
+        app.emit("triage-run-event", event)
+            .map_err(|error| format!("triage replay event delivery failed: {error}"))?;
+    }
+    Ok(terminal)
+}
+
 /// Trusted local re-analysis of template vectors; raw events are not reparsed.
 #[tauri::command]
 async fn reanalyze_log_corpus(
@@ -14048,6 +14076,7 @@ pub fn run() {
             list_log_templates,
             ingest_log_path,
             install_demo_log_corpus,
+            triage_replay,
             cancel_log_ingest,
             get_failed_log_ingest_diagnostic,
             clear_failed_log_ingest_diagnostic,
@@ -14446,6 +14475,34 @@ mod log_ingest_cancel_registry_tests {
                 "busy",
             ),
             Err("busy".into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod triage_replay_host_tests {
+    use super::*;
+
+    #[test]
+    fn replay_command_is_registered_and_uses_the_rust_validator_and_shared_stream() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("triage_replay,"), "replay command must be registered");
+        let start = source
+            .find("async fn triage_replay(")
+            .expect("triage replay command");
+        let end = source[start..]
+            .find("\n#[tauri::command]")
+            .map(|offset| start + offset)
+            .expect("triage replay command boundary");
+        let body = &source[start..end];
+        assert!(body.contains("TriageReplayV1"));
+        assert!(body.contains(".validate()"));
+        assert!(body.contains("triage-run-event"));
+        assert!(body.contains("app.emit"));
+        assert!(body.contains(".last()"));
+        assert!(
+            !body.contains("load_config") && !body.contains("SecretStore") && !body.contains("keychain"),
+            "replay consumption must not load host credentials"
         );
     }
 }
