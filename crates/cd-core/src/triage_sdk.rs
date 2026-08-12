@@ -706,7 +706,13 @@ impl TriageReplayV1 {
                 if index + 1 != self.events.len() {
                     return Err(TriageContractError::EventAfterTerminal);
                 }
-                if !validation {
+                // Cancellation may be observed before the host reaches its
+                // validation checkpoint. Failed/timed-out terminals still
+                // require validation so they cannot bypass the normal
+                // host-owned result gate.
+                if !validation
+                    && !matches!(event.event, TriageRunEventPayloadV2::Cancelled { .. })
+                {
                     return Err(TriageContractError::InvalidPhaseOrder);
                 }
                 continue;

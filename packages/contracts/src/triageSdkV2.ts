@@ -647,10 +647,36 @@ export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
       }, payload);
       checkReconciliation("event.event.summary", payload.summary);
       break;
+    case "preliminary_reconciliation":
+      checkObject("event.event", {
+        kind: f.req(f.en("preliminary_reconciliation")),
+        summary: f.req(reconciliation),
+      }, payload);
+      checkReconciliation("event.event.summary", payload.summary);
+      break;
+    case "final_reconciliation":
+      checkObject("event.event", {
+        kind: f.req(f.en("final_reconciliation")),
+        summary: f.req(reconciliation),
+      }, payload);
+      checkReconciliation("event.event.summary", payload.summary);
+      break;
     case "validation":
       checkObject("event.event", {
         kind: f.req(f.en("validation")),
         passed: f.req(f.bool),
+        reason_codes: f.opt(f.arr(f.str)),
+      }, payload);
+      boundedUniqueStrings(
+        "event.event.reason_codes",
+        payload.reason_codes ?? [],
+        MAX_REASON_CODES,
+      );
+      break;
+    case "correction":
+      checkObject("event.event", {
+        kind: f.req(f.en("correction")),
+        applied: f.req(f.bool),
         reason_codes: f.opt(f.arr(f.str)),
       }, payload);
       boundedUniqueStrings(
@@ -767,6 +793,15 @@ export function parseTriageReplayV1(value: unknown): TriageReplayV1 {
       "first run_started fingerprint mismatch",
     );
   let terminals = 0;
+  let packetReady = false;
+  let legacyReconciliation = false;
+  let preliminaryReconciliation = false;
+  let finalReconciliation = false;
+  let validation = false;
+  let correction = false;
+  let finalizerAttempt = false;
+  let reviewerAttempt = false;
+  let contributorAttempt = false;
   events.forEach((event, index) => {
     if (event.run_id !== replay.run_id)
       throw new ContractViolation(`replay.events[${index}].run_id`, "run identity mismatch");
@@ -779,6 +814,78 @@ export function parseTriageReplayV1(value: unknown): TriageReplayV1 {
       terminals += 1;
       if (index + 1 !== events.length)
         throw new ContractViolation(`replay.events[${index}]`, "event after terminal");
+      if (!validation && event.event.kind !== "cancelled")
+        throw new ContractViolation(`replay.events[${index}]`, "terminal before validation");
+      return;
+    }
+    const payload = event.event as Record<string, unknown>;
+    let phaseOk = false;
+    switch (payload.kind) {
+      case "run_started":
+        phaseOk = index === 0;
+        break;
+      case "packet_ready":
+        phaseOk = index === 1 && !packetReady && !legacyReconciliation &&
+          !preliminaryReconciliation && !validation;
+        break;
+      case "role_attempt": {
+        const attempt = payload.attempt as Record<string, unknown>;
+        const role = attempt.role as Record<string, unknown> | string;
+        const contributor = typeof role === "object" && role !== null &&
+          typeof role.contributor === "string";
+        const finalizer = role === "finalizer";
+        const reviewer = role === "reviewer";
+        phaseOk = contributor
+          ? packetReady && !legacyReconciliation && !preliminaryReconciliation &&
+            !finalReconciliation && !validation && !finalizerAttempt && !reviewerAttempt
+          : finalizer
+            ? packetReady && (legacyReconciliation || finalReconciliation ||
+              (!contributorAttempt && !reviewerAttempt && !preliminaryReconciliation)) &&
+              !validation && !finalizerAttempt
+            : reviewer
+              ? packetReady && preliminaryReconciliation && !finalReconciliation &&
+                !validation && !reviewerAttempt
+              : false;
+        break;
+      }
+      case "reconciliation":
+        phaseOk = packetReady && !legacyReconciliation &&
+          !preliminaryReconciliation && !validation;
+        break;
+      case "preliminary_reconciliation":
+        phaseOk = packetReady && contributorAttempt && !legacyReconciliation &&
+          !preliminaryReconciliation && !validation;
+        break;
+      case "final_reconciliation":
+        phaseOk = packetReady && preliminaryReconciliation &&
+          !finalReconciliation && !validation;
+        break;
+      case "validation":
+        phaseOk = (legacyReconciliation || finalReconciliation) && !validation;
+        break;
+      case "correction":
+        phaseOk = validation && !correction;
+        break;
+      default:
+        phaseOk = false;
+    }
+    if (!phaseOk)
+      throw new ContractViolation(`replay.events[${index}]`, "invalid phase order");
+    switch (payload.kind) {
+      case "packet_ready": packetReady = true; break;
+      case "role_attempt": {
+        const role = (payload.attempt as Record<string, unknown>).role as Record<string, unknown> | string;
+        if (typeof role === "object" && role !== null && typeof role.contributor === "string") contributorAttempt = true;
+        else if (role === "finalizer") finalizerAttempt = true;
+        else if (role === "reviewer") reviewerAttempt = true;
+        break;
+      }
+      case "reconciliation": legacyReconciliation = true; break;
+      case "preliminary_reconciliation": preliminaryReconciliation = true; break;
+      case "final_reconciliation": finalReconciliation = true; break;
+      case "validation": validation = true; break;
+      case "correction": correction = true; break;
+      default: break;
     }
   });
   if (terminals !== 1)

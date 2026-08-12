@@ -106,8 +106,7 @@ describe("Rust-generated triage SDK v2 contracts", () => {
     const partial = load("policy-preflight.standard.json") as {
       slots: Array<Record<string, unknown>>;
     };
-    partial.slots[0].qualification_schema_id =
-      "contextdesk.triage.qualification.v2";
+    delete partial.slots[0].workflow_id;
     expect(() => parseCompiledTriagePolicyV2(partial)).toThrow();
 
     const malformed = load("policy-preflight.standard.json") as {
