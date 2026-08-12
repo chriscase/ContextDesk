@@ -52,4 +52,7 @@ until the factory exposes an async cancellation contract; it now fails closed
 before and after setup rather than handing a stale budget to the runner. A
 fresh exact-runtime live gateway diagnostic must still be run. These setup and
 live-provider checks are not evidence that the primary OpenAI-compatible path
-is unusable.
+is unusable. Exact-role finalizer probes now credit a dispatched-or-raced
+operation conservatively and recheck cancellation before publishing
+qualification; generic provider attempts credit failed/timeout operations
+before returning their bounded attempt record.

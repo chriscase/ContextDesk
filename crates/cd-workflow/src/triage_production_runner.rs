@@ -1101,7 +1101,7 @@ impl TriageProductionRunnerV1 {
         interrupted: &mut Option<Interruption>,
         provider_calls: &mut u32,
     ) -> (TriageRoleAttemptV1, Option<ChatCompletion>) {
-        let fail = |status, code: &str| TriageRoleAttemptV1 {
+        let fail_with_calls = |status, code: &str, physical_provider_calls| TriageRoleAttemptV1 {
             attempt_id: format!("attempt:{}:{}", input.run_id, slot.slot_id),
             role_slot_id: slot.slot_id.clone(),
             role: slot.kind,
@@ -1111,10 +1111,11 @@ impl TriageProductionRunnerV1 {
             elapsed_ms: 0,
             input_chars: 0,
             output_chars: 0,
-            physical_provider_calls: Some(0),
+            physical_provider_calls: Some(physical_provider_calls),
             semantic_corrections: Some(0),
             terminal_disposition: Some(disposition_for(status)),
         };
+        let fail = |status, code: &str| fail_with_calls(status, code, 0);
         if slot.disposition != SlotDispositionV2::Admitted {
             return (
                 fail(
@@ -1200,10 +1201,18 @@ impl TriageProductionRunnerV1 {
         *provider_calls = (*provider_calls).saturating_add(1);
         let response = match completion {
             Ok(Ok(response)) => response,
-            Ok(Err(_)) => return (fail(TriageAttemptStatus::Failed, "provider_failed"), None),
+            Ok(Err(_)) => {
+                return (
+                    fail_with_calls(TriageAttemptStatus::Failed, "provider_failed", 1),
+                    None,
+                )
+            }
             Err(_) => {
                 *interrupted = Some(Interruption::TimedOut);
-                return (fail(TriageAttemptStatus::TimedOut, "deadline"), None);
+                return (
+                    fail_with_calls(TriageAttemptStatus::TimedOut, "deadline", 1),
+                    None,
+                );
             }
         };
         let response = if streamed.trim().is_empty() {
@@ -1309,6 +1318,11 @@ impl TriageProductionRunnerV1 {
                     }
                     let mut corrected_stream = String::new();
                     let mut on_corrected = |text: String| corrected_stream.push_str(&text);
+                    // The correction call is admitted and counted before
+                    // awaiting it. A cancellation, timeout, refusal, or
+                    // malformed response cannot erase a provider call from
+                    // replay accounting.
+                    physical_calls = physical_calls.saturating_add(1);
                     let correction = tokio::time::timeout(
                         timeout,
                         backend.backend.complete_streaming(
@@ -1321,7 +1335,6 @@ impl TriageProductionRunnerV1 {
                     .await;
                     *provider_calls = (*provider_calls).saturating_add(1);
                     if let Ok(Ok(corrected)) = correction {
-                        physical_calls = physical_calls.saturating_add(1);
                         corrections = 1;
                         total_input = total_input.saturating_add(correction_chars);
                         let corrected = if corrected_stream.trim().is_empty() {

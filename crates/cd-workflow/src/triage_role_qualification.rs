@@ -96,6 +96,34 @@ pub enum TriageRoleProbeError {
     ProbeFailed,
 }
 
+async fn build_probe_backend_with_budget(
+    inputs: &crate::provider::ResolvedTurnInputs,
+    deadline_ms: u64,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<Box<dyn ChatBackend>, TriageRoleProbeError> {
+    if cancel
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    {
+        return Err(TriageRoleProbeError::ProbeFailed);
+    }
+    let cancel_wait: Pin<Box<dyn Future<Output = ()> + Send>> = if let Some(flag) = cancel {
+        Box::pin(wait_for_cancel(flag))
+    } else {
+        Box::pin(std::future::pending())
+    };
+    tokio::pin!(cancel_wait);
+    tokio::select! {
+        result = tokio::time::timeout(
+            Duration::from_millis(deadline_ms),
+            backend_for_resolved_turn(inputs),
+        ) => result
+            .map_err(|_| TriageRoleProbeError::ProbeFailed)?
+            .map_err(|_| TriageRoleProbeError::BackendUnavailable),
+        _ = &mut cancel_wait => Err(TriageRoleProbeError::ProbeFailed),
+    }
+}
+
 impl std::fmt::Display for TriageRoleProbeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -409,11 +437,15 @@ async fn qualify_with_backend(
     );
     // Use the same cooperative cancellation signal for finalizer probes as for
     // contribution probes.  A cancelled probe must never mint qualification.
-    let response = match complete_once(&*backend, &messages, deadline_ms, cancel).await {
+    let response = match complete_once(&*backend, &messages, deadline_ms, cancel.clone()).await {
         Ok(response) => response,
         Err(reason) => {
-            let calls = if reason == "cancelled" { 0 } else { 1 };
-            return record(key, RoleQualificationV2::Unqualified, calls, reason);
+            // Once the preflight cancellation check has passed, the probe
+            // operation is considered dispatched for accounting purposes.
+            // A cancellation winning the race cannot prove that the provider
+            // did not receive the request, so undercounting would make the
+            // persisted call budget dishonest.
+            return record(key, RoleQualificationV2::Unqualified, 1, reason);
         }
     };
     let hooks = HostValidatedAnswerHooks::default();
@@ -424,7 +456,10 @@ async fn qualify_with_backend(
         && hooks
             .finalize(&slot, &response, &packet, &reconciliation())
             .await
-            .is_some();
+            .is_some()
+        && !cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst));
     record(
         key,
         if accepted {
@@ -490,9 +525,8 @@ pub async fn qualify_configured_role_v2(
         Some(&request.model_id),
     );
     inputs.deadline_plan.total_ms = request.deadline_ms;
-    let backend = backend_for_resolved_turn(&inputs)
-        .await
-        .map_err(|_| TriageRoleProbeError::BackendUnavailable)?;
+    let backend =
+        build_probe_backend_with_budget(&inputs, request.deadline_ms, cancel.clone()).await?;
     qualify_role_v2_with_backend(TriageRoleProbeBackendInput {
         profile_id: profile.id.clone(),
         base_url: profile.base_url.clone(),
