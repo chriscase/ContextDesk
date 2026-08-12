@@ -127,6 +127,11 @@ shell_quote() {
 default_cache_root() {
   if [[ -n "${CONTEXTDESK_BUILD_CACHE_ROOT:-}" ]]; then
     printf '%s\n' "$CONTEXTDESK_BUILD_CACHE_ROOT"
+  elif [[ "$(uname -s 2>/dev/null || true)" == "Darwin" && -n "${HOME:-}" ]]; then
+    # Prefer the platform cache location on macOS even when a shell exports
+    # XDG_CACHE_HOME. This keeps one durable cache instead of silently
+    # creating a second multi-gigabyte target under ~/.cache.
+    printf '%s/Library/Caches/ContextDesk/build-v1\n' "$HOME"
   elif [[ -n "${XDG_CACHE_HOME:-}" ]]; then
     printf '%s/contextdesk/build-v1\n' "$XDG_CACHE_HOME"
   elif [[ -n "${HOME:-}" ]]; then

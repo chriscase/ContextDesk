@@ -20,7 +20,8 @@ eval "$(scripts/local-build-cache.sh activate)"
 The default shared target is:
 
 ```text
-${XDG_CACHE_HOME:-$HOME/.cache}/contextdesk/build-v1/cargo-target
+macOS: $HOME/Library/Caches/ContextDesk/build-v1/cargo-target
+other Unix: ${XDG_CACHE_HOME:-$HOME/.cache}/contextdesk/build-v1/cargo-target
 ```
 
 Choose an absolute location explicitly when the default volume is too small:

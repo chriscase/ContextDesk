@@ -17,6 +17,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export EXACT_HEAD_REPO_ROOT="$ROOT"
+
+# Match the full gate's local cache policy so standalone acceptance rehearsals
+# do not rebuild the same native dependency graph in every worktree. Explicit
+# CARGO_TARGET_DIR, CI, or the opt-out variable retains full control.
+if [[ -z "${CARGO_TARGET_DIR:-}" && "${CI:-}" != "true" &&
+      "${CONTEXTDESK_DISABLE_SHARED_BUILD_CACHE:-0}" != "1" &&
+      -x "$ROOT/scripts/local-build-cache.sh" ]]; then
+  if [[ -n "${CONTEXTDESK_BUILD_CACHE_ROOT:-}" ||
+        -d "${HOME:-}/Library/Caches/ContextDesk/build-v1" ||
+        -d "${XDG_CACHE_HOME:-${HOME:-}/.cache}/contextdesk/build-v1" ]]; then
+    eval "$("$ROOT/scripts/local-build-cache.sh" activate)"
+  fi
+fi
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 export PATH="${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"

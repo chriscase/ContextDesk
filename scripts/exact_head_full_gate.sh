@@ -18,6 +18,20 @@ set -o pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Prefer the marked shared target for local release gates. This keeps the
+# expensive root/Tauri dependency graph (including native DuckDB objects)
+# reusable across registered worktrees. Callers can opt out for an unusual
+# toolchain/target with CONTEXTDESK_DISABLE_SHARED_BUILD_CACHE=1 or by
+# explicitly setting CARGO_TARGET_DIR. CI keeps its runner-managed cache.
+if [[ -z "${CARGO_TARGET_DIR:-}" && "${CI:-}" != "true" &&
+      "${CONTEXTDESK_DISABLE_SHARED_BUILD_CACHE:-0}" != "1" &&
+      -x "$ROOT/scripts/local-build-cache.sh" ]]; then
+  if [[ -n "${CONTEXTDESK_BUILD_CACHE_ROOT:-}" ||
+        -d "${HOME:-}/Library/Caches/ContextDesk/build-v1" ||
+        -d "${XDG_CACHE_HOME:-${HOME:-}/.cache}/contextdesk/build-v1" ]]; then
+    eval "$("$ROOT/scripts/local-build-cache.sh" activate)"
+  fi
+fi
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 export PATH="${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
