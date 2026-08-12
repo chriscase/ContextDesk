@@ -1,0 +1,9 @@
+{
+  "schema_id": "contextdesk.extension.role_capability.v1",
+  "role": "observation_extractor",
+  "required_capabilities": ["plain_chat", "prompted_json"],
+  "may_propose": ["observations"],
+  "may_not": ["initiating_cause", "mint_evidence", "switch_provider"],
+  "requires_measured_qualification": true,
+  "notes": "Host-grounded observations only"
+}

@@ -35,6 +35,9 @@ pub mod embed;
 pub mod embedding_space;
 pub mod error;
 pub mod events;
+/// Versioned extension contracts for future multi-model triage/retrieval
+/// (docs + pure validators; does not redesign production turn paths).
+pub mod extension_contract;
 /// Host-grounded fast-triage route: complete evidence packet, typed-only
 /// parsing, local validation, one bounded correction, one visible escalation.
 pub mod fast_triage;

@@ -1,0 +1,25 @@
+{
+  "schema_id": "contextdesk.extension.evidence_packet.v1",
+  "packet_id": "pkt-leak",
+  "packet_digest": "a1b2c3d4e5f60718293a4b5c6d7e8f901234567890abcdef1234567890abcd",
+  "binding": {
+    "session_id": "s",
+    "turn_id": "t",
+    "corpus_id": "c",
+    "ledger_digest": "deadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "time_quality": "order_only",
+  "privacy": "share_safe",
+  "evidence": [
+    {
+      "evidence_id": "e:a:1",
+      "candidate_id": "a"
+    }
+  ],
+  "retrieval": {
+    "mode": "embedding",
+    "endpoint_fingerprint": "https://private.example.invalid/v1",
+    "dialect": "openai_embeddings",
+    "dimensions": 8
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "schema_id": "contextdesk.extension.negotiation.v1",
+  "dialect": "ollama",
+  "surface": "chat_completions",
+  "capabilities": [
+    { "kind": "json_object", "request": "require" }
+  ]
+}
