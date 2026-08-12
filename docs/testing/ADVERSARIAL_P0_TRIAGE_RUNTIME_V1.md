@@ -1,6 +1,6 @@
 # Adversarial triage-runtime hardening — P0 fix
 
-**Code SHA:** `6ac8ff5d377013a0ed9eebafdfbcd547b15795fa`
+**Code SHA:** `84d91b083d35a1c4d095bf44facb72ba29b831b1`
 **Branch:** `integrate/triage-policy-sdk-v2`  
 **Scope:** provider-free production-path hardening; no live compatibility claim
 
@@ -45,9 +45,11 @@ share-safe artifact references are relative rather than absolute. CLI
 turn-owned retrieval now preserves adaptive defaults while using the explicit
 whole-turn deadline for configured embedding/rerank roles.
 
-Still open before a broad release claim: provider setup/authentication itself
-must be bounded by the remaining whole-turn budget for every provider, and a
-fresh exact-runtime live gateway diagnostic must be run. The HTTP transport
-factory audit now covers Ollama and embedding/rerank adapters; these remaining
-setup and live-provider checks are not evidence that the primary
-OpenAI-compatible path is unusable.
+Provider setup/authentication is now arbitrated by the remaining whole-turn
+budget and the final runner budget is recomputed after setup. A backend
+factory's synchronous DNS/client construction cannot be forcibly interrupted
+until the factory exposes an async cancellation contract; it now fails closed
+before and after setup rather than handing a stale budget to the runner. A
+fresh exact-runtime live gateway diagnostic must still be run. These setup and
+live-provider checks are not evidence that the primary OpenAI-compatible path
+is unusable.
