@@ -6,6 +6,7 @@ use cd_core::investigation_answer::{
     AnswerBindingV1, AnswerEnvelopeV1, EvidenceRole, HostEvidenceEntry, InvestigationAnswerV1,
     LogSnapshotRevisionV1, SCHEMA_V1,
 };
+use cd_core::multi_model::triage_policy::{TriageContributorRole, TriageSlotKindV2};
 use cd_core::triage_sdk::*;
 
 fn fixtures_dir() -> PathBuf {
@@ -136,7 +137,7 @@ fn replay() -> TriageReplayV1 {
                     attempt: TriageRoleAttemptV1 {
                         attempt_id: "attempt:01".into(),
                         role_slot_id: "slot:causal:01".into(),
-                        role: "causal_proposer".into(),
+                        role: TriageSlotKindV2::Contributor(TriageContributorRole::CausalProposer),
                         model: Some(ModelRef {
                             profile_id: "profile:primary".into(),
                             model_id: "model:catalog:exact".into(),
@@ -262,6 +263,7 @@ fn replay_requires_contiguous_order_and_exactly_one_last_terminal() {
         6,
         TriageRunEventPayloadV2::Failed {
             category: "should_not_exist".into(),
+            partial_result: None,
         },
     ));
     assert_eq!(
@@ -287,6 +289,93 @@ fn replay_binds_the_first_started_event_to_the_request_fingerprint() {
     assert_eq!(
         wrong_fingerprint.validate(),
         Err(TriageContractError::RequestFingerprintMismatch)
+    );
+}
+
+#[test]
+fn scope_revision_and_source_id_set_fail_closed() {
+    let mut zero_revision = request();
+    zero_revision.scope.corpus_revision = Some(0);
+    assert_eq!(
+        zero_revision.validate(),
+        Err(TriageContractError::InvalidField("corpus_revision"))
+    );
+
+    let mut duplicate_sources = request();
+    duplicate_sources.scope.source_ids = vec!["source:one".into(), "source:one".into()];
+    assert_eq!(
+        duplicate_sources.validate(),
+        Err(TriageContractError::InvalidField("source_ids"))
+    );
+}
+
+#[test]
+fn failure_timeout_and_cancel_terminals_preserve_an_honest_partial() {
+    let partial = Box::new(partial_result());
+    for terminal in [
+        TriageRunEventPayloadV2::Failed {
+            category: "provider_failed".into(),
+            partial_result: Some(partial.clone()),
+        },
+        TriageRunEventPayloadV2::TimedOut {
+            category: "whole_turn_deadline".into(),
+            partial_result: Some(partial.clone()),
+        },
+        TriageRunEventPayloadV2::Cancelled {
+            cancellation_id: "cancel:golden:01".into(),
+            partial_result: Some(partial.clone()),
+        },
+    ] {
+        let mut replay = replay();
+        replay.events[5] = event(5, terminal);
+        replay.validate().unwrap();
+    }
+
+    let mut share_safe_timeout = event(
+        5,
+        TriageRunEventPayloadV2::TimedOut {
+            category: "whole_turn_deadline".into(),
+            partial_result: Some(partial.clone()),
+        },
+    );
+    share_safe_timeout.privacy = PacketPrivacyBoundary::ShareSafe;
+    assert_eq!(
+        share_safe_timeout.validate(),
+        Err(TriageContractError::PrivacyLeak)
+    );
+
+    let mut wrong_run = partial_result();
+    wrong_run.run_id = "run:different".into();
+    let mut wrong_run_replay = replay();
+    wrong_run_replay.events[5] = event(
+        5,
+        TriageRunEventPayloadV2::TimedOut {
+            category: "whole_turn_deadline".into(),
+            partial_result: Some(Box::new(wrong_run)),
+        },
+    );
+    assert_eq!(
+        wrong_run_replay.validate(),
+        Err(TriageContractError::RunIdentityMismatch)
+    );
+
+    let mut grounded = partial_result();
+    grounded.kind = TriageResultKind::GroundedFinal;
+    grounded.validation_state = TriageValidationState::Passed;
+    grounded.accepted_evidence_ids = vec!["evidence:01".into()];
+    grounded.answer = Some(partial_answer());
+    grounded.validate().unwrap();
+    let mut grounded_replay = replay();
+    grounded_replay.events[5] = event(
+        5,
+        TriageRunEventPayloadV2::Failed {
+            category: "provider_failed".into(),
+            partial_result: Some(Box::new(grounded)),
+        },
+    );
+    assert_eq!(
+        grounded_replay.validate(),
+        Err(TriageContractError::InvalidField("terminal_partial_result"))
     );
 }
 
@@ -324,16 +413,14 @@ fn honest_partial_may_carry_a_host_authored_non_root_answer_floor() {
 
 #[test]
 fn attempt_and_reconciliation_mutations_fail_closed() {
-    let mut bad_role_replay = replay();
-    let TriageRunEventPayloadV2::RoleAttempt { attempt } = &mut bad_role_replay.events[2].event
-    else {
-        panic!("fixture attempt")
-    };
-    attempt.role = "invented_role".into();
-    assert_eq!(
-        bad_role_replay.validate(),
-        Err(TriageContractError::InvalidField("role"))
-    );
+    let bad_role_replay = replay();
+    let encoded = serde_json::to_value(&bad_role_replay).unwrap();
+    let mut invented = encoded;
+    invented["events"][2]["event"]["attempt"]["role"] = "invented_role".into();
+    assert!(matches!(
+        parse_replay_v1(&invented.to_string()),
+        Err(TriageContractError::Parse)
+    ));
 
     let mut bad_count_replay = replay();
     let TriageRunEventPayloadV2::Reconciliation { summary } = &mut bad_count_replay.events[3].event
@@ -423,6 +510,7 @@ fn regenerate_goldens() {
         6,
         TriageRunEventPayloadV2::Failed {
             category: "second_terminal".into(),
+            partial_result: None,
         },
     ));
     fs::write(

@@ -1,12 +1,12 @@
 # Extension contract v1 — multi-model triage & retrieval
 
-**Status:** durable contract + pure validators + hermetic fixtures.  
-**Does not redesign** production chat, turn_trace, retry, or budget allocation.  
-**Does not claim** any provider or model is universally compatible.  
+**Status:** durable contract + pure validators + hermetic fixtures.
+**Does not redesign** production chat, turn_trace, retry, or budget allocation.
+**Does not claim** any provider or model is universally compatible.
 **No readiness badges.**
 
-Branch surface: `docs/extension-contract-v1`  
-Code: `cd_core::extension_contract`  
+Branch surface: `docs/extension-contract-v1`
+Code: `cd_core::extension_contract`
 Fixtures: `fixtures/extension-contract/v1/`
 
 ## Why this exists

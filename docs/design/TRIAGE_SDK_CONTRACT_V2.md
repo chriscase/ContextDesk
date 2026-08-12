@@ -41,14 +41,21 @@ The projection is scanned and validated before export.
 - sequence numbers are contiguous from zero;
 - the first event is `run_started` and repeats the replay request fingerprint;
 - every event has the same run identity;
-- exactly one of `completed`, `failed`, or `cancelled` occurs;
+- exactly one of `completed`, `failed`, `timed_out`, or `cancelled` occurs;
 - the terminal is the last event;
+- failure, timeout, and cancellation may carry an owner-only honest partial so
+  completed deterministic work is not hidden;
 - role attempts and reconciliation summaries remain explicit, including
   abstention, invalid output, unavailable roles, timeouts, cancellation,
   failures, and non-admission.
 
 Hosts may attach their own delivery framing, but may not reorder, recreate, or
 infer authoritative events from displayed prose.
+
+Role attempts use Triage Policy V2's shared `TriageSlotKindV2` directly. A
+contributor carries the closed typed contributor role, while finalizer and
+reviewer remain distinct phases. Legacy aliases and unknown V2 roles fail
+closed during deserialization.
 
 ## Relationship to extension contracts
 

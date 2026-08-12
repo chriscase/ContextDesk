@@ -36,7 +36,9 @@
         "attempt": {
           "attempt_id": "attempt:01",
           "role_slot_id": "slot:causal:01",
-          "role": "causal_proposer",
+          "role": {
+            "contributor": "causal_proposer"
+          },
           "model": {
             "profile_id": "profile:primary",
             "model_id": "model:catalog:exact"

@@ -16,6 +16,7 @@ use thiserror::Error;
 use crate::extension_contract::{scan_share_safe_text, PacketPrivacyBoundary};
 use crate::investigation_answer::AnswerEnvelopeV1;
 pub use crate::model_ref::ModelRef;
+use crate::multi_model::triage_policy::TriageSlotKindV2;
 
 pub const TRIAGE_REQUEST_SCHEMA_V2: &str = "contextdesk.triage.request.v2";
 pub const TRIAGE_RUN_EVENT_SCHEMA_V2: &str = "contextdesk.triage.run_event.v2";
@@ -32,6 +33,16 @@ pub struct TriageScopeV1 {
     pub corpus_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_ids: Vec<String>,
+}
+
+impl TriageScopeV1 {
+    pub fn validate(&self) -> Result<(), TriageContractError> {
+        validate_opaque_id("corpus_id", &self.corpus_id)?;
+        if self.corpus_revision == Some(0) {
+            return Err(TriageContractError::InvalidField("corpus_revision"));
+        }
+        validate_unique_ids("source_ids", &self.source_ids)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -82,13 +93,10 @@ impl TriageRequestV2 {
             return Err(TriageContractError::PrivacyLeak);
         }
         validate_opaque_id("run_id", &self.run_id)?;
-        validate_opaque_id("corpus_id", &self.scope.corpus_id)?;
+        self.scope.validate()?;
         validate_opaque_id("cancellation_id", &self.cancellation_id)?;
         if self.task.trim().is_empty() {
             return Err(TriageContractError::InvalidField("task"));
-        }
-        for source in &self.scope.source_ids {
-            validate_opaque_id("source_ids", source)?;
         }
         match &self.policy {
             TriagePolicySelectionV2::Standard { model } => model
@@ -137,7 +145,7 @@ pub enum TriageAttemptStatus {
 pub struct TriageRoleAttemptV1 {
     pub attempt_id: String,
     pub role_slot_id: String,
-    pub role: String,
+    pub role: TriageSlotKindV2,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelRef>,
     pub status: TriageAttemptStatus,
@@ -152,19 +160,6 @@ impl TriageRoleAttemptV1 {
     pub fn validate(&self) -> Result<(), TriageContractError> {
         validate_opaque_id("attempt_id", &self.attempt_id)?;
         validate_opaque_id("role_slot_id", &self.role_slot_id)?;
-        if ![
-            "observation_extractor",
-            "timeline_analyst",
-            "causal_proposer",
-            "contradiction_checker",
-            "evidence_gap_finder",
-            "finalizer",
-            "reviewer",
-        ]
-        .contains(&self.role.as_str())
-        {
-            return Err(TriageContractError::InvalidField("role"));
-        }
         if let Some(model) = &self.model {
             model
                 .validate()
@@ -362,9 +357,18 @@ pub enum TriageRunEventPayloadV2 {
     },
     Failed {
         category: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial_result: Option<Box<TriageResultV2>>,
+    },
+    TimedOut {
+        category: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial_result: Option<Box<TriageResultV2>>,
     },
     Cancelled {
         cancellation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial_result: Option<Box<TriageResultV2>>,
     },
 }
 
@@ -372,7 +376,10 @@ impl TriageRunEventPayloadV2 {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. }
+            Self::Completed { .. }
+                | Self::Failed { .. }
+                | Self::TimedOut { .. }
+                | Self::Cancelled { .. }
         )
     }
 }
@@ -412,11 +419,23 @@ impl TriageRunEventV2 {
             TriageRunEventPayloadV2::Validation { reason_codes, .. } => {
                 validate_unique_reason_codes(reason_codes)?;
             }
-            TriageRunEventPayloadV2::Failed { category } => {
-                validate_opaque_id("failure_category", category)?;
+            TriageRunEventPayloadV2::Failed {
+                category,
+                partial_result,
             }
-            TriageRunEventPayloadV2::Cancelled { cancellation_id } => {
+            | TriageRunEventPayloadV2::TimedOut {
+                category,
+                partial_result,
+            } => {
+                validate_opaque_id("failure_category", category)?;
+                validate_terminal_partial(&self.run_id, partial_result.as_deref())?;
+            }
+            TriageRunEventPayloadV2::Cancelled {
+                cancellation_id,
+                partial_result,
+            } => {
                 validate_opaque_id("cancellation_id", cancellation_id)?;
+                validate_terminal_partial(&self.run_id, partial_result.as_deref())?;
             }
             TriageRunEventPayloadV2::Completed { .. } => {}
         }
@@ -428,6 +447,21 @@ impl TriageRunEventV2 {
         }
         if self.privacy == PacketPrivacyBoundary::ShareSafe {
             if matches!(self.event, TriageRunEventPayloadV2::Completed { .. }) {
+                return Err(TriageContractError::PrivacyLeak);
+            }
+            if matches!(
+                self.event,
+                TriageRunEventPayloadV2::Failed {
+                    partial_result: Some(_),
+                    ..
+                } | TriageRunEventPayloadV2::TimedOut {
+                    partial_result: Some(_),
+                    ..
+                } | TriageRunEventPayloadV2::Cancelled {
+                    partial_result: Some(_),
+                    ..
+                }
+            ) {
                 return Err(TriageContractError::PrivacyLeak);
             }
             if matches!(
@@ -607,6 +641,23 @@ fn validate_unique_ids(field: &'static str, ids: &[String]) -> Result<(), Triage
     } else {
         Err(TriageContractError::InvalidField(field))
     }
+}
+
+fn validate_terminal_partial(
+    run_id: &str,
+    partial: Option<&TriageResultV2>,
+) -> Result<(), TriageContractError> {
+    let Some(partial) = partial else {
+        return Ok(());
+    };
+    partial.validate()?;
+    if partial.run_id != run_id {
+        return Err(TriageContractError::RunIdentityMismatch);
+    }
+    if partial.kind != TriageResultKind::HonestPartial {
+        return Err(TriageContractError::InvalidField("terminal_partial_result"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

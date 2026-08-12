@@ -43,6 +43,20 @@ const reconciliation = f.obj({
   root_cause_established: f.req(f.bool),
 });
 
+const triageSlotKind = f.pred("typed triage slot kind", (value) => {
+  if (value === "finalizer" || value === "reviewer") return true;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== "contributor") return false;
+  return [
+    "observation_extractor",
+    "timeline_analyst",
+    "causal_proposer",
+    "contradiction_checker",
+    "evidence_gap_finder",
+  ].includes((value as Record<string, unknown>).contributor as string);
+});
+
 function objectValue(path: string, value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new ContractViolation(path, "expected object");
@@ -122,7 +136,7 @@ function checkAttempt(path: string, value: unknown): void {
     {
       attempt_id: f.req(f.str),
       role_slot_id: f.req(f.str),
-      role: f.req(f.str),
+      role: f.req(triageSlotKind),
       model: f.opt(modelRef),
       status: f.req(
         f.en(
@@ -224,12 +238,29 @@ export function parseTriageRunEventV2(value: unknown): TriageRunEventV2 {
       break;
     case "failed":
       checkObject("event.event", {
-        kind: f.req(f.en("failed")), category: f.req(f.str),
+        kind: f.req(f.en("failed")),
+        category: f.req(f.str),
+        partial_result: f.opt(f.pred("triage result", (candidate) => {
+          try { checkResult("event.event.partial_result", candidate); return true; } catch { return false; }
+        })),
+      }, payload);
+      break;
+    case "timed_out":
+      checkObject("event.event", {
+        kind: f.req(f.en("timed_out")),
+        category: f.req(f.str),
+        partial_result: f.opt(f.pred("triage result", (candidate) => {
+          try { checkResult("event.event.partial_result", candidate); return true; } catch { return false; }
+        })),
       }, payload);
       break;
     case "cancelled":
       checkObject("event.event", {
-        kind: f.req(f.en("cancelled")), cancellation_id: f.req(f.str),
+        kind: f.req(f.en("cancelled")),
+        cancellation_id: f.req(f.str),
+        partial_result: f.opt(f.pred("triage result", (candidate) => {
+          try { checkResult("event.event.partial_result", candidate); return true; } catch { return false; }
+        })),
       }, payload);
       break;
     default:
@@ -266,7 +297,9 @@ export function parseTriageReplayV1(value: unknown): TriageReplayV1 {
       throw new ContractViolation(`replay.events[${index}].run_id`, "run identity mismatch");
     if (event.sequence !== index)
       throw new ContractViolation(`replay.events[${index}].sequence`, "non-contiguous sequence");
-    const terminal = ["completed", "failed", "cancelled"].includes(event.event.kind);
+    const terminal = ["completed", "failed", "timed_out", "cancelled"].includes(
+      event.event.kind,
+    );
     if (terminal) {
       terminals += 1;
       if (index + 1 !== events.length)
