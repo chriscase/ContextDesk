@@ -464,8 +464,14 @@ pub async fn resolve_v2_host(
         }
     }
 
+    // The deterministic phase has consumed part of the user budget. The
+    // runner starts now, so bind its compiled whole-turn budget to the actual
+    // remaining allowance; otherwise an explicit original deadline would be
+    // double-counted and the provider phase could outlive the request.
+    let mut execution_policy = policy.clone();
+    execution_policy.budget.whole_turn_deadline_ms = Some(remaining_deadline_ms);
     let resolution = match resolve_v2_production(
-        policy,
+        &execution_policy,
         preflight,
         authorized,
         remaining_deadline_ms,
