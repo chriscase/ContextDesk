@@ -29,6 +29,8 @@ pub mod retrieval_diagnostic;
 pub mod session;
 pub mod timezone;
 pub mod tools;
+/// Host-neutral Triage Policy V2 compilation and deterministic mock/replay seam.
+pub mod triage;
 pub mod turn;
 
 /// Re-export core context plan types at the shared workflow boundary.
