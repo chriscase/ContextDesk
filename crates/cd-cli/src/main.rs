@@ -180,10 +180,8 @@ async fn run_state_free(cli: &Cli) -> Option<i32> {
                 verdict,
             ))
         }
-        Command::Triage { action } => {
-            let result = commands::triage::run(action);
-            Some(emit_triage_run(format, color, result))
-        }
+        Command::Triage { action } => commands::triage::state_free(action)
+            .map(|result| emit_triage_run(format, color, result)),
         _ => None,
     }
 }
@@ -221,9 +219,17 @@ async fn dispatch(
         Command::Normalize(_)
         | Command::Normalized { .. }
         | Command::Eval { .. }
-        | Command::TriagePolicy { .. }
-        | Command::Triage { .. } => {
+        | Command::TriagePolicy { .. } => {
             unreachable!("state-free commands return before stateful dispatch")
+        }
+        Command::Triage { action } => {
+            let secrets = adapters::secret_store();
+            let result = match action {
+                cli::TriageAction::Run(args) => {
+                    commands::triage::run_stateful(args, paths, app_cfg, &secrets).await
+                }
+            };
+            emit_triage_run(format, resolved.color.value, result)
         }
         Command::Corpus { action } => {
             let result = commands::corpus::run(action, &paths.cache_root);
@@ -519,10 +525,10 @@ fn emit_completed<T: Render>(
     completed_verdict_exit(code, verdict)
 }
 
-/// Render the staged triage facade as an honest unsupported envelope.
-/// Unlike a completed verdict (doctor/eval), not_implemented must not look
-/// like a successful command to machine clients even though the typed data
-/// explains exactly which request was accepted.
+/// Render a typed state-free triage refusal. Unlike a completed verdict,
+/// `not_implemented` must not look like a successful command to machine
+/// clients even though the typed data explains exactly which request was
+/// accepted.
 fn emit_triage_run(
     format: OutputFormat,
     color: config::ColorMode,
@@ -530,9 +536,17 @@ fn emit_triage_run(
 ) -> i32 {
     match result {
         Ok(output) if output.unsupported() => {
-            let error = CliError::not_implemented(
-                "the host-neutral Triage V2 runner is not wired on this build",
-            );
+            let reason = output
+                .reason_codes
+                .first()
+                .map(String::as_str)
+                .unwrap_or("triage_route_unavailable");
+            let message = if reason == "standard_uses_established_path" {
+                "Standard triage uses the established chat path; use `contextdesk chat`"
+            } else {
+                "the requested Triage V2 route is unavailable on this build"
+            };
+            let error = CliError::not_implemented(message);
             match format {
                 OutputFormat::Text => {
                     println!("{}", presentation::present(&output.render_text(), color));

@@ -744,7 +744,15 @@ impl TriageProductionRunnerV1 {
                 vec!["no_correction_requested".into()]
             },
         });
-        let grounded_final = validation_passed && finalizer_answer.is_some();
+        // A syntactically valid envelope is not by itself a grounded root
+        // cause.  Neutral packets may legitimately produce a bounded answer
+        // whose `root_cause_established` flag is false; keep that outcome an
+        // honest partial rather than upgrading it merely because a finalizer
+        // returned JSON.
+        let grounded_final = validation_passed
+            && finalizer_answer
+                .as_ref()
+                .is_some_and(|answer| answer.answer.root_cause_established);
         let accepted_evidence_ids = finalizer_answer
             .as_ref()
             .map(|answer| {
@@ -1553,7 +1561,7 @@ mod tests {
                     schema: SCHEMA_V1.into(),
                     candidates: Vec::new(),
                     canonical_citations: Vec::new(),
-                    root_cause_established: false,
+                    root_cause_established: true,
                 },
                 semantic_attempts: 0,
             })

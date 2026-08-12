@@ -1548,7 +1548,14 @@ const TRACE_CORRELATION_STRUCTURAL_KIND: &str = "unverified_trace_key_correlatio
 /// `unclassified` and the packet reports `role_evidence: host_neutral`. Every
 /// structural check still applies: scope isolation, chronology, contradictions,
 /// citation completeness, and an unsupported root are all still rejected.
-fn fast_triage_packet(
+/// Build the canonical host-owned fast-triage packet from a deterministic
+/// broad-triage brief.  This is the single packet-construction seam shared by
+/// the established agent path and provider-neutral Triage Policy V2 hosts.
+///
+/// The helper never calls a provider and never infers causal roles.  Candidate
+/// and comparison rows remain neutral until a separately validated model
+/// proposal is accepted by the host.
+pub fn build_fast_triage_packet(
     candidates: &[crate::tool_host::BroadLogTriageCandidate],
     comparison_context: Option<&crate::tool_host::BroadLogTriageComparisonContext>,
     binding: crate::investigation_answer::AnswerBindingV1,
@@ -1676,7 +1683,7 @@ async fn run_fast_triage_seam(
         binding,
         deadline_ms,
     } = inputs;
-    let packet = match fast_triage_packet(
+    let packet = match build_fast_triage_packet(
         &brief.candidate_groups,
         brief.comparison_context.as_ref(),
         binding,
@@ -5130,7 +5137,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     // reconciliation answer. Single and legacy Review remain
                     // untouched when this runtime is absent.
                     if let Some(runtime) = opts.contribution_runtime.clone() {
-                        let packet = match fast_triage_packet(
+                        let packet = match build_fast_triage_packet(
                             &brief.candidate_groups,
                             brief.comparison_context.as_ref(),
                             multi_stage_binding.clone(),

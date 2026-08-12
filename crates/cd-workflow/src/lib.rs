@@ -31,6 +31,8 @@ pub mod timezone;
 pub mod tools;
 /// Host-neutral Triage Policy V2 compilation and deterministic mock/replay seam.
 pub mod triage;
+/// Trusted application-state resolution for the V2 production runner.
+pub mod triage_host;
 /// Trusted-host, default-off adapter for the currently supported V2
 /// contributor-only production subset.
 pub mod triage_production;

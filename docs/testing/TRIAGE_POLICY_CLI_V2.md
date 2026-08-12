@@ -1,7 +1,8 @@
 # Triage Policy V2 provider-free CLI proof
 
-Status: **partial issue #872 implementation; policy authoring/preflight only,
-not runtime orchestration or provider readiness.**
+Status: **partial issue #872 implementation; Enhanced/Advanced CLI execution is
+wired through the trusted host resolver, with live provider readiness still
+requiring explicit preflight evidence.**
 
 ## Surface
 
@@ -13,6 +14,7 @@ contextdesk triage-policy store list --store FILE
 contextdesk triage-policy store save --store FILE --policy FILE --policy-id ID
 contextdesk triage-policy store select --store FILE --policy-id ID
 contextdesk triage-policy store clear --store FILE
+contextdesk triage run --request REQUEST.json --preflight PREFLIGHT.json
 ```
 
 All three actions return `contextdesk.cli.triage_policy.v1` with
@@ -58,14 +60,36 @@ explicit reversible selection changes; no selection means Standard remains the
 safe default. Store output contains policy ids and revisions only, never
 credentials, endpoints, provider bodies, or corpus data.
 
+## Stateful V2 run
+
+`triage run` accepts one bounded `contextdesk.triage.request.v2` document. An
+Enhanced or Advanced request must include a host-authored
+`TriagePolicyPreflightV2` document with `--preflight`; omission or malformed
+preflight fails closed before a provider call. The command then uses the
+existing CLI paths, app configuration, protected-file credential plumbing,
+corpus binding, packet builder, provider backend factory, production runner,
+validation hooks, replay, and cleanup. It does not create a second HTTP client
+or a parallel triage implementation. The exact model id from each admitted
+preflight slot is passed to the backend factory rather than allowing a global
+default model to replace it.
+
+The output is owner-only and contains the typed V2 result plus the ordered
+replay. A grounded result reports `status: "completed"`; a host-validated
+answer that does not establish a root cause reports `status: "partial"`. The
+Standard selection remains intentionally state-free and returns a typed
+`standard_uses_established_path` refusal; ordinary single-model work continues
+through `contextdesk chat` and the established workflow.
+
 ## Residuals
 
-- Automatic AppConfig migration and runtime policy selection are still
-  intentionally not wired; the new store is an explicit file surface until
-  the trusted resolver is integrated.
-- No provider qualification evidence is gathered; preflight facts are explicit
-  host input and the report says live compatibility was not evaluated.
-- No runtime execution, cancellation, replay, finalization, review, GUI, or
-  TypeScript parity is claimed by this slice.
+- Automatic AppConfig migration and implicit policy selection remain deferred;
+  the policy store and preflight are explicit opt-in inputs.
+- No provider qualification evidence is gathered by this command; preflight
+  facts are explicit host input and live compatibility is not inferred.
+- Tauri/GUI live selection and server-side live execution still need to call
+  the same host resolver; the CLI path is the first product surface wired.
+- CLI output is emitted after the run. Incremental JSONL/Tauri event streaming
+  remains follow-up work, although the returned replay is the shared ordered
+  SDK event stream.
 - JSONL currently uses the normal one-shot envelope because compilation does
   not stream; the future execution surface will use shared SDK run events.

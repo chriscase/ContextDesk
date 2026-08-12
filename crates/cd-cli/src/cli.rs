@@ -319,6 +319,10 @@ pub struct TriageRunArgs {
     /// Use `-` to read the bounded request body from stdin.
     #[arg(long, visible_alias = "input", value_name = "FILE")]
     pub request: PathBuf,
+    /// Host-authored qualification/preflight JSON for an Enhanced/Advanced
+    /// inline or saved policy.  Omitting it keeps the command fail-closed.
+    #[arg(long, value_name = "FILE")]
+    pub preflight: Option<PathBuf>,
 }
 
 /// Explicit-file operations for the revisioned Triage Policy V2 store.

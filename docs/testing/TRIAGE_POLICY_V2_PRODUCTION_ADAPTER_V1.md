@@ -1,6 +1,7 @@
 # Triage Policy V2 production adapter — contributor subset V1
 
-Status: **provider-free production-path adapter; partial, not product wired**
+Status: **provider-free production-path adapter; contributor subset is wired
+through the trusted CLI host path, with broader surfaces still partial**
 
 This slice bridges the exact, pure `TriagePolicyV2` compiler output to the
 existing linked-log `ContributionRuntime`. It intentionally prepares only the
@@ -35,6 +36,9 @@ The adapter does not read `AppConfig`, credentials, Keychain, protected files,
 endpoints, qualification storage, corpora, or retrieval state. A trusted Rust
 host resolves those facts first and supplies exact `RolePreflightV2` records
 plus opaque authorized backends. The compiler remains the only policy compiler.
+The first product host is the CLI `triage run --request ... --preflight ...`
+path, which performs that resolution through the existing provider and corpus
+plumbing before invoking this adapter.
 
 ## Typed pre-provider refusals
 
@@ -82,11 +86,13 @@ The adapter test proves:
 
 ## Not proven / residual product blocker
 
-- No CLI, Tauri, server, or SDK command selects this adapter yet.
-- No host resolver yet constructs exact-role V2 preflight plus backend bindings
-  from saved policy, qualification evidence, credentials, and provider config.
-- The owner-only V2 request/event/result stream is not projected from the
-  existing production contribution events.
+- Tauri, server, and GUI commands do not select this adapter yet; the CLI is the
+  first wired product surface.
+- The CLI host resolver constructs exact-role V2 preflight plus backend
+  bindings from saved/inline policy, explicit preflight evidence, credentials,
+  and provider config. Broader role support still remains outside this subset.
+- The CLI returns the owner-only V2 request/event/result replay after the run;
+  incremental progress projection remains open on other surfaces.
 - A smaller per-contributor operation timeout, finalizer reserve, reviewer
   reserve/condition/requirement, timeline role, and visible optional dropout
   still require production runtime/event work.

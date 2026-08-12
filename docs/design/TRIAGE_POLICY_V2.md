@@ -191,10 +191,15 @@ causal proposals, contradiction checking, and evidence-gap finding. That reuses
 the existing immutable host packet, provider backends, cancellation, budgets,
 stage events, validation, reconciliation, renderer, and cleanup.
 
-It refuses Standard (which stays on the established single-model route),
-timeline analysis, a finalizer, a reviewer, visible optional-role dropout, or
-deadline semantics the established route cannot enforce. It is not selected by
-CLI or Tauri yet. See
+The trusted host resolver now binds this production runner for the explicit CLI
+`triage run --request ... --preflight ...` surface. It resolves the exact
+corpus, packet, profile, protected-file credentials, qualified model ids, and
+backend through the existing plumbing, then returns the shared typed replay and
+result. It refuses Standard (which stays on the established single-model
+route), timeline analysis, a finalizer, a reviewer, visible optional-role
+dropout, or deadline semantics the established route cannot enforce. Tauri/GUI
+and server live selection are still follow-up surfaces; they must call this
+same resolver rather than recreate it. See
 [`TRIAGE_POLICY_V2_PRODUCTION_ADAPTER_V1.md`](../testing/TRIAGE_POLICY_V2_PRODUCTION_ADAPTER_V1.md).
 
 ## Release proof
