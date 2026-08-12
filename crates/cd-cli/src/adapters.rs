@@ -300,7 +300,11 @@ pub fn apply_configured_retrieval_roles(
         .as_ref()
         .filter(|role| role.enabled)
     {
-        match cd_workflow::retrieval::build_embedding_backend(role, Some(secrets)) {
+        match cd_workflow::retrieval::build_embedding_backend_with_timeout(
+            role,
+            Some(secrets),
+            app_cfg.router.deadline_ms,
+        ) {
             Ok(backend) => {
                 host.set_embed_backend_with_model(Some(Arc::clone(&backend)), &role.model);
                 host.set_log_embed_backend(Some(backend), &role.model);
@@ -316,7 +320,11 @@ pub fn apply_configured_retrieval_roles(
         .as_ref()
         .filter(|role| role.enabled)
     {
-        match cd_workflow::retrieval::build_rerank_backend(role, Some(secrets)) {
+        match cd_workflow::retrieval::build_rerank_backend_with_timeout(
+            role,
+            Some(secrets),
+            app_cfg.router.deadline_ms,
+        ) {
             Ok(backend) => host.set_log_rerank_backend(Some(backend)),
             Err(error) => {
                 tracing::warn!(error = %error, "configured CLI reranker role unavailable; preserving pre-rerank order");
