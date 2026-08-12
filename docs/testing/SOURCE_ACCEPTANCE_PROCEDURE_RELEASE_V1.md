@@ -3,7 +3,7 @@
 Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
-- branch: `integrate/triage-policy-sdk-v2`
+- branch: `integrate/triage-policy-sdk-v2-vercel-evidence-v1`
 - exact tested source/build SHA: `fcfdd30d1e52ee0fa379cce4682a79c51ce252c6`
 - acceptance-procedure revision: this branch tip may be newer than the build
   SHA; fetch the branch first, then build the exact tested SHA above. This
@@ -11,14 +11,17 @@ Authoritative source:
 
 The exact tested source/build SHA above is the identity that must be fetched, built, and
 verified. Do not substitute an older baseline, a moving branch tip, or an
-unrelated local checkout. There is not yet live Vercel evidence for this exact
-runtime. The prior report
+unrelated local checkout. A fresh exact-runtime Vercel diagnostic is now
+recorded in
+`docs/testing/VERCEL_DEEPSEEK_DIAGNOSTIC_2026-08-12_RELEASE_FCFDD30D.md`.
+The prior report
 `docs/testing/VERCEL_DEEPSEEK_DIAGNOSTIC_2026-08-12_RELEASE_A3A5263E.md`
 is historical evidence for the preceding code SHA only; it is useful
 transport/product-path evidence, but it is not an employer-gateway
 compatibility claim or evidence for this exact runtime.
 Earlier `188e20a9ff35`, `601964de`, and `da231830` runs are also historical
-context only.
+context only. The fresh run is still Vercel-only evidence and does not
+establish employer-gateway compatibility.
 
 This pin supersedes earlier acceptance inputs. Since those older pins, the
 release has added the typed Triage Policy V2 graph and host resolver, shared
@@ -103,7 +106,8 @@ product/usefulness failure rather than guessing at a provider cause.
 The release includes explicit inconclusive verdicts, exact model/profile
 binding, protected-file credentials, adaptive deadlines, production-path
 embedding/reranking adapters, and bounded reasoning-channel telemetry. The
-current Vercel evidence is limited to the DeepSeek diagnostic described above;
-it does not establish employer compatibility or retrieval-role readiness. Live
-employer compatibility, answer usefulness, and any employer embedding/rerank
-verdict still require this machine's own gateway and corpus evidence.
+current Vercel evidence is limited to the DeepSeek diagnostic described in
+the exact-runtime report; it does not establish employer compatibility or
+retrieval-role readiness. Live employer compatibility, answer usefulness, and
+any employer embedding/rerank verdict still require this machine's own gateway
+and corpus evidence.

@@ -1,8 +1,8 @@
 # Adversarial triage-runtime hardening — P0 fix
 
 **Code SHA:** `fcfdd30d1e52ee0fa379cce4682a79c51ce252c6`
-**Branch:** `integrate/triage-policy-sdk-v2`  
-**Scope:** provider-free production-path hardening; no live compatibility claim
+**Branch:** `integrate/triage-policy-sdk-v2-vercel-evidence-v1`
+**Scope:** provider-free production-path hardening plus exact-runtime Vercel evidence; no employer compatibility claim
 
 ## Finding
 
@@ -30,9 +30,11 @@ successful V2 triage path.
 - `cargo test -p cd-workflow --test triage_policy_production_adapter` — 5 passed
 - `cargo test -p cd-cli --test gateway_diagnose` — 17 passed
 
-The full workspace and a new exact-SHA live Vercel diagnostic remain required
-before acceptance. The earlier Vercel report is historical for the preceding
-code SHA.
+The full workspace gates pass on the exact code SHA. A fresh exact-SHA Vercel
+diagnostic is recorded in
+`docs/testing/VERCEL_DEEPSEEK_DIAGNOSTIC_2026-08-12_RELEASE_FCFDD30D.md`.
+The earlier Vercel report remains historical for the preceding code SHA, and
+the fresh Vercel result is not an employer-gateway verdict.
 
 ## Follow-up status
 
@@ -50,9 +52,11 @@ budget and the final runner budget is recomputed after setup. A backend
 factory's synchronous DNS/client construction cannot be forcibly interrupted
 until the factory exposes an async cancellation contract; it now fails closed
 before and after setup rather than handing a stale budget to the runner. A
-fresh exact-runtime live gateway diagnostic must still be run. These setup and
-live-provider checks are not evidence that the primary OpenAI-compatible path
-is unusable. CLI and desktop configured retrieval roles now share the same
+fresh exact-runtime live gateway diagnostic has now been run on Vercel; it
+passed the product workflow and usefulness dimensions while correctly leaving
+the direct native-tool capability unqualified. These setup and live-provider
+checks are not evidence that the primary OpenAI-compatible path is unusable.
+CLI and desktop configured retrieval roles now share the same
 explicit-vs-adaptive timeout selection. Exact-role qualification setup and its
 synthetic probe share one turn-owned deadline; contributor qualification
 rechecks cancellation before publishing. Exact-role finalizer probes credit a
