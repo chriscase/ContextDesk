@@ -158,6 +158,7 @@ fn compile_accepts_exact_namespaced_model_id_without_state_or_network() {
     let json = envelope(&output);
     assert_eq!(json["command"], "triage_policy");
     assert_eq!(json["data"]["accepted"], true);
+    assert_eq!(json["data"]["privacy"], "owner_only");
     assert_eq!(json["data"]["mode"], "standard");
     assert_eq!(
         json["data"]["slots"][0]["model"]["model_id"],
@@ -263,7 +264,7 @@ fn egress_denial_and_same_model_independence_are_honest() {
 }
 
 #[test]
-fn output_is_share_safe_and_never_echoes_input_paths() {
+fn owner_only_output_is_bounded_secret_free_and_does_not_echo_paths() {
     let temp = tempfile::tempdir().expect("tempdir");
     let secretish_dir = temp.path().join("owner-private-vck_not_a_real_secret");
     std::fs::create_dir(&secretish_dir).expect("private-looking dir");
@@ -286,7 +287,7 @@ fn output_is_share_safe_and_never_echoes_input_paths() {
             !rendered
                 .to_ascii_lowercase()
                 .contains(&forbidden.to_ascii_lowercase()),
-            "share-safe output leaked {forbidden}: {rendered}"
+            "bounded owner-only output leaked {forbidden}: {rendered}"
         );
     }
 
@@ -312,6 +313,7 @@ fn example_is_standard_offline_and_progressive() {
     assert!(output.status.success());
     let json = envelope(&output);
     assert_eq!(json["data"]["mode"], "standard");
+    assert_eq!(json["data"]["privacy"], "owner_only");
     assert_eq!(
         json["data"]["example_policy"]["schema_id"],
         "contextdesk.triage_policy.v2"
@@ -324,5 +326,6 @@ fn example_is_standard_offline_and_progressive() {
         .expect("run text example");
     let text = String::from_utf8(text.stdout).expect("text utf8");
     assert!(text.contains("Standard is the permanent simple default"));
+    assert!(text.contains("Output privacy: owner-only"));
     assert!(text.contains("Network: no"));
 }

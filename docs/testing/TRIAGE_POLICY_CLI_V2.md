@@ -11,15 +11,18 @@ contextdesk triage-policy validate --policy FILE --preflight FILE
 contextdesk triage-policy compile --policy FILE --preflight FILE
 ```
 
-All three actions return `contextdesk.cli.triage_policy.v1`. Validation and
-compilation call `cd_core::multi_model::triage_policy::compile_triage_policy_v2`
-directly. There is no second policy implementation in the CLI.
+All three actions return `contextdesk.cli.triage_policy.v1` with
+`privacy: "owner_only"`. Validation and compilation call
+`cd_core::multi_model::triage_policy::compile_triage_policy_v2` directly. There
+is no second policy implementation in the CLI.
 
 The command is dispatched before ContextDesk path/config resolution. It reads
 only the explicitly named JSON files, each bounded to 1 MiB. It does not read
 or mutate AppConfig or CLI state, touch a corpus, read credentials or Keychain,
 perform discovery, or contact a provider. Input paths and parse details are not
-included in output.
+included in output. Exact profile/model identities are intentionally retained,
+so this owner-local output is not described or tested as share-safe and must be
+reviewed before sharing.
 
 A rejected but well-formed policy is a completed report with process exit 8
 (`not_ready`), preserving every typed rejection and configured slot disposition
@@ -40,8 +43,9 @@ git diff --check
 
 The six process tests cover exact namespaced model ids, invalid schema, required
 and optional dropout, denied remote egress, same-model/multi-role accounting,
-poisoned ambient state, path/privacy scanning, the safe Standard example, and
-both human and JSON rendering.
+poisoned ambient state, bounded/path-safe and secret-free output, explicit
+owner-only labelling, the safe Standard example, and both human and JSON
+rendering.
 
 ## Residuals
 

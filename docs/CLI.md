@@ -75,7 +75,7 @@ metacharacters literal. If a question begins with a command name such as
 | `logging-assessment [corpus-id]` (alias `assess`) | Deterministic logging-quality assessment with fixed finding-code improvement hints (no provider); defaults to the current corpus. |
 | `exception-episodes [corpus-id]` | Deterministic exception episode correlation (occurrence vs raw records; no provider). |
 | `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
-| `triage-policy validate\|compile\|example` | Offline Triage Policy V2 validation over explicit policy/preflight JSON files. Does not read AppConfig, credentials, Keychain, discovery state, or a corpus, and never contacts a provider. |
+| `triage-policy validate\|compile\|example` | Offline, owner-only Triage Policy V2 validation over explicit policy/preflight JSON files. Retains exact profile/model identities; does not read AppConfig, credentials, Keychain, discovery state, or a corpus, and never contacts a provider. |
 | `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
 
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
@@ -303,6 +303,14 @@ counts; those counts are explicitly not consensus. Rejected preflight is a
 completed result with exit code 8 (`not_ready`) so JSON output retains every
 typed rejection and slot disposition. Malformed or oversized input is a user
 error. Input paths are never echoed.
+
+This is an **owner-only** view, explicitly labelled `privacy: "owner_only"` in
+JSON and in human output, because exact profile and catalog-model identities are
+part of the policy and compiled plan. The command remains bounded, does not read
+or print credentials, and does not echo input paths, but its output is not a
+share-safe artifact. Review it before sharing. There is deliberately no
+pseudonymization here: the owner-local compiler must show which exact configured
+model each role would use.
 
 Standard remains the permanent simple one-model default. Enhanced and Advanced
 use the same contract with progressively visible roles, budgets, qualification,

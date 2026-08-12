@@ -56,6 +56,9 @@ pub struct TriagePolicyCommandOutput {
     pub action: &'static str,
     /// Whether the compiler accepted the policy and preflight facts.
     pub accepted: bool,
+    /// Exact profile/model identities make this an owner-local view, not a
+    /// share-safe artifact.
+    pub privacy: &'static str,
     /// Progressive-disclosure policy level, when input parsing succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<TriagePolicyMode>,
@@ -106,7 +109,7 @@ impl Render for TriagePolicyCommandOutput {
             }
         } else {
             out.push_str(&format!(
-                "Status: {}\nMode:   {}\n",
+                "Status:  {}\nMode:    {}\nPrivacy: owner-only (contains exact profile/model identities)\n",
                 if self.accepted {
                     "ACCEPTED"
                 } else {
@@ -158,7 +161,7 @@ impl Render for TriagePolicyCommandOutput {
             }
         }
         out.push_str(
-            "\nExternal effects\n  Network: no\n  Credentials: not read\n  App configuration: not accessed\n  Live compatibility: not evaluated\n",
+            "\nExternal effects\n  Network: no\n  Credentials: not read\n  App configuration: not accessed\n  Live compatibility: not evaluated\n  Output privacy: owner-only; review before sharing\n",
         );
         out
     }
@@ -190,6 +193,7 @@ fn evaluate(
             schema_id: TRIAGE_POLICY_CLI_SCHEMA_ID,
             action,
             accepted: true,
+            privacy: "owner_only",
             mode: Some(mode),
             slots: compiled.slots.clone(),
             rejections: Vec::new(),
@@ -202,6 +206,7 @@ fn evaluate(
             schema_id: TRIAGE_POLICY_CLI_SCHEMA_ID,
             action,
             accepted: false,
+            privacy: "owner_only",
             mode: Some(mode),
             slots: failure.slots,
             rejections: failure.rejections,
@@ -225,6 +230,7 @@ fn example() -> TriagePolicyCommandOutput {
         schema_id: TRIAGE_POLICY_CLI_SCHEMA_ID,
         action: "example",
         accepted: true,
+        privacy: "owner_only",
         mode: Some(TriagePolicyMode::Standard),
         slots: Vec::new(),
         rejections: Vec::new(),
