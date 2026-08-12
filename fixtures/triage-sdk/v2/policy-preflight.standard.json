@@ -60,7 +60,8 @@
       "reserve_ms": 120000,
       "operation_timeout_ms": 120000,
       "max_context_chars": 120000
-    }
+    },
+    "phase_cap_authority": "stock_default"
   },
   "execution": "sequential"
 }

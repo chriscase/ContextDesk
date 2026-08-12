@@ -181,7 +181,19 @@ pub struct TerminalPhaseBudgetV2 {
 }
 
 /// Independent, host-measurable ceilings for one triage turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TriagePhaseCapAuthorityV2 {
+    /// The cap values came from [`TriageBudgetV2::default`].
+    #[default]
+    StockDefault,
+    /// The cap values were supplied or intentionally changed by a policy
+    /// author and must not be widened by host alignment.
+    Explicit,
+}
+
+/// Independent, host-measurable ceilings for one triage turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TriageBudgetV2 {
     /// Explicit monotonic whole-turn deadline, or `None` to inherit host policy.
@@ -198,6 +210,10 @@ pub struct TriageBudgetV2 {
     pub finalizer: TerminalPhaseBudgetV2,
     /// Conditional reviewer reserve and operation cap.
     pub reviewer: TerminalPhaseBudgetV2,
+    /// Provenance for host alignment of operation caps. The field is additive
+    /// on the wire; omission in legacy budget objects is treated as explicit.
+    #[serde(default)]
+    pub phase_cap_authority: TriagePhaseCapAuthorityV2,
 }
 
 impl Default for TriageBudgetV2 {
@@ -229,7 +245,53 @@ impl Default for TriageBudgetV2 {
                 operation_timeout_ms: 120_000,
                 max_context_chars: 120_000,
             },
+            phase_cap_authority: TriagePhaseCapAuthorityV2::StockDefault,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for TriageBudgetV2 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            whole_turn_deadline_ms: Option<u64>,
+            max_provider_calls: u32,
+            max_context_chars: u64,
+            contributors: ContributorPhaseBudgetV2,
+            corrections: CorrectionBudgetV2,
+            finalizer: TerminalPhaseBudgetV2,
+            reviewer: TerminalPhaseBudgetV2,
+            #[serde(default)]
+            phase_cap_authority: Option<TriagePhaseCapAuthorityV2>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            whole_turn_deadline_ms: wire.whole_turn_deadline_ms,
+            max_provider_calls: wire.max_provider_calls,
+            max_context_chars: wire.max_context_chars,
+            contributors: wire.contributors,
+            corrections: wire.corrections,
+            finalizer: wire.finalizer,
+            reviewer: wire.reviewer,
+            // A serialized budget object without provenance is user-authored
+            // or legacy data; fail closed rather than widening equal-valued
+            // caps. Rust-side `TriageBudgetV2::default()` remains stock.
+            phase_cap_authority: wire
+                .phase_cap_authority
+                .unwrap_or(TriagePhaseCapAuthorityV2::Explicit),
+        })
+    }
+}
+
+impl TriageBudgetV2 {
+    /// Mark operation caps as explicitly authored after intentional mutation.
+    pub fn mark_phase_caps_explicit(&mut self) {
+        self.phase_cap_authority = TriagePhaseCapAuthorityV2::Explicit;
     }
 }
 
@@ -1086,6 +1148,7 @@ pub fn migrate_resolved_legacy_policy_v1(input: LegacyResolvedTriagePolicyV1) ->
         budget.corrections.operation_timeout_ms =
             budget.corrections.operation_timeout_ms.min(deadline);
     }
+    budget.mark_phase_caps_explicit();
 
     if mode == TriagePolicyMode::Standard {
         TriagePolicyV2::standard(input.primary, input.primary_allow_remote)
@@ -1110,6 +1173,38 @@ pub fn migrate_resolved_legacy_policy_v1(input: LegacyResolvedTriagePolicyV1) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase_cap_authority_serialization_fails_closed_for_legacy_budgets() {
+        let stock = TriageBudgetV2::default();
+        let stock_json = serde_json::to_value(stock).expect("stock budget serializes");
+        assert_eq!(
+            stock_json["phase_cap_authority"],
+            serde_json::Value::String("stock_default".into())
+        );
+
+        let mut legacy_json = stock_json.clone();
+        legacy_json
+            .as_object_mut()
+            .expect("budget serializes as object")
+            .remove("phase_cap_authority");
+        let legacy: TriageBudgetV2 =
+            serde_json::from_value(legacy_json).expect("legacy budget remains readable");
+        assert_eq!(
+            legacy.phase_cap_authority,
+            TriagePhaseCapAuthorityV2::Explicit,
+            "without provenance, host alignment must fail closed"
+        );
+
+        let mut explicit_json = stock_json;
+        explicit_json["phase_cap_authority"] = serde_json::Value::String("explicit".into());
+        let explicit: TriageBudgetV2 =
+            serde_json::from_value(explicit_json).expect("explicit budget remains readable");
+        assert_eq!(
+            explicit.phase_cap_authority,
+            TriagePhaseCapAuthorityV2::Explicit
+        );
+    }
 
     fn model(profile: &str, model_id: &str) -> ModelRef {
         ModelRef {

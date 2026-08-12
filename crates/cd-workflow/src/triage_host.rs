@@ -206,6 +206,30 @@ fn validate_requested_scope(
     Ok(())
 }
 
+/// Align a stock/default phase cap with the host's remaining whole-turn
+/// allowance. Explicit provenance is checked by [`align_stock_phase_caps`].
+fn align_stock_phase_cap(configured_ms: u64, remaining_ms: u64) -> u64 {
+    configured_ms.max(remaining_ms)
+}
+
+fn align_stock_phase_caps(policy: &mut TriagePolicyV2, remaining_ms: u64) {
+    if policy.budget.phase_cap_authority
+        != cd_core::multi_model::triage_policy::TriagePhaseCapAuthorityV2::StockDefault
+    {
+        return;
+    }
+    policy.budget.contributors.operation_timeout_ms = align_stock_phase_cap(
+        policy.budget.contributors.operation_timeout_ms,
+        remaining_ms,
+    );
+    policy.budget.corrections.operation_timeout_ms =
+        align_stock_phase_cap(policy.budget.corrections.operation_timeout_ms, remaining_ms);
+    policy.budget.finalizer.operation_timeout_ms =
+        align_stock_phase_cap(policy.budget.finalizer.operation_timeout_ms, remaining_ms);
+    policy.budget.reviewer.operation_timeout_ms =
+        align_stock_phase_cap(policy.budget.reviewer.operation_timeout_ms, remaining_ms);
+}
+
 fn validate_preflight_profile_bindings(
     cfg: &AppConfig,
     preflight: &TriagePolicyPreflightV2,
@@ -577,33 +601,13 @@ pub async fn resolve_v2_host(
     // remaining allowance; otherwise an explicit original deadline would be
     // double-counted and the provider phase could outlive the request.
     //
-    // Raise phase operation caps to at least that remaining whole-turn
-    // allowance. Default TriageBudgetV2 contributor caps are 120s; leaving
-    // them unchanged under a longer host deadline made prepare_v2 fail and
-    // (before fail-closed resolution) silently drop the typed contribution
-    // runtime.
+    // Align only stock/default phase caps to the remaining whole-turn
+    // allowance. Explicit user-authored caps remain authoritative, including
+    // a deliberately smaller cap that should fail closed rather than being
+    // silently enlarged.
     let mut execution_policy = policy.clone();
     execution_policy.budget.whole_turn_deadline_ms = Some(remaining_deadline_ms);
-    execution_policy.budget.contributors.operation_timeout_ms = execution_policy
-        .budget
-        .contributors
-        .operation_timeout_ms
-        .max(remaining_deadline_ms);
-    execution_policy.budget.corrections.operation_timeout_ms = execution_policy
-        .budget
-        .corrections
-        .operation_timeout_ms
-        .max(remaining_deadline_ms);
-    execution_policy.budget.finalizer.operation_timeout_ms = execution_policy
-        .budget
-        .finalizer
-        .operation_timeout_ms
-        .max(remaining_deadline_ms);
-    execution_policy.budget.reviewer.operation_timeout_ms = execution_policy
-        .budget
-        .reviewer
-        .operation_timeout_ms
-        .max(remaining_deadline_ms);
+    align_stock_phase_caps(&mut execution_policy, remaining_deadline_ms);
     let resolution = match resolve_v2_production(
         &execution_policy,
         preflight,
@@ -661,7 +665,7 @@ mod tests {
     use cd_core::investigation_answer::{EvidenceRole, HostEvidenceEntry, HostEvidenceLedger};
     use cd_core::model_ref::ModelRef;
     use cd_core::multi_model::triage_policy::{
-        RolePreflightV2, RoleQualificationV2, RoleRequirement, TriageSlotKindV2,
+        RolePreflightV2, RoleQualificationV2, RoleRequirement, TriageBudgetV2, TriageSlotKindV2,
     };
     use cd_core::providers::ProviderProfile;
     use cd_core::triage_role_qualification::{
@@ -686,6 +690,102 @@ mod tests {
             validate_requested_scope(None, &["source-a".into()], 7),
             Err("source_scope_not_supported_by_v2_packet_builder")
         );
+    }
+
+    #[test]
+    fn stock_phase_caps_align_to_remaining_host_budget() {
+        let mut policy = TriagePolicyV2::standard(
+            ModelRef {
+                profile_id: "profile:test".into(),
+                model_id: "model:test".into(),
+            },
+            false,
+        );
+        policy.mode = TriagePolicyMode::Enhanced;
+        let remaining_ms = 300_000;
+        align_stock_phase_caps(&mut policy, remaining_ms);
+        let stock = TriageBudgetV2::default();
+        assert_eq!(
+            policy.budget.contributors.operation_timeout_ms,
+            remaining_ms
+        );
+        assert_eq!(policy.budget.corrections.operation_timeout_ms, remaining_ms);
+        assert_eq!(policy.budget.finalizer.operation_timeout_ms, remaining_ms);
+        assert_eq!(policy.budget.reviewer.operation_timeout_ms, remaining_ms);
+        assert!(stock.contributors.operation_timeout_ms < remaining_ms);
+    }
+
+    #[test]
+    fn explicit_smaller_phase_caps_are_not_silently_enlarged() {
+        let mut policy = TriagePolicyV2::standard(
+            ModelRef {
+                profile_id: "profile:test".into(),
+                model_id: "model:test".into(),
+            },
+            false,
+        );
+        policy.mode = TriagePolicyMode::Enhanced;
+        let remaining_ms = 300_000;
+        let explicit = remaining_ms - 1;
+        policy.budget.mark_phase_caps_explicit();
+        policy.budget.contributors.operation_timeout_ms = explicit;
+        policy.budget.corrections.operation_timeout_ms = explicit;
+        policy.budget.finalizer.operation_timeout_ms = explicit;
+        policy.budget.reviewer.operation_timeout_ms = explicit;
+        align_stock_phase_caps(&mut policy, remaining_ms);
+        assert_eq!(policy.budget.contributors.operation_timeout_ms, explicit);
+        assert_eq!(policy.budget.corrections.operation_timeout_ms, explicit);
+        assert_eq!(policy.budget.finalizer.operation_timeout_ms, explicit);
+        assert_eq!(policy.budget.reviewer.operation_timeout_ms, explicit);
+    }
+
+    #[test]
+    fn explicit_larger_phase_caps_are_preserved_without_downward_mutation() {
+        let mut policy = TriagePolicyV2::standard(
+            ModelRef {
+                profile_id: "profile:test".into(),
+                model_id: "model:test".into(),
+            },
+            false,
+        );
+        policy.mode = TriagePolicyMode::Enhanced;
+        let remaining_ms = 300_000;
+        let explicit = remaining_ms + 1;
+        policy.budget.mark_phase_caps_explicit();
+        policy.budget.contributors.operation_timeout_ms = explicit;
+        policy.budget.corrections.operation_timeout_ms = explicit;
+        policy.budget.finalizer.operation_timeout_ms = explicit;
+        policy.budget.reviewer.operation_timeout_ms = explicit;
+        align_stock_phase_caps(&mut policy, remaining_ms);
+        assert_eq!(policy.budget.contributors.operation_timeout_ms, explicit);
+        assert_eq!(policy.budget.corrections.operation_timeout_ms, explicit);
+        assert_eq!(policy.budget.finalizer.operation_timeout_ms, explicit);
+        assert_eq!(policy.budget.reviewer.operation_timeout_ms, explicit);
+    }
+
+    #[test]
+    fn explicit_stock_valued_phase_caps_are_not_treated_as_defaults() {
+        let mut policy = TriagePolicyV2::standard(
+            ModelRef {
+                profile_id: "profile:test".into(),
+                model_id: "model:test".into(),
+            },
+            false,
+        );
+        policy.mode = TriagePolicyMode::Enhanced;
+        policy.budget.mark_phase_caps_explicit();
+        let remaining_ms = 300_000;
+        let stock_ms = TriageBudgetV2::default().contributors.operation_timeout_ms;
+        assert_eq!(stock_ms, 120_000);
+        policy.budget.contributors.operation_timeout_ms = stock_ms;
+        policy.budget.corrections.operation_timeout_ms = stock_ms;
+        policy.budget.finalizer.operation_timeout_ms = stock_ms;
+        policy.budget.reviewer.operation_timeout_ms = stock_ms;
+        align_stock_phase_caps(&mut policy, remaining_ms);
+        assert_eq!(policy.budget.contributors.operation_timeout_ms, stock_ms);
+        assert_eq!(policy.budget.corrections.operation_timeout_ms, stock_ms);
+        assert_eq!(policy.budget.finalizer.operation_timeout_ms, stock_ms);
+        assert_eq!(policy.budget.reviewer.operation_timeout_ms, stock_ms);
     }
 
     #[test]
