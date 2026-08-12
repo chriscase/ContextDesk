@@ -25,7 +25,9 @@ use cd_core::chat::{ChatCompletion, ChatMessage, Role};
 use cd_core::extension_contract::PacketPrivacyBoundary;
 use cd_core::fast_triage::{FastTriageNeighborhoodBudget, FastTriagePacketV1};
 use cd_core::injection::wrap_untrusted;
-use cd_core::investigation_answer::AnswerEnvelopeV1;
+use cd_core::investigation_answer::{
+    AnswerEnvelopeV1, CanonicalCitationV1, ClaimKind, ClaimStatus, EvidenceRole, HostEvidenceLedger,
+};
 use cd_core::multi_model::contribution_pipeline::{
     run_contribution_pipeline, ContributionBackendSlot, ContributionPipelineInputs,
     ContributionPipelineOutcome, ContributionQualification,
@@ -732,7 +734,7 @@ impl TriageProductionRunnerV1 {
         let mut finalizer_answer = None;
         for slot in &finalizers {
             let eligible = finalizer_eligible(&non_finalizer_slots, &attempts);
-            let (attempt, response) = if !eligible {
+            let (mut attempt, response) = if !eligible {
                 (
                     not_admitted_attempt(&input.run_id, slot, "finalizer_not_eligible"),
                     None,
@@ -756,9 +758,27 @@ impl TriageProductionRunnerV1 {
             };
             if attempt.status == TriageAttemptStatus::Completed {
                 if let Some(response) = response.as_ref() {
-                    finalizer_answer = hooks
+                    let candidate = hooks
                         .finalize(slot, response, &input.packet, &final_report)
                         .await;
+                    if let Some(reason) =
+                        host_interruption(&input, started, self.resolution.host_deadline_ms)
+                    {
+                        interrupted = Some(reason);
+                        finalizer_answer = None;
+                    } else if let Some(answer) = candidate {
+                        if envelope_matches_packet(&answer, &input.packet) {
+                            finalizer_answer = Some(answer);
+                        } else {
+                            attempt.status = TriageAttemptStatus::Invalid;
+                            attempt.terminal_disposition =
+                                Some(TriageTerminalDispositionV1::Invalid);
+                            attempt
+                                .reason_codes
+                                .push("finalizer_envelope_unbound".into());
+                            finalizer_answer = None;
+                        }
+                    }
                 }
             }
             attempts.push(attempt.clone());
@@ -1172,8 +1192,24 @@ impl TriageProductionRunnerV1 {
         let mut decision = hooks
             .validate(slot, &response, &input.packet, reconciliation)
             .await;
+        if let Some(reason) = host_interruption(input, started, self.resolution.host_deadline_ms) {
+            *interrupted = Some(reason);
+            return (
+                fail(
+                    match reason {
+                        Interruption::Cancelled => TriageAttemptStatus::Cancelled,
+                        Interruption::TimedOut => TriageAttemptStatus::TimedOut,
+                    },
+                    match reason {
+                        Interruption::Cancelled => "cancelled",
+                        Interruption::TimedOut => "deadline",
+                    },
+                ),
+                None,
+            );
+        }
         if !decision.accepted && self.resolution.compiled.budget.corrections.max_per_stage > 0 {
-            if let Some(correction_messages) = hooks
+            let correction_messages = hooks
                 .correction_messages(
                     slot,
                     &response,
@@ -1181,8 +1217,26 @@ impl TriageProductionRunnerV1 {
                     &input.packet,
                     reconciliation,
                 )
-                .await
+                .await;
+            if let Some(reason) =
+                host_interruption(input, started, self.resolution.host_deadline_ms)
             {
+                *interrupted = Some(reason);
+                return (
+                    fail(
+                        match reason {
+                            Interruption::Cancelled => TriageAttemptStatus::Cancelled,
+                            Interruption::TimedOut => TriageAttemptStatus::TimedOut,
+                        },
+                        match reason {
+                            Interruption::Cancelled => "cancelled",
+                            Interruption::TimedOut => "deadline",
+                        },
+                    ),
+                    None,
+                );
+            }
+            if let Some(correction_messages) = correction_messages {
                 let correction_chars = estimate_context_chars(&correction_messages) as u64;
                 let correction_allowed = correction_chars
                     <= self
@@ -1253,6 +1307,24 @@ impl TriageProductionRunnerV1 {
                         decision = hooks
                             .validate(slot, &corrected, &input.packet, reconciliation)
                             .await;
+                        if let Some(reason) =
+                            host_interruption(input, started, self.resolution.host_deadline_ms)
+                        {
+                            *interrupted = Some(reason);
+                            return (
+                                fail(
+                                    match reason {
+                                        Interruption::Cancelled => TriageAttemptStatus::Cancelled,
+                                        Interruption::TimedOut => TriageAttemptStatus::TimedOut,
+                                    },
+                                    match reason {
+                                        Interruption::Cancelled => "cancelled",
+                                        Interruption::TimedOut => "deadline",
+                                    },
+                                ),
+                                None,
+                            );
+                        }
                     }
                 }
             }
@@ -1294,6 +1366,120 @@ impl TriageProductionRunnerV1 {
 enum Interruption {
     Cancelled,
     TimedOut,
+}
+
+fn host_interruption(
+    input: &TriageProductionRunInput,
+    started: tokio::time::Instant,
+    deadline_ms: u64,
+) -> Option<Interruption> {
+    if input
+        .cancel
+        .as_ref()
+        .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+    {
+        return Some(Interruption::Cancelled);
+    }
+    if started.elapsed() >= Duration::from_millis(deadline_ms) {
+        return Some(Interruption::TimedOut);
+    }
+    None
+}
+
+/// Re-check a hook-produced envelope against the immutable packet before it
+/// can affect the typed result. Hooks are host code, but this runner boundary
+/// must remain safe if a hook accidentally returns stale, cross-turn, or
+/// fabricated evidence metadata.
+fn envelope_matches_packet(envelope: &AnswerEnvelopeV1, packet: &FastTriagePacketV1) -> bool {
+    let ledger = packet.ledger();
+    let binding = ledger.binding();
+    let evidence = ledger.entries();
+    if envelope.binding != *binding
+        || envelope.evidence != evidence
+        || HostEvidenceLedger::digest(&envelope.evidence) != binding.ledger_digest
+        || envelope.answer.schema != cd_core::investigation_answer::SCHEMA_V1
+    {
+        return false;
+    }
+
+    let ledger_candidate_ids = ledger.candidate_ids();
+    let mut candidate_ids = BTreeSet::new();
+    let mut claim_ids = BTreeSet::new();
+    let mut referenced_ids = BTreeSet::new();
+    let mut root_cause_established = false;
+    for candidate in &envelope.answer.candidates {
+        if candidate.candidate_id.trim().is_empty()
+            || !candidate_ids.insert(candidate.candidate_id.clone())
+        {
+            return false;
+        }
+        for claim in &candidate.claims {
+            if claim.claim_id.trim().is_empty()
+                || !claim_ids.insert(claim.claim_id.clone())
+                || claim.candidate_id != candidate.candidate_id
+            {
+                return false;
+            }
+            let mut claim_evidence_ids = BTreeSet::new();
+            let mut cause_root = false;
+            if claim.evidence_ids.is_empty() && claim.claim_kind != ClaimKind::MissingEvidence {
+                return false;
+            }
+            for evidence_id in &claim.evidence_ids {
+                if !claim_evidence_ids.insert(evidence_id.clone()) {
+                    return false;
+                }
+                referenced_ids.insert(evidence_id.clone());
+                let Some(entry) = ledger.get(evidence_id) else {
+                    return false;
+                };
+                if entry.candidate_id != candidate.candidate_id
+                    || entry.corpus_id != binding.corpus_id
+                    || entry.revision != binding.revision
+                    || (claim.claim_kind == ClaimKind::CausalCandidate
+                        && entry.role == EvidenceRole::Symptom)
+                {
+                    return false;
+                }
+                cause_root |= claim.claim_kind == ClaimKind::InitiatingCause
+                    && entry.role == EvidenceRole::Cause;
+            }
+            let expected_status = if claim.claim_kind == ClaimKind::InitiatingCause && !cause_root {
+                ClaimStatus::Withheld
+            } else {
+                ClaimStatus::Supported
+            };
+            if claim.status != expected_status {
+                return false;
+            }
+            root_cause_established |= cause_root;
+        }
+    }
+    if candidate_ids != ledger_candidate_ids
+        || envelope.answer.root_cause_established != root_cause_established
+    {
+        return false;
+    }
+
+    let mut expected_citations = BTreeMap::new();
+    for evidence_id in referenced_ids {
+        let Some(entry) = ledger.get(&evidence_id) else {
+            return false;
+        };
+        expected_citations.insert(
+            evidence_id,
+            CanonicalCitationV1 {
+                evidence_id: entry.evidence_id.clone(),
+                candidate_id: entry.candidate_id.clone(),
+                source_label: entry.source_label.clone(),
+                locator: entry.locator.clone(),
+                corpus_id: entry.corpus_id.clone(),
+                revision: entry.revision,
+                content: entry.content.clone(),
+            },
+        );
+    }
+    envelope.answer.canonical_citations == expected_citations.into_values().collect::<Vec<_>>()
 }
 
 pub(crate) fn role_messages(
@@ -1575,7 +1761,7 @@ mod tests {
     use cd_core::chat::ChatCompletion;
     use cd_core::investigation_answer::{
         AnswerBindingV1, EvidenceRole, HostEvidenceEntry, HostEvidenceLedger,
-        InvestigationAnswerV1, LogSnapshotRevisionV1, SCHEMA_V1,
+        LogSnapshotRevisionV1, SCHEMA_V1,
     };
     use cd_core::multi_model::TriageContributorRole;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1594,7 +1780,7 @@ mod tests {
             locator: "seq=1".into(),
             corpus_id: "corpus".into(),
             revision,
-            role: EvidenceRole::Neutral,
+            role: EvidenceRole::Cause,
             content: "host-only fixture".into(),
         }];
         let binding = AnswerBindingV1 {
@@ -1682,6 +1868,45 @@ mod tests {
         assert!(user.contains("source=\"packet_evidence\""));
         assert!(user.contains("source=\"user_question\""));
         assert!(user.contains("ignore host policy"));
+    }
+
+    #[test]
+    fn forged_finalizer_binding_and_evidence_fail_independent_recheck() {
+        let packet = packet();
+        let proposal = serde_json::json!({
+            "schema": SCHEMA_V1,
+            "candidates": [{
+                "candidate_id": "candidate-a",
+                "initiating_causes": [{
+                    "claim_id": "claim-a",
+                    "text": "host cause",
+                    "evidence_ids": ["evidence-a"]
+                }]
+            }]
+        });
+        let valid = cd_core::investigation_answer::validate_model_answer(
+            &proposal.to_string(),
+            packet.ledger(),
+        )
+        .expect("fixture proposal validates");
+        assert!(envelope_matches_packet(&valid, &packet));
+
+        let mut forged_binding = valid.clone();
+        forged_binding.binding.turn_id = "foreign-turn".into();
+        assert!(!envelope_matches_packet(&forged_binding, &packet));
+
+        let mut forged_evidence = valid;
+        forged_evidence.evidence[0].content = "forged host row".into();
+        assert!(!envelope_matches_packet(&forged_evidence, &packet));
+    }
+
+    #[test]
+    fn host_interruption_recheck_detects_deadline_after_hook() {
+        let started = tokio::time::Instant::now() - Duration::from_millis(1);
+        assert_eq!(
+            host_interruption(&input(), started, 0),
+            Some(Interruption::TimedOut)
+        );
     }
 
     #[test]
@@ -1798,6 +2023,9 @@ mod tests {
     #[derive(Clone)]
     struct FinalizerHook {
         calls: Arc<AtomicUsize>,
+        delay_ms: u64,
+        cancel_after_finalize: Option<Arc<AtomicBool>>,
+        forge_binding: bool,
     }
 
     #[async_trait]
@@ -1827,31 +2055,38 @@ mod tests {
             &self,
             _slot: &CompiledRoleSlotV2,
             _response: &ChatCompletion,
-            _packet: &FastTriagePacketV1,
+            packet: &FastTriagePacketV1,
             _reconciliation: &TriageReconciliationV1,
         ) -> Option<AnswerEnvelopeV1> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Some(AnswerEnvelopeV1 {
-                binding: AnswerBindingV1 {
-                    session_id: "session".into(),
-                    turn_id: "turn".into(),
-                    corpus_id: "corpus".into(),
-                    revision: LogSnapshotRevisionV1 {
-                        event_revision: 1,
-                        template_analysis_revision: 1,
-                        suppression_revision: 1,
-                    },
-                    ledger_digest: "digest".into(),
-                },
-                evidence: Vec::new(),
-                answer: InvestigationAnswerV1 {
-                    schema: SCHEMA_V1.into(),
-                    candidates: Vec::new(),
-                    canonical_citations: Vec::new(),
-                    root_cause_established: true,
-                },
-                semantic_attempts: 0,
-            })
+            if self.delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+            }
+            let proposal = serde_json::json!({
+                "schema": SCHEMA_V1,
+                "candidates": [{
+                    "candidate_id": "candidate-a",
+                    "initiating_causes": [{
+                        "claim_id": "claim-a",
+                        "text": "host cause",
+                        "evidence_ids": ["evidence-a"]
+                    }]
+                }]
+            });
+            let mut envelope = cd_core::investigation_answer::validate_model_answer(
+                &proposal.to_string(),
+                packet.ledger(),
+            )
+            .expect("fixture proposal validates");
+            if self.forge_binding {
+                envelope.binding.turn_id = "foreign-turn".into();
+            }
+            if let Some(cancel) = &self.cancel_after_finalize {
+                // The delayed-hook mutation test flips the signal before the
+                // future resolves; the runner must re-check it after await.
+                cancel.store(true, Ordering::SeqCst);
+            }
+            Some(envelope)
         }
     }
 
@@ -1966,20 +2201,20 @@ mod tests {
                         profile_id: "profile-observe".into(),
                         model_id: "model-observe".into(),
                     },
-                    backend: Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
-                        "{}",
-                        Vec::new(),
-                        "stop",
-                    )])),
+                    backend: Arc::new(ScriptedBackend::new(vec![
+                        ChatCompletion::from_parts("{}", Vec::new(), "stop"),
+                        ChatCompletion::from_parts("{}", Vec::new(), "stop"),
+                        ChatCompletion::from_parts("{}", Vec::new(), "stop"),
+                    ])),
                 },
                 AuthorizedTriageBackendV1 {
                     slot_id: "finalizer".into(),
                     model,
-                    backend: Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
-                        "{}",
-                        Vec::new(),
-                        "stop",
-                    )])),
+                    backend: Arc::new(ScriptedBackend::new(vec![
+                        ChatCompletion::from_parts("{}", Vec::new(), "stop"),
+                        ChatCompletion::from_parts("{}", Vec::new(), "stop"),
+                        ChatCompletion::from_parts("{}", Vec::new(), "stop"),
+                    ])),
                 },
                 AuthorizedTriageBackendV1 {
                     slot_id: "reviewer".into(),
@@ -1987,20 +2222,50 @@ mod tests {
                         profile_id: "profile-reviewer".into(),
                         model_id: "model-reviewer".into(),
                     },
-                    backend: Arc::new(ScriptedBackend::new(vec![ChatCompletion::from_parts(
-                        serde_json::json!({
-                            "schema": cd_core::multi_model::contributions::CONTRIBUTION_SCHEMA_V1,
-                            "packet_id": input().packet.packet_id(),
-                            "role": "reviewer",
-                            "abstained": true,
-                            "claims": [],
-                            "evidence_gaps": [],
-                            "contradictions": []
-                        })
-                        .to_string(),
-                        Vec::new(),
-                        "stop",
-                    )])),
+                    backend: Arc::new(ScriptedBackend::new(vec![
+                        ChatCompletion::from_parts(
+                            serde_json::json!({
+                                "schema": cd_core::multi_model::contributions::CONTRIBUTION_SCHEMA_V1,
+                                "packet_id": input().packet.packet_id(),
+                                "role": "reviewer",
+                                "abstained": true,
+                                "claims": [],
+                                "evidence_gaps": [],
+                                "contradictions": []
+                            })
+                            .to_string(),
+                            Vec::new(),
+                            "stop",
+                        ),
+                        ChatCompletion::from_parts(
+                            serde_json::json!({
+                                "schema": cd_core::multi_model::contributions::CONTRIBUTION_SCHEMA_V1,
+                                "packet_id": input().packet.packet_id(),
+                                "role": "reviewer",
+                                "abstained": true,
+                                "claims": [],
+                                "evidence_gaps": [],
+                                "contradictions": []
+                            })
+                            .to_string(),
+                            Vec::new(),
+                            "stop",
+                        ),
+                        ChatCompletion::from_parts(
+                            serde_json::json!({
+                                "schema": cd_core::multi_model::contributions::CONTRIBUTION_SCHEMA_V1,
+                                "packet_id": input().packet.packet_id(),
+                                "role": "reviewer",
+                                "abstained": true,
+                                "claims": [],
+                                "evidence_gaps": [],
+                                "contradictions": []
+                            })
+                            .to_string(),
+                            Vec::new(),
+                            "stop",
+                        ),
+                    ])),
                 },
             ],
             60_000,
@@ -2009,11 +2274,15 @@ mod tests {
         )
         .expect("finalizer resolves");
         let calls = Arc::new(AtomicUsize::new(0));
-        let result = TriageProductionRunnerV1::new(resolved)
+        let runner = TriageProductionRunnerV1::new(resolved);
+        let result = runner
             .run(
                 input(),
                 &FinalizerHook {
                     calls: Arc::clone(&calls),
+                    delay_ms: 0,
+                    cancel_after_finalize: None,
+                    forge_binding: false,
                 },
             )
             .await
@@ -2030,6 +2299,51 @@ mod tests {
                         && attempt.status == TriageAttemptStatus::Completed
             )
         }));
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut delayed_input = input();
+        delayed_input.cancel = Some(Arc::clone(&cancel));
+        let delayed = runner
+            .run(
+                delayed_input,
+                &FinalizerHook {
+                    calls: Arc::clone(&calls),
+                    delay_ms: 10,
+                    cancel_after_finalize: Some(cancel),
+                    forge_binding: false,
+                },
+            )
+            .await
+            .expect("delayed hook remains a valid replay");
+        assert!(!delayed.completed);
+        assert_eq!(delayed.result.kind, TriageResultKind::HonestPartial);
+        assert!(delayed.result.answer.is_none());
+        assert!(delayed
+            .replay
+            .events
+            .iter()
+            .any(|event| { matches!(&event.event, TriageRunEventPayloadV2::Cancelled { .. }) }));
+
+        let forged = runner
+            .run(
+                input(),
+                &FinalizerHook {
+                    calls,
+                    delay_ms: 0,
+                    cancel_after_finalize: None,
+                    forge_binding: true,
+                },
+            )
+            .await
+            .expect("forged envelope remains a valid replay");
+        assert!(!forged.completed);
+        assert_eq!(forged.result.kind, TriageResultKind::HonestPartial);
+        assert!(forged.result.answer.is_none());
+        assert!(forged
+            .result
+            .reason_codes
+            .iter()
+            .any(|code| code == "finalizer_envelope_unbound"));
     }
 
     #[tokio::test]
