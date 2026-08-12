@@ -1,0 +1,67 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe13-chronology-contradiction",
+  "title": "Chronology recovery roles and contradictory cause/abstention",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What failed first and what recovered later?",
+      "relevant_ids": [
+        "d01",
+        "d02",
+        "d03"
+      ],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 2,
+        "d03": 2
+      },
+      "must_include_ids": [
+        "d01",
+        "d03"
+      ],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 3
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "lease",
+        "250"
+      ],
+      "trigger_tokens": [
+        "lease window",
+        "250"
+      ],
+      "symptom_tokens": [
+        "amber-sync aborted"
+      ],
+      "recovery_tokens": [
+        "prior configuration restored"
+      ],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": [
+        "d01"
+      ],
+      "forbidden_evidence_ids": [],
+      "requires_abstention": false,
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "candidate_expectations": {
+    "good_trigger_then_recovery": "pass",
+    "mut_recovery_as_trigger": "fail",
+    "mut_contradictory_abstention": "fail"
+  },
+  "incidents": {
+    "main": [
+      "d01",
+      "d02",
+      "d03"
+    ]
+  }
+}

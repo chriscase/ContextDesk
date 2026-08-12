@@ -1,0 +1,67 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe11-tool-progress",
+  "title": "Tool zero-cite, non-progress, and withdrawal honesty",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "Did search tools produce citeable evidence?",
+      "relevant_ids": [
+        "d01"
+      ],
+      "graded_gains": {
+        "d01": 3
+      },
+      "must_include_ids": [
+        "d01"
+      ],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 3
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "lease",
+        "250"
+      ],
+      "trigger_tokens": [
+        "lease window"
+      ],
+      "symptom_tokens": [
+        "amber-sync aborted"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": [
+        "d01"
+      ],
+      "forbidden_evidence_ids": [],
+      "requires_abstention": false,
+      "forbidden_conclusion_tokens": [],
+      "diagnostic": {
+        "allowed_categories": [
+          "tool_withdrawn_non_progress",
+          "compatible_success"
+        ],
+        "expected_usefulness_policy": "all_succeeded",
+        "require_honest_usefulness": true,
+        "separate_transport_from_grounding": false,
+        "require_citeable_on_tool_progress": true,
+        "require_tool_withdrawal_after_non_progress": true,
+        "required_roles": [],
+        "budget_exhaustion_forbids_useful": false,
+        "require_share_safe_export": true
+      }
+    }
+  ],
+  "candidate_expectations": {
+    "good_withdraw_after_non_progress": "pass",
+    "mut_zero_cite_progress": "fail",
+    "mut_non_progress_no_withdraw": "fail"
+  },
+  "incidents": {}
+}

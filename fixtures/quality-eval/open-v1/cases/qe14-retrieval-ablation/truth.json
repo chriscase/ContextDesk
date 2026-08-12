@@ -1,0 +1,71 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe14-retrieval-ablation",
+  "title": "Keyword dense hybrid rerank and identity-mismatch retrieval ablations",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "Which records establish the lease window configuration fault?",
+      "relevant_ids": [
+        "d01",
+        "d02"
+      ],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 2
+      },
+      "must_include_ids": [
+        "d01"
+      ],
+      "must_exclude_ids": [
+        "d05"
+      ],
+      "foreign_incident_ids": [
+        "d05"
+      ],
+      "top_k": 3
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "lease",
+        "250"
+      ],
+      "trigger_tokens": [
+        "lease window",
+        "250"
+      ],
+      "symptom_tokens": [
+        "amber-sync aborted"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": [
+        "d01"
+      ],
+      "forbidden_evidence_ids": [
+        "d05"
+      ],
+      "requires_abstention": false,
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_foreign_identity": "fail"
+  },
+  "incidents": {
+    "main": [
+      "d01",
+      "d02",
+      "d03"
+    ],
+    "mail": [
+      "d04",
+      "d05"
+    ]
+  }
+}

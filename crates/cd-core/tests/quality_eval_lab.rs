@@ -5,7 +5,7 @@
 use cd_core::capability_qualification::{QualificationKey, QualificationStore};
 use cd_core::quality_eval::{
     apply_judge_cannot_override, assert_suite_digest, gate_export_text, load_suite,
-    quality_units_are_gateway_scoped, run_hermetic_suite, scan_privacy_text,
+    matrix_summary_lines, quality_units_are_gateway_scoped, run_hermetic_suite, scan_privacy_text,
     scan_runtime_isolation, score_retrieval, serialize_json, validate_ranking, write_export,
     CandidateExpectation, HermeticRunOptions, LaneStatus, ModelSubject,
     QUALITY_EVAL_SCHEMA_VERSION, RUNTIME_FORBIDDEN_EVALUATOR_TOKENS,
@@ -22,7 +22,7 @@ fn suite_root() -> PathBuf {
 fn open_suite_loads_and_isolates_truth_from_runtime() {
     let suite = load_suite(&suite_root()).expect("load suite");
     assert_eq!(suite.manifest.suite_id, "quality-eval-open-v1");
-    assert_eq!(suite.cases.len(), 8);
+    assert_eq!(suite.cases.len(), 14);
     assert_eq!(suite.manifest.schema_version, QUALITY_EVAL_SCHEMA_VERSION);
     assert_eq!(suite.digest.len(), 64);
 
@@ -209,6 +209,93 @@ fn mutation_merged_incidents_has_typed_reason() {
 }
 
 #[test]
+fn adversarial_diagnostic_mutations_fail_with_typed_reasons() {
+    let suite = load_suite(&suite_root()).unwrap();
+    let record = run_hermetic_suite(&suite, &HermeticRunOptions::default());
+    let by_id: std::collections::BTreeMap<_, _> = record
+        .cases
+        .iter()
+        .flat_map(|c| c.answers.iter())
+        .map(|a| (a.candidate_id.as_str(), a))
+        .collect();
+
+    let expect_fail = |id: &str, dim: &str, reason: &str| {
+        let ans = by_id.get(id).unwrap_or_else(|| panic!("missing {id}"));
+        assert!(!ans.passed, "{id} must fail");
+        assert!(
+            ans.failed_ids().contains(&dim),
+            "{id} missing dim {dim}; failed={:?}",
+            ans.failed_ids()
+        );
+        assert!(
+            ans.dimensions
+                .iter()
+                .any(|d| d.id == dim && !d.passed && d.reason == reason),
+            "{id} missing reason {reason} on {dim}; dims={:?}",
+            ans.dimensions
+        );
+    };
+
+    expect_fail(
+        "mut_claims_all_succeeded",
+        "attempt_usefulness",
+        failure_reason::DISHONEST_ATTEMPT_USEFULNESS,
+    );
+    expect_fail(
+        "mut_timeout_as_grounding",
+        "transport_versus_grounding",
+        failure_reason::TRANSPORT_MISLABELED_AS_GROUNDING,
+    );
+    expect_fail(
+        "mut_zero_cite_progress",
+        "tool_citeable_evidence",
+        failure_reason::TOOL_ZERO_CITEABLE_EVIDENCE,
+    );
+    expect_fail(
+        "mut_non_progress_no_withdraw",
+        "tool_non_progress_withdrawal",
+        failure_reason::TOOL_NON_PROGRESS_WITHOUT_WITHDRAWAL,
+    );
+    expect_fail(
+        "mut_role_dropped_silent",
+        "multi_model_role_coverage",
+        failure_reason::ROLE_DROPOUT_WITHOUT_BUDGET,
+    );
+    expect_fail(
+        "mut_budget_claimed_useful",
+        "host_budget_honesty",
+        failure_reason::BUDGET_EXHAUSTION_CLAIMED_USEFUL,
+    );
+    expect_fail(
+        "mut_contradictory_abstention",
+        "cause_abstention_consistency",
+        failure_reason::CONTRADICTORY_CAUSE_ABSTENTION,
+    );
+    expect_fail(
+        "mut_live_role_confusion",
+        "cause_versus_symptom",
+        failure_reason::SYMPTOM_PROMOTED_TO_TRIGGER,
+    );
+}
+
+#[test]
+fn matrix_summary_covers_every_scripted_candidate() {
+    let suite = load_suite(&suite_root()).unwrap();
+    let record = run_hermetic_suite(&suite, &HermeticRunOptions::default());
+    let lines = matrix_summary_lines(&record);
+    assert!(lines[0].starts_with("case_id\t"));
+    let body = &lines[1..];
+    let expected_count: usize = suite.cases.iter().map(|c| c.runtime.candidates.len()).sum();
+    assert_eq!(body.len(), expected_count);
+    assert!(body.iter().all(|line| line.split('\t').count() >= 6));
+    // No expectation mismatches in a healthy hermetic cage.
+    assert!(record.cases.iter().all(|c| c
+        .answers
+        .iter()
+        .all(|a| { a.expectation_met == Some(true) })));
+}
+
+#[test]
 fn mutation_live_role_confusion_fails_role_dimensions_with_typed_reasons() {
     let suite = load_suite(&suite_root()).unwrap();
     let record = run_hermetic_suite(&suite, &HermeticRunOptions::default());
@@ -340,6 +427,7 @@ fn ranking_mutations_fail_closed() {
         ranked_ids: vec!["a".into(), "a".into()],
         upstream_ranked_ids: None,
         k: Some(2),
+        lane_label: None,
     };
     let reasons = validate_ranking(&dup, &known);
     assert!(reasons
@@ -351,6 +439,7 @@ fn ranking_mutations_fail_closed() {
         ranked_ids: vec!["z".into()],
         upstream_ranked_ids: None,
         k: Some(1),
+        lane_label: None,
     };
     let reasons = validate_ranking(&unknown, &known);
     assert!(reasons
@@ -573,6 +662,7 @@ fn empty_truth_and_zero_hit_edges() {
         ranked_ids: vec!["n1".into()],
         upstream_ranked_ids: None,
         k: Some(1),
+        lane_label: None,
     };
     let m = score_retrieval(&truth, &ranking, &known);
     assert_eq!(m.status, LaneStatus::Executed);

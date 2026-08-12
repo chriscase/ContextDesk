@@ -3,6 +3,7 @@
 //! Prose style is not scored. Host-authoritative checks cover schema shape,
 //! citations, decisive facts, role separations, and abstention honesty.
 
+use super::diagnostic_score::score_diagnostic_dimensions;
 use super::types::{
     failure_reason, AnswerDimension, AnswerScore, AnswerTruth, CandidateAnswer, EvidencePacket,
     LaneStatus,
@@ -444,6 +445,40 @@ pub fn score_answer(
         },
     ));
 
+    // 15) Contradictory cause assertion vs abstention language.
+    let abstention_markers = [
+        "not established",
+        "cannot establish",
+        "can't establish",
+        "unable to establish",
+        "insufficient evidence",
+        "not enough evidence",
+        "not enough information",
+        "cannot determine",
+        "can't determine",
+        "inconclusive",
+    ];
+    let contradiction = answer.asserts_root_cause_established
+        && abstention_markers
+            .iter()
+            .any(|marker| answer.conclusion.to_ascii_lowercase().contains(marker));
+    dimensions.push(dim(
+        "cause_abstention_consistency",
+        !contradiction,
+        if contradiction {
+            failure_reason::CONTRADICTORY_CAUSE_ABSTENTION
+        } else {
+            "cause assertion and abstention language are consistent"
+        },
+    ));
+
+    // 16) Diagnostic honesty (gateway/tool/role) — same answer score envelope.
+    score_diagnostic_dimensions(
+        answer.diagnostic.as_ref(),
+        truth.diagnostic.as_ref(),
+        &mut dimensions,
+    );
+
     let passed = dimensions.iter().all(|d| d.passed);
     AnswerScore {
         candidate_id: answer.candidate_id.clone(),
@@ -529,6 +564,7 @@ mod tests {
             requires_abstention: false,
             packet_overrides: Default::default(),
             forbidden_conclusion_tokens: vec!["validation bypass".into()],
+            diagnostic: None,
         }
     }
 
@@ -548,6 +584,7 @@ mod tests {
             }],
             conclusion: "Invalid lease boundary caused the failure".into(),
             confidence: "medium".into(),
+            diagnostic: None,
         };
         let score = score_answer(&ans, &truth, &pkt);
         assert!(score.passed, "failed: {:?}", score.failed_ids());
@@ -569,6 +606,7 @@ mod tests {
             }],
             conclusion: "lease boundary issue".into(),
             confidence: "high".into(),
+            diagnostic: None,
         };
         let score = score_answer(&ans, &truth, &pkt);
         assert!(!score.passed);
@@ -587,6 +625,7 @@ mod tests {
             claims: vec![],
             conclusion: "The available evidence is inconclusive.".into(),
             confidence: "low".into(),
+            diagnostic: None,
         };
 
         let score = score_answer(&ans, &truth, &pkt);
@@ -623,6 +662,7 @@ mod tests {
             }],
             conclusion: "The initiating cause is not established from this packet.".into(),
             confidence: "low".into(),
+            diagnostic: None,
         };
 
         let fixed = score_answer(&ans, &truth, &pkt);
@@ -651,6 +691,7 @@ mod tests {
             }],
             conclusion: "Invalid lease boundary caused the failure".into(),
             confidence: "medium".into(),
+            diagnostic: None,
         };
 
         let unknown_role = score_answer(&ans, &truth, &pkt);
@@ -687,6 +728,7 @@ mod tests {
             }],
             conclusion: "lease boundary".into(),
             confidence: "high".into(),
+            diagnostic: None,
         };
         let score = score_answer(&ans, &truth, &pkt);
         assert!(!score.passed);
@@ -709,6 +751,7 @@ mod tests {
             }],
             conclusion: "Invalid lease boundary caused the failure".into(),
             confidence: "medium".into(),
+            diagnostic: None,
         };
 
         let score = score_answer(&ans, &truth, &pkt);
@@ -739,6 +782,7 @@ mod tests {
             }],
             conclusion: "definitely the root cause".into(),
             confidence: "high".into(),
+            diagnostic: None,
         };
         let score = score_answer(&ans, &truth, &pkt);
         assert!(!score.passed);
@@ -760,6 +804,7 @@ mod tests {
             claims: vec![],
             conclusion: "There is not enough information.".into(),
             confidence: "low".into(),
+            diagnostic: None,
         };
 
         let score = score_answer(&ans, &truth, &pkt);
@@ -796,6 +841,7 @@ mod tests {
                 "The database pool was certainly misconfigured; that caused the aborted requests."
                     .into(),
             confidence: "high".into(),
+            diagnostic: None,
         };
 
         let score = score_answer(&ans, &truth, &pkt);
@@ -824,6 +870,7 @@ mod tests {
             }],
             conclusion: "x".into(),
             confidence: "high".into(),
+            diagnostic: None,
         };
         let score = score_answer(&ans, &truth, &pkt);
         assert!(!score.passed);
@@ -855,6 +902,7 @@ mod tests {
             ],
             conclusion: "Lease boundary and aborted requests jointly caused the outage".into(),
             confidence: "high".into(),
+            diagnostic: None,
         };
 
         let score = score_answer(&ans, &truth, &pkt);
@@ -892,6 +940,7 @@ mod tests {
             ],
             conclusion: "Lease boundary drove the outage chain including sink stress".into(),
             confidence: "high".into(),
+            diagnostic: None,
         };
 
         let score = score_answer(&ans, &truth, &pkt);
@@ -938,6 +987,7 @@ mod tests {
             ],
             conclusion: "Lease boundary caused aborts. Telemetry is independent.".into(),
             confidence: "medium".into(),
+            diagnostic: None,
         };
 
         let score = score_answer(&ans, &truth, &pkt);
@@ -976,6 +1026,7 @@ mod tests {
             ],
             conclusion: "Both lease and boundary triggers jointly explain the failure".into(),
             confidence: "medium".into(),
+            diagnostic: None,
         };
 
         let score = score_answer(&ans, &truth, &pkt);

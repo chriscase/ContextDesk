@@ -229,6 +229,10 @@ pub struct RetrievalRanking {
     /// Declared K budget for recall@k (defaults to ranked list length).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub k: Option<u32>,
+    /// Optional ablation lane label (keyword, dense, hybrid, rerank, …).
+    /// Informational for matrix summaries; never invents a retrieval pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_label: Option<String>,
 }
 
 /// Model-visible evidence packet handed to answer scoring.
@@ -314,6 +318,51 @@ pub struct AnswerTruth {
     /// Forbidden conclusion tokens (fabrications).
     #[serde(default)]
     pub forbidden_conclusion_tokens: Vec<String>,
+    /// Optional host-only diagnostic-honesty truth for gateway/tool/orchestration
+    /// scripted envelopes attached to candidates of this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<DiagnosticTruth>,
+}
+
+/// Host-only expectations for scripted diagnostic honesty envelopes.
+///
+/// Reuses production category labels from
+/// [`crate::linked_triage_contract::LinkedTriageDiagnosticCategory`] where
+/// applicable. Empty / absent truth means diagnostic dimensions are not scored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticTruth {
+    /// Allowed values for `ScriptedDiagnostic.reported_category`.
+    #[serde(default)]
+    pub allowed_categories: Vec<String>,
+    /// Expected usefulness policy label (e.g. `mixed_accounted`, `all_failed`,
+    /// `any_success`). Empty skips policy equality.
+    #[serde(default)]
+    pub expected_usefulness_policy: String,
+    /// When true, `claims_useful` may only be true under an honest policy given
+    /// the attempt rows (mixed outcomes cannot claim universal usefulness).
+    #[serde(default)]
+    pub require_honest_usefulness: bool,
+    /// When true, transport/auth/timeout attempt failures must not be reported
+    /// as host-grounding refusal categories.
+    #[serde(default)]
+    pub separate_transport_from_grounding: bool,
+    /// When true, tool steps that claim progress require citeable_hits > 0.
+    #[serde(default)]
+    pub require_citeable_on_tool_progress: bool,
+    /// When true, a run of non-progress tool steps must end with withdrawal.
+    #[serde(default)]
+    pub require_tool_withdrawal_after_non_progress: bool,
+    /// Role names that must appear; a `dropped` status without budget exhaustion
+    /// fails role coverage.
+    #[serde(default)]
+    pub required_roles: Vec<String>,
+    /// When true, `host_budget_exhausted` forbids `claims_useful`.
+    #[serde(default)]
+    pub budget_exhaustion_forbids_useful: bool,
+    /// When true, export_text must pass the share-safe privacy scanner.
+    #[serde(default)]
+    pub require_share_safe_export: bool,
 }
 
 /// Host-only establishability truth for one evidence packet.
@@ -385,6 +434,89 @@ pub struct CandidateAnswer {
     /// Confidence label: high | medium | low.
     #[serde(default)]
     pub confidence: String,
+    /// Optional scripted diagnostic honesty envelope (attempts, tools, roles).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<ScriptedDiagnostic>,
+}
+
+/// One provider/semantic attempt row in a scripted diagnostic envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptedAttempt {
+    /// Stable attempt id within the candidate.
+    pub attempt_id: String,
+    /// Host-owned failure/success class:
+    /// `success` | `transport` | `auth` | `timeout` | `host_grounding` | `analysis` | `empty`.
+    pub failure_class: String,
+    /// Whether the attempt produced a successful evaluable analysis.
+    #[serde(default)]
+    pub succeeded: bool,
+    /// Whether citeable analysis evidence was produced.
+    #[serde(default)]
+    pub citeable_evidence: bool,
+}
+
+/// One tool step in a scripted diagnostic envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptedToolStep {
+    /// Stable step id.
+    pub step_id: String,
+    /// Tool kind label (`search`, `other`, …).
+    #[serde(default)]
+    pub kind: String,
+    /// Count of citeable evidence hits returned.
+    #[serde(default)]
+    pub citeable_hits: u32,
+    /// Whether the host treats this step as progress.
+    #[serde(default)]
+    pub progress: bool,
+    /// Whether the host withdrew the tool after non-progress.
+    #[serde(default)]
+    pub withdrawn: bool,
+}
+
+/// One multi-model role outcome in a scripted diagnostic envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptedRoleOutcome {
+    /// Role name (`investigator`, `reviewer`, `synthesizer`, …).
+    pub role: String,
+    /// `completed` | `dropped` | `budget_exhausted` | `transport_failed`.
+    pub status: String,
+}
+
+/// Scripted diagnostic honesty envelope attached to a candidate answer.
+///
+/// This is fixture-authored; it reuses production category vocabulary and
+/// privacy scanners. It is not a second agent pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptedDiagnostic {
+    /// Attempt rows for mixed pass/fail usefulness checks.
+    #[serde(default)]
+    pub attempts: Vec<ScriptedAttempt>,
+    /// Tool steps for zero-cite / non-progress / withdrawal checks.
+    #[serde(default)]
+    pub tool_steps: Vec<ScriptedToolStep>,
+    /// Multi-model role outcomes.
+    #[serde(default)]
+    pub roles: Vec<ScriptedRoleOutcome>,
+    /// Host budget exhausted before all required work completed.
+    #[serde(default)]
+    pub host_budget_exhausted: bool,
+    /// Category the diagnostic report claims (must match host truth allow-list).
+    #[serde(default)]
+    pub reported_category: String,
+    /// Whether the report claims overall usefulness.
+    #[serde(default)]
+    pub claims_useful: bool,
+    /// Usefulness policy label the report asserts.
+    #[serde(default)]
+    pub usefulness_policy: String,
+    /// Share-safe export sample text (no secrets/paths/raw bodies).
+    #[serde(default)]
+    pub export_text: String,
 }
 
 /// One structured claim in a candidate answer.
@@ -609,6 +741,27 @@ pub struct CaseRunResult {
     pub isolation_findings: Vec<String>,
 }
 
+/// One row in a deterministic candidate expectation matrix summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatrixRow {
+    /// Case id.
+    pub case_id: String,
+    /// Candidate id.
+    pub candidate_id: String,
+    /// Host-only expected outcome label (`pass` / `fail` / `unset`).
+    pub expected: String,
+    /// Actual deterministic pass/fail.
+    pub actual_passed: bool,
+    /// Whether expectation was met.
+    pub expectation_met: bool,
+    /// Failed dimension ids (empty when pass).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_dimensions: Vec<String>,
+    /// Failed dimension reasons (aligned loosely; may be shorter).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failure_reasons: Vec<String>,
+}
+
 /// Typed scoring failure reasons (stable strings for mutation tests).
 pub mod failure_reason {
     /// Ranking contained duplicate ids.
@@ -671,4 +824,20 @@ pub mod failure_reason {
     pub const CANDIDATE_EXPECTATION_MISMATCH: &str = "candidate_expectation_mismatch";
     /// Runtime/truth fixture identities or references were structurally invalid.
     pub const INVALID_FIXTURE_CONTRACT: &str = "invalid_fixture_contract";
+    /// Report claimed usefulness that the attempt rows do not support.
+    pub const DISHONEST_ATTEMPT_USEFULNESS: &str = "dishonest_attempt_usefulness";
+    /// Transport/auth/timeout failure mislabeled as host-grounding refusal.
+    pub const TRANSPORT_MISLABELED_AS_GROUNDING: &str = "transport_mislabeled_as_grounding";
+    /// Tool progress claimed with zero citeable evidence hits.
+    pub const TOOL_ZERO_CITEABLE_EVIDENCE: &str = "tool_zero_citeable_evidence";
+    /// Non-progress tool loop without host withdrawal.
+    pub const TOOL_NON_PROGRESS_WITHOUT_WITHDRAWAL: &str = "tool_non_progress_without_withdrawal";
+    /// Required multi-model role dropped without honest budget status.
+    pub const ROLE_DROPOUT_WITHOUT_BUDGET: &str = "role_dropout_without_budget";
+    /// Host budget exhaustion reported as useful completion.
+    pub const BUDGET_EXHAUSTION_CLAIMED_USEFUL: &str = "budget_exhaustion_claimed_useful";
+    /// Diagnostic category not in the host allow-list.
+    pub const INVALID_DIAGNOSTIC_CATEGORY: &str = "invalid_diagnostic_category";
+    /// Answer both asserts an established cause and uses abstention language.
+    pub const CONTRADICTORY_CAUSE_ABSTENTION: &str = "contradictory_cause_abstention";
 }

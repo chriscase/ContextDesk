@@ -1,0 +1,64 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe10-grounding-vs-transport",
+  "title": "Host grounding refusal versus transport auth timeout failures",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "Classify why the analysis attempt failed.",
+      "relevant_ids": [
+        "d01",
+        "d02"
+      ],
+      "graded_gains": {
+        "d01": 2,
+        "d02": 2
+      },
+      "must_include_ids": [
+        "d02"
+      ],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 2
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": false,
+      "required_fact_tokens": [],
+      "trigger_tokens": [],
+      "symptom_tokens": [
+        "amber-sync aborted"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": [],
+      "forbidden_evidence_ids": [],
+      "requires_abstention": true,
+      "forbidden_conclusion_tokens": [],
+      "diagnostic": {
+        "allowed_categories": [
+          "timeout",
+          "host_grounding_refusal",
+          "transport_failure",
+          "auth_failure"
+        ],
+        "expected_usefulness_policy": "all_failed",
+        "require_honest_usefulness": true,
+        "separate_transport_from_grounding": true,
+        "require_citeable_on_tool_progress": false,
+        "require_tool_withdrawal_after_non_progress": false,
+        "required_roles": [],
+        "budget_exhaustion_forbids_useful": false,
+        "require_share_safe_export": true
+      }
+    }
+  ],
+  "candidate_expectations": {
+    "good_timeout_classified": "pass",
+    "good_host_grounding": "pass",
+    "mut_timeout_as_grounding": "fail"
+  },
+  "incidents": {}
+}

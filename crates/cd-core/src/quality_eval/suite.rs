@@ -414,6 +414,24 @@ pub fn scan_runtime_isolation(runtime: &CaseRuntime) -> Vec<String> {
                 surfaces.push(id.as_str());
             }
         }
+        if let Some(diag) = &cand.diagnostic {
+            surfaces.push(diag.reported_category.as_str());
+            surfaces.push(diag.usefulness_policy.as_str());
+            // export_text is scanned by privacy, not isolation evaluator tokens
+            // beyond the shared blob join below when present in prose fields.
+            for attempt in &diag.attempts {
+                surfaces.push(attempt.attempt_id.as_str());
+                surfaces.push(attempt.failure_class.as_str());
+            }
+            for step in &diag.tool_steps {
+                surfaces.push(step.step_id.as_str());
+                surfaces.push(step.kind.as_str());
+            }
+            for role in &diag.roles {
+                surfaces.push(role.role.as_str());
+                surfaces.push(role.status.as_str());
+            }
+        }
     }
     for ranking in &runtime.rankings {
         for id in &ranking.ranked_ids {
@@ -672,6 +690,7 @@ mod tests {
                 claims: vec![],
                 conclusion: "configured boundary changed".into(),
                 confidence: "medium".into(),
+                diagnostic: None,
             }],
         };
         let truth = CaseTruth {
@@ -701,6 +720,7 @@ mod tests {
                 requires_abstention: false,
                 packet_overrides: BTreeMap::new(),
                 forbidden_conclusion_tokens: vec![],
+                diagnostic: None,
             }],
             candidate_expectations: BTreeMap::from([(
                 "candidate".into(),

@@ -125,6 +125,14 @@ and must not be closed with lexical heuristics. Do not treat the
 quality-evaluation scorer fix as proof that the production rubric already
 covers independent-incident demotion.
 
+## Adversarial expansion (causality + diagnostic honesty)
+
+See [`QUALITY_EVAL_ADVERSARIAL_LANE_V1.md`](QUALITY_EVAL_ADVERSARIAL_LANE_V1.md)
+for open-v1 cases qe09–qe14 (attempt usefulness, transport-vs-grounding, tool
+non-progress/withdrawal, multi-model budget, chronology/contradiction, retrieval
+ablation labels) and the deterministic matrix summary. That expansion reuses
+this harness only; it does not claim live-provider usefulness.
+
 ## Fixture layout
 
 ```text

@@ -216,6 +216,17 @@ pub fn run_hermetic_suite(suite: &LoadedSuite, opts: &HermeticRunOptions) -> Qua
 
     let retrieval_quality = case_results.iter().any(|case| !case.retrieval.is_empty());
     let answer_quality = case_results.iter().any(|case| !case.answers.is_empty());
+    let orchestration_quality = suite.cases.iter().any(|case| {
+        case.runtime
+            .candidates
+            .iter()
+            .any(|c| c.diagnostic.as_ref().is_some_and(|d| !d.roles.is_empty()))
+            || case.truth.answers.iter().any(|a| {
+                a.diagnostic
+                    .as_ref()
+                    .is_some_and(|d| !d.required_roles.is_empty())
+            })
+    });
 
     QualityRunRecord {
         schema_id: RUN_RECORD_SCHEMA_ID.into(),
@@ -234,7 +245,7 @@ pub fn run_hermetic_suite(suite: &LoadedSuite, opts: &HermeticRunOptions) -> Qua
             compatibility_untouched: true,
             retrieval_quality,
             answer_quality,
-            orchestration_quality: false,
+            orchestration_quality,
             live_optional: false,
         },
     }

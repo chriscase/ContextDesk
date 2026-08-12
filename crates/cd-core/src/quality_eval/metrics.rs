@@ -250,6 +250,7 @@ mod tests {
             ranked_ids: vec!["a".into(), "b".into(), "c".into()],
             upstream_ranked_ids: None,
             k: Some(3),
+            lane_label: None,
         };
         let m = score_retrieval(&t, &r, &known(&["a", "b", "c", "x"]));
         assert_eq!(m.status, LaneStatus::Executed);
@@ -267,6 +268,7 @@ mod tests {
             ranked_ids: vec!["a".into()],
             upstream_ranked_ids: None,
             k: Some(3),
+            lane_label: None,
         };
 
         let m = score_retrieval(&t, &r, &known(&["a", "b", "c"]));
@@ -284,6 +286,7 @@ mod tests {
             ranked_ids: vec!["a".into(), "a".into()],
             upstream_ranked_ids: None,
             k: Some(2),
+            lane_label: None,
         };
         let m = score_retrieval(&t, &r, &known(&["a"]));
         assert_eq!(m.status, LaneStatus::Failed);
@@ -302,6 +305,7 @@ mod tests {
             ranked_ids: vec!["ghost".into()],
             upstream_ranked_ids: None,
             k: Some(1),
+            lane_label: None,
         };
         let m = score_retrieval(&t, &r, &known(&["a"]));
         assert_eq!(m.status, LaneStatus::Failed);
@@ -319,6 +323,7 @@ mod tests {
             ranked_ids: vec![],
             upstream_ranked_ids: None,
             k: Some(1),
+            lane_label: None,
         };
         let m = score_retrieval(&t, &r, &known(&["a"]));
         assert_eq!(m.status, LaneStatus::Failed);
@@ -336,6 +341,7 @@ mod tests {
             ranked_ids: vec!["a".into()],
             upstream_ranked_ids: None,
             k: Some(0),
+            lane_label: None,
         };
 
         let metrics = score_retrieval(&truth, &ranking, &known(&["a"]));
@@ -356,6 +362,7 @@ mod tests {
             ranked_ids: vec!["a".into(), "decoy".into(), "noise".into()],
             upstream_ranked_ids: None,
             k: Some(1),
+            lane_label: None,
         };
 
         let metrics = score_retrieval(&truth, &ranking, &known(&["a", "decoy", "noise"]));
@@ -377,6 +384,7 @@ mod tests {
             ranked_ids: vec!["noise".into()],
             upstream_ranked_ids: None,
             k: Some(1),
+            lane_label: None,
         };
         let m = score_retrieval(&t, &r, &known(&["noise"]));
         assert_eq!(m.status, LaneStatus::Executed);
@@ -393,6 +401,7 @@ mod tests {
             ranked_ids: vec!["a".into(), "c".into()],
             upstream_ranked_ids: Some(vec!["a".into(), "b".into(), "c".into()]),
             k: Some(2),
+            lane_label: None,
         };
         let m = score_retrieval(&t, &r, &known(&["a", "b", "c"]));
         assert_eq!(m.status, LaneStatus::Executed);
@@ -412,6 +421,7 @@ mod tests {
             ranked_ids: vec!["a".into(), "x".into()],
             upstream_ranked_ids: None,
             k: Some(2),
+            lane_label: None,
         };
         let m = score_retrieval(&t, &r, &known(&["a", "x"]));
         assert_eq!(m.foreign_incident_hits, 1);
