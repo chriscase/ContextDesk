@@ -2234,12 +2234,14 @@ mod tests {
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
+                        ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                     ])),
                 },
                 AuthorizedTriageBackendV1 {
                     slot_id: "finalizer".into(),
                     model,
                     backend: Arc::new(ScriptedBackend::new(vec![
+                        ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
@@ -2328,6 +2330,39 @@ mod tests {
                         && attempt.status == TriageAttemptStatus::Completed
             )
         }));
+
+        // Flip cancellation from the event sink after validation, exercising
+        // the narrow gap before final result/terminal construction.
+        let gap_cancel = Arc::new(AtomicBool::new(false));
+        let sink_cancel = Arc::clone(&gap_cancel);
+        let gap_sink: TriageEventSink = Arc::new(move |event| {
+            if matches!(event.event, TriageRunEventPayloadV2::Validation { .. }) {
+                sink_cancel.store(true, Ordering::SeqCst);
+            }
+        });
+        let mut gap_input = input();
+        gap_input.cancel = Some(gap_cancel);
+        let gap = runner
+            .run_with_event_sink(
+                gap_input,
+                &FinalizerHook {
+                    calls: Arc::clone(&calls),
+                    delay_ms: 0,
+                    cancel_after_finalize: None,
+                    forge_binding: false,
+                },
+                Some(gap_sink),
+            )
+            .await
+            .expect("gap cancellation remains a valid replay");
+        assert!(!gap.completed);
+        assert_eq!(gap.result.kind, TriageResultKind::HonestPartial);
+        assert!(gap.result.answer.is_none());
+        assert!(gap
+            .replay
+            .events
+            .iter()
+            .any(|event| matches!(&event.event, TriageRunEventPayloadV2::Cancelled { .. })));
 
         let cancel = Arc::new(AtomicBool::new(false));
         let mut delayed_input = input();
