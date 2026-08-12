@@ -42,3 +42,25 @@ currently wires finalizer, reviewer, correction, or these V2 replay events to
 a live provider. Any future adapter must retain the same preflight facts,
 event ordering, slot accounting, privacy boundary, and terminal invariant;
 this seam intentionally makes no readiness or provider compatibility claim.
+
+## Hardened integration checkpoint
+
+The exact integrated branch checkpoint `integrate/triage-policy-sdk-v2` at
+`59f7bc61` adds the adversarial state-machine lane and closes the remaining
+replay/runner gaps:
+
+- Enhanced/Advanced replay accepts only the canonical preliminary-review-final
+  phase order; Standard retains its legacy finalizer-first sequence.
+- Required contributor failure makes the finalizer explicitly not admitted;
+  optional dropout cannot swallow a cancellation/deadline boundary.
+- Additive qualification fields reject explicit JSON `null` while preserving
+  omission-based Standard migration.
+- The adversarial suite covers phase reordering, duplicate terminals, same-model
+  false consensus, budget oversubscription, malformed reason codes, dropout,
+  cancellation/timeout, finalizer eligibility, and share-safe privacy.
+
+Focused evidence at this checkpoint: 9 adversarial tests, 17 SDK contract tests
+(1 ignored golden regeneration), 29 core policy tests, 15 workflow unit tests,
+7 CLI tests, and clippy with `-D warnings` for `cd-core`, `cd-workflow`, and
+`cd-cli`. These remain hermetic; no live provider or release-readiness claim is
+made.
