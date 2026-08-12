@@ -4,14 +4,15 @@ Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
 - branch: `integrate/release-quality-v2`
-- exact tested source/build SHA: `9053ade3e785511681d90092cb3f8fafada86a60`
+- exact tested source/build SHA: `8b732d007a51a2624e363693fff555b609fd2456`
 
 The exact tested source/build SHA above is the identity that must be fetched, built, and
 verified. Do not substitute an older baseline, a moving branch tip, or an
-unrelated local checkout. The final commit is documentation-only after the
-tested product-path ancestor `aeaf5a7e7f686a6e4113f46ffaf24279d5073d89`;
-the live Vercel evidence is explicitly recorded against that ancestor and is
-not broadened into a universal provider claim.
+unrelated local checkout. The live Vercel evidence is explicitly recorded
+against the tested product-path ancestor
+`aeaf5a7e7f686a6e4113f46ffaf24279d5073d89`; the later commits add only
+deterministic quality-evaluation hardening and documentation. That live
+evidence is not broadened into a universal provider claim.
 
 This pin supersedes the earlier `c0935715…`, `85c065f0…`, and `64edb0a…`
 acceptance inputs. Since those older pins, the release has added the chat-contract v4
