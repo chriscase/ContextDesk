@@ -260,6 +260,16 @@ pub fn triage_role_probe_fingerprint() -> String {
     format!("sha256:{digest:x}")
 }
 
+/// Fingerprint a typed transport protocol without retaining its label in the
+/// persisted role evidence.  The protocol string itself is already supplied
+/// by the configured provider kind; it is never inferred from a model name or
+/// endpoint hostname.
+pub fn triage_protocol_fingerprint(protocol: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(protocol.as_bytes());
+    format!("sha256:{digest:x}")
+}
+
 fn validate_record(
     record: &TriageRoleQualificationRecordV1,
 ) -> Result<(), TriageRoleQualificationError> {

@@ -439,6 +439,11 @@ struct AppState {
     qualification_store: Mutex<cd_core::capability_qualification::QualificationStore>,
     /// Secret-free evidence file. Viewing it never resolves credentials or contacts a provider.
     qualification_store_path: PathBuf,
+    /// Exact host-owned Triage Policy V2 role qualification, kept separate
+    /// from generic capability evidence so a transport pass cannot authorize
+    /// an incompatible packet/validator workflow.
+    triage_role_qualification_store:
+        Mutex<cd_core::triage_role_qualification::TriageRoleQualificationStoreV1>,
     /// One-shot exact Log Explorer navigation targets (#698 exact-nav).
     /// Keyed by corpus id. `take` delivers once; cleared on take, discard, or window destroy.
     log_explorer_nav_targets: Mutex<LogExplorerNavTargetStore>,
@@ -10182,110 +10187,16 @@ fn triage_policy_for_request(
     }
 }
 
-fn triage_policy_slots(
-    policy: &cd_core::multi_model::triage_policy::TriagePolicyV2,
-) -> Vec<(
-    String,
-    cd_core::multi_model::triage_policy::TriageSlotKindV2,
-    cd_core::model_ref::ModelRef,
-)> {
-    use cd_core::multi_model::triage_policy::TriageSlotKindV2;
-    let mut slots = Vec::new();
-    slots.extend(policy.contributors.iter().map(|slot| {
-        (
-            slot.slot_id.clone(),
-            TriageSlotKindV2::Contributor(slot.role),
-            slot.model.clone(),
-        )
-    }));
-    if let Some(slot) = &policy.finalizer {
-        slots.push((
-            slot.slot_id.clone(),
-            TriageSlotKindV2::Finalizer,
-            slot.model.clone(),
-        ));
-    }
-    if let Some(slot) = &policy.reviewer {
-        slots.push((
-            slot.slot_id.clone(),
-            TriageSlotKindV2::Reviewer,
-            slot.model.clone(),
-        ));
-    }
-    slots
-}
-
 fn triage_preflight_for_policy(
     state: &AppState,
     cfg: &AppConfig,
     policy: &cd_core::multi_model::triage_policy::TriagePolicyV2,
 ) -> cd_core::multi_model::triage_policy::TriagePolicyPreflightV2 {
-    use cd_core::capability_qualification::QualificationKey;
-    use cd_core::multi_model::triage_policy::{
-        RolePreflightV2, RoleQualificationV2, TriagePolicyMode,
-    };
-
-    let mut store = state.qualification_store.lock().expect("qualification_store");
-    let roles = triage_policy_slots(policy)
-        .into_iter()
-        .map(|(slot_id, kind, model)| {
-            let profile = cfg
-                .providers
-                .profiles
-                .iter()
-                .find(|profile| profile.id == model.profile_id);
-            let available = profile.is_some();
-            // Egress is a profile policy, not a provider-kind heuristic.  A
-            // non-Ollama profile may still be explicitly local-only, while a
-            // custom local gateway must not be treated as remote merely
-            // because its protocol kind is OpenAI-compatible.
-            let remote = profile.is_some_and(|profile| !profile.local_only);
-            let mut qualification = RoleQualificationV2::Unverified;
-            let qualification_schema_id = None;
-            let workflow_id = None;
-            let protocol_fingerprint = None;
-
-            if let Some(profile) = profile {
-                let key = QualificationKey::with_provider_kind(
-                    &profile.id,
-                    &profile.base_url,
-                    &model.model_id,
-                    profile.kind,
-                );
-                let report = store.get_for_selection(&key).cloned();
-                if policy.mode == TriagePolicyMode::Standard {
-                    // Standard retains its established path and its legacy
-                    // preflight may omit the richer V2 qualification stamp.
-                    qualification = RoleQualificationV2::Qualified;
-                } else if let Some(report) = report.as_ref().filter(|report| report.key == key) {
-                    // Generic capability qualification is intentionally not
-                    // promoted to a Triage Policy V2 role qualification.  A
-                    // generation/JSON-proposal pass proves a transport
-                    // capability, not the exact role workflow, packet
-                    // contract, or host validator.  Until a dedicated V2
-                    // qualification report exists, remain fail-closed.
-                    qualification = if report.stale {
-                        RoleQualificationV2::Stale
-                    } else {
-                        RoleQualificationV2::Unverified
-                    };
-                }
-            }
-
-            RolePreflightV2 {
-                slot_id,
-                model,
-                kind,
-                available,
-                qualification,
-                remote,
-                qualification_schema_id,
-                workflow_id,
-                protocol_fingerprint,
-            }
-        })
-        .collect();
-    cd_core::multi_model::triage_policy::TriagePolicyPreflightV2 { roles }
+    let role_store = state
+        .triage_role_qualification_store
+        .lock()
+        .expect("triage_role_qualification_store");
+    cd_workflow::triage_host::preflight_for_policy(cfg, policy, &role_store)
 }
 
 fn triage_fingerprint(bytes: &[u8]) -> String {
@@ -14199,6 +14110,18 @@ pub fn run() {
                 tracing::warn!(%error, "qualification evidence could not be loaded");
                 cd_core::capability_qualification::QualificationStore::default()
             });
+    let triage_role_qualification_store_path =
+        cd_core::triage_role_qualification::triage_role_qualification_store_path(
+            path.parent().expect("config directory"),
+        );
+    let triage_role_qualification_store =
+        cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(
+            &triage_role_qualification_store_path,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "triage role qualification evidence could not be loaded");
+            cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::default()
+        });
 
     let state = AppState {
         branding,
@@ -14245,6 +14168,7 @@ pub fn run() {
         handbook: Mutex::new(None),
         qualification_store: Mutex::new(qualification_store),
         qualification_store_path,
+        triage_role_qualification_store: Mutex::new(triage_role_qualification_store),
         log_explorer_nav_targets: Mutex::new(LogExplorerNavTargetStore::default()),
     };
     tauri::Builder::default()

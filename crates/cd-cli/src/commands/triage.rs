@@ -205,7 +205,7 @@ pub async fn run_stateful(
     // host. Keep the refusal before ToolHost construction and credential
     // resolution. A future dedicated V2 role-qualification store will supply
     // host-derived facts here, shared with Tauri.
-    let preflight = load_live_v2_preflight(args)?;
+    let preflight = load_live_v2_preflight(args, paths, cfg, &policy)?;
 
     if let Some(deadline_ms) = request.overrides.deadline_ms {
         policy.budget.whole_turn_deadline_ms = Some(deadline_ms);
@@ -213,6 +213,11 @@ pub async fn run_stateful(
     if let Some(max_provider_calls) = request.overrides.max_provider_calls {
         policy.budget.max_provider_calls = max_provider_calls;
     }
+    // Reject before ToolHost construction or credential resolution when an
+    // exact role record is absent/stale/mismatched.  The caller-supplied JSON
+    // preflight was already rejected above and cannot affect this decision.
+    cd_workflow::triage::compile_preflight(&policy, &preflight)
+        .map_err(|_| CliError::user("triage_role_qualification_unavailable"))?;
     let deadline_ms =
         policy
             .budget
@@ -303,16 +308,27 @@ pub async fn run_stateful(
     })
 }
 
-/// Resolve live V2 qualification from host-owned evidence only. Until the
-/// dedicated role-qualification store is implemented, execution is
-/// deliberately unavailable; arbitrary `--preflight` JSON must never become
-/// provider or egress authority.
-fn load_live_v2_preflight(args: &TriageRunArgs) -> CliResult<TriagePolicyPreflightV2> {
+/// Resolve live V2 qualification from host-owned evidence only. Arbitrary
+/// `--preflight` JSON remains simulation-only and can never become provider or
+/// egress authority. The store is secret-free and is keyed by the exact
+/// profile, endpoint fingerprint, catalog model, role, protocol, and probe
+/// contract; a missing record remains an honest unverified refusal.
+fn load_live_v2_preflight(
+    args: &TriageRunArgs,
+    paths: &Paths,
+    cfg: &cd_core::config::AppConfig,
+    policy: &TriagePolicyV2,
+) -> CliResult<TriagePolicyPreflightV2> {
     if args.preflight.is_some() {
-        Err(CliError::user("caller_preflight_not_authoritative"))
-    } else {
-        Err(CliError::user("triage_role_qualification_unavailable"))
+        return Err(CliError::user("caller_preflight_not_authoritative"));
     }
+    let path =
+        cd_core::triage_role_qualification::triage_role_qualification_store_path(&paths.config_dir);
+    let store = cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(&path)
+        .map_err(|_| CliError::user("triage_role_qualification_store_unavailable"))?;
+    Ok(cd_workflow::triage_host::preflight_for_policy(
+        cfg, policy, &store,
+    ))
 }
 
 #[cfg(test)]

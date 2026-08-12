@@ -21,10 +21,13 @@ use cd_core::investigation_answer::{validate_model_answer, AnswerEnvelopeV1};
 use cd_core::investigation_answer::{AnswerBindingV1, LogSnapshotRevisionV1};
 use cd_core::keychain_store::SecretStore;
 use cd_core::multi_model::triage_policy::{
-    CompiledRoleSlotV2, CompiledTriagePolicyV2, SlotDispositionV2, TriagePolicyPreflightV2,
-    TriagePolicyV2, TriageSlotKindV2,
+    CompiledRoleSlotV2, CompiledTriagePolicyV2, RolePreflightV2, RoleQualificationV2,
+    SlotDispositionV2, TriagePolicyMode, TriagePolicyPreflightV2, TriagePolicyV2, TriageSlotKindV2,
 };
 use cd_core::tool_host::ToolHost;
+use cd_core::triage_role_qualification::{
+    triage_protocol_fingerprint, TriageRoleQualificationKeyV1, TriageRoleQualificationStoreV1,
+};
 use cd_core::triage_sdk::TriageContractError;
 
 use crate::provider::{
@@ -67,6 +70,112 @@ pub struct ResolvedTriageHostV1 {
     pub packet: FastTriagePacketV1,
     pub resolution: ResolvedTriageProductionV1,
     pub binding: LinkedCorpusBinding,
+}
+
+/// Build exact V2 preflight facts from the trusted local profile set and the
+/// separate host-owned role qualification store.  Generic capability reports
+/// are intentionally not consulted: transport compatibility alone cannot
+/// authorize a packet/validator workflow.  This helper is shared by CLI and
+/// Tauri so they cannot drift in identity, egress, or qualification rules.
+pub fn preflight_for_policy(
+    cfg: &AppConfig,
+    policy: &TriagePolicyV2,
+    role_store: &TriageRoleQualificationStoreV1,
+) -> TriagePolicyPreflightV2 {
+    let mut slots = Vec::new();
+    slots.extend(policy.contributors.iter().map(|slot| {
+        (
+            slot.slot_id.clone(),
+            TriageSlotKindV2::Contributor(slot.role),
+            slot.model.clone(),
+        )
+    }));
+    if let Some(slot) = &policy.finalizer {
+        slots.push((
+            slot.slot_id.clone(),
+            TriageSlotKindV2::Finalizer,
+            slot.model.clone(),
+        ));
+    }
+    if let Some(slot) = &policy.reviewer {
+        slots.push((
+            slot.slot_id.clone(),
+            TriageSlotKindV2::Reviewer,
+            slot.model.clone(),
+        ));
+    }
+
+    TriagePolicyPreflightV2 {
+        roles: slots
+            .into_iter()
+            .map(|(slot_id, kind, model)| {
+                let profile = cfg
+                    .providers
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == model.profile_id);
+                let available = profile.is_some();
+                let remote = profile.is_some_and(|profile| !profile.local_only);
+                if policy.mode == TriagePolicyMode::Standard {
+                    return RolePreflightV2 {
+                        slot_id,
+                        model,
+                        kind,
+                        available,
+                        qualification: RoleQualificationV2::Qualified,
+                        remote,
+                        qualification_schema_id: None,
+                        workflow_id: None,
+                        protocol_fingerprint: None,
+                    };
+                }
+
+                let Some(profile) = profile else {
+                    return RolePreflightV2 {
+                        slot_id,
+                        model,
+                        kind,
+                        available: false,
+                        qualification: RoleQualificationV2::Unverified,
+                        remote,
+                        qualification_schema_id: None,
+                        workflow_id: None,
+                        protocol_fingerprint: None,
+                    };
+                };
+                let transport =
+                    cd_core::capability_qualification::QualificationKey::with_provider_kind(
+                        &profile.id,
+                        &profile.base_url,
+                        &model.model_id,
+                        profile.kind,
+                    )
+                    .transport_protocol;
+                let role_key = TriageRoleQualificationKeyV1::current(
+                    &profile.id,
+                    &profile.base_url,
+                    &model.model_id,
+                    kind,
+                    triage_protocol_fingerprint(&transport),
+                );
+                let qualification = role_store
+                    .get(&role_key)
+                    .map(|record| record.qualification)
+                    .unwrap_or(RoleQualificationV2::Unverified);
+                RolePreflightV2 {
+                    slot_id,
+                    model,
+                    kind,
+                    available,
+                    qualification,
+                    remote,
+                    qualification_schema_id: Some(role_key.qualification_schema_id),
+                    workflow_id: Some(role_key.workflow_id),
+                    protocol_fingerprint: Some(role_key.protocol_fingerprint),
+                }
+            })
+            .collect(),
+    }
 }
 
 /// Content-free errors from the trusted host boundary.
@@ -529,6 +638,10 @@ mod tests {
         RolePreflightV2, RoleQualificationV2, RoleRequirement, TriageSlotKindV2,
     };
     use cd_core::providers::ProviderProfile;
+    use cd_core::triage_role_qualification::{
+        triage_protocol_fingerprint, TriageRoleQualificationKeyV1, TriageRoleQualificationRecordV1,
+        TriageRoleQualificationStoreV1,
+    };
     use cd_core::triage_sdk::TriageReconciliationV1;
 
     #[test]
@@ -575,6 +688,67 @@ mod tests {
         )
         .expect_err("forged remote fact");
         assert!(matches!(error, TriageHostError::Profile(_)));
+    }
+
+    #[test]
+    fn shared_preflight_reads_only_exact_role_store_identity() {
+        let mut cfg = AppConfig::default();
+        let mut profile = ProviderProfile::ollama_local();
+        profile.id = "profile:test".into();
+        profile.chat_model = "model:test".into();
+        cfg.providers.profiles.push(profile.clone());
+        let mut policy = TriagePolicyV2::standard(
+            ModelRef {
+                profile_id: profile.id.clone(),
+                model_id: profile.chat_model.clone(),
+            },
+            false,
+        );
+        policy.mode = cd_core::multi_model::triage_policy::TriagePolicyMode::Enhanced;
+        let kind = TriageSlotKindV2::Finalizer;
+        let transport = cd_core::capability_qualification::QualificationKey::with_provider_kind(
+            &profile.id,
+            &profile.base_url,
+            &profile.chat_model,
+            profile.kind,
+        )
+        .transport_protocol;
+        let key = TriageRoleQualificationKeyV1::current(
+            &profile.id,
+            &profile.base_url,
+            &profile.chat_model,
+            kind,
+            triage_protocol_fingerprint(&transport),
+        );
+        let mut store = TriageRoleQualificationStoreV1::default();
+        store
+            .put(TriageRoleQualificationRecordV1 {
+                key,
+                qualification: RoleQualificationV2::Qualified,
+                physical_provider_calls: 1,
+                semantic_corrections: 0,
+                reason: "synthetic role probe passed".into(),
+                tested_at: 1,
+            })
+            .unwrap();
+        let preflight = preflight_for_policy(&cfg, &policy, &store);
+        assert_eq!(preflight.roles.len(), 1);
+        assert_eq!(
+            preflight.roles[0].qualification,
+            RoleQualificationV2::Qualified
+        );
+        assert_eq!(
+            preflight.roles[0].qualification_schema_id.as_deref(),
+            Some(cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_SCHEMA_V2)
+        );
+
+        let mut sibling_policy = policy;
+        sibling_policy.finalizer.as_mut().unwrap().model.model_id = "other".into();
+        let sibling = preflight_for_policy(&cfg, &sibling_policy, &store);
+        assert_eq!(
+            sibling.roles[0].qualification,
+            RoleQualificationV2::Unverified
+        );
     }
 
     fn packet() -> FastTriagePacketV1 {
