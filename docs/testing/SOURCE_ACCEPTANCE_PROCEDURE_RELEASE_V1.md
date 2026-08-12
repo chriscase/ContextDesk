@@ -4,7 +4,7 @@ Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
 - branch: `integrate/triage-policy-sdk-v2`
-- exact tested source/build SHA: `d96687bbec1f046ddff2d981da0a965069bb12db`
+- exact tested source/build SHA: `c66d3a0f1c7dac9b9b4240aef5a4aae9e310f01e`
 - acceptance-procedure revision: this branch tip may be newer than the build
   SHA; fetch the branch first, then build the exact tested SHA above. This
   avoids an impossible self-referential commit hash in the procedure itself.

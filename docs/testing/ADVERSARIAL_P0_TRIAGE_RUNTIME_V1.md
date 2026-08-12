@@ -1,6 +1,6 @@
 # Adversarial triage-runtime hardening — P0 fix
 
-**Code SHA:** `d96687bbec1f046ddff2d981da0a965069bb12db`
+**Code SHA:** `c66d3a0f1c7dac9b9b4240aef5a4aae9e310f01e`
 **Branch:** `integrate/triage-policy-sdk-v2`  
 **Scope:** provider-free production-path hardening; no live compatibility claim
 
