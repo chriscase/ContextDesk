@@ -4,7 +4,7 @@ Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
 - branch: `integrate/triage-policy-sdk-v2`
-- exact tested source/build SHA: `01ba43feed9d2e218aa2f23734f9021e6de85022`
+- exact tested source/build SHA: `a3a5263e408c8c1cd3030f470be690e334f1adad`
 
 The exact tested source/build SHA above is the identity that must be fetched, built, and
 verified. Do not substitute an older baseline, a moving branch tip, or an
@@ -12,8 +12,10 @@ unrelated local checkout. The bounded Vercel evidence for this exact runtime is
 recorded in
 `docs/testing/VERCEL_DEEPSEEK_DIAGNOSTIC_2026-08-12_RELEASE_01BA43FE.md`.
 It is useful transport/product-path evidence, but it is not an employer-gateway
-compatibility claim. Earlier `188e20a9ff35`, `601964de`, and `da231830` runs
-remain historical context only.
+compatibility claim. The preceding `01ba43fe` Vercel run remains historical
+context only because this release adds cancellation hardening after that run.
+Earlier `188e20a9ff35`, `601964de`, and `da231830` runs are also historical
+context only.
 
 This pin supersedes earlier acceptance inputs. Since those older pins, the
 release has added the typed Triage Policy V2 graph and host resolver, shared
