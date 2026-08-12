@@ -10371,6 +10371,8 @@ async fn triage_run_v2(
         request_fingerprint: triage_fingerprint(&request_bytes),
         policy_fingerprint: triage_fingerprint(&policy_bytes),
         corpus_id: request.scope.corpus_id.clone(),
+        corpus_revision: request.scope.corpus_revision,
+        source_ids: request.scope.source_ids.clone(),
         user_text: request.task.clone(),
         cancellation_id: request.cancellation_id.clone(),
         explicit_review_requested: false,

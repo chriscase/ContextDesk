@@ -46,6 +46,12 @@ pub struct TriageHostRunInput {
     pub request_fingerprint: String,
     pub policy_fingerprint: String,
     pub corpus_id: String,
+    /// Optional corpus revision requested by the SDK scope. The host proves
+    /// the bound corpus is still at this revision before building the packet.
+    pub corpus_revision: Option<u64>,
+    /// Explicit source restriction from the SDK scope. The current broad
+    /// packet builder is whole-corpus, so non-empty restrictions fail closed.
+    pub source_ids: Vec<String>,
     pub user_text: String,
     pub cancellation_id: String,
     pub explicit_review_requested: bool,
@@ -66,11 +72,26 @@ pub struct ResolvedTriageHostV1 {
 #[derive(Debug, Clone)]
 pub enum TriageHostError {
     Corpus(String),
+    Scope(String),
     Policy(String),
     Profile(String),
     Backend(String),
     Runner(TriageProductionRunnerError),
     Contract(TriageContractError),
+}
+
+fn validate_requested_scope(
+    corpus_revision: Option<u64>,
+    source_ids: &[String],
+    bound_revision: u64,
+) -> Result<(), &'static str> {
+    if !source_ids.is_empty() {
+        return Err("source_scope_not_supported_by_v2_packet_builder");
+    }
+    if corpus_revision.is_some_and(|revision| revision != bound_revision) {
+        return Err("corpus_revision_changed_before_v2_packet_build");
+    }
+    Ok(())
 }
 
 /// A conservative production hook: contributor/reviewer responses must be
@@ -173,6 +194,7 @@ impl std::fmt::Display for TriageHostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Corpus(_) => "corpus_binding_failed",
+            Self::Scope(_) => "triage_scope_rejected",
             Self::Policy(_) => "policy_preflight_rejected",
             Self::Profile(_) => "provider_profile_unavailable",
             Self::Backend(_) => "provider_backend_unavailable",
@@ -213,6 +235,12 @@ pub async fn resolve_v2_host(
 
     let binding = bind_linked_corpus(host, cache_root, &input.corpus_id)
         .map_err(|error| TriageHostError::Corpus(error.to_string()))?;
+    if let Err(reason) =
+        validate_requested_scope(input.corpus_revision, &input.source_ids, binding.revision)
+    {
+        unbind_linked_corpus(host, binding);
+        return Err(TriageHostError::Scope(reason.into()));
+    }
     let brief = match host.build_broad_log_triage_brief() {
         Ok(brief) => brief,
         Err(error) => {
@@ -365,6 +393,24 @@ mod tests {
     use cd_core::model_ref::ModelRef;
     use cd_core::multi_model::triage_policy::{RoleRequirement, TriageSlotKindV2};
     use cd_core::triage_sdk::TriageReconciliationV1;
+
+    #[test]
+    fn requested_scope_accepts_current_revision_without_sources() {
+        assert!(validate_requested_scope(Some(7), &[], 7).is_ok());
+        assert!(validate_requested_scope(None, &[], 7).is_ok());
+    }
+
+    #[test]
+    fn requested_scope_rejects_revision_drift_and_unimplemented_sources() {
+        assert_eq!(
+            validate_requested_scope(Some(6), &[], 7),
+            Err("corpus_revision_changed_before_v2_packet_build")
+        );
+        assert_eq!(
+            validate_requested_scope(None, &["source-a".into()], 7),
+            Err("source_scope_not_supported_by_v2_packet_builder")
+        );
+    }
 
     fn packet() -> FastTriagePacketV1 {
         let revision = LogSnapshotRevisionV1 {
