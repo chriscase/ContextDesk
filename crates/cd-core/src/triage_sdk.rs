@@ -684,6 +684,11 @@ impl TriageReplayV1 {
             return Err(TriageContractError::RequestFingerprintMismatch);
         }
         let mut terminal_count = 0usize;
+        let mut packet_ready = false;
+        let mut reconciliation = false;
+        let mut validation = false;
+        let mut finalizer_attempt = false;
+        let mut reviewer_attempt = false;
         for (index, event) in self.events.iter().enumerate() {
             event.validate()?;
             if event.run_id != self.run_id {
@@ -697,6 +702,61 @@ impl TriageReplayV1 {
                 if index + 1 != self.events.len() {
                     return Err(TriageContractError::EventAfterTerminal);
                 }
+                if !validation {
+                    return Err(TriageContractError::InvalidPhaseOrder);
+                }
+                continue;
+            }
+            let phase_ok = match &event.event {
+                TriageRunEventPayloadV2::RunStarted { .. } => index == 0,
+                TriageRunEventPayloadV2::PacketReady { .. } => {
+                    index == 1 && !packet_ready && !reconciliation && !validation
+                }
+                TriageRunEventPayloadV2::RoleAttempt { attempt } => match attempt.role {
+                    TriageSlotKindV2::Contributor(_) => {
+                        packet_ready
+                            && !reconciliation
+                            && !validation
+                            && !finalizer_attempt
+                            && !reviewer_attempt
+                    }
+                    TriageSlotKindV2::Finalizer => {
+                        packet_ready
+                            && reconciliation
+                            && !validation
+                            && !finalizer_attempt
+                            && !reviewer_attempt
+                    }
+                    TriageSlotKindV2::Reviewer => {
+                        packet_ready && reconciliation && !validation && !reviewer_attempt
+                    }
+                },
+                TriageRunEventPayloadV2::Reconciliation { .. } => {
+                    packet_ready && !reconciliation && !validation
+                }
+                TriageRunEventPayloadV2::Validation { .. } => reconciliation && !validation,
+                TriageRunEventPayloadV2::Completed { .. }
+                | TriageRunEventPayloadV2::Failed { .. }
+                | TriageRunEventPayloadV2::TimedOut { .. }
+                | TriageRunEventPayloadV2::Cancelled { .. } => false,
+            };
+            if !phase_ok {
+                return Err(TriageContractError::InvalidPhaseOrder);
+            }
+            match &event.event {
+                TriageRunEventPayloadV2::PacketReady { .. } => packet_ready = true,
+                TriageRunEventPayloadV2::RoleAttempt { attempt } => match attempt.role {
+                    TriageSlotKindV2::Contributor(_) => {}
+                    TriageSlotKindV2::Finalizer => finalizer_attempt = true,
+                    TriageSlotKindV2::Reviewer => reviewer_attempt = true,
+                },
+                TriageRunEventPayloadV2::Reconciliation { .. } => reconciliation = true,
+                TriageRunEventPayloadV2::Validation { .. } => validation = true,
+                TriageRunEventPayloadV2::RunStarted { .. }
+                | TriageRunEventPayloadV2::Completed { .. }
+                | TriageRunEventPayloadV2::Failed { .. }
+                | TriageRunEventPayloadV2::TimedOut { .. }
+                | TriageRunEventPayloadV2::Cancelled { .. } => {}
             }
         }
         if terminal_count != 1 {
@@ -854,6 +914,8 @@ pub enum TriageContractError {
     TerminalCount(usize),
     #[error("triage replay contains an event after its terminal event")]
     EventAfterTerminal,
+    #[error("triage replay violates canonical phase ordering")]
+    InvalidPhaseOrder,
     #[error("triage run identity does not match its envelope")]
     RunIdentityMismatch,
     #[error("share-safe triage serialization contains owner-only material")]
