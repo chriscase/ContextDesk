@@ -10397,6 +10397,14 @@ async fn triage_run_v2(
             resolved,
             input,
             &cd_workflow::triage_host::HostValidatedAnswerHooks::default(),
+            Some(Arc::new({
+                let app = app.clone();
+                move |event| {
+                    // Progressive events are a convenience view; the
+                    // validated replay returned below remains authoritative.
+                    let _ = app.emit("triage-run-event", event);
+                }
+            })),
         )
         .await
         .map_err(|error| error.to_string())
@@ -10412,10 +10420,6 @@ async fn triage_run_v2(
         &cancel,
     );
     let result = execution?;
-    for event in &result.replay.events {
-        app.emit("triage-run-event", event)
-            .map_err(|error| format!("triage event delivery failed: {error}"))?;
-    }
     result
         .replay
         .events

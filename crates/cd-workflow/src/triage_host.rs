@@ -365,6 +365,7 @@ pub async fn run_v2_host<H: TriageProductionHooks + ?Sized>(
     resolved: ResolvedTriageHostV1,
     input: TriageHostRunInput,
     hooks: &H,
+    event_sink: Option<crate::triage_production_runner::TriageEventSink>,
 ) -> Result<TriageProductionRunResultV1, TriageHostError> {
     let packet = resolved.packet.clone();
     let runner = TriageProductionRunnerV1::new(resolved.resolution);
@@ -379,7 +380,7 @@ pub async fn run_v2_host<H: TriageProductionHooks + ?Sized>(
         cancel: input.cancel,
     };
     let result = runner
-        .run(run_input, hooks)
+        .run_with_event_sink(run_input, hooks, event_sink)
         .await
         .map_err(TriageHostError::Runner);
     unbind_linked_corpus(host, resolved.binding);

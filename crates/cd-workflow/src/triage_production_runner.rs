@@ -71,6 +71,11 @@ pub struct TriageProductionRunInput {
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
+/// Optional synchronous observer for host-local progressive event delivery.
+/// The runner still retains and validates the complete replay; this callback
+/// is only a live view and must not be used as the source of truth.
+pub type TriageEventSink = Arc<dyn Fn(&TriageRunEventV2) + Send + Sync>;
+
 /// A host decision after inspecting one provider completion.  No decision
 /// text is copied to the event ledger; only these bounded reason codes are.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -409,16 +414,36 @@ impl TriageProductionRunnerError {
 /// Append-only owner-only V2 event ledger.  The shared replay validator is
 /// called at the boundary, so callers cannot accidentally publish a phase
 /// reorder or duplicate terminal.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TriageProductionEventLedgerV1 {
     run_id: String,
     request_fingerprint: String,
     events: Vec<TriageRunEventV2>,
+    sink: Option<TriageEventSink>,
+}
+
+impl std::fmt::Debug for TriageProductionEventLedgerV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TriageProductionEventLedgerV1")
+            .field("run_id", &self.run_id)
+            .field("request_fingerprint", &self.request_fingerprint)
+            .field("events", &self.events)
+            .field("progressive_sink", &self.sink.is_some())
+            .finish()
+    }
 }
 
 impl TriageProductionEventLedgerV1 {
     /// Start a ledger with the canonical prelude.
     pub fn new(input: &TriageProductionRunInput) -> Result<Self, TriageProductionRunnerError> {
+        Self::new_with_sink(input, None)
+    }
+
+    /// Start a ledger with an optional progressive observer.
+    pub fn new_with_sink(
+        input: &TriageProductionRunInput,
+        sink: Option<TriageEventSink>,
+    ) -> Result<Self, TriageProductionRunnerError> {
         if input.run_id.trim().is_empty() {
             return Err(TriageProductionRunnerError::InvalidInput("run_id"));
         }
@@ -439,6 +464,7 @@ impl TriageProductionEventLedgerV1 {
             run_id: input.run_id.clone(),
             request_fingerprint: input.request_fingerprint.clone(),
             events: Vec::new(),
+            sink,
         };
         ledger.push(TriageRunEventPayloadV2::RunStarted {
             request_fingerprint: input.request_fingerprint.clone(),
@@ -453,13 +479,17 @@ impl TriageProductionEventLedgerV1 {
     }
 
     fn push(&mut self, event: TriageRunEventPayloadV2) {
-        self.events.push(TriageRunEventV2 {
+        let event = TriageRunEventV2 {
             schema_id: TRIAGE_RUN_EVENT_SCHEMA_V2.into(),
             run_id: self.run_id.clone(),
             sequence: self.events.len() as u64,
             privacy: PacketPrivacyBoundary::OwnerOnly,
             event,
-        });
+        };
+        if let Some(sink) = &self.sink {
+            sink(&event);
+        }
+        self.events.push(event);
     }
 
     /// Borrow the ordered event stream.
@@ -518,11 +548,22 @@ impl TriageProductionRunnerV1 {
         input: TriageProductionRunInput,
         hooks: &H,
     ) -> Result<TriageProductionRunResultV1, TriageProductionRunnerError> {
+        self.run_with_event_sink(input, hooks, None).await
+    }
+
+    /// Execute while optionally publishing each validated event as soon as it
+    /// is appended. The final replay remains the authoritative output.
+    pub async fn run_with_event_sink<H: TriageProductionHooks + ?Sized>(
+        &self,
+        input: TriageProductionRunInput,
+        hooks: &H,
+        sink: Option<TriageEventSink>,
+    ) -> Result<TriageProductionRunResultV1, TriageProductionRunnerError> {
         if input.packet.packet_id().trim().is_empty() {
             return Err(TriageProductionRunnerError::InvalidInput("packet_id"));
         }
         let started = tokio::time::Instant::now();
-        let mut ledger = TriageProductionEventLedgerV1::new(&input)?;
+        let mut ledger = TriageProductionEventLedgerV1::new_with_sink(&input, sink)?;
         let slots = &self.resolution.compiled.slots;
         let contributors = slots
             .iter()
@@ -1382,6 +1423,33 @@ mod tests {
             ledger.finish(),
             Err(TriageProductionRunnerError::Contract(_))
         ));
+    }
+
+    #[test]
+    fn progressive_sink_observes_each_event_in_replay_order() {
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_observed = Arc::clone(&observed);
+        let sink: TriageEventSink = Arc::new(move |event| {
+            sink_observed
+                .lock()
+                .expect("sink lock")
+                .push(event.sequence);
+        });
+        let mut ledger =
+            TriageProductionEventLedgerV1::new_with_sink(&input(), Some(sink)).expect("prelude");
+        ledger.push(TriageRunEventPayloadV2::Correction {
+            applied: false,
+            reason_codes: vec!["test".into()],
+        });
+        let replay_events = ledger.events().to_vec();
+        let sequences = observed.lock().expect("sink lock").clone();
+        assert_eq!(
+            sequences,
+            replay_events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

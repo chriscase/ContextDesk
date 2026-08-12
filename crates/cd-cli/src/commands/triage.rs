@@ -262,6 +262,7 @@ pub async fn run_stateful(
         resolved,
         input,
         &cd_workflow::triage_host::HostValidatedAnswerHooks::default(),
+        None,
     )
     .await
     .map_err(|error| CliError::user(error.to_string()))?;
