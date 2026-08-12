@@ -2834,6 +2834,20 @@ fn write_artifact_bundle(
         serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    // Keep diagnostic bundles owner-only regardless of the process umask.
+    // Even the share-safe files contain local run metadata and are only made
+    // shareable after an explicit owner review/copy.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+        std::fs::set_permissions(&report_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+        let manifest_path = dir.join("manifest.json");
+        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
     Ok(dir)
 }
 
@@ -3525,6 +3539,9 @@ mod tests {
 
     #[test]
     fn artifact_writer_reapplies_policy_to_report_and_manifest() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
         let profile = "private-profile-73";
         let model = "exact-model/customer-9";
         let policy = ShareSafeRedactionPolicy::new([profile, model]);
@@ -3556,5 +3573,25 @@ mod tests {
             manifest["files"][0]["sha256"].as_str(),
             Some(expected.as_str())
         );
+
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "diagnostic bundle directory must be owner-only"
+            );
+            for name in ["report.json", "manifest.json"] {
+                assert_eq!(
+                    std::fs::metadata(dir.join(name))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600,
+                    "diagnostic bundle file must be owner-only: {name}"
+                );
+            }
+        }
     }
 }
