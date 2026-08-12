@@ -1,10 +1,10 @@
 # Vercel DeepSeek V4 Flash diagnostic evidence — TimelineAnalyst release
 
 **Run date:** 2026-08-12  
-**ContextDesk build:** `da23183081d7641edc9faa4f17a5923549442273`  
-**Gateway/model:** exact discovered catalog id `deepseek/deepseek-v4-flash`  
-**Diagnostic:** basic, 600-second whole-operation bound, protected-file credential reference  
-**Run id:** `gwdx-1786531636079-84328` (owner-local artifact)
+**ContextDesk build:** `601964deee2f3bffc675ed398514e0a7d24a197c`
+**Gateway/model:** exact discovered catalog id `deepseek/deepseek-v4-flash`
+**Diagnostic:** basic, 600-second whole-operation bound, protected-file credential reference
+**Run id:** `gwdx-1786531919778-86198` (owner-local artifact)
 
 This is an operator-selected live observation, not a readiness badge. The
 share-safe report, manifest, JSONL trace, and private provider exchange files
@@ -15,17 +15,17 @@ committed here.
 
 | Dimension | Result |
 | --- | --- |
-| Ordinary generation | pass; direct 1,628 ms, product 1,572 ms |
-| Structured JSON response | pass; direct 1,508 ms, product 1,740 ms |
-| Direct native tool-call probe | fail, `response_contract` (4,343 ms) |
-| Product tool + continuation path | pass; real search tool and grounded result (5,357 ms) |
-| Selected-context attachment path | pass; current fact cited and superseded decoy avoided (1,935 ms) |
-| Product linked-log triage | pass; known-truth scorer passed (38,578 ms, 4 requests) |
+| Ordinary generation | pass; direct 1,407 ms, product 1,525 ms |
+| Structured JSON response | pass; direct 1,576 ms, product 1,305 ms |
+| Direct native tool-call probe | fail, `response_contract` (3,911 ms) |
+| Product tool + continuation path | pass; real search tool and grounded result (4,809 ms) |
+| Selected-context attachment path | pass; current fact cited and superseded decoy avoided (1,973 ms) |
+| Product linked-log triage | pass; known-truth scorer passed |
 | Product workflow verdict | pass |
 | Answers-useful verdict | pass |
 | Gateway-model compatibility verdict | fail |
 | Requests | 19 of 23 planned maximum |
-| Elapsed | 66,183 ms |
+| Elapsed | 64,390 ms |
 | Cleanup | 2 temporary corpora and 3 sessions removed; no failures |
 | Cost/tokens | unknown; the gateway report did not include usage |
 
