@@ -108,6 +108,8 @@ pub mod tool_host;
 pub mod tools;
 /// Hermetic broad-triage quality contract and structured rubric.
 pub mod triage_quality;
+/// Versioned, host-neutral SDK request, event, result, cancellation, and replay contracts.
+pub mod triage_sdk;
 pub mod turn_trace;
 pub mod vector_index;
 pub mod web_research;

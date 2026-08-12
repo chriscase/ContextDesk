@@ -1,0 +1,25 @@
+{
+  "cancellation_id": "cancel:golden:01",
+  "overrides": {
+    "deadline_ms": 600000,
+    "max_provider_calls": 3
+  },
+  "policy": {
+    "kind": "standard",
+    "model": {
+      "model_id": "model:catalog:exact",
+      "profile_id": "profile:primary"
+    }
+  },
+  "privacy": "owner_only",
+  "run_id": "run:golden:01",
+  "schema_id": "contextdesk.triage.request.v99",
+  "scope": {
+    "corpus_id": "corpus:demo:01",
+    "corpus_revision": 63,
+    "source_ids": [
+      "source:edm"
+    ]
+  },
+  "task": "Find the initiating cause and keep downstream symptoms separate."
+}

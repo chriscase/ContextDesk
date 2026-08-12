@@ -17,7 +17,7 @@ pub struct ModelRef {
 }
 
 impl ModelRef {
-    /// Validate that both identities are non-empty, opaque, and content-free.
+    /// Validate content-free identities while preserving namespaced catalog ids.
     pub fn validate(&self) -> Result<(), ModelRefError> {
         validate_profile_id(&self.profile_id)?;
         validate_model_id(&self.model_id)
