@@ -3,22 +3,23 @@
 Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
-- branch: `integrate/release-quality-v2`
-- exact tested source/build SHA: `8b732d007a51a2624e363693fff555b609fd2456`
+- branch: `integrate/triage-policy-sdk-v2`
+- exact tested source/build SHA: `2d0392d4becc22204c55d518082f42edbf32b349`
 
 The exact tested source/build SHA above is the identity that must be fetched, built, and
 verified. Do not substitute an older baseline, a moving branch tip, or an
-unrelated local checkout. The live Vercel evidence is explicitly recorded
-against the tested product-path ancestor
-`aeaf5a7e7f686a6e4113f46ffaf24279d5073d89`; the later commits add only
-deterministic quality-evaluation hardening and documentation. That live
-evidence is not broadened into a universal provider claim.
+unrelated local checkout. The live Vercel evidence is explicitly recorded in
+`docs/testing/VERCEL_DEEPSEEK_DIAGNOSTIC_2026-08-12_RELEASE_188E20A9.md`.
+The evidence was run against the immediately preceding code SHA
+`188e20a9ff35`; the final commit adds only that evidence note, so the runtime
+code is unchanged. This live observation is not broadened into a universal
+provider claim.
 
-This pin supersedes the earlier `c0935715…`, `85c065f0…`, and `64edb0a…`
-acceptance inputs. Since those older pins, the release has added the chat-contract v4
-transport/mode identity and fail-closed qualification, host-grounded fast
-triage, bounded deadline controls, wider production rerank candidate handling,
-and the current protected-file gateway diagnostic plumbing. Historical
+This pin supersedes earlier acceptance inputs. Since those older pins, the
+release has added the typed Triage Policy V2 graph and host resolver, shared
+CLI/Tauri/TypeScript SDK seams, chat-contract v4 transport/mode identity and
+fail-closed qualification, bounded deadline controls, production embedding and
+rerank adapters, and the protected-file gateway diagnostic plumbing. Historical
 live-provider reports for older SHAs are not evidence for this exact release.
 
 This is the source-build path for a separate company machine. It does not
@@ -91,7 +92,7 @@ product/usefulness failure rather than guessing at a provider cause.
 The release includes explicit inconclusive verdicts, exact model/profile
 binding, protected-file credentials, adaptive deadlines, production-path
 embedding/reranking adapters, and bounded reasoning-channel telemetry. The
-release's Vercel evidence additionally passes Qwen3 Embedding 0.6B and Voyage
-Rerank 2.5 Lite through those production adapters. Live employer compatibility,
-answer usefulness, and any employer retrieval-role verdict still require this
-machine's own gateway and corpus evidence.
+current Vercel evidence is limited to the DeepSeek diagnostic described above;
+it does not establish employer compatibility or retrieval-role readiness. Live
+employer compatibility, answer usefulness, and any employer embedding/rerank
+verdict still require this machine's own gateway and corpus evidence.
