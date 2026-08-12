@@ -1,10 +1,15 @@
-# Shared local build cache
+# Worktree-scoped local build cache
 
 ContextDesk has two Rust workspaces: the repository root and
-`desktop/src-tauri`. Cargo normally gives each Git worktree—and each workspace
-inside it—a separate `target/`. That is safe but can duplicate tens of
-gigabytes. ContextDesk provides an **opt-in** helper that points both workspaces
-at one explicit Cargo target outside every registered worktree.
+`desktop/src-tauri`. ContextDesk provides an **opt-in** helper that moves build
+artifacts outside source directories while preserving one stable target
+identity per Git worktree. Rust compiler objects are reused across those
+targets through `sccache` when it is installed.
+
+Targets are deliberately not shared by divergent worktrees. Cargo fingerprints
+do not safely distinguish identical package names from separate mutable source
+roots: a shared target can run a stale test binary produced by another
+worktree. Worktree-scoped targets preserve correctness.
 
 The helper does not modify `~/.cargo/config.toml`, shell profiles, repository
 Cargo profiles, or CI configuration.
@@ -17,11 +22,11 @@ From any ContextDesk worktree:
 eval "$(scripts/local-build-cache.sh activate)"
 ```
 
-The default shared target is:
+The default target family is:
 
 ```text
-macOS: $HOME/Library/Caches/ContextDesk/build-v1/cargo-target
-other Unix: ${XDG_CACHE_HOME:-$HOME/.cache}/contextdesk/build-v1/cargo-target
+macOS: $HOME/Library/Caches/ContextDesk/build-v1/cargo-targets/<worktree-hash>
+other Unix: ${XDG_CACHE_HOME:-$HOME/.cache}/contextdesk/build-v1/cargo-targets/<worktree-hash>
 ```
 
 Choose an absolute location explicitly when the default volume is too small:
@@ -54,16 +59,16 @@ cargo test -p cd-core
 ( cd desktop && npm run tauri:build -- --bundles app )
 ```
 
-Cargo's target lock and fingerprints make the root and nested Tauri workspaces
-compatible with the same target for the normal ContextDesk toolchain and target
-triple. Use a different `--cache-root` suffix when intentionally switching Rust
-toolchains, target triples, or incompatible build environments. Concurrent
-commands may serialize on Cargo's target lock; do not treat one shared target as
-a distributed cache.
+The root and nested Tauri workspaces in one worktree use the same scoped target
+for the normal ContextDesk toolchain and target triple. Use a different
+`--cache-root` suffix when intentionally switching Rust toolchains, target
+triples, or incompatible build environments. Concurrent commands in one
+worktree may serialize on Cargo's target lock.
 
-The first build still compiles normally. Reuse helps later worktrees avoid
-rebuilding identical dependencies and avoids two full Rust target trees in each
-worktree.
+The first build in a worktree still compiles normally. `sccache` can reuse Rust
+compiler objects across worktrees, while native build-script outputs such as
+DuckDB remain isolated for correctness. Reuse long-lived integration worktrees
+instead of creating a fresh build worktree for every small change.
 
 ## Read-only inventory
 
@@ -77,7 +82,8 @@ It reports:
 
 - the primary and linked registered worktrees;
 - whether each worktree has tracked or untracked changes;
-- root, Tauri, and shared Cargo targets with sizes and cleanup eligibility;
+- root, Tauri, legacy-shared, and worktree-scoped Cargo targets with sizes and
+  cleanup eligibility;
 - `.app` bundles nested in targets;
 - per-worktree `desktop/node_modules` and `.fastembed_cache` sizes.
 
@@ -126,7 +132,9 @@ scripts/local-build-cache.sh cleanup --apply \
 All requested targets are validated before the first cleanup. The helper accepts
 only:
 
-- the marked shared `cargo-target`;
+- marked cache-root `cargo-targets/<worktree-hash>` targets;
+- the marked legacy shared `cargo-target` (cleanup only; activation no longer
+  selects it);
 - `<linked-worktree>/target`;
 - `<linked-worktree>/desktop/src-tauri/target`.
 
@@ -149,10 +157,10 @@ the target. The helper can validate paths and packages, but it cannot portably
 prove that no compiler child process is using a target. Inventory first, stop or
 finish active builds, preserve any package, then apply cleanup.
 
-The shared target is intentionally not pruned automatically. Use inventory to
-watch its size and the same explicit dry-run/apply cleanup when it is no longer
-worth retaining. This keeps disk use bounded without a background process
-deleting artifacts unexpectedly.
+Targets are intentionally not pruned automatically. Use inventory to watch
+their sizes and the same explicit dry-run/apply cleanup when a worktree target
+is no longer worth retaining. This keeps disk use bounded without a background
+process deleting artifacts unexpectedly.
 
 ## Frontend and hosted caching
 

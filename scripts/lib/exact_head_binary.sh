@@ -9,7 +9,7 @@
 # Rules:
 # - Never silently use a pre-existing binary without a matching stamp.
 # - Stamp is written only after a deliberate cargo build of this checkout.
-# - CARGO_TARGET_DIR may be shared; never clean the shared target.
+# - CARGO_TARGET_DIR may be external/worktree-scoped; never clean it here.
 # - Stamp + embedded capabilities.git_sha must both match worktree HEAD.
 set -euo pipefail
 

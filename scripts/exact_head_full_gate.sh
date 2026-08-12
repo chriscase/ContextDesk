@@ -18,11 +18,11 @@ set -o pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Prefer the marked shared target for local release gates. This keeps the
-# expensive root/Tauri dependency graph (including native DuckDB objects)
-# reusable across registered worktrees. Callers can opt out for an unusual
-# toolchain/target with CONTEXTDESK_DISABLE_SHARED_BUILD_CACHE=1 or by
-# explicitly setting CARGO_TARGET_DIR. CI keeps its runner-managed cache.
+# Prefer the marked worktree-scoped cache target for local release gates.
+# Compiler objects remain reusable through sccache without allowing divergent
+# worktrees to share Cargo fingerprints. Callers can opt out for an unusual
+# toolchain/target with the legacy CONTEXTDESK_DISABLE_SHARED_BUILD_CACHE=1
+# switch or by explicitly setting CARGO_TARGET_DIR. CI keeps its own cache.
 if [[ -z "${CARGO_TARGET_DIR:-}" && "${CI:-}" != "true" &&
       "${CONTEXTDESK_DISABLE_SHARED_BUILD_CACHE:-0}" != "1" &&
       -x "$ROOT/scripts/local-build-cache.sh" ]]; then
