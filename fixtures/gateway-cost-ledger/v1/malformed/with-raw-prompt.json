@@ -1,0 +1,9 @@
+{
+  "schema_id": "contextdesk.gateway_diagnostic.v1",
+  "run_id": "bad-prompt",
+  "raw_prompt": "system: do not share",
+  "verdicts": {
+    "gateway_model_status": "pass"
+  },
+  "cases": []
+}

@@ -1,0 +1,32 @@
+{
+  "schema_id": "contextdesk.gateway_cost_ledger_historical_row.v1",
+  "historical_row": true,
+  "documented_source": "docs/benchmarks/VERCEL_DEEPSEEK_TRIAGE_DIAGNOSTIC_77E520DA.md",
+  "run_id": "gwdx-hist-77e520da-run1",
+  "source_build": "77e520da063bf872a011d3418c983660e5b47cd0",
+  "model_label": "deepseek/deepseek-v4-flash",
+  "gateway_label": "Vercel AI Gateway",
+  "role_hint": "chat",
+  "level": "basic",
+  "request_count": 15,
+  "deadline_secs": 600,
+  "deadline_exceeded": false,
+  "cancelled": false,
+  "cleanup_status": "ok",
+  "elapsed_ms": 86900,
+  "gateway_model_status": "pass",
+  "product_workflow_status": "pass",
+  "answers_useful_status": "fail",
+  "case_classifications": [
+    "compatible",
+    "compatible",
+    "retry_required",
+    "compatible",
+    "usefulness_gap"
+  ],
+  "failure_categories": [
+    "usefulness_gap",
+    "typed_trigger_identification",
+    "typed_symptom_separation"
+  ]
+}

@@ -9,6 +9,7 @@ pub mod eval;
 pub mod exception_episodes;
 pub mod explore;
 pub mod gateway;
+pub mod gateway_ledger;
 pub mod import;
 pub mod logging_assessment;
 pub mod models;

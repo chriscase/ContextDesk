@@ -1,0 +1,12 @@
+{
+  "schema_id": "contextdesk.gateway_diagnostic_manifest.v1",
+  "schema_version": 1,
+  "run_id": "gwdx-fixture-deepseek-505c3793",
+  "files": [
+    {
+      "name": "report.json",
+      "sha256": "f46e78526a90f9eba18eea44e64b0539ea0b6dba4ea23e6b247d0a829d03aab2",
+      "bytes": 4875
+    }
+  ]
+}

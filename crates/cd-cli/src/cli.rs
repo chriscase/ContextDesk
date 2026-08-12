@@ -206,6 +206,23 @@ pub enum GatewayAction {
     /// pipeline. Shows planned checks and request/time bounds and requires
     /// confirmation (or `--yes`) before any network call.
     Diagnose(GatewayDiagnoseArgs),
+    /// Offline cost/reliability ledger comparison over share-safe diagnostic
+    /// bundles and documented historical benchmark rows. Never makes live
+    /// gateway calls and never emits readiness claims from aggregates.
+    Ledger(GatewayLedgerArgs),
+}
+
+/// Options for `contextdesk gateway ledger`.
+#[derive(Debug, Clone, clap::Args)]
+pub struct GatewayLedgerArgs {
+    /// Share-safe diagnostic bundle directory (`report.json` + optional
+    /// `manifest.json`), a report JSON file, or a documented historical row
+    /// JSON file. Repeatable.
+    #[arg(long = "input", required = true)]
+    pub inputs: Vec<PathBuf>,
+    /// Optional path to write the share-safe comparison JSON report.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
 }
 
 /// Diagnostic depth. `Basic` is the only default; `Extended` must be chosen

@@ -1,0 +1,31 @@
+{
+  "schema_id": "contextdesk.gateway_cost_ledger_historical_row.v1",
+  "historical_row": true,
+  "documented_source": "docs/benchmarks/VERCEL_GATEWAY_DIAGNOSTIC_505C3793.md",
+  "run_id": "gwdx-1786463126666-5571",
+  "source_build": "505c37933440eff305ebb32b99347c42965ff957",
+  "model_label": "deepseek/deepseek-v4-flash",
+  "gateway_label": "Vercel AI Gateway",
+  "role_hint": "chat",
+  "level": "basic",
+  "request_count": 19,
+  "deadline_secs": 600,
+  "deadline_exceeded": false,
+  "cancelled": false,
+  "cleanup_status": "ok",
+  "elapsed_ms": 58000,
+  "gateway_model_status": "fail",
+  "product_workflow_status": "pass",
+  "answers_useful_status": "pass",
+  "case_classifications": [
+    "compatible",
+    "compatible",
+    "retry_required",
+    "compatible",
+    "compatible"
+  ],
+  "failure_categories": [
+    "retry_required",
+    "response_contract"
+  ]
+}

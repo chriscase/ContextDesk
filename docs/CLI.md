@@ -77,6 +77,7 @@ metacharacters literal. If a question begins with a command name such as
 | `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
 | `triage-policy validate\|compile\|example` | Offline, owner-only Triage Policy V2 validation over explicit policy/preflight JSON files. Retains exact profile/model identities; does not read AppConfig, credentials, Keychain, discovery state, or a corpus, and never contacts a provider. |
 | `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
+| `gateway ledger` | Offline cost/reliability comparison over share-safe diagnostic bundles and documented historical rows. Never makes live calls; never emits readiness claims from aggregates. See [Gateway cost/reliability ledger](benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md). |
 
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
 to a live binary when `CONTEXTDESK_BIN` is set.
@@ -461,6 +462,28 @@ that acknowledgment. A role that lacks it is reported as
 `egress_not_acknowledged` and the keyword/structured baseline remains usable.
 These are compatibility and safety contracts, not claims of semantic quality;
 live employer-model quality still requires a consented diagnostic run.
+
+## Gateway cost/reliability ledger (`contextdesk gateway ledger`)
+
+Offline comparison of **already share-safe** gateway diagnostic bundles and
+documented historical benchmark rows. This command never contacts a gateway,
+never reads credentials, and never invents live observations.
+
+```bash
+contextdesk gateway ledger \
+  --input fixtures/gateway-cost-ledger/v1/deepseek \
+  --input fixtures/gateway-cost-ledger/v1/gpt-oss \
+  --input fixtures/gateway-cost-ledger/v1/historical/row-01.json \
+  --out /tmp/ledger-comparison.json
+```
+
+Each `--input` may be a diagnostic bundle directory (`report.json` + optional
+`manifest.json`), a report JSON file, or a historical row JSON file. The
+comparison reports per-model runs, pass rates by diagnostic dimension (with
+`inconclusive` preserved separately), median latency, cost/token summaries,
+and confidence caveats. Missing cost/tokens stay **unknown**, never zero.
+Aggregates never emit readiness or verified claims. See
+[GATEWAY_COST_RELIABILITY_LEDGER_V1.md](benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md).
 
 ## Isolated profiles (`--data-dir` / `--profile-dir`)
 

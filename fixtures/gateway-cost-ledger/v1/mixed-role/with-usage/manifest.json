@@ -1,0 +1,12 @@
+{
+  "schema_id": "contextdesk.gateway_diagnostic_manifest.v1",
+  "schema_version": 1,
+  "run_id": "gwdx-fixture-pseudo-cost",
+  "files": [
+    {
+      "name": "report.json",
+      "sha256": "bbca984c3c562e306f43ebeb66e147c0fec151dbb2b86abfb63215d1a43e0898",
+      "bytes": 1894
+    }
+  ]
+}

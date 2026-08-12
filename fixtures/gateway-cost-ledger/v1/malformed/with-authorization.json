@@ -1,0 +1,9 @@
+{
+  "schema_id": "contextdesk.gateway_diagnostic.v1",
+  "run_id": "bad-auth",
+  "authorization": "Bearer sk-live-should-reject",
+  "verdicts": {
+    "gateway_model_status": "pass"
+  },
+  "cases": []
+}

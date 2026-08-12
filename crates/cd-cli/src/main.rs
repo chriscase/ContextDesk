@@ -425,41 +425,46 @@ async fn dispatch(
             .await;
             emit(format, resolved.color.value, "models", result)
         }
-        Command::Gateway { action } => {
-            let cli::GatewayAction::Diagnose(args) = action;
-            let secrets = adapters::secret_store();
-            let sessions = adapters::session_store(paths);
-            let result = commands::gateway::run(
-                args,
-                paths,
-                app_cfg,
-                &secrets,
-                &sessions,
-                format,
-                resolved.color.value,
-                resolved.default_provider_profile.value.as_deref(),
-                resolved.default_chat_model.value.as_deref(),
-            )
-            .await;
-            match result {
-                // `commands::gateway::run` already rendered every case line
-                // and the terminal verdict/envelope itself for every format
-                // — mirrors `doctor`'s own bespoke streaming path — so the
-                // exit code reflects the compatibility verdicts, not merely
-                // "did the command run."
-                Ok(report) => {
-                    if report.cancelled {
-                        ExitCategory::Cancelled.code()
-                    } else if commands::gateway::report_requires_not_ready(&report) {
-                        ExitCategory::NotReady.code()
-                    } else {
-                        0
+        Command::Gateway { action } => match action {
+            cli::GatewayAction::Diagnose(args) => {
+                let secrets = adapters::secret_store();
+                let sessions = adapters::session_store(paths);
+                let result = commands::gateway::run(
+                    args,
+                    paths,
+                    app_cfg,
+                    &secrets,
+                    &sessions,
+                    format,
+                    resolved.color.value,
+                    resolved.default_provider_profile.value.as_deref(),
+                    resolved.default_chat_model.value.as_deref(),
+                )
+                .await;
+                match result {
+                    // `commands::gateway::run` already rendered every case line
+                    // and the terminal verdict/envelope itself for every format
+                    // — mirrors `doctor`'s own bespoke streaming path — so the
+                    // exit code reflects the compatibility verdicts, not merely
+                    // "did the command run."
+                    Ok(report) => {
+                        if report.cancelled {
+                            ExitCategory::Cancelled.code()
+                        } else if commands::gateway::report_requires_not_ready(&report) {
+                            ExitCategory::NotReady.code()
+                        } else {
+                            0
+                        }
                     }
+                    Err(e) if format == OutputFormat::Jsonl => e.category.code(),
+                    Err(e) => emit_error(format, "gateway_diagnose", e),
                 }
-                Err(e) if format == OutputFormat::Jsonl => e.category.code(),
-                Err(e) => emit_error(format, "gateway_diagnose", e),
             }
-        }
+            cli::GatewayAction::Ledger(args) => {
+                let result = commands::gateway_ledger::run(args);
+                emit(format, resolved.color.value, "gateway_ledger", result)
+            }
+        },
     }
 }
 

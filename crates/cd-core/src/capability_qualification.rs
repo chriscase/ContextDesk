@@ -1869,7 +1869,7 @@ fn probe_native_tool_call(
                     "native auto tool_call for inert probe tool",
                     meta.with_dialect(dialect),
                 ),
-                Err(e) if prose_fake => check_with_evidence(
+                Err(_e) if prose_fake => check_with_evidence(
                     CapabilityKind::NativeToolCall,
                     CapabilityStatus::Fail,
                     start,
