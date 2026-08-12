@@ -782,6 +782,37 @@ mod tests {
     }
 
     #[test]
+    fn stream_order_places_reconciliation_and_validation_before_terminal() {
+        let script = MockRoleScript::new()
+            .with_outcome("observe", MockRoleOutcome::completed())
+            .with_outcome("finalize", MockRoleOutcome::completed());
+        let result = MockTriageRunner::new(script)
+            .run(&policy(), &preflight(&policy()), &input())
+            .unwrap();
+        assert!(matches!(
+            result.replay.events[2].event,
+            TriageRunEventPayloadV2::RoleAttempt { .. }
+        ));
+        assert!(matches!(
+            result.replay.events[3].event,
+            TriageRunEventPayloadV2::RoleAttempt { .. }
+        ));
+        assert!(matches!(
+            result.replay.events[4].event,
+            TriageRunEventPayloadV2::RoleAttempt { .. }
+        ));
+        assert!(matches!(
+            result.replay.events[5].event,
+            TriageRunEventPayloadV2::Reconciliation { .. }
+        ));
+        assert!(matches!(
+            result.replay.events[6].event,
+            TriageRunEventPayloadV2::Validation { .. }
+        ));
+        assert!(result.replay.events[7].event.is_terminal());
+    }
+
+    #[test]
     fn optional_dropout_is_explicit_and_reviewer_is_not_admitted_without_need() {
         let mut policy = policy();
         policy.contributors[0].requirement = RoleRequirement::Optional;
@@ -978,5 +1009,25 @@ mod tests {
         assert!(!encoded.contains("provider response"));
         assert!(!encoded.contains("user task"));
         assert!(encoded.contains("request:fingerprint:secret-task-never-added"));
+    }
+
+    #[test]
+    fn seam_has_no_host_runtime_imports() {
+        let source = include_str!("triage.rs");
+        let forbidden_imports = [
+            "use tauri",
+            "use keyring",
+            "use keychain",
+            "use std::fs",
+            "use tokio::fs",
+            "use crate::config",
+            "use crate::app_config",
+        ];
+        assert!(source.lines().all(|line| {
+            let code = line.split("//").next().unwrap_or_default().trim_start();
+            forbidden_imports
+                .iter()
+                .all(|prefix| !code.starts_with(prefix))
+        }));
     }
 }
