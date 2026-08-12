@@ -9,6 +9,10 @@ not runtime orchestration or provider readiness.**
 contextdesk triage-policy example
 contextdesk triage-policy validate --policy FILE --preflight FILE
 contextdesk triage-policy compile --policy FILE --preflight FILE
+contextdesk triage-policy store list --store FILE
+contextdesk triage-policy store save --store FILE --policy FILE --policy-id ID
+contextdesk triage-policy store select --store FILE --policy-id ID
+contextdesk triage-policy store clear --store FILE
 ```
 
 All three actions return `contextdesk.cli.triage_policy.v1` with
@@ -47,9 +51,18 @@ poisoned ambient state, bounded/path-safe and secret-free output, explicit
 owner-only labelling, the safe Standard example, and both human and JSON
 rendering.
 
+The store actions operate only on the explicitly named non-secret policy-store
+file. `save` validates the V2 schema, increments that policy identity's
+revision, selects it, and publishes atomically. `select` and `clear` are
+explicit reversible selection changes; no selection means Standard remains the
+safe default. Store output contains policy ids and revisions only, never
+credentials, endpoints, provider bodies, or corpus data.
+
 ## Residuals
 
-- No saved-policy store or AppConfig migration is exposed here.
+- Automatic AppConfig migration and runtime policy selection are still
+  intentionally not wired; the new store is an explicit file surface until
+  the trusted resolver is integrated.
 - No provider qualification evidence is gathered; preflight facts are explicit
   host input and the report says live compatibility was not evaluated.
 - No runtime execution, cancellation, replay, finalization, review, GUI, or
