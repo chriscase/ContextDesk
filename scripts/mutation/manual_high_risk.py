@@ -30,6 +30,11 @@ class Mutation:
     test_filter: str
     occurrence: int = 0
     equivalent_reason: str | None = None
+    # Cargo package whose focused regression kills this mutant.
+    package: str = "cd-core"
+    # Optional cargo target selector ("--lib" or "--test <name>") so a
+    # mutation rebuilds only the one binary its regression lives in.
+    target: str | None = None
 
 
 MUTATIONS = [
@@ -223,6 +228,78 @@ MUTATIONS = [
         replacement="    let has_dropout = false;\n",
         test_filter="complete_role_coverage_with_dropout_recommends_escalation",
     ),
+    # --- Triage Policy V2 production runner / event ledger ---
+    Mutation(
+        name="triage_policy_route_guard_bypassed",
+        file="crates/cd-core/src/agent.rs",
+        needle="    if !linked_broad_triage {\n        if let Some(binding) = opts\n            .contribution_runtime\n            .as_ref()\n            .and_then(|runtime| runtime.policy_binding.as_ref())\n        {\n",
+        replacement="    if false {\n        if let Some(binding) = opts\n            .contribution_runtime\n            .as_ref()\n            .and_then(|runtime| runtime.policy_binding.as_ref())\n        {\n",
+        test_filter="policy_bound_contribution_refuses_focused_route_before_any_provider_call",
+        target="--lib",
+    ),
+    Mutation(
+        name="triage_ledger_required_failure_ignored",
+        file="crates/cd-workflow/src/triage_run.rs",
+        needle="                                required_failed = true;\n",
+        replacement="                                required_failed = false;\n",
+        test_filter="required_malformed_contribution_is_honest_partial_failure",
+        package="cd-workflow",
+        target="--test triage_policy_run_ledger",
+    ),
+    Mutation(
+        name="triage_ledger_cancellation_ignored",
+        file="crates/cd-workflow/src/triage_run.rs",
+        needle="                    TriageAttemptStatus::Cancelled => cancelled = true,\n",
+        replacement="                    TriageAttemptStatus::Cancelled => cancelled = false,\n",
+        test_filter="cancellation_projects_cancelled_terminal_with_exact_identity",
+        package="cd-workflow",
+        target="--test triage_policy_run_ledger",
+    ),
+    Mutation(
+        name="triage_ledger_same_model_counted_twice",
+        file="crates/cd-workflow/src/triage_run.rs",
+        needle="            distinct_models: models.len() as u32,\n",
+        replacement="            distinct_models: completed.len() as u32,\n",
+        test_filter="same_model_two_roles_reports_non_independence",
+        package="cd-workflow",
+        target="--test triage_policy_run_ledger",
+    ),
+    Mutation(
+        name="triage_share_safe_keeps_exact_model",
+        file="crates/cd-workflow/src/triage_run.rs",
+        needle="            attempt.model = None;\n",
+        replacement="            let _ = &attempt.model;\n",
+        test_filter="share_safe_projection_drops_models_terminals_and_scans_clean",
+        package="cd-workflow",
+        target="--test triage_policy_run_ledger",
+    ),
+    Mutation(
+        name="triage_ledger_abstention_counts_as_completion",
+        file="crates/cd-workflow/src/triage_run.rs",
+        needle="        ContributionAvailability::Completed if abstained => TriageAttemptStatus::Abstained,\n",
+        replacement="        ContributionAvailability::Completed if abstained => TriageAttemptStatus::Completed,\n",
+        test_filter="abstention_is_typed_and_never_counts_as_support",
+        package="cd-workflow",
+        target="--test triage_policy_run_ledger",
+    ),
+    Mutation(
+        name="triage_ledger_accepts_mismatched_stage_identity",
+        file="crates/cd-workflow/src/triage_run.rs",
+        needle="        if !matches_binding {\n            inner.poison = Some(\"stage_binding_mismatch\");\n            return;\n        }\n",
+        replacement="        let _ = matches_binding;\n",
+        test_filter="projection_mismatch_poisons_instead_of_misattributing",
+        package="cd-workflow",
+        target="--test triage_policy_run_ledger",
+    ),
+    Mutation(
+        name="triage_adapter_binds_backends_for_degraded_slots",
+        file="crates/cd-workflow/src/triage_production.rs",
+        needle="    let contributor_slots = compiled\n        .slots\n        .iter()\n        .filter(admitted)\n        .filter(|slot| matches!(slot.kind, TriageSlotKindV2::Contributor(_)))\n        .collect::<Vec<_>>();\n",
+        replacement="    let contributor_slots = compiled\n        .slots\n        .iter()\n        .filter(|slot| matches!(slot.kind, TriageSlotKindV2::Contributor(_)))\n        .collect::<Vec<_>>();\n",
+        test_filter="optional_dropout_is_an_explicit_role_attempt",
+        package="cd-workflow",
+        target="--test triage_policy_run_ledger",
+    ),
 ]
 
 
@@ -256,7 +333,8 @@ def run_mutation(mutation: Mutation, timeout: int) -> dict[str, object]:
             "cargo",
             "test",
             "-p",
-            "cd-core",
+            mutation.package,
+            *(mutation.target.split() if mutation.target else []),
             mutation.test_filter,
             "--",
             "--nocapture",
