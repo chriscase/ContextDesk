@@ -19,6 +19,15 @@ pub const TRIAGE_POLICY_SCHEMA_V2: &str = "contextdesk.triage_policy.v2";
 /// Stable schema identifier for compiled policy plans.
 pub const COMPILED_TRIAGE_POLICY_SCHEMA_V2: &str = "contextdesk.triage_policy.compiled.v2";
 
+/// Exact qualification evidence schema accepted by the V2 role preflight.
+///
+/// This is intentionally separate from [`TRIAGE_POLICY_SCHEMA_V2`]: a policy
+/// names what the host may run, while this stamp names the synthetic probe
+/// contract that actually authorized the role.
+pub const TRIAGE_QUALIFICATION_SCHEMA_V2: &str = "contextdesk.triage.qualification.v2";
+/// Workflow identity bound by a V2 role qualification record.
+pub const TRIAGE_QUALIFICATION_WORKFLOW_V2: &str = "contextdesk.triage.role.v2";
+
 /// Public-policy bounds. These are denial-of-service and operator-error
 /// ceilings, not recommended runtime defaults.
 pub const MAX_TRIAGE_POLICY_SLOTS_V2: usize = 32;
@@ -307,6 +316,16 @@ pub struct RolePreflightV2 {
     pub qualification: RoleQualificationV2,
     /// Whether this exact profile is remote for the current host.
     pub remote: bool,
+    /// Schema of the exact qualification evidence. `None` is retained for
+    /// legacy Standard preflight records and never upgrades a missing verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualification_schema_id: Option<String>,
+    /// Workflow identity used by the qualification probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    /// Secret-free fingerprint of the transport protocol/dialect qualified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_fingerprint: Option<String>,
 }
 
 /// Pure compiler input. No credentials, endpoints, or provider response text.
@@ -408,6 +427,15 @@ pub struct CompiledRoleSlotV2 {
     /// Content-free causes for a degraded/rejected disposition.
     #[serde(default)]
     pub rejections: Vec<PolicyRejectionCategoryV2>,
+    /// Qualification schema carried through to the immutable execution plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualification_schema_id: Option<String>,
+    /// Qualification workflow carried through to the immutable execution plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    /// Qualified transport protocol fingerprint carried through to the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_fingerprint: Option<String>,
 }
 
 /// Inputs for honest same-model independence accounting.
@@ -609,9 +637,15 @@ pub fn compile_triage_policy_v2(
     let mut slots = Vec::with_capacity(inputs.len());
     for input in inputs {
         let mut causes = Vec::new();
+        let mut qualification_schema_id = None;
+        let mut workflow_id = None;
+        let mut protocol_fingerprint = None;
         match facts.get(input.slot_id.as_str()) {
             None => causes.push(PolicyRejectionCategoryV2::RoleUnavailable),
             Some(fact) => {
+                qualification_schema_id = fact.qualification_schema_id.clone();
+                workflow_id = fact.workflow_id.clone();
+                protocol_fingerprint = fact.protocol_fingerprint.clone();
                 if fact.model != input.model || fact.kind != input.kind {
                     causes.push(PolicyRejectionCategoryV2::PreflightBindingMismatch);
                 }
@@ -619,6 +653,13 @@ pub fn compile_triage_policy_v2(
                     causes.push(PolicyRejectionCategoryV2::RoleUnavailable);
                 }
                 if fact.qualification != RoleQualificationV2::Qualified {
+                    causes.push(PolicyRejectionCategoryV2::QualificationUnavailable);
+                }
+                // A qualified role must carry one complete, current
+                // qualification stamp. Legacy Standard records may omit the
+                // stamp during migration; omission never upgrades an
+                // Enhanced/Advanced record to Qualified.
+                if !qualification_binding_is_current(fact, policy.mode) {
                     causes.push(PolicyRejectionCategoryV2::QualificationUnavailable);
                 }
                 if fact.remote && !input.allow_remote {
@@ -659,6 +700,9 @@ pub fn compile_triage_policy_v2(
             requirement: input.requirement,
             disposition,
             rejections: causes,
+            qualification_schema_id,
+            workflow_id,
+            protocol_fingerprint,
         });
     }
 
@@ -835,6 +879,39 @@ fn valid_slot_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
+/// Validate the exact qualification stamp attached to one host fact.
+///
+/// `None` for all three fields is an explicitly recognized legacy shape only
+/// for Standard mode. Partial stamps, stale schema/workflow ids, and malformed
+/// protocol fingerprints fail closed in every mode. In particular, a legacy
+/// omission is never treated as positive evidence for an expanded policy.
+fn qualification_binding_is_current(fact: &RolePreflightV2, mode: TriagePolicyMode) -> bool {
+    let fields = (
+        fact.qualification_schema_id.as_deref(),
+        fact.workflow_id.as_deref(),
+        fact.protocol_fingerprint.as_deref(),
+    );
+    if fields == (None, None, None) {
+        return mode == TriagePolicyMode::Standard;
+    }
+    let (Some(schema), Some(workflow), Some(protocol)) = fields else {
+        return false;
+    };
+    schema == TRIAGE_QUALIFICATION_SCHEMA_V2
+        && workflow == TRIAGE_QUALIFICATION_WORKFLOW_V2
+        && valid_protocol_fingerprint(protocol)
+}
+
+fn valid_protocol_fingerprint(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.starts_with("sha256:")
+        && value.len() <= 512
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains("://")
+        && !value.chars().any(char::is_control)
+}
+
 fn reject(
     rejections: &mut Vec<PolicyRejectionV2>,
     slot_id: Option<&str>,
@@ -1007,6 +1084,9 @@ mod tests {
                     available: true,
                     qualification: RoleQualificationV2::Qualified,
                     remote: false,
+                    qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
+                    workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
+                    protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
                 })
                 .collect(),
         }
@@ -1047,6 +1127,26 @@ mod tests {
         assert_eq!(compiled.slots.len(), 1);
         assert_eq!(compiled.slots[0].kind, TriageSlotKindV2::Finalizer);
         assert_eq!(compiled.independence_counts.role_slots, 1);
+    }
+
+    #[test]
+    fn legacy_standard_qualification_omission_does_not_authorize_enhanced() {
+        let standard = TriagePolicyV2::standard(model("local", "mistral:latest"), false);
+        let mut legacy = facts(&standard);
+        let fact = &mut legacy.roles[0];
+        fact.qualification_schema_id = None;
+        fact.workflow_id = None;
+        fact.protocol_fingerprint = None;
+        assert!(compile_triage_policy_v2(&standard, &legacy).is_ok());
+
+        let enhanced = enhanced();
+        let mut expanded_legacy = facts(&enhanced);
+        for fact in &mut expanded_legacy.roles {
+            fact.qualification_schema_id = None;
+            fact.workflow_id = None;
+            fact.protocol_fingerprint = None;
+        }
+        assert!(compile_triage_policy_v2(&enhanced, &expanded_legacy).is_err());
     }
 
     #[test]
@@ -1183,6 +1283,47 @@ mod tests {
         let mut preflight = facts(&policy);
         preflight.roles[0].qualification = RoleQualificationV2::Unqualified;
         assert!(compile_triage_policy_v2(&policy, &preflight).is_err());
+    }
+
+    #[test]
+    fn enhanced_qualification_binding_is_exact_and_complete() {
+        let policy = enhanced();
+        let mut missing = facts(&policy);
+        let observe = missing
+            .roles
+            .iter_mut()
+            .find(|fact| fact.slot_id == "observe")
+            .expect("observe fact");
+        observe.protocol_fingerprint = None;
+        let failure = compile_triage_policy_v2(&policy, &missing).expect_err("partial stamp");
+        assert!(failure.rejections.iter().any(|rejection| {
+            rejection.category == PolicyRejectionCategoryV2::QualificationUnavailable
+        }));
+
+        let mut stale = facts(&policy);
+        let observe = stale
+            .roles
+            .iter_mut()
+            .find(|fact| fact.slot_id == "observe")
+            .expect("observe fact");
+        observe.workflow_id = Some("contextdesk.triage.role.v1".into());
+        let failure = compile_triage_policy_v2(&policy, &stale).expect_err("stale stamp");
+        assert!(failure.rejections.iter().any(|rejection| {
+            rejection.category == PolicyRejectionCategoryV2::QualificationUnavailable
+        }));
+
+        let mut malformed = facts(&policy);
+        let observe = malformed
+            .roles
+            .iter_mut()
+            .find(|fact| fact.slot_id == "observe")
+            .expect("observe fact");
+        observe.protocol_fingerprint = Some("sha1:not-the-qualified-protocol".into());
+        let failure = compile_triage_policy_v2(&policy, &malformed)
+            .expect_err("malformed protocol fingerprint");
+        assert!(failure.rejections.iter().any(|rejection| {
+            rejection.category == PolicyRejectionCategoryV2::QualificationUnavailable
+        }));
     }
 
     #[test]

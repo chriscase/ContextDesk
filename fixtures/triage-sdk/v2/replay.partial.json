@@ -46,7 +46,10 @@
           "status": "completed",
           "elapsed_ms": 24360,
           "input_chars": 3612,
-          "output_chars": 812
+          "output_chars": 812,
+          "physical_provider_calls": 1,
+          "semantic_corrections": 0,
+          "terminal_disposition": "completed"
         }
       }
     },

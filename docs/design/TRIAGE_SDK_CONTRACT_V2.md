@@ -64,6 +64,29 @@ contributor carries the closed typed contributor role, while finalizer and
 reviewer remain distinct phases. Legacy aliases and unknown V2 roles fail
 closed during deserialization.
 
+## Qualification binding and physical accounting
+
+V2 preflight facts may carry the additive `qualification_schema_id`,
+`workflow_id`, and `protocol_fingerprint` fields. A positive qualification for
+Enhanced or Advanced policies is accepted only when all three are present and
+equal to `contextdesk.triage.qualification.v2`, `contextdesk.triage.role.v2`,
+and a bounded protocol fingerprint. Partial, stale, or mismatched stamps fail
+closed. For migration, an all-absent stamp remains readable for Standard
+preflight records because Standard's existing single-model behavior is
+unchanged; omission never authorizes an expanded policy. Compiled slots carry
+the stamp forward so later host stages cannot silently substitute a different
+workflow or protocol.
+
+`TriageRoleAttemptV1` has additive `physical_provider_calls`,
+`semantic_corrections`, and `terminal_disposition` fields. Physical calls count
+provider operations (including transport retries), semantic corrections count
+content-bearing correction attempts, and disposition is the explicit terminal
+state for that slot. They are independently bounded and validated; a
+not-admitted role cannot claim calls, and a supplied disposition must match the
+attempt status. Existing JSON may omit these fields and remains readable as a
+legacy record with unknown accounting, but omission is never interpreted as
+zero or as successful completion.
+
 ## Relationship to extension contracts
 
 The earlier extension-contract lane supplies evidence-packet, negotiation,

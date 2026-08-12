@@ -150,6 +150,9 @@ fn replay() -> TriageReplayV1 {
                         elapsed_ms: 24_360,
                         input_chars: 3_612,
                         output_chars: 812,
+                        physical_provider_calls: Some(1),
+                        semantic_corrections: Some(0),
+                        terminal_disposition: Some(TriageTerminalDispositionV1::Completed),
                     },
                 },
             ),
@@ -205,6 +208,13 @@ fn compiled_standard_policy() -> cd_core::multi_model::triage_policy::CompiledTr
                 available: true,
                 qualification: RoleQualificationV2::Qualified,
                 remote: false,
+                qualification_schema_id: Some(
+                    cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_SCHEMA_V2.into(),
+                ),
+                workflow_id: Some(
+                    cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_WORKFLOW_V2.into(),
+                ),
+                protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
             }],
         },
     )
@@ -601,6 +611,35 @@ fn share_safe_role_attempt_cannot_expose_exact_model_identity() {
     let mut attempt = replay().events[2].clone();
     attempt.privacy = PacketPrivacyBoundary::ShareSafe;
     assert_eq!(attempt.validate(), Err(TriageContractError::PrivacyLeak));
+}
+
+#[test]
+fn physical_and_semantic_attempt_accounting_fails_closed() {
+    let mut attempt = replay().events[2].clone();
+    let TriageRunEventPayloadV2::RoleAttempt { attempt } = &mut attempt.event else {
+        panic!("fixture role attempt")
+    };
+    attempt.physical_provider_calls = Some(1);
+    attempt.semantic_corrections = Some(2);
+    assert_eq!(
+        attempt.validate(),
+        Err(TriageContractError::InvalidField("semantic_corrections"))
+    );
+
+    attempt.semantic_corrections = Some(0);
+    attempt.terminal_disposition = Some(TriageTerminalDispositionV1::Failed);
+    assert_eq!(
+        attempt.validate(),
+        Err(TriageContractError::InvalidField("terminal_disposition"))
+    );
+
+    attempt.terminal_disposition = Some(TriageTerminalDispositionV1::Completed);
+    attempt.status = TriageAttemptStatus::NotAdmitted;
+    attempt.physical_provider_calls = Some(1);
+    assert_eq!(
+        attempt.validate(),
+        Err(TriageContractError::InvalidField("not_admitted_accounting"))
+    );
 }
 
 #[test]

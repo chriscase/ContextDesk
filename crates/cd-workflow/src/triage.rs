@@ -14,11 +14,13 @@ use cd_core::multi_model::triage_policy::{
     compile_triage_policy_v2, CompiledRoleSlotV2, CompiledTriagePolicyV2,
     PolicyRejectionCategoryV2, ReviewerConditionV2, RoleRequirement, SlotDispositionV2,
     TriagePolicyCompileFailureV2, TriagePolicyPreflightV2, TriagePolicyV2, TriageSlotKindV2,
+    TRIAGE_QUALIFICATION_SCHEMA_V2, TRIAGE_QUALIFICATION_WORKFLOW_V2,
 };
 use cd_core::triage_sdk::{
     TriageAttemptStatus, TriageContractError, TriageReconciliationV1, TriageReplayV1,
     TriageResultKind, TriageResultV2, TriageRoleAttemptV1, TriageRunEventPayloadV2,
-    TriageRunEventV2, TriageValidationState, TRIAGE_REPLAY_SCHEMA_V1, TRIAGE_RUN_EVENT_SCHEMA_V2,
+    TriageRunEventV2, TriageTerminalDispositionV1, TriageValidationState, TRIAGE_REPLAY_SCHEMA_V1,
+    TRIAGE_RUN_EVENT_SCHEMA_V2,
 };
 
 /// Compile the exact policy and host-observed role facts without touching
@@ -496,6 +498,26 @@ fn role_attempt(
     outcome: MockRoleOutcome,
 ) -> TriageRoleAttemptV1 {
     let (status, reasons, elapsed_ms, input_chars, output_chars) = outcome.status_and_metrics();
+    let physical_provider_calls = match status {
+        TriageAttemptStatus::Completed
+        | TriageAttemptStatus::Abstained
+        | TriageAttemptStatus::Invalid => Some(1),
+        TriageAttemptStatus::Unavailable
+        | TriageAttemptStatus::NotAdmitted
+        | TriageAttemptStatus::TimedOut
+        | TriageAttemptStatus::Cancelled
+        | TriageAttemptStatus::Failed => Some(0),
+    };
+    let terminal_disposition = Some(match status {
+        TriageAttemptStatus::Completed => TriageTerminalDispositionV1::Completed,
+        TriageAttemptStatus::Abstained => TriageTerminalDispositionV1::Abstained,
+        TriageAttemptStatus::Invalid => TriageTerminalDispositionV1::Invalid,
+        TriageAttemptStatus::Unavailable => TriageTerminalDispositionV1::Unavailable,
+        TriageAttemptStatus::TimedOut => TriageTerminalDispositionV1::TimedOut,
+        TriageAttemptStatus::Cancelled => TriageTerminalDispositionV1::Cancelled,
+        TriageAttemptStatus::Failed => TriageTerminalDispositionV1::Failed,
+        TriageAttemptStatus::NotAdmitted => TriageTerminalDispositionV1::NotAdmitted,
+    });
     TriageRoleAttemptV1 {
         attempt_id: format!("attempt:{run_id}:{}", slot.slot_id),
         role_slot_id: slot.slot_id.clone(),
@@ -506,6 +528,9 @@ fn role_attempt(
         elapsed_ms,
         input_chars,
         output_chars,
+        physical_provider_calls,
+        semantic_corrections: Some(0),
+        terminal_disposition,
     }
 }
 
@@ -700,6 +725,9 @@ mod tests {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
+            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
+            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
+            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         }];
         roles.push(RolePreflightV2 {
             slot_id: "finalize".into(),
@@ -708,6 +736,9 @@ mod tests {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
+            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
+            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
+            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         });
         roles.push(RolePreflightV2 {
             slot_id: "review".into(),
@@ -716,6 +747,9 @@ mod tests {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
+            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
+            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
+            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         });
         let _ = policy;
         TriagePolicyPreflightV2 { roles }

@@ -11,6 +11,10 @@ export const TRIAGE_CANCELLATION_SCHEMA_V1 =
 export const COMPILED_TRIAGE_POLICY_SCHEMA_V2 =
   "contextdesk.triage_policy.compiled.v2" as const;
 export const TRIAGE_POLICY_SCHEMA_V2 = "contextdesk.triage_policy.v2" as const;
+export const TRIAGE_QUALIFICATION_SCHEMA_V2 =
+  "contextdesk.triage.qualification.v2" as const;
+export const TRIAGE_QUALIFICATION_WORKFLOW_V2 =
+  "contextdesk.triage.role.v2" as const;
 
 const MAX_WIRE_BYTES = 4 * 1024 * 1024;
 const MAX_TASK_BYTES = 64 * 1024;
@@ -337,6 +341,9 @@ export function parseCompiledTriagePolicyV2(
       f.en("admitted", "optional_degraded", "required_rejected"),
     ),
     rejections: f.req(f.arr(rejectionCategory)),
+    qualification_schema_id: f.opt(f.str),
+    workflow_id: f.opt(f.str),
+    protocol_fingerprint: f.opt(f.str),
   });
   checkObject(
     "compiled_policy",
@@ -382,6 +389,39 @@ export function parseCompiledTriagePolicyV2(
     const rejections = slot.rejections as unknown[];
     if (rejections.length > MAX_REASON_CODES)
       throw new ContractViolation(`compiled_policy.slots[${index}].rejections`, "too many reasons");
+    const qualification = [
+      slot.qualification_schema_id,
+      slot.workflow_id,
+      slot.protocol_fingerprint,
+    ];
+    if (qualification.some((value) => value !== undefined)) {
+      if (qualification.some((value) => value === undefined))
+        throw new ContractViolation(
+          `compiled_policy.slots[${index}]`,
+          "qualification binding must be complete",
+        );
+      if (
+        slot.qualification_schema_id !== TRIAGE_QUALIFICATION_SCHEMA_V2 ||
+        slot.workflow_id !== TRIAGE_QUALIFICATION_WORKFLOW_V2
+      )
+        throw new ContractViolation(
+          `compiled_policy.slots[${index}]`,
+          "stale qualification schema or workflow",
+        );
+      const protocolFingerprint = slot.protocol_fingerprint;
+      if (
+        typeof protocolFingerprint !== "string" ||
+        !protocolFingerprint.startsWith("sha256:")
+      )
+        throw new ContractViolation(
+          `compiled_policy.slots[${index}].protocol_fingerprint`,
+          "invalid protocol fingerprint",
+        );
+      boundedOpaque(
+        `compiled_policy.slots[${index}].protocol_fingerprint`,
+        slot.protocol_fingerprint,
+      );
+    }
   });
   groups.forEach((candidate, index) => {
     if (!validModelRef(candidate.model))
@@ -419,6 +459,20 @@ function checkAttempt(path: string, value: unknown): void {
       elapsed_ms: f.req(f.u64),
       input_chars: f.req(f.u64),
       output_chars: f.req(f.u64),
+      physical_provider_calls: f.opt(f.u64),
+      semantic_corrections: f.opt(f.u64),
+      terminal_disposition: f.opt(
+        f.en(
+          "completed",
+          "abstained",
+          "invalid",
+          "unavailable",
+          "timed_out",
+          "cancelled",
+          "failed",
+          "not_admitted",
+        ),
+      ),
     },
     value,
   );
@@ -432,6 +486,42 @@ function checkAttempt(path: string, value: unknown): void {
     attempt.reason_codes ?? [],
     MAX_REASON_CODES,
   );
+  if (
+    typeof attempt.physical_provider_calls === "number" &&
+    attempt.physical_provider_calls > MAX_PROVIDER_CALLS
+  )
+    throw new ContractViolation(
+      `${path}.physical_provider_calls`,
+      "physical provider calls exceed the request bound",
+    );
+  if (
+    typeof attempt.physical_provider_calls === "number" &&
+    typeof attempt.semantic_corrections === "number" &&
+    attempt.semantic_corrections > attempt.physical_provider_calls
+  )
+    throw new ContractViolation(
+      `${path}.semantic_corrections`,
+      "semantic corrections exceed physical provider calls",
+    );
+  if (
+    attempt.status === "not_admitted" &&
+    ((typeof attempt.physical_provider_calls === "number" &&
+      attempt.physical_provider_calls > 0) ||
+      (typeof attempt.semantic_corrections === "number" &&
+        attempt.semantic_corrections > 0))
+  )
+    throw new ContractViolation(
+      path,
+      "not-admitted role cannot claim provider accounting",
+    );
+  if (
+    attempt.terminal_disposition !== undefined &&
+    attempt.terminal_disposition !== attempt.status
+  )
+    throw new ContractViolation(
+      `${path}.terminal_disposition`,
+      "terminal disposition does not match attempt status",
+    );
 }
 
 function checkReconciliation(path: string, value: unknown): void {

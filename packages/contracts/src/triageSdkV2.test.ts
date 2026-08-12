@@ -92,4 +92,50 @@ describe("Rust-generated triage SDK v2 contracts", () => {
     compiled.slots[0].model.profile_id = "p".repeat(257);
     expect(() => parseCompiledTriagePolicyV2(compiled)).toThrow();
   });
+
+  it("rejects stale or partial qualification bindings", () => {
+    const compiled = load("policy-preflight.standard.json") as {
+      slots: Array<Record<string, unknown>>;
+    };
+    compiled.slots[0].qualification_schema_id =
+      "contextdesk.triage.qualification.v1";
+    compiled.slots[0].workflow_id = "contextdesk.triage.role.v2";
+    compiled.slots[0].protocol_fingerprint = "sha256:fixture";
+    expect(() => parseCompiledTriagePolicyV2(compiled)).toThrow();
+
+    const partial = load("policy-preflight.standard.json") as {
+      slots: Array<Record<string, unknown>>;
+    };
+    partial.slots[0].qualification_schema_id =
+      "contextdesk.triage.qualification.v2";
+    expect(() => parseCompiledTriagePolicyV2(partial)).toThrow();
+
+    const malformed = load("policy-preflight.standard.json") as {
+      slots: Array<Record<string, unknown>>;
+    };
+    malformed.slots[0].qualification_schema_id =
+      "contextdesk.triage.qualification.v2";
+    malformed.slots[0].workflow_id = "contextdesk.triage.role.v2";
+    malformed.slots[0].protocol_fingerprint = "sha1:not-v2";
+    expect(() => parseCompiledTriagePolicyV2(malformed)).toThrow();
+  });
+
+  it("keeps physical calls, semantic corrections, and disposition distinct", () => {
+    const replay = load("replay.partial.json") as {
+      events: Array<{ event: { attempt: Record<string, unknown> } }>;
+    };
+    const attempt = replay.events[2].event.attempt;
+    attempt.physical_provider_calls = 1;
+    attempt.semantic_corrections = 2;
+    expect(() => parseTriageReplayV1(replay)).toThrow();
+
+    attempt.semantic_corrections = 0;
+    attempt.terminal_disposition = "failed";
+    expect(() => parseTriageReplayV1(replay)).toThrow();
+
+    attempt.terminal_disposition = "completed";
+    attempt.status = "not_admitted";
+    attempt.physical_provider_calls = 1;
+    expect(() => parseTriageReplayV1(replay)).toThrow();
+  });
 });

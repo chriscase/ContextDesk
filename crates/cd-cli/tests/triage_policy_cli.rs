@@ -5,7 +5,7 @@ use cd_core::model_ref::ModelRef;
 use cd_core::multi_model::triage_policy::{
     ContributorSlotV2, RolePreflightV2, RoleQualificationV2, RoleRequirement,
     TriageContributorRole, TriagePolicyMode, TriagePolicyPreflightV2, TriagePolicyV2,
-    TriageSlotKindV2,
+    TriageSlotKindV2, TRIAGE_QUALIFICATION_SCHEMA_V2, TRIAGE_QUALIFICATION_WORKFLOW_V2,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -66,6 +66,9 @@ fn facts(policy: &TriagePolicyV2) -> TriagePolicyPreflightV2 {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
+            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
+            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
+            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         });
     }
     if let Some(finalizer) = &policy.finalizer {
@@ -76,6 +79,9 @@ fn facts(policy: &TriagePolicyV2) -> TriagePolicyPreflightV2 {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
+            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
+            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
+            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         });
     }
     if let Some(reviewer) = &policy.reviewer {
@@ -86,6 +92,9 @@ fn facts(policy: &TriagePolicyV2) -> TriagePolicyPreflightV2 {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
+            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
+            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
+            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         });
     }
     TriagePolicyPreflightV2 { roles }

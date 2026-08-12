@@ -15,7 +15,7 @@ use cd_core::multi_model::triage_policy::{
     ContributorSlotV2, FinalizerSlotV2, ReviewerConditionV2, ReviewerSlotV2, RolePreflightV2,
     RoleQualificationV2, RoleRequirement, SlotDispositionV2, TriageContributorRole,
     TriagePolicyMode, TriagePolicyPreflightV2, TriagePolicyV2, TriageSlotKindV2,
-    TRIAGE_POLICY_SCHEMA_V2,
+    TRIAGE_POLICY_SCHEMA_V2, TRIAGE_QUALIFICATION_SCHEMA_V2, TRIAGE_QUALIFICATION_WORKFLOW_V2,
 };
 use cd_core::multi_model::{
     run_contribution_pipeline, ContributionAvailability, ContributionPipelineInputs,
@@ -74,6 +74,9 @@ fn preflight(policy: &TriagePolicyV2) -> TriagePolicyPreflightV2 {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
+            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
+            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
+            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         })
         .collect::<Vec<_>>();
     if let Some(slot) = &policy.finalizer {
@@ -84,6 +87,9 @@ fn preflight(policy: &TriagePolicyV2) -> TriagePolicyPreflightV2 {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
+            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
+            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
+            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         });
     }
     if let Some(slot) = &policy.reviewer {
@@ -94,6 +100,9 @@ fn preflight(policy: &TriagePolicyV2) -> TriagePolicyPreflightV2 {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
+            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
+            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
+            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         });
     }
     TriagePolicyPreflightV2 { roles }

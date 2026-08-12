@@ -179,6 +179,26 @@ pub enum TriageAttemptStatus {
     NotAdmitted,
 }
 
+/// Terminal accounting for one role slot. This is intentionally separate
+/// from the run-level terminal event: a replay can contain a completed run
+/// with optional role dropouts, or a failed run with several already-terminal
+/// attempts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriageTerminalDispositionV1 {
+    Completed,
+    Abstained,
+    Invalid,
+    Unavailable,
+    TimedOut,
+    Cancelled,
+    Failed,
+    NotAdmitted,
+}
+
+/// Compatibility alias for callers that use the attempt-qualified name.
+pub type TriageAttemptTerminalDispositionV1 = TriageTerminalDispositionV1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TriageRoleAttemptV1 {
@@ -193,6 +213,18 @@ pub struct TriageRoleAttemptV1 {
     pub elapsed_ms: u64,
     pub input_chars: u64,
     pub output_chars: u64,
+    /// Physical provider operations attributed to this role. Transport
+    /// retries count here even when they produce one semantic correction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_provider_calls: Option<u32>,
+    /// Content-bearing semantic corrections, kept distinct from transport
+    /// retries and physical provider operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_corrections: Option<u32>,
+    /// Explicit per-role terminal disposition. Missing is a legacy/unknown
+    /// value and never implies success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_disposition: Option<TriageTerminalDispositionV1>,
 }
 
 impl TriageRoleAttemptV1 {
@@ -205,7 +237,46 @@ impl TriageRoleAttemptV1 {
                 .map_err(|_| TriageContractError::InvalidField("model"))?;
         }
         validate_unique_reason_codes(&self.reason_codes)?;
+        if self
+            .physical_provider_calls
+            .is_some_and(|calls| calls > MAX_TRIAGE_REQUEST_PROVIDER_CALLS)
+        {
+            return Err(TriageContractError::InvalidField("physical_provider_calls"));
+        }
+        if let (Some(calls), Some(corrections)) =
+            (self.physical_provider_calls, self.semantic_corrections)
+        {
+            if corrections > calls {
+                return Err(TriageContractError::InvalidField("semantic_corrections"));
+            }
+        }
+        if self.status == TriageAttemptStatus::NotAdmitted
+            && (self.physical_provider_calls.is_some_and(|calls| calls > 0)
+                || self
+                    .semantic_corrections
+                    .is_some_and(|corrections| corrections > 0))
+        {
+            return Err(TriageContractError::InvalidField("not_admitted_accounting"));
+        }
+        if let Some(disposition) = self.terminal_disposition {
+            if disposition != terminal_disposition_for_status(self.status) {
+                return Err(TriageContractError::InvalidField("terminal_disposition"));
+            }
+        }
         Ok(())
+    }
+}
+
+fn terminal_disposition_for_status(status: TriageAttemptStatus) -> TriageTerminalDispositionV1 {
+    match status {
+        TriageAttemptStatus::Completed => TriageTerminalDispositionV1::Completed,
+        TriageAttemptStatus::Abstained => TriageTerminalDispositionV1::Abstained,
+        TriageAttemptStatus::Invalid => TriageTerminalDispositionV1::Invalid,
+        TriageAttemptStatus::Unavailable => TriageTerminalDispositionV1::Unavailable,
+        TriageAttemptStatus::TimedOut => TriageTerminalDispositionV1::TimedOut,
+        TriageAttemptStatus::Cancelled => TriageTerminalDispositionV1::Cancelled,
+        TriageAttemptStatus::Failed => TriageTerminalDispositionV1::Failed,
+        TriageAttemptStatus::NotAdmitted => TriageTerminalDispositionV1::NotAdmitted,
     }
 }
 
