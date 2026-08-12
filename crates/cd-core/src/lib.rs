@@ -114,6 +114,8 @@ pub mod tools;
 pub mod triage_policy_store;
 /// Hermetic broad-triage quality contract and structured rubric.
 pub mod triage_quality;
+/// Host-owned, exact-role qualification evidence for Triage Policy V2.
+pub mod triage_role_qualification;
 /// Versioned, host-neutral SDK request, event, result, cancellation, and replay contracts.
 pub mod triage_sdk;
 pub mod turn_trace;
