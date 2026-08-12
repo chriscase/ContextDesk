@@ -440,15 +440,17 @@ pub async fn run(
     sanitize_gateway_report(&mut report, &redaction);
 
     let artifact_run_dir = run_id_for_dir(&report.run_id);
-    match write_artifact_bundle(args, paths, &artifact_run_dir, &report, &redaction) {
-        Ok(dir) => report.artifact_dir = Some(dir.display().to_string()),
-        Err(e) => eprintln!("warning: failed to write diagnostic artifact bundle: {e}"),
-    }
     if args.raw && args.raw_i_understand {
         match write_private_capture(args, paths, &artifact_run_dir, &report, &redaction) {
             Ok(()) => report.private_capture_written = true,
             Err(e) => eprintln!("warning: failed to write private capture: {e}"),
         }
+    }
+    // Persist the share-safe report after the optional private capture so its
+    // boolean accurately records the artifact that was actually written.
+    match write_artifact_bundle(args, paths, &artifact_run_dir, &report, &redaction) {
+        Ok(dir) => report.artifact_dir = Some(dir.display().to_string()),
+        Err(e) => eprintln!("warning: failed to write diagnostic artifact bundle: {e}"),
     }
 
     print_terminal(

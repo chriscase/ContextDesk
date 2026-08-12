@@ -346,6 +346,14 @@ async fn raw_capture_is_owner_only_and_separate_from_the_share_safe_bundle() {
     assert_eq!(value["data"]["private_capture_written"], true);
 
     let artifact_dir = value["data"]["artifact_dir"].as_str().unwrap();
+    let persisted_report: Value = serde_json::from_slice(
+        &std::fs::read(Path::new(artifact_dir).join("report.json")).unwrap(),
+    )
+    .expect("persisted report json");
+    assert_eq!(
+        persisted_report["private_capture_written"], true,
+        "persisted share-safe report must agree with the terminal result"
+    );
     let private_path = Path::new(artifact_dir).join("private").join("capture.json");
     assert!(private_path.exists(), "private capture file must exist");
     let perms = std::fs::metadata(&private_path).unwrap().permissions();
