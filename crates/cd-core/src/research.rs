@@ -704,7 +704,15 @@ pub async fn backend_for_with_timeout_and_effort(
 
     match profile.kind {
         ProviderKind::Ollama => {
-            let client = OllamaClient::new(&profile.base_url, &profile.chat_model)?;
+            // The turn-owned ceiling must reach Ollama exactly like the other
+            // dialects: local models are the class the router grants patient
+            // deadlines to, so a fixed 120s transport default would silently
+            // pre-empt an explicit user-authored deadline.
+            let client = OllamaClient::new_with_timeout(
+                &profile.base_url,
+                &profile.chat_model,
+                request_timeout,
+            )?;
             Ok(Box::new(OllamaBackend(client)))
         }
         ProviderKind::OpenAiCompatible => {
