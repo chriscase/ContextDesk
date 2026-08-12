@@ -180,6 +180,10 @@ async fn run_state_free(cli: &Cli) -> Option<i32> {
                 verdict,
             ))
         }
+        Command::Triage { action } => {
+            let result = commands::triage::run(action);
+            Some(emit_triage_run(format, color, result))
+        }
         _ => None,
     }
 }
@@ -217,7 +221,8 @@ async fn dispatch(
         Command::Normalize(_)
         | Command::Normalized { .. }
         | Command::Eval { .. }
-        | Command::TriagePolicy { .. } => {
+        | Command::TriagePolicy { .. }
+        | Command::Triage { .. } => {
             unreachable!("state-free commands return before stateful dispatch")
         }
         Command::Corpus { action } => {
@@ -512,6 +517,49 @@ fn emit_completed<T: Render>(
 ) -> i32 {
     let code = emit(format, color, command, result);
     completed_verdict_exit(code, verdict)
+}
+
+/// Render the staged triage facade as an honest unsupported envelope.
+/// Unlike a completed verdict (doctor/eval), not_implemented must not look
+/// like a successful command to machine clients even though the typed data
+/// explains exactly which request was accepted.
+fn emit_triage_run(
+    format: OutputFormat,
+    color: config::ColorMode,
+    result: Result<commands::triage::TriageRunOutput, CliError>,
+) -> i32 {
+    match result {
+        Ok(output) if output.unsupported() => {
+            let error = CliError::not_implemented(
+                "the host-neutral Triage V2 runner is not wired on this build",
+            );
+            match format {
+                OutputFormat::Text => {
+                    println!("{}", presentation::present(&output.render_text(), color));
+                }
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    let envelope = Envelope {
+                        schema_version: envelope::ENVELOPE_SCHEMA_VERSION,
+                        ok: false,
+                        command: "triage_run",
+                        data: Some(output.render_json()),
+                        error: Some(envelope::ErrorEnvelope {
+                            kind: error.category.kind(),
+                            message: error.message.clone(),
+                        }),
+                    };
+                    println!(
+                        "{}",
+                        serde_json::to_string(&envelope)
+                            .expect("triage unsupported envelope is serializable")
+                    );
+                }
+            }
+            error.category.code()
+        }
+        Ok(output) => emit(format, color, "triage_run", Ok(output)),
+        Err(error) => emit_error(format, "triage_run", error),
+    }
 }
 
 fn completed_verdict_exit(base_code: i32, verdict: Option<ExitCategory>) -> i32 {

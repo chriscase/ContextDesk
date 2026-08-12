@@ -190,6 +190,16 @@ pub enum Command {
         #[command(subcommand)]
         action: TriagePolicyAction,
     },
+    /// Run one versioned Triage SDK request.
+    ///
+    /// The command currently exposes the host-neutral request/replay boundary
+    /// only; until a trusted production runner is wired, it fails closed with
+    /// a typed unsupported result and never reads provider configuration or
+    /// credentials.
+    Triage {
+        #[command(subcommand)]
+        action: TriageAction,
+    },
     /// Provider-neutral gateway/model diagnostics for one explicitly selected model.
     Gateway {
         #[command(subcommand)]
@@ -293,6 +303,22 @@ pub enum TriagePolicyAction {
         #[command(subcommand)]
         action: TriagePolicyStoreAction,
     },
+}
+
+/// Provider-neutral Triage SDK actions.
+#[derive(Debug, Subcommand)]
+pub enum TriageAction {
+    /// Run one explicit TriageRequestV2 JSON document.
+    Run(TriageRunArgs),
+}
+
+/// Explicit request input for `contextdesk triage run`.
+#[derive(Debug, Clone, clap::Args)]
+pub struct TriageRunArgs {
+    /// JSON file containing one `contextdesk.triage.request.v2` request.
+    /// Use `-` to read the bounded request body from stdin.
+    #[arg(long, visible_alias = "input", value_name = "FILE")]
+    pub request: PathBuf,
 }
 
 /// Explicit-file operations for the revisioned Triage Policy V2 store.
@@ -884,6 +910,7 @@ pub const KNOWN_SUBCOMMANDS: &[&str] = &[
     "models",
     "eval",
     "triage-policy",
+    "triage",
     "gateway",
 ];
 
