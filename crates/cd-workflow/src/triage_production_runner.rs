@@ -1250,6 +1250,7 @@ impl TriageProductionRunnerV1 {
         // alive through every post-call hook so cancellation/deadline exits
         // cannot erase a physical provider attempt from the ledger.
         let mut physical_calls = 1u32;
+        let mut correction_provider_calls = 0u32;
         let mut corrections = 0u32;
         let mut total_input = input_chars;
         let mut accepted_response = response.clone();
@@ -1315,7 +1316,7 @@ impl TriageProductionRunnerV1 {
                         <= self.resolution.compiled.budget.max_context_chars;
                 if correction_allowed {
                     if *provider_calls >= self.resolution.compiled.budget.max_provider_calls
-                        || corrections
+                        || correction_provider_calls
                             >= self
                                 .resolution
                                 .compiled
@@ -1373,7 +1374,8 @@ impl TriageProductionRunnerV1 {
                             None,
                         );
                     }
-                    physical_calls = physical_calls.saturating_add(1);
+                    correction_provider_calls = correction_provider_calls.saturating_add(1);
+                    physical_calls = 1u32.saturating_add(correction_provider_calls);
                     let correction = tokio::time::timeout(
                         correction_timeout,
                         backend.backend.complete_streaming(
