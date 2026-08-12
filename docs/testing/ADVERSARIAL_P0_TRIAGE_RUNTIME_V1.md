@@ -1,6 +1,6 @@
 # Adversarial triage-runtime hardening — P0 fix
 
-**Code SHA:** `56994b6f5c41bb12702e1033daaec04dce0f7ae4`
+**Code SHA:** `6ac8ff5d377013a0ed9eebafdfbcd547b15795fa`
 **Branch:** `integrate/triage-policy-sdk-v2`  
 **Scope:** provider-free production-path hardening; no live compatibility claim
 
@@ -25,7 +25,7 @@ successful V2 triage path.
 
 - `cargo fmt --all -- --check` — pass
 - `cargo clippy -p cd-workflow --all-targets -- -D warnings` — pass
-- `cargo test -p cd-workflow --lib triage_production_runner` — 9 passed
+- `cargo test -p cd-workflow --lib triage_production_runner` — 11 passed
 - `cargo test -p cd-workflow --lib triage_role_qualification` — 4 passed
 - `cargo test -p cd-workflow --test triage_policy_production_adapter` — 5 passed
 - `cargo test -p cd-cli --test gateway_diagnose` — 17 passed
@@ -36,14 +36,18 @@ code SHA.
 
 ## Follow-up status
 
-The first five lifecycle/authority follow-ups are now implemented and covered
-by focused tests: qualification cancellation is joined before cleanup, stalled
-non-stream requests observe the cooperative token, generic hooks are checked
-again after return, finalizer envelopes are independently bound to the host
-ledger, and share-safe artifact references are relative rather than absolute.
+The lifecycle/authority follow-ups are implemented and covered by focused
+tests: qualification cancellation is joined before cleanup, stalled non-stream
+requests observe the cooperative token, generic hooks are checked again after
+return, finalizer envelopes are independently bound to the host ledger,
+late interruption is rechecked before and after terminal construction, and
+share-safe artifact references are relative rather than absolute. CLI
+turn-owned retrieval now preserves adaptive defaults while using the explicit
+whole-turn deadline for configured embedding/rerank roles.
 
-Still open before a broad release claim: the provider-factory audit must cover
-every optional transport (notably Ollama and embedding/rerank adapters) with
-the same host-owned timeout, and a fresh exact-runtime live gateway diagnostic
-must be run. These are bounded residuals, not evidence that the primary
+Still open before a broad release claim: provider setup/authentication itself
+must be bounded by the remaining whole-turn budget for every provider, and a
+fresh exact-runtime live gateway diagnostic must be run. The HTTP transport
+factory audit now covers Ollama and embedding/rerank adapters; these remaining
+setup and live-provider checks are not evidence that the primary
 OpenAI-compatible path is unusable.
