@@ -10199,6 +10199,91 @@ fn triage_preflight_for_policy(
     cd_workflow::triage_host::preflight_for_policy(cfg, policy, &role_store)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TriageRoleQualificationCommandRequest {
+    profile_id: String,
+    model_id: String,
+    kind: cd_core::multi_model::triage_policy::TriageSlotKindV2,
+    deadline_ms: u64,
+    confirm: bool,
+}
+
+/// Run one exact-role synthetic qualification through the same provider,
+/// packet, and validator seams as the CLI. The webview receives only the
+/// bounded host-authored result; raw provider output and credentials stay in
+/// the native process.
+#[tauri::command]
+async fn triage_qualify_role_v2(
+    state: State<'_, AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let request: TriageRoleQualificationCommandRequest =
+        serde_json::from_value(request).map_err(|_| "invalid triage role qualification request")?;
+    if !request.confirm {
+        return Err("triage role qualification requires explicit confirmation".into());
+    }
+    let cfg = state.config.lock().expect("config").clone();
+    let profile = cfg
+        .providers
+        .profiles
+        .iter()
+        .find(|profile| profile.id == request.profile_id)
+        .cloned()
+        .ok_or_else(|| "provider profile was not found".to_string())?;
+    let config_dir = ensure_config_dir(&state.branding).map_err(|_| "config directory unavailable")?;
+    let store_path = cd_core::triage_role_qualification::triage_role_qualification_store_path(
+        &config_dir,
+    );
+    cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(&store_path)
+        .map_err(|_| "triage role qualification store is unavailable")?;
+    let kind = request.kind;
+    let record = cd_workflow::triage_role_qualification::qualify_configured_role_v2(
+        &cfg,
+        &state.secrets,
+        &cd_workflow::triage_role_qualification::TriageRoleProbeRequest {
+            profile_id: request.profile_id.clone(),
+            model_id: request.model_id.clone(),
+            kind,
+            deadline_ms: request.deadline_ms,
+        },
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let qualification = record.qualification;
+    let physical_provider_calls = record.physical_provider_calls;
+    let semantic_corrections = record.semantic_corrections;
+    let reason = record.reason.clone();
+    cd_workflow::triage_role_qualification::publish_role_qualification_record(
+        &config_dir,
+        record,
+    )
+    .map_err(|_| "triage role qualification store could not be published")?;
+    let needs_provider = !matches!(
+        kind,
+        cd_core::multi_model::triage_policy::TriageSlotKindV2::Contributor(
+            cd_core::multi_model::triage_policy::TriageContributorRole::TimelineAnalyst
+        ) | cd_core::multi_model::triage_policy::TriageSlotKindV2::Reviewer
+    );
+    Ok(serde_json::json!({
+        "schema_id": "contextdesk.tauri.triage_role_qualification.v1",
+        "action": "qualify",
+        "accepted": qualification == cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+        "profile_id": request.profile_id,
+        "model_id": request.model_id,
+        "kind": kind,
+        "qualification": qualification,
+        "physical_provider_calls": physical_provider_calls,
+        "semantic_corrections": semantic_corrections,
+        "reason": reason,
+        "store_written": true,
+        "network": needs_provider,
+        "credentials_read": needs_provider && profile.api_key_ref.is_some(),
+        "privacy": "owner_only"
+    }))
+}
+
 fn triage_fingerprint(bytes: &[u8]) -> String {
     use sha2::Digest;
     format!("sha256:{:x}", sha2::Sha256::digest(bytes))
@@ -14326,6 +14411,7 @@ pub fn run() {
             list_log_templates,
             ingest_log_path,
             install_demo_log_corpus,
+            triage_qualify_role_v2,
             triage_preflight_v2,
             triage_run_v2,
             triage_cancel_v2,

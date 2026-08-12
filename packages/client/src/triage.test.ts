@@ -50,3 +50,49 @@ describe("triage EngineClient adapter conformance", () => {
     });
   }
 });
+
+describe("exact-role qualification mock seam", () => {
+  const roleQualification = {
+    schema_id: "contextdesk.tauri.triage_role_qualification.v1" as const,
+    action: "qualify" as const,
+    accepted: true,
+    profile_id: "profile:vercel",
+    model_id: "deepseek-v4-flash",
+    kind: "finalizer",
+    qualification: "qualified" as const,
+    physical_provider_calls: 1,
+    semantic_corrections: 0,
+    reason: "qualified",
+    store_written: true,
+    network: true,
+    credentials_read: true,
+    privacy: "owner_only" as const,
+  };
+
+  it("requires confirmation and exact identity", async () => {
+    const client = createMockEngineClient({
+      triage: { preflight, replay, roleQualification },
+    });
+    await expect(client.triage.qualify({
+      profile_id: "profile:vercel",
+      model_id: "deepseek-v4-flash",
+      kind: "finalizer",
+      deadline_ms: 300_000,
+      confirm: false,
+    })).rejects.toMatchObject({ code: "invalid" });
+    await expect(client.triage.qualify({
+      profile_id: "profile:vercel",
+      model_id: "other-model",
+      kind: "finalizer",
+      deadline_ms: 300_000,
+      confirm: true,
+    })).rejects.toMatchObject({ code: "conflict" });
+    await expect(client.triage.qualify({
+      profile_id: "profile:vercel",
+      model_id: "deepseek-v4-flash",
+      kind: "finalizer",
+      deadline_ms: 300_000,
+      confirm: true,
+    })).resolves.toMatchObject({ qualification: "qualified" });
+  });
+});

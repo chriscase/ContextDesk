@@ -11,8 +11,11 @@ import { listen } from "@tauri-apps/api/event";
 import {
   parseCompiledTriagePolicyV2,
   parseTriageReplayV1,
+  parseTriageRoleQualificationResultV1,
   parseTriageRunEventV2,
   type TriageReplayV1,
+  type TriageRoleQualificationRequestV1,
+  type TriageRoleQualificationResultV1,
   type TriageRunEventV2,
   type WireImportPreviewPlan,
   type WireProcessProgress,
@@ -127,6 +130,17 @@ function createTauriTriageService(transport: TauriTransport): TriageService {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new EngineError("failed", `invalid triage preflight from host: ${message}`);
+      }
+    },
+    qualify: async (
+      request: TriageRoleQualificationRequestV1,
+    ): Promise<TriageRoleQualificationResultV1> => {
+      const result = await call<unknown>(transport, "triage_qualify_role_v2", { request });
+      try {
+        return parseTriageRoleQualificationResultV1(structuredClone(result));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new EngineError("failed", `invalid triage role qualification from host: ${message}`);
       }
     },
     run: async (request, options = {}) => {

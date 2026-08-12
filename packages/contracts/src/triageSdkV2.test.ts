@@ -6,6 +6,7 @@ import {
   parseCompiledTriagePolicyV2,
   parseTriageCancellationV1,
   parseTriageReplayV1,
+  parseTriageRoleQualificationResultV1,
   parseTriageRunEventV2,
   parseTriageRequestV2,
 } from "./triageSdkV2";
@@ -19,6 +20,54 @@ const load = (name: string): unknown =>
   JSON.parse(readFileSync(join(fixtureDir, name), "utf8"));
 
 describe("Rust-generated triage SDK v2 contracts", () => {
+  it("accepts the bounded exact-role qualification result", () => {
+    const result = parseTriageRoleQualificationResultV1({
+      schema_id: "contextdesk.tauri.triage_role_qualification.v1",
+      action: "qualify",
+      accepted: true,
+      profile_id: "profile:vercel",
+      model_id: "deepseek-v4-flash",
+      kind: "finalizer",
+      qualification: "qualified",
+      physical_provider_calls: 1,
+      semantic_corrections: 0,
+      reason: "qualified",
+      store_written: true,
+      network: true,
+      credentials_read: true,
+      privacy: "owner_only",
+    });
+    expect(result.qualification).toBe("qualified");
+    expect(result.physical_provider_calls).toBe(1);
+  });
+
+  it("rejects unsafe or unbounded exact-role qualification results", () => {
+    const result = {
+      schema_id: "contextdesk.tauri.triage_role_qualification.v1",
+      action: "qualify",
+      accepted: true,
+      profile_id: "profile:vercel",
+      model_id: "deepseek-v4-flash",
+      kind: "finalizer",
+      qualification: "qualified",
+      physical_provider_calls: 1,
+      semantic_corrections: 0,
+      reason: "qualified",
+      store_written: true,
+      network: true,
+      credentials_read: true,
+      privacy: "owner_only",
+    };
+    expect(() => parseTriageRoleQualificationResultV1({
+      ...result,
+      profile_id: "/Users/private/profile",
+    })).toThrow();
+    expect(() => parseTriageRoleQualificationResultV1({
+      ...result,
+      physical_provider_calls: 9,
+    })).toThrow();
+  });
+
   it("accepts the exact request and ordered replay goldens", () => {
     expect(parseTriageRequestV2(load("request.standard.json")).run_id).toBe("run:golden:01");
     expect(parseTriageReplayV1(load("replay.partial.json")).events).toHaveLength(6);

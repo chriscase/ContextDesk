@@ -13,7 +13,10 @@ import {
   parseTriageCancellationV1,
   parseTriageReplayV1,
   parseTriageRequestV2,
+  parseTriageRoleQualificationResultV1,
   type CompiledTriagePolicyV2,
+  type TriageRoleQualificationRequestV1,
+  type TriageRoleQualificationResultV1,
   type TriageReplayV1,
   type WireImportPreviewPlan,
   type WireImportPreviewReport,
@@ -65,6 +68,8 @@ export type MockTriageScenario = {
   cancelledReplay?: TriageReplayV1;
   /** Park a run before event delivery until `flush()` or `cancel()` is called. */
   manualFlush?: boolean;
+  /** Optional exact-role qualification result returned by `triage.qualify`. */
+  roleQualification?: TriageRoleQualificationResultV1;
 };
 
 /** The default deterministic preview: one of every ledger state. */
@@ -222,6 +227,11 @@ export class MockEngineClient implements EngineClient {
           replay: parseTriageReplayV1(structuredClone(scenario.triage.replay)),
           cancelledReplay: scenario.triage.cancelledReplay
             ? parseTriageReplayV1(structuredClone(scenario.triage.cancelledReplay))
+            : undefined,
+          roleQualification: scenario.triage.roleQualification
+            ? parseTriageRoleQualificationResultV1(
+                structuredClone(scenario.triage.roleQualification),
+              )
             : undefined,
           manualFlush: scenario.triage.manualFlush,
         }
@@ -575,6 +585,24 @@ export class MockEngineClient implements EngineClient {
         parseTriageRequestV2(structuredClone(request));
         const scenario = this.#triageScenario ?? unsupported();
         return structuredClone(scenario.preflight);
+      },
+      qualify: async (request: TriageRoleQualificationRequestV1) => {
+        const scenario = this.#triageScenario ?? unsupported();
+        if (!request.confirm) {
+          throw new EngineError("invalid", "triage role qualification requires confirmation");
+        }
+        const configured = scenario.roleQualification;
+        if (!configured) {
+          throw new EngineError("unsupported", "exact-role qualification is not configured for this adapter");
+        }
+        if (
+          request.profile_id !== configured.profile_id ||
+          request.model_id !== configured.model_id ||
+          JSON.stringify(request.kind) !== JSON.stringify(configured.kind)
+        ) {
+          throw new EngineError("conflict", "qualification identity does not match the configured scenario");
+        }
+        return structuredClone(configured);
       },
       run: async (request, options = {}) => {
         const parsedRequest = parseTriageRequestV2(structuredClone(request));

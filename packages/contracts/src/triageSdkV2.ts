@@ -15,6 +15,8 @@ export const TRIAGE_QUALIFICATION_SCHEMA_V2 =
   "contextdesk.triage.qualification.v2" as const;
 export const TRIAGE_QUALIFICATION_WORKFLOW_V2 =
   "contextdesk.triage.role.v2" as const;
+export const TRIAGE_ROLE_QUALIFICATION_RESULT_SCHEMA_V1 =
+  "contextdesk.tauri.triage_role_qualification.v1" as const;
 
 const MAX_WIRE_BYTES = 4 * 1024 * 1024;
 const MAX_TASK_BYTES = 64 * 1024;
@@ -61,6 +63,73 @@ export type CompiledTriagePolicyV2 = Record<string, unknown> & {
   mode: "standard" | "enhanced" | "advanced";
   slots: Record<string, unknown>[];
 };
+
+export type TriageRoleQualificationRequestV1 = {
+  profile_id: string;
+  model_id: string;
+  kind: Record<string, unknown> | string;
+  deadline_ms: number;
+  confirm: boolean;
+};
+
+export type TriageRoleQualificationResultV1 = Record<string, unknown> & {
+  schema_id: typeof TRIAGE_ROLE_QUALIFICATION_RESULT_SCHEMA_V1;
+  action: "qualify";
+  accepted: boolean;
+  profile_id: string;
+  model_id: string;
+  kind: Record<string, unknown> | string;
+  qualification: "qualified" | "unqualified" | "unverified" | "stale";
+  physical_provider_calls: number;
+  semantic_corrections: number;
+  reason: string;
+  store_written: boolean;
+  network: boolean;
+  credentials_read: boolean;
+  privacy: "owner_only";
+};
+
+export function parseTriageRoleQualificationResultV1(
+  value: unknown,
+): TriageRoleQualificationResultV1 {
+  const row = objectValue("triage_role_qualification", value);
+  checkObject("triage_role_qualification", {
+    schema_id: f.req(f.str),
+    action: f.req(f.str),
+    accepted: f.req(f.bool),
+    profile_id: f.req(f.str),
+    model_id: f.req(f.str),
+    kind: f.req(f.json),
+    qualification: f.req(f.str),
+    physical_provider_calls: f.req(f.u64),
+    semantic_corrections: f.req(f.u64),
+    reason: f.req(f.str),
+    store_written: f.req(f.bool),
+    network: f.req(f.bool),
+    credentials_read: f.req(f.bool),
+    privacy: f.req(f.str),
+  }, row);
+  if (row.schema_id !== TRIAGE_ROLE_QUALIFICATION_RESULT_SCHEMA_V1)
+    throw new ContractViolation("triage_role_qualification.schema_id", "unexpected schema");
+  if (row.action !== "qualify")
+    throw new ContractViolation("triage_role_qualification.action", "unexpected action");
+  boundedOpaque("triage_role_qualification.profile_id", row.profile_id);
+  if (encoder.encode(row.model_id as string).byteLength > 512)
+    throw new ContractViolation("triage_role_qualification.model_id", "model id too large");
+  const physicalProviderCalls = row.physical_provider_calls as number;
+  if (!Number.isInteger(physicalProviderCalls) || physicalProviderCalls < 0 || physicalProviderCalls > 8)
+    throw new ContractViolation("triage_role_qualification.physical_provider_calls", "invalid call count");
+  const semanticCorrections = row.semantic_corrections as number;
+  if (!Number.isInteger(semanticCorrections) || semanticCorrections < 0 || semanticCorrections > 2)
+    throw new ContractViolation("triage_role_qualification.semantic_corrections", "invalid correction count");
+  if (!(["qualified", "unqualified", "unverified", "stale"] as const).includes(row.qualification as never))
+    throw new ContractViolation("triage_role_qualification.qualification", "invalid verdict");
+  if (typeof row.reason !== "string" || row.reason.length > 256 || /[\u0000-\u001f\u007f]/u.test(row.reason))
+    throw new ContractViolation("triage_role_qualification.reason", "invalid reason");
+  if (row.privacy !== "owner_only")
+    throw new ContractViolation("triage_role_qualification.privacy", "invalid privacy");
+  return row as TriageRoleQualificationResultV1;
+}
 
 function wireBytes(path: string, value: unknown): number {
   try {

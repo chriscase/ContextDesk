@@ -314,9 +314,8 @@ pub async fn qualify(
         .ok_or_else(|| CliError::user("provider profile was not found"))?;
     let store_path =
         cd_core::triage_role_qualification::triage_role_qualification_store_path(&paths.config_dir);
-    let mut store =
-        cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(&store_path)
-            .map_err(|_| CliError::user("triage role qualification store is unavailable"))?;
+    cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(&store_path)
+        .map_err(|_| CliError::user("triage role qualification store is unavailable"))?;
     let record = cd_workflow::triage_role_qualification::qualify_configured_role_v2(
         cfg,
         secrets,
@@ -334,12 +333,11 @@ pub async fn qualify(
     let physical_provider_calls = record.physical_provider_calls;
     let semantic_corrections = record.semantic_corrections;
     let reason = record.reason.clone();
-    store
-        .put(record)
-        .map_err(|_| CliError::user("triage role qualification record was rejected"))?;
-    store
-        .save(&store_path)
-        .map_err(|_| CliError::user("triage role qualification store could not be published"))?;
+    cd_workflow::triage_role_qualification::publish_role_qualification_record(
+        &paths.config_dir,
+        record,
+    )
+    .map_err(|_| CliError::user("triage role qualification store could not be published"))?;
     let needs_provider = !matches!(
         kind,
         TriageSlotKindV2::Contributor(

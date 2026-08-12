@@ -12,6 +12,8 @@ import type {
   TriageCancellationV1,
   TriageReplayV1,
   TriageRequestV2,
+  TriageRoleQualificationRequestV1,
+  TriageRoleQualificationResultV1,
   TriageRunEventV2,
   WireImportPreviewPlan,
   WireProcessProgress,
@@ -265,6 +267,10 @@ export interface TriageService {
   readonly capability: TriageAdapterCapability;
   /** Ask the host to compile/preflight; TypeScript never recompiles policy. */
   preflight(request: TriageRequestV2): Promise<CompiledTriagePolicyV2>;
+  /** Run one explicit synthetic exact-role qualification through the host. */
+  qualify(
+    request: TriageRoleQualificationRequestV1,
+  ): Promise<TriageRoleQualificationResultV1>;
   /** Execute the host path and return its one authoritative terminal event. */
   run(request: TriageRequestV2, options?: TriageRunOptions): Promise<TriageRunEventV2>;
   /** Consume a host-authored replay through the same ordered event boundary. */
@@ -288,6 +294,7 @@ export function unsupportedTriageService(reason: string): TriageService {
   return {
     capability: { supported: false, reason, replay: false },
     preflight: unsupported,
+    qualify: unsupported,
     run: unsupported,
     replay: unsupported,
     cancel: unsupported,

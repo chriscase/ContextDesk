@@ -8,6 +8,7 @@
 //! into the record.
 
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -527,6 +528,24 @@ pub async fn qualify_configured_role_v2(
         backend: Arc::from(backend),
     })
     .await
+}
+
+/// Atomically publish one host-authored role record in the shared local store.
+/// CLI and Tauri use this helper so persistence validation and replacement
+/// semantics cannot drift between hosts.
+pub fn publish_role_qualification_record(
+    config_dir: &Path,
+    record: TriageRoleQualificationRecordV1,
+) -> Result<(), TriageRoleProbeError> {
+    let path = cd_core::triage_role_qualification::triage_role_qualification_store_path(config_dir);
+    let mut store = cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(&path)
+        .map_err(|_| TriageRoleProbeError::ProbeFailed)?;
+    store
+        .put(record)
+        .map_err(|_| TriageRoleProbeError::ProbeFailed)?;
+    store
+        .save(&path)
+        .map_err(|_| TriageRoleProbeError::ProbeFailed)
 }
 
 #[cfg(test)]
