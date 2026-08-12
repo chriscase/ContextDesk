@@ -75,6 +75,7 @@ metacharacters literal. If a question begins with a command name such as
 | `logging-assessment [corpus-id]` (alias `assess`) | Deterministic logging-quality assessment with fixed finding-code improvement hints (no provider); defaults to the current corpus. |
 | `exception-episodes [corpus-id]` | Deterministic exception episode correlation (occurrence vs raw records; no provider). |
 | `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
+| `triage-policy validate\|compile\|example` | Offline Triage Policy V2 validation over explicit policy/preflight JSON files. Does not read AppConfig, credentials, Keychain, discovery state, or a corpus, and never contacts a provider. |
 | `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
 
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
@@ -282,6 +283,30 @@ never touches the keychain (it only needs `resolve_provider_profile`, not
 probe and live turn each read is handed straight to the existing safe
 functions that already never log it — nothing in this command ever writes
 to `cli.toml` or the shared `AppConfig` either.
+
+## Triage Policy V2 (`contextdesk triage-policy`)
+
+This state-free surface previews the same pure compiler used by the reusable
+triage contracts. It is suitable for policy authoring and automation before
+any provider operation:
+
+```bash
+contextdesk triage-policy example
+contextdesk triage-policy validate --policy policy.json --preflight preflight.json
+contextdesk triage-policy compile --policy policy.json --preflight preflight.json --json
+```
+
+`validate` reports every configured slot as admitted, optionally degraded, or
+required/rejected. `compile` additionally returns the complete deterministic
+sequential plan and separate role-slot, exact-model, catalog-model, and gateway
+counts; those counts are explicitly not consensus. Rejected preflight is a
+completed result with exit code 8 (`not_ready`) so JSON output retains every
+typed rejection and slot disposition. Malformed or oversized input is a user
+error. Input paths are never echoed.
+
+Standard remains the permanent simple one-model default. Enhanced and Advanced
+use the same contract with progressively visible roles, budgets, qualification,
+and egress choices; this CLI does not silently select or substitute a model.
 
 ## Gateway diagnostics (`contextdesk gateway diagnose`)
 

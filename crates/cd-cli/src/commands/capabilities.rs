@@ -134,6 +134,9 @@ const COMMANDS: &[&str] = &[
     "eval suites",
     "eval validate",
     "eval run",
+    "triage-policy validate",
+    "triage-policy compile",
+    "triage-policy example",
 ];
 
 pub fn run(branding: &Branding) -> CapabilitiesOutput {

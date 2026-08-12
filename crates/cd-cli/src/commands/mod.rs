@@ -19,3 +19,4 @@ pub mod retrieval_reanalyze;
 pub mod retrieval_status;
 pub mod session;
 pub mod timezone;
+pub mod triage_policy;

@@ -177,6 +177,13 @@ pub enum Command {
         #[command(subcommand)]
         action: EvalAction,
     },
+    /// Validate or compile an explicit Triage Policy V2 entirely offline.
+    /// Reads only the two named JSON files; never reads app config,
+    /// credentials, Keychain, a model catalog, or a corpus.
+    TriagePolicy {
+        #[command(subcommand)]
+        action: TriagePolicyAction,
+    },
     /// Provider-neutral gateway/model diagnostics for one explicitly selected model.
     Gateway {
         #[command(subcommand)]
@@ -246,6 +253,28 @@ pub enum EvalAction {
     Validate(EvalValidateArgs),
     /// Run the hermetic suite and print a report (optionally write JSON/JSONL).
     Run(EvalRunArgs),
+}
+
+/// Provider-free Triage Policy V2 actions.
+#[derive(Debug, Subcommand)]
+pub enum TriagePolicyAction {
+    /// Validate one inline policy against explicit host preflight facts.
+    Validate(TriagePolicyFileArgs),
+    /// Compile one inline policy into its deterministic sequential plan.
+    Compile(TriagePolicyFileArgs),
+    /// Print a safe Standard-policy example with placeholder identities.
+    Example,
+}
+
+/// Explicit files for provider-free policy validation and compilation.
+#[derive(Debug, Clone, clap::Args)]
+pub struct TriagePolicyFileArgs {
+    /// JSON file containing one `contextdesk.triage_policy.v2` policy.
+    #[arg(long, value_name = "FILE")]
+    pub policy: PathBuf,
+    /// JSON file containing host-authored `TriagePolicyPreflightV2` facts.
+    #[arg(long, value_name = "FILE")]
+    pub preflight: PathBuf,
 }
 
 /// Options for `contextdesk eval validate`.
@@ -779,6 +808,7 @@ pub const KNOWN_SUBCOMMANDS: &[&str] = &[
     "reanalyze",
     "models",
     "eval",
+    "triage-policy",
     "gateway",
 ];
 
