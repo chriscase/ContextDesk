@@ -182,6 +182,21 @@ the desktop receives no privileged orchestration path.
 7. Add parallelism or adaptive routing only after the sequential policy is
    demonstrably correct and useful.
 
+## Current production adapter boundary
+
+The first trusted-host adapter is deliberately narrower than the full policy.
+It can convert a fully admitted Enhanced/Advanced contributor-only plan into
+the established linked-log contribution runtime for observation extraction,
+causal proposals, contradiction checking, and evidence-gap finding. That reuses
+the existing immutable host packet, provider backends, cancellation, budgets,
+stage events, validation, reconciliation, renderer, and cleanup.
+
+It refuses Standard (which stays on the established single-model route),
+timeline analysis, a finalizer, a reviewer, visible optional-role dropout, or
+deadline semantics the established route cannot enforce. It is not selected by
+CLI or Tauri yet. See
+[`TRIAGE_POLICY_V2_PRODUCTION_ADAPTER_V1.md`](../testing/TRIAGE_POLICY_V2_PRODUCTION_ADAPTER_V1.md).
+
 ## Release proof
 
 Release claims require clean exact identity; legacy migration; provider-free

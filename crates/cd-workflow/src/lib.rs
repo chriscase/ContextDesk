@@ -31,6 +31,9 @@ pub mod timezone;
 pub mod tools;
 /// Host-neutral Triage Policy V2 compilation and deterministic mock/replay seam.
 pub mod triage;
+/// Trusted-host, default-off adapter for the currently supported V2
+/// contributor-only production subset.
+pub mod triage_production;
 pub mod turn;
 
 /// Re-export core context plan types at the shared workflow boundary.
