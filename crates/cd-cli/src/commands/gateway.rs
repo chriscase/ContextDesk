@@ -683,9 +683,7 @@ fn compute_verdicts(cases: &[CaseReport]) -> Verdicts {
     let diagnostic_fault = cases
         .iter()
         .any(|c| c.classification == CaseClassification::DiagnosticFault);
-    let product_workflow_status = if diagnostic_fault {
-        VerdictStatus::Inconclusive
-    } else if !product_executed {
+    let product_workflow_status = if diagnostic_fault || !product_executed {
         VerdictStatus::Inconclusive
     } else if product_failed {
         VerdictStatus::Fail
@@ -697,9 +695,7 @@ fn compute_verdicts(cases: &[CaseReport]) -> Verdicts {
 
     let scorer_executed = cases.iter().any(|c| c.scorer.executed);
     let scorer_failed = cases.iter().any(|c| c.scorer.executed && !c.scorer.passed);
-    let answers_useful_status = if diagnostic_fault {
-        VerdictStatus::Inconclusive
-    } else if !scorer_executed {
+    let answers_useful_status = if diagnostic_fault || !scorer_executed {
         VerdictStatus::Inconclusive
     } else if scorer_failed {
         VerdictStatus::Fail

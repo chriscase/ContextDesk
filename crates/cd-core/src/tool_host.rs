@@ -491,9 +491,17 @@ fn broad_triage_candidate_observation(
     let pattern = broad_triage_candidate_pattern(corpus, template_id, fallback_message);
     let pattern = broad_triage_bounded_line(&pattern);
     let pattern = serde_json::to_string(&pattern).unwrap_or_else(|_| "\"<invalid>\"".into());
+    // Template mining intentionally generalizes repeated rows, but that can
+    // erase event-kind and mechanism words needed to distinguish a trigger
+    // from a downstream reaction. Keep a bounded observed exemplar beside
+    // the stable template. It remains untrusted data and is JSON-quoted so
+    // log text cannot alter the packet grammar.
+    let observed_message = broad_triage_bounded_line(fallback_message);
+    let observed_message =
+        serde_json::to_string(&observed_message).unwrap_or_else(|_| "\"<invalid>\"".into());
     format!(
-        "- axis_value={} level={} source={} service={} template_id={} pattern={}\n",
-        axis_value, level, source, service, template_id, pattern
+        "- axis_value={} level={} source={} service={} template_id={} pattern={} observed_message={}\n",
+        axis_value, level, source, service, template_id, pattern, observed_message
     )
 }
 
@@ -10013,6 +10021,40 @@ mod tests {
         );
         assert!(observation.contains(fallback));
         assert!(!observation.contains("metadata unavailable"));
+
+        // An informative but lossy template must not hide the bounded
+        // observed line. This is the case that previously dropped
+        // `kind=exception` from the candidate-stage packet.
+        corpus
+            .upsert_templates([crate::log_analysis::TemplateRow {
+                info: crate::log_analysis::TemplateInfo {
+                    template_id: 406,
+                    pattern: "LeaseWindowExpired".into(),
+                    token_count: 1,
+                    count: 1,
+                    first_seen: 1_700_000_000,
+                    last_seen: 1_700_000_000,
+                    severity: 4,
+                    example: "LeaseWindowExpired".into(),
+                },
+                content_hash: "lossy-informative-template".into(),
+                vector: None,
+            }])
+            .unwrap();
+        let observed =
+            "kind=exception level=error service=worker LeaseWindowExpired during acquisition";
+        let lossy_observation = broad_triage_candidate_observation(
+            &corpus,
+            1_700_000_002,
+            "ERROR",
+            &identity.source,
+            Some("worker"),
+            406,
+            observed,
+        );
+        assert!(lossy_observation.contains("pattern=\"LeaseWindowExpired\""));
+        assert!(lossy_observation.contains("observed_message="));
+        assert!(lossy_observation.contains("kind=exception"));
         let missing_identity = crate::log_analysis::SearchEvidenceIdentity {
             template_id: 405,
             ..identity
