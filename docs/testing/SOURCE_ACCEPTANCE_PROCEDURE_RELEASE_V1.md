@@ -1,17 +1,20 @@
-# Source-based acceptance procedure — acceptance release v1
+# Source-based acceptance procedure — release-quality v2
 
 Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
-- branch: `feat/multimodel-contribution-reconcile-v1`
-- exact tested source/build SHA: `c09357153e0c8953f2862c3cf3d8377ec9bc6bc7`
+- branch: `integrate/release-quality-v2`
+- exact tested source/build SHA: `9053ade3e785511681d90092cb3f8fafada86a60`
 
 The exact tested source/build SHA above is the identity that must be fetched, built, and
 verified. Do not substitute an older baseline, a moving branch tip, or an
-unrelated local checkout.
+unrelated local checkout. The final commit is documentation-only after the
+tested product-path ancestor `aeaf5a7e7f686a6e4113f46ffaf24279d5073d89`;
+the live Vercel evidence is explicitly recorded against that ancestor and is
+not broadened into a universal provider claim.
 
-This pin supersedes the earlier `85c065f0…` and `64edb0a…` acceptance inputs.
-Since those older pins, the release has added the chat-contract v4
+This pin supersedes the earlier `c0935715…`, `85c065f0…`, and `64edb0a…`
+acceptance inputs. Since those older pins, the release has added the chat-contract v4
 transport/mode identity and fail-closed qualification, host-grounded fast
 triage, bounded deadline controls, wider production rerank candidate handling,
 and the current protected-file gateway diagnostic plumbing. Historical
@@ -61,7 +64,10 @@ contextdesk --profile <profile> --model <exact-id-from-discovery> --json models 
 
 Start with the exact catalog ID returned for DeepSeek V4 Flash. Do not shorten
 or infer the ID. Do not verify the whole catalog initially. A Vercel diagnostic
-on this release also passed `deepseek/deepseek-v4-flash`, but that evidence is
+on the tested product-path ancestor passed `deepseek/deepseek-v4-flash` for
+ordinary, structured, attachment, product-tool, and synthetic linked-log
+triage; its separate direct native-tool continuation probe failed a response
+contract, so no native-tools verified badge is implied. That evidence is
 scoped to Vercel and must not be reused as an employer-gateway verdict.
 
 ## 5. Run one bounded product triage
