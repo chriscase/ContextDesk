@@ -5,7 +5,9 @@
 //! existing deterministic broad-triage brief; it does not create a second
 //! provider client or a second evidence-selection path.
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -310,6 +312,42 @@ async fn wait_for_cancel(cancel: Arc<AtomicBool>) {
     }
 }
 
+/// Await provider construction inside the same host-owned budget as the
+/// subsequent provider calls.  Construction can perform authentication or
+/// token refresh, so allowing it to run outside the turn deadline would let
+/// setup outlive the request and hand the runner a stale allowance.
+async fn await_backend_with_turn_budget<F, T>(
+    started: Instant,
+    deadline_ms: u64,
+    cancel: Option<Arc<AtomicBool>>,
+    future: F,
+) -> Result<T, TriageHostError>
+where
+    F: Future<Output = cd_core::error::CoreResult<T>>,
+{
+    let remaining_ms =
+        deadline_ms.saturating_sub(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+    if remaining_ms == 0 {
+        return Err(TriageHostError::Deadline);
+    }
+    let cancel_wait: Pin<Box<dyn Future<Output = ()> + Send>> = if let Some(cancel) = cancel {
+        Box::pin(wait_for_cancel(cancel))
+    } else {
+        Box::pin(std::future::pending())
+    };
+    tokio::pin!(cancel_wait);
+    tokio::select! {
+        result = tokio::time::timeout(Duration::from_millis(remaining_ms), future) => {
+            match result {
+                Ok(Ok(value)) => Ok(value),
+                Ok(Err(_)) => Err(TriageHostError::Backend("backend_build_failed".into())),
+                Err(_) => Err(TriageHostError::Deadline),
+            }
+        }
+        _ = &mut cancel_wait => Err(TriageHostError::Cancelled),
+    }
+}
+
 /// A conservative production hook: only a finalizer may create an
 /// authoritative answer envelope.  Contributor slots are validated by the
 /// typed contribution pipeline before this hook is reached.  Reviewer and
@@ -502,7 +540,7 @@ pub async fn resolve_v2_host(
         },
     };
     let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    let remaining_deadline_ms = input.deadline_ms.saturating_sub(elapsed_ms);
+    let mut remaining_deadline_ms = input.deadline_ms.saturating_sub(elapsed_ms);
     if remaining_deadline_ms == 0 {
         unbind_linked_corpus(host, binding);
         return Err(TriageHostError::Deadline);
@@ -535,7 +573,6 @@ pub async fn resolve_v2_host(
     };
 
     let mut budget_cfg = cfg.clone();
-    budget_cfg.router.deadline_ms = remaining_deadline_ms;
     budget_cfg.router.deadline_is_explicit = true;
     let credentials = TurnProviderCredentialCache::new(secrets);
     let mut authorized = Vec::new();
@@ -544,6 +581,14 @@ pub async fn resolve_v2_host(
         .iter()
         .filter(|slot| slot.disposition == SlotDispositionV2::Admitted)
     {
+        let slot_remaining_ms = input
+            .deadline_ms
+            .saturating_sub(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        if slot_remaining_ms == 0 {
+            unbind_linked_corpus(host, binding);
+            return Err(TriageHostError::Deadline);
+        }
+        budget_cfg.router.deadline_ms = slot_remaining_ms;
         let profile = match resolve_provider_profile(&budget_cfg, Some(&slot.model.profile_id)) {
             Ok(profile) => profile,
             Err(error) => {
@@ -562,11 +607,18 @@ pub async fn resolve_v2_host(
                 selected,
                 Some(slot.model.model_id.as_str()),
             );
-            let backend = match backend_for_resolved_turn(&resolved).await {
+            let backend = match await_backend_with_turn_budget(
+                started,
+                input.deadline_ms,
+                input.cancel.clone(),
+                backend_for_resolved_turn(&resolved),
+            )
+            .await
+            {
                 Ok(backend) => backend,
-                Err(_) => {
+                Err(error) => {
                     unbind_linked_corpus(host, binding);
-                    return Err(TriageHostError::Backend("backend_build_failed".into()));
+                    return Err(error);
                 }
             };
             authorized.push(AuthorizedTriageBackendV1 {
@@ -581,11 +633,18 @@ pub async fn resolve_v2_host(
                 profile,
                 Some(slot.model.model_id.as_str()),
             );
-            let backend = match backend_for_resolved_turn(&resolved).await {
+            let backend = match await_backend_with_turn_budget(
+                started,
+                input.deadline_ms,
+                input.cancel.clone(),
+                backend_for_resolved_turn(&resolved),
+            )
+            .await
+            {
                 Ok(backend) => backend,
-                Err(_) => {
+                Err(error) => {
                     unbind_linked_corpus(host, binding);
-                    return Err(TriageHostError::Backend("backend_build_failed".into()));
+                    return Err(error);
                 }
             };
             authorized.push(AuthorizedTriageBackendV1 {
@@ -594,6 +653,16 @@ pub async fn resolve_v2_host(
                 backend: Arc::from(backend),
             });
         }
+    }
+
+    // Setup/authentication consumed part of the original turn. Never hand
+    // the runner the pre-setup allowance after a slow provider factory.
+    remaining_deadline_ms = input
+        .deadline_ms
+        .saturating_sub(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+    if remaining_deadline_ms == 0 {
+        unbind_linked_corpus(host, binding);
+        return Err(TriageHostError::Deadline);
     }
 
     // The deterministic phase has consumed part of the user budget. The
@@ -673,6 +742,32 @@ mod tests {
         TriageRoleQualificationStoreV1,
     };
     use cd_core::triage_sdk::TriageReconciliationV1;
+
+    #[tokio::test]
+    async fn provider_setup_observes_remaining_turn_deadline() {
+        let result = await_backend_with_turn_budget(Instant::now(), 20, None, async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<_, cd_core::error::CoreError>(())
+        })
+        .await;
+        assert!(matches!(result, Err(TriageHostError::Deadline)));
+    }
+
+    #[tokio::test]
+    async fn provider_setup_observes_turn_cancellation() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            signal.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let result = await_backend_with_turn_budget(Instant::now(), 500, Some(cancel), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok::<_, cd_core::error::CoreError>(())
+        })
+        .await;
+        assert!(matches!(result, Err(TriageHostError::Cancelled)));
+    }
 
     #[test]
     fn requested_scope_accepts_current_revision_without_sources() {
