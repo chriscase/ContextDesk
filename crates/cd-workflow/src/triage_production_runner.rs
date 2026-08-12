@@ -1225,10 +1225,29 @@ impl TriageProductionRunnerV1 {
         let response = match completion {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
+                if let Some(reason) =
+                    host_interruption(input, started, self.resolution.host_deadline_ms)
+                {
+                    *interrupted = Some(reason);
+                    return (
+                        fail_with_calls(
+                            match reason {
+                                Interruption::Cancelled => TriageAttemptStatus::Cancelled,
+                                Interruption::TimedOut => TriageAttemptStatus::TimedOut,
+                            },
+                            match reason {
+                                Interruption::Cancelled => "cancelled",
+                                Interruption::TimedOut => "deadline",
+                            },
+                            1,
+                        ),
+                        None,
+                    );
+                }
                 return (
                     fail_with_calls(TriageAttemptStatus::Failed, "provider_failed", 1),
                     None,
-                )
+                );
             }
             Err(_) => {
                 *interrupted = Some(Interruption::TimedOut);
