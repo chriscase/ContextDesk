@@ -13,7 +13,6 @@ use cd_core::multi_model::triage_policy::{
     RoleQualificationV2, RoleRequirement, TriageContributorRole, TriagePolicyMode,
     TriagePolicyPreflightV2, TriagePolicyV2, TriageSlotKindV2,
 };
-use cd_core::multi_model::{TRIAGE_QUALIFICATION_SCHEMA_V2, TRIAGE_QUALIFICATION_WORKFLOW_V2};
 use cd_core::triage_sdk::{
     TriageAttemptStatus, TriageContractError, TriageReplayV1, TriageRoleAttemptV1,
     TriageRunEventPayloadV2,
@@ -79,9 +78,6 @@ fn preflight(policy: &TriagePolicyV2) -> TriagePolicyPreflightV2 {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
-            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
-            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
-            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         })
         .collect::<Vec<_>>();
     if let Some(slot) = &policy.finalizer {
@@ -92,9 +88,6 @@ fn preflight(policy: &TriagePolicyV2) -> TriagePolicyPreflightV2 {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
-            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
-            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
-            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         });
     }
     if let Some(slot) = &policy.reviewer {
@@ -105,9 +98,6 @@ fn preflight(policy: &TriagePolicyV2) -> TriagePolicyPreflightV2 {
             available: true,
             qualification: RoleQualificationV2::Qualified,
             remote: false,
-            qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
-            workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
-            protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
         });
     }
     TriagePolicyPreflightV2 { roles }
@@ -162,7 +152,7 @@ impl TriageRoleExecutor for RecordingExecutor {
 }
 
 #[test]
-fn canonical_phase_order_is_contributor_then_reviewer_then_finalizer() {
+fn canonical_phase_order_is_contributor_then_finalizer_then_reviewer() {
     let mut policy = policy();
     // Force the conditional reviewer to run without changing the slot order.
     policy.reviewer.as_mut().unwrap().condition = ReviewerConditionV2::ExplicitRequest;
@@ -177,8 +167,8 @@ fn canonical_phase_order_is_contributor_then_reviewer_then_finalizer() {
                 output_chars: 4,
             },
         )
-        .with_outcome("review", MockRoleOutcome::completed())
-        .with_outcome("finalize", MockRoleOutcome::completed());
+        .with_outcome("finalize", MockRoleOutcome::completed())
+        .with_outcome("review", MockRoleOutcome::completed());
     let mut input = input();
     input.control.explicit_review_requested = true;
     let result = MockTriageRunner::new(script)
@@ -193,8 +183,8 @@ fn canonical_phase_order_is_contributor_then_reviewer_then_finalizer() {
         vec![
             TriageSlotKindV2::Contributor(TriageContributorRole::ObservationExtractor),
             TriageSlotKindV2::Contributor(TriageContributorRole::ContradictionChecker),
-            TriageSlotKindV2::Reviewer,
             TriageSlotKindV2::Finalizer,
+            TriageSlotKindV2::Reviewer,
         ]
     );
     let phase_kinds = result
@@ -219,10 +209,8 @@ fn canonical_phase_order_is_contributor_then_reviewer_then_finalizer() {
             {
                 "reviewer"
             }
-            TriageRunEventPayloadV2::PreliminaryReconciliation { .. } => "preliminary",
-            TriageRunEventPayloadV2::FinalReconciliation { .. } => "final",
+            TriageRunEventPayloadV2::Reconciliation { .. } => "reconcile",
             TriageRunEventPayloadV2::Validation { .. } => "validate",
-            TriageRunEventPayloadV2::Correction { .. } => "correction",
             event if event.is_terminal() => "terminal",
             _ => "other",
         })
@@ -234,12 +222,10 @@ fn canonical_phase_order_is_contributor_then_reviewer_then_finalizer() {
             "packet",
             "contributor",
             "contributor",
-            "preliminary",
-            "reviewer",
-            "final",
+            "reconcile",
             "finalizer",
+            "reviewer",
             "validate",
-            "correction",
             "terminal",
         ]
     );
@@ -264,14 +250,11 @@ fn finalizer_is_not_called_after_required_contributor_failure() {
         .unwrap();
     let role_attempts = attempts(&result.replay);
     assert_eq!(role_attempts[0].status, TriageAttemptStatus::Failed);
-    assert_eq!(role_attempts[3].status, TriageAttemptStatus::NotAdmitted);
-    assert!(role_attempts[3]
+    assert_eq!(role_attempts[2].status, TriageAttemptStatus::NotAdmitted);
+    assert!(role_attempts[2]
         .reason_codes
         .contains(&"finalizer_not_eligible".into()));
-    assert_eq!(
-        *calls.lock().unwrap(),
-        vec!["observe", "challenge", "review"]
-    );
+    assert_eq!(*calls.lock().unwrap(), vec!["observe", "challenge"]);
     assert!(matches!(
         result.replay.events.last().unwrap().event,
         TriageRunEventPayloadV2::Failed { .. }
@@ -297,8 +280,8 @@ fn finalizer_and_reviewer_remain_distinct_even_when_model_is_shared() {
         .into_iter()
         .map(|attempt| (attempt.role, attempt.model.clone()))
         .collect::<Vec<_>>();
-    assert_eq!(kinds[2].0, TriageSlotKindV2::Reviewer);
-    assert_eq!(kinds[3].0, TriageSlotKindV2::Finalizer);
+    assert_eq!(kinds[2].0, TriageSlotKindV2::Finalizer);
+    assert_eq!(kinds[3].0, TriageSlotKindV2::Reviewer);
     assert_eq!(kinds[2].1, kinds[3].1);
     assert_eq!(
         result
@@ -337,7 +320,7 @@ fn same_model_roles_never_masquerade_as_independent_consensus() {
         .events
         .iter()
         .find_map(|event| match &event.event {
-            TriageRunEventPayloadV2::FinalReconciliation { summary } => Some(summary),
+            TriageRunEventPayloadV2::Reconciliation { summary } => Some(summary),
             _ => None,
         })
         .unwrap();
@@ -434,9 +417,6 @@ fn replay_rejects_reordered_events_and_duplicate_terminal_delivery() {
 
     let mut reordered = baseline.clone();
     reordered.events.swap(1, 2);
-    for (index, event) in reordered.events.iter_mut().enumerate() {
-        event.sequence = index as u64;
-    }
     assert_eq!(
         reordered.validate(),
         Err(TriageContractError::InvalidPhaseOrder)
