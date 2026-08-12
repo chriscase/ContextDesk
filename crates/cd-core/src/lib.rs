@@ -67,6 +67,8 @@ pub mod memory;
 pub mod memory_fs;
 pub mod model_context;
 pub mod model_curation;
+/// Exact gateway-scoped model identity shared by policy and SDK contracts.
+pub mod model_ref;
 pub mod model_role_hints;
 pub mod module_registry;
 pub mod modules;
