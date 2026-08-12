@@ -227,7 +227,7 @@ pub enum TriageExecutionPolicyV1 {
 #[serde(deny_unknown_fields)]
 pub struct TriagePolicyV2 {
     /// Must equal [`TRIAGE_POLICY_SCHEMA_V2`].
-    pub schema: String,
+    pub schema_id: String,
     /// Product disclosure level.
     pub mode: TriagePolicyMode,
     /// Ordered contributor slots. Duplicate roles and models are allowed.
@@ -249,16 +249,16 @@ pub struct TriagePolicyV2 {
 
 impl TriagePolicyV2 {
     /// Construct the permanent simple default around one exact answer model.
-    pub fn standard(model: ModelRef) -> Self {
+    pub fn standard(model: ModelRef, allow_remote: bool) -> Self {
         Self {
-            schema: TRIAGE_POLICY_SCHEMA_V2.into(),
+            schema_id: TRIAGE_POLICY_SCHEMA_V2.into(),
             mode: TriagePolicyMode::Standard,
             contributors: Vec::new(),
             finalizer: Some(FinalizerSlotV2 {
                 slot_id: "standard-finalizer".into(),
                 model,
                 requirement: RoleRequirement::Required,
-                allow_remote: false,
+                allow_remote,
             }),
             reviewer: None,
             budget: TriageBudgetV2::default(),
@@ -287,6 +287,10 @@ pub enum RoleQualificationV2 {
 pub struct RolePreflightV2 {
     /// Exact policy slot identity.
     pub slot_id: String,
+    /// Exact model identity observed by host resolution.
+    pub model: ModelRef,
+    /// Exact phase/role identity observed by host resolution.
+    pub kind: TriageSlotKindV2,
     /// Whether the configured profile/model can currently be constructed.
     pub available: bool,
     /// Exact workflow/role qualification state.
@@ -320,10 +324,10 @@ pub enum PolicyRejectionCategoryV2 {
     StandardModeExpanded,
     /// Standard mode lacks one required finalizer.
     StandardFinalizerRequired,
+    /// Enhanced/Advanced policy contains no model slots.
+    EmptyPolicy,
     /// A budget is zero or cannot fit configured phases.
     InvalidBudget,
-    /// V2 does not support parallel policy execution.
-    UnsupportedExecution,
     /// The host has no current runtime for the configured exact model.
     RoleUnavailable,
     /// Exact workflow/role qualification is absent, stale, or failed.
@@ -334,6 +338,8 @@ pub enum PolicyRejectionCategoryV2 {
     UnknownPreflightSlot,
     /// Preflight supplied more than one fact record for the same slot.
     DuplicatePreflightSlot,
+    /// Preflight facts do not match the slot's exact model or role binding.
+    PreflightBindingMismatch,
     /// The contributor-phase call cap cannot admit this role.
     ProviderCallBudgetInsufficient,
 }
@@ -422,7 +428,7 @@ pub struct TriageIndependenceCountsV2 {
 #[serde(deny_unknown_fields)]
 pub struct CompiledTriagePolicyV2 {
     /// Must equal [`COMPILED_TRIAGE_POLICY_SCHEMA_V2`].
-    pub schema: String,
+    pub schema_id: String,
     /// Original disclosure mode.
     pub mode: TriagePolicyMode,
     /// Every configured slot in deterministic execution order.
@@ -463,11 +469,22 @@ pub fn compile_triage_policy_v2(
     preflight: &TriagePolicyPreflightV2,
 ) -> Result<CompiledTriagePolicyV2, TriagePolicyCompileFailureV2> {
     let mut rejections = Vec::new();
-    if policy.schema != TRIAGE_POLICY_SCHEMA_V2 {
+    if policy.schema_id != TRIAGE_POLICY_SCHEMA_V2 {
         reject(
             &mut rejections,
             None,
             PolicyRejectionCategoryV2::SchemaMismatch,
+        );
+    }
+    if policy.mode != TriagePolicyMode::Standard
+        && policy.contributors.is_empty()
+        && policy.finalizer.is_none()
+        && policy.reviewer.is_none()
+    {
+        reject(
+            &mut rejections,
+            None,
+            PolicyRejectionCategoryV2::EmptyPolicy,
         );
     }
 
@@ -561,20 +578,12 @@ pub fn compile_triage_policy_v2(
     let mut slots = Vec::with_capacity(inputs.len());
     for input in inputs {
         let mut causes = Vec::new();
-        if matches!(input.kind, TriageSlotKindV2::Contributor(_)) {
-            if input.requirement == RoleRequirement::Required {
-                if !required_contributors_fit {
-                    causes.push(PolicyRejectionCategoryV2::ProviderCallBudgetInsufficient);
-                }
-            } else if optional_contributors_admitted < optional_contributor_capacity {
-                optional_contributors_admitted += 1;
-            } else {
-                causes.push(PolicyRejectionCategoryV2::ProviderCallBudgetInsufficient);
-            }
-        }
         match facts.get(input.slot_id.as_str()) {
             None => causes.push(PolicyRejectionCategoryV2::RoleUnavailable),
             Some(fact) => {
+                if fact.model != input.model || fact.kind != input.kind {
+                    causes.push(PolicyRejectionCategoryV2::PreflightBindingMismatch);
+                }
                 if !fact.available {
                     causes.push(PolicyRejectionCategoryV2::RoleUnavailable);
                 }
@@ -583,6 +592,19 @@ pub fn compile_triage_policy_v2(
                 }
                 if fact.remote && !input.allow_remote {
                     causes.push(PolicyRejectionCategoryV2::EgressDenied);
+                }
+            }
+        }
+        if matches!(input.kind, TriageSlotKindV2::Contributor(_)) {
+            if input.requirement == RoleRequirement::Required {
+                if !required_contributors_fit {
+                    causes.push(PolicyRejectionCategoryV2::ProviderCallBudgetInsufficient);
+                }
+            } else if causes.is_empty() {
+                if optional_contributors_admitted < optional_contributor_capacity {
+                    optional_contributors_admitted += 1;
+                } else {
+                    causes.push(PolicyRejectionCategoryV2::ProviderCallBudgetInsufficient);
                 }
             }
         }
@@ -640,7 +662,7 @@ pub fn compile_triage_policy_v2(
         .collect();
 
     Ok(CompiledTriagePolicyV2 {
-        schema: COMPILED_TRIAGE_POLICY_SCHEMA_V2.into(),
+        schema_id: COMPILED_TRIAGE_POLICY_SCHEMA_V2.into(),
         mode: policy.mode,
         slots,
         independence_groups,
@@ -749,14 +771,7 @@ fn validate_budget(policy: &TriagePolicyV2, rejections: &mut Vec<PolicyRejection
         || budget.whole_turn_deadline_ms == Some(0)
         || budget
             .whole_turn_deadline_ms
-            .is_some_and(|deadline| terminal_reserve > deadline)
-        || budget.whole_turn_deadline_ms.is_some_and(|deadline| {
-            budget.contributors.operation_timeout_ms > deadline
-                || (has_finalizer && budget.finalizer.operation_timeout_ms > deadline)
-                || (has_reviewer && budget.reviewer.operation_timeout_ms > deadline)
-                || (budget.corrections.max_provider_calls > 0
-                    && budget.corrections.operation_timeout_ms > deadline)
-        });
+            .is_some_and(|deadline| terminal_reserve > deadline);
     if invalid {
         reject(rejections, None, PolicyRejectionCategoryV2::InvalidBudget);
     }
@@ -803,6 +818,8 @@ pub struct LegacyResolvedTriagePolicyV1 {
     pub mode: MultiModelMode,
     /// Existing primary/final answer model.
     pub primary: ModelRef,
+    /// Existing explicit remote-egress authorization for the primary model.
+    pub primary_allow_remote: bool,
     /// Existing optional reviewer assignment.
     pub reviewer: Option<ModelRef>,
     /// Existing contribution assignments.
@@ -862,9 +879,9 @@ pub fn migrate_resolved_legacy_policy_v1(input: LegacyResolvedTriagePolicyV1) ->
     budget.whole_turn_deadline_ms =
         (input.budget.deadline_ms > 0).then_some(input.budget.deadline_ms);
     budget.max_provider_calls = input.budget.max_total_provider_rounds;
-    budget.max_context_chars = input.budget.max_context_chars_total.unwrap_or_else(|| {
-        u64::try_from(input.contribution_policy.max_context_chars).unwrap_or(u64::MAX)
-    });
+    if let Some(total) = input.budget.max_context_chars_total {
+        budget.max_context_chars = total;
+    }
     budget.contributors.max_provider_calls =
         u32::try_from(input.contribution_policy.max_contributors)
             .unwrap_or(u32::MAX)
@@ -887,12 +904,22 @@ pub fn migrate_resolved_legacy_policy_v1(input: LegacyResolvedTriagePolicyV1) ->
         .unwrap_or(u64::MAX)
         .min(budget.max_context_chars);
     budget.reviewer.max_context_chars = budget.finalizer.max_context_chars;
+    if let Some(deadline) = budget.whole_turn_deadline_ms {
+        let terminal_phases = if reviewer.is_some() { 3 } else { 2 };
+        let reserve = deadline / terminal_phases;
+        budget.finalizer.reserve_ms = reserve;
+        budget.finalizer.operation_timeout_ms = budget.finalizer.operation_timeout_ms.min(deadline);
+        budget.reviewer.reserve_ms = reserve;
+        budget.reviewer.operation_timeout_ms = budget.reviewer.operation_timeout_ms.min(deadline);
+        budget.corrections.operation_timeout_ms =
+            budget.corrections.operation_timeout_ms.min(deadline);
+    }
 
     if mode == TriagePolicyMode::Standard {
-        TriagePolicyV2::standard(input.primary)
+        TriagePolicyV2::standard(input.primary, input.primary_allow_remote)
     } else {
         TriagePolicyV2 {
-            schema: TRIAGE_POLICY_SCHEMA_V2.into(),
+            schema_id: TRIAGE_POLICY_SCHEMA_V2.into(),
             mode,
             contributors,
             finalizer: Some(FinalizerSlotV2 {
@@ -925,6 +952,8 @@ mod tests {
                 .into_iter()
                 .map(|slot| RolePreflightV2 {
                     slot_id: slot.slot_id,
+                    model: slot.model,
+                    kind: slot.kind,
                     available: true,
                     qualification: RoleQualificationV2::Qualified,
                     remote: false,
@@ -934,7 +963,7 @@ mod tests {
     }
 
     fn enhanced() -> TriagePolicyV2 {
-        let mut policy = TriagePolicyV2::standard(model("gateway-a", "openai/gpt-oss-120b"));
+        let mut policy = TriagePolicyV2::standard(model("gateway-a", "openai/gpt-oss-120b"), false);
         policy.mode = TriagePolicyMode::Enhanced;
         policy.contributors = vec![
             ContributorSlotV2 {
@@ -962,12 +991,27 @@ mod tests {
 
     #[test]
     fn standard_is_legacy_compatible_and_single_model() {
-        let policy = TriagePolicyV2::standard(model("local", "mistral:latest"));
+        let policy = TriagePolicyV2::standard(model("local", "mistral:latest"), false);
         let compiled = compile_triage_policy_v2(&policy, &facts(&policy)).expect("compile");
         assert_eq!(compiled.mode, TriagePolicyMode::Standard);
         assert_eq!(compiled.slots.len(), 1);
         assert_eq!(compiled.slots[0].kind, TriageSlotKindV2::Finalizer);
         assert_eq!(compiled.independence_counts.role_slots, 1);
+    }
+
+    #[test]
+    fn explicitly_authorized_remote_standard_model_compiles() {
+        let policy =
+            TriagePolicyV2::standard(model("company-gateway", "openai/gpt-oss-120b"), true);
+        let mut preflight = facts(&policy);
+        preflight.roles[0].remote = true;
+        assert!(compile_triage_policy_v2(&policy, &preflight).is_ok());
+
+        let denied =
+            TriagePolicyV2::standard(model("company-gateway", "openai/gpt-oss-120b"), false);
+        let mut denied_facts = facts(&denied);
+        denied_facts.roles[0].remote = true;
+        assert!(compile_triage_policy_v2(&denied, &denied_facts).is_err());
     }
 
     #[test]
@@ -1060,6 +1104,30 @@ mod tests {
     }
 
     #[test]
+    fn preflight_model_and_role_must_match_the_exact_policy_binding() {
+        let policy = enhanced();
+        for mutate in [true, false] {
+            let mut preflight = facts(&policy);
+            let observe = preflight
+                .roles
+                .iter_mut()
+                .find(|fact| fact.slot_id == "observe")
+                .expect("observe fact");
+            if mutate {
+                observe.model = model("gateway-a", "different-model");
+            } else {
+                observe.kind =
+                    TriageSlotKindV2::Contributor(TriageContributorRole::ContradictionChecker);
+            }
+            let failure =
+                compile_triage_policy_v2(&policy, &preflight).expect_err("binding mismatch");
+            assert!(failure.rejections.iter().any(|rejection| {
+                rejection.category == PolicyRejectionCategoryV2::PreflightBindingMismatch
+            }));
+        }
+    }
+
+    #[test]
     fn unqualified_role_cannot_opt_out_of_exact_qualification() {
         let policy = enhanced();
         let mut preflight = facts(&policy);
@@ -1144,6 +1212,39 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_optional_does_not_starve_a_later_eligible_optional() {
+        let mut policy = enhanced();
+        policy.contributors.insert(
+            0,
+            ContributorSlotV2 {
+                slot_id: "unavailable-optional".into(),
+                role: TriageContributorRole::EvidenceGapFinder,
+                model: model("gateway-c", "model-c"),
+                requirement: RoleRequirement::Optional,
+                allow_remote: false,
+            },
+        );
+        policy.budget.contributors.max_provider_calls = 2;
+        let mut preflight = facts(&policy);
+        preflight
+            .roles
+            .iter_mut()
+            .find(|fact| fact.slot_id == "unavailable-optional")
+            .expect("fact")
+            .available = false;
+        let compiled = compile_triage_policy_v2(&policy, &preflight).expect("compile");
+        assert_eq!(
+            compiled
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == "challenge")
+                .expect("later optional")
+                .disposition,
+            SlotDispositionV2::Admitted
+        );
+    }
+
+    #[test]
     fn required_contributors_that_cannot_fit_fail_preflight() {
         let mut policy = enhanced();
         policy.budget.contributors.max_provider_calls = 0;
@@ -1175,9 +1276,39 @@ mod tests {
     }
 
     #[test]
+    fn standard_short_deadline_ignores_inactive_contributor_phase_cap() {
+        let mut policy = TriagePolicyV2::standard(model("local", "mistral:latest"), false);
+        policy.budget.whole_turn_deadline_ms = Some(60_000);
+        policy.budget.finalizer.reserve_ms = 30_000;
+        policy.budget.finalizer.operation_timeout_ms = 60_000;
+        assert!(compile_triage_policy_v2(&policy, &facts(&policy)).is_ok());
+    }
+
+    #[test]
+    fn empty_enhanced_and_advanced_policies_fail_closed() {
+        for mode in [TriagePolicyMode::Enhanced, TriagePolicyMode::Advanced] {
+            let policy = TriagePolicyV2 {
+                schema_id: TRIAGE_POLICY_SCHEMA_V2.into(),
+                mode,
+                contributors: Vec::new(),
+                finalizer: None,
+                reviewer: None,
+                budget: TriageBudgetV2::default(),
+                execution: TriageExecutionPolicyV1::Sequential,
+            };
+            let failure = compile_triage_policy_v2(&policy, &TriagePolicyPreflightV2::default())
+                .expect_err("empty policy");
+            assert!(failure
+                .rejections
+                .iter()
+                .any(|rejection| rejection.category == PolicyRejectionCategoryV2::EmptyPolicy));
+        }
+    }
+
+    #[test]
     fn omitted_defaults_are_sequential_and_bounded() {
         let json = serde_json::json!({
-            "schema": TRIAGE_POLICY_SCHEMA_V2,
+            "schema_id": TRIAGE_POLICY_SCHEMA_V2,
             "mode": "enhanced",
             "contributors": [],
             "finalizer": {
@@ -1198,7 +1329,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_rejected() {
         let json = serde_json::json!({
-            "schema": TRIAGE_POLICY_SCHEMA_V2,
+            "schema_id": TRIAGE_POLICY_SCHEMA_V2,
             "mode": "standard",
             "contributors": [],
             "budget": TriageBudgetV2::default(),
@@ -1249,12 +1380,13 @@ mod tests {
         let migrated = migrate_resolved_legacy_policy_v1(LegacyResolvedTriagePolicyV1 {
             mode: MultiModelMode::Single,
             primary: primary.clone(),
+            primary_allow_remote: false,
             reviewer: None,
             contributors: Vec::new(),
             budget: MultiModelBudget::default(),
             contribution_policy: ContributionRoutingPolicy::default(),
         });
-        assert_eq!(migrated, TriagePolicyV2::standard(primary));
+        assert_eq!(migrated, TriagePolicyV2::standard(primary, false));
     }
 
     #[test]
@@ -1264,6 +1396,7 @@ mod tests {
         let migrated = migrate_resolved_legacy_policy_v1(LegacyResolvedTriagePolicyV1 {
             mode: MultiModelMode::Contributions,
             primary,
+            primary_allow_remote: false,
             reviewer: None,
             contributors: vec![LegacyResolvedContributorV1 {
                 role: ContributionRole::Reviewer,
@@ -1276,5 +1409,27 @@ mod tests {
         });
         assert!(migrated.contributors.is_empty());
         assert_eq!(migrated.reviewer.expect("reviewer").model, reviewer_model);
+    }
+
+    #[test]
+    fn legacy_enhanced_defaults_migrate_to_a_compilable_policy() {
+        let migrated = migrate_resolved_legacy_policy_v1(LegacyResolvedTriagePolicyV1 {
+            mode: MultiModelMode::Review,
+            primary: model("primary", "model-a"),
+            primary_allow_remote: false,
+            reviewer: Some(model("reviewer", "model-b")),
+            contributors: vec![LegacyResolvedContributorV1 {
+                role: ContributionRole::ObservationExtractor,
+                model: model("contributor", "model-c"),
+                require_qualified: true,
+                allow_remote: false,
+            }],
+            budget: MultiModelBudget {
+                deadline_ms: 180_000,
+                ..MultiModelBudget::default()
+            },
+            contribution_policy: ContributionRoutingPolicy::default(),
+        });
+        compile_triage_policy_v2(&migrated, &facts(&migrated)).expect("migrated policy compiles");
     }
 }
