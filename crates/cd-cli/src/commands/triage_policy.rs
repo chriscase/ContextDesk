@@ -13,9 +13,13 @@ use cd_core::multi_model::triage_policy::{
     TriageIndependenceCountsV2, TriagePolicyMode, TriagePolicyPreflightV2, TriagePolicyV2,
     TriageSlotKindV2,
 };
+use cd_core::triage_policy_store::TriagePolicyStoreV1;
 use serde::Serialize;
 
-use crate::cli::{TriagePolicyAction, TriagePolicyFileArgs};
+use crate::cli::{
+    TriagePolicyAction, TriagePolicyFileArgs, TriagePolicyStoreAction, TriagePolicyStoreFileArgs,
+    TriagePolicyStoreSaveArgs, TriagePolicyStoreSelectArgs,
+};
 use crate::envelope::{CliError, CliResult, Render};
 
 /// Stable schema for the CLI policy result payload.
@@ -77,6 +81,15 @@ pub struct TriagePolicyCommandOutput {
     /// Safe placeholder policy for `example` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub example_policy: Option<TriagePolicyV2>,
+    /// Saved-policy identities for store operations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved_policy_ids: Vec<String>,
+    /// Current explicit saved-policy selection, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_policy_id: Option<String>,
+    /// Revision written by a store save operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_revision: Option<u64>,
     /// Explicit proof that this command did not evaluate a provider.
     pub offline: OfflinePolicyEvidence,
 }
@@ -106,6 +119,29 @@ impl Render for TriagePolicyCommandOutput {
                         .unwrap_or_else(|_| "{\"error\":\"serialization_failed\"}".into()),
                 );
                 out.push('\n');
+            }
+        } else if self.action.starts_with("store_") {
+            out.push_str(&format!(
+                "Status:  {}\nPrivacy: owner-only (exact policy identities)\n",
+                if self.accepted {
+                    "ACCEPTED"
+                } else {
+                    "REJECTED"
+                }
+            ));
+            if !self.saved_policy_ids.is_empty() {
+                out.push_str("Saved policies\n");
+                for id in &self.saved_policy_ids {
+                    out.push_str(&format!("  - {id}\n"));
+                }
+            }
+            if let Some(active) = &self.active_policy_id {
+                out.push_str(&format!("Active selection: {active}\n"));
+            } else {
+                out.push_str("Active selection: none (Standard remains the default)\n");
+            }
+            if let Some(revision) = self.saved_revision {
+                out.push_str(&format!("Saved revision: {revision}\n"));
             }
         } else {
             out.push_str(&format!(
@@ -177,6 +213,84 @@ pub fn run(action: &TriagePolicyAction) -> CliResult<TriagePolicyCommandOutput> 
         TriagePolicyAction::Validate(args) => evaluate("validate", args, false),
         TriagePolicyAction::Compile(args) => evaluate("compile", args, true),
         TriagePolicyAction::Example => Ok(example()),
+        TriagePolicyAction::Store { action } => run_store(action),
+    }
+}
+
+fn run_store(action: &TriagePolicyStoreAction) -> CliResult<TriagePolicyCommandOutput> {
+    match action {
+        TriagePolicyStoreAction::List(args) => store_list(args),
+        TriagePolicyStoreAction::Save(args) => store_save(args),
+        TriagePolicyStoreAction::Select(args) => store_select(args),
+        TriagePolicyStoreAction::Clear(args) => store_clear(args),
+    }
+}
+
+fn store_list(args: &TriagePolicyStoreFileArgs) -> CliResult<TriagePolicyCommandOutput> {
+    let store = TriagePolicyStoreV1::load(&args.store)
+        .map_err(|_| CliError::user("could not load triage policy store"))?;
+    Ok(store_output("store_list", &store, None))
+}
+
+fn store_save(args: &TriagePolicyStoreSaveArgs) -> CliResult<TriagePolicyCommandOutput> {
+    let policy: TriagePolicyV2 = read_json(&args.policy, "policy")?;
+    let mut store = TriagePolicyStoreV1::load(&args.store)
+        .map_err(|_| CliError::user("could not load triage policy store"))?;
+    let revision = store
+        .upsert(args.policy_id.clone(), policy)
+        .map_err(|_| CliError::user("policy could not be saved to the triage policy store"))?;
+    store
+        .save(&args.store)
+        .map_err(|_| CliError::user("could not publish triage policy store"))?;
+    Ok(store_output("store_save", &store, Some(revision)))
+}
+
+fn store_select(args: &TriagePolicyStoreSelectArgs) -> CliResult<TriagePolicyCommandOutput> {
+    let mut store = TriagePolicyStoreV1::load(&args.store)
+        .map_err(|_| CliError::user("could not load triage policy store"))?;
+    store
+        .select(&args.policy_id)
+        .map_err(|_| CliError::user("requested triage policy is not saved"))?;
+    store
+        .save(&args.store)
+        .map_err(|_| CliError::user("could not publish triage policy store"))?;
+    Ok(store_output("store_select", &store, None))
+}
+
+fn store_clear(args: &TriagePolicyStoreFileArgs) -> CliResult<TriagePolicyCommandOutput> {
+    let mut store = TriagePolicyStoreV1::load(&args.store)
+        .map_err(|_| CliError::user("could not load triage policy store"))?;
+    store.clear_selection();
+    store
+        .save(&args.store)
+        .map_err(|_| CliError::user("could not publish triage policy store"))?;
+    Ok(store_output("store_clear", &store, None))
+}
+
+fn store_output(
+    action: &'static str,
+    store: &TriagePolicyStoreV1,
+    saved_revision: Option<u64>,
+) -> TriagePolicyCommandOutput {
+    TriagePolicyCommandOutput {
+        schema_id: TRIAGE_POLICY_CLI_SCHEMA_ID,
+        action,
+        accepted: true,
+        privacy: "owner_only",
+        mode: None,
+        slots: Vec::new(),
+        rejections: Vec::new(),
+        independence: None,
+        compiled: None,
+        example_policy: None,
+        saved_policy_ids: store
+            .policies
+            .iter()
+            .map(|saved| saved.policy_id.clone())
+            .collect(),
+        active_policy_id: store.active_policy_id.clone(),
+        saved_revision,
+        offline: OfflinePolicyEvidence::default(),
     }
 }
 
@@ -200,6 +314,9 @@ fn evaluate(
             independence: Some(compiled.independence_counts),
             compiled: include_compiled.then_some(compiled),
             example_policy: None,
+            saved_policy_ids: Vec::new(),
+            active_policy_id: None,
+            saved_revision: None,
             offline: OfflinePolicyEvidence::default(),
         }),
         Err(failure) => Ok(TriagePolicyCommandOutput {
@@ -213,6 +330,9 @@ fn evaluate(
             independence: None,
             compiled: None,
             example_policy: None,
+            saved_policy_ids: Vec::new(),
+            active_policy_id: None,
+            saved_revision: None,
             offline: OfflinePolicyEvidence::default(),
         }),
     }
@@ -237,6 +357,9 @@ fn example() -> TriagePolicyCommandOutput {
         independence: None,
         compiled: None,
         example_policy: Some(policy),
+        saved_policy_ids: Vec::new(),
+        active_policy_id: None,
+        saved_revision: None,
         offline: OfflinePolicyEvidence::default(),
     }
 }
@@ -263,6 +386,10 @@ fn title_case(action: &str) -> &'static str {
         "validate" => "Validate",
         "compile" => "Compile",
         "example" => "Example",
+        "store_list" => "Store list",
+        "store_save" => "Store save",
+        "store_select" => "Store select",
+        "store_clear" => "Store clear",
         _ => "Policy",
     }
 }

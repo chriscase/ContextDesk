@@ -287,6 +287,58 @@ pub enum TriagePolicyAction {
     Compile(TriagePolicyFileArgs),
     /// Print a safe Standard-policy example with placeholder identities.
     Example,
+    /// Manage an explicit, non-secret saved-policy store without loading app
+    /// configuration or credentials.
+    Store {
+        #[command(subcommand)]
+        action: TriagePolicyStoreAction,
+    },
+}
+
+/// Explicit-file operations for the revisioned Triage Policy V2 store.
+#[derive(Debug, Subcommand)]
+pub enum TriagePolicyStoreAction {
+    /// List saved policy identities and the current explicit selection.
+    List(TriagePolicyStoreFileArgs),
+    /// Save a policy JSON document and select it, incrementing its revision.
+    Save(TriagePolicyStoreSaveArgs),
+    /// Select an existing policy without changing its body.
+    Select(TriagePolicyStoreSelectArgs),
+    /// Clear the opt-in selection; Standard remains the safe default.
+    Clear(TriagePolicyStoreFileArgs),
+}
+
+/// Explicit path to one non-secret policy store.
+#[derive(Debug, Clone, clap::Args)]
+pub struct TriagePolicyStoreFileArgs {
+    /// Store JSON path. The file is not inferred from app configuration.
+    #[arg(long, value_name = "FILE")]
+    pub store: PathBuf,
+}
+
+/// Save one policy JSON document into an explicit store path.
+#[derive(Debug, Clone, clap::Args)]
+pub struct TriagePolicyStoreSaveArgs {
+    /// Store JSON path. The file is not inferred from app configuration.
+    #[arg(long, value_name = "FILE")]
+    pub store: PathBuf,
+    /// Policy JSON path.
+    #[arg(long, value_name = "FILE")]
+    pub policy: PathBuf,
+    /// Stable policy identity.
+    #[arg(long, value_name = "ID")]
+    pub policy_id: String,
+}
+
+/// Select one saved policy in an explicit store path.
+#[derive(Debug, Clone, clap::Args)]
+pub struct TriagePolicyStoreSelectArgs {
+    /// Store JSON path. The file is not inferred from app configuration.
+    #[arg(long, value_name = "FILE")]
+    pub store: PathBuf,
+    /// Existing policy identity.
+    #[arg(long, value_name = "ID")]
+    pub policy_id: String,
 }
 
 /// Explicit files for provider-free policy validation and compilation.

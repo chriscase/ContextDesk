@@ -329,3 +329,55 @@ fn example_is_standard_offline_and_progressive() {
     assert!(text.contains("Output privacy: owner-only"));
     assert!(text.contains("Network: no"));
 }
+
+#[test]
+fn store_save_list_and_clear_are_explicit_and_offline() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let policy_path = temp.path().join("policy.json");
+    let store_path = temp.path().join("policies.json");
+    std::fs::write(
+        &policy_path,
+        serde_json::to_vec_pretty(&standard(false)).expect("policy JSON"),
+    )
+    .expect("write policy");
+
+    let saved = cli()
+        .args(["--json", "triage-policy", "store", "save", "--store"])
+        .arg(&store_path)
+        .args(["--policy"])
+        .arg(&policy_path)
+        .args(["--policy-id", "demo"])
+        .output()
+        .expect("save policy");
+    assert!(
+        saved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    let saved_json = envelope(&saved);
+    assert_eq!(saved_json["data"]["action"], "store_save");
+    assert_eq!(saved_json["data"]["saved_revision"], 1);
+    assert_eq!(saved_json["data"]["active_policy_id"], "demo");
+    assert_eq!(saved_json["data"]["offline"]["network"], false);
+
+    let listed = cli()
+        .args(["--json", "triage-policy", "store", "list", "--store"])
+        .arg(&store_path)
+        .output()
+        .expect("list policies");
+    assert!(listed.status.success());
+    let listed_json = envelope(&listed);
+    assert_eq!(
+        listed_json["data"]["saved_policy_ids"],
+        serde_json::json!(["demo"])
+    );
+
+    let cleared = cli()
+        .args(["--json", "triage-policy", "store", "clear", "--store"])
+        .arg(&store_path)
+        .output()
+        .expect("clear selection");
+    assert!(cleared.status.success());
+    let cleared_json = envelope(&cleared);
+    assert!(cleared_json["data"]["active_policy_id"].is_null());
+}

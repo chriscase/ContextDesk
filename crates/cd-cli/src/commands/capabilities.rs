@@ -137,6 +137,7 @@ const COMMANDS: &[&str] = &[
     "triage-policy validate",
     "triage-policy compile",
     "triage-policy example",
+    "triage-policy store",
 ];
 
 pub fn run(branding: &Branding) -> CapabilitiesOutput {
