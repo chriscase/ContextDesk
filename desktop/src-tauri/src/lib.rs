@@ -3113,6 +3113,71 @@ fn set_router_budget(
     Ok(budget)
 }
 
+/// Share-safe DTO for reasoning-effort settings (omit or level token).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReasoningEffortDto {
+    /// `omit` or level token (`none`/`low`/…).
+    policy: String,
+    /// Present when explicit.
+    level: Option<String>,
+}
+
+#[tauri::command]
+fn get_reasoning_effort(state: State<'_, AppState>) -> ReasoningEffortDto {
+    let cfg = state.config.lock().expect("config");
+    match cfg.reasoning_effort.level {
+        None => ReasoningEffortDto {
+            policy: "omit".into(),
+            level: None,
+        },
+        Some(level) => ReasoningEffortDto {
+            policy: "explicit".into(),
+            level: Some(level.as_str().into()),
+        },
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SetReasoningEffortReq {
+    /// Empty / "omit" / "auto" → provider default. Else a level token.
+    level: Option<String>,
+}
+
+#[tauri::command]
+fn set_reasoning_effort(
+    state: State<'_, AppState>,
+    req: SetReasoningEffortReq,
+) -> Result<ReasoningEffortDto, String> {
+    let mut cfg_guard = state.config.lock().expect("config");
+    // Mutate a clone first. If persistence fails, the running host keeps the
+    // exact prior policy instead of diverging from config.json.
+    let mut cfg = cfg_guard.clone();
+    match req.level.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("omit") | Some("auto") => cfg.reasoning_effort.apply_omit(),
+        Some(raw) => {
+            let level = cd_core::reasoning_effort::ReasoningEffortLevel::parse(raw)
+                .map_err(|e| e.to_string())?;
+            cfg.reasoning_effort.apply_level(level);
+        }
+    }
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    let dto = match cfg.reasoning_effort.level {
+        None => ReasoningEffortDto {
+            policy: "omit".into(),
+            level: None,
+        },
+        Some(level) => ReasoningEffortDto {
+            policy: "explicit".into(),
+            level: Some(level.as_str().into()),
+        },
+    };
+    *cfg_guard = cfg;
+    drop(cfg_guard);
+    let _ = ensure_host(&state);
+    Ok(dto)
+}
+
 /// Open an http(s) URL in the **system** default browser.
 ///
 /// WKWebView / Tauri does not treat `window.open` as a real browser launch.
@@ -14079,6 +14144,8 @@ pub fn run() {
             set_ambient_recall_enabled,
             get_router_budget,
             set_router_budget,
+            get_reasoning_effort,
+            set_reasoning_effort,
             list_web_research_sources,
             set_web_research_sources,
             open_external_url,

@@ -8,13 +8,22 @@ import {
   type DeadlinePreset,
 } from "../../lib/deadlineControls";
 import {
+  effortPolicyHint,
+  levelFromDto,
+  levelToSavePayload,
+  REASONING_EFFORT_OPTIONS,
+  type ReasoningEffortLevel,
+} from "../../lib/reasoningEffort";
+import {
   hostCheckForUpdates,
   hostGetAmbientRecallEnabled,
   hostGetBranding,
   hostGetHybridRetrieval,
+  hostGetReasoningEffort,
   hostInstallUpdate,
   hostSetAmbientRecallEnabled,
   hostSetHybridRetrieval,
+  hostSetReasoningEffort,
   hostSourceGitFetch,
   hostSourceGitStatus,
   type BrandingDto,
@@ -383,11 +392,92 @@ export function GeneralSection({
           }))
         }
       />
+      <ReasoningEffortControls baseId={baseId} />
       <DeadlineControls
         baseId={baseId}
         routerBudget={routerBudget}
         setRouterBudget={setRouterBudget}
       />
+    </div>
+  );
+}
+
+/**
+ * Reasoning-effort control: omit (provider default) or an explicit level.
+ * Affects cost/latency only — not a readiness badge.
+ */
+export function ReasoningEffortControls({ baseId }: { baseId: string }) {
+  const [level, setLevel] = useState<ReasoningEffortLevel>("omit");
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const dto = await hostGetReasoningEffort();
+        if (cancelled || !dto) return;
+        setLevel(levelFromDto(dto.policy, dto.level));
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onChange = async (next: ReasoningEffortLevel) => {
+    const previous = level;
+    setLevel(next);
+    setError(null);
+    setNote(null);
+    try {
+      const saved = await hostSetReasoningEffort(levelToSavePayload(next));
+      setLevel(levelFromDto(saved.policy, saved.level));
+      setNote(
+        next === "omit"
+          ? "Saved: provider default (no effort field)."
+          : `Saved: explicit effort “${next}”.`,
+      );
+    } catch (e) {
+      setLevel(previous);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="reasoning-effort-controls">
+      <SelectField
+        id={`${baseId}-reasoning-effort`}
+        label="Reasoning effort"
+        hint={effortPolicyHint(level)}
+        value={level}
+        onChange={(event) =>
+          void onChange(event.target.value as ReasoningEffortLevel)
+        }
+        aria-describedby={
+          error ? `${baseId}-reasoning-effort-error` : undefined
+        }
+      >
+        {REASONING_EFFORT_OPTIONS.map((opt) => (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
+          </option>
+        ))}
+      </SelectField>
+      {error ? (
+        <p
+          id={`${baseId}-reasoning-effort-error`}
+          className="field__error"
+          role="alert"
+        >
+          {error}
+        </p>
+      ) : null}
+      {note && !error ? <p className="field__hint">{note}</p> : null}
     </div>
   );
 }

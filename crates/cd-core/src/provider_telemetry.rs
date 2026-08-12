@@ -100,6 +100,14 @@ pub struct ProviderTransportTelemetry {
     /// Actual gateway/request cost when supplied (never invented as 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
+    /// Requested reasoning-effort policy label (`omit` or level). Share-safe;
+    /// never a prompt, body, header, URL, or secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_requested: Option<String>,
+    /// Exact effort request applied on the wire (`omit` or level). Share-safe;
+    /// not proof the remote model honored it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_effective: Option<String>,
 }
 
 /// Sum a per-round numeric metric only when **every** round reports it.
@@ -161,6 +169,8 @@ impl ProviderTransportTelemetry {
             && self.cached_tokens.is_none()
             && self.total_tokens.is_none()
             && self.cost.is_none()
+            && self.reasoning_effort_requested.is_none()
+            && self.reasoning_effort_effective.is_none()
     }
 
     /// Merge later patches without inventing values. Later `Some` wins;
@@ -206,6 +216,13 @@ impl ProviderTransportTelemetry {
         }
         if other.cost.is_some() {
             self.cost = other.cost;
+        }
+        // Share-safe effort labels: later Some wins; None never clears.
+        if other.reasoning_effort_requested.is_some() {
+            self.reasoning_effort_requested = other.reasoning_effort_requested.clone();
+        }
+        if other.reasoning_effort_effective.is_some() {
+            self.reasoning_effort_effective = other.reasoning_effort_effective.clone();
         }
     }
 
@@ -713,6 +730,36 @@ mod tests {
         let long = "m".repeat(MAX_TELEMETRY_STRING_CHARS + 50);
         let bounded = sanitize_configured_identity(&long);
         assert_eq!(bounded.chars().count(), MAX_TELEMETRY_STRING_CHARS);
+    }
+
+    #[test]
+    fn merge_from_preserves_reasoning_effort_labels() {
+        let mut base = ProviderTransportTelemetry {
+            reasoning_effort_requested: Some("high".into()),
+            reasoning_effort_effective: Some("high".into()),
+            prompt_tokens: Some(1),
+            ..Default::default()
+        };
+        // Later body usage must not wipe effort labels.
+        let body_only = ProviderTransportTelemetry {
+            completion_tokens: Some(2),
+            ..Default::default()
+        };
+        base.merge_from(&body_only);
+        assert_eq!(base.reasoning_effort_requested.as_deref(), Some("high"));
+        assert_eq!(base.reasoning_effort_effective.as_deref(), Some("high"));
+        assert_eq!(base.completion_tokens, Some(2));
+        assert_eq!(base.prompt_tokens, Some(1));
+
+        // Later Some wins.
+        let later = ProviderTransportTelemetry {
+            reasoning_effort_requested: Some("low".into()),
+            reasoning_effort_effective: Some("low".into()),
+            ..Default::default()
+        };
+        base.merge_from(&later);
+        assert_eq!(base.reasoning_effort_requested.as_deref(), Some("low"));
+        assert!(!base.is_empty());
     }
 
     #[test]

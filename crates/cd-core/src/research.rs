@@ -636,6 +636,28 @@ pub async fn backend_for_with_timeout(
     api_key: Option<String>,
     request_timeout: std::time::Duration,
 ) -> CoreResult<Box<dyn ChatBackend>> {
+    backend_for_with_timeout_and_effort(
+        profile,
+        api_key,
+        request_timeout,
+        crate::reasoning_effort::EffectiveEffortPolicy::Omit,
+    )
+    .await
+}
+
+/// Like [`backend_for_with_timeout`], with an explicit reasoning-effort policy.
+///
+/// Omission keeps wire behavior unchanged. Explicit effort on dialects without
+/// an implemented field mapping fails closed before any HTTP client is used
+/// (no foreign field leakage). Exact model/value support remains provider
+/// evidence; OpenAI-compatible values are transmitted unchanged, never
+/// silently downgraded.
+pub async fn backend_for_with_timeout_and_effort(
+    profile: &ProviderProfile,
+    api_key: Option<String>,
+    request_timeout: std::time::Duration,
+    effort: crate::reasoning_effort::EffectiveEffortPolicy,
+) -> CoreResult<Box<dyn ChatBackend>> {
     // Remote profiles may use corporate private DNS (TriageTool-style gateways).
     // SSRF still applies to model-driven tools; the user-configured base is trusted.
     let policy = if profile.local_only {
@@ -643,6 +665,42 @@ pub async fn backend_for_with_timeout(
     } else {
         SsrfPolicy::allow_private_networks()
     };
+
+    // Fail closed for explicit effort on dialects with no Completions field.
+    if !matches!(effort, crate::reasoning_effort::EffectiveEffortPolicy::Omit) {
+        let dialect = crate::reasoning_effort::dialect_from_provider_kind(profile.kind);
+        let allowed = crate::reasoning_effort::transport_candidate_levels(
+            dialect,
+            crate::reasoning_effort::ChatApiSurface::ChatCompletions,
+        );
+        if allowed.is_empty() {
+            return Err(CoreError::Message(
+                crate::reasoning_effort::ReasoningEffortApplyError::UnsupportedDialect {
+                    dialect: dialect.as_str().into(),
+                    surface: crate::reasoning_effort::ChatApiSurface::ChatCompletions
+                        .as_str()
+                        .into(),
+                    requested: effort.as_label().into(),
+                }
+                .to_string(),
+            ));
+        }
+        if let Some(level) = effort.level() {
+            if !allowed.contains(&level) {
+                return Err(CoreError::Message(
+                    crate::reasoning_effort::ReasoningEffortApplyError::UnsupportedLevel {
+                        dialect: dialect.as_str().into(),
+                        surface: crate::reasoning_effort::ChatApiSurface::ChatCompletions
+                            .as_str()
+                            .into(),
+                        requested: level.as_str().into(),
+                        allowed: allowed.iter().map(|l| l.as_str().to_string()).collect(),
+                    }
+                    .to_string(),
+                ));
+            }
+        }
+    }
 
     match profile.kind {
         ProviderKind::Ollama => {
@@ -656,7 +714,8 @@ pub async fn backend_for_with_timeout(
                 &profile.chat_model,
                 &policy,
                 request_timeout,
-            )?;
+            )?
+            .with_reasoning_effort(effort);
             Ok(Box::new(OpenAiBackend(client)))
         }
         ProviderKind::Anthropic => {
@@ -719,7 +778,8 @@ pub async fn backend_for_with_timeout(
                 &SsrfPolicy::default(),
                 request_timeout,
             )?
-            .with_extra_headers(headers);
+            .with_extra_headers(headers)
+            .with_reasoning_effort(effort);
             Ok(Box::new(OpenAiBackend(client)))
         }
     }
@@ -907,6 +967,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
         None,
         None,
         None,
+        crate::reasoning_effort::EffectiveEffortPolicy::Omit,
     )
     .await
 }
@@ -949,6 +1010,8 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     multi_model: Option<crate::agent::MultiModelRuntime>,
     fast_triage: Option<crate::agent::FastTriageRuntime>,
     contribution_runtime: Option<crate::agent::ContributionRuntime>,
+    // Effective reasoning-effort policy for this turn (omit = provider default).
+    reasoning_effort: crate::reasoning_effort::EffectiveEffortPolicy,
 ) -> CoreResult<Vec<StreamEvent>> {
     let user_selection = match user_selection.map(str::trim) {
         Some("") | None => None,
@@ -1081,10 +1144,11 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
             turn_started_at,
             deadline_plan,
             cancel_ref,
-            backend_for_with_timeout(
+            backend_for_with_timeout_and_effort(
                 profile,
                 api_key,
                 Duration::from_millis(deadline_plan.total_ms.max(1)),
+                reasoning_effort,
             ),
         )
         .await
