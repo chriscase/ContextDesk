@@ -685,10 +685,14 @@ impl TriageReplayV1 {
         }
         let mut terminal_count = 0usize;
         let mut packet_ready = false;
-        let mut reconciliation = false;
+        let mut legacy_reconciliation = false;
+        let mut preliminary_reconciliation = false;
+        let mut final_reconciliation = false;
         let mut validation = false;
+        let mut correction = false;
         let mut finalizer_attempt = false;
         let mut reviewer_attempt = false;
+        let mut contributor_attempt = false;
         for (index, event) in self.events.iter().enumerate() {
             event.validate()?;
             if event.run_id != self.run_id {
@@ -710,31 +714,67 @@ impl TriageReplayV1 {
             let phase_ok = match &event.event {
                 TriageRunEventPayloadV2::RunStarted { .. } => index == 0,
                 TriageRunEventPayloadV2::PacketReady { .. } => {
-                    index == 1 && !packet_ready && !reconciliation && !validation
+                    index == 1
+                        && !packet_ready
+                        && !legacy_reconciliation
+                        && !preliminary_reconciliation
+                        && !validation
                 }
                 TriageRunEventPayloadV2::RoleAttempt { attempt } => match attempt.role {
                     TriageSlotKindV2::Contributor(_) => {
                         packet_ready
-                            && !reconciliation
+                            && !legacy_reconciliation
+                            && !preliminary_reconciliation
+                            && !final_reconciliation
                             && !validation
                             && !finalizer_attempt
                             && !reviewer_attempt
                     }
                     TriageSlotKindV2::Finalizer => {
                         packet_ready
-                            && reconciliation
+                            // Standard mode historically emits its single
+                            // finalizer before reconciliation. Preserve that
+                            // legacy shape when no contributor/reviewer has
+                            // appeared; V2 contributors always precede this.
+                            && (legacy_reconciliation
+                                || final_reconciliation
+                                || (!contributor_attempt
+                                    && !reviewer_attempt
+                                    && !preliminary_reconciliation))
                             && !validation
                             && !finalizer_attempt
-                            && !reviewer_attempt
                     }
                     TriageSlotKindV2::Reviewer => {
-                        packet_ready && reconciliation && !validation && !reviewer_attempt
+                        packet_ready
+                            && preliminary_reconciliation
+                            && !final_reconciliation
+                            && !validation
+                            && !reviewer_attempt
                     }
                 },
                 TriageRunEventPayloadV2::Reconciliation { .. } => {
-                    packet_ready && !reconciliation && !validation
+                    packet_ready
+                        && !legacy_reconciliation
+                        && !preliminary_reconciliation
+                        && !validation
                 }
-                TriageRunEventPayloadV2::Validation { .. } => reconciliation && !validation,
+                TriageRunEventPayloadV2::PreliminaryReconciliation { .. } => {
+                    packet_ready
+                        && contributor_attempt
+                        && !legacy_reconciliation
+                        && !preliminary_reconciliation
+                        && !validation
+                }
+                TriageRunEventPayloadV2::FinalReconciliation { .. } => {
+                    packet_ready
+                        && preliminary_reconciliation
+                        && !final_reconciliation
+                        && !validation
+                }
+                TriageRunEventPayloadV2::Validation { .. } => {
+                    (legacy_reconciliation || final_reconciliation) && !validation
+                }
+                TriageRunEventPayloadV2::Correction { .. } => validation && !correction,
                 TriageRunEventPayloadV2::Completed { .. }
                 | TriageRunEventPayloadV2::Failed { .. }
                 | TriageRunEventPayloadV2::TimedOut { .. }
@@ -746,12 +786,17 @@ impl TriageReplayV1 {
             match &event.event {
                 TriageRunEventPayloadV2::PacketReady { .. } => packet_ready = true,
                 TriageRunEventPayloadV2::RoleAttempt { attempt } => match attempt.role {
-                    TriageSlotKindV2::Contributor(_) => {}
+                    TriageSlotKindV2::Contributor(_) => contributor_attempt = true,
                     TriageSlotKindV2::Finalizer => finalizer_attempt = true,
                     TriageSlotKindV2::Reviewer => reviewer_attempt = true,
                 },
-                TriageRunEventPayloadV2::Reconciliation { .. } => reconciliation = true,
+                TriageRunEventPayloadV2::Reconciliation { .. } => legacy_reconciliation = true,
+                TriageRunEventPayloadV2::PreliminaryReconciliation { .. } => {
+                    preliminary_reconciliation = true
+                }
+                TriageRunEventPayloadV2::FinalReconciliation { .. } => final_reconciliation = true,
                 TriageRunEventPayloadV2::Validation { .. } => validation = true,
+                TriageRunEventPayloadV2::Correction { .. } => correction = true,
                 TriageRunEventPayloadV2::RunStarted { .. }
                 | TriageRunEventPayloadV2::Completed { .. }
                 | TriageRunEventPayloadV2::Failed { .. }

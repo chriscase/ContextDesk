@@ -440,6 +440,7 @@ where
         ));
 
         for slot in &finalizer_slots {
+            let eligible = finalizer_eligible_for_slots(&contributor_slots, &attempts);
             run_scripted_slot(
                 self,
                 slot,
@@ -449,7 +450,7 @@ where
                 &mut interruption,
                 &mut attempts,
                 &mut events,
-                None,
+                (!eligible).then_some("finalizer_not_eligible"),
             );
         }
 
@@ -538,6 +539,7 @@ impl Interruption {
 /// cancellation/deadline accounting independent from role kind and records an
 /// explicit attempt for every configured slot, including a conditional
 /// reviewer that was not needed.
+#[allow(clippy::too_many_arguments)]
 fn run_scripted_slot<E>(
     runner: &MockTriageRunner<E>,
     slot: &CompiledRoleSlotV2,
@@ -553,6 +555,15 @@ where
     E: TriageRoleExecutor,
 {
     let index = attempts.len();
+    // Cancellation/deadline controls apply at the configured execution
+    // boundary even when an earlier optional slot was not admitted.
+    if interruption.is_none() {
+        if input.control.cancel_at_slot == Some(index) {
+            *interruption = Some(Interruption::Cancelled);
+        } else if input.control.timeout_at_slot == Some(index) {
+            *interruption = Some(Interruption::TimedOut);
+        }
+    }
     let outcome = if compiled.is_err() {
         MockRoleOutcome::NotAdmitted {
             reason_codes: vec!["policy_preflight_rejected".into()],
@@ -670,6 +681,29 @@ fn reviewer_needed_for_slot(
                 && attempt.status != TriageAttemptStatus::Completed
         }),
     }
+}
+
+/// A finalizer may only see a reconciliation containing every required
+/// contributor's accepted typed outcome. Optional contributor dropouts do not
+/// block an honest partial finalization; required failures do.
+fn finalizer_eligible_for_slots(
+    contributor_slots: &[CompiledRoleSlotV2],
+    attempts: &[TriageRoleAttemptV1],
+) -> bool {
+    contributor_slots
+        .iter()
+        .filter(|slot| slot.requirement == RoleRequirement::Required)
+        .all(|slot| {
+            attempts
+                .iter()
+                .find(|attempt| attempt.role_slot_id == slot.slot_id)
+                .is_some_and(|attempt| {
+                    matches!(
+                        attempt.status,
+                        TriageAttemptStatus::Completed | TriageAttemptStatus::Abstained
+                    )
+                })
+        })
 }
 
 fn role_attempt(
@@ -866,6 +900,7 @@ mod tests {
         ContributorSlotV2, FinalizerSlotV2, ReviewerConditionV2, ReviewerSlotV2, RolePreflightV2,
         RoleQualificationV2, TriageContributorRole, TriagePolicyMode,
     };
+    use cd_core::multi_model::{TRIAGE_QUALIFICATION_SCHEMA_V2, TRIAGE_QUALIFICATION_WORKFLOW_V2};
 
     fn model(profile: &str, model_id: &str) -> ModelRef {
         ModelRef {
@@ -906,7 +941,7 @@ mod tests {
     fn preflight(policy: &TriagePolicyV2) -> TriagePolicyPreflightV2 {
         let mut roles = vec![RolePreflightV2 {
             slot_id: "observe".into(),
-            model: model("gateway-a", "model-a"),
+            model: policy.contributors[0].model.clone(),
             kind: TriageSlotKindV2::Contributor(TriageContributorRole::ObservationExtractor),
             available: true,
             qualification: RoleQualificationV2::Qualified,
@@ -917,7 +952,7 @@ mod tests {
         }];
         roles.push(RolePreflightV2 {
             slot_id: "finalize".into(),
-            model: model("gateway-a", "model-a"),
+            model: policy.finalizer.as_ref().unwrap().model.clone(),
             kind: TriageSlotKindV2::Finalizer,
             available: true,
             qualification: RoleQualificationV2::Qualified,
@@ -928,7 +963,7 @@ mod tests {
         });
         roles.push(RolePreflightV2 {
             slot_id: "review".into(),
-            model: model("gateway-b", "model-b"),
+            model: policy.reviewer.as_ref().unwrap().model.clone(),
             kind: TriageSlotKindV2::Reviewer,
             available: true,
             qualification: RoleQualificationV2::Qualified,
@@ -1141,6 +1176,9 @@ mod tests {
                 available: true,
                 qualification: RoleQualificationV2::Qualified,
                 remote: false,
+                qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
+                workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
+                protocol_fingerprint: Some("sha256:triage-fixture-protocol".into()),
             }],
         };
         let input = input();

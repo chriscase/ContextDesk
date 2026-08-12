@@ -7,7 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::model_ref::ModelRef;
 
@@ -318,13 +319,25 @@ pub struct RolePreflightV2 {
     pub remote: bool,
     /// Schema of the exact qualification evidence. `None` is retained for
     /// legacy Standard preflight records and never upgrades a missing verdict.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub qualification_schema_id: Option<String>,
     /// Workflow identity used by the qualification probe.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub workflow_id: Option<String>,
     /// Secret-free fingerprint of the transport protocol/dialect qualified.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub protocol_fingerprint: Option<String>,
 }
 
@@ -428,13 +441,25 @@ pub struct CompiledRoleSlotV2 {
     #[serde(default)]
     pub rejections: Vec<PolicyRejectionCategoryV2>,
     /// Qualification schema carried through to the immutable execution plan.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub qualification_schema_id: Option<String>,
     /// Qualification workflow carried through to the immutable execution plan.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub workflow_id: Option<String>,
     /// Qualified transport protocol fingerprint carried through to the plan.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_null_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub protocol_fingerprint: Option<String>,
 }
 
@@ -912,6 +937,25 @@ fn valid_protocol_fingerprint(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+/// Preserve the wire distinction between an omitted additive field and an
+/// explicit JSON null. Missing fields migrate as `None`; present null is
+/// malformed and must fail closed, matching the TypeScript contract mirror.
+fn deserialize_non_null_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Err(serde::de::Error::custom(
+            "null is not valid for an additive option",
+        ));
+    }
+    T::deserialize(value)
+        .map(Some)
+        .map_err(|error| serde::de::Error::custom(error.to_string()))
+}
+
 fn reject(
     rejections: &mut Vec<PolicyRejectionV2>,
     slot_id: Option<&str>,
@@ -1324,6 +1368,22 @@ mod tests {
         assert!(failure.rejections.iter().any(|rejection| {
             rejection.category == PolicyRejectionCategoryV2::QualificationUnavailable
         }));
+    }
+
+    #[test]
+    fn qualification_additive_fields_reject_explicit_null_but_allow_omission() {
+        let policy = enhanced();
+        let fact = facts(&policy).roles.into_iter().next().expect("role fact");
+        let mut encoded = serde_json::to_value(&fact).expect("encode role fact");
+        encoded
+            .as_object_mut()
+            .expect("role object")
+            .remove("qualification_schema_id");
+        assert!(serde_json::from_value::<RolePreflightV2>(encoded).is_ok());
+
+        let mut encoded = serde_json::to_value(&fact).expect("encode role fact");
+        encoded["qualification_schema_id"] = Value::Null;
+        assert!(serde_json::from_value::<RolePreflightV2>(encoded).is_err());
     }
 
     #[test]
