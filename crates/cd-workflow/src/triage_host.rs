@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use cd_core::agent::build_fast_triage_packet;
 use cd_core::chat::{ChatCompletion, ChatMessage, Role};
@@ -73,6 +74,8 @@ pub struct ResolvedTriageHostV1 {
 pub enum TriageHostError {
     Corpus(String),
     Scope(String),
+    Cancelled,
+    Deadline,
     Policy(String),
     Profile(String),
     Backend(String),
@@ -92,6 +95,15 @@ fn validate_requested_scope(
         return Err("corpus_revision_changed_before_v2_packet_build");
     }
     Ok(())
+}
+
+async fn wait_for_cancel(cancel: Arc<AtomicBool>) {
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 /// A conservative production hook: contributor/reviewer responses must be
@@ -195,6 +207,8 @@ impl std::fmt::Display for TriageHostError {
         f.write_str(match self {
             Self::Corpus(_) => "corpus_binding_failed",
             Self::Scope(_) => "triage_scope_rejected",
+            Self::Cancelled => "triage_cancelled",
+            Self::Deadline => "triage_deadline_exhausted",
             Self::Policy(_) => "policy_preflight_rejected",
             Self::Profile(_) => "provider_profile_unavailable",
             Self::Backend(_) => "provider_backend_unavailable",
@@ -241,13 +255,53 @@ pub async fn resolve_v2_host(
         unbind_linked_corpus(host, binding);
         return Err(TriageHostError::Scope(reason.into()));
     }
-    let brief = match host.build_broad_log_triage_brief() {
-        Ok(brief) => brief,
+    let started = Instant::now();
+    let job = match host.prepare_broad_log_triage_brief() {
+        Ok(job) => job,
         Err(error) => {
             unbind_linked_corpus(host, binding);
             return Err(TriageHostError::Corpus(error.to_string()));
         }
     };
+    let abort = job.abort_handle();
+    let worker = tokio::task::spawn_blocking(move || job.build());
+    let mut deadline = Box::pin(tokio::time::sleep(Duration::from_millis(input.deadline_ms)));
+    let cancel_wait: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        if let Some(cancel) = input.cancel.clone() {
+            Box::pin(wait_for_cancel(cancel))
+        } else {
+            Box::pin(std::future::pending())
+        };
+    tokio::pin!(cancel_wait);
+    let brief = tokio::select! {
+        result = worker => match result {
+            Ok(Ok(brief)) => brief,
+            Ok(Err(error)) => {
+                unbind_linked_corpus(host, binding);
+                return Err(TriageHostError::Corpus(error.to_string()));
+            }
+            Err(_) => {
+                unbind_linked_corpus(host, binding);
+                return Err(TriageHostError::Corpus("deterministic_triage_worker_failed".into()));
+            }
+        },
+        _ = &mut deadline => {
+            abort.abort();
+            unbind_linked_corpus(host, binding);
+            return Err(TriageHostError::Deadline);
+        },
+        _ = &mut cancel_wait => {
+            abort.abort();
+            unbind_linked_corpus(host, binding);
+            return Err(TriageHostError::Cancelled);
+        },
+    };
+    let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let remaining_deadline_ms = input.deadline_ms.saturating_sub(elapsed_ms);
+    if remaining_deadline_ms == 0 {
+        unbind_linked_corpus(host, binding);
+        return Err(TriageHostError::Deadline);
+    }
     let answer_binding = AnswerBindingV1 {
         session_id: format!("triage:{}", input.run_id),
         turn_id: input.run_id.clone(),
@@ -276,7 +330,7 @@ pub async fn resolve_v2_host(
     };
 
     let mut budget_cfg = cfg.clone();
-    budget_cfg.router.deadline_ms = input.deadline_ms;
+    budget_cfg.router.deadline_ms = remaining_deadline_ms;
     budget_cfg.router.deadline_is_explicit = true;
     let credentials = TurnProviderCredentialCache::new(secrets);
     let mut authorized = Vec::new();
@@ -341,7 +395,7 @@ pub async fn resolve_v2_host(
         policy,
         preflight,
         authorized,
-        input.deadline_ms,
+        remaining_deadline_ms,
         input.context_char_budget,
         FastTriageNeighborhoodBudget::default(),
     ) {
