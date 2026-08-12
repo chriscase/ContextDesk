@@ -547,12 +547,24 @@ pub struct TriageProductionRunResultV1 {
 #[derive(Debug, Clone)]
 pub struct TriageProductionRunnerV1 {
     resolution: ResolvedTriageProductionV1,
+    #[cfg(test)]
+    terminal_commit_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl TriageProductionRunnerV1 {
     /// Bind a resolved policy once; each run remains turn-scoped.
     pub fn new(resolution: ResolvedTriageProductionV1) -> Self {
-        Self { resolution }
+        Self {
+            resolution,
+            #[cfg(test)]
+            terminal_commit_cancel: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_test_terminal_commit_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.terminal_commit_cancel = Some(cancel);
+        self
     }
 
     /// Access the immutable resolved plan.
@@ -905,6 +917,10 @@ impl TriageProductionRunnerV1 {
         // selecting/publishing the terminal event. A cancellation observed
         // here can never be represented as Completed; a request arriving
         // after this point is ordered after the already-committed result.
+        #[cfg(test)]
+        if let Some(cancel) = &self.terminal_commit_cancel {
+            cancel.store(true, Ordering::SeqCst);
+        }
         if interrupted.is_none() {
             if let Some(reason) =
                 host_interruption(&input, started, self.resolution.host_deadline_ms)
@@ -1939,13 +1955,16 @@ mod tests {
     use async_trait::async_trait;
     use cd_core::agent::ScriptedBackend;
     use cd_core::chat::ChatCompletion;
+    use cd_core::error::{CoreError, CoreResult};
     use cd_core::investigation_answer::{
         AnswerBindingV1, EvidenceRole, HostEvidenceEntry, HostEvidenceLedger,
         LogSnapshotRevisionV1, SCHEMA_V1,
     };
     use cd_core::multi_model::TriageContributorRole;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     fn packet() -> FastTriagePacketV1 {
         let revision = LogSnapshotRevisionV1 {
@@ -2208,6 +2227,274 @@ mod tests {
         forge_binding: bool,
     }
 
+    #[derive(Debug)]
+    enum CorrectionBackendOutcome {
+        Success,
+        Failure,
+        Sleep(Duration),
+    }
+
+    struct CorrectionBackend {
+        outcomes: Mutex<VecDeque<CorrectionBackendOutcome>>,
+        calls: Arc<AtomicUsize>,
+        cancel_after_dispatch: Option<Arc<AtomicBool>>,
+    }
+
+    #[async_trait]
+    impl cd_core::agent::ChatBackend for CorrectionBackend {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = self
+                .outcomes
+                .lock()
+                .expect("correction backend lock")
+                .pop_front()
+                .expect("correction backend script");
+            match outcome {
+                CorrectionBackendOutcome::Success => {
+                    Ok(ChatCompletion::from_parts("{}", Vec::new(), "stop"))
+                }
+                CorrectionBackendOutcome::Failure => {
+                    if let Some(cancel) = &self.cancel_after_dispatch {
+                        cancel.store(true, Ordering::SeqCst);
+                    }
+                    Err(CoreError::Message("correction failure".into()))
+                }
+                CorrectionBackendOutcome::Sleep(delay) => {
+                    tokio::time::sleep(delay).await;
+                    Ok(ChatCompletion::from_parts("{}", Vec::new(), "stop"))
+                }
+            }
+        }
+    }
+
+    struct CorrectionHook {
+        validations: AtomicUsize,
+        cancel_on_correction: Option<Arc<AtomicBool>>,
+    }
+
+    #[async_trait]
+    impl TriageProductionHooks for CorrectionHook {
+        async fn validate(
+            &self,
+            _slot: &CompiledRoleSlotV2,
+            _response: &ChatCompletion,
+            _packet: &FastTriagePacketV1,
+            _reconciliation: &TriageReconciliationV1,
+        ) -> TriageValidationDecision {
+            if self.validations.fetch_add(1, Ordering::SeqCst) == 0 {
+                TriageValidationDecision::rejected("needs_correction")
+            } else {
+                TriageValidationDecision::accepted()
+            }
+        }
+
+        async fn correction_messages(
+            &self,
+            _slot: &CompiledRoleSlotV2,
+            _response: &ChatCompletion,
+            _reason_codes: &[String],
+            _packet: &FastTriagePacketV1,
+            _reconciliation: &TriageReconciliationV1,
+        ) -> Option<Vec<ChatMessage>> {
+            if let Some(cancel) = &self.cancel_on_correction {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            Some(vec![ChatMessage {
+                role: Role::User,
+                content: "correct the bounded proposal".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            }])
+        }
+    }
+
+    #[allow(clippy::field_reassign_with_default)]
+    fn correction_runner(
+        outcome: CorrectionBackendOutcome,
+        max_provider_calls: u32,
+        cancel_after_dispatch: Option<Arc<AtomicBool>>,
+    ) -> (
+        TriageProductionRunnerV1,
+        Arc<AtomicUsize>,
+        CompiledRoleSlotV2,
+    ) {
+        let model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-correction".into(),
+            model_id: "model-correction".into(),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = Arc::new(CorrectionBackend {
+            outcomes: Mutex::new(VecDeque::from([CorrectionBackendOutcome::Success, outcome])),
+            calls: Arc::clone(&calls),
+            cancel_after_dispatch,
+        });
+        let slot = CompiledRoleSlotV2 {
+            slot_id: "finalizer".into(),
+            kind: TriageSlotKindV2::Finalizer,
+            model: model.clone(),
+            requirement: RoleRequirement::Required,
+            disposition: SlotDispositionV2::Admitted,
+            rejections: Vec::new(),
+            qualification_schema_id: Some(
+                cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_SCHEMA_V2.into(),
+            ),
+            workflow_id: Some(
+                cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_WORKFLOW_V2.into(),
+            ),
+            protocol_fingerprint: Some("sha256:test".into()),
+        };
+        let mut budget = cd_core::multi_model::triage_policy::TriageBudgetV2::default();
+        budget.max_provider_calls = max_provider_calls;
+        budget.max_context_chars = 10_000;
+        budget.contributors.max_provider_calls = 0;
+        budget.contributors.max_context_chars = 10_000;
+        budget.corrections.max_provider_calls = 1;
+        budget.corrections.max_context_chars = 10_000;
+        budget.corrections.operation_timeout_ms = 5;
+        budget.finalizer.reserve_ms = 0;
+        budget.finalizer.max_context_chars = 10_000;
+        budget.finalizer.operation_timeout_ms = 100;
+        let compiled = CompiledTriagePolicyV2 {
+            schema_id: cd_core::multi_model::triage_policy::COMPILED_TRIAGE_POLICY_SCHEMA_V2.into(),
+            mode: TriagePolicyMode::Enhanced,
+            slots: vec![slot.clone()],
+            independence_groups: Vec::new(),
+            independence_counts: cd_core::multi_model::triage_policy::TriageIndependenceCountsV2 {
+                role_slots: 1,
+                distinct_model_refs: 1,
+                distinct_model_ids: 1,
+                distinct_gateways: 1,
+            },
+            budget,
+            execution: Default::default(),
+        };
+        let mut backends = BTreeMap::new();
+        backends.insert(
+            "finalizer".into(),
+            AuthorizedTriageBackendV1 {
+                slot_id: "finalizer".into(),
+                model,
+                backend,
+            },
+        );
+        let resolved = ResolvedTriageProductionV1 {
+            compiled,
+            backends,
+            contribution_runtime: None,
+            reviewer_conditions: BTreeMap::new(),
+            host_deadline_ms: 1_000,
+            host_context_char_budget: 10_000,
+        };
+        (TriageProductionRunnerV1::new(resolved), calls, slot)
+    }
+
+    #[tokio::test]
+    async fn correction_outcomes_are_typed_and_physical_calls_preserved() {
+        struct Case {
+            name: &'static str,
+            outcome: CorrectionBackendOutcome,
+            expected_status: TriageAttemptStatus,
+            expected_code: &'static str,
+            cancel: bool,
+        }
+        let cases = [
+            Case {
+                name: "provider failure",
+                outcome: CorrectionBackendOutcome::Failure,
+                expected_status: TriageAttemptStatus::Failed,
+                expected_code: "correction_provider_failed",
+                cancel: false,
+            },
+            Case {
+                name: "cancellation observed",
+                outcome: CorrectionBackendOutcome::Failure,
+                expected_status: TriageAttemptStatus::Cancelled,
+                expected_code: "cancelled",
+                cancel: true,
+            },
+            Case {
+                name: "correction timeout",
+                outcome: CorrectionBackendOutcome::Sleep(Duration::from_millis(25)),
+                expected_status: TriageAttemptStatus::TimedOut,
+                expected_code: "correction_deadline",
+                cancel: false,
+            },
+        ];
+        for case in cases {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let (runner, calls, slot) =
+                correction_runner(case.outcome, 6, case.cancel.then_some(Arc::clone(&cancel)));
+            let mut run_input = input();
+            run_input.cancel = Some(Arc::clone(&cancel));
+            let hook = CorrectionHook {
+                validations: AtomicUsize::new(0),
+                cancel_on_correction: None,
+            };
+            let mut interrupted = None;
+            let mut provider_calls = 0;
+            let (attempt, response) = runner
+                .run_generic_slot(
+                    &slot,
+                    &run_input,
+                    tokio::time::Instant::now(),
+                    &hook,
+                    &reconciliation_from_attempts(std::slice::from_ref(&slot), &[], true),
+                    &mut interrupted,
+                    &mut provider_calls,
+                )
+                .await;
+            assert_eq!(attempt.status, case.expected_status, "{}", case.name);
+            assert!(
+                attempt
+                    .reason_codes
+                    .iter()
+                    .any(|code| code == case.expected_code),
+                "{}: {:?}",
+                case.name,
+                attempt.reason_codes
+            );
+            assert_eq!(attempt.physical_provider_calls, Some(2), "{}", case.name);
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "{}", case.name);
+            assert!(
+                response.is_none(),
+                "failed correction cannot return a response"
+            );
+        }
+
+        // A prior provider call may consume the same number as the correction
+        // phase cap without preventing the first correction: the correction
+        // counter is local to this stage, while the total cap still has room.
+        let (runner, calls, slot) = correction_runner(CorrectionBackendOutcome::Success, 6, None);
+        let hook = CorrectionHook {
+            validations: AtomicUsize::new(0),
+            cancel_on_correction: None,
+        };
+        let mut interrupted = None;
+        let mut provider_calls = 1;
+        let (attempt, response) = runner
+            .run_generic_slot(
+                &slot,
+                &input(),
+                tokio::time::Instant::now(),
+                &hook,
+                &reconciliation_from_attempts(std::slice::from_ref(&slot), &[], true),
+                &mut interrupted,
+                &mut provider_calls,
+            )
+            .await;
+        assert_eq!(attempt.status, TriageAttemptStatus::Completed);
+        assert_eq!(attempt.physical_provider_calls, Some(2));
+        assert_eq!(attempt.semantic_corrections, Some(1));
+        assert!(response.is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(provider_calls, 3);
+    }
+
     #[async_trait]
     impl TriageProductionHooks for FinalizerHook {
         async fn validate(
@@ -2386,12 +2673,14 @@ mod tests {
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
+                        ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                     ])),
                 },
                 AuthorizedTriageBackendV1 {
                     slot_id: "finalizer".into(),
                     model,
                     backend: Arc::new(ScriptedBackend::new(vec![
+                        ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
                         ChatCompletion::from_parts("{}", Vec::new(), "stop"),
@@ -2510,6 +2799,41 @@ mod tests {
         assert_eq!(gap.result.kind, TriageResultKind::HonestPartial);
         assert!(gap.result.answer.is_none());
         assert!(gap
+            .replay
+            .events
+            .iter()
+            .any(|event| matches!(&event.event, TriageRunEventPayloadV2::Cancelled { .. })));
+
+        // This cancellation is injected by a test-only seam immediately
+        // before the runner's final non-awaiting observation. Earlier checks
+        // cannot see it, so the test is genuinely discriminating for the
+        // terminal linearization point.
+        let terminal_cancel = Arc::new(AtomicBool::new(false));
+        let mut terminal_input = input();
+        terminal_input.cancel = Some(Arc::clone(&terminal_cancel));
+        let terminal = runner
+            .clone()
+            .with_test_terminal_commit_cancel(terminal_cancel)
+            .run(
+                terminal_input,
+                &FinalizerHook {
+                    calls: Arc::clone(&calls),
+                    delay_ms: 0,
+                    cancel_after_finalize: None,
+                    forge_binding: false,
+                },
+            )
+            .await
+            .expect("terminal linearization remains a valid replay");
+        assert!(!terminal.completed);
+        assert_eq!(terminal.result.kind, TriageResultKind::HonestPartial);
+        assert_eq!(
+            terminal.result.validation_state,
+            TriageValidationState::Failed
+        );
+        assert!(terminal.result.answer.is_none());
+        assert!(terminal.result.accepted_evidence_ids.is_empty());
+        assert!(terminal
             .replay
             .events
             .iter()
