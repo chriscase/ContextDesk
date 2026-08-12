@@ -817,6 +817,49 @@ mod tests {
     }
 
     #[test]
+    fn admitted_remote_slot_rechecks_policy_egress_independent_of_preflight() {
+        let mut cfg = AppConfig::default();
+        let mut profile = ProviderProfile::ollama_local();
+        profile.id = "profile:remote".into();
+        profile.chat_model = "model:test".into();
+        profile.local_only = false;
+        cfg.providers.profiles.push(profile.clone());
+        let model = ModelRef {
+            profile_id: profile.id,
+            model_id: profile.chat_model,
+        };
+        let denied = TriagePolicyV2::standard(model.clone(), false);
+        // Model the exact hostile mutation this second check exists to stop:
+        // preflight claims the configured remote profile is local and the
+        // compiler therefore admits it. Runtime must derive locality from
+        // AppConfig again rather than trusting that compiled disposition.
+        let forged = TriagePolicyPreflightV2 {
+            roles: vec![RolePreflightV2 {
+                slot_id: "standard-finalizer".into(),
+                model: model.clone(),
+                kind: TriageSlotKindV2::Finalizer,
+                available: true,
+                qualification: RoleQualificationV2::Qualified,
+                remote: false,
+                qualification_schema_id: None,
+                workflow_id: None,
+                protocol_fingerprint: None,
+            }],
+        };
+        let compiled = compile_preflight(&denied, &forged).expect("forged preflight admits slot");
+        let error = validate_runtime_egress(&cfg, &denied, &compiled)
+            .expect_err("remote profile requires explicit policy permission");
+        assert!(matches!(error, TriageHostError::Profile(ref reason) if reason == "egress_denied"));
+
+        let allowed = TriagePolicyV2::standard(model, true);
+        let preflight =
+            preflight_for_policy(&cfg, &allowed, &TriageRoleQualificationStoreV1::default());
+        let compiled = compile_preflight(&allowed, &preflight).expect("standard compiles");
+        validate_runtime_egress(&cfg, &allowed, &compiled)
+            .expect("explicit remote permission is honored");
+    }
+
+    #[test]
     fn shared_preflight_reads_only_exact_role_store_identity() {
         let mut cfg = AppConfig::default();
         let mut profile = ProviderProfile::ollama_local();

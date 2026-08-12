@@ -184,22 +184,25 @@ the desktop receives no privileged orchestration path.
 
 ## Current production adapter boundary
 
-The first trusted-host adapter is deliberately narrower than the full policy.
-It can convert a fully admitted Enhanced/Advanced contributor-only plan into
-the established linked-log contribution runtime for observation extraction,
-causal proposals, contradiction checking, and evidence-gap finding. That reuses
-the existing immutable host packet, provider backends, cancellation, budgets,
-stage events, validation, reconciliation, renderer, and cleanup.
+The trusted-host adapter converts an admitted Enhanced/Advanced plan into the
+established linked-log contribution runtime for typed contributors, timeline
+analysis, finalization, and conditional review. That reuses the existing
+immutable host packet, provider backends, cancellation, budgets, stage events,
+validation, reconciliation, renderer, and cleanup.
 
 The trusted host resolver now binds this production runner for the explicit CLI
-`triage run --request ... --preflight ...` surface. It resolves the exact
+`triage run --request ...` surface. Live preflight is derived only from the
+host-owned exact role-qualification store; caller-authored preflight remains
+available only to provider-free `triage-policy validate/compile` and is
+rejected as runtime authority before application state is loaded. The resolver
+resolves the exact
 corpus, packet, profile, protected-file credentials, qualified model ids, and
 backend through the existing plumbing, then returns the shared typed replay and
 result. It refuses Standard (which stays on the established single-model
-route), timeline analysis, a finalizer, a reviewer, visible optional-role
-dropout, or deadline semantics the established route cannot enforce. Tauri/GUI
-and server live selection are still follow-up surfaces; they must call this
-same resolver rather than recreate it. See
+route) and any role or deadline semantics the production runtime cannot
+enforce. Tauri derives the same host-owned preflight facts; broader GUI and
+server live selection must continue to call this resolver rather than recreate
+it. See
 [`TRIAGE_POLICY_V2_PRODUCTION_ADAPTER_V1.md`](../testing/TRIAGE_POLICY_V2_PRODUCTION_ADAPTER_V1.md).
 
 ## Release proof

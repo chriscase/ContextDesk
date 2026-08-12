@@ -21,6 +21,27 @@ fn request_json() -> String {
     .to_string()
 }
 
+fn inline_request_json() -> String {
+    serde_json::json!({
+        "schema_id": "contextdesk.triage.request.v2",
+        "run_id": "run:cli-inline",
+        "privacy": "owner_only",
+        "task": "What happened?",
+        "scope": {"corpus_id": "corpus:cli-process"},
+        "policy": {
+            "kind": "inline",
+            "schema_id": "contextdesk.triage_policy.v2",
+            "document": {
+                "schema_id": "contextdesk.triage_policy.v2",
+                "mode": "enhanced"
+            }
+        },
+        "overrides": {},
+        "cancellation_id": "cancel:cli-inline"
+    })
+    .to_string()
+}
+
 fn cli() -> Command {
     Command::cargo_bin("contextdesk").expect("contextdesk binary")
 }
@@ -110,4 +131,47 @@ fn triage_run_is_explicitly_registered_and_not_rewritten_as_chat() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("Run one explicit TriageRequestV2 JSON document"));
+}
+
+#[test]
+fn caller_preflight_is_rejected_before_app_state_for_every_runtime_mode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing_data = dir.path().join("must-not-be-created");
+    let missing_config = dir.path().join("must-not-be-read.json");
+    let missing_preflight = dir.path().join("must-not-be-read-preflight.json");
+
+    for (name, request) in [
+        ("standard", request_json()),
+        ("enhanced", inline_request_json()),
+    ] {
+        let request_path = dir.path().join(format!("{name}-request.json"));
+        std::fs::write(&request_path, request).expect("write request");
+        let output = cli()
+            .args(["--app-config"])
+            .arg(&missing_config)
+            .args(["--data-dir"])
+            .arg(&missing_data)
+            .args(["--json", "triage", "run", "--request"])
+            .arg(&request_path)
+            .arg("--preflight")
+            .arg(&missing_preflight)
+            .output()
+            .expect("run contextdesk triage");
+
+        assert_eq!(output.status.code(), Some(1), "{name}");
+        let json: Value = serde_json::from_slice(&output.stdout).expect("one JSON object");
+        assert_eq!(json["ok"], false, "{name}");
+        assert_eq!(json["command"], "triage_run", "{name}");
+        assert_eq!(json["error"]["kind"], "user_error", "{name}");
+        assert_eq!(
+            json["error"]["message"], "caller_preflight_not_authoritative",
+            "{name}"
+        );
+        assert!(!missing_data.exists(), "{name} must remain state-free");
+        assert!(!missing_config.exists(), "{name} must not load app config");
+        assert!(
+            !missing_preflight.exists(),
+            "{name} must not consume caller preflight"
+        );
+    }
 }

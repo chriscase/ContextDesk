@@ -77,8 +77,9 @@ unqualified result is retained as negative evidence and exits with
 Enhanced or Advanced request fails closed with
 `triage_role_qualification_unavailable` until the exact role records required
 by the compiled policy exist; if `--preflight` is supplied it is rejected as
-`caller_preflight_not_authoritative`. This refusal occurs before ToolHost
-construction or credential resolution. The provider-free
+`caller_preflight_not_authoritative` for every runtime mode. This refusal is
+state-free: it occurs before application configuration, ToolHost construction,
+or credential resolution, and the supplied file is not read. The provider-free
 `triage-policy validate/compile` commands continue to accept explicit
 preflight JSON for simulation only. The live command and Tauri now use the
 same trusted resolver, existing protected-file plumbing, corpus binding,

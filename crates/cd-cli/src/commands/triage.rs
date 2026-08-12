@@ -3,8 +3,9 @@
 //! The public request and replay contracts live in `cd_core`; this module is
 //! deliberately only a thin host boundary.  Standard requests remain on the
 //! established chat path; Enhanced/Advanced requests use the shared trusted
-//! host resolver and production runner when an explicit preflight document is
-//! supplied.
+//! host resolver and production runner only with host-owned qualification
+//! evidence. Caller-authored preflight documents remain provider-free policy
+//! simulation inputs and are never runtime authority.
 
 use std::io::Read;
 use std::path::Path;
@@ -137,6 +138,13 @@ pub fn run(action: &TriageAction) -> CliResult<TriageRunOutput> {
 pub fn state_free(action: &TriageAction) -> Option<CliResult<TriageRunOutput>> {
     match action {
         TriageAction::Run(args) => {
+            // Runtime preflight authority is host-owned. Reject the legacy
+            // caller input before path/config resolution so it cannot affect
+            // Standard or Enhanced/Advanced execution and cannot trigger a
+            // credential adapter as a side effect of refusal.
+            if args.preflight.is_some() {
+                return Some(Err(CliError::user("caller_preflight_not_authoritative")));
+            }
             let raw = match read_request(&args.request) {
                 Ok(raw) => raw,
                 Err(error) => return Some(Err(error)),
