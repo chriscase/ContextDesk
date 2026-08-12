@@ -328,6 +328,7 @@ package_has_verified_copy() {
 command_activate() {
   local cache_root
   local repo_root
+  local sccache_bin
   cache_root="$(default_cache_root)"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -345,6 +346,13 @@ command_activate() {
   cache_root="$(prepare_cache_root "$cache_root" "$repo_root")"
   printf 'export CONTEXTDESK_BUILD_CACHE_ROOT=%s\n' "$(shell_quote "$cache_root")"
   printf 'export CARGO_TARGET_DIR=%s\n' "$(shell_quote "$cache_root/cargo-target")"
+  # sccache is optional, but when installed it gives intentionally isolated
+  # or cleaned targets the same compiler-object reuse as the shared target.
+  if sccache_bin="$(command -v sccache 2>/dev/null)"; then
+    mkdir -p "$cache_root/sccache"
+    printf 'export RUSTC_WRAPPER=%s\n' "$(shell_quote "$sccache_bin")"
+    printf 'export SCCACHE_DIR=%s\n' "$(shell_quote "$cache_root/sccache")"
+  fi
 }
 
 inventory_target() {

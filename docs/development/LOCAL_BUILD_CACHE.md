@@ -32,12 +32,16 @@ eval "$(scripts/local-build-cache.sh activate \
 ```
 
 The command refuses a cache root inside any registered worktree or behind a
-symlink. It exports only:
+symlink. It always exports:
 
 ```text
 CONTEXTDESK_BUILD_CACHE_ROOT
 CARGO_TARGET_DIR
 ```
+
+When `sccache` is installed, activation also exports `RUSTC_WRAPPER` and a
+cache-local `SCCACHE_DIR`. This is optional compiler-object reuse for clean or
+intentionally isolated targets; it does not change the Cargo target identity.
 
 Those exports apply to root Cargo commands and are inherited by desktop/Tauri
 commands:
