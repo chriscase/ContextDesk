@@ -1,6 +1,6 @@
 # Adversarial triage-runtime hardening — P0 fix
 
-**Code SHA:** `75e177db4b3ea05f35dcfd22da7be887e0ace8d4`
+**Code SHA:** `dfa47be7c9e08bbdca4b0ecbfc0a24bfb21511d6`
 **Branch:** `integrate/triage-policy-sdk-v2`  
 **Scope:** provider-free production-path hardening; no live compatibility claim
 
@@ -53,7 +53,11 @@ before and after setup rather than handing a stale budget to the runner. A
 fresh exact-runtime live gateway diagnostic must still be run. These setup and
 live-provider checks are not evidence that the primary OpenAI-compatible path
 is unusable. CLI and desktop configured retrieval roles now share the same
-explicit-vs-adaptive timeout selection. Exact-role finalizer probes now credit a dispatched-or-raced
-operation conservatively and recheck cancellation before publishing
-qualification; generic provider attempts credit failed/timeout operations
-before returning their bounded attempt record.
+explicit-vs-adaptive timeout selection. Exact-role qualification setup and its
+synthetic probe share one turn-owned deadline; contributor qualification
+rechecks cancellation before publishing. Exact-role finalizer probes credit a
+dispatched-or-raced operation conservatively and recheck cancellation before
+publishing qualification. Generic provider attempts use a fresh correction
+timeout bounded by remaining turn time and the correction phase cap, compare
+correction calls against a correction-local counter, and credit failed/timeout
+operations on every post-call interruption path.

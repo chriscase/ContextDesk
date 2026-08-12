@@ -4,7 +4,7 @@ Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
 - branch: `integrate/triage-policy-sdk-v2`
-- exact tested source/build SHA: `75e177db4b3ea05f35dcfd22da7be887e0ace8d4`
+- exact tested source/build SHA: `dfa47be7c9e08bbdca4b0ecbfc0a24bfb21511d6`
 - acceptance-procedure revision: this branch tip may be newer than the build
   SHA; fetch the branch first, then build the exact tested SHA above. This
   avoids an impossible self-referential commit hash in the procedure itself.
@@ -25,8 +25,12 @@ release has added the typed Triage Policy V2 graph and host resolver, shared
 CLI/Tauri/TypeScript SDK seams, chat-contract v4 transport/mode identity and
 fail-closed qualification, bounded deadline controls, production embedding and
 rerank adapters, and the protected-file gateway diagnostic plumbing. This source
-also fails closed when typed-contribution runtime preparation rejects instead of
-silently falling back to a generic role path. Historical
+also keeps exact-role qualification setup and its synthetic probe inside one
+turn-owned deadline, bounds semantic correction calls by both remaining turn
+time and their correction phase cap, and preserves physical provider-call
+counts on every post-call interruption path. It fails closed when
+typed-contribution runtime preparation rejects instead of silently falling back
+to a generic role path. Historical
 live-provider reports for older SHAs are not evidence for this exact release.
 
 This is the source-build path for a separate company machine. It does not
