@@ -104,6 +104,26 @@ fn parse_jsonl(stdout: &[u8]) -> Vec<Value> {
         .collect()
 }
 
+/// `gateway diagnose` intentionally reports only a relative run reference.
+/// The invoking owner resolves it below the known local diagnostic root; the
+/// CLI must never serialize the absolute data directory that contains it.
+fn artifact_path(data_dir: &Path, artifact_ref: &str) -> std::path::PathBuf {
+    let reference = Path::new(artifact_ref);
+    assert!(
+        reference.is_relative(),
+        "artifact reference must be relative"
+    );
+    assert_eq!(
+        reference.components().count(),
+        1,
+        "artifact ref is a run dir only"
+    );
+    data_dir
+        .join("cache")
+        .join("gateway-diagnostics")
+        .join(reference)
+}
+
 // ---------------------------------------------------------------------------
 // Consent gate: never a network call before explicit confirmation.
 // ---------------------------------------------------------------------------
@@ -257,18 +277,22 @@ async fn full_run_cleans_up_and_writes_a_checksummed_share_safe_artifact() {
         "cleanup must report no failures on a normal run: {cleanup}"
     );
 
-    let artifact_dir = data["artifact_dir"]
+    let artifact_ref = data["artifact_dir"]
         .as_str()
         .expect("artifact_dir must be reported");
-    let report_path = Path::new(artifact_dir).join("report.json");
-    let manifest_path = Path::new(artifact_dir).join("manifest.json");
+    assert!(!Path::new(artifact_ref).is_absolute());
+    let artifact_dir = artifact_path(data_dir.path(), artifact_ref);
+    let report_path = artifact_dir.join("report.json");
+    let manifest_path = artifact_dir.join("manifest.json");
     assert!(
         report_path.exists(),
-        "report.json must exist at {artifact_dir}"
+        "report.json must exist at {}",
+        artifact_dir.display()
     );
     assert!(
         manifest_path.exists(),
-        "manifest.json must exist at {artifact_dir}"
+        "manifest.json must exist at {}",
+        artifact_dir.display()
     );
 
     let report_bytes = std::fs::read(&report_path).expect("read report.json");
@@ -309,7 +333,7 @@ async fn full_run_cleans_up_and_writes_a_checksummed_share_safe_artifact() {
     );
 
     assert!(
-        !Path::new(artifact_dir).join("private").exists(),
+        !artifact_dir.join("private").exists(),
         "no private capture directory may exist without --raw"
     );
 }
@@ -345,16 +369,16 @@ async fn raw_capture_is_owner_only_and_separate_from_the_share_safe_bundle() {
     let value: Value = serde_json::from_slice(&output.stdout).expect("stdout is one JSON envelope");
     assert_eq!(value["data"]["private_capture_written"], true);
 
-    let artifact_dir = value["data"]["artifact_dir"].as_str().unwrap();
-    let persisted_report: Value = serde_json::from_slice(
-        &std::fs::read(Path::new(artifact_dir).join("report.json")).unwrap(),
-    )
-    .expect("persisted report json");
+    let artifact_ref = value["data"]["artifact_dir"].as_str().unwrap();
+    let artifact_dir = artifact_path(data_dir.path(), artifact_ref);
+    let persisted_report: Value =
+        serde_json::from_slice(&std::fs::read(artifact_dir.join("report.json")).unwrap())
+            .expect("persisted report json");
     assert_eq!(
         persisted_report["private_capture_written"], true,
         "persisted share-safe report must agree with the terminal result"
     );
-    let private_path = Path::new(artifact_dir).join("private").join("capture.json");
+    let private_path = artifact_dir.join("private").join("capture.json");
     assert!(private_path.exists(), "private capture file must exist");
     let perms = std::fs::metadata(&private_path).unwrap().permissions();
     assert_eq!(
@@ -362,7 +386,7 @@ async fn raw_capture_is_owner_only_and_separate_from_the_share_safe_bundle() {
         0o600,
         "private capture file must be owner-only (0600)"
     );
-    let dir_perms = std::fs::metadata(Path::new(artifact_dir).join("private"))
+    let dir_perms = std::fs::metadata(artifact_dir.join("private"))
         .unwrap()
         .permissions();
     assert_eq!(
@@ -373,7 +397,7 @@ async fn raw_capture_is_owner_only_and_separate_from_the_share_safe_bundle() {
 
     // Never silently included in the share-safe report: the private file's
     // path/content is not referenced from report.json.
-    let report_text = std::fs::read_to_string(Path::new(artifact_dir).join("report.json")).unwrap();
+    let report_text = std::fs::read_to_string(artifact_dir.join("report.json")).unwrap();
     assert!(
         !report_text.contains("private/capture.json"),
         "share-safe report must not reference the private capture file"
@@ -750,9 +774,9 @@ async fn protected_file_credential_reaches_wire_never_share_safe_output() {
         gateway.request_count()
     );
 
-    let artifact_dir = data["artifact_dir"].as_str().expect("artifact_dir");
-    let report_text =
-        std::fs::read_to_string(Path::new(artifact_dir).join("report.json")).expect("report");
+    let artifact_ref = data["artifact_dir"].as_str().expect("artifact_dir");
+    let artifact_dir = artifact_path(data_dir.path(), artifact_ref);
+    let report_text = std::fs::read_to_string(artifact_dir.join("report.json")).expect("report");
     assert!(
         !report_text.contains(secret),
         "share-safe report must not embed the credential"
@@ -761,10 +785,14 @@ async fn protected_file_credential_reaches_wire_never_share_safe_output() {
         !report_text.contains("Authorization"),
         "share-safe report must not embed Authorization header text"
     );
-    // Absolute private paths: the data_dir itself must not appear in the
-    // written share-safe report (artifact_dir is set after write, so the
-    // on-disk report.json keeps artifact_dir null — still forbid data_dir).
+    // Absolute private paths: neither terminal nor persisted share-safe
+    // output may include the data dir. The report carries only a relative
+    // owner-resolvable run reference.
     let data_dir_str = data_dir.path().to_string_lossy();
+    assert!(
+        !stdout.contains(data_dir_str.as_ref()),
+        "terminal JSON must not embed the operator data_dir absolute path"
+    );
     assert!(
         !report_text.contains(data_dir_str.as_ref()),
         "share-safe report must not embed the operator data_dir absolute path"
@@ -898,8 +926,9 @@ async fn share_safe_report_redacts_identity_endpoint_paths_and_bodies() {
     cmd.args(["--json", "gateway", "diagnose", "--yes", "--timeout", "20"]);
     let output = run_blocking(cmd).await;
     let value: Value = serde_json::from_slice(&output.stdout).expect("json");
-    let artifact_dir = value["data"]["artifact_dir"].as_str().unwrap();
-    let report_text = std::fs::read_to_string(Path::new(artifact_dir).join("report.json")).unwrap();
+    let artifact_ref = value["data"]["artifact_dir"].as_str().unwrap();
+    let artifact_dir = artifact_path(data_dir.path(), artifact_ref);
+    let report_text = std::fs::read_to_string(artifact_dir.join("report.json")).unwrap();
 
     for forbidden in [
         secret,
@@ -938,11 +967,10 @@ async fn share_safe_report_redacts_identity_endpoint_paths_and_bodies() {
     );
 
     // Manifest checksum still matches report bytes under redaction.
-    let report_bytes = std::fs::read(Path::new(artifact_dir).join("report.json")).unwrap();
-    let manifest: Value = serde_json::from_slice(
-        &std::fs::read(Path::new(artifact_dir).join("manifest.json")).unwrap(),
-    )
-    .unwrap();
+    let report_bytes = std::fs::read(artifact_dir.join("report.json")).unwrap();
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(artifact_dir.join("manifest.json")).unwrap())
+            .unwrap();
     let expected = {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();

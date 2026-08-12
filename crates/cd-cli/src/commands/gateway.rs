@@ -350,7 +350,9 @@ pub async fn run(
     // since only one capability applies to that role.
     let shared_qualification =
         if matches!(role, ModelRoleHint::Investigator | ModelRoleHint::Unknown) {
-            let qual = run_shared_qualification(&profile, &model, &credentials, deadline).await;
+            let qual =
+                run_shared_qualification(&profile, &model, &credentials, deadline, cancel.clone())
+                    .await;
             requests_made += qual.requests_used;
             Some(qual)
         } else {
@@ -443,14 +445,30 @@ pub async fn run(
     if args.raw && args.raw_i_understand {
         match write_private_capture(args, paths, &artifact_run_dir, &report, &redaction) {
             Ok(()) => report.private_capture_written = true,
-            Err(e) => eprintln!("warning: failed to write private capture: {e}"),
+            // `std::io::Error` commonly contains an absolute local path. The
+            // command's terminal output is share-safe by default even when a
+            // requested owner-only capture cannot be created.
+            Err(_) => eprintln!("warning: failed to write owner-only private capture"),
         }
     }
     // Persist the share-safe report after the optional private capture so its
     // boolean accurately records the artifact that was actually written.
-    match write_artifact_bundle(args, paths, &artifact_run_dir, &report, &redaction) {
-        Ok(dir) => report.artifact_dir = Some(dir.display().to_string()),
-        Err(e) => eprintln!("warning: failed to write diagnostic artifact bundle: {e}"),
+    // `artifact_dir` is intentionally a relative, owner-resolvable run
+    // reference. The absolute write location is never serialized or printed:
+    // resolve it locally below `--out`, or below the default
+    // `<data-dir>/cache/gateway-diagnostics` root.
+    let artifact_reference = artifact_reference(&artifact_run_dir);
+    let mut persisted_report = report.clone();
+    persisted_report.artifact_dir = Some(artifact_reference.clone());
+    match write_artifact_bundle(
+        args,
+        paths,
+        &artifact_run_dir,
+        &persisted_report,
+        &redaction,
+    ) {
+        Ok(_) => report.artifact_dir = Some(artifact_reference),
+        Err(_) => eprintln!("warning: failed to write share-safe diagnostic artifact bundle"),
     }
 
     print_terminal(
@@ -565,10 +583,14 @@ fn sanitize_gateway_report(
         sanitize_case_report(case, policy);
     }
     sanitize_cleanup_report(&mut report.cleanup, policy);
+    // This field crosses the terminal and share-safe artifact boundary. Do
+    // not attempt to redact a path: preserving enough of one to remain
+    // useful also preserves machine topology. Re-mint the stable relative
+    // run reference from the safe run id instead.
     report.artifact_dir = report
         .artifact_dir
-        .as_deref()
-        .map(|value| run_id_for_dir(&policy.redact_text(value)));
+        .as_ref()
+        .map(|_| artifact_reference(&report.run_id));
 }
 
 fn level_str(level: DiagnoseLevel) -> &'static str {
@@ -1105,7 +1127,8 @@ async fn run_one_case(
             .await
         }
         "embedding_or_rerank_contract" => {
-            case_embedding_or_rerank(profile, model, role, credentials, deadline).await
+            case_embedding_or_rerank(profile, model, role, credentials, deadline, cancel.clone())
+                .await
         }
         other => skipped_case(other, "unknown case id"),
     }
@@ -1120,12 +1143,19 @@ async fn run_shared_qualification(
     model: &str,
     credentials: &LiveCredentials,
     deadline: Instant,
+    user_cancel: Arc<AtomicBool>,
 ) -> SharedQualification {
     let profile = profile.clone();
     let model = model.to_string();
     let api_key = credentials.api_key.clone();
     let extra_headers = credentials.extra_headers.clone();
     let budget = deadline.saturating_duration_since(Instant::now());
+    // This private token is separate from the user turn token so a deadline
+    // can halt qualification without being misreported as an operator cancel.
+    // It is nonetheless passed through the established transport/probe seam;
+    // no diagnostic-only HTTP client or cancellation path is introduced.
+    let qualification_cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_worker = qualification_cancel.clone();
     let joined = tokio::task::spawn_blocking(move || {
         let backend = backend_for_provider(profile.kind);
         let base_url =
@@ -1144,11 +1174,10 @@ async fn run_shared_qualification(
             profile.kind,
         );
         let gate = gate_for_model(&profile, true, &model);
-        let cancel = Arc::new(AtomicBool::new(false));
-        run_qualification(key, gate, &mut transport, &cancel)
+        run_qualification(key, gate, &mut transport, &cancel_for_worker)
     });
-    match tokio::time::timeout(budget.max(Duration::from_millis(1)), joined).await {
-        Ok(Ok(report)) => {
+    match await_shared_qualification(joined, budget, user_cancel, qualification_cancel).await {
+        SharedQualificationWait::Completed(Ok(report)) => {
             let requests_used = report
                 .checks
                 .iter()
@@ -1160,16 +1189,81 @@ async fn run_shared_qualification(
                 failure_detail: None,
             }
         }
-        Ok(Err(e)) => SharedQualification {
+        SharedQualificationWait::Completed(Err(e)) => SharedQualification {
             report: None,
             requests_used: 0,
             failure_detail: Some(format!("qualification task failed: {e}")),
         },
-        Err(_) => SharedQualification {
+        SharedQualificationWait::TimedOut => SharedQualification {
             report: None,
             requests_used: 0,
-            failure_detail: Some("direct-lane qualification timed out".to_string()),
+            failure_detail: Some(
+                "direct-lane qualification timed out after cancellation completed".to_string(),
+            ),
         },
+        SharedQualificationWait::Cancelled => SharedQualification {
+            report: None,
+            requests_used: 0,
+            failure_detail: Some(
+                "direct-lane qualification cancelled after cancellation completed".to_string(),
+            ),
+        },
+    }
+}
+
+/// Terminal outcome from a shared qualification worker. A timeout or user
+/// cancellation is not returned until the worker has observed its cooperative
+/// token and joined. That ordering is critical because cleanup may destroy the
+/// diagnostic's disposable state immediately after this function returns.
+enum SharedQualificationWait<T> {
+    Completed(Result<T, tokio::task::JoinError>),
+    TimedOut,
+    Cancelled,
+}
+
+async fn wait_for_cancel(cancel: Arc<AtomicBool>) {
+    while !cancel.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn await_shared_qualification<T: Send + 'static>(
+    mut worker: tokio::task::JoinHandle<T>,
+    budget: Duration,
+    user_cancel: Arc<AtomicBool>,
+    qualification_cancel: Arc<AtomicBool>,
+) -> SharedQualificationWait<T> {
+    // `run_qualification` checks its token before each probe. A pre-set
+    // deadline/cancel still joins the worker so no detached blocking task can
+    // outlive the diagnostic and race cleanup.
+    if user_cancel.load(Ordering::SeqCst) {
+        qualification_cancel.store(true, Ordering::SeqCst);
+        let _ = worker.await;
+        return SharedQualificationWait::Cancelled;
+    }
+    if budget.is_zero() {
+        qualification_cancel.store(true, Ordering::SeqCst);
+        let _ = worker.await;
+        return SharedQualificationWait::TimedOut;
+    }
+
+    tokio::select! {
+        biased;
+        result = &mut worker => SharedQualificationWait::Completed(result),
+        _ = wait_for_cancel(user_cancel) => {
+            qualification_cancel.store(true, Ordering::SeqCst);
+            // Do not detach. The transport/probe owns cancellation and must
+            // finish before the caller may clean up synthetic state.
+            let _ = worker.await;
+            SharedQualificationWait::Cancelled
+        }
+        _ = tokio::time::sleep(budget) => {
+            qualification_cancel.store(true, Ordering::SeqCst);
+            // Do not detach. This is the lifecycle invariant the diagnostic
+            // needs when a provider is slow or ignores the initial deadline.
+            let _ = worker.await;
+            SharedQualificationWait::TimedOut
+        }
     }
 }
 
@@ -2520,13 +2614,14 @@ async fn case_embedding_or_rerank(
     role: ModelRoleHint,
     credentials: &LiveCredentials,
     deadline: Instant,
+    cancel: Arc<AtomicBool>,
 ) -> CaseReport {
     let kind = if role == ModelRoleHint::Embedding {
         cd_core::capability_qualification::CapabilityKind::EmbeddingContract
     } else {
         cd_core::capability_qualification::CapabilityKind::RerankerContract
     };
-    let qual = run_shared_qualification(profile, model, credentials, deadline).await;
+    let qual = run_shared_qualification(profile, model, credentials, deadline, cancel).await;
     let requests_used = qual.requests_used;
     let mut direct = lane_from_qualification(Some(&qual), kind);
     direct.requests_used = requests_used;
@@ -2795,6 +2890,14 @@ fn artifact_root(paths: &Paths, out: &Option<PathBuf>, run_dir: &str) -> PathBuf
     out.clone()
         .unwrap_or_else(|| paths.cache_root.join("gateway-diagnostics"))
         .join(run_dir)
+}
+
+/// Stable relative reference for terminal and share-safe output. The command
+/// deliberately never projects the owner-local filesystem root here. Resolve
+/// this run directory under the caller's `--out` directory, or under the
+/// default `<data-dir>/cache/gateway-diagnostics` directory.
+fn artifact_reference(run_dir: &str) -> String {
+    run_id_for_dir(run_dir)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -3409,6 +3512,68 @@ mod tests {
         assert_eq!(*activity.lock().unwrap(), vec!["started", "cancelled"]);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn qualification_timeout_waits_for_worker_exit_before_cleanup_can_continue() {
+        // A stand-in for a provider operation that is stalled until the
+        // transport's existing cancel token is observed. The lifecycle helper
+        // must not return its timeout state before the worker records exit.
+        let user_cancel = Arc::new(AtomicBool::new(false));
+        let qualification_cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = qualification_cancel.clone();
+        let worker_exited = Arc::new(AtomicBool::new(false));
+        let exited_for_worker = worker_exited.clone();
+        let worker = tokio::spawn(async move {
+            while !worker_cancel.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            exited_for_worker.store(true, Ordering::SeqCst);
+        });
+
+        let outcome = await_shared_qualification(
+            worker,
+            Duration::from_secs(5),
+            user_cancel,
+            qualification_cancel.clone(),
+        )
+        .await;
+        assert!(matches!(outcome, SharedQualificationWait::TimedOut));
+        assert!(qualification_cancel.load(Ordering::SeqCst));
+        assert!(
+            worker_exited.load(Ordering::SeqCst),
+            "a caller may only enter cleanup after the qualification worker exited"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn qualification_user_cancel_waits_for_worker_exit_before_terminal_cancelled() {
+        let user_cancel = Arc::new(AtomicBool::new(false));
+        let qualification_cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = qualification_cancel.clone();
+        let worker_exited = Arc::new(AtomicBool::new(false));
+        let exited_for_worker = worker_exited.clone();
+        let worker = tokio::spawn(async move {
+            while !worker_cancel.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            exited_for_worker.store(true, Ordering::SeqCst);
+        });
+        let cancel_later = user_cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            cancel_later.store(true, Ordering::SeqCst);
+        });
+
+        let outcome = await_shared_qualification(
+            worker,
+            Duration::from_secs(60),
+            user_cancel,
+            qualification_cancel,
+        )
+        .await;
+        assert!(matches!(outcome, SharedQualificationWait::Cancelled));
+        assert!(worker_exited.load(Ordering::SeqCst));
+    }
+
     fn adversarial_case_detail(profile: &str, model: &str) -> String {
         let body = serde_json::json!({
             "error": {
@@ -3530,13 +3695,24 @@ mod tests {
             "useful category was lost: {case_jsonl}"
         );
         assert!(
-            !report
-                .artifact_dir
-                .as_deref()
-                .unwrap_or_default()
-                .starts_with('/'),
-            "machine output must use a relative artifact reference: {report_json}"
+            report.artifact_dir.as_deref() == Some(artifact_reference(&report.run_id).as_str()),
+            "terminal/share-safe output must remint a relative artifact reference: {report_json}"
         );
+    }
+
+    #[test]
+    fn mutation_absolute_artifact_path_is_never_projected_to_terminal_or_share_safe_output() {
+        let profile = "private-profile-73";
+        let model = "exact-model/customer-9";
+        let policy = ShareSafeRedactionPolicy::new([profile, model]);
+        let mut report = adversarial_report(profile, model);
+        sanitize_gateway_report(&mut report, &policy);
+        let expected = artifact_reference(&report.run_id);
+        let rendered = serde_json::to_string(&report).unwrap();
+        assert_eq!(report.artifact_dir.as_deref(), Some(expected.as_str()));
+        assert!(!rendered.contains("/private/tmp"));
+        assert!(!rendered.contains("/home/"));
+        assert!(!rendered.contains("\\\\"));
     }
 
     #[test]

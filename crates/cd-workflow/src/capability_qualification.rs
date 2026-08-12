@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Cancel registry key — one qualification run at a time.
 pub const QUALIFICATION_CANCEL_KEY: &str = "capability_qualification";
@@ -315,6 +316,30 @@ impl LiveQualificationTransport {
         }
     }
 
+    /// Poll the established qualification cancellation token while a
+    /// non-streamed provider future is in flight. Dropping reqwest's future
+    /// closes the in-flight operation; this is the same client and transport
+    /// used by ordinary qualification, not a diagnostic-specific client.
+    async fn await_or_cancel<T>(
+        cancel: &AtomicBool,
+        future: impl std::future::Future<Output = T>,
+    ) -> Result<T, ()> {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(());
+        }
+        tokio::pin!(future);
+        tokio::select! {
+            result = &mut future => Ok(result),
+            _ = Self::wait_for_cancel(cancel) => Err(()),
+        }
+    }
+
+    async fn wait_for_cancel(cancel: &AtomicBool) {
+        while !cancel.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     fn to_chat_messages(msgs: &[SyntheticMessage]) -> Vec<ChatMessage> {
         msgs.iter()
             .map(|m| {
@@ -498,11 +523,19 @@ impl LiveQualificationTransport {
         } else {
             // Honor typed chat mode (response_format / forced tool). Never discard;
             // never silent mid-turn downgrade when the gateway rejects the mode.
-            match client
-                .complete_with_mode(&messages, tools, &req.chat_mode)
-                .await
+            match Self::await_or_cancel(
+                cancel,
+                client.complete_with_mode(&messages, tools, &req.chat_mode),
+            )
+            .await
             {
-                Ok(comp) => Ok(Self::map_completion(
+                Err(()) => Ok(SyntheticChatResponse {
+                    cancelled: true,
+                    dialect: Some(dialect.as_str().into()),
+                    mode_transmitted: true,
+                    ..Default::default()
+                }),
+                Ok(Ok(comp)) => Ok(Self::map_completion(
                     comp.content,
                     comp.tool_calls,
                     false,
@@ -510,7 +543,7 @@ impl LiveQualificationTransport {
                     dialect,
                     true,
                 )),
-                Err(e) => Err(TransportError {
+                Ok(Err(e)) => Err(TransportError {
                     reason: redact_host_err(&e.to_string()),
                 }),
             }
@@ -547,8 +580,14 @@ impl LiveQualificationTransport {
         // Ollama client uses non-stream complete only. Never claim streamed=true
         // without observing real stream deltas — Streaming probe must degrade/fail honestly.
         // Only plain / prompted_json reach here (native modes refused above).
-        match client.complete(&messages, tools).await {
-            Ok(comp) => Ok(Self::map_completion(
+        match Self::await_or_cancel(cancel, client.complete(&messages, tools)).await {
+            Err(()) => Ok(SyntheticChatResponse {
+                cancelled: true,
+                dialect: Some(dialect.as_str().into()),
+                mode_transmitted: true,
+                ..Default::default()
+            }),
+            Ok(Ok(comp)) => Ok(Self::map_completion(
                 comp.content,
                 comp.tool_calls,
                 false,
@@ -556,7 +595,7 @@ impl LiveQualificationTransport {
                 dialect,
                 true, // plain/prompted modes were transmitted as ordinary chat
             )),
-            Err(e) => Err(TransportError {
+            Ok(Err(e)) => Err(TransportError {
                 reason: redact_host_err(&e.to_string()),
             }),
         }
@@ -624,8 +663,14 @@ impl LiveQualificationTransport {
                 }
             }
         } else {
-            match client.complete(&messages, tools).await {
-                Ok(comp) => Ok(Self::map_completion(
+            match Self::await_or_cancel(cancel, client.complete(&messages, tools)).await {
+                Err(()) => Ok(SyntheticChatResponse {
+                    cancelled: true,
+                    dialect: Some(dialect.as_str().into()),
+                    mode_transmitted: true,
+                    ..Default::default()
+                }),
+                Ok(Ok(comp)) => Ok(Self::map_completion(
                     comp.content,
                     comp.tool_calls,
                     false,
@@ -633,7 +678,7 @@ impl LiveQualificationTransport {
                     dialect,
                     true,
                 )),
-                Err(e) => Err(TransportError {
+                Ok(Err(e)) => Err(TransportError {
                     reason: redact_host_err(&e.to_string()),
                 }),
             }
@@ -1031,10 +1076,14 @@ pub fn preflight_inert_and_export_guard(sample: Option<&QualificationReportDto>)
 mod tests {
     use super::*;
     use cd_core::capability_qualification::{
-        ContractVerdict, ScriptedQualificationTransport, SyntheticChatResponse,
-        SYNTH_GENERATION_MARKER,
+        ContractVerdict, ScriptedQualificationTransport, SyntheticChatRequest,
+        SyntheticChatResponse, SyntheticMessage, SYNTH_GENERATION_MARKER,
     };
+    use cd_core::openai_chat_contract::OpenAiChatRequestMode;
     use cd_core::providers::{ProviderCapabilities, ProviderDeadlinePreference, ProviderKind};
+    use cd_test_gateway::{MockGateway, Step};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     fn sample_profile(tools: bool) -> ProviderProfile {
         ProviderProfile {
@@ -1054,6 +1103,61 @@ mod tests {
             },
             deadline_preference: ProviderDeadlinePreference::Auto,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_streaming_live_probe_cancellation_drops_a_stalled_provider_operation() {
+        // This intentionally stalls *after* a real request reaches the wire.
+        // The qualification transport must observe the existing shared token
+        // and return, rather than leaving the `spawn_blocking` qualification
+        // worker alive to race gateway-diagnostic cleanup.
+        let gateway = MockGateway::start_routed(|_| Step::Stall).await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_worker = cancel.clone();
+        let base_url = gateway.base_url().to_string();
+        let worker = tokio::task::spawn_blocking(move || {
+            let mut transport = LiveQualificationTransport::new(
+                LiveBackendKind::OpenAiCompatible,
+                base_url,
+                None,
+                false,
+            );
+            transport.chat_complete(
+                &SyntheticChatRequest {
+                    model_id: "synthetic-model".into(),
+                    messages: vec![SyntheticMessage {
+                        role: "user".into(),
+                        content: "synthetic-only".into(),
+                        tool_call_id: None,
+                        tool_calls: vec![],
+                    }],
+                    tools: vec![],
+                    stream: false,
+                    chat_mode: OpenAiChatRequestMode::Plain,
+                },
+                &cancel_for_worker,
+            )
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while gateway.request_count() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("stalled request reached the real qualification transport");
+
+        cancel.store(true, Ordering::SeqCst);
+        let response = tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("cancellation must drain the blocking qualification worker")
+            .expect("worker join")
+            .expect("transport result");
+        assert!(response.cancelled);
+        assert_eq!(
+            gateway.request_count(),
+            1,
+            "cancel must not retry the stalled probe"
+        );
     }
 
     #[test]
