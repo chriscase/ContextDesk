@@ -321,7 +321,7 @@ pub fn resolve_v2_production(
                 contributors: contributor_slots,
                 finalizer: None,
                 reviewer: None,
-                budget: policy.budget.clone(),
+                budget: policy.budget,
                 execution: policy.execution,
             };
             let contributor_preflight = TriagePolicyPreflightV2 {
