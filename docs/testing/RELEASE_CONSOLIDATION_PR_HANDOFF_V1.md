@@ -62,6 +62,11 @@ Recommended links:
 
 ## Required remote gates before merge
 
+The required CI workflow is configured for `pull_request` events (and pushes
+to `main`), not arbitrary feature-branch pushes. Opening the PR is therefore
+what starts the authoritative multi-OS checks; a local or branch-only run is
+not a substitute.
+
 1. Full GitHub CI, including Windows/source-build and secret/privacy scans.
 2. Independent exact-SHA review of the code pin and acceptance procedure.
 3. Review of the open issue criteria (#861, #863–#872); leave deliberately
