@@ -3,16 +3,17 @@
 Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
-- branch: `integrate/triage-policy-sdk-v2`
-- exact tested source/build SHA: `fcfdd30d1e52ee0fa379cce4682a79c51ce252c6`
+- branch: `integrate/release-consolidation-v1`
+- exact tested source/build SHA: `160deb66cf64e77e5ffc37865f25817a7b0f2fc8`
 - acceptance-procedure revision: this branch tip may be newer than the build
   SHA; fetch the branch first, then build the exact tested SHA above. This
   avoids an impossible self-referential commit hash in the procedure itself.
 
 The exact tested source/build SHA above is the identity that must be fetched, built, and
 verified. Do not substitute an older baseline, a moving branch tip, or an
-unrelated local checkout. There is not yet live Vercel evidence for this exact
-runtime. The prior report
+unrelated local checkout. The live evidence ledger is in
+`docs/testing/RELEASE_LIVE_EVIDENCE_V1.md`; it records separate Vercel and
+employer observations and does not make a universal model claim. The prior report
 `docs/testing/VERCEL_DEEPSEEK_DIAGNOSTIC_2026-08-12_RELEASE_A3A5263E.md`
 is historical evidence for the preceding code SHA only; it is useful
 transport/product-path evidence, but it is not an employer-gateway
