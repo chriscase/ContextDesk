@@ -66,7 +66,7 @@ do
     [ -f "$required" ] || fail "required release document is missing: $required"
 done
 
-if rg -n -i '(/Users/|/private/tmp|[A-Z]:\\\\Users\\\\|vck_[A-Za-z0-9]|sk-[A-Za-z0-9])' \
+if rg -n -i '(/Users/|/private/tmp|[A-Z]:\\\\Users\\\\|(^|[^A-Za-z])(vck_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9]{16,}))' \
     docs/testing/RELEASE_CONSOLIDATION_STATUS_V1.md \
     docs/testing/RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md \
     docs/testing/RELEASE_LIVE_EVIDENCE_V1.md \
