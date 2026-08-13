@@ -58,6 +58,20 @@ named runs; they do not create universal model or gateway badges.
 Those issue bodies still contain unchecked acceptance criteria, so none were
 auto-closed or relabeled as complete during consolidation.
 
+As of the final audit, the superseded PRs remain open and were not modified:
+
+- #860: `integrate/evidence-investigation-final-rc2` → `main`, head
+  `677a3b621b92c5c88b21b684cce677b63d70dbd9`, non-draft and mergeable but
+  superseded by this candidate.
+- #870: `agent/gateway-diagnostic-budget` → `integrate/acceptance-release-v1`,
+  head `17a854f506561634f63d07c9d83cbd5af70057f6`, draft and conflicting.
+- #871: `agent/gateway-diagnostic-redaction` →
+  `integrate/acceptance-release-v1`, head
+  `61f9fc1019d76b39590097c228b2bd92a7952109`, draft and conflicting.
+
+They require owner-approved retirement after the replacement PR is accepted;
+closing them now would erase useful historical review context.
+
 No new feature feedback is part of this candidate unless it identifies a
 release-blocking defect. The current shared build target is retained for
 reproducibility; only missing worktree registrations and disposable verification
