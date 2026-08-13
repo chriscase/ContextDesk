@@ -10,7 +10,7 @@ PRs remain approval-gated.
 - Branch: `integrate/release-consolidation-v1`
 - Current documentation tip: resolve `git rev-parse HEAD` after fetching the
   branch; documentation-only commits may advance it.
-- Exact code/build pin: `93ede3a28b0e14096d461c3c5a8d9f2af4e68451`
+- Exact code/build pin: `74bd160e90d8f179b1784418a717884787ab6018`
 - Expected merge simulation: clean against `origin/main`
 
 The documentation tip is intentionally newer than the code pin. Build and
@@ -30,7 +30,7 @@ documentation-only evidence and handoff notes.
   provider-free preflight under local `pwsh`
 - Claims, CLI docs, protocol fixtures, evidence-drift, packaging, and media
   checks: pass
-- Exact source binary identity verified as `git=93ede3a28b0e`; binary SHA-256 is
+- Exact source binary identity verified as `git=74bd160e90d8`; binary SHA-256 is
   recorded in the consolidation status document.
 - Vercel and employer DeepSeek product-path evidence is recorded in
   `RELEASE_LIVE_EVIDENCE_V1.md`
