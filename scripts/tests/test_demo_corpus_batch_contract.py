@@ -7,8 +7,10 @@ the aggregate report.
 """
 
 from pathlib import Path
+import json
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 
@@ -85,6 +87,51 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
             "if ($errors.Count -ne 0) { $errors | % Message; exit 1 }"
         )
         subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-Command", command], check=True)
+
+    def test_powershell_preflight_executes_when_available(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell is not installed on this development host")
+        with tempfile.TemporaryDirectory(dir=ROOT.parent) as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            source_dir = root / "source"
+            source_dir.mkdir()
+            source = source_dir / "input.log"
+            source.write_text("fixture\n", encoding="utf-8")
+            cli = root / "fake-contextdesk.ps1"
+            cli.write_text(
+                "param([Parameter(ValueFromRemainingArguments=$true)][object[]]$Rest)\n"
+                "Write-Output '{\"schema_version\":1,\"ok\":true,"
+                "\"command\":\"normalize\",\"data\":{\"events\":1,"
+                "\"sources_selected\":1,\"sources_failed\":0,\"partial\":false}}'\n",
+                encoding="utf-8",
+            )
+            output = root / "output"
+            completed = subprocess.run(
+                [
+                    pwsh,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-File",
+                    str(SCRIPT),
+                    "-Cli",
+                    str(cli),
+                    "-DataDir",
+                    str(data_dir),
+                    "-Source",
+                    str(source),
+                    "-OutputRoot",
+                    str(output),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8-sig"))
+            self.assertTrue(report["all_required_passed"])
 
 
 if __name__ == "__main__":

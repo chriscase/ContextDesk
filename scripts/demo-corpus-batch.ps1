@@ -112,7 +112,7 @@ function Test-ReparsePointInExistingPath {
                 return $true
             }
         }
-        $parent = Split-Path -LiteralPath $candidate -Parent
+        $parent = [System.IO.Path]::GetDirectoryName($candidate)
         if ([string]::IsNullOrWhiteSpace($parent) -or $parent -ceq $candidate) { break }
         $candidate = $parent
     }
@@ -256,7 +256,7 @@ $scriptRepoRoot = Get-CanonicalPath (Split-Path -Parent $PSScriptRoot) -MustExis
 if (Test-ReparsePointInExistingPath $outputFull) {
     throw 'OutputRoot and its existing parents must not contain a symlink, junction, or other reparse point.'
 }
-if (Test-PathSameOrWithin $outputFull $dataFull -or Test-PathSameOrWithin $dataFull $outputFull) {
+if ((Test-PathSameOrWithin $outputFull $dataFull) -or (Test-PathSameOrWithin $dataFull $outputFull)) {
     throw 'OutputRoot and DataDir must be separate trees.'
 }
 if (Test-PathSameOrWithin $outputFull $scriptRepoRoot) {
@@ -270,9 +270,9 @@ foreach ($sourceFull in $Source) {
     $sourceRoot = if ($sourceItem.PSIsContainer) {
         $sourceFull
     } else {
-        Split-Path -LiteralPath $sourceFull -Parent
+        [System.IO.Path]::GetDirectoryName($sourceFull)
     }
-    if (Test-PathSameOrWithin $outputFull $sourceRoot -or Test-PathSameOrWithin $sourceRoot $outputFull) {
+    if ((Test-PathSameOrWithin $outputFull $sourceRoot) -or (Test-PathSameOrWithin $sourceRoot $outputFull)) {
         throw 'OutputRoot must be outside every source tree in both directions.'
     }
 }
