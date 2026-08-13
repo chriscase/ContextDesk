@@ -77,6 +77,13 @@ metacharacters literal. If a question begins with a command name such as
 | `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
 | `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
 
+For a serial, multi-corpus demonstration that reuses these same CLI paths,
+see [`scripts/demo-corpus-batch.ps1`](../scripts/demo-corpus-batch.ps1) and the
+[multi-corpus runbook](DEMO_RUNBOOK.md#c1-multi-corpus-demonstration-serial-production-cli-path).
+It is a thin acceptance/demo orchestrator, not a second provider client. Its
+preflight is offline; execution is explicit, one selected model and one turn
+per corpus, with local raw artifacts and an aggregate report.
+
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
 to a live binary when `CONTEXTDESK_BIN` is set.
 

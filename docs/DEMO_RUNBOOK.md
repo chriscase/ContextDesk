@@ -174,6 +174,59 @@ $BIN --data-dir "$DATA" --json chat --dry-run --activity summary \
 Live chat (optional): omit `--dry-run` after `contextdesk config init` /
 provider setup; **Expect:** grounded final text + citations when tools work.
 
+### C1. Multi-corpus demonstration (serial, production CLI path)
+
+For a short demonstration covering several inputs, use the checked-in
+`scripts/demo-corpus-batch.ps1` harness on Windows. It is intentionally a
+thin orchestrator around the binary above: it does not implement HTTP, model
+parsing, retrieval, or a second agent loop.
+
+First run the provider-free preflight. It normalizes each selected source into
+a fresh output directory and verifies any existing corpus ids, but it does not
+import, read credentials, or contact a gateway:
+
+```powershell
+.\scripts\demo-corpus-batch.ps1 `
+  -Cli .\contextdesk.exe `
+  -DataDir "$env:LOCALAPPDATA\ContextDesk\demo-batch" `
+  -Source .\case-a.zip, .\case-b `
+  -OutputRoot .\demo-batch-preflight
+```
+
+After reviewing the preflight report, run the selected cases serially. The
+example below uses the exact catalog id returned by model discovery; substitute
+the model actually selected on the user's gateway. `-AllowImport` is required
+because source imports change the specified data directory:
+
+```powershell
+.\scripts\demo-corpus-batch.ps1 `
+  -Cli .\contextdesk.exe `
+  -DataDir "$env:LOCALAPPDATA\ContextDesk\demo-batch" `
+  -Source .\case-a.zip, .\case-b `
+  -OutputRoot .\demo-batch-run `
+  -Execute -AllowImport `
+  -Model "qwen-3.6-27b" -Deadline 10m
+```
+
+To use already imported corpora without mutating them, pass explicit ids and
+omit `-AllowImport` (the script still requires `-Execute` for provider calls):
+
+```powershell
+.\scripts\demo-corpus-batch.ps1 `
+  -Cli .\contextdesk.exe `
+  -DataDir "$env:LOCALAPPDATA\ContextDesk\acceptance-rc2" `
+  -CorpusId "<exact-corpus-id-1>", "<exact-corpus-id-2>" `
+  -OutputRoot .\demo-batch-run `
+  -Execute -Model "qwen-3.6-27b" -Deadline 10m
+```
+
+Each case receives exactly one `--mode single` turn with `--trace summary`
+and `--activity summary`; there is no retry or concurrent execution. Raw
+JSONL/stdout and stderr are retained under `raw-local-only/` for local
+debugging and test fixture extraction. Share only `report.json` or
+`report.md` after inspecting them: `grounding=grounded` certifies host citation
+identity, not the model's causal interpretation or completeness.
+
 ### D. Timezone review fixture (when demonstrating ambiguity)
 
 ```bash
