@@ -123,12 +123,12 @@ the protected main checkout and the dirty acceptance checkout were not touched:
 
 | Removed worktree | Preserved branch |
 | --- | --- |
-| `/private/tmp/contextdesk-demo-batch-v1` | `integrate/demo-batch-v1` |
-| `/private/tmp/contextdesk-final-integration` | `integrate/acceptance-release-v1-final` |
-| `/private/tmp/contextdesk-multimodel-v2` | `feat/multimodel-contribution-reconcile-v1` |
-| `/private/tmp/contextdesk-release-quality-v2` | `integrate/release-quality-v2` |
-| `/private/tmp/contextdesk-telemetry-summary-authority-v1` | `fix/telemetry-summary-authority-v1` |
-| `/private/tmp/contextdesk-triage-policy-sdk-v2` | `integrate/triage-policy-sdk-v2` |
+| `contextdesk-demo-batch-v1` | `integrate/demo-batch-v1` |
+| `contextdesk-final-integration` | `integrate/acceptance-release-v1-final` |
+| `contextdesk-multimodel-v2` | `feat/multimodel-contribution-reconcile-v1` |
+| `contextdesk-release-quality-v2` | `integrate/release-quality-v2` |
+| `contextdesk-telemetry-summary-authority-v1` | `fix/telemetry-summary-authority-v1` |
+| `contextdesk-triage-policy-sdk-v2` | `integrate/triage-policy-sdk-v2` |
 
 No uncommitted files were present in those worktrees. The shared Rust target
 and all unmerged or dirty worktrees were retained.
