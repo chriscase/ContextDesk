@@ -80,6 +80,13 @@ metacharacters literal. If a question begins with a command name such as
 | `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
 | `gateway ledger` | Offline cost/reliability comparison over share-safe diagnostic bundles and documented historical rows. Never makes live calls; never emits readiness claims from aggregates. See [Gateway cost/reliability ledger](benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md). |
 
+For a serial, multi-corpus demonstration that reuses these same CLI paths,
+see [`scripts/demo-corpus-batch.ps1`](../scripts/demo-corpus-batch.ps1) and the
+[multi-corpus runbook](DEMO_RUNBOOK.md#c1-multi-corpus-demonstration-serial-production-cli-path).
+It is a thin acceptance/demo orchestrator, not a second provider client. Its
+preflight is offline; execution is explicit, one selected model and one turn
+per corpus, with local raw artifacts and an aggregate report.
+
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
 to a live binary when `CONTEXTDESK_BIN` is set.
 
@@ -1210,6 +1217,16 @@ PowerShell, set its output encoding first:
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 $OutputEncoding = [Console]::OutputEncoding
 ```
+
+For a corpus-linked text turn, the CLI buffers the finished answer and emits
+a compact investigation report: the question, analyst model, elapsed time,
+grounding state, validation tier, and the model's formatted observations,
+candidate causes, symptoms, competing explanations, recovery signals, and
+missing evidence. A typed host envelope is labeled `HOST-VALIDATED`; a
+nonempty narrative without that envelope is still shown as
+`PROVISIONAL — human review recommended` rather than discarded. This report
+is presentation-only: `--json` and `--jsonl` retain their stable envelope
+and streaming contracts.
 
 Ctrl-C during `chat` sets the same
 cooperative cancel flag `run_chat_workflow` already accepts (the same

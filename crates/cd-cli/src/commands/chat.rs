@@ -214,6 +214,10 @@ pub async fn run(
     let stdout_is_tty = io::stdout().is_terminal();
     let jsonl = matches!(format, OutputFormat::Jsonl);
     let text = matches!(format, OutputFormat::Text);
+    // Corpus-linked answers get a finished report so the question, model, and
+    // validation tier remain visible together. Ordinary chat keeps its
+    // existing streaming projection.
+    let render_investigation = text && corpus_id.is_some();
 
     // The renderer must exist and announce itself BEFORE any fallible setup
     // step, not just before the turn itself — `tool_host` below can fail
@@ -316,7 +320,7 @@ pub async fn run(
         } else if text {
             if let StreamEvent::TextDelta { text } = &event {
                 let clean = terminal_text.push(text);
-                if implicit_chat {
+                if implicit_chat || render_investigation {
                     buffered_answer.push_str(&clean);
                 } else {
                     chat_renderer.on_event(&event);
@@ -554,7 +558,11 @@ pub async fn run(
 
     match format {
         OutputFormat::Text => {
-            if withheld_error.is_none() && !outcome.final_text.is_empty() && !implicit_chat {
+            if withheld_error.is_none()
+                && !outcome.final_text.is_empty()
+                && !implicit_chat
+                && !render_investigation
+            {
                 println!();
             }
             // Status line first — never interleave with trace/activity sections.
@@ -563,13 +571,45 @@ pub async fn run(
                     message: &error.message,
                 });
             } else {
-                let grounding = grounding_status(corpus_id.as_deref(), &outcome.events);
+                let typed_answer = investigation_answer_from_events(&outcome.events).is_some();
+                let grounding = if corpus_id.is_some()
+                    && !typed_answer
+                    && !outcome.final_text.trim().is_empty()
+                {
+                    "provisional"
+                } else {
+                    grounding_status(corpus_id.as_deref(), &outcome.events)
+                };
                 chat_renderer.finish(ChatOutcomeSummary::Ok {
                     session_id: &outcome.session_id,
                     grounding,
                 });
             }
-            if implicit_chat && withheld_error.is_none() {
+            if render_investigation && withheld_error.is_none() {
+                let answer = if buffered_answer.trim().is_empty() {
+                    &outcome.final_text
+                } else {
+                    &buffered_answer
+                };
+                let typed_answer = investigation_answer_from_events(&outcome.events).is_some();
+                let grounding = if typed_answer {
+                    grounding_status(corpus_id.as_deref(), &outcome.events)
+                } else {
+                    "provisional"
+                };
+                print!(
+                    "{}",
+                    crate::answer_render::render_investigation(
+                        &question,
+                        answer,
+                        &outcome.chat_model,
+                        elapsed_ms,
+                        typed_answer,
+                        grounding,
+                        color,
+                    )
+                );
+            } else if implicit_chat && withheld_error.is_none() {
                 let answer = if buffered_answer.trim().is_empty() {
                     &outcome.final_text
                 } else {

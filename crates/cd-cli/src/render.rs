@@ -539,6 +539,7 @@ fn human_grounding_label(grounding: &str) -> &'static str {
     match grounding {
         "grounded" => "citations checked; interpretation unverified",
         "ungrounded" => "citation check failed",
+        "provisional" => "provisional model narrative; review recommended",
         _ => "no corpus evidence check",
     }
 }
@@ -693,6 +694,10 @@ mod tests {
         assert_eq!(
             human_grounding_label("not_applicable"),
             "no corpus evidence check"
+        );
+        assert_eq!(
+            human_grounding_label("provisional"),
+            "provisional model narrative; review recommended"
         );
     }
 
