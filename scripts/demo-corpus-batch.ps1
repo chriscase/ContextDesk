@@ -263,6 +263,9 @@ if (Test-PathSameOrWithin $outputFull $scriptRepoRoot) {
     throw 'OutputRoot must be outside the ContextDesk checkout to prevent corpus-derived artifacts entering the repository.'
 }
 foreach ($sourceFull in $Source) {
+    if (Test-ReparsePointInExistingPath $sourceFull) {
+        throw 'Source inputs and their existing parents must not contain a symlink, junction, or other reparse point.'
+    }
     $sourceItem = Get-Item -LiteralPath $sourceFull -ErrorAction Stop
     if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'Source inputs must not be symlinks, junctions, or other reparse points.'

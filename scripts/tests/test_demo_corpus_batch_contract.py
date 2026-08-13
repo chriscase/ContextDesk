@@ -73,6 +73,7 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
         self.assertIn("OutputRoot and DataDir must be separate trees.", self.source)
         self.assertIn("OutputRoot and its existing parents must not contain a symlink", self.source)
         self.assertIn("Source inputs must not be symlinks", self.source)
+        self.assertIn("Source inputs and their existing parents must not contain a symlink", self.source)
         self.assertIn("OutputRoot must be outside the ContextDesk checkout", self.source)
         self.assertIn("OutputRoot must be outside every source tree in both directions.", self.source)
 
