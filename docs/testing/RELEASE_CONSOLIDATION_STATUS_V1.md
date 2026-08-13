@@ -52,6 +52,9 @@ named runs; they do not create universal model or gateway badges.
 4. Audit open issues #861, #863–#872 and record which acceptance criteria are
    complete versus deliberately deferred to the next development cycle.
 
+Those issue bodies still contain unchecked acceptance criteria, so none were
+auto-closed or relabeled as complete during consolidation.
+
 No new feature feedback is part of this candidate unless it identifies a
 release-blocking defect. The current shared build target is retained for
 reproducibility; only missing worktree registrations and disposable verification
