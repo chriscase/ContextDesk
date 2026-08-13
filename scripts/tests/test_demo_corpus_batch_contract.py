@@ -51,8 +51,10 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
             "function Test-ReparsePointInExistingPath",
             "function Get-CanonicalPath",
             "function Get-StrictBool",
+            "function Get-StrictString",
             "Malformed = $malformed",
             "--fail-on-partial",
+            "time_unresolved",
             "error_events",
             "validation_tier",
             "$liveTrace = $dryRun -eq $false",
@@ -107,7 +109,8 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
                 "param([Parameter(ValueFromRemainingArguments=$true)][object[]]$Rest)\n"
                 "Write-Output '{\"schema_version\":1,\"ok\":true,"
                 "\"command\":\"normalize\",\"data\":{\"events\":1,"
-                "\"sources_selected\":1,\"sources_failed\":0,\"partial\":false}}'\n",
+                "\"sources_selected\":1,\"sources_failed\":0,\"partial\":false,"
+                "\"time_unresolved\":0}}'\n",
                 encoding="utf-8",
             )
             output = root / "output"
@@ -134,6 +137,39 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
             report = json.loads((output / "report.json").read_text(encoding="utf-8-sig"))
             self.assertTrue(report["all_required_passed"])
+
+            unresolved_output = root / "unresolved-output"
+            cli.write_text(
+                cli.read_text(encoding="utf-8").replace(
+                    '"time_unresolved":0', '"time_unresolved":1'
+                ),
+                encoding="utf-8",
+            )
+            unresolved = subprocess.run(
+                [
+                    pwsh,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-File",
+                    str(SCRIPT),
+                    "-Cli",
+                    str(cli),
+                    "-DataDir",
+                    str(data_dir),
+                    "-Source",
+                    str(source),
+                    "-OutputRoot",
+                    str(unresolved_output),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(unresolved.returncode, 0)
+            unresolved_report = json.loads(
+                (unresolved_output / "report.json").read_text(encoding="utf-8-sig")
+            )
+            self.assertFalse(unresolved_report["all_required_passed"])
 
 
 if __name__ == "__main__":

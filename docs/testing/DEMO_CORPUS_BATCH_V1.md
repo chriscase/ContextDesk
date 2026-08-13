@@ -43,9 +43,9 @@ parses a model response as authority.
   default. The default output root is the operating system temporary directory;
   an explicitly supplied root is rejected if it contains (or is contained by)
   the data directory, the ContextDesk checkout, or any source tree.
-  Existing output parents and source inputs may not be symlinks/junctions/
-  reparse points, so lexical containment checks cannot be bypassed through an
-  alias.
+  Existing parents of the output, data directory, checkout, and source inputs
+  may not be symlinks/junctions/reparse points, so lexical containment checks
+  cannot be bypassed through an alias.
 - Each successful turn also gets a local `case-XX-answer.md` projection so a
   developer can review the actual answer without decoding JSONL. It is in the
   same non-share-safe class as the raw capture.

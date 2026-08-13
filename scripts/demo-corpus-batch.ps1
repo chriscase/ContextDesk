@@ -173,7 +173,15 @@ function Number-From {
     foreach ($name in $Names) {
         $property = $Object.PSObject.Properties[$name]
         if ($null -ne $property -and $null -ne $property.Value) {
-            try { return [int64]$property.Value } catch { }
+            $typeCode = [System.Type]::GetTypeCode($property.Value.GetType())
+            if ($typeCode -in @(
+                [System.TypeCode]::SByte, [System.TypeCode]::Byte,
+                [System.TypeCode]::Int16, [System.TypeCode]::UInt16,
+                [System.TypeCode]::Int32, [System.TypeCode]::UInt32,
+                [System.TypeCode]::Int64, [System.TypeCode]::UInt64
+            )) {
+                try { return [int64]$property.Value } catch { }
+            }
         }
     }
     return $null
@@ -185,6 +193,15 @@ function Get-StrictBool {
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property -or $property.Value -isnot [bool]) { return $null }
     return [bool]$property.Value
+}
+
+function Get-StrictString {
+    param([object] $Object, [string] $Name)
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property -or $property.Value -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($property.Value)) { return $null }
+    return [string]$property.Value
 }
 
 function New-CaseResult {
@@ -328,9 +345,11 @@ foreach ($sourcePath in $Source) {
     $preflightEvents = Number-From $data @('events_imported', 'events', 'record_count')
     $preflightSelected = Number-From $data @('sources_selected', 'selected_sources')
     $preflightFailed = Number-From $data @('sources_failed', 'failed_sources')
+    $preflightUnresolved = Number-From $data @('time_unresolved')
     $preflightOk = $preflightEnvelopeOk -eq $true -and $exit -eq 0 -and
         $preflightPartial -eq $false -and ($preflightEvents -as [int64]) -gt 0 -and
-        ($preflightSelected -as [int64]) -gt 0 -and ($preflightFailed -as [int64]) -eq 0
+        ($preflightSelected -as [int64]) -gt 0 -and ($preflightFailed -as [int64]) -eq 0 -and
+        $preflightUnresolved -eq 0
     $case.preflight = [ordered]@{
         status = if ($preflightOk) { 'pass' } else { 'fail' }
         exit_code = $exit
@@ -339,6 +358,7 @@ foreach ($sourcePath in $Source) {
         events = $preflightEvents
         sources = $preflightSelected
         failed_sources = $preflightFailed
+        timezone_unresolved_records = $preflightUnresolved
         error_code = if ($null -ne $envelope.error) { Safe-Code $envelope.error.kind } else { $null }
     }
 
@@ -364,9 +384,13 @@ foreach ($sourcePath in $Source) {
         $importEvents = Number-From $importData @('events_imported', 'events')
         $importSelected = Number-From $importData @('sources_selected', 'selected_sources')
         $importFailed = Number-From $importData @('sources_failed', 'failed_sources')
+        $importTimezoneProperty = if ($null -ne $importData) {
+            $importData.PSObject.Properties['timezone_ambiguous_sources']
+        } else { $null }
+        $importTimezoneShapeOk = $null -ne $importTimezoneProperty -and
+            $importTimezoneProperty.Value -is [System.Array]
         $importAmbiguous = 0
-        if ($null -ne $importData -and
-            $null -ne $importData.PSObject.Properties['timezone_ambiguous_sources']) {
+        if ($importTimezoneShapeOk) {
             $importAmbiguous = @($importData.timezone_ambiguous_sources | Where-Object {
                 -not [string]::IsNullOrWhiteSpace([string]$_)
             }).Count
@@ -375,7 +399,8 @@ foreach ($sourcePath in $Source) {
             $importExit -eq 0 -and $importPartial -eq $false -and
             -not [string]::IsNullOrWhiteSpace($importId) -and
             ($importEvents -as [int64]) -gt 0 -and
-            ($importSelected -as [int64]) -gt 0 -and ($importFailed -as [int64]) -eq 0
+            ($importSelected -as [int64]) -gt 0 -and ($importFailed -as [int64]) -eq 0 -and
+            $importTimezoneShapeOk
         $case.import = [ordered]@{
             status = if (-not $importOperationalOk) { 'fail' } elseif ($importAmbiguous -gt 0) { 'needs-timezone' } else { 'pass' }
             exit_code = $importExit
@@ -439,10 +464,12 @@ if ($CorpusId.Count -gt 0) {
         $tzArgs.Add($cid)
         $tzExit = Invoke-CliCapture $tzArgs $tzStdout $tzStderr
         $tzEnvelope = Read-JsonEnvelope $tzStdout
-        $tzSources = if ($null -ne $tzEnvelope -and $null -ne $tzEnvelope.data.sources) {
-            @($tzEnvelope.data.sources)
-        } else { @() }
-        $tzShapeOk = $tzSources.Count -gt 0
+        $tzSourcesProperty = if ($null -ne $tzEnvelope -and $null -ne $tzEnvelope.data) {
+            $tzEnvelope.data.PSObject.Properties['sources']
+        } else { $null }
+        $tzShapeOk = $null -ne $tzSourcesProperty -and
+            $tzSourcesProperty.Value -is [System.Array]
+        $tzSources = if ($tzShapeOk) { @($tzSourcesProperty.Value) } else { @() }
         $tzUnresolved = 0
         foreach ($tzSource in $tzSources) {
             $unresolved = Number-From $tzSource @('unresolved_local_records')
@@ -504,10 +531,22 @@ if ($Execute) {
         $chatExit = Invoke-CliCapture $args $stdout $stderr
         $parsed = Read-JsonLines $stdout
         $lines = @($parsed.Values)
-        $done = @($lines | Where-Object { $_.operation -eq 'done' })
-        $trace = @($lines | Where-Object { $_.operation -eq 'trace_summary' })
-        $errorLines = @($lines | Where-Object { $_.operation -eq 'error' })
-        $typed = @($lines | Where-Object { $_.operation -eq 'investigation_answer' }).Count -gt 0
+        $streamShapeOk = $lines.Count -gt 0
+        foreach ($line in $lines) {
+            if ((Get-StrictString $line 'schema') -cne 'contextdesk.cli.stream.v1' -or
+                (Number-From $line @('version')) -ne 1 -or
+                $null -eq (Get-StrictString $line 'operation') -or
+                $null -eq (Get-StrictString $line 'type') -or
+                $null -eq (Number-From $line @('seq'))) {
+                $streamShapeOk = $false
+            }
+        }
+        $done = @($lines | Where-Object { $_.operation -eq 'done' -and $_.type -eq 'done' })
+        $trace = @($lines | Where-Object { $_.operation -eq 'trace_summary' -and $_.type -eq 'trace_summary' })
+        $errorLines = @($lines | Where-Object { $_.operation -eq 'error' -or $_.type -eq 'error' })
+        $typed = @($lines | Where-Object {
+            $_.operation -eq 'investigation_answer' -and $_.type -eq 'investigation_answer'
+        }).Count -gt 0
         $doneOk = $false
         if ($done.Count -eq 1) {
             $doneOk = (Get-StrictBool $done[0] 'ok') -eq $true
@@ -523,7 +562,7 @@ if ($Execute) {
         }
         $grounding = if ($trace.Count -eq 1) { Safe-Code $trace[0].grounding } else { $null }
         $quality = if ($typed) { 'host_validated' } elseif ($grounding -eq 'grounded') { 'provisional' } else { 'not_grounded' }
-        $triageOperationalOk = $chatExit -eq 0 -and $parsed.Malformed -eq 0 -and
+        $triageOperationalOk = $chatExit -eq 0 -and $parsed.Malformed -eq 0 -and $streamShapeOk -and
             $parsed.NonEmpty -gt 0 -and $done.Count -eq 1 -and
             $lastOperation -eq 'done' -and $doneOk -and
             -not [string]::IsNullOrWhiteSpace($answerText) -and
