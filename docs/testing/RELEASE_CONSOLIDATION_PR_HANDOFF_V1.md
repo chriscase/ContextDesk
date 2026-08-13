@@ -53,6 +53,12 @@ The PR description should link the status and acceptance documents and should
 state that live evidence is model/gateway-specific, not a universal readiness
 badge.
 
+Recommended links:
+
+- [consolidation status](RELEASE_CONSOLIDATION_STATUS_V1.md)
+- [source acceptance procedure](SOURCE_ACCEPTANCE_PROCEDURE_RELEASE_V1.md)
+- [share-safe live evidence](RELEASE_LIVE_EVIDENCE_V1.md)
+
 ## Required remote gates before merge
 
 1. Full GitHub CI, including Windows/source-build and secret/privacy scans.
