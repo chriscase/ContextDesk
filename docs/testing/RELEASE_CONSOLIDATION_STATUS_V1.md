@@ -8,7 +8,8 @@ code/build identity from the later documentation commits.
 
 ## Identity and ancestry
 
-- Consolidation branch tip: `2dc828beb282f5c338b4a60f3cea454f2d57aea2`
+- Consolidation code/evidence tip before this status record: `2dc828beb282f5c338b4a60f3cea454f2d57aea2`
+- Current documentation tip: resolve `git rev-parse HEAD` after fetching the branch
 - Exact code/build pin: `160deb66cf64e77e5ffc37865f25817a7b0f2fc8`
 - Accepted triage runtime ancestor: `fcfdd30d1e52ee0fa379cce4682a79c51ce252c6`
 - Successful demo branch ancestor: `0638e2776d9e68e936302b8be6aa757b62690dcf`
