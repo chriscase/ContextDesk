@@ -59,3 +59,32 @@ No new feature feedback is part of this candidate unless it identifies a
 release-blocking defect. The current shared build target is retained for
 reproducibility; only missing worktree registrations and disposable verification
 worktrees have been pruned.
+
+## Post-demo lane review
+
+The latest delegated lanes were reviewed against this candidate before the
+release handoff:
+
+- Claude's `contextdesk/adversarial-verify-m82zyb` is historical evidence for
+  the earlier `a3a5263e` baseline. Its Ollama timeout fix is already present in
+  this candidate; its qualification tests document cancellation residuals but
+  do not represent a current-head review.
+- Claude's `retrieval-safety-pass-88408b8` closes five real retrieval-diagnostic
+  safety gaps, but its production patch is based on `88408b8` and conflicts
+  with the later embedding/rerank transport contracts already in this
+  candidate. It is therefore preserved as a follow-up lane, not merged by
+  guesswork into the release candidate.
+- The Triage Policy V2 runner lane remains a substantial experimental
+  contributor-led SDK/CLI slice. Its own report says Tauri/server selection,
+  finalizer/reviewer execution, retrieval specialists, and live-provider
+  evidence remain open; it is not required for the successful single-model
+  demo and remains next-cycle work.
+- The Grok adversarial policy and qualification audits are hermetic, historical
+  test evidence on earlier ancestors. Their covered invariants are represented
+  by the current workspace gates or remain tracked in the open issues; no
+  source changes were copied without a current-head review.
+
+This review found no new release-blocking defect in the accepted demo path.
+The retrieval safety pass is the highest-value follow-up after the release
+candidate is accepted; it must be rebased and re-gated rather than cherry-
+picked across conflicting transport code.
