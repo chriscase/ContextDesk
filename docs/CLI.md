@@ -1147,6 +1147,16 @@ PowerShell, set its output encoding first:
 $OutputEncoding = [Console]::OutputEncoding
 ```
 
+For a corpus-linked text turn, the CLI buffers the finished answer and emits
+a compact investigation report: the question, analyst model, elapsed time,
+grounding state, validation tier, and the model's formatted observations,
+candidate causes, symptoms, competing explanations, recovery signals, and
+missing evidence. A typed host envelope is labeled `HOST-VALIDATED`; a
+nonempty narrative without that envelope is still shown as
+`PROVISIONAL — human review recommended` rather than discarded. This report
+is presentation-only: `--json` and `--jsonl` retain their stable envelope
+and streaming contracts.
+
 Ctrl-C during `chat` sets the same
 cooperative cancel flag `run_chat_workflow` already accepts (the same
 mechanism `contextdesk doctor`'s own live-turn checks use, see
