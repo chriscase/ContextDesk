@@ -119,16 +119,22 @@ pub fn normalize_offline(
     )?;
     check_cancel(cancel)?;
 
-    // Ephemeral cache + private staging for JSONL publish.
+    // Keep the ingest database in the OS temp root instead of nesting it under
+    // the user-selected output parent. The ingest store adds several private
+    // staging/corpus components; output-relative placement can exceed legacy
+    // Windows path limits before DuckDB opens `events.duckdb`.
+    let cache_root_guard = create_ephemeral_cache_root()?;
+    let cache_root = cache_root_guard.path();
+
+    // Staging remains beside the destination so publish_staging can use an
+    // atomic same-filesystem rename.
     let work_root = options
         .output
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!(".contextdesk-normalize-{}", Uuid::now_v7()));
     fs::create_dir_all(&work_root)?;
-    let cache_root = work_root.join("cache");
     let staging_dir = work_root.join("staging");
-    fs::create_dir_all(&cache_root)?;
     fs::create_dir_all(&staging_dir)?;
 
     let cleanup = || {
@@ -151,7 +157,7 @@ pub fn normalize_offline(
             ..LogEmbedPolicy::default()
         };
         let ingest = ingest_path_with_policy_selection_and_observer(
-            &cache_root,
+            cache_root,
             &options.input,
             "normalize-ephemeral",
             &policy,
@@ -171,7 +177,7 @@ pub fn normalize_offline(
                 true,
             ),
         );
-        let corpus = LogCorpus::open(&cache_root, &ingest.corpus_id)?;
+        let corpus = LogCorpus::open(cache_root, &ingest.corpus_id)?;
         let rows = load_events_with_originals(&corpus)?;
         // Fail closed on silent partial export (e.g. keyset dropping seq 0).
         let ingested_lines = ingest.stats.lines;
@@ -184,7 +190,7 @@ pub fn normalize_offline(
         }
         drop(corpus);
         // Discard ephemeral corpus directory under cache (best-effort).
-        let _ = LogCorpus::discard(&cache_root, &ingest.corpus_id);
+        let _ = LogCorpus::discard(cache_root, &ingest.corpus_id);
 
         let batches = build_source_batches(&rows, &options.timezone)?;
         if batches.is_empty() {
@@ -279,6 +285,13 @@ pub fn normalize_offline(
     result
 }
 
+fn create_ephemeral_cache_root() -> CoreResult<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("cdn-")
+        .tempdir()
+        .map_err(|error| CoreError::Message(format!("create normalize cache: {error}")))
+}
+
 /// Convenience: normalize with silent progress.
 pub fn normalize_offline_quiet(options: &NormalizeOptions) -> CoreResult<NormalizeOutcome> {
     normalize_offline(options, None, &NoopProcessProgress)
@@ -371,7 +384,16 @@ mod tests {
         let mut on_disk = 0u64;
         for entry in fs::read_dir(output.join("sources")).unwrap() {
             let text = fs::read_to_string(entry.unwrap().path()).unwrap();
-            on_disk += text.lines().count().saturating_sub(1) as u64; // minus header
+            let mut lines = text.lines();
+            let _header = lines.next().expect("header");
+            for (expected_source_seq, line) in lines.enumerate() {
+                let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                assert_eq!(
+                    event["sourceSeq"], expected_source_seq as u64,
+                    "every source file must restart at zero and remain contiguous"
+                );
+                on_disk += 1;
+            }
         }
         assert_eq!(
             on_disk, outcome.report.events,
@@ -388,6 +410,61 @@ mod tests {
             })
             .collect();
         assert!(leftovers.is_empty(), "ephemeral staging must be cleaned");
+    }
+
+    #[test]
+    fn ephemeral_ingest_cache_uses_short_system_temp_root() {
+        let cache = create_ephemeral_cache_root().expect("ephemeral normalize cache");
+        let name = cache
+            .path()
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("cache basename");
+        assert!(name.starts_with("cdn-"), "unexpected cache name: {name}");
+        assert!(cache.path().is_dir());
+    }
+
+    #[test]
+    fn oversized_single_record_normalizes_with_disclosed_message_truncation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("oversized.log");
+        let output = tmp.path().join("out");
+        let message = "x".repeat(449_400);
+        let mut content = String::new();
+        for second in 0..10 {
+            content.push_str(&format!(
+                "2026-01-01T00:00:{second:02}Z INFO ordinary event {second}\n"
+            ));
+        }
+        content.push_str(&format!("2026-01-01T00:01:00Z INFO {message}\n"));
+        fs::write(&input, content).unwrap();
+
+        let options = NormalizeOptions {
+            input,
+            output: output.clone(),
+            output_format: "jsonl".into(),
+            timezone: NormalizeTimezonePolicy::default(),
+            fail_on_partial: false,
+        };
+        let outcome = normalize_offline_quiet(&options).expect("oversized record normalizes");
+        assert_eq!(outcome.report.events, 11);
+        assert_eq!(outcome.report.sources.len(), 1);
+        assert_eq!(outcome.report.truncations, 1);
+
+        let source_path = output.join(&outcome.report.sources[0].relative_path);
+        let text = fs::read_to_string(source_path).unwrap();
+        let event: serde_json::Value = serde_json::from_str(
+            text.lines()
+                .nth(11)
+                .expect("oversized event follows ten ordinary events"),
+        )
+        .unwrap();
+        assert_eq!(
+            event["message"].as_str().unwrap().chars().count(),
+            cd_core::normalized_log_events::MAX_MESSAGE_CHARS
+        );
+        assert_eq!(event["attributes"]["contextdesk.message_truncated"], true);
+        assert_eq!(event["canonicalTruncated"], true);
     }
 
     /// Single one-line source must publish (seq 0 is the only event).
