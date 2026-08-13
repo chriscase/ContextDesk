@@ -190,7 +190,7 @@ import, read credentials, or contact a gateway:
   -Cli .\contextdesk.exe `
   -DataDir "$env:LOCALAPPDATA\ContextDesk\demo-batch" `
   -Source .\case-a.zip, .\case-b `
-  -OutputRoot .\demo-batch-preflight
+  -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-batch-preflight')
 ```
 
 After reviewing the preflight report, run the selected cases serially. The
@@ -203,7 +203,7 @@ because source imports change the specified data directory:
   -Cli .\contextdesk.exe `
   -DataDir "$env:LOCALAPPDATA\ContextDesk\demo-batch" `
   -Source .\case-a.zip, .\case-b `
-  -OutputRoot .\demo-batch-run `
+  -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-batch-run') `
   -Execute -AllowImport `
   -Model "qwen-3.6-27b" -Deadline 10m
 ```
@@ -216,16 +216,20 @@ omit `-AllowImport` (the script still requires `-Execute` for provider calls):
   -Cli .\contextdesk.exe `
   -DataDir "$env:LOCALAPPDATA\ContextDesk\acceptance-rc2" `
   -CorpusId "<exact-corpus-id-1>", "<exact-corpus-id-2>" `
-  -OutputRoot .\demo-batch-run `
+  -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-batch-run') `
   -Execute -Model "qwen-3.6-27b" -Deadline 10m
 ```
 
 Each case receives exactly one `--mode single` turn with `--trace summary`
-and `--activity summary`; there is no retry or concurrent execution. Raw
-JSONL/stdout and stderr are retained under `raw-local-only/` for local
-debugging and test fixture extraction. Share only `report.json` or
-`report.md` after inspecting them: `grounding=grounded` certifies host citation
-identity, not the model's causal interpretation or completeness.
+and `--activity summary`; there is no retry or concurrent execution. Existing
+corpora are checked with `timezone status` and are not queued if unresolved
+local timestamps remain. Raw JSONL/stdout and stderr are retained under
+`raw-local-only/` for local debugging and test fixture extraction. The harness
+exits nonzero if a required case is partial, malformed, ungrounded, mismatched,
+or otherwise incomplete. Share only `report.json` or `report.md` after
+inspecting them: `grounding=grounded` certifies host citation identity, not the
+model's causal interpretation or completeness; validation tier is reported
+separately.
 
 ### D. Timezone review fixture (when demonstrating ambiguity)
 

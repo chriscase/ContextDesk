@@ -35,10 +35,41 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
 
     def test_raw_material_is_separated_from_aggregate_report(self) -> None:
         self.assertIn("raw-local-only", self.source)
+        self.assertIn("normalized-preflight", self.source)
         self.assertIn("report.json", self.source)
         self.assertIn("report.md", self.source)
         self.assertIn("answer_markdown", self.source)
         self.assertIn("Raw JSONL/stdout and stderr remain local", self.source)
+        self.assertIn("local_only = $true", self.source)
+
+    def test_harness_fails_closed_on_malformed_or_incomplete_runs(self) -> None:
+        for needle in (
+            "function Test-PathWithin",
+            "function Test-PathSameOrWithin",
+            "function Get-CanonicalPath",
+            "function Get-StrictBool",
+            "Malformed = $malformed",
+            "--fail-on-partial",
+            "error_events",
+            "validation_tier",
+            "$liveTrace = $dryRun -eq $false",
+            "all_required_passed",
+            "if (-not $report.all_required_passed) { exit 1 }",
+        ):
+            self.assertIn(needle, self.source)
+        self.assertNotIn("$args.Add('--auto-approve')", self.source)
+
+    def test_harness_checks_existing_timezone_before_live_turn(self) -> None:
+        self.assertIn("timezone", self.source)
+        self.assertIn("unresolved_local_records", self.source)
+        self.assertIn("status = if ($tzOk) { 'existing' } else { 'needs-timezone' }", self.source)
+        self.assertIn("if ($tzOk) {", self.source)
+
+    def test_default_output_is_disposable_and_contained_paths_are_rejected(self) -> None:
+        self.assertIn("[System.IO.Path]::GetTempPath()", self.source)
+        self.assertIn("OutputRoot and DataDir must be separate trees.", self.source)
+        self.assertIn("OutputRoot must be outside the ContextDesk checkout", self.source)
+        self.assertIn("OutputRoot must be outside every source tree in both directions.", self.source)
 
     def test_powershell_parser_when_available(self) -> None:
         pwsh = shutil.which("pwsh")
