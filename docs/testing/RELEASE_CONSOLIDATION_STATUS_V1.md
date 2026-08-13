@@ -88,3 +88,22 @@ This review found no new release-blocking defect in the accepted demo path.
 The retrieval safety pass is the highest-value follow-up after the release
 candidate is accepted; it must be rebased and re-gated rather than cherry-
 picked across conflicting transport code.
+
+## Verified worktree cleanup
+
+Before handoff, the following clean, branch-backed worktrees were verified to
+be ancestors of this candidate and were removed as disposable checkout
+registrations. Their Git branches and commits remain available locally/remotely;
+the protected main checkout and the dirty acceptance checkout were not touched:
+
+| Removed worktree | Preserved branch |
+| --- | --- |
+| `/private/tmp/contextdesk-demo-batch-v1` | `integrate/demo-batch-v1` |
+| `/private/tmp/contextdesk-final-integration` | `integrate/acceptance-release-v1-final` |
+| `/private/tmp/contextdesk-multimodel-v2` | `feat/multimodel-contribution-reconcile-v1` |
+| `/private/tmp/contextdesk-release-quality-v2` | `integrate/release-quality-v2` |
+| `/private/tmp/contextdesk-telemetry-summary-authority-v1` | `fix/telemetry-summary-authority-v1` |
+| `/private/tmp/contextdesk-triage-policy-sdk-v2` | `integrate/triage-policy-sdk-v2` |
+
+No uncommitted files were present in those worktrees. The shared Rust target
+and all unmerged or dirty worktrees were retained.
