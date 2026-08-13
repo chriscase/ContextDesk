@@ -109,6 +109,11 @@ picked across conflicting transport code.
 The approval-gated PR command and remote CI checklist are captured in
 `RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md`; no PR has been opened yet.
 
+The read-only verifier `docs/testing/verify-release-consolidation.sh` passes on
+the current tip and proves the exact pin, accepted ancestry, clean state,
+merge-tree result, docs-only post-pin scope, required evidence files, and
+release-document hygiene.
+
 The local host now has PowerShell 7 available, so the harness parser and
 provider-free preflight were exercised here. This does not replace the
 Windows-runner job: Windows source/build and platform-specific behavior still
