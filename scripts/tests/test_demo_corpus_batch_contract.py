@@ -70,9 +70,35 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
         self.assertIn("[System.IO.Path]::GetTempPath()", self.source)
         self.assertIn("OutputRoot and DataDir must be separate trees.", self.source)
         self.assertIn("OutputRoot and its existing parents must not contain a symlink", self.source)
-        self.assertIn("Source inputs must not be symlinks", self.source)
+        self.assertIn(
+            "Source inputs and their existing parents must not contain a symlink",
+            self.source,
+        )
+        self.assertIn("Test-ReparsePointInExistingPath $sourceFull", self.source)
         self.assertIn("OutputRoot must be outside the ContextDesk checkout", self.source)
         self.assertIn("OutputRoot must be outside every source tree in both directions.", self.source)
+
+    def test_path_containment_or_operators_are_parenthesized(self) -> None:
+        """Bare `cmd $a $b -or cmd $c $d` binds `-or` as a parameter when the
+        callee declares Mandatory parameters (PowerShell 5.1 and 7). Containment
+        checks must parenthesize each call.
+        """
+        self.assertIn(
+            "(Test-PathSameOrWithin $outputFull $dataFull) -or (Test-PathSameOrWithin $dataFull $outputFull)",
+            self.source,
+        )
+        self.assertIn(
+            "(Test-PathSameOrWithin $outputFull $sourceRoot) -or (Test-PathSameOrWithin $sourceRoot $outputFull)",
+            self.source,
+        )
+        self.assertNotIn(
+            "Test-PathSameOrWithin $outputFull $dataFull -or Test-PathSameOrWithin",
+            self.source,
+        )
+        self.assertNotIn(
+            "Test-PathSameOrWithin $outputFull $sourceRoot -or Test-PathSameOrWithin",
+            self.source,
+        )
 
     def test_powershell_parser_when_available(self) -> None:
         pwsh = shutil.which("pwsh")

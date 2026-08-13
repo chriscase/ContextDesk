@@ -256,7 +256,9 @@ $scriptRepoRoot = Get-CanonicalPath (Split-Path -Parent $PSScriptRoot) -MustExis
 if (Test-ReparsePointInExistingPath $outputFull) {
     throw 'OutputRoot and its existing parents must not contain a symlink, junction, or other reparse point.'
 }
-if (Test-PathSameOrWithin $outputFull $dataFull -or Test-PathSameOrWithin $dataFull $outputFull) {
+# Parenthesize each call: bare `cmd $a $b -or cmd $c $d` is parsed as a
+# named parameter `-or` when the callee uses Mandatory parameters (PS 5.1/7).
+if ((Test-PathSameOrWithin $outputFull $dataFull) -or (Test-PathSameOrWithin $dataFull $outputFull)) {
     throw 'OutputRoot and DataDir must be separate trees.'
 }
 if (Test-PathSameOrWithin $outputFull $scriptRepoRoot) {
@@ -264,15 +266,17 @@ if (Test-PathSameOrWithin $outputFull $scriptRepoRoot) {
 }
 foreach ($sourceFull in $Source) {
     $sourceItem = Get-Item -LiteralPath $sourceFull -ErrorAction Stop
-    if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'Source inputs must not be symlinks, junctions, or other reparse points.'
+    # Walk existing parents (same helper as OutputRoot) so a junction on an
+    # intermediate component cannot bypass lexical containment checks.
+    if (Test-ReparsePointInExistingPath $sourceFull) {
+        throw 'Source inputs and their existing parents must not contain a symlink, junction, or other reparse point.'
     }
     $sourceRoot = if ($sourceItem.PSIsContainer) {
         $sourceFull
     } else {
         Split-Path -LiteralPath $sourceFull -Parent
     }
-    if (Test-PathSameOrWithin $outputFull $sourceRoot -or Test-PathSameOrWithin $sourceRoot $outputFull) {
+    if ((Test-PathSameOrWithin $outputFull $sourceRoot) -or (Test-PathSameOrWithin $sourceRoot $outputFull)) {
         throw 'OutputRoot must be outside every source tree in both directions.'
     }
 }
