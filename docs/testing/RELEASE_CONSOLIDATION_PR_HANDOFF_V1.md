@@ -60,6 +60,17 @@ Recommended links:
 - [source acceptance procedure](SOURCE_ACCEPTANCE_PROCEDURE_RELEASE_V1.md)
 - [share-safe live evidence](RELEASE_LIVE_EVIDENCE_V1.md)
 
+The read-only pre-PR verifier can be rerun from the candidate checkout:
+
+```sh
+docs/testing/verify-release-consolidation.sh
+```
+
+It checks the exact code pin, accepted ancestry, clean state, merge-tree
+result, documentation-only post-pin changes, required evidence files, and
+release-document path/credential hygiene. It does not fetch, build, clean,
+contact a provider, or create a PR.
+
 ## Required remote gates before merge
 
 The required CI workflow is configured for `pull_request` events (and pushes
