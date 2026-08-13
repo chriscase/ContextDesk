@@ -19,6 +19,12 @@ code/build identity from the later documentation commits.
 - Merge simulation with `origin/main`: clean; no conflicts
 - Main checkout and the pre-existing dirty acceptance worktree were not changed
 
+The dirty acceptance checkout remains a preserved, non-authoritative working
+copy on `integrate/acceptance-release-v1` at its own historical pin. Its
+uncommitted procedure edits were not inspected for adoption or overwritten.
+Acceptance operators must use this consolidation branch and its exact code pin,
+not that older checkout, once the owner opens the promotion PR.
+
 ## Local gates
 
 | Gate | Result |
