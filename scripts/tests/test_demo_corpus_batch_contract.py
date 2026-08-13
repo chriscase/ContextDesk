@@ -71,6 +71,7 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
     def test_default_output_is_disposable_and_contained_paths_are_rejected(self) -> None:
         self.assertIn("[System.IO.Path]::GetTempPath()", self.source)
         self.assertIn("OutputRoot and DataDir must be separate trees.", self.source)
+        self.assertIn("DataDir and its existing parents must not contain a symlink", self.source)
         self.assertIn("OutputRoot and its existing parents must not contain a symlink", self.source)
         self.assertIn("Source inputs must not be symlinks", self.source)
         self.assertIn("Source inputs and their existing parents must not contain a symlink", self.source)

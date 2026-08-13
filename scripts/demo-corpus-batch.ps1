@@ -253,6 +253,12 @@ if (Test-Path -LiteralPath $OutputRoot) {
 $outputFull = Get-CanonicalPath $OutputRoot
 $dataFull = Get-CanonicalPath $DataDir -MustExist
 $scriptRepoRoot = Get-CanonicalPath (Split-Path -Parent $PSScriptRoot) -MustExist
+if (Test-ReparsePointInExistingPath $dataFull) {
+    throw 'DataDir and its existing parents must not contain a symlink, junction, or other reparse point.'
+}
+if (Test-ReparsePointInExistingPath $scriptRepoRoot) {
+    throw 'The ContextDesk checkout and its existing parents must not contain a symlink, junction, or other reparse point.'
+}
 if (Test-ReparsePointInExistingPath $outputFull) {
     throw 'OutputRoot and its existing parents must not contain a symlink, junction, or other reparse point.'
 }
