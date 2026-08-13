@@ -28,3 +28,7 @@ fixtures/normalized-log-events/** text eol=lf
 # Gateway diagnostic ledger fixtures include manifests that hash the exact
 # report bytes. Keep their JSON byte-stable on Windows as well as Unix.
 fixtures/gateway-cost-ledger/** text eol=lf
+
+# Triage SDK v2 golden request/replay files are compared byte-for-byte.
+# Keep their serialized JSON LF-stable on Windows as well as Unix.
+fixtures/triage-sdk/** text eol=lf
