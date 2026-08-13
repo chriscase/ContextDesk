@@ -13,7 +13,7 @@ code/build identity from the later documentation commits.
 
 - Consolidation code/evidence tip before this status record: `2dc828beb282f5c338b4a60f3cea454f2d57aea2`
 - Current documentation tip: resolve `git rev-parse HEAD` after fetching the branch
-- Exact code/build pin: `160deb66cf64e77e5ffc37865f25817a7b0f2fc8`
+- Exact code/build pin: `93ede3a28b0e14096d461c3c5a8d9f2af4e68451`
 - Accepted triage runtime ancestor: `fcfdd30d1e52ee0fa379cce4682a79c51ce252c6`
 - Successful demo branch ancestor: `0638e2776d9e68e936302b8be6aa757b62690dcf`
 - Merge simulation with `origin/main`: clean; no conflicts
@@ -39,11 +39,15 @@ not that older checkout, once the owner opens the promotion PR.
 | Desktop tests and packaging checks | 192 Vitest files / 1,888 tests; 54 Node checks; all pass |
 | Demo PowerShell contract suite | 8 passed, including parser and executable preflight under local `pwsh` |
 | Claims, CLI docs, protocol fixtures, evidence drift, packaging, media checks | pass |
-| Exact release binary identity | pass; embedded `git=160deb66cf64` |
+| Exact release binary identity | pass; embedded `git=93ede3a28b0e` |
 
 Binary SHA-256 for the exact code pin:
 
-`2b294f078eeff8e47b85d5daf0580d14b25aae94c12487729a78e6997db596df`
+`445ae064ff2e48386176e82671b725abe15d369706adaf74062af5ca963aecbe`
+
+The code pin is the pure-rustfmt follow-up to the prior candidate. It closes
+the nested Tauri workspace formatting mismatch found by macOS and Ubuntu CI;
+no behavior or product logic changed.
 
 ## Live evidence
 

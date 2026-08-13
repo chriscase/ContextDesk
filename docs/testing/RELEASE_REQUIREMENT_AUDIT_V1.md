@@ -5,14 +5,14 @@ It distinguishes locally proven work from evidence that can only exist after an
 owner-authorized pull request and remote CI.
 
 Candidate branch: `integrate/release-consolidation-v1`  
-Exact code/build pin: `160deb66cf64e77e5ffc37865f25817a7b0f2fc8`  
+Exact code/build pin: `93ede3a28b0e14096d461c3c5a8d9f2af4e68451`
 Current documentation tip: resolve `git rev-parse HEAD` after fetching the
 branch.
 
 | Requirement | Evidence | Status |
 | --- | --- | --- |
 | Reconcile triage runtime and demo batch | Merge commit `68743152717c92c2901ce02e9a1c30e3859378bf`; both accepted SHAs are ancestors | Proven |
-| Preserve exact accepted build identity | Detached release build reported `git=160deb66cf64`; binary SHA is recorded in the status document | Proven locally |
+| Preserve exact accepted build identity | Detached release build reported `git=93ede3a28b0e`; binary SHA is recorded in the status document | Proven locally |
 | Preserve user work | Main checkout and dirty acceptance checkout were never modified; dirty acceptance procedure remains preserved | Proven locally |
 | Preserve Vercel/employer evidence | Share-safe ledger in `RELEASE_LIVE_EVIDENCE_V1.md` | Proven, scoped to named runs |
 | Correct source acceptance procedure | Branch, exact code pin, `Asia/Tokyo`, protected-file credentials, and 600-second procedure are pinned | Proven locally |

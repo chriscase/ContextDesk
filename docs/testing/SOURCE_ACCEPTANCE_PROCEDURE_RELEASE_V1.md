@@ -4,7 +4,7 @@ Authoritative source:
 
 - repository: `https://github.com/chriscase/ContextDesk.git`
 - branch: `integrate/release-consolidation-v1`
-- exact tested source/build SHA: `160deb66cf64e77e5ffc37865f25817a7b0f2fc8`
+- exact tested source/build SHA: `93ede3a28b0e14096d461c3c5a8d9f2af4e68451`
 - acceptance-procedure revision: this branch tip may be newer than the build
   SHA; fetch the branch first, then build the exact tested SHA above. This
   avoids an impossible self-referential commit hash in the procedure itself.
