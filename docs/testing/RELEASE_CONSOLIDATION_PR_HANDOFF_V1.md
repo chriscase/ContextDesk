@@ -8,7 +8,8 @@ it.
 
 - Repository: `https://github.com/chriscase/ContextDesk.git`
 - Branch: `integrate/release-consolidation-v1`
-- Current documentation tip: `9467e83d50215cb860c9a797586fa6155de96a26`
+- Current documentation tip: resolve `git rev-parse HEAD` after fetching the
+  branch; documentation-only commits may advance it.
 - Exact code/build pin: `160deb66cf64e77e5ffc37865f25817a7b0f2fc8`
 - Expected merge simulation: clean against `origin/main`
 
