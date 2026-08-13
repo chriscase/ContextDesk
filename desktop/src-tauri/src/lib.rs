@@ -1913,7 +1913,10 @@ fn set_multi_model_mode(state: State<'_, AppState>, mode: String) -> Result<(), 
     };
     let mut cfg = state.config.lock().expect("config lock").clone();
     cfg.multi_model.mode = new_mode;
-    cfg.contributions.enabled = matches!(new_mode, cd_core::multi_model::MultiModelMode::Contributions);
+    cfg.contributions.enabled = matches!(
+        new_mode,
+        cd_core::multi_model::MultiModelMode::Contributions
+    );
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
     save_config(&path, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock().expect("config lock") = cfg;
@@ -3175,7 +3178,12 @@ fn set_reasoning_effort(
     // Mutate a clone first. If persistence fails, the running host keeps the
     // exact prior policy instead of diverging from config.json.
     let mut cfg = cfg_guard.clone();
-    match req.level.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    match req
+        .level
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         None | Some("omit") | Some("auto") => cfg.reasoning_effort.apply_omit(),
         Some(raw) => {
             let level = cd_core::reasoning_effort::ReasoningEffortLevel::parse(raw)
@@ -5159,12 +5167,10 @@ async fn agent_turn(
         use cd_core::capability_qualification::{
             capability_contract_verdict, CapabilityContract, ContractVerdict,
         };
-        Some(
-            matches!(
-                capability_contract_verdict(Some(report), CapabilityContract::JsonProposal),
-                ContractVerdict::Qualified
-            ),
-        )
+        Some(matches!(
+            capability_contract_verdict(Some(report), CapabilityContract::JsonProposal),
+            ContractVerdict::Qualified
+        ))
     });
     let review_context_budget = cfg
         .model_context_budgets
@@ -7477,8 +7483,7 @@ fn get_capability_qualification(
     req: QualificationSelectReq,
 ) -> Result<Option<capability_qualification_host::QualificationReportDto>, String> {
     let (profile, model) = resolve_qualification_identity_target(&state, &req)?;
-    let key =
-        capability_qualification_host::qualification_key_for_profile(&profile, &model);
+    let key = capability_qualification_host::qualification_key_for_profile(&profile, &model);
     let cfg = state.config.lock().expect("config").clone();
     let tools_for_model = model_tools_enabled(&cfg, &profile, &model);
     let gate = capability_qualification_host::gate_for_model(&profile, tools_for_model, &model);
@@ -7503,8 +7508,7 @@ async fn start_capability_qualification(
     let cfg = state.config.lock().expect("config").clone();
     let tools_for_model = model_tools_enabled(&cfg, &profile, &model);
     let gate = capability_qualification_host::gate_for_model(&profile, tools_for_model, &model);
-    let key =
-        capability_qualification_host::qualification_key_for_profile(&profile, &model);
+    let key = capability_qualification_host::qualification_key_for_profile(&profile, &model);
 
     // Single-flight cancel flag (one qualification at a time).
     let cancel = {
@@ -7595,8 +7599,7 @@ fn clear_capability_qualification(
     req: QualificationSelectReq,
 ) -> Result<bool, String> {
     let (profile, model) = resolve_qualification_identity_target(&state, &req)?;
-    let key =
-        capability_qualification_host::qualification_key_for_profile(&profile, &model);
+    let key = capability_qualification_host::qualification_key_for_profile(&profile, &model);
     let mut store = state
         .qualification_store
         .lock()
@@ -10156,7 +10159,8 @@ fn parse_tauri_triage_request(
     if bytes.len() > cd_core::triage_sdk::MAX_TRIAGE_WIRE_BYTES {
         return Err("triage request exceeds the public size bound".into());
     }
-    let text = String::from_utf8(bytes.clone()).map_err(|_| "invalid triage request".to_string())?;
+    let text =
+        String::from_utf8(bytes.clone()).map_err(|_| "invalid triage request".to_string())?;
     let request = cd_core::triage_sdk::parse_request_v2(&text)
         .map_err(|_| "triage request rejected by the V2 contract".to_string())?;
     Ok((request, bytes))
@@ -10182,8 +10186,10 @@ fn triage_policy_for_request(
                 !matches!(profile.kind, ProviderKind::Ollama),
             ))
         }
-        TriagePolicySelectionV2::Inline { document, .. } => serde_json::from_value(document.clone())
-            .map_err(|_| "inline triage policy could not be decoded".to_string()),
+        TriagePolicySelectionV2::Inline { document, .. } => {
+            serde_json::from_value(document.clone())
+                .map_err(|_| "inline triage policy could not be decoded".to_string())
+        }
         TriagePolicySelectionV2::Saved {
             policy_id,
             policy_revision,
@@ -10196,9 +10202,7 @@ fn triage_policy_for_request(
             store
                 .policies
                 .iter()
-                .find(|saved| {
-                    saved.policy_id == *policy_id && saved.revision == *policy_revision
-                })
+                .find(|saved| saved.policy_id == *policy_id && saved.revision == *policy_revision)
                 .map(|saved| saved.policy.clone())
                 .ok_or_else(|| "requested triage policy revision is unavailable".to_string())
         }
@@ -10249,10 +10253,10 @@ async fn triage_qualify_role_v2(
         .find(|profile| profile.id == request.profile_id)
         .cloned()
         .ok_or_else(|| "provider profile was not found".to_string())?;
-    let config_dir = ensure_config_dir(&state.branding).map_err(|_| "config directory unavailable")?;
-    let store_path = cd_core::triage_role_qualification::triage_role_qualification_store_path(
-        &config_dir,
-    );
+    let config_dir =
+        ensure_config_dir(&state.branding).map_err(|_| "config directory unavailable")?;
+    let store_path =
+        cd_core::triage_role_qualification::triage_role_qualification_store_path(&config_dir);
     cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(&store_path)
         .map_err(|_| "triage role qualification store is unavailable")?;
     let kind = request.kind;
@@ -10273,11 +10277,8 @@ async fn triage_qualify_role_v2(
     let physical_provider_calls = record.physical_provider_calls;
     let semantic_corrections = record.semantic_corrections;
     let reason = record.reason.clone();
-    cd_workflow::triage_role_qualification::publish_role_qualification_record(
-        &config_dir,
-        record,
-    )
-    .map_err(|_| "triage role qualification store could not be published")?;
+    cd_workflow::triage_role_qualification::publish_role_qualification_record(&config_dir, record)
+        .map_err(|_| "triage role qualification store could not be published")?;
     let needs_provider = !matches!(
         kind,
         cd_core::multi_model::triage_policy::TriageSlotKindV2::Contributor(
@@ -10349,16 +10350,23 @@ async fn triage_run_v2(
     ) {
         return Err("standard_uses_established_path".into());
     }
-    let deadline_ms = policy.budget.whole_turn_deadline_ms.unwrap_or(if cfg.router.deadline_is_explicit {
-        cfg.router.deadline_ms
-    } else {
-        300_000
-    });
+    let deadline_ms =
+        policy
+            .budget
+            .whole_turn_deadline_ms
+            .unwrap_or(if cfg.router.deadline_is_explicit {
+                cfg.router.deadline_ms
+            } else {
+                300_000
+            });
     let context_char_budget = usize::try_from(policy.budget.max_context_chars)
         .map_err(|_| "triage context budget is not representable".to_string())?;
     let cache_root = log_cache_dir(&state)?;
     ensure_host(&state)?;
-    let cancel_key = format!("{TRIAGE_V2_CANCEL_KEY}:{}:{}", request.run_id, request.cancellation_id);
+    let cancel_key = format!(
+        "{TRIAGE_V2_CANCEL_KEY}:{}:{}",
+        request.run_id, request.cancellation_id
+    );
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let mut cancels = state.cancels.lock().expect("cancels");
@@ -10379,7 +10387,8 @@ async fn triage_run_v2(
             }
         }
     };
-    let policy_bytes = serde_json::to_vec(&policy).map_err(|_| "triage policy unavailable".to_string())?;
+    let policy_bytes =
+        serde_json::to_vec(&policy).map_err(|_| "triage policy unavailable".to_string())?;
     let input = cd_workflow::triage_host::TriageHostRunInput {
         run_id: request.run_id.clone(),
         request_fingerprint: triage_fingerprint(&request_bytes),
@@ -10475,8 +10484,8 @@ async fn triage_replay(
     app: tauri::AppHandle,
     replay: serde_json::Value,
 ) -> Result<cd_core::triage_sdk::TriageRunEventV2, String> {
-    let replay: cd_core::triage_sdk::TriageReplayV1 =
-        serde_json::from_value(replay).map_err(|error| format!("invalid triage replay: {error}"))?;
+    let replay: cd_core::triage_sdk::TriageReplayV1 = serde_json::from_value(replay)
+        .map_err(|error| format!("invalid triage replay: {error}"))?;
     replay
         .validate()
         .map_err(|error| format!("invalid triage replay: {error}"))?;
@@ -14847,7 +14856,10 @@ mod triage_replay_host_tests {
                 "{command} command must be registered"
             );
         }
-        assert!(source.contains("triage_replay,"), "replay command must be registered");
+        assert!(
+            source.contains("triage_replay,"),
+            "replay command must be registered"
+        );
         let start = source
             .find("async fn triage_replay(")
             .expect("triage replay command");
@@ -14862,7 +14874,9 @@ mod triage_replay_host_tests {
         assert!(body.contains("app.emit"));
         assert!(body.contains(".last()"));
         assert!(
-            !body.contains("load_config") && !body.contains("SecretStore") && !body.contains("keychain"),
+            !body.contains("load_config")
+                && !body.contains("SecretStore")
+                && !body.contains("keychain"),
             "replay consumption must not load host credentials"
         );
     }
@@ -14886,7 +14900,10 @@ mod triage_replay_host_tests {
             "triage-run-event",
             "remove_cancel_if_owned",
         ] {
-            assert!(run_body.contains(required), "live run must contain {required}");
+            assert!(
+                run_body.contains(required),
+                "live run must contain {required}"
+            );
         }
         let cancel_start = source
             .find("fn triage_cancel_v2(")
@@ -20184,7 +20201,10 @@ mod log_embedding_host_tests {
                 .identity(),
             "bge-m3"
         );
-        assert!(host.log_rerank_backend().is_some(), "reranker role attached");
+        assert!(
+            host.log_rerank_backend().is_some(),
+            "reranker role attached"
+        );
     }
 
     #[test]
