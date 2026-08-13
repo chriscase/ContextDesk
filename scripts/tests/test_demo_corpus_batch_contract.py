@@ -37,6 +37,7 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
         self.assertIn("raw-local-only", self.source)
         self.assertIn("report.json", self.source)
         self.assertIn("report.md", self.source)
+        self.assertIn("answer_markdown", self.source)
         self.assertIn("Raw JSONL/stdout and stderr remain local", self.source)
 
     def test_powershell_parser_when_available(self) -> None:

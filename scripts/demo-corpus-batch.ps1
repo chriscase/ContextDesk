@@ -322,6 +322,22 @@ if ($Execute) {
         }
         $case.artifacts.chat_stdout = [System.IO.Path]::GetFileName($stdout)
         $case.artifacts.chat_stderr = [System.IO.Path]::GetFileName($stderr)
+        $answerPath = Join-Path $caseDir ('case-{0:D2}-answer.md' -f $caseNumber)
+        $answerText = if ($doneOk) { [string]$done[0].final_text } else { '' }
+        $answerDocument = @(
+            ('# ContextDesk answer - {0}' -f $case.case)
+            ''
+            ('Model: `{0}`' -f $Model)
+            ('Grounding: `{0}`' -f $(if ($null -ne $grounding) { $grounding } else { 'unknown' }))
+            ('Typed host answer emitted: `{0}`' -f $typed)
+            ''
+            '---'
+            ''
+            $answerText
+        )
+        $answerDocument | Set-Content -LiteralPath $answerPath -Encoding UTF8
+        $case.triage.answer_chars = $answerText.Length
+        $case.artifacts.answer_markdown = [System.IO.Path]::GetFileName($answerPath)
     }
 }
 
@@ -352,6 +368,8 @@ $md.Add('| --- | --- | --- | --- | --- | --- | ---: |')
 foreach ($row in $results) {
     $md.Add(('| {0} | {1} | {2} | {3} | {4} | {5} | {6} |' -f $row.case, $row.preflight.status, $row.import.status, $row.triage.status, $row.triage.typed_answer, $row.triage.grounding, $row.triage.elapsed_ms))
 }
+$md.Add('')
+$md.Add('Per-case answer Markdown files are local-only artifacts beside each captured JSONL turn. They are intended for operator review and may contain corpus-derived text.')
 $md.Add('')
 $md.Add('Interpretation, causal claims, and evidence completeness require human review of each local answer. `grounding=grounded` only certifies host citation identity, not model correctness.')
 $mdPath = Join-Path $OutputRoot 'report.md'

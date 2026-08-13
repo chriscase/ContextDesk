@@ -39,6 +39,9 @@ parses a model response as authority.
 - Raw JSONL/stdout/stderr are retained below `raw-local-only/` for local
   debugging and fixture extraction. They may contain corpus/model output and
   must not be uploaded by default.
+- Each successful turn also gets a local `case-XX-answer.md` projection so a
+  developer can review the actual answer without decoding JSONL. It is in the
+  same non-share-safe class as the raw capture.
 - `report.json` and `report.md` contain case ordinals, bounded status fields,
   typed-answer/grounding flags, timing, and sanitized error codes only. A
   `grounding=grounded` flag certifies host citation identity, not causal truth,
