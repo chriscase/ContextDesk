@@ -24,3 +24,7 @@ fixtures/citation-contracts/** text eol=lf
 # The fixture suite asserts this, so a checkout that rewrote line endings
 # would fail the suite rather than silently changing the corpus.
 fixtures/normalized-log-events/** text eol=lf
+
+# Gateway diagnostic ledger fixtures include manifests that hash the exact
+# report bytes. Keep their JSON byte-stable on Windows as well as Unix.
+fixtures/gateway-cost-ledger/** text eol=lf
