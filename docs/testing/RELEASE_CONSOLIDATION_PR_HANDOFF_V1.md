@@ -59,6 +59,7 @@ Recommended links:
 - [consolidation status](RELEASE_CONSOLIDATION_STATUS_V1.md)
 - [source acceptance procedure](SOURCE_ACCEPTANCE_PROCEDURE_RELEASE_V1.md)
 - [share-safe live evidence](RELEASE_LIVE_EVIDENCE_V1.md)
+- [requirement audit](RELEASE_REQUIREMENT_AUDIT_V1.md)
 
 The read-only pre-PR verifier can be rerun from the candidate checkout:
 

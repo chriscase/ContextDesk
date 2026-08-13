@@ -115,6 +115,9 @@ merge-tree result, docs-only post-pin scope, required evidence files, and
 release-document hygiene. Its shell syntax check passes, and an intentionally
 wrong code pin is rejected before any other check.
 
+The complete requirement-by-requirement completion audit is recorded in
+`RELEASE_REQUIREMENT_AUDIT_V1.md`.
+
 The local host now has PowerShell 7 available, so the harness parser and
 provider-free preflight were exercised here. This does not replace the
 Windows-runner job: Windows source/build and platform-specific behavior still
