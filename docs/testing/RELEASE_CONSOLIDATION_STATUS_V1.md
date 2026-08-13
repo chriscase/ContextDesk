@@ -89,6 +89,9 @@ The retrieval safety pass is the highest-value follow-up after the release
 candidate is accepted; it must be rebased and re-gated rather than cherry-
 picked across conflicting transport code.
 
+The approval-gated PR command and remote CI checklist are captured in
+`RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md`; no PR has been opened yet.
+
 ## Verified worktree cleanup
 
 Before handoff, the following clean, branch-backed worktrees were verified to
