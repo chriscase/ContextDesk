@@ -102,6 +102,23 @@ function Test-PathSameOrWithin {
         (Test-PathWithin $Child $Parent)
 }
 
+function Test-ReparsePointInExistingPath {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+    $candidate = [System.IO.Path]::GetFullPath($Path)
+    while (-not [string]::IsNullOrWhiteSpace($candidate)) {
+        if (Test-Path -LiteralPath $candidate) {
+            $item = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return $true
+            }
+        }
+        $parent = Split-Path -LiteralPath $candidate -Parent
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -ceq $candidate) { break }
+        $candidate = $parent
+    }
+    return $false
+}
+
 function Invoke-CliCapture {
     param(
         [string[]] $Arguments,
@@ -236,6 +253,9 @@ if (Test-Path -LiteralPath $OutputRoot) {
 $outputFull = Get-CanonicalPath $OutputRoot
 $dataFull = Get-CanonicalPath $DataDir -MustExist
 $scriptRepoRoot = Get-CanonicalPath (Split-Path -Parent $PSScriptRoot) -MustExist
+if (Test-ReparsePointInExistingPath $outputFull) {
+    throw 'OutputRoot and its existing parents must not contain a symlink, junction, or other reparse point.'
+}
 if (Test-PathSameOrWithin $outputFull $dataFull -or Test-PathSameOrWithin $dataFull $outputFull) {
     throw 'OutputRoot and DataDir must be separate trees.'
 }
@@ -244,6 +264,9 @@ if (Test-PathSameOrWithin $outputFull $scriptRepoRoot) {
 }
 foreach ($sourceFull in $Source) {
     $sourceItem = Get-Item -LiteralPath $sourceFull -ErrorAction Stop
+    if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Source inputs must not be symlinks, junctions, or other reparse points.'
+    }
     $sourceRoot = if ($sourceItem.PSIsContainer) {
         $sourceFull
     } else {
@@ -378,6 +401,10 @@ if ($CorpusId.Count -gt 0) {
     $args.Add('list')
     $listExit = Invoke-CliCapture $args $listStdout $listStderr
     $listEnvelope = Read-JsonEnvelope $listStdout
+    $listOk = Get-StrictBool $listEnvelope 'ok'
+    if ($listExit -ne 0 -or $listOk -ne $true) {
+        throw 'Corpus list did not produce a successful JSON envelope.'
+    }
     $known = @()
     if ($null -ne $listEnvelope -and $null -ne $listEnvelope.data.corpora) {
         $known = @($listEnvelope.data.corpora | ForEach-Object { [string]$_.id })
@@ -406,11 +433,19 @@ if ($CorpusId.Count -gt 0) {
         $tzSources = if ($null -ne $tzEnvelope -and $null -ne $tzEnvelope.data.sources) {
             @($tzEnvelope.data.sources)
         } else { @() }
-        $tzUnresolved = @($tzSources | Where-Object {
-            [int64]$_.unresolved_local_records -gt 0
-        }).Count
+        $tzShapeOk = $tzSources.Count -gt 0
+        $tzUnresolved = 0
+        foreach ($tzSource in $tzSources) {
+            $unresolved = Number-From $tzSource @('unresolved_local_records')
+            if ($null -eq $unresolved -or $unresolved -lt 0) {
+                $tzShapeOk = $false
+            } else {
+                $tzUnresolved += $unresolved
+            }
+        }
         $tzEnvelopeOk = Get-StrictBool $tzEnvelope 'ok'
-        $tzOk = $tzEnvelopeOk -eq $true -and $tzExit -eq 0 -and $tzUnresolved -eq 0
+        $tzOk = $tzEnvelopeOk -eq $true -and $tzExit -eq 0 -and
+            $tzShapeOk -and $tzUnresolved -eq 0
         $existingCase.preflight = [ordered]@{
             status = if ($tzOk) { 'existing' } else { 'needs-timezone' }
             source_scan = 'not-run'

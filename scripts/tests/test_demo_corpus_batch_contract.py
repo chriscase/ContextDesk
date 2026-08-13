@@ -46,6 +46,7 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
         for needle in (
             "function Test-PathWithin",
             "function Test-PathSameOrWithin",
+            "function Test-ReparsePointInExistingPath",
             "function Get-CanonicalPath",
             "function Get-StrictBool",
             "Malformed = $malformed",
@@ -68,6 +69,8 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
     def test_default_output_is_disposable_and_contained_paths_are_rejected(self) -> None:
         self.assertIn("[System.IO.Path]::GetTempPath()", self.source)
         self.assertIn("OutputRoot and DataDir must be separate trees.", self.source)
+        self.assertIn("OutputRoot and its existing parents must not contain a symlink", self.source)
+        self.assertIn("Source inputs must not be symlinks", self.source)
         self.assertIn("OutputRoot must be outside the ContextDesk checkout", self.source)
         self.assertIn("OutputRoot must be outside every source tree in both directions.", self.source)
 
