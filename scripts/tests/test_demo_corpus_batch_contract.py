@@ -86,7 +86,7 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
             self.skipTest("PowerShell is not installed on this development host")
         command = (
             "$tokens=$null; $errors=$null; "
-            "[System.Management.Automation.Language.Parser]::ParseFile(" 
+            "[System.Management.Automation.Language.Parser]::ParseFile("
             f"'{SCRIPT.as_posix()}', [ref]$tokens, [ref]$errors) | Out-Null; "
             "if ($errors.Count -ne 0) { $errors | % Message; exit 1 }"
         )

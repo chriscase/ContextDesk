@@ -266,6 +266,7 @@ const triageBudget = f.obj({
   corrections: f.req(correctionBudget),
   finalizer: f.req(terminalBudget),
   reviewer: f.req(terminalBudget),
+  phase_cap_authority: f.req(f.en("stock_default", "explicit")),
 });
 
 function objectValue(path: string, value: unknown): Record<string, unknown> {
