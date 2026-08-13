@@ -581,6 +581,8 @@ pub struct LogExplorerTurnContext {
 
 const BROAD_TRIAGE_MULTI_INCIDENT_SYSTEM_TEXT: &str = "MULTI-INCIDENT HONESTY: A broad corpus may contain several unrelated failures. For several independently supported incidents, lead with `Likely causes:` rather than forcing one root cause for the corpus. Distinct host trace-key groups must remain separate unless host evidence explicitly links them. A shared trace key is correlation evidence, not proof of one execution. Never claim one group caused another without shared governed evidence.";
 
+const TIME_QUALITY_HONESTY_SYSTEM_TEXT: &str = "TIME QUALITY HONESTY: The host will disclose the corpus time quality. When it is order-only, `seq` and source/event order are the only chronology available: do not call records concurrent, simultaneous, or happened-before in wall-clock time, and do not infer durations or cross-source temporal precedence. Say that records are nearby or ordered in the retained source/event sequence when that is all the evidence supports. When time quality is mixed, restrict temporal claims to the wall-clock subset the host identifies and disclose the limitation.";
+
 impl LogExplorerTurnContext {
     const MAX_ID_CHARS: usize = 128;
     const MAX_BRIEF_CHARS: usize = 2_000;
@@ -775,8 +777,9 @@ impl LogExplorerTurnContext {
              Do not describe a Unix epoch as wall-clock time without a displayed timezone-aware \
              conversion. State what additional logs or configuration would be needed when the \
              evidence cannot establish causality. Disclose missing or failed evidence. Never \
-             fabricate a result, path, citation, count, or causal claim.",
-            self.corpus_id
+             fabricate a result, path, citation, count, or causal claim. {}",
+            self.corpus_id,
+            TIME_QUALITY_HONESTY_SYSTEM_TEXT
         )
     }
 
@@ -796,10 +799,11 @@ impl LogExplorerTurnContext {
              time without a timezone-aware conversion. Distinguish observation from inference, \
              label confidence, disclose caps and time-quality limits, identify the next evidence \
              needed to resolve uncertainty, and never fabricate a result, citation, count, or \
-             causal claim.\n\n{}\n\n{}",
+             causal claim.\n\n{}\n\n{}\n\n{}",
             self.corpus_id,
             crate::triage_quality::triage_answer_contract_system_text(),
-            BROAD_TRIAGE_MULTI_INCIDENT_SYSTEM_TEXT
+            BROAD_TRIAGE_MULTI_INCIDENT_SYSTEM_TEXT,
+            TIME_QUALITY_HONESTY_SYSTEM_TEXT
         )
     }
 
@@ -7837,6 +7841,11 @@ mod tests {
             "{synthesis_hint}"
         );
         assert!(
+            synthesis_hint
+                .contains("do not call records concurrent, simultaneous, or happened-before"),
+            "{synthesis_hint}"
+        );
+        assert!(
             !synthesis_hint.contains("STRUCTURED TRIAGE ANSWER CONTRACT"),
             "focused linked chat must not require the broad RCA shape: {synthesis_hint}"
         );
@@ -7854,6 +7863,10 @@ mod tests {
                 "missing {required:?}: {broad_hint}"
             );
         }
+        assert!(
+            broad_hint.contains("do not call records concurrent, simultaneous, or happened-before"),
+            "{broad_hint}"
+        );
         assert!(
             broad_hint.contains("STRUCTURED TRIAGE ANSWER CONTRACT"),
             "{broad_hint}"
