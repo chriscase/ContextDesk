@@ -2,6 +2,9 @@
 
 Status: **candidate prepared; remote CI and merge approval pending**
 
+Feature freeze: no non-blocking feature work is being added to this release
+candidate while remote CI and review are pending.
+
 This record describes the candidate on
 `integrate/release-consolidation-v1`. It intentionally separates the exact
 code/build identity from the later documentation commits.
