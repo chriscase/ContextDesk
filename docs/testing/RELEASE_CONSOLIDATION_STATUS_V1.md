@@ -113,7 +113,8 @@ candidate is accepted; it must be rebased and re-gated rather than cherry-
 picked across conflicting transport code.
 
 The approval-gated PR command and remote CI checklist are captured in
-`RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md`; no PR has been opened yet.
+`RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md`; draft PR #873 is now open for CI and
+review, but it has not been approved or merged.
 
 The read-only verifier `docs/testing/verify-release-consolidation.sh` passes on
 the current tip and proves the exact pin, accepted ancestry, clean state,

@@ -1,8 +1,8 @@
 # Release consolidation PR handoff v1
 
-This is the approval-gated handoff for the post-demo release candidate. No PR
-has been opened by the consolidation work; the owner must decide when to open
-it.
+This is the approval-gated handoff for the post-demo release candidate. Draft
+PR #873 is open for remote CI and review; merge and retirement of superseded
+PRs remain approval-gated.
 
 ## Exact source
 
