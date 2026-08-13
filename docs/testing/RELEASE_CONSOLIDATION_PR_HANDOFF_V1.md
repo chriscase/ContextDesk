@@ -26,7 +26,8 @@ documentation-only evidence and handoff notes.
 - Desktop lint: 0 errors, 9 existing warnings
 - Desktop tests: 1,888 Vitest tests passed
 - Node packaging/privacy checks: 54 passed
-- PowerShell demo contract: 8 passed on the available host
+- PowerShell demo contract: 8 passed, including parser and executable
+  provider-free preflight under local `pwsh`
 - Claims, CLI docs, protocol fixtures, evidence-drift, packaging, and media
   checks: pass
 - Exact source binary identity previously verified as `git=160deb66cf64`

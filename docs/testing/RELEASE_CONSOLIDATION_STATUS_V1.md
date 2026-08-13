@@ -28,7 +28,7 @@ code/build identity from the later documentation commits.
 | Desktop typecheck | pass |
 | Desktop lint | 0 errors; 9 warnings |
 | Desktop tests and packaging checks | 192 Vitest files / 1,888 tests; 54 Node checks; all pass |
-| Demo PowerShell contract suite | 8 passed |
+| Demo PowerShell contract suite | 8 passed, including parser and executable preflight under local `pwsh` |
 | Claims, CLI docs, protocol fixtures, evidence drift, packaging, media checks | pass |
 | Exact release binary identity | pass; embedded `git=160deb66cf64` |
 
@@ -91,6 +91,11 @@ picked across conflicting transport code.
 
 The approval-gated PR command and remote CI checklist are captured in
 `RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md`; no PR has been opened yet.
+
+The local host now has PowerShell 7 available, so the harness parser and
+provider-free preflight were exercised here. This does not replace the
+Windows-runner job: Windows source/build and platform-specific behavior still
+require the owner-authorized PR CI matrix.
 
 ## Verified worktree cleanup
 
