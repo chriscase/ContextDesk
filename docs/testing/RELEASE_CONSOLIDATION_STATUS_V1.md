@@ -13,7 +13,7 @@ code/build identity from the later documentation commits.
 
 - Consolidation code/evidence tip before this status record: `2dc828beb282f5c338b4a60f3cea454f2d57aea2`
 - Current documentation tip: resolve `git rev-parse HEAD` after fetching the branch
-- Exact code/build pin: `74bd160e90d8f179b1784418a717884787ab6018`
+- Exact code/build pin: `a79069445dc79aba835e7627ec75c8cbbffd5492`
 - Accepted triage runtime ancestor: `fcfdd30d1e52ee0fa379cce4682a79c51ce252c6`
 - Successful demo branch ancestor: `0638e2776d9e68e936302b8be6aa757b62690dcf`
 - Merge simulation with `origin/main`: clean; no conflicts
@@ -39,16 +39,16 @@ not that older checkout, once the owner opens the promotion PR.
 | Desktop tests and packaging checks | 192 Vitest files / 1,888 tests; 54 Node checks; all pass |
 | Demo PowerShell contract suite | 8 passed, including parser and executable preflight under local `pwsh` |
 | Claims, CLI docs, protocol fixtures, evidence drift, packaging, media checks | pass |
-| Exact release binary identity | pass; embedded `git=74bd160e90d8` |
+| Exact release binary identity | pass; embedded `git=a79069445dc7` |
 
 Binary SHA-256 for the exact code pin:
 
-`d54c3e42ebb83a906d95462324138d53110414e08a70a96ebcd9b6df84b5bdec`
+`34e9d7b773cb2d46e20ea7b8ec8df97e2d7fd286efcc645a2e59cbe873a5c8eb`
 
 The code pin includes the pure-rustfmt follow-up and the cross-platform fixture
-line-ending contract. The former closes the nested Tauri workspace formatting
-mismatch; the latter keeps manifest-hashed ledger JSON byte-stable on Windows.
-Neither changes product logic.
+line-ending contracts. The former closes the nested Tauri workspace formatting
+mismatch; the latter keeps manifest-hashed ledger and Triage SDK golden JSON
+byte-stable on Windows. Neither changes product logic.
 
 ## Live evidence
 
