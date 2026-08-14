@@ -12,9 +12,10 @@ use crate::config::{ColorMode, OutputFormat};
 use crate::envelope::{CliError, CliResult, Render};
 use crate::progress::CliProgressObserver;
 use cd_core::config::AppConfig;
+use cd_core::log_analysis::import_outcome::{ImportOutcomeClass, ImportOutcomeReport};
 use cd_core::log_analysis::import_preview::ImportPreviewItem;
 use cd_core::process_progress::CancelFlag;
-use cd_workflow::import::{default_import_with_observer, DefaultImportOutcome};
+use cd_workflow::import::{default_import_with_outcome, DefaultImportOutcome};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
@@ -44,6 +45,9 @@ pub struct ImportOutput {
     pub reviewed_format_warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<Vec<SelectionItem>>,
+    /// Fail-closed import result contract. `partial` above stays a bare bool
+    /// for existing scripts; this says partial *how*, and which member.
+    pub outcome: ImportOutcomeReport,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,8 +84,16 @@ impl From<&ImportPreviewItem> for SelectionItem {
 
 impl Render for ImportOutput {
     fn render_text(&self) -> String {
+        // Never say "complete" for a partial corpus. The verdict comes from the
+        // typed contract, not from whether the command returned Ok.
+        let headline = match self.outcome.class {
+            ImportOutcomeClass::Complete => "Import complete",
+            ImportOutcomeClass::Partial => "Import complete with defects (PARTIAL)",
+            // Unreachable on this arm: a rejected import returns `Err`.
+            ImportOutcomeClass::Rejected => "Import rejected",
+        };
         let mut out = format!(
-            "Import complete\n\n  Corpus       {}\n  Corpus ID    {}\n  Events       {}\n  Templates    {}",
+            "{headline}\n\n  Corpus       {}\n  Corpus ID    {}\n  Events       {}\n  Templates    {}",
             self.corpus_name,
             self.corpus_id,
             self.events_imported,
@@ -151,6 +163,10 @@ impl Render for ImportOutput {
                 self.corpus_id
             ));
         }
+        if !self.outcome.defects.is_empty() || self.outcome.class != ImportOutcomeClass::Complete {
+            out.push_str("\n\n");
+            out.push_str(self.outcome.render_summary().trim_end());
+        }
         if let Some(selection) = &self.selection {
             out.push_str("\n\nselection:\n");
             for item in selection {
@@ -195,6 +211,7 @@ impl From<DefaultImportOutcome> for ImportOutput {
                 .collect(),
             reviewed_format_warnings: outcome.reviewed_format_warnings,
             selection: None,
+            outcome: outcome.outcome,
         }
     }
 }
@@ -231,7 +248,7 @@ pub async fn run(
     let cancel_for_task = cancel.clone();
     let observer_for_task = observer.clone();
     let mut import_task = tokio::task::spawn_blocking(move || {
-        default_import_with_observer(
+        default_import_with_outcome(
             &cache_root_owned,
             &source_owned,
             &cfg_owned,
@@ -240,7 +257,7 @@ pub async fn run(
         )
     });
 
-    // `default_import_with_observer` runs on a blocking thread so this task
+    // `default_import_with_outcome` runs on a blocking thread so this task
     // stays free to race it against Ctrl-C; on cancel we set the flag and
     // wait for the SAME task to actually return (ingest's staging cleanup
     // runs via `Drop` on that thread, not here) rather than abandoning it.
@@ -261,19 +278,39 @@ pub async fn run(
     observer.finish();
 
     let outcome = match joined {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(core_error)) => {
+        Ok((Ok(outcome), _)) => outcome,
+        Ok((Err(core_error), rejected)) => {
             if matches!(&core_error, cd_core::error::CoreError::Cancelled) {
                 return Err(CliError::cancelled(
                     "import cancelled — no partial corpus was published, safe to retry",
                 ));
             }
-            let message = core_error.to_string();
-            return Err(if message.contains("nothing importable") {
-                CliError::user(message)
+            // A rejected import is where a bare engine message used to be the
+            // whole answer. Lead with it (scripts match on it today), then say
+            // which source or archive member stopped the run, and carry the
+            // typed document for `--format json`.
+            // The locator is its own field below, so strip the marker the
+            // engine used to carry it out rather than printing it twice.
+            let raw = core_error.to_string();
+            let message =
+                cd_core::log_analysis::import_outcome::strip_member_annotation(&raw).to_string();
+            let located = rejected
+                .defects
+                .first()
+                .map(|defect| {
+                    format!(
+                        "{message}\n\nfailing source: {} ({})\nnothing was published — the library is unchanged",
+                        defect.source.identity,
+                        defect.code.as_str()
+                    )
+                })
+                .unwrap_or_else(|| message.clone());
+            let error = if message.contains("nothing importable") {
+                CliError::user(located)
             } else {
-                CliError::internal(message)
-            });
+                CliError::internal(located)
+            };
+            return Err(error.with_details(rejected.to_json()));
         }
         Err(join_error) => {
             return Err(CliError::internal(format!(
