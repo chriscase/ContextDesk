@@ -108,6 +108,9 @@ logs/
 # Hermetic triage quality lab (synthetic only).
 !fixtures/triage-root-cause-lab/**
 !fixtures/triage-root-cause-lab/**/*.log
+# Import result contract members (synthetic only).
+!fixtures/import-outcome/**
+!fixtures/import-outcome/**/*.log
 
 # Python bytecode from the reference producer examples.
 __pycache__/

@@ -23,10 +23,11 @@
 use cd_core::config::AppConfig;
 use cd_core::error::{CoreError, CoreResult};
 use cd_core::log_analysis::embed_policy::LogEmbedPolicy;
+use cd_core::log_analysis::import_outcome::ImportOutcomeReport;
 use cd_core::log_analysis::import_preview::{
     preview_import_plan, verify_import_plan, ImportPreviewCounts, ImportPreviewPlan,
 };
-use cd_core::log_analysis::ingest::{ingest_path_with_policy_selection_and_observer, IngestReport};
+use cd_core::log_analysis::ingest::{ingest_path_with_outcome, IngestReport};
 use cd_core::log_analysis::store::LogCorpus;
 use cd_core::process_progress::{CancelFlag, NoopProcessProgress, ProcessProgressObserver};
 use std::path::Path;
@@ -155,6 +156,12 @@ pub struct DefaultImportOutcome {
     /// The plan review, retained so `--explain-selection` can render exact
     /// per-item reasons without a second preview pass.
     pub plan: ImportPreviewPlan,
+    /// Fail-closed import result contract: complete / partial / rejected, with
+    /// the exact source or archive member behind any defect.
+    ///
+    /// `partial` above stays as it was for existing callers; this is the typed
+    /// answer to "partial *how*, and which member".
+    pub outcome: ImportOutcomeReport,
 }
 
 /// Run the zero-touch default import path for one source path.
@@ -186,12 +193,59 @@ pub fn default_import_with_observer(
     cancel: Option<&CancelFlag>,
     observer: &dyn ProcessProgressObserver,
 ) -> CoreResult<DefaultImportOutcome> {
-    let plan = preview_import_plan(source_path, cancel)?;
+    default_import_with_outcome(cache_root, source_path, cfg, cancel, observer).0
+}
+
+/// [`default_import_with_observer`], additionally returning the fail-closed
+/// import result contract on **both** arms.
+///
+/// A rejected import returns `Err` as before — the engine's error contract is
+/// unchanged — but the accompanying [`ImportOutcomeReport`] survives it, so a
+/// host can tell the operator which archive member stopped the run instead of
+/// only relaying a bare message. Failures before ingest starts (nothing
+/// importable, plan drift) still classify as rejected, so every attempt yields
+/// exactly one classified outcome.
+pub fn default_import_with_outcome(
+    cache_root: &Path,
+    source_path: &Path,
+    cfg: &AppConfig,
+    cancel: Option<&CancelFlag>,
+    observer: &dyn ProcessProgressObserver,
+) -> (CoreResult<DefaultImportOutcome>, ImportOutcomeReport) {
+    match default_import_inner(cache_root, source_path, cfg, cancel, observer) {
+        Ok(outcome) => {
+            let report = outcome.outcome.clone();
+            (Ok(outcome), report)
+        }
+        Err(failure) => {
+            let (error, outcome) = *failure;
+            (Err(error), outcome)
+        }
+    }
+}
+
+/// The real body. `Err` carries the classified outcome alongside the error so
+/// neither caller above has to reconstruct it. The pair is boxed to keep the
+/// error variant small.
+fn default_import_inner(
+    cache_root: &Path,
+    source_path: &Path,
+    cfg: &AppConfig,
+    cancel: Option<&CancelFlag>,
+    observer: &dyn ProcessProgressObserver,
+) -> Result<DefaultImportOutcome, Box<(CoreError, ImportOutcomeReport)>> {
+    // Pre-ingest refusals still classify, and name the member when the preview
+    // walk knew one — a corrupt nested archive is found there, before ingest.
+    let reject = |error: CoreError| {
+        let outcome = ImportOutcomeReport::rejected_from_error(&error);
+        Box::new((error, outcome))
+    };
+    let plan = preview_import_plan(source_path, cancel).map_err(reject)?;
     if let Some(block) = plan.report.plan_block() {
-        return Err(CoreError::Policy(format!(
+        return Err(reject(CoreError::Policy(format!(
             "nothing importable at {}: {block:?}",
             source_path.display()
-        )));
+        ))));
     }
     let counts: ImportPreviewCounts = plan.report.counts.clone();
 
@@ -209,9 +263,10 @@ pub fn default_import_with_observer(
         &plan.plan_token,
         &selected,
         cancel,
-    )?;
+    )
+    .map_err(reject)?;
 
-    let corpus_name = suggest_corpus_name(source_path, cache_root)?;
+    let corpus_name = suggest_corpus_name(source_path, cache_root).map_err(reject)?;
     let policy = LogEmbedPolicy {
         mode: cd_core::log_analysis::embed_policy::LogEmbedMode::None,
         ..LogEmbedPolicy::default()
@@ -225,7 +280,9 @@ pub fn default_import_with_observer(
     let reviewed_format_warnings: Vec<String> = Vec::new();
     let reviewed_formats_applied: Vec<ReviewedFormatApplication> = Vec::new();
 
-    let report = ingest_path_with_policy_selection_and_observer(
+    // Same production engine and selection as before; this entry point only
+    // also returns the classified outcome.
+    let (ingest_result, outcome) = ingest_path_with_outcome(
         cache_root,
         source_path,
         &corpus_name,
@@ -233,14 +290,24 @@ pub fn default_import_with_observer(
         None,
         observer,
         cancel,
-        &selection,
-    )?;
+        Some(&selection),
+    );
+    let report = match ingest_result {
+        Ok(report) => report,
+        Err(error) => return Err(Box::new((error, outcome))),
+    };
 
-    let timezone_ambiguous_sources = crate::timezone::unresolved_sources_after_default_apply(
+    // Past this line the corpus is already published, so a failure here is NOT
+    // a rejection — saying "rejected, nothing published" would be false about a
+    // corpus that exists on disk. Carry the real ingest outcome with the error.
+    let timezone_ambiguous_sources = match crate::timezone::unresolved_sources_after_default_apply(
         cache_root,
         &report.corpus_id,
         cfg.default_timezone.as_deref(),
-    )?;
+    ) {
+        Ok(sources) => sources,
+        Err(error) => return Err(Box::new((error, outcome))),
+    };
 
     Ok(DefaultImportOutcome {
         entries_examined: counts.total,
@@ -262,6 +329,7 @@ pub fn default_import_with_observer(
         reviewed_format_warnings,
         report,
         plan,
+        outcome,
     })
 }
 

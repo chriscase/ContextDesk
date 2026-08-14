@@ -1,0 +1,4 @@
+{"ts":"2026-03-01T09:20:00Z","level":"info","msg":"first record parses"}
+{"ts":"2026-03-01T09:20:01Z","level":"warn","msg":"unterminated object
+{"ts" 2026-03-01T09:20:02Z "level" "info"}
+{"ts":"2026-03-01T09:20:03Z","level":"info","msg":"last record parses"}

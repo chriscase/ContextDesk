@@ -581,6 +581,7 @@ fn emit_triage_run(
                         error: Some(envelope::ErrorEnvelope {
                             kind: error.category.kind(),
                             message: error.message.clone(),
+                            details: error.details.clone(),
                         }),
                     };
                     println!(

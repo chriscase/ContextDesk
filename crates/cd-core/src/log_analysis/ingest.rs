@@ -3,6 +3,9 @@
 use super::drain::DrainMiner;
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
 use super::frame::LogicalRecordFramer;
+use super::import_outcome::{
+    outcome_from_ingest, DefectLedger, ImportDefectCode, ImportOutcomeReport, RecordLocation,
+};
 use super::import_preview::{ImportPreviewItem, ImportPreviewReport};
 use super::ingest_confidence::{IngestConfidenceAggregator, IngestConfidenceReport};
 use super::parse::{parse_line_with_fingerprint, LogFormat};
@@ -84,6 +87,14 @@ pub struct IngestStats {
     /// Counts by active timestamp basis.
     #[serde(default)]
     pub active_timestamp_basis_counts: std::collections::BTreeMap<String, u64>,
+    /// Located defect ledger for the import result contract.
+    ///
+    /// Deliberately **not serialized**: persisted [`super::store::CorpusStats`]
+    /// and every manifest derived from it keep exactly the fields they had, so
+    /// existing deterministic digests are unaffected. The ledger is a run
+    /// artifact consumed by [`super::import_outcome`], not corpus metadata.
+    #[serde(skip)]
+    pub defects: DefectLedger,
 }
 
 impl IngestStats {
@@ -148,6 +159,22 @@ impl IngestStats {
             self.exclusion_examples
                 .push(format!("{reason}: {safe_basename}"));
         }
+        // The aggregate above keeps only a redacted leaf name, which cannot
+        // name `outer.zip!/inner.zip!/app.log`. Record the full identity chain
+        // here too; the ledger drops intentional-filtering reasons itself, so
+        // this funnel stays reason-agnostic.
+        self.defects
+            .record_ingest_reason(reason, &source.to_string_lossy());
+    }
+
+    /// Record the run-aborting defect against the source that caused it.
+    ///
+    /// Called immediately before the corresponding `Err` return so a rejected
+    /// import can still name the exact archive or member that stopped it. The
+    /// error's own message is never copied into the ledger: it can carry an
+    /// absolute path or OS text, and the code is the stable explanation.
+    fn reject(&mut self, code: ImportDefectCode, identity: &str) {
+        self.defects.record_fatal(code, identity, None);
     }
 }
 
@@ -537,6 +564,98 @@ pub fn ingest_path_with_policy_selection_and_observer_managed(
         Some(managed_identity),
         Some(selection),
     )
+}
+
+/// Policy ingest that also returns the fail-closed import result contract.
+///
+/// Behaviourally identical to [`ingest_path_with_policy_selection_and_observer`]
+/// — same walk, same policy, same publication gate. The difference is what the
+/// caller learns when something goes wrong.
+///
+/// The [`ImportOutcomeReport`] is returned on **both** arms, which is the point:
+/// a rejected import previously surfaced as a bare `CoreError` string such as
+/// `zip open: invalid Zip archive`, with no way to tell which nested member was
+/// bad. The outcome names it. Callers that only need the old behaviour keep
+/// using the existing entry points unchanged.
+///
+/// Returning a tuple rather than folding the error into the report keeps the
+/// engine's own error contract intact for existing callers, and keeps the
+/// classification honest: `Err` always pairs with
+/// [`super::import_outcome::ImportOutcomeClass::Rejected`], never with a
+/// published class.
+#[allow(clippy::too_many_arguments)]
+pub fn ingest_path_with_outcome(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    policy: &LogEmbedPolicy,
+    embed: Option<Arc<dyn EmbedBackend>>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    selection: Option<&IngestSelection>,
+) -> (CoreResult<IngestReport>, ImportOutcomeReport) {
+    // Argument validation happens before the walk, so there is no ledger yet.
+    // These still return a classified, rejected outcome rather than leaving the
+    // caller to decide what an early error means.
+    if let Err(error) = policy.assert_embed_allowed() {
+        let outcome = ImportOutcomeReport::rejected_without_locator(&error);
+        return (Err(error), outcome);
+    }
+    if let Some(selection) = selection {
+        if selection.selected.len() > super::import_preview::MAX_IMPORT_PREVIEW_ITEMS {
+            let error = CoreError::Policy(format!(
+                "import selection lists {} identities (limit {})",
+                selection.selected.len(),
+                super::import_preview::MAX_IMPORT_PREVIEW_ITEMS
+            ));
+            let outcome = ImportOutcomeReport::rejected_without_locator(&error);
+            return (Err(error), outcome);
+        }
+    }
+    let backend = match policy.mode {
+        LogEmbedMode::None => None,
+        LogEmbedMode::Local | LogEmbedMode::Cloud => embed,
+    };
+    if policy.mode == LogEmbedMode::Cloud && backend.is_none() {
+        let error = CoreError::Config(
+            "cloud embed mode requires an EmbedBackend (key from keychain)".into(),
+        );
+        let outcome = ImportOutcomeReport::rejected_without_locator(&error);
+        return (Err(error), outcome);
+    }
+
+    let mut sink: Option<ImportOutcomeReport> = None;
+    let result = ingest_path_inner_with_limits_and_fault(
+        cache_root,
+        path,
+        name,
+        backend.as_deref(),
+        policy.model_id.as_str(),
+        policy.mode,
+        policy.defer_above_source_bytes,
+        progress,
+        cancel,
+        None,
+        selection,
+        RawIngestLimits::default(),
+        None,
+        Some(&mut sink),
+    );
+    // The walk fills the sink on both arms. It can still be empty when the run
+    // failed before reaching it (corpus creation, staging setup); classify that
+    // as rejected too rather than inventing a success.
+    let outcome = sink.unwrap_or_else(|| match &result {
+        Ok(report) => {
+            ImportOutcomeReport::published(&report.corpus_id, &report.stats, &report.stats.defects)
+        }
+        Err(error) => ImportOutcomeReport::rejected_without_locator(error),
+    });
+    debug_assert_eq!(
+        result.is_ok(),
+        outcome.class.published(),
+        "ingest result and outcome class must agree"
+    );
+    (result, outcome)
 }
 
 fn cancelled(cancel: Option<&CancelFlag>) -> bool {
@@ -1700,6 +1819,22 @@ fn preflight_raw_log_zip<R: Read + Seek>(
     Ok(plans)
 }
 
+/// True when a source identity declares JSON Lines by extension.
+///
+/// Extension-based on purpose: this decides whether a record's failure to parse
+/// as JSON is *reportable*, and only a member that declares the format has made
+/// a promise to break. Content sniffing would flag ordinary text logs that
+/// happen to start with a brace. The leaf is taken after the archive-member
+/// separator so `outer.zip!/app.jsonl` is recognised.
+fn is_json_lines_source(identity: &str) -> bool {
+    let leaf = identity
+        .rsplit(['/', '\\'])
+        .find(|component| !component.is_empty())
+        .unwrap_or_default();
+    let lower = leaf.to_ascii_lowercase();
+    lower.ends_with(".jsonl") || lower.ends_with(".ndjson")
+}
+
 fn read_bounded_line(
     reader: &mut dyn BufRead,
     output: &mut Vec<u8>,
@@ -1843,6 +1978,15 @@ fn ingest_lines_from_reader(
     let mut framer = LogicalRecordFramer::new();
     // Parallel raw-byte accumulation so source_byte_count stays pre-decode.
     let mut pending_raw: Vec<u8> = Vec::new();
+    // Physical position within this member, for record-level defect locations.
+    // Reset per member because a location is only meaningful relative to the
+    // member an operator would open.
+    let mut physical_line = 0u64;
+    // JSON Lines is one JSON value per physical line by definition, so for
+    // these members physical position *is* record position and no framer state
+    // is needed to locate a bad record. Other formats legitimately span lines,
+    // so they are not checked here.
+    let member_is_json_lines = is_json_lines_source(source_label);
     loop {
         if cancelled(cancel) {
             emit(
@@ -1860,7 +2004,8 @@ fn ingest_lines_from_reader(
             return Err(CoreError::Cancelled);
         }
         raw_line.clear();
-        let bytes = time_op_result_ms(ops, IngestOp::DiscoverRead, || {
+        let record_offset = source_bytes_read;
+        let read = time_op_result_ms(ops, IngestOp::DiscoverRead, || {
             read_bounded_line(
                 reader,
                 &mut raw_line,
@@ -1869,10 +2014,29 @@ fn ingest_lines_from_reader(
                 progress,
                 Path::new(source_label),
             )
-        })?;
+        });
+        let bytes = match read {
+            Ok(bytes) => bytes,
+            Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+            Err(error) => {
+                // Reading stopped part-way through the member. Record where, so
+                // the rejected outcome can say "stopped at line N" instead of
+                // only naming the member.
+                stats.defects.record_fatal(
+                    ImportDefectCode::MemberReadFailed,
+                    source_label,
+                    Some(RecordLocation::new(
+                        physical_line.saturating_add(1),
+                        record_offset,
+                    )),
+                );
+                return Err(error);
+            }
+        };
         if bytes == 0 {
             break;
         }
+        physical_line = physical_line.saturating_add(1);
         source_bytes_read = source_bytes_read.saturating_add(bytes as u64);
         if source_bytes_read > limits.max_file_bytes {
             return Err(CoreError::Policy(format!(
@@ -1896,6 +2060,23 @@ fn ingest_lines_from_reader(
                 .to_vec()
         };
         let physical = String::from_utf8_lossy(&physical_bytes).into_owned();
+        if member_is_json_lines {
+            let trimmed = physical.trim();
+            // Blank separator lines are permitted by every JSON Lines reader in
+            // practice; only a non-blank line that is not a JSON value is a
+            // malformed record.
+            if !trimmed.is_empty() && serde_json::from_str::<serde_json::Value>(trimmed).is_err() {
+                // The record is still ingested — the parser falls back to plain
+                // text, and dropping it would lose evidence. What changes is
+                // that the operator is now told it did not parse as declared,
+                // and exactly where. Only the position is recorded, never the
+                // record itself.
+                stats.defects.record_malformed_structured_record(
+                    source_label,
+                    RecordLocation::new(physical_line, record_offset),
+                );
+            }
+        }
         let completed = time_op_ms(ops, IngestOp::ParseFrame, || framer.push_line(&physical));
         if let Some(logical) = completed {
             // `push_line` has two completion shapes:
@@ -2210,6 +2391,21 @@ fn stage_nested_archive(
     Ok(staged)
 }
 
+/// Tag a preview failure with the archive member it happened in.
+///
+/// Only the message-bearing variants are annotated. `Cancelled` is a caller
+/// decision rather than a defect in any member, and an annotated cancellation
+/// would misreport a clean Ctrl-C as a corrupt archive.
+fn annotate_preview_member(error: CoreError, identity: &str) -> CoreError {
+    use super::import_outcome::annotate_member;
+    match error {
+        CoreError::Cancelled => CoreError::Cancelled,
+        CoreError::Policy(message) => CoreError::Policy(annotate_member(&message, identity)),
+        CoreError::Message(message) => CoreError::Message(annotate_member(&message, identity)),
+        other => CoreError::Message(annotate_member(&other.to_string(), identity)),
+    }
+}
+
 fn archive_member_identity(archive_identity: &str, member_identity: &str) -> String {
     format!("{archive_identity}!/{member_identity}")
 }
@@ -2292,6 +2488,7 @@ fn ingest_from_zip_file(
         return Err(CoreError::Cancelled);
     }
     if archive_depth == 0 || archive_depth > limits.max_archive_depth {
+        stats.reject(ImportDefectCode::ArchiveDepthExceeded, archive_identity);
         return Err(CoreError::Policy(format!(
             "raw log nested archive depth limit exceeded ({} > {})",
             archive_depth, limits.max_archive_depth
@@ -2310,19 +2507,28 @@ fn ingest_from_zip_file(
                     LogIngestEvidenceReason::ParseFailed,
                     Path::new(archive_identity),
                 );
+                // Names the archive itself: at preflight no member is known
+                // yet, and for a nested container `archive_identity` is
+                // already the full `outer.zip!/inner.zip` chain.
+                stats.reject(ImportDefectCode::ArchiveUnreadable, archive_identity);
             }
             return Err(error);
         }
     };
-    let mut archive = zip::ZipArchive::new(archive_file).map_err(|e| {
-        emit_ingest_evidence(
-            progress,
-            LogIngestEvidenceReason::ParseFailed,
-            Path::new(archive_identity),
-        );
-        CoreError::Message(format!("zip open: {e}"))
-    })?;
+    let mut archive = match zip::ZipArchive::new(archive_file) {
+        Ok(archive) => archive,
+        Err(e) => {
+            emit_ingest_evidence(
+                progress,
+                LogIngestEvidenceReason::ParseFailed,
+                Path::new(archive_identity),
+            );
+            stats.reject(ImportDefectCode::ArchiveUnreadable, archive_identity);
+            return Err(CoreError::Message(format!("zip open: {e}")));
+        }
+    };
     if archive.len() != plans.len() {
+        stats.reject(ImportDefectCode::ArchiveUnreadable, archive_identity);
         return Err(CoreError::Policy(
             "raw log zip entry index is ambiguous".into(),
         ));
@@ -2426,9 +2632,13 @@ fn ingest_from_zip_file(
             .with_bytes(stats.source_bytes),
         );
 
-        let entry = archive
-            .by_index(i)
-            .map_err(|e| CoreError::Message(format!("zip entry: {e}")))?;
+        let entry = match archive.by_index(i) {
+            Ok(entry) => entry,
+            Err(e) => {
+                stats.reject(ImportDefectCode::ArchiveMemberUnstable, &source_identity);
+                return Err(CoreError::Message(format!("zip entry: {e}")));
+            }
+        };
         let (runtime_identity, runtime_directory) = validate_raw_log_zip_entry(
             std::str::from_utf8(entry.name_raw())
                 .map_err(|_| CoreError::Policy("raw log zip entry name is not UTF-8".into()))?,
@@ -2441,6 +2651,8 @@ fn ingest_from_zip_file(
             || entry.size() != plan.expanded_size
             || entry.compressed_size() != plan.compressed_size
         {
+            drop(entry);
+            stats.reject(ImportDefectCode::ArchiveMemberUnstable, &source_identity);
             return Err(CoreError::Policy(
                 "raw log zip entry changed after preflight".into(),
             ));
@@ -2456,6 +2668,7 @@ fn ingest_from_zip_file(
                     LogIngestEvidenceReason::ReadFailed,
                     Path::new(&source_identity),
                 );
+                stats.reject(ImportDefectCode::MemberReadFailed, &source_identity);
                 return Err(CoreError::Policy(error.to_string()));
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
@@ -2467,6 +2680,7 @@ fn ingest_from_zip_file(
                     LogIngestEvidenceReason::ReadFailed,
                     Path::new(&source_identity),
                 );
+                stats.reject(ImportDefectCode::MemberReadFailed, &source_identity);
                 return Err(CoreError::Message(format!(
                     "raw log zip member read failed: {error}"
                 )));
@@ -2482,6 +2696,7 @@ fn ingest_from_zip_file(
             }
             let next_depth = archive_depth.saturating_add(1);
             if next_depth > limits.max_archive_depth {
+                stats.reject(ImportDefectCode::ArchiveDepthExceeded, &source_identity);
                 return Err(CoreError::Policy(format!(
                     "raw log nested archive depth limit exceeded ({} > {})",
                     next_depth, limits.max_archive_depth
@@ -2513,12 +2728,17 @@ fn ingest_from_zip_file(
                             LogIngestEvidenceReason::ReadFailed,
                             Path::new(&source_identity),
                         );
+                        stats.reject(
+                            ImportDefectCode::NestedArchiveStagingFailed,
+                            &source_identity,
+                        );
                     }
                     return Err(error);
                 }
             };
             let bounded = reader.into_inner();
             if bounded.member_bytes != plan.expanded_size {
+                stats.reject(ImportDefectCode::ArchiveMemberUnstable, &source_identity);
                 return Err(CoreError::Policy(format!(
                     "raw log zip member size mismatch (declared {}, read {})",
                     plan.expanded_size, bounded.member_bytes
@@ -2586,6 +2806,7 @@ fn ingest_from_zip_file(
         )?;
         let bounded = reader.into_inner();
         if bounded.member_bytes != plan.expanded_size {
+            stats.reject(ImportDefectCode::ArchiveMemberUnstable, &source_identity);
             return Err(CoreError::Policy(format!(
                 "raw log zip member size mismatch (declared {}, read {})",
                 plan.expanded_size, bounded.member_bytes
@@ -2695,6 +2916,7 @@ fn ingest_path_inner_with_fault(
         selection,
         RawIngestLimits::default(),
         fault,
+        None,
     )
 }
 
@@ -2713,6 +2935,10 @@ fn ingest_path_inner_with_limits_and_fault(
     selection: Option<&IngestSelection>,
     limits: RawIngestLimits,
     fault: IngestFaultHook<'_>,
+    // Filled on both the published and the rejected path. `None` keeps every
+    // existing caller byte-identical; only the outcome-returning entry point
+    // asks for it.
+    outcome_sink: Option<&mut Option<ImportOutcomeReport>>,
 ) -> CoreResult<IngestReport> {
     let kind = ProcessProgressKind::LogIngest;
     let source_label = progress_basename(path);
@@ -2754,6 +2980,10 @@ fn ingest_path_inner_with_limits_and_fault(
     );
 
     let mut staging = IngestStaging::new(cache_root)?;
+    // Declared out here so the walk's defect ledger outlives an aborted run.
+    // On the `Err` paths below the report is gone, but this still holds the
+    // located reason the walk stopped.
+    let mut walk_stats = IngestStats::default();
     let ingest_result = (|| {
         let report = match ingest_path_into_cache(
             staging.cache_root(),
@@ -2769,6 +2999,7 @@ fn ingest_path_inner_with_limits_and_fault(
             limits,
             fault,
             &ops,
+            &mut walk_stats,
         ) {
             Ok(report) => report,
             Err(_error) if cancelled(cancel) => {
@@ -2849,7 +3080,17 @@ fn ingest_path_inner_with_limits_and_fault(
         Ok(report)
     })();
     let cleanup_result = staging.cleanup_checked();
-    let (mut report, cleanup_deferred) = reconcile_ingest_cleanup(ingest_result, cleanup_result)?;
+    let reconciled = reconcile_ingest_cleanup(ingest_result, cleanup_result);
+    // Classify before the `?` below. After it, a failed run has dropped both the
+    // error and the ledger, and the caller is left with the bare message this
+    // contract exists to replace.
+    if let Some(sink) = outcome_sink {
+        *sink = Some(outcome_from_ingest(
+            reconciled.as_ref().map(|(report, _)| report),
+            &walk_stats,
+        ));
+    }
+    let (mut report, cleanup_deferred) = reconciled?;
     let embedding_deferred = report.embedding.state == EmbeddingState::Deferred;
     let op_us = ops.into_inner().unwrap_or_default();
     let mut op_timings = op_us.to_ms();
@@ -2908,6 +3149,10 @@ fn ingest_path_into_cache(
     limits: RawIngestLimits,
     fault: IngestFaultHook<'_>,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
+    // Owned by the caller so an aborted walk's defect ledger is still readable
+    // after this function returns `Err` — that is how a rejected import names
+    // the member that stopped it instead of returning a bare message.
+    stats: &mut IngestStats,
 ) -> CoreResult<IngestReport> {
     let kind = ProcessProgressKind::LogIngest;
     let source_label = progress_basename(path);
@@ -2915,7 +3160,6 @@ fn ingest_path_into_cache(
     let corpus = LogCorpus::create(cache_root, name)?;
     check_ingest_fault(fault, IngestCheckpoint::CorpusCreated)?;
     let mut miner = DrainMiner::default();
-    let mut stats = IngestStats::default();
     let mut confidence = IngestConfidenceAggregator::default();
     let mut seq = 0u64;
     let mut batch = Vec::with_capacity(256);
@@ -2929,7 +3173,7 @@ fn ingest_path_into_cache(
             &private_archive_root,
             &corpus,
             &mut miner,
-            &mut stats,
+            stats,
             &mut confidence,
             &mut seq,
             &mut batch,
@@ -3076,7 +3320,7 @@ fn ingest_path_into_cache(
                     &private_archive_root,
                     &corpus,
                     &mut miner,
-                    &mut stats,
+                    stats,
                     &mut confidence,
                     &mut seq,
                     &mut batch,
@@ -3154,7 +3398,7 @@ fn ingest_path_into_cache(
                 Some(file.as_path()),
                 &corpus,
                 &mut miner,
-                &mut stats,
+                stats,
                 &mut confidence,
                 &mut seq,
                 &mut batch,
@@ -3450,7 +3694,9 @@ fn ingest_path_into_cache(
 
     Ok(IngestReport {
         corpus_id: corpus.id().to_string(),
-        stats,
+        // Cloned rather than moved: the caller keeps the same stats value so an
+        // aborted run's defect ledger survives this function returning `Err`.
+        stats: stats.clone(),
         confidence,
         top_templates: top,
         embedding,
@@ -3880,7 +4126,8 @@ pub(super) fn preview_import_path_impl(
                 cancel,
                 &mut items,
                 &mut truncated,
-            )?;
+            )
+            .map_err(|error| annotate_preview_member(error, &identity))?;
             continue;
         }
 
@@ -4108,6 +4355,9 @@ fn preview_zip_members<R: Read + Seek>(
             }
             drop(reader);
             let mut nested = std::io::Cursor::new(buf);
+            // A corrupt nested container fails here, where its identity is
+            // still known. Propagating bare would surface as `zip open: ...`
+            // with nothing naming the member, which is the whole complaint.
             preview_zip_members(
                 &mut nested,
                 &identity,
@@ -4117,7 +4367,8 @@ fn preview_zip_members<R: Read + Seek>(
                 cancel,
                 items,
                 truncated,
-            )?;
+            )
+            .map_err(|error| annotate_preview_member(error, &identity))?;
             continue;
         }
 
@@ -4219,6 +4470,7 @@ mod tests {
             None,
             None,
             limits,
+            None,
             None,
         )
     }
