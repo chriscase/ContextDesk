@@ -12,8 +12,9 @@ code/build identity from the later documentation commits.
 ## Identity and ancestry
 
 - Consolidation code/evidence tip before this status record: `2dc828beb282f5c338b4a60f3cea454f2d57aea2`
-- Current documentation tip: resolve `git rev-parse HEAD` after fetching the branch
+- Current branch tip: resolve `git rev-parse HEAD` after fetching the branch; documentation and scoped CI commits may advance it
 - Exact code/build pin: `a79069445dc79aba835e7627ec75c8cbbffd5492`
+- Scoped CI mitigation: `52fc2f51c9c692a042e26fc9e3719c3c77967231` (workflow-only; bounds Linux test/build parallelism)
 - Accepted triage runtime ancestor: `fcfdd30d1e52ee0fa379cce4682a79c51ce252c6`
 - Successful demo branch ancestor: `0638e2776d9e68e936302b8be6aa757b62690dcf`
 - Merge simulation with `origin/main`: clean; no conflicts
@@ -83,6 +84,10 @@ As of the final audit, the superseded PRs remain open and were not modified:
 They require owner-approved retirement after the replacement PR is accepted;
 closing them now would erase useful historical review context.
 
+The Ubuntu workspace CI retry twice lost hosted-runner communication during the
+large test step without a test assertion failure. The mitigation is workflow-only
+and does not alter the exact runtime/build pin or binary identity.
+
 No new feature feedback is part of this candidate unless it identifies a
 release-blocking defect. The current shared build target is retained for
 reproducibility; only missing worktree registrations and disposable verification
@@ -123,7 +128,7 @@ review, but it has not been approved or merged.
 
 The read-only verifier `docs/testing/verify-release-consolidation.sh` passes on
 the current tip and proves the exact pin, accepted ancestry, clean state,
-merge-tree result, docs-only post-pin scope, required evidence files, and
+merge-tree result, docs-or-scoped-CI post-pin scope, required evidence files, and
 release-document hygiene. Its shell syntax check passes, and an intentionally
 wrong code pin is rejected before any other check.
 
