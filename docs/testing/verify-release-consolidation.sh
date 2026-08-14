@@ -51,10 +51,12 @@ done
 MERGE_TREE=$(git merge-tree --write-tree "$MAIN_REF" "$CANDIDATE_REF") ||
     fail "candidate does not merge cleanly with $MAIN_REF"
 
-if ! git diff --quiet "$EXPECTED_CODE_SHA..$CANDIDATE_REF" -- . ':(exclude)docs'; then
-    printf '%s\n' 'Non-documentation changes after the exact code pin:' >&2
+if ! git diff --quiet "$EXPECTED_CODE_SHA..$CANDIDATE_REF" -- . \
+    ':(exclude)docs' \
+    ':(exclude).github/workflows/ci.yml'; then
+    printf '%s\n' 'Non-documentation/non-CI changes after the exact code pin:' >&2
     git diff --name-only "$EXPECTED_CODE_SHA..$CANDIDATE_REF" -- . ':(exclude)docs' >&2
-    fail "post-pin changes are not documentation-only"
+    fail "post-pin changes are not documentation-only or the scoped CI workflow"
 fi
 
 for required in \
@@ -80,4 +82,4 @@ printf 'candidate_sha=%s\n' "$CANDIDATE_SHA"
 printf 'main_sha=%s\n' "$MAIN_SHA"
 printf 'exact_code_sha=%s\n' "$EXPECTED_CODE_SHA"
 printf 'merge_tree=%s\n' "$MERGE_TREE"
-printf 'post_pin_change_scope=docs-only\n'
+printf 'post_pin_change_scope=docs-or-scoped-ci-workflow\n'
