@@ -9,6 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Number of shards the Ubuntu workspace test suite is split into (#874).
+  # `strategy.matrix` cannot read the env context, so the shard list below is
+  # spelled out literally; the aggregate job fails closed if the two ever
+  # disagree (a missing index, or an index above this count).
+  CD_SHARD_COUNT: "4"
 
 # Keep every main-branch run, but stop spending runner time on an obsolete PR
 # revision once a newer commit for the same PR has started CI.
@@ -116,20 +121,143 @@ jobs:
       - name: clippy (workspace, all targets)
         # Lints libs, bins, and tests (#162).
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: test workspace
+      - name: test workspace (macOS/Windows)
         # cd-core + cd-server (incl. tenant isolation) (#160); offline, no real keychain (#178).
-        # Keep the Linux workspace suite single-threaded: the expanded
-        # retrieval/triage fixture suite can starve the hosted runner even
-        # with bounded parallelism and surface as a lost runner connection.
+        # Unchanged for macOS and Windows, which finish this step normally.
+        # Linux runs the same suite in the `rust-ubuntu-shard` matrix below: as
+        # one step it ran 70-80 minutes and a lost runner left the step
+        # `in_progress` with no log blob at all (#874). The single-threaded
+        # Linux constraint moved with it, so nothing about the suite is relaxed.
+        if: runner.os != 'Linux'
         env:
-          RUST_TEST_THREADS: ${{ runner.os == 'Linux' && '1' || '4' }}
-          CARGO_BUILD_JOBS: ${{ runner.os == 'Linux' && '1' || '4' }}
+          RUST_TEST_THREADS: "4"
+          CARGO_BUILD_JOBS: "4"
         run: cargo test --workspace
       - name: embed_host example build (#170)
         # Keeps crates/cd-core/examples/embed_host from rotting.
         run: cargo build -p cd-core --examples
       - name: server smoke
         run: cargo run -p cd-server -- --print-branding
+
+  # Linux half of the workspace test gate (#874). Same tests as
+  # `cargo test --workspace`, split into CD_SHARD_COUNT deterministic shards so
+  # a shard is bounded, announces every test target it starts, and leaves
+  # per-shard logs behind even when it fails. Coverage is enforced by
+  # `rust-ubuntu-tests` below, not by trust.
+  rust-ubuntu-shard:
+    name: rust tests (ubuntu shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    # A shard runs a quarter of a suite that took 70-80 minutes as one step,
+    # but on a cold cache it also compiles the dependency graph itself (the
+    # clippy step that used to warm it lives in the `rust` job). Generous
+    # enough that a cold run is not a false failure, hard enough that a hang
+    # cannot sit for hours; per-unit timeouts inside the shard catch a single
+    # stuck test binary long before this.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with CD_SHARD_COUNT (see the workflow `env` block).
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux keyring deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Free disk space (bundled DuckDB build is large, #358)
+        run: |
+          sudo rm -rf /opt/hostedtoolcache/CodeQL /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc
+          df -h /
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # One cache entry shared by every shard instead of the action's
+          # default per-job key: the shards differ only in which test binaries
+          # they link, so dependency artifacts — including the expensive
+          # bundled DuckDB C++ build (#358) — are compiled once and restored by
+          # all four. The action's normal OS/toolchain/lockfile keying stays in
+          # force, so a dependency change still invalidates the entry.
+          shared-key: ubuntu-workspace-tests
+          cache-workspace-crates: true
+          # Cache keys are immutable, so only one shard writes the shared
+          # entry; the others would race for it and log a redundant save. Shard
+          # 1 is the writer, and it still saves when the shard fails so a red
+          # run does not force the next one to rebuild DuckDB from scratch.
+          save-if: ${{ matrix.shard == 1 }}
+          cache-on-failure: true
+      - name: shard plan (deterministic, exhaustive)
+        # Fails closed before anything is built if the partition is not an
+        # exact cover of the workspace's test targets.
+        run: sh scripts/ci_shard_plan.sh verify --shards "$CD_SHARD_COUNT"
+      - name: run shard ${{ matrix.shard }}
+        # Same environment constraints as the monolithic step it replaces: the
+        # expanded retrieval/triage fixture suite can starve a hosted runner
+        # even with bounded parallelism and surface as a lost connection.
+        env:
+          RUST_TEST_THREADS: "1"
+          CARGO_BUILD_JOBS: "1"
+        run: |
+          sh scripts/ci_run_shard.sh \
+            --shard "${{ matrix.shard }}" \
+            --shards "$CD_SHARD_COUNT" \
+            --out ci-shards
+      - name: shard diagnostic summary
+        # Runs on failure too: reports the last completed unit, the unit left
+        # in flight, and the test counts reached before the shard died.
+        if: always()
+        run: sh scripts/ci_run_shard.sh --summary ci-shards
+      - name: upload shard results
+        # Independent per shard, so one dead runner cannot take the other
+        # shards' diagnostics down with it.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-ubuntu-shard-${{ matrix.shard }}
+          path: ci-shards/
+          if-no-files-found: error
+          retention-days: 14
+
+  # Fail-closed replacement for the single Ubuntu `cargo test --workspace` gate.
+  # A missing shard (lost runner), a failed shard, a shard that stopped early,
+  # or a test unit no shard claimed all fail this job.
+  rust-ubuntu-tests:
+    name: rust tests (ubuntu aggregate)
+    needs: [rust-ubuntu-shard]
+    # Must run even when a shard failed or vanished: that is the case this job
+    # exists to diagnose.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: download shard results
+        uses: actions/download-artifact@v4
+        # A shard whose runner disappeared uploads nothing. Missing artifacts
+        # are named by the aggregate step below rather than failing here with a
+        # less useful message.
+        continue-on-error: true
+        with:
+          pattern: rust-ubuntu-shard-*
+          path: shard-results
+      - name: shard tooling self-test
+        # The gate checks its own machinery before it judges the shards:
+        # partition, aggregation, and the failure paths that decide whether a
+        # red suite can report green. Hermetic, ~10s, no build.
+        run: sh scripts/tests/ci_shard_test.sh
+      - name: per-shard diagnostics
+        run: sh scripts/ci_run_shard.sh --summary shard-results || true
+      - name: aggregate shard results (fail closed)
+        run: sh scripts/ci_aggregate_shards.sh --dir shard-results --shards "$CD_SHARD_COUNT"
+      - name: every shard job must have succeeded
+        # Belt and braces: the artifact check above cannot see a job that was
+        # cancelled after uploading, so the matrix outcome is gated too.
+        run: |
+          result='${{ needs.rust-ubuntu-shard.result }}'
+          echo "shard matrix result: $result"
+          if [ "$result" != success ]; then
+            echo "::error title=ubuntu test shards::shard matrix reported '$result'"
+            exit 1
+          fi
 
   tauri-host:
     name: tauri host (${{ matrix.os }})

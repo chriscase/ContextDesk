@@ -80,6 +80,11 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
+# One CI Ubuntu test shard, exactly as CI partitions it (#874) — see below
+sh scripts/ci_shard_plan.sh verify --shards 4
+sh scripts/ci_run_shard.sh --shard 2 --shards 4
+sh scripts/ci_run_shard.sh --summary ci-shards
+
 # Desktop
 cd desktop
 npm install
@@ -110,6 +115,42 @@ Index caps (all in `index.rs`; surfaced via `AppConfig`):
 - **`MAX_FILE_BYTES`** — per-file read cap, **512 KiB** (larger files / binaries skipped
   before any `read_to_string`, so huge dumps never allocate in full).
 - **`MAX_DEPTH`** — directory-walk depth cap, **12** (runaway nesting is skipped).
+
+## CI Ubuntu workspace test shards (#874)
+
+`cargo test --workspace` is still the local gate and still the gate on macOS and
+Windows. On Ubuntu it ran 70–80 minutes as one step, and when the hosted runner
+lost its connection GitHub marked the job failed with the step still
+`in_progress` and **no log blob at all** — nothing said which test was running.
+CI therefore runs the same suite as `CD_SHARD_COUNT` (currently **4**) shards:
+
+| Script | Role |
+| --- | --- |
+| `scripts/ci_shard_plan.sh` | Enumerates every testable target from `cargo metadata` and partitions it. `verify` fails closed if the partition is not an exact, duplicate-free cover. |
+| `scripts/ci_run_shard.sh` | Runs one shard: per-unit start/finish lines, a heartbeat while a unit runs, a per-unit log, `progress.jsonl`, and `status.json`. |
+| `scripts/ci_aggregate_shards.sh` | The gate. Fails if a shard is missing, failed, stopped early, or if any test unit was claimed by no shard. |
+
+Properties worth knowing:
+
+- **Coverage is checked, not assumed.** The shard plan comes from Cargo's own
+  view of the workspace, so a new `crates/*/tests/*.rs` joins a shard on its
+  next run; the aggregate recomputes the plan and rejects any unit that no
+  shard reported. Unit tests (`--lib`), binary unit tests (`--bins`), doc tests
+  (`--doc`), and every integration target are all units.
+- **The partition is deterministic** — round-robin over a canonically sorted
+  unit list — so a shard reproduces identically on a laptop:
+  `sh scripts/ci_run_shard.sh --shard 2 --shards 4`.
+- **A dead runner is still readable.** `sh scripts/ci_run_shard.sh --summary
+  <dir>` reports each shard's last completed unit, the unit left in flight, and
+  the test counts reached — on the CI artifact or on a local `ci-shards/`
+  directory. Shards upload independently, so one lost runner does not take the
+  other shards' diagnostics with it.
+- **Dependencies are compiled once.** All four shards share one
+  `Swatinem/rust-cache` entry (`shared-key: ubuntu-workspace-tests`), so the
+  bundled DuckDB C++ build (#358) is restored rather than rebuilt per shard;
+  shard 1 is the only writer because cache keys are immutable.
+- **Nothing is relaxed.** Shards keep `RUST_TEST_THREADS=1` and
+  `CARGO_BUILD_JOBS=1`, the same constraints the single Linux step used.
 
 ## Renderer visual acceptance (desktop)
 
