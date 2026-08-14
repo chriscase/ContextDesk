@@ -167,6 +167,67 @@ export CONTEXTDESK_DATA_DIR="$RUNNER_TEMP/cd-ci"
 # Protocol: docs/LANGUAGE_INTEGRATION.md
 ```
 
+### CLI cookbook — common workflows
+
+The [full CLI guide](docs/CLI.md) is the authoritative command reference. These
+short examples are the most useful starting points; replace `<id>` and
+`<exact-model-id>` with values returned by the preceding command.
+
+```bash
+# 1. Build once and isolate all state in a disposable profile.
+cargo build -p cd-cli --release
+BIN=./target/release/contextdesk
+DATA="$(mktemp -d)"
+
+# 2. Import and inspect a corpus without contacting a provider.
+$BIN --data-dir "$DATA" --json import ./fixtures/cli-release-demo
+$BIN --data-dir "$DATA" --json corpus list
+$BIN --data-dir "$DATA" --json explore "timeout" --k 10
+$BIN --data-dir "$DATA" --json context "what failed?" --k 10
+
+# 3. Check local configuration and readiness before a live turn.
+$BIN --data-dir "$DATA" --json config show
+$BIN --data-dir "$DATA" doctor --skip-live-turn
+$BIN --data-dir "$DATA" --json capabilities
+
+# 4. Discover a selected gateway catalog, then verify only chosen models.
+$BIN --data-dir "$DATA" --profile work models discover
+$BIN --data-dir "$DATA" models
+$BIN --data-dir "$DATA" --profile work models verify <exact-model-id>
+
+# 5. Run one bounded, consented diagnostic for one exact model.
+$BIN --data-dir "$DATA" --profile work --model <exact-model-id> \
+  gateway diagnose --yes --jsonl
+# Use --timeout 600 for an intentionally slow gateway.
+# The default report is share-safe; --raw requires --raw-i-understand.
+
+# 6. Ask a grounded question and retain a readable activity trace.
+$BIN --data-dir "$DATA" --profile work --model <exact-model-id> \
+  chat "What failed, what followed, and what evidence is missing?" \
+  --trace full --trace-ack --activity full --activity-ack
+
+# 7. Compile/validate a multi-model triage policy without a provider call.
+$BIN --data-dir "$DATA" triage-policy example
+$BIN --data-dir "$DATA" triage-policy validate \
+  --policy policy.json --preflight preflight.json
+$BIN --data-dir "$DATA" triage-policy compile \
+  --policy policy.json --preflight preflight.json --json
+
+# 8. Analyze or export offline data.
+$BIN --data-dir "$DATA" exception-episodes <corpus-id>
+$BIN normalize ./fixtures/cli-release-demo --output ./out-normalize --json
+$BIN normalized validate ./out-normalize
+```
+
+The commands before model discovery are offline and do not read credentials.
+`models discover`, `models verify`, `doctor` with live checks, `gateway diagnose`,
+and `chat` may contact the configured gateway and require explicit consent.
+Use `--json` for one machine-readable envelope, `--jsonl` for streaming
+progress, `--no-color` for redirected output, and `--data-dir` to keep the run
+separate from the desktop profile. See [CLI.md](docs/CLI.md) for exit codes,
+deadline controls, protected-file credentials, share-safe artifacts, and
+Windows/PowerShell examples.
+
 ### Product gallery (packaged app)
 
 ![ContextDesk Logs library showing an installed synthetic demonstration corpus](docs/media/gallery/logs-library-demo.png)
