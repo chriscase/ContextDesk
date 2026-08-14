@@ -31,7 +31,9 @@ Workspace roots are user-chosen paths in Settings; path allowlisting is in `cd_c
 
 | Job | Ubuntu | macOS | Windows |
 |-----|--------|-------|---------|
-| `rust` (fmt, clippy, `cargo test --workspace`) | yes | yes | yes (#178) |
+| `rust` (fmt, clippy, example build, server smoke) | yes | yes | yes (#178) |
+| `rust` — `cargo test --workspace` as one step | no, sharded (#874) | yes | yes (#178) |
+| `rust tests (ubuntu shard N)` + `rust tests (ubuntu aggregate)` (#874) | yes | — | — |
 | `tauri-host` (desktop host compile) | yes | yes | no (see residual) |
 | `desktop` UI (npm) | yes | — | — |
 | `release` bundles | tag-only | tag-only | tag-only (#172) |
@@ -39,6 +41,7 @@ Workspace roots are user-chosen paths in Settings; path allowlisting is in `cd_c
 ## Known caveats
 
 - **Linux CI** installs `libdbus-1-dev` for keyring compile; runtime Secret Service may be absent — tests must not require it.
+- **Ubuntu workspace tests are sharded** (#874): four shards run exactly the units `cargo test --workspace` would, and the aggregate job fails closed if a shard is missing, failed, or left a test unit unrun. macOS and Windows still run the suite as one step. See [`docs/DEV.md`](DEV.md) § CI Ubuntu workspace test shards.
 - **Windows path separators** (`\`) are handled by `std::path`; do not hard-code `/` in allowlist assertions beyond structural checks.
 - **Symlink escape** tests remain `#[cfg(unix)]` (symlink APIs differ on Windows).
 - **Real keychain I/O** is operator-local / `#[ignore]` if added later — never default CI.
