@@ -9,6 +9,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Number of shards the Ubuntu workspace test suite is split into (#874).
+  # `strategy.matrix` cannot read the env context, so the shard list below is
+  # spelled out literally; the aggregate job fails closed if the two ever
+  # disagree. Cache key `ubuntu-workspace-tests` is shared by rust-ubuntu
+  # (the only writer) and every shard (lookup-only).
+  CD_SHARD_COUNT: "4"
 
 # Keep every main-branch run, but stop spending runner time on an obsolete PR
 # revision once a newer commit for the same PR has started CI.
@@ -81,55 +87,236 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  # macOS / Windows keep the monolithic `cargo test --workspace` step. Ubuntu
+  # tests moved to rust-ubuntu-shard (#874): the combined Linux step ran 70-80
+  # minutes and then lost the runner with the step still `in_progress` and no
+  # log blob.
   rust:
     name: rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Three-OS core matrix (#178): keychain naming + paths must stay offline-safe.
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Three-OS core matrix (#178): Ubuntu lives in `rust-ubuntu` below so
+        # shards can `needs` that job without waiting for Windows/macOS.
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy (workspace, all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test workspace (macOS/Windows)
+        env:
+          RUST_TEST_THREADS: "4"
+          CARGO_BUILD_JOBS: "4"
+        run: cargo test --workspace
+      - name: embed_host example build (#170)
+        run: cargo build -p cd-core --examples
+      - name: server smoke
+        run: cargo run -p cd-server -- --print-branding
+
+  # Ubuntu fmt/clippy/examples/smoke plus the one cache write for the test
+  # shards. Hosted runs 31828397526 and 31835229724 were all cache misses
+  # (`No cache found` in 1-2s) because only shard 1 was allowed to save and
+  # shard 1 died before the cache post-step — so every retry stayed cold and
+  # each shard compiled DuckDB for 36-55 minutes.
+  rust-ubuntu:
+    name: rust (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: Linux keyring deps
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - name: Free disk space (Linux — bundled DuckDB build is large, #358)
-        if: runner.os == 'Linux'
+      - name: Free disk space (bundled DuckDB build is large, #358)
         run: |
           sudo rm -rf /opt/hostedtoolcache/CodeQL /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc
           df -h /
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
         with:
-          # Cache workspace crates as well as dependencies so fresh runners
-          # do not repeatedly rebuild the large local workspace.
-          # The action's normal OS/toolchain/lockfile keying remains in force.
+          shared-key: ubuntu-workspace-tests
           cache-workspace-crates: true
-          # Preserve useful cache material when a later lint/test step fails.
           cache-on-failure: true
+      - name: record cache restore
+        run: |
+          mkdir -p ci-shards
+          sh scripts/ci_record_cache.sh \
+            --out ci-shards/cache-status.json \
+            --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
+            --role warmup \
+            --shared-key ubuntu-workspace-tests \
+            --save true
       - name: fmt
-        # rustfmt is OS-agnostic; still run on all three for early signal.
         run: cargo fmt --all -- --check
       - name: clippy (workspace, all targets)
-        # Lints libs, bins, and tests (#162).
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: test workspace
-        # cd-core + cd-server (incl. tenant isolation) (#160); offline, no real keychain (#178).
-        # Keep the Linux workspace suite single-threaded: the expanded
-        # retrieval/triage fixture suite can starve the hosted runner even
-        # with bounded parallelism and surface as a lost runner connection.
+        run: |
+          (
+            waited=0
+            while sleep 60; do
+              waited=$((waited + 60))
+              echo "[ubuntu rust] clippy still running after ${waited}s ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            done
+          ) &
+          hb=$!
+          set +e
+          cargo clippy --workspace --all-targets -- -D warnings
+          rc=$?
+          set -e
+          kill "$hb" 2>/dev/null || true
+          wait "$hb" 2>/dev/null || true
+          exit "$rc"
+      - name: compile workspace tests (cache warmup)
+        # One compile of DuckDB/workspace test binaries. Shards are lookup-only
+        # and should restore this entry. CARGO_BUILD_JOBS=2 matches the 2-core
+        # hosted runner; test execution stays single-threaded on the shards.
         env:
-          RUST_TEST_THREADS: ${{ runner.os == 'Linux' && '1' || '4' }}
-          CARGO_BUILD_JOBS: ${{ runner.os == 'Linux' && '1' || '4' }}
-        run: cargo test --workspace
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          (
+            waited=0
+            while sleep 60; do
+              waited=$((waited + 60))
+              echo "[warmup] cargo test --workspace --no-run still running after ${waited}s ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            done
+          ) &
+          hb=$!
+          set +e
+          cargo test --workspace --no-run
+          rc=$?
+          set -e
+          kill "$hb" 2>/dev/null || true
+          wait "$hb" 2>/dev/null || true
+          exit "$rc"
       - name: embed_host example build (#170)
-        # Keeps crates/cd-core/examples/embed_host from rotting.
         run: cargo build -p cd-core --examples
       - name: server smoke
         run: cargo run -p cd-server -- --print-branding
+      - name: upload cache status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-ubuntu-cache-status
+          path: ci-shards/cache-status.json
+          if-no-files-found: error
+          retention-days: 14
+
+  rust-ubuntu-shard:
+    name: rust tests (ubuntu shard ${{ matrix.shard }})
+    needs: [rust-ubuntu]
+    runs-on: ubuntu-latest
+    # Tests only, after the warmup job has compiled. 50 minutes is enough for
+    # the known 525s integration target plus `cd-core/lib` splits, and is
+    # below the ~86-96 minute hosted-runner-loss window from runs
+    # 31828397526 / 31835229724. A step timeout (below) leaves the runner
+    # alive so always() diagnostics can upload.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with CD_SHARD_COUNT (see the workflow `env` block).
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux keyring deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Free disk space (bundled DuckDB build is large, #358)
+        run: |
+          sudo rm -rf /opt/hostedtoolcache/CodeQL /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc
+          df -h /
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          shared-key: ubuntu-workspace-tests
+          cache-workspace-crates: true
+          lookup-only: true
+          save-if: false
+      - name: record cache restore
+        run: |
+          mkdir -p ci-shards
+          sh scripts/ci_record_cache.sh \
+            --out ci-shards/cache-status.json \
+            --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
+            --role shard \
+            --shard '${{ matrix.shard }}' \
+            --shared-key ubuntu-workspace-tests \
+            --save false
+          echo "CD_CACHE_STATE=$(jq -r .cache_state ci-shards/cache-status.json)" >> "$GITHUB_ENV"
+      - name: shard plan (deterministic, exhaustive)
+        run: sh scripts/ci_shard_plan.sh verify --shards "$CD_SHARD_COUNT"
+      - name: run shard ${{ matrix.shard }}
+        # Step timeout so GitHub SIGTERM's the script while the VM is still
+        # up; ci_run_shard.sh then writes incomplete status.json and the
+        # always() steps below can upload. A lost VM cannot upload — the
+        # warmup job exists so shards should not reach that window.
+        timeout-minutes: 50
+        env:
+          RUST_TEST_THREADS: "1"
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          stdbuf -oL -eL sh scripts/ci_run_shard.sh \
+            --shard "${{ matrix.shard }}" \
+            --shards "$CD_SHARD_COUNT" \
+            --out ci-shards
+      - name: shard diagnostic summary
+        if: always()
+        run: |
+          if [ -f ci-shards/cache-status.json ]; then
+            echo "cache-status:"
+            cat ci-shards/cache-status.json
+            echo
+          fi
+          sh scripts/ci_run_shard.sh --summary ci-shards || true
+      - name: upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-ubuntu-shard-${{ matrix.shard }}
+          path: ci-shards/
+          if-no-files-found: error
+          retention-days: 14
+
+  rust-ubuntu-tests:
+    name: rust tests (ubuntu aggregate)
+    needs: [rust-ubuntu-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: download shard results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: rust-ubuntu-shard-*
+          path: shard-results
+      - name: shard tooling self-test
+        run: sh scripts/tests/ci_shard_test.sh
+      - name: per-shard diagnostics
+        run: sh scripts/ci_run_shard.sh --summary shard-results || true
+      - name: aggregate shard results (fail closed)
+        run: sh scripts/ci_aggregate_shards.sh --dir shard-results --shards "$CD_SHARD_COUNT"
+      - name: every shard job must have succeeded
+        run: |
+          result='${{ needs.rust-ubuntu-shard.result }}'
+          echo "shard matrix result: $result"
+          if [ "$result" != success ]; then
+            echo "::error title=ubuntu test shards::shard matrix reported '$result'"
+            exit 1
+          fi
 
   tauri-host:
     name: tauri host (${{ matrix.os }})
@@ -155,7 +342,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
-          # Native dependency builds remain valid even if a later host gate fails.
           cache-on-failure: true
       - name: fmt
         run: cargo fmt -- --check
