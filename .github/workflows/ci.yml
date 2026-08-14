@@ -115,6 +115,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test workspace
         # cd-core + cd-server (incl. tenant isolation) (#160); offline, no real keychain (#178).
+        # Bound Linux parallelism: the expanded retrieval/triage fixture suite
+        # otherwise can starve the hosted runner and surface as a lost runner
+        # connection rather than a test failure.
+        env:
+          RUST_TEST_THREADS: ${{ runner.os == 'Linux' && '2' || '4' }}
+          CARGO_BUILD_JOBS: ${{ runner.os == 'Linux' && '2' || '4' }}
         run: cargo test --workspace
       - name: embed_host example build (#170)
         # Keeps crates/cd-core/examples/embed_host from rotting.
