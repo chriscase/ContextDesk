@@ -88,6 +88,28 @@ done
 grep -qx "cd-core/doc" "$TMP/units" || fail "doc tests are missing from the plan"
 grep -qx "cd-core/lib" "$TMP/units" || fail "lib unit tests are missing from the plan"
 
+# A target kind the plan cannot select -- a bench, or an example with
+# `test = true` -- must stop the gate rather than sit outside it. Driven with a
+# stub `cargo metadata` because the workspace has no such target today, which
+# is exactly why the guard needs a test.
+META_STUB="$TMP/meta-stub"
+mkdir -p "$META_STUB"
+cat >"$META_STUB/cargo" <<'EOF'
+#!/usr/bin/env sh
+cat <<'JSON'
+{"packages":[{"name":"cd-core","manifest_path":"/nonexistent/Cargo.toml","targets":[
+  {"kind":["lib"],"name":"cd_core","test":true,"doctest":true},
+  {"kind":["bench"],"name":"retrieval_bench","test":true,"doctest":false}]}],
+ "workspace_members":[],"version":1}
+JSON
+EOF
+chmod +x "$META_STUB/cargo"
+expect_fail "a bench target the plan cannot select must fail verification" \
+  env PATH="$META_STUB:$PATH" sh "$PLAN" verify --shards 2
+grep -q "belong to no shard unit" "$TMP/out" ||
+  fail "verify must explain that a testable target is unmapped"
+grep -q "retrieval_bench" "$TMP/out" || fail "verify must name the unmapped target"
+
 expect_fail "shard 0 must be rejected" sh "$PLAN" shard 0 --shards 4
 expect_fail "shard above the count must be rejected" sh "$PLAN" shard 5 --shards 4
 expect_fail "runner must reject a shard outside the matrix" \

@@ -49,24 +49,55 @@ die() {
   exit 1
 }
 
+metadata() {
+  cargo metadata --no-deps --format-version 1 --manifest-path "$ROOT/Cargo.toml"
+}
+
+# A library target can be declared under any of these crate types; `--lib`
+# selects it in every case.  Kept in one place so `enumerate_units` and the
+# unmapped-target guard below cannot drift apart.
+LIB_KINDS='["lib","rlib","dylib","cdylib","staticlib","proc-macro"]'
+
 # Every testable target in the root workspace, in a canonical, locale-stable
 # order.  `--no-deps` keeps this to workspace members and avoids touching the
 # network: it does not resolve or download dependencies.
 enumerate_units() {
-  cargo metadata --no-deps --format-version 1 --manifest-path "$ROOT/Cargo.toml" |
-    jq -r '
-      .packages[] as $p
+  metadata |
+    jq -r --argjson libkinds "$LIB_KINDS" '
+      ([$libkinds[]] | map({(.): true}) | add) as $lib
+      | .packages[] as $p
       | $p.targets[] as $t
+      | (any($t.kind[]; $lib[.] == true)) as $is_lib
       | [
-          (if ($t.kind | index("lib")) != null and $t.test    then [$p.name, 0, "", "\($p.name)/lib"]  else empty end),
-          (if ($t.kind | index("bin")) != null and $t.test    then [$p.name, 1, "", "\($p.name)/bins"] else empty end),
-          (if ($t.kind | index("lib")) != null and $t.doctest then [$p.name, 2, "", "\($p.name)/doc"]  else empty end),
-          (if ($t.kind | index("test")) != null and $t.test   then [$p.name, 3, $t.name, "\($p.name)/test/\($t.name)"] else empty end)
+          (if $is_lib and $t.test                            then [$p.name, 0, "", "\($p.name)/lib"]  else empty end),
+          (if ($t.kind | index("bin")) != null and $t.test   then [$p.name, 1, "", "\($p.name)/bins"] else empty end),
+          (if $is_lib and $t.doctest                         then [$p.name, 2, "", "\($p.name)/doc"]  else empty end),
+          (if ($t.kind | index("test")) != null and $t.test  then [$p.name, 3, $t.name, "\($p.name)/test/\($t.name)"] else empty end)
         ][]
       | @tsv
     ' |
     LC_ALL=C sort -u |
     cut -f4
+}
+
+# Any target `cargo test` would pick up but this script does not know how to
+# turn into a unit -- a bench target, or an example with `test = true`.  Rather
+# than let it fall outside the gate, the plan refuses to run until someone
+# teaches the enumeration about it.
+unmapped_targets() {
+  metadata |
+    jq -r --argjson libkinds "$LIB_KINDS" '
+      ([$libkinds[]] | map({(.): true}) | add) as $lib
+      | .packages[] as $p
+      | $p.targets[]
+      | select(.test or .doctest)
+      | select(
+          (any(.kind[]; $lib[.] == true) | not)
+          and (.kind | index("bin")) == null
+          and (.kind | index("test")) == null
+        )
+      | "\($p.name): \(.kind | join(",")) target \(.name)"
+    '
 }
 
 # Cached enumeration: several subcommands need the list more than once and
@@ -176,11 +207,20 @@ verify() {
     i=$((i + 1))
   done
 
-  # 4. Independent cross-check against the filesystem.  `cargo metadata` and
+  # 4. No target that `cargo test` would run may be left unmapped: a bench
+  #    target or a `test = true` example would otherwise be quietly excluded.
+  unmapped=$(unmapped_targets)
+  if [ -n "$unmapped" ]; then
+    echo "error: these targets are testable but belong to no shard unit:" >&2
+    printf '  %s\n' "$unmapped" >&2
+    echo "  teach scripts/ci_shard_plan.sh how to select them before merging" >&2
+    failures=$((failures + 1))
+  fi
+
+  # 5. Independent cross-check against the filesystem.  `cargo metadata` and
   #    the crates/*/tests tree have to agree, so a metadata parsing regression
   #    that silently drops integration targets cannot pass unnoticed.
-  cargo metadata --no-deps --format-version 1 --manifest-path "$ROOT/Cargo.toml" |
-    jq -r '.packages[] | "\(.manifest_path)\t\(.name)"' >"$tmp/manifests"
+  metadata | jq -r '.packages[] | "\(.manifest_path)\t\(.name)"' >"$tmp/manifests"
   for file in "$ROOT"/crates/*/tests/*.rs; do
     [ -e "$file" ] || continue
     manifest=$(dirname "$(dirname "$file")")/Cargo.toml
