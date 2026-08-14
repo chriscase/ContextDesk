@@ -172,17 +172,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           # One cache entry shared by every shard instead of the action's
-          # default per-job key: the shards differ only in which test binaries
-          # they link, so dependency artifacts — including the expensive
-          # bundled DuckDB C++ build (#358) — are compiled once and restored by
-          # all four. The action's normal OS/toolchain/lockfile keying stays in
-          # force, so a dependency change still invalidates the entry.
+          # default per-job key. The action's OS/toolchain/lockfile keying
+          # stays in force. A later (warm) run can restore workspace crates
+          # and DuckDB (#358). A cold run does not: all four jobs start
+          # together, miss the cache, and may each compile dependencies.
           shared-key: ubuntu-workspace-tests
           cache-workspace-crates: true
           # Cache keys are immutable, so only one shard writes the shared
-          # entry; the others would race for it and log a redundant save. Shard
-          # 1 is the writer, and it still saves when the shard fails so a red
-          # run does not force the next one to rebuild DuckDB from scratch.
+          # entry. Shard 1 is the writer; it still saves when the shard
+          # fails so the *next* run can restore. A lost shard-1 runner
+          # never reaches this post step and writes nothing.
           save-if: ${{ matrix.shard == 1 }}
           cache-on-failure: true
       - name: shard plan (deterministic, exhaustive)

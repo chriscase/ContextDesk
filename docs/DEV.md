@@ -145,10 +145,15 @@ Properties worth knowing:
   the test counts reached — on the CI artifact or on a local `ci-shards/`
   directory. Shards upload independently, so one lost runner does not take the
   other shards' diagnostics with it.
-- **Dependencies are compiled once.** All four shards share one
-  `Swatinem/rust-cache` entry (`shared-key: ubuntu-workspace-tests`), so the
-  bundled DuckDB C++ build (#358) is restored rather than rebuilt per shard;
-  shard 1 is the only writer because cache keys are immutable.
+- **Shared cache helps later runs, not a cold concurrent start.** All four
+  shards use one `Swatinem/rust-cache` entry (`shared-key:
+  ubuntu-workspace-tests`); shard 1 is the only writer because cache keys
+  are immutable. On a **warm** run that key can restore workspace crates and
+  the bundled DuckDB C++ build (#358). On a **cold** run the four shard jobs
+  start together, all miss the cache, and **each may compile dependencies
+  (including DuckDB) independently**. The shared entry is written only after
+  shard 1 finishes (including on shard-1 failure); a lost shard-1 runner
+  writes nothing.
 - **Nothing is relaxed.** Shards keep `RUST_TEST_THREADS=1` and
   `CARGO_BUILD_JOBS=1`, the same constraints the single Linux step used.
 
