@@ -7,7 +7,7 @@ owner-authorized pull request and remote CI.
 Candidate branch: `integrate/release-consolidation-v1`  
 Exact code/build pin: `a79069445dc79aba835e7627ec75c8cbbffd5492`
 Current documentation tip: resolve `git rev-parse HEAD` after fetching the
-branch.
+branch; the current docs/CI tip is `7395610612dd389e79b57f2e19703b6c68416155`.
 
 | Requirement | Evidence | Status |
 | --- | --- | --- |
@@ -23,9 +23,9 @@ branch.
 | Desktop/Tauri host | Tauri check/clippy and desktop build passed | Proven locally |
 | Frontend | Typecheck passed; lint had 0 errors and 9 existing warnings; 1,888 Vitest tests passed | Proven locally |
 | PowerShell harness | `pwsh` parser and provider-free preflight passed; 8-test contract suite passed | Proven locally |
-| Windows/platform behavior | Requires the repository's Windows CI runner | Pending PR/CI |
-| Privacy and secret scanning | Local claims/privacy/path checks passed; gitleaks is a PR workflow gate | Pending PR/CI |
-| Exact mergeability | `git merge-tree --write-tree origin/main HEAD` is clean | Proven locally |
+| Windows/platform behavior | Windows, macOS, and Ubuntu Rust jobs passed in CI run `31762796754` | Proven remotely |
+| Privacy and secret scanning | CI run `31762796754` passed gitleaks, claims, close-proof, GUI, and desktop privacy-related gates | Proven remotely |
+| Exact mergeability | PR #873 reports `mergeable=true`, `mergeable_state=clean`; merge base is `main` | Proven remotely |
 | Remaining blockers recorded | Status, handoff, live-evidence, and acceptance documents list residuals and do not issue universal readiness claims | Proven locally |
 | PR plan prepared | `RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md` contains the exact owner-run command and gate checklist | Proven locally |
 | Obsolete worktree cleanup | Six clean, incorporated worktrees removed; branches preserved; dirty/unmerged worktrees retained | Proven locally |
@@ -34,7 +34,8 @@ branch.
 
 ## Decision
 
-The candidate is ready to open for review, but it is not honestly merge-ready
-until the pending PR/CI/review rows are complete. The read-only verifier
-`verify-release-consolidation.sh` must pass before opening the PR; it does not
-replace Windows CI or human approval.
+The candidate is review-ready: all automated local and remote gates are green,
+and the independent exact-pin review found no release-blocking defect. It is
+not merged until the owner approves PR #873 and the deferred issue criteria are
+acknowledged. The read-only verifier remains the evidence-drift guard; it does
+not replace human approval.
