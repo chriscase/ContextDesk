@@ -8,14 +8,16 @@ PRs remain approval-gated.
 
 - Repository: `https://github.com/chriscase/ContextDesk.git`
 - Branch: `integrate/release-consolidation-v1`
-- Current documentation tip: resolve `git rev-parse HEAD` after fetching the
-  branch; documentation-only commits may advance it.
+- Current branch tip: resolve `git rev-parse HEAD` after fetching the
+  branch; documentation and scoped CI commits may advance it.
 - Exact code/build pin: `a79069445dc79aba835e7627ec75c8cbbffd5492`
 - Expected merge simulation: clean against `origin/main`
 
-The documentation tip is intentionally newer than the code pin. Build and
-verify the exact code pin for source acceptance; the later commits are
-documentation-only evidence and handoff notes.
+The branch tip is intentionally newer than the code pin. Build and verify the
+exact code pin for source acceptance; later commits are documentation or the
+scoped CI workflow mitigation only. The mitigation bounds Linux parallelism in
+the full workspace test and does not change product/runtime code or binary
+identity.
 
 ## Local evidence already complete
 
@@ -69,7 +71,7 @@ docs/testing/verify-release-consolidation.sh
 ```
 
 It checks the exact code pin, accepted ancestry, clean state, merge-tree
-result, documentation-only post-pin changes, required evidence files, and
+result, documentation-or-scoped-CI post-pin changes, required evidence files, and
 release-document path/credential hygiene. It does not fetch, build, clean,
 contact a provider, or create a PR.
 
@@ -80,7 +82,9 @@ to `main`), not arbitrary feature-branch pushes. Opening the PR is therefore
 what starts the authoritative multi-OS checks; a local or branch-only run is
 not a substitute.
 
-1. Full GitHub CI, including Windows/source-build and secret/privacy scans.
+1. Full GitHub CI, including Windows/source-build and secret/privacy scans. The
+   Ubuntu workspace test now uses bounded Linux parallelism after two hosted-runner
+   communication losses with no test assertion failure.
 2. Independent exact-SHA review of the code pin and acceptance procedure.
 3. Review of the open issue criteria (#861, #863–#872); leave deliberately
    deferred feature work open.
