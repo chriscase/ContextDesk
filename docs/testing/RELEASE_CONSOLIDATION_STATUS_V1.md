@@ -14,7 +14,7 @@ code/build identity from the later documentation commits.
 - Consolidation code/evidence tip before this status record: `2dc828beb282f5c338b4a60f3cea454f2d57aea2`
 - Current branch tip: resolve `git rev-parse HEAD` after fetching the branch; documentation and scoped CI commits may advance it
 - Exact code/build pin: `a79069445dc79aba835e7627ec75c8cbbffd5492`
-- Scoped CI mitigation: `52fc2f51c9c692a042e26fc9e3719c3c77967231` (workflow-only; bounds Linux test/build parallelism)
+- Scoped CI mitigations: `52fc2f51c9c692a042e26fc9e3719c3c77967231` (bounded Linux parallelism) and `498b5b79c31f3ceb5b141446d1f3c7feccaa6824` (single Linux test/build worker; workflow-only)
 - Accepted triage runtime ancestor: `fcfdd30d1e52ee0fa379cce4682a79c51ce252c6`
 - Successful demo branch ancestor: `0638e2776d9e68e936302b8be6aa757b62690dcf`
 - Merge simulation with `origin/main`: clean; no conflicts
@@ -84,9 +84,10 @@ As of the final audit, the superseded PRs remain open and were not modified:
 They require owner-approved retirement after the replacement PR is accepted;
 closing them now would erase useful historical review context.
 
-The Ubuntu workspace CI retry twice lost hosted-runner communication during the
-large test step without a test assertion failure. The mitigation is workflow-only
-and does not alter the exact runtime/build pin or binary identity.
+The Ubuntu workspace CI retry three times lost hosted-runner communication during the
+large test step without a test assertion failure, including once after bounded
+parallelism. The latest workflow-only mitigation serializes Linux test/build work;
+it does not alter the exact runtime/build pin or binary identity.
 
 No new feature feedback is part of this candidate unless it identifies a
 release-blocking defect. The current shared build target is retained for
