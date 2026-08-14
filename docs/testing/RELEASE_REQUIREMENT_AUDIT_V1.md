@@ -7,7 +7,7 @@ owner-authorized pull request and remote CI.
 Candidate branch: `integrate/release-consolidation-v1`  
 Exact code/build pin: `a79069445dc79aba835e7627ec75c8cbbffd5492`
 Current documentation tip: resolve `git rev-parse HEAD` after fetching the
-branch; the current docs/CI tip is `7395610612dd389e79b57f2e19703b6c68416155`.
+branch; the current docs/CI tip is `8a8be447bdf43e6238ccb6f17c862432da6f4a01`.
 
 | Requirement | Evidence | Status |
 | --- | --- | --- |
@@ -23,9 +23,9 @@ branch; the current docs/CI tip is `7395610612dd389e79b57f2e19703b6c68416155`.
 | Desktop/Tauri host | Tauri check/clippy and desktop build passed | Proven locally |
 | Frontend | Typecheck passed; lint had 0 errors and 9 existing warnings; 1,888 Vitest tests passed | Proven locally |
 | PowerShell harness | `pwsh` parser and provider-free preflight passed; 8-test contract suite passed | Proven locally |
-| Windows/platform behavior | Windows, macOS, and Ubuntu Rust jobs passed in CI run `31762796754` | Proven remotely |
-| Privacy and secret scanning | CI run `31762796754` passed gitleaks, claims, close-proof, GUI, and desktop privacy-related gates | Proven remotely |
-| Exact mergeability | PR #873 reports `mergeable=true`, `mergeable_state=clean`; merge base is `main` | Proven remotely |
+| Windows/platform behavior | Prior code-equivalent run `31762796754` passed all three OS Rust jobs; current cache-enabled run `31798069015` passed Windows/macOS but Ubuntu lost hosted-runner communication with no assertion failure | Proven for code-equivalent release; current-tip revalidation infra-limited |
+| Privacy and secret scanning | Prior full-green run `31762796754` passed gitleaks, claims, close-proof, GUI, and desktop privacy-related gates; current run `31798069015` passed those non-Ubuntu jobs again | Proven remotely; current non-Ubuntu recheck green |
+| Exact mergeability | PR #873 reports `mergeable=true`; current `mergeable_state=unstable` reflects the failed Ubuntu hosted-runner check, while the merge base remains `main` | Structurally proven; CI infrastructure blocker remains |
 | Remaining blockers recorded | Status, handoff, live-evidence, and acceptance documents list residuals and do not issue universal readiness claims | Proven locally |
 | PR plan prepared | `RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md` contains the exact owner-run command and gate checklist | Proven locally |
 | Obsolete worktree cleanup | Six clean, incorporated worktrees removed; branches preserved; dirty/unmerged worktrees retained | Proven locally |

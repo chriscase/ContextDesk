@@ -59,9 +59,13 @@ named runs; they do not create universal model or gateway badges.
 
 ## Remaining release actions
 
-1. Full GitHub CI has passed on run `31762796754` at branch tip
+1. Prior code-equivalent full GitHub CI passed on run `31762796754` at
    `9ae170715fb72e156e2921c93fb64fae83997cfe`, including Windows portability,
    Ubuntu/macOS workspace tests, desktop/Tauri checks, and secret scanning.
+   Current cache-enabled run `31798069015` passed every non-Ubuntu job and
+   recorded full-match workspace cache hits on Windows/macOS; Ubuntu again lost
+   hosted-runner communication during `cargo test --workspace` with no assertion
+   or compiler failure. This is the remaining remote-infrastructure blocker.
 2. Obtain final independent exact-SHA review and owner approval.
 3. Replace or close obsolete release PR #860 and draft PRs #870/#871 only
    after the replacement PR is accepted.
@@ -85,10 +89,12 @@ As of the final audit, the superseded PRs remain open and were not modified:
 They require owner-approved retirement after the replacement PR is accepted;
 closing them now would erase useful historical review context.
 
-The Ubuntu workspace CI retry three times lost hosted-runner communication during the
-large test step without a test assertion failure, including once after bounded
-parallelism. The latest workflow-only mitigation serializes Linux test/build work;
-it does not alter the exact runtime/build pin or binary identity.
+The Ubuntu workspace CI has now lost hosted-runner communication three times during
+the large test step without a test assertion failure, including after bounded and
+serialized Linux resource use. The cache mitigation commit
+`8a8be447bdf43e6238ccb6f17c862432da6f4a01` is effective on Windows/macOS, but did
+not eliminate this Ubuntu runner instability. None of these workflow-only changes
+alter the exact runtime/build pin or binary identity.
 
 No new feature feedback is part of this candidate unless it identifies a
 release-blocking defect. The current shared build target is retained for
@@ -125,8 +131,9 @@ candidate is accepted; it must be rebased and re-gated rather than cherry-
 picked across conflicting transport code.
 
 The approval-gated PR command and remote CI checklist are captured in
-`RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md`; draft PR #873 is open, mergeable, and
-CI-green, but it has not been approved or merged.
+`RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md`; draft PR #873 is open and structurally
+mergeable, but its current `mergeable_state=unstable` reflects the Ubuntu hosted
+runner failure above. It has not been approved or merged.
 
 The read-only verifier `docs/testing/verify-release-consolidation.sh` passes on
 the current tip and proves the exact pin, accepted ancestry, clean state,

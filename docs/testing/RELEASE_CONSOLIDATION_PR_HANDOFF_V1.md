@@ -82,9 +82,12 @@ to `main`), not arbitrary feature-branch pushes. Opening the PR is therefore
 what starts the authoritative multi-OS checks; a local or branch-only run is
 not a substitute.
 
-1. Full GitHub CI, including Windows/source-build and secret/privacy scans. The
-   Ubuntu workspace test now uses serialized Linux test/build work after three
-   hosted-runner communication losses with no test assertion failure.
+1. Full GitHub CI, including Windows/source-build and secret/privacy scans. Prior
+   code-equivalent run `31762796754` passed the complete matrix. Current
+   cache-enabled run `31798069015` passed every non-Ubuntu job and proved cache
+   hits on Windows/macOS, but Ubuntu again lost hosted-runner communication during
+   the workspace test with no assertion or compiler failure. This is documented
+   infrastructure instability, not a product failure; do not blindly rerun it.
 2. Independent exact-SHA review of the code pin and acceptance procedure.
 3. Review of the open issue criteria (#861, #863–#872); leave deliberately
    deferred feature work open.
