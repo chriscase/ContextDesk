@@ -2,8 +2,11 @@
 # Record an honest rust-cache restore result for Ubuntu CI shards (#874).
 #
 # Swatinem/rust-cache exposes `cache-hit` only for an exact key match. A miss
-# is always recorded as cold — including prefix restores — so a later job
-# cannot claim a warm cache it did not actually get.
+# is always recorded as cold. An exact hit is still cold when --restore-dir
+# is set and that directory was not populated — `lookup-only: true` reports
+# a hit without downloading files (hosted run 31845262696).
+#
+# `cache_state` is `warm` only when the files are actually present.
 #
 # No network, no secrets. Requires: jq.
 set -eu
@@ -14,14 +17,19 @@ ROLE=""
 SHARD=""
 SHARED_KEY="ubuntu-workspace-tests"
 SAVE=""
+RESTORE_DIR=""
 
 usage() {
   cat <<'EOF'
 Usage:
   sh scripts/ci_record_cache.sh --out FILE --hit true|false|'' --role warmup|shard
                                 [--shard N] [--shared-key NAME] [--save true|false]
+                                [--restore-dir DIR]
 
-Writes a bounded JSON object. `cache_state` is `warm` only when --hit is true.
+Writes a bounded JSON object. `cache_state` is `warm` only when --hit is true
+AND, if --restore-dir is set, that directory exists and is non-empty.
+Swatinem `lookup-only: true` reports cache-hit without downloading files;
+never use it on the shard jobs.
 EOF
 }
 
@@ -62,6 +70,11 @@ while [ $# -gt 0 ]; do
       SAVE=$2
       shift 2
       ;;
+    --restore-dir)
+      [ $# -ge 2 ] || die "--restore-dir needs a value"
+      RESTORE_DIR=$2
+      shift 2
+      ;;
     -h | --help)
       usage
       exit 0
@@ -94,6 +107,18 @@ else
   esac
 fi
 
+RESTORE="none"
+if [ "$STATE" = warm ] && [ -n "$RESTORE_DIR" ]; then
+  if [ -d "$RESTORE_DIR" ] && [ -n "$(find "$RESTORE_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]; then
+    RESTORE=files
+  else
+    STATE=cold
+    RESTORE=key-hit-without-files
+  fi
+elif [ "$STATE" = warm ]; then
+  RESTORE=assumed
+fi
+
 dir=$(dirname "$OUT")
 mkdir -p "$dir"
 
@@ -108,11 +133,12 @@ jq -n \
   --arg role "$ROLE" \
   --arg state "$STATE" \
   --arg key "$SHARED_KEY" \
+  --arg restore "$RESTORE" \
   --argjson hit "$HIT_JSON" \
   --argjson save "$SAVE_JSON" \
   --argjson shard "$shard_json" \
   '{schema: $schema, role: $role, shard: $shard, shared_key: $key,
-    cache_hit: $hit, cache_state: $state, save: $save}' \
+    cache_hit: $hit, cache_state: $state, save: $save, restore: $restore}' \
   >"$OUT"
 
-echo "cache record: role=$ROLE state=$STATE hit=$HIT_JSON save=$SAVE_JSON key=$SHARED_KEY"
+echo "cache record: role=$ROLE state=$STATE hit=$HIT_JSON save=$SAVE_JSON restore=$RESTORE key=$SHARED_KEY"

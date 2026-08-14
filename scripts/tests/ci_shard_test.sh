@@ -390,6 +390,25 @@ expect_ok "empty hit is cold, never warm" sh "$CACHE" --out "$TMP/cache-empty.js
 expect_ok "garbage hit is cold" sh "$CACHE" --out "$TMP/cache-junk.json" --hit maybe --role warmup
 [ "$(jq -r '.cache_state' "$TMP/cache-junk.json")" = cold ] || fail "non-true hit must not claim warm"
 
+# Hosted run 31845262696: lookup-only reported cache-hit without files.
+mkdir -p "$TMP/empty-target"
+expect_ok "hit without restored files is cold" \
+  sh "$CACHE" --out "$TMP/cache-hit-nofiles.json" --hit true --role shard --save false \
+  --restore-dir "$TMP/empty-target"
+[ "$(jq -r '.cache_hit' "$TMP/cache-hit-nofiles.json")" = true ] || fail "must still record the action hit"
+[ "$(jq -r '.cache_state' "$TMP/cache-hit-nofiles.json")" = cold ] ||
+  fail "key hit without files must not claim warm"
+[ "$(jq -r '.restore' "$TMP/cache-hit-nofiles.json")" = "key-hit-without-files" ] ||
+  fail "must name the lookup-only miss"
+
+mkdir -p "$TMP/full-target/debug"
+echo stub >"$TMP/full-target/debug/foo"
+expect_ok "hit with restored files is warm" \
+  sh "$CACHE" --out "$TMP/cache-hit-files.json" --hit true --role shard --save false \
+  --restore-dir "$TMP/full-target"
+[ "$(jq -r '.cache_state' "$TMP/cache-hit-files.json")" = warm ] || fail "hit+files must be warm"
+[ "$(jq -r '.restore' "$TMP/cache-hit-files.json")" = files ] || fail "restore=files"
+
 # ------------------------------------------------------- workflow contracts
 python3 - "$WF" "$SHARDS" <<'PY' || fail "workflow contract python failed"
 import sys, yaml
@@ -457,8 +476,8 @@ if wu.get("save-if") in (False, "false"):
 sh = cache_step(jobs["rust-ubuntu-shard"])["with"]
 if sh.get("shared-key") != "ubuntu-workspace-tests":
     raise SystemExit("shard shared-key mismatch")
-if sh.get("lookup-only") not in (True, "true"):
-    raise SystemExit("shards must be lookup-only")
+if sh.get("lookup-only") in (True, "true"):
+    raise SystemExit("shards must not use lookup-only (that skips the download)")
 if sh.get("save-if") not in (False, "false"):
     raise SystemExit("shards must not save the shared cache")
 

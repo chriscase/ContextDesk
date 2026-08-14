@@ -13,7 +13,9 @@ env:
   # `strategy.matrix` cannot read the env context, so the shard list below is
   # spelled out literally; the aggregate job fails closed if the two ever
   # disagree. Cache key `ubuntu-workspace-tests` is shared by rust-ubuntu
-  # (the only writer) and every shard (lookup-only).
+  # (the only writer) and every shard (`save-if: false` so they restore but
+  # do not save). Do not set Swatinem `lookup-only: true` on shards: that
+  # checks the key without downloading files.
   CD_SHARD_COUNT: "4"
 
 # Keep every main-branch run, but stop spending runner time on an obsolete PR
@@ -178,7 +180,8 @@ jobs:
           wait "$hb" 2>/dev/null || true
           exit "$rc"
       - name: compile workspace tests (cache warmup)
-        # One compile of DuckDB/workspace test binaries. Shards are lookup-only
+        # One compile of DuckDB/workspace test binaries. Shards restore this
+        # cache with save-if: false (they must actually download the files).
         # and should restore this entry. CARGO_BUILD_JOBS=2 matches the 2-core
         # hosted runner; test execution stays single-threaded on the shards.
         env:
@@ -241,18 +244,25 @@ jobs:
         with:
           shared-key: ubuntu-workspace-tests
           cache-workspace-crates: true
-          lookup-only: true
+          # save-if: false restores files and skips the save post-step.
+          # lookup-only: true would set cache-hit without downloading (run
+          # 31845262696): shards compiled 11–12 min while recording warm.
+          lookup-only: false
           save-if: false
       - name: record cache restore
         run: |
           mkdir -p ci-shards
+          # restore-dir keeps cache_state honest: lookup-only reports a hit
+          # without downloading files (run 31845262696 compiled 11–12 min
+          # while recording warm).
           sh scripts/ci_record_cache.sh \
             --out ci-shards/cache-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
             --role shard \
             --shard '${{ matrix.shard }}' \
             --shared-key ubuntu-workspace-tests \
-            --save false
+            --save false \
+            --restore-dir target
           echo "CD_CACHE_STATE=$(jq -r .cache_state ci-shards/cache-status.json)" >> "$GITHUB_ENV"
       - name: shard plan (deterministic, exhaustive)
         run: sh scripts/ci_shard_plan.sh verify --shards "$CD_SHARD_COUNT"

@@ -165,9 +165,11 @@ Properties worth knowing:
   that is already gone cannot upload; the warmup job exists so shards should
   not sit in the 86–96 minute hosted-runner-loss window.
 - **Cache is honest.** `cache_state` is `warm` only when Swatinem reports an
-  exact `cache-hit`. Shards are `lookup-only` / `save-if: false`. A cold
-  concurrent start does **not** compile DuckDB four times: the warmup job is
-  the only writer, and shards start after it finishes.
+  exact `cache-hit` **and** the restored `target/` directory is non-empty.
+  Shards use `save-if: false` (restore files, do not save). Do **not** set
+  `lookup-only: true`: that reports a hit without downloading, which hosted
+  run `31845262696` recorded as warm while each shard still compiled for
+  11–12 minutes. The warmup job is the only writer.
 - **Nothing about the suite is relaxed.** Shards keep `RUST_TEST_THREADS=1`.
   macOS and Windows still run `cargo test --workspace`.
 
