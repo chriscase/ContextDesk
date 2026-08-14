@@ -7,7 +7,9 @@ owner-authorized pull request and remote CI.
 Candidate branch: `integrate/release-consolidation-v1`  
 Exact code/build pin: `a79069445dc79aba835e7627ec75c8cbbffd5492`
 Current documentation tip: resolve `git rev-parse HEAD` after fetching the
-branch; the current docs/CI tip is `8a8be447bdf43e6238ccb6f17c862432da6f4a01`.
+branch. The preceding CI tip was `8a8be447bdf43e6238ccb6f17c862432da6f4a01`;
+this audit is intentionally tip-independent so later documentation commits do
+not make it stale.
 
 | Requirement | Evidence | Status |
 | --- | --- | --- |
