@@ -1,9 +1,9 @@
 # Release consolidation status v1
 
-Status: **candidate prepared; remote CI and merge approval pending**
+Status: **candidate ready for owner review and merge approval**
 
 Feature freeze: no non-blocking feature work is being added to this release
-candidate while remote CI and review are pending.
+candidate while owner review and merge approval are pending.
 
 This record describes the candidate on
 `integrate/release-consolidation-v1`. It intentionally separates the exact
@@ -59,8 +59,9 @@ named runs; they do not create universal model or gateway badges.
 
 ## Remaining release actions
 
-1. Open a review PR for this branch and run the repository's full GitHub CI
-   matrix, including Windows portability and secret scanning.
+1. Full GitHub CI has passed on run `31762796754` at branch tip
+   `9ae170715fb72e156e2921c93fb64fae83997cfe`, including Windows portability,
+   Ubuntu/macOS workspace tests, desktop/Tauri checks, and secret scanning.
 2. Obtain final independent exact-SHA review and owner approval.
 3. Replace or close obsolete release PR #860 and draft PRs #870/#871 only
    after the replacement PR is accepted.
@@ -124,8 +125,8 @@ candidate is accepted; it must be rebased and re-gated rather than cherry-
 picked across conflicting transport code.
 
 The approval-gated PR command and remote CI checklist are captured in
-`RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md`; draft PR #873 is now open for CI and
-review, but it has not been approved or merged.
+`RELEASE_CONSOLIDATION_PR_HANDOFF_V1.md`; draft PR #873 is open, mergeable, and
+CI-green, but it has not been approved or merged.
 
 The read-only verifier `docs/testing/verify-release-consolidation.sh` passes on
 the current tip and proves the exact pin, accepted ancestry, clean state,
