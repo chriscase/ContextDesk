@@ -951,6 +951,73 @@ async fn reasoning_fills_completion_empty_visible_length_finish() {
     ));
 }
 
+/// DeepSeek/Qwen-style reasoning fields remain out of visible answer text,
+/// while the host records only a bounded channel length for diagnosis.
+#[tokio::test]
+async fn separate_reasoning_channel_does_not_leak_into_visible_answer() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_raw(
+                    serde_json::json!({
+                        "id": "chatcmpl-reasoning-channel",
+                        "model": "deepseek/deepseek-v4-flash",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "reasoning_content": "internal chain of thought",
+                                "content": "visible answer"
+                            },
+                            "finish_reason": "stop"
+                        }]
+                    })
+                    .to_string(),
+                    "application/json",
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let completion = client(&server.uri())
+        .complete(&one_user_message("answer"), None)
+        .await
+        .unwrap();
+    assert_eq!(completion.content, "visible answer");
+    assert_eq!(completion.finish_reason, "stop");
+    assert_eq!(
+        completion.telemetry.reasoning_content_chars,
+        Some("internal chain of thought".chars().count() as u64)
+    );
+    assert!(!completion.content.contains("internal chain"));
+}
+
+#[tokio::test]
+async fn streamed_reasoning_channel_is_counted_without_visible_leakage() {
+    let server = MockServer::start().await;
+    mount_sse(
+        &server,
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"internal \"}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{\"content\":\"visible\"}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await;
+
+    let completion = client(&server.uri())
+        .complete_stream(&one_user_message("answer"), None)
+        .await
+        .unwrap();
+    assert_eq!(completion.content, "visible");
+    assert_eq!(completion.finish_reason, "stop");
+    assert_eq!(
+        completion.telemetry.reasoning_content_chars,
+        Some("internal ".chars().count() as u64)
+    );
+}
+
 /// Missing usage / route / cost stay explicitly unknown.
 #[tokio::test]
 async fn missing_metadata_stays_unknown_not_inferred_from_configured_model() {
@@ -1053,6 +1120,7 @@ async fn secrets_never_appear_in_traced_transport_dto() {
             prompt_tokens: turn_transport.prompt_tokens,
             completion_tokens: turn_transport.completion_tokens,
             reasoning_tokens: turn_transport.reasoning_tokens,
+            reasoning_content_chars: turn_transport.reasoning_content_chars,
             cached_tokens: turn_transport.cached_tokens,
             total_tokens: turn_transport.total_tokens,
             cost: turn_transport.cost,

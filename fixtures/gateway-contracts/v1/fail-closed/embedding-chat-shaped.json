@@ -1,0 +1,11 @@
+{
+  "case": "role_mismatched_chat_envelope_for_embed",
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "I cannot embed this"
+      }
+    }
+  ]
+}

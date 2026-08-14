@@ -1,0 +1,123 @@
+{
+  "case_id": "rb09-time-uncertainty",
+  "queries": [
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "reconciliation",
+          "duplicate"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "broad",
+      "query_id": "rb09-time-uncertainty-q1",
+      "question": "Did the nightly reconciliation misbehave?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "reconciliation",
+          "twice",
+          "fall-back"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "causal",
+      "query_id": "rb09-time-uncertainty-q2",
+      "question": "Why did reconciliation run twice?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "duplicate",
+          "reconciliation"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "symptom",
+      "query_id": "rb09-time-uncertainty-q3",
+      "question": "Show duplicate reconciliation evidence."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "evt-67FD3A87"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "identifier",
+      "query_id": "rb09-time-uncertainty-q4",
+      "question": "Find evt-67FD3A87 occurrences."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "charge",
+          "lost",
+          "missing"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "negative",
+      "query_id": "rb09-time-uncertainty-q5",
+      "question": "Did the billing API lose charges?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "clock",
+          "fall-back",
+          "duplicate"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "competing",
+      "query_id": "rb09-time-uncertainty-q6",
+      "question": "Could the duplicate run be a clock problem rather than a scheduler bug?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "reconciliation",
+          "started",
+          "twice"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "chronology",
+      "query_id": "rb09-time-uncertainty-q7",
+      "question": "Exactly when did the second run start?"
+    }
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_queries.v1",
+  "schema_version": 1,
+  "suite_id": "contextdesk.log_lab.retrieval_ablation"
+}

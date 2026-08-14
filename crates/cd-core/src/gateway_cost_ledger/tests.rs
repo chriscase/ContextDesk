@@ -1,0 +1,487 @@
+//! Hermetic tests for the gateway cost/reliability ledger.
+
+use super::*;
+use crate::gateway_cost_ledger::ingest::fixture_root;
+use crate::gateway_cost_ledger::redact::leaky_run_for_mutation;
+use crate::gateway_cost_ledger::schema::{MAX_LEDGER_COLLECTION_ITEMS, MAX_LEDGER_STRING_BYTES};
+
+#[test]
+fn ingests_deepseek_gpt_oss_and_mixed_role_bundles() {
+    let root = fixture_root();
+    let deepseek = ingest_diagnostic_bundle(&root.join("deepseek")).expect("deepseek");
+    let gpt = ingest_diagnostic_bundle(&root.join("gpt-oss")).expect("gpt-oss");
+    let mixed = ingest_diagnostic_bundle(&root.join("mixed-role")).expect("mixed-role");
+
+    assert_eq!(deepseek.len(), 1);
+    assert_eq!(gpt.len(), 1);
+    assert_eq!(mixed.len(), 1);
+
+    match &deepseek[0].model {
+        IdentityLabel::Pseudonym { value } => assert_eq!(value, "p-fixturemodel1"),
+        other => panic!("expected pseudonymous diagnostic label, got {other:?}"),
+    }
+    match &gpt[0].model {
+        IdentityLabel::Pseudonym { value } => assert_eq!(value, "p-fixturemodel2"),
+        other => panic!("expected pseudonymous diagnostic label, got {other:?}"),
+    }
+    match &mixed[0].model {
+        IdentityLabel::Pseudonym { value } => assert_eq!(value, "p-mixedmodel01"),
+        other => panic!("expected pseudonymous diagnostic label, got {other:?}"),
+    }
+
+    assert_eq!(deepseek[0].answers_useful, VerdictStatus::Pass);
+    assert_eq!(gpt[0].answers_useful, VerdictStatus::Fail);
+    assert_eq!(mixed[0].answers_useful, VerdictStatus::Inconclusive);
+
+    // Cost/tokens absent on these share-safe reports → unknown, never zero.
+    assert_eq!(deepseek[0].reported_cost, MetricF64::Unknown);
+    assert_eq!(deepseek[0].tokens.total, MetricU64::Unknown);
+    assert_eq!(gpt[0].reported_cost, MetricF64::Unknown);
+    assert_eq!(mixed[0].reported_cost, MetricF64::Unknown);
+}
+
+#[test]
+fn ingests_documented_historical_rows_without_inventing_cost() {
+    let root = fixture_root().join("historical");
+    let mut runs = Vec::new();
+    for name in ["row-01.json", "row-02.json", "row-03.json"] {
+        let path = root.join(name);
+        runs.extend(ingest_path(&path).expect(name));
+    }
+    assert_eq!(runs.len(), 3);
+    for run in &runs {
+        assert_eq!(run.source_kind, LedgerSourceKind::HistoricalBenchmarkRow);
+        assert_eq!(run.reported_cost, MetricF64::Unknown);
+        assert_eq!(run.tokens.input, MetricU64::Unknown);
+        assert!(run
+            .caveats
+            .iter()
+            .any(|c| c.code == "historical_documented_row"));
+    }
+    assert_eq!(runs[0].request_count, MetricU64::Known(19));
+    assert_eq!(runs[2].elapsed_ms, MetricU64::Known(86900));
+}
+
+#[test]
+fn rejects_secret_bearing_and_raw_prompt_inputs() {
+    let root = fixture_root().join("malformed");
+    let auth = ingest_path(&root.join("with-authorization.json"));
+    assert!(
+        matches!(
+            auth,
+            Err(IngestError::Redaction(
+                LedgerRedactionError::ForbiddenField(_)
+            ))
+        ),
+        "authorization field must be rejected: {auth:?}"
+    );
+    let prompt = ingest_path(&root.join("with-raw-prompt.json"));
+    assert!(
+        matches!(
+            prompt,
+            Err(IngestError::Redaction(
+                LedgerRedactionError::ForbiddenField(_)
+            ))
+        ),
+        "raw_prompt field must be rejected: {prompt:?}"
+    );
+}
+
+#[test]
+fn rejects_endpoint_and_authorization_details_before_mapping() {
+    let path = fixture_root()
+        .join("malformed")
+        .join("with-endpoint-in-detail-report.json");
+    assert!(matches!(
+        ingest_path(&path),
+        Err(IngestError::Redaction(
+            LedgerRedactionError::ForbiddenContent(_)
+        ))
+    ));
+}
+
+#[test]
+fn unknown_cost_stays_unknown_in_aggregates_and_never_becomes_zero() {
+    let with_usage = ingest_diagnostic_bundle(&fixture_root().join("mixed-role/with-usage"))
+        .expect("with-usage");
+    let without = ingest_diagnostic_bundle(&fixture_root().join("mixed-role/without-usage"))
+        .expect("without-usage");
+
+    assert_eq!(
+        with_usage[0].reported_cost,
+        MetricF64::Known(0.0123),
+        "fixture with usage must retain known cost"
+    );
+    assert_eq!(without[0].reported_cost, MetricF64::Unknown);
+
+    let mixed = [with_usage[0].clone(), without[0].clone()];
+    let aggregates = aggregate_runs(&mixed);
+    assert_eq!(aggregates.len(), 1);
+    assert_eq!(
+        aggregates[0].reported_cost,
+        MetricF64::Unknown,
+        "mixing known+unknown cost must yield unknown, not a partial/zero sum"
+    );
+    assert_eq!(aggregates[0].tokens.total, MetricU64::Unknown);
+
+    // Mutation: forcing Unknown→Known(0) would be dishonest — prove the
+    // honesty helper itself refuses to treat unknown as zero.
+    assert_ne!(MetricF64::Unknown, MetricF64::Known(0.0));
+    assert_ne!(MetricU64::Unknown, MetricU64::Known(0));
+    assert_eq!(
+        MetricF64::sum_all([MetricF64::Known(0.0), MetricF64::Unknown]),
+        MetricF64::Unknown
+    );
+}
+
+#[test]
+fn mutation_redaction_removes_credentials_paths_and_endpoints() {
+    let mut leaky = leaky_run_for_mutation();
+    let before = serde_json::to_string(&leaky).expect("serialize");
+    assert!(
+        assert_share_safe_ledger_json(&before).is_err(),
+        "pre-redaction leaky run must fail share-safe gate"
+    );
+
+    redact_ledger_run(&mut leaky);
+    let after = serde_json::to_string(&leaky).expect("serialize");
+    assert_share_safe_ledger_json(&after).expect("post-redaction must be share-safe");
+    assert!(!after.contains("synthetic-mutation-canary"));
+    assert!(!after.contains("/private/tmp"));
+    assert!(!after.contains("/Users/owner"));
+    assert!(!after.contains("https://private.gateway.example"));
+    assert!(matches!(leaky.model, IdentityLabel::Unknown));
+    assert!(matches!(leaky.gateway, IdentityLabel::Unknown));
+}
+
+#[test]
+fn mutation_zero_filling_cost_would_fail_honesty_assertions() {
+    let runs = ingest_diagnostic_bundle(&fixture_root().join("deepseek")).expect("deepseek");
+    let mut dishonest = runs[0].clone();
+    // Simulate a buggy aggregator that zero-fills missing cost.
+    dishonest.reported_cost = MetricF64::Known(0.0);
+    assert_eq!(runs[0].reported_cost, MetricF64::Unknown);
+    assert_ne!(
+        dishonest.reported_cost, runs[0].reported_cost,
+        "mutation oracle: zero-filled cost must differ from honest unknown"
+    );
+    let agg = aggregate_runs(&runs);
+    assert_eq!(agg[0].reported_cost, MetricF64::Unknown);
+}
+
+#[test]
+fn inconclusive_stays_separate_from_fail_in_pass_rates() {
+    let mixed = ingest_diagnostic_bundle(&fixture_root().join("mixed-role")).expect("mixed");
+    let report = build_comparison_report(&mixed);
+    assert_eq!(report.models.len(), 1);
+    let row = &report.models[0];
+    assert_eq!(row.aggregate.answers_useful.pass, 0);
+    assert_eq!(row.aggregate.answers_useful.fail, 0);
+    assert_eq!(row.aggregate.answers_useful.inconclusive, 1);
+    assert!(
+        row.pass_rates.answers_useful.is_none(),
+        "inconclusive-only dimension must not invent a pass rate"
+    );
+    assert_eq!(row.aggregate.gateway_model.pass, 1);
+    assert_eq!(row.pass_rates.gateway_model, Some(1.0));
+}
+
+#[test]
+fn comparison_report_is_deterministic_and_share_safe() {
+    let root = fixture_root();
+    let mut runs = Vec::new();
+    for rel in [
+        "deepseek",
+        "gpt-oss",
+        "mixed-role",
+        "historical/row-01.json",
+        "historical/row-02.json",
+        "historical/row-03.json",
+    ] {
+        runs.extend(ingest_path(&root.join(rel)).expect(rel));
+    }
+    let a = build_comparison_report(&runs);
+    let mut shuffled = runs.clone();
+    shuffled.reverse();
+    let b = build_comparison_report(&shuffled);
+    assert_eq!(a, b, "comparison must be order-independent");
+
+    let json = emit_comparison_json(&a).expect("emit");
+    let text = render_comparison_text(&a);
+    assert!(!json.to_ascii_lowercase().contains("\"verified\""));
+    assert!(!json.to_ascii_lowercase().contains("readiness_badge"));
+    assert!(!text.to_ascii_lowercase().contains("verified badge"));
+    assert!(text.contains("unknown"));
+    assert!(a.run_count >= 6);
+    assert!(a.models.len() >= 2);
+    assert!(a
+        .confidence_caveats
+        .iter()
+        .any(|c| c.code == "no_readiness_claim_from_aggregate"));
+}
+
+#[test]
+fn private_model_label_not_in_allowlist_becomes_unknown() {
+    let value = serde_json::json!({
+        "schema_id": "contextdesk.gateway_cost_ledger_historical_row.v1",
+        "schema_version": 1,
+        "historical_row": true,
+        "documented_source": "fixtures/gateway-cost-ledger/v1/historical/private-label-test",
+        "run_id": "private-label-run",
+        "model_label": "corp-private-alias-x",
+        "gateway_label": "employer-private-gateway",
+        "gateway_model_status": "inconclusive",
+        "product_workflow_status": "inconclusive",
+        "answers_useful_status": "inconclusive"
+    });
+    // corp-private-alias-x appears in the mixed catalog fixture as an id, but
+    // it is intentionally NOT in the exact-model allowlist for ledger identity.
+    let run = ingest_json_value(&value, "private-label-test").expect("ingest");
+    assert!(matches!(run.model, IdentityLabel::Unknown));
+    assert!(matches!(run.gateway, IdentityLabel::Unknown));
+}
+
+#[test]
+fn metric_sum_all_preserves_genuine_zero_distinct_from_unknown() {
+    assert_eq!(
+        MetricU64::sum_all([MetricU64::Known(0), MetricU64::Known(0)]),
+        MetricU64::Known(0)
+    );
+    assert_eq!(
+        MetricF64::sum_all([MetricF64::Known(0.0), MetricF64::Known(0.0)]),
+        MetricF64::Known(0.0)
+    );
+    assert_eq!(
+        MetricU64::sum_all([MetricU64::Known(0), MetricU64::Unknown]),
+        MetricU64::Unknown
+    );
+}
+
+#[test]
+fn missing_booleans_stay_unknown_and_false_stays_observed_false() {
+    let base = serde_json::json!({
+        "schema_id": "contextdesk.gateway_cost_ledger_historical_row.v1",
+        "schema_version": 1,
+        "historical_row": true,
+        "documented_source": "fixtures/gateway-cost-ledger/v1/historical/bool-test",
+        "run_id": "bool-unknown",
+        "model_label": "openai/gpt-oss-120b",
+        "gateway_label": "Vercel AI Gateway"
+    });
+    let unknown = ingest_json_value(&base, "bool-test").expect("unknown booleans");
+    assert_eq!(unknown.deadline_exceeded, ObservationBool::Unknown);
+    assert_eq!(unknown.cancelled, ObservationBool::Unknown);
+
+    let mut explicit = base;
+    explicit["run_id"] = serde_json::json!("bool-false");
+    explicit["deadline_exceeded"] = serde_json::json!(false);
+    explicit["cancelled"] = serde_json::json!(false);
+    let observed = ingest_json_value(&explicit, "bool-test").expect("observed false");
+    assert_eq!(observed.deadline_exceeded, ObservationBool::Known(false));
+    assert_eq!(observed.cancelled, ObservationBool::Known(false));
+
+    let aggregate = aggregate_runs(&[unknown, observed]);
+    assert_eq!(aggregate.len(), 1);
+    assert_eq!(aggregate[0].deadline_exceeded.unknown, 1);
+    assert_eq!(aggregate[0].deadline_exceeded.false_count, 1);
+    assert_eq!(aggregate[0].deadline_exceeded.true_count, 0);
+}
+
+#[test]
+fn malformed_negative_and_out_of_range_metrics_fail_closed() {
+    let base = serde_json::json!({
+        "schema_id": "contextdesk.gateway_cost_ledger_historical_row.v1",
+        "schema_version": 1,
+        "historical_row": true,
+        "documented_source": "fixtures/gateway-cost-ledger/v1/historical/numeric-test",
+        "run_id": "numeric-test",
+        "model_label": "openai/gpt-oss-120b",
+        "gateway_label": "Vercel AI Gateway"
+    });
+    let mutations = [
+        ("reported_cost", serde_json::json!(-0.01)),
+        ("reported_cost", serde_json::json!(1_000_000.01)),
+        ("request_count", serde_json::json!(-1)),
+        ("request_count", serde_json::json!(10_000_001)),
+        ("elapsed_ms", serde_json::json!(-1)),
+        ("elapsed_ms", serde_json::json!(604_800_001_u64)),
+        ("deadline_secs", serde_json::json!(604_801_u64)),
+    ];
+    for (field, bad) in mutations {
+        let mut mutated = base.clone();
+        mutated[field] = bad;
+        assert!(
+            matches!(
+                ingest_json_value(&mutated, "numeric-test"),
+                Err(IngestError::Rejected(_))
+            ),
+            "{field} mutation must reject"
+        );
+    }
+
+    let mut bad_tokens = base;
+    bad_tokens["tokens"] = serde_json::json!({ "total": 1_000_000_000_001_u64 });
+    assert!(matches!(
+        ingest_json_value(&bad_tokens, "numeric-test"),
+        Err(IngestError::Rejected(_))
+    ));
+}
+
+#[test]
+fn direct_ledger_cannot_promote_diagnostic_exact_identity() {
+    let mut run = LedgerRunRecord::blank("direct-exact", LedgerSourceKind::DiagnosticBundle);
+    run.source_ref = "owner-local-report".into();
+    run.model = IdentityLabel::Exact {
+        value: "openai/gpt-oss-120b".into(),
+    };
+    let value = serde_json::to_value(run).expect("serialize direct run");
+    assert!(matches!(
+        ingest_json_value(&value, "direct"),
+        Err(IngestError::Rejected(_))
+    ));
+}
+
+#[test]
+fn live_and_historical_provenance_cohorts_never_aggregate_together() {
+    let mut observed = LedgerRunRecord::blank("observed", LedgerSourceKind::DiagnosticBundle);
+    observed.source_ref = "share-safe-report".into();
+    observed.model = IdentityLabel::Pseudonym {
+        value: "p-same-model".into(),
+    };
+    let mut historical =
+        LedgerRunRecord::blank("historical", LedgerSourceKind::HistoricalBenchmarkRow);
+    historical.source_ref = "documented-row".into();
+    historical.model = IdentityLabel::Pseudonym {
+        value: "p-same-model".into(),
+    };
+
+    let aggregates = aggregate_runs(&[observed, historical]);
+    assert_eq!(aggregates.len(), 2);
+    assert_ne!(aggregates[0].source_kind, aggregates[1].source_kind);
+}
+
+#[test]
+fn unknown_identities_and_distinct_gateways_do_not_collapse() {
+    let mut unknown_a = LedgerRunRecord::blank("unknown-a", LedgerSourceKind::DiagnosticBundle);
+    unknown_a.source_ref = "report-a".into();
+    let mut unknown_b = LedgerRunRecord::blank("unknown-b", LedgerSourceKind::DiagnosticBundle);
+    unknown_b.source_ref = "report-b".into();
+
+    let mut gateway_a = LedgerRunRecord::blank("gateway-a", LedgerSourceKind::DiagnosticBundle);
+    gateway_a.source_ref = "report-c".into();
+    gateway_a.model = IdentityLabel::Pseudonym {
+        value: "p-model".into(),
+    };
+    gateway_a.gateway = IdentityLabel::Pseudonym {
+        value: "p-gateway-a".into(),
+    };
+    let mut gateway_b = gateway_a.clone();
+    gateway_b.run_id = "gateway-b".into();
+    gateway_b.source_ref = "report-d".into();
+    gateway_b.gateway = IdentityLabel::Pseudonym {
+        value: "p-gateway-b".into(),
+    };
+
+    assert_eq!(
+        aggregate_runs(&[unknown_a, unknown_b, gateway_a, gateway_b]).len(),
+        4
+    );
+}
+
+#[test]
+fn invalid_typed_status_and_conflicting_aliases_reject() {
+    let base = serde_json::json!({
+        "schema_id": "contextdesk.gateway_cost_ledger_historical_row.v1",
+        "schema_version": 1,
+        "historical_row": true,
+        "documented_source": "fixtures/gateway-cost-ledger/v1/historical/status-test",
+        "run_id": "status-test"
+    });
+    for (field, value) in [
+        ("answers_useful_status", serde_json::json!("maybe")),
+        ("cleanup_status", serde_json::json!("mostly")),
+        ("deadline_exceeded", serde_json::json!("false")),
+    ] {
+        let mut bad = base.clone();
+        bad[field] = value;
+        assert!(matches!(
+            ingest_json_value(&bad, "status-test"),
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    let mut conflicting_tokens = base.clone();
+    conflicting_tokens["tokens"] = serde_json::json!({ "input": 10, "prompt_tokens": 11 });
+    assert!(matches!(
+        ingest_json_value(&conflicting_tokens, "status-test"),
+        Err(IngestError::Rejected(_))
+    ));
+
+    let mut conflicting_cost = base;
+    conflicting_cost["reported_cost"] = serde_json::json!(0.1);
+    conflicting_cost["cost"] = serde_json::json!(0.2);
+    assert!(matches!(
+        ingest_json_value(&conflicting_cost, "status-test"),
+        Err(IngestError::Rejected(_))
+    ));
+}
+
+#[test]
+fn oversize_collections_and_strings_fail_before_mapping() {
+    let mut oversized = serde_json::json!({
+        "schema_id": "contextdesk.gateway_cost_ledger_historical_row.v1",
+        "schema_version": 1,
+        "historical_row": true,
+        "documented_source": "fixtures/gateway-cost-ledger/v1/historical/bounds-test",
+        "run_id": "bounds-test"
+    });
+    oversized["failure_categories"] = serde_json::Value::Array(
+        (0..=MAX_LEDGER_COLLECTION_ITEMS)
+            .map(|_| serde_json::json!("bounded"))
+            .collect(),
+    );
+    assert!(matches!(
+        ingest_json_value(&oversized, "bounds-test"),
+        Err(IngestError::Rejected(_))
+    ));
+
+    let mut long = serde_json::json!({
+        "schema_id": "contextdesk.gateway_cost_ledger_historical_row.v1",
+        "schema_version": 1,
+        "historical_row": true,
+        "documented_source": "fixtures/gateway-cost-ledger/v1/historical/bounds-test",
+        "run_id": "bounds-test"
+    });
+    long["note"] = serde_json::json!("x".repeat(MAX_LEDGER_STRING_BYTES + 1));
+    assert!(matches!(
+        ingest_json_value(&long, "bounds-test"),
+        Err(IngestError::Rejected(_))
+    ));
+}
+
+#[test]
+fn manifest_integrity_is_required_and_fail_closed() {
+    let source = fixture_root().join("deepseek");
+    let temp = tempfile::tempdir().expect("temp bundle");
+    std::fs::copy(source.join("report.json"), temp.path().join("report.json"))
+        .expect("copy report");
+    assert!(matches!(
+        ingest_diagnostic_bundle(temp.path()),
+        Err(IngestError::Rejected(_))
+    ));
+    std::fs::write(
+        temp.path().join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_id": "contextdesk.gateway_diagnostic_manifest.v1",
+            "schema_version": 1,
+            "run_id": "gwdx-fixture-deepseek-505c3793",
+            "files": []
+        }))
+        .expect("serialize manifest"),
+    )
+    .expect("write manifest");
+    assert!(matches!(
+        ingest_diagnostic_bundle(temp.path()),
+        Err(IngestError::Rejected(_))
+    ));
+}

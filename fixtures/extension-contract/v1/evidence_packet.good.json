@@ -1,0 +1,58 @@
+{
+  "schema_id": "contextdesk.extension.evidence_packet.v1",
+  "packet_id": "pkt-synthetic-001",
+  "packet_digest": "a1b2c3d4e5f60718293a4b5c6d7e8f901234567890abcdef1234567890abcd",
+  "binding": {
+    "session_id": "sess-synthetic",
+    "turn_id": "turn-1",
+    "corpus_id": "corpus-synthetic",
+    "ledger_digest": "deadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcdef",
+    "event_revision": 1,
+    "template_analysis_revision": 1,
+    "suppression_revision": 0
+  },
+  "time_quality": "order_only",
+  "timezone": null,
+  "privacy": "share_safe",
+  "evidence": [
+    {
+      "evidence_id": "e:trace:alpha:10",
+      "candidate_id": "trace:alpha",
+      "chronology_ordinal": 10,
+      "role": "initiating_cause",
+      "scope": "candidate"
+    },
+    {
+      "evidence_id": "e:template:bravo:40",
+      "candidate_id": "template:bravo",
+      "chronology_ordinal": 40,
+      "role": "downstream_symptom",
+      "scope": "candidate"
+    },
+    {
+      "evidence_id": "e:global_timeline_context:11",
+      "candidate_id": "global_timeline_context",
+      "chronology_ordinal": 11,
+      "role": "unclassified",
+      "scope": "independent"
+    }
+  ],
+  "retrieval": {
+    "mode": "keyword",
+    "embedding_space_schema_id": null,
+    "endpoint_fingerprint": null,
+    "model_fingerprint": null,
+    "dimensions": null,
+    "dialect": null
+  },
+  "truncation": {
+    "truncated": false,
+    "reason": null,
+    "kept": 3,
+    "omitted": 0
+  },
+  "maps_to_schemas": [
+    "contextdesk.fast_triage.packet.v1",
+    "contextdesk.investigation_answer.v1"
+  ]
+}

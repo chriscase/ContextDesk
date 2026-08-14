@@ -127,8 +127,18 @@ const COMMANDS: &[&str] = &[
     "config path",
     "capabilities",
     "doctor",
+    "models",
+    "retrieval-status",
     "logging-assessment",
     "exception-episodes",
+    "eval suites",
+    "eval validate",
+    "eval run",
+    "triage-policy validate",
+    "triage-policy compile",
+    "triage-policy example",
+    "triage-policy store",
+    "triage-policy qualify",
 ];
 
 pub fn run(branding: &Branding) -> CapabilitiesOutput {

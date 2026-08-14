@@ -64,7 +64,7 @@ fn default_deadline_ms() -> u64 {
     // Stored fallback and managed-provider adaptive ceiling. Local/private
     // profiles receive the patient adaptive plan in TurnDeadlinePlan, while
     // cancellation and one monotonic hard ceiling remain authoritative.
-    120_000
+    180_000
 }
 fn migrated_deadline_is_explicit() -> bool {
     true
@@ -98,7 +98,10 @@ impl RouterBudget {
         self.max_sources = self.max_sources.clamp(1, 16);
         self.max_tool_rounds = self.max_tool_rounds.clamp(1, 32);
         self.max_results_per_source = self.max_results_per_source.clamp(1, 50);
-        self.deadline_ms = self.deadline_ms.clamp(500, 600_000);
+        self.deadline_ms = self.deadline_ms.clamp(
+            crate::deadline_controls::MIN_DEADLINE_MS,
+            crate::deadline_controls::MAX_DEADLINE_MS,
+        );
         if self.order.is_empty() {
             self.order = default_order();
         }
@@ -179,7 +182,7 @@ impl TurnDeadlinePlan {
         } else if slow_private {
             300_000
         } else {
-            120_000
+            180_000
         };
         let phase = |numerator: u64, denominator: u64| {
             total_ms
@@ -306,7 +309,7 @@ mod tests {
 
     #[test]
     fn default_memory_first() {
-        assert_eq!(RouterBudget::default().deadline_ms, 120_000);
+        assert_eq!(RouterBudget::default().deadline_ms, 180_000);
         let avail = [SourceKind::Wiki, SourceKind::Memory, SourceKind::Files];
         let ranked = rank_sources("how does auth work", &avail, &RouterBudget::default());
         assert_eq!(ranked[0], SourceKind::Memory);
@@ -361,8 +364,8 @@ mod tests {
         managed.local_only = false;
         managed.base_url = "https://models.example.com/v1".into();
         let managed = TurnDeadlinePlan::for_profile(&budget, &managed);
-        assert_eq!(managed.total_ms, 120_000);
-        assert_eq!(managed.retrieving_ms, 72_000);
+        assert_eq!(managed.total_ms, 180_000);
+        assert_eq!(managed.retrieving_ms, 108_000);
 
         for host in [
             "gateway.internal",
@@ -401,7 +404,7 @@ mod tests {
         profile.deadline_preference = ProviderDeadlinePreference::Standard;
         assert_eq!(
             TurnDeadlinePlan::for_profile(&RouterBudget::default(), &profile).total_ms,
-            120_000
+            180_000
         );
     }
 

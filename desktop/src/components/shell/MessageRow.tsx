@@ -31,6 +31,7 @@ import {
 import { classifyCompletedCitation } from "../../lib/citations";
 import { ActivityCompactLine } from "../activity/ActivityCompactLine";
 import { settleTurnLifecycle } from "../../lib/activity/turnLifecycle";
+import { TurnProgressTimeline } from "../TurnProgressTimeline";
 import type { ActivityMode, ActivityTurn } from "../../lib/activity/types";
 import type {
   HostEvidenceCitation,
@@ -93,6 +94,12 @@ function citationsSignature(citations: Msg["citations"]): string {
     .join("|");
 }
 
+function progressSignature(progress: Msg["turnProgress"]): string {
+  if (!progress?.length) return "0";
+  const last = progress.at(-1);
+  return `${progress.length}:${last?.stage ?? ""}:${last?.phase ?? ""}:${last?.elapsedMs ?? 0}`;
+}
+
 /** Equality for React.memo — settled rows equal when id/content/stream/tools stable. */
 export function messageRowPropsEqual(
   prev: MessageRowProps,
@@ -106,6 +113,12 @@ export function messageRowPropsEqual(
     return false;
   }
   if ((prev.msg.trail?.length ?? 0) !== (next.msg.trail?.length ?? 0)) {
+    return false;
+  }
+  if (
+    progressSignature(prev.msg.turnProgress) !==
+    progressSignature(next.msg.turnProgress)
+  ) {
     return false;
   }
   if (
@@ -508,6 +521,40 @@ function MessageRowImpl({
         <details className="msg__meta-details">
           <summary>Response details</summary>
           <footer className="msg__meta">{formatMsgMetaFooter(m.meta)}</footer>
+        </details>
+      ) : null}
+      {m.role === "assistant" &&
+      m.turnProgress &&
+      m.turnProgress.length > 0 ? (
+        <TurnProgressTimeline events={m.turnProgress} live={showLiveStreaming} />
+      ) : null}
+      {m.role === "assistant" &&
+      !showLiveStreaming &&
+      (!m.turnProgress || m.turnProgress.length === 0) &&
+      m.multiModelStages &&
+      m.multiModelStages.length > 0 ? (
+        <details className="msg__meta-details">
+          <summary>
+            Multi-model review
+            {(() => {
+              const summary = m.multiModelStages.find(
+                (s) => s.stage === "summary",
+              );
+              return summary?.status ? ` — ${summary.status}` : "";
+            })()}
+          </summary>
+          <ul className="msg__multimodel">
+            {m.multiModelStages.map((s, i) => (
+              <li key={`${s.stage}-${s.phase}-${i}`} className="msg__multimodel-line">
+                <span className="msg__multimodel-role">
+                  {s.stage}
+                  {s.candidateId ? ` (${s.candidateId})` : ""}
+                  {s.status ? ` · ${s.status}` : ""}
+                </span>
+                {s.detail ? <span className="msg__multimodel-detail">{s.detail}</span> : null}
+              </li>
+            ))}
+          </ul>
         </details>
       ) : null}
       {m.role === "assistant" &&

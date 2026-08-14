@@ -15,9 +15,12 @@ Parent epic: **#300**. Registry issue: **#54**.
 | `slate` | Slate | dark | `desktop/src/styles/themes/slate.css` |
 | `sand` | Sand | light | `desktop/src/styles/themes/sand.css` |
 | `forest` | Forest | dark | `desktop/src/styles/themes/forest.css` |
+| `grokptah` | GrokPtah | dark | `desktop/src/styles/themes/grokptah.css` |
 
 Structure (radii, type scale, space) lives in `desktop/src/styles/tokens.css` and
-is shared by every skin.
+is shared by every skin. A skin therefore changes **color only** — it cannot
+make its own chrome denser without moving that shared layer under every other
+skin. Per-skin visual QA notes: [`SKIN_GROKPTAH_QA.md`](SKIN_GROKPTAH_QA.md).
 
 ## How to add a skin
 

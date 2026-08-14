@@ -1,0 +1,220 @@
+{
+  "base_ts": 1740470640,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.3,
+      "min_recall_at_25": 0.5,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb09-time-uncertainty",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb09-time-uncertainty-g01",
+      "incident_id": null,
+      "notes": "one instant, three encodings; not three events in sequence",
+      "role": "neutral",
+      "sources": [
+        "billing/api.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "evt-67FD3A87",
+      "ts": 1740472440
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb09-time-uncertainty-g02",
+      "incident_id": "rb09-time-uncertainty-inc1",
+      "notes": "fall-back local time without offset: could be either UTC instant",
+      "role": "trigger",
+      "sources": [
+        "sched/local.jsonl"
+      ],
+      "timestamp_certainty": "ambiguous_local",
+      "token": "evt-0ACC3482",
+      "ts": 1740472540
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb09-time-uncertainty-g03",
+      "incident_id": "rb09-time-uncertainty-inc1",
+      "notes": "order-only records: sequence within the file is known, wall time is not",
+      "role": "symptom",
+      "sources": [
+        "audit/steps.log"
+      ],
+      "timestamp_certainty": "order_only",
+      "token": "run-38F1EFE8",
+      "ts": 1740472640
+    }
+  ],
+  "expected": {
+    "bytes": 62449,
+    "events": 367,
+    "excluded_files": [],
+    "files": 3,
+    "files_by_path": {
+      "audit/steps.log": {
+        "bytes": 136,
+        "events": 3,
+        "sha256": "4e5ac420e64967d658c60aef8a294f5fc802e11cc169564f2df28f35d7628ee6"
+      },
+      "billing/api.jsonl": {
+        "bytes": 62090,
+        "events": 363,
+        "sha256": "e9eaab442ec04829f6ee75b9a74eadff32baa06b7ddc8239aff2f519d6749f93"
+      },
+      "sched/local.jsonl": {
+        "bytes": 223,
+        "events": 1,
+        "sha256": "3c02570750829ff6a418a42b19fc839f0483127bcbe0d598a63c5ec8a5616d5b"
+      }
+    },
+    "severities": {
+      "info": 365,
+      "warn": 2
+    },
+    "source_count": 3,
+    "sources": {
+      "audit/steps.log": 3,
+      "billing/api.jsonl": 363,
+      "sched/local.jsonl": 1
+    },
+    "time_quality": "mixed"
+  },
+  "forbidden_claims": [
+    "a confident cross-source wall-clock ordering of the audit steps",
+    "the duplicate run started at exactly 01:30 UTC"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "3b164cd848863c7f4caca92b706e20305828ef3ac17ec684011f05515adb7c3b",
+  "incidents": [
+    {
+      "incident_id": "rb09-time-uncertainty-inc1",
+      "root_cause_status": "established",
+      "summary": "A reconciliation started twice during the ambiguous fall-back hour; the audit trail is order-only, so cross-source wall-clock ordering cannot be established.",
+      "trigger_group_ids": [
+        "rb09-time-uncertainty-g02"
+      ],
+      "window_from_ts": 1740472340,
+      "window_to_ts": 1740472840
+    }
+  ],
+  "intended_probe": "ambiguous local time, mixed offsets, DST ambiguity and order-only records must not yield invented cross-source chronology",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb09-time-uncertainty-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb09-time-uncertainty-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb09-time-uncertainty-g03"
+        }
+      ]
+    },
+    "rb09-time-uncertainty-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb09-time-uncertainty-g02"
+        }
+      ]
+    },
+    "rb09-time-uncertainty-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb09-time-uncertainty-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb09-time-uncertainty-g03"
+        }
+      ]
+    },
+    "rb09-time-uncertainty-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb09-time-uncertainty-g01"
+        }
+      ]
+    },
+    "rb09-time-uncertainty-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb09-time-uncertainty-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb09-time-uncertainty-g02"
+        }
+      ]
+    },
+    "rb09-time-uncertainty-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb09-time-uncertainty-g02"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "the scheduler's zone rules are not declared in the corpus",
+    "order-only evidence cannot be upgraded to calendar time"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the three shared-instant encodings are one instant, not a sequence",
+    "the duplicate start sits in the ambiguous fall-back hour",
+    "the audit steps are ordered only relative to each other"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "b8f8227c4863cb6f22421be8f175c00835312567ddd88b1f8e5659ce961f6fc4",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Time uncertainty"
+}

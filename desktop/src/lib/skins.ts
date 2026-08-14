@@ -10,7 +10,13 @@
  * 5. Add/extend an AA contrast test for text tokens on --bg-app / --bg-panel.
  */
 
-export type SkinId = "dark" | "light" | "slate" | "sand" | "forest";
+export type SkinId =
+  | "dark"
+  | "light"
+  | "slate"
+  | "sand"
+  | "forest"
+  | "grokptah";
 
 /** Mini-preview swatches for the Appearance card grid (mirror theme CSS). */
 export type SkinSwatches = {
@@ -98,6 +104,19 @@ export const SKINS: readonly SkinMeta[] = [
       elevated: "#18221e",
       accent: "#3ecf8e",
       text: "#e4ebe7",
+    },
+  },
+  {
+    id: "grokptah",
+    label: "GrokPtah",
+    description: "Graphite workbench with warm gold",
+    colorScheme: "dark",
+    swatches: {
+      app: "#0b0c0e",
+      panel: "#12141a",
+      elevated: "#181b22",
+      accent: "#f0b429",
+      text: "#eceef2",
     },
   },
 ] as const;

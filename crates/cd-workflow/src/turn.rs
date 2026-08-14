@@ -58,6 +58,19 @@ pub struct TurnExecutionOptions<'a> {
     /// Text the user explicitly selected for this turn. Never derive from a
     /// viewport, ambient recall, or attachment inventory.
     pub user_selection: Option<&'a str>,
+    /// Optional resolved multi-model reviewer runtime. `None` (the default)
+    /// keeps the single-model path. The workflow layer builds this only after
+    /// resolving qualification and egress; the presence of a runtime means
+    /// "review may run at the broad-triage seam".
+    pub multi_model: Option<cd_core::agent::MultiModelRuntime>,
+    /// Optional bounded host-grounded contribution runtime. It is resolved
+    /// before this seam and is independent of the reviewer mode.
+    pub contribution_runtime: Option<cd_core::agent::ContributionRuntime>,
+    /// Optional resolved host-grounded fast-triage runtime. `None` (the
+    /// default) keeps the established single/multi-stage path unchanged.
+    /// The runtime is considered only at the linked broad-triage seam after
+    /// exact persisted route evidence and fallback policy have been resolved.
+    pub fast_triage: Option<cd_core::agent::FastTriageRuntime>,
 }
 
 /// Drive the shared provider/tool kernel for either an ordinary or a linked
@@ -121,6 +134,10 @@ pub async fn run_turn(
             options.applied_skill_ids,
             options.turn_id.clone(),
             options.user_selection,
+            options.multi_model.clone(),
+            options.fast_triage.clone(),
+            options.contribution_runtime.clone(),
+            resolved.reasoning_effort,
         )
         .await?
     } else {
@@ -144,6 +161,10 @@ pub async fn run_turn(
             options.applied_skill_ids,
             options.turn_id,
             options.user_selection,
+            options.multi_model,
+            options.fast_triage,
+            options.contribution_runtime,
+            resolved.reasoning_effort,
         )
         .await?
     };
@@ -179,6 +200,8 @@ pub struct LinkedCorpusBinding {
     /// dry-run summary's "which corpus content this turn was grounded
     /// against," since the corpus can keep receiving imports afterward.
     pub revision: u64,
+    /// Exact event/template/suppression snapshot used by typed authority.
+    pub snapshot_revision: cd_core::investigation_answer::LogSnapshotRevisionV1,
 }
 
 /// Bind one corpus to the tool host for a linked turn: pin log-tool scope,
@@ -199,11 +222,13 @@ pub fn bind_linked_corpus(
     let revision = corpus.revision();
     host.seed_log_corpus_handle(corpus_id, corpus)?;
     host.pin_log_suppression_lens(corpus_id)?;
+    let snapshot_revision = host.linked_log_snapshot_revision(corpus_id)?;
 
     Ok(LinkedCorpusBinding {
         previous_scope,
         previous_active,
         revision,
+        snapshot_revision,
     })
 }
 
@@ -277,6 +302,9 @@ pub async fn run_linked_turn(
             turn_prelude_emitted,
             applied_skill_ids: &[],
             user_selection: None,
+            multi_model: None,
+            contribution_runtime: None,
+            fast_triage: None,
         },
         live,
         checkpoint_out,

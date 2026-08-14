@@ -11,7 +11,10 @@
 //! - [`TracingChatBackend`] wraps any backend (real or [`DryRunBackend`])
 //!   and records one [`TracedCall`] per `complete`/`complete_streaming`
 //!   invocation into a [`TurnTraceSink`], then forwards to the wrapped
-//!   backend unchanged.
+//!   backend unchanged. Each started attempt uses an explicit RAII lifecycle
+//!   guard so a host outer deadline/cancel race that drops the in-flight
+//!   future still retains a bounded, redacted terminal outcome (never a
+//!   silent missing attempt).
 //!
 //! Neither type changes how a turn is driven. Both are constructed upstream
 //! of [`crate::agent::run_agent_turn_with_sink_and_checkpoint`] and handed
@@ -786,6 +789,13 @@ pub enum TracedOutcome {
         /// Redacted error text.
         message: String,
     },
+    /// Host or cooperative cancel terminated an attempt that had already
+    /// crossed the provider-attempt boundary. Unit variant on purpose: no
+    /// prompt, evidence, secret, URL, or provider body may ride along.
+    Cancelled,
+    /// Host operation-cap or whole-turn deadline dropped an in-flight
+    /// attempt. Unit variant for the same redaction reason as [`Self::Cancelled`].
+    TimedOut,
 }
 
 /// One `complete`/`complete_streaming` invocation, captured whole.
@@ -897,6 +907,19 @@ pub enum TracedHostEvent {
         /// Debug label of the phase (avoids coupling this module to every
         /// `AgentPhase` rename).
         phase: String,
+    },
+    /// Metadata-only multi-model role lifecycle. Model prose is never kept.
+    MultiModelStage {
+        /// Functional role or `summary`.
+        stage: String,
+        /// `started`, `finished`, or `summary`.
+        phase: String,
+        /// Host-authored bounded outcome when present.
+        status: Option<String>,
+        /// Opaque owning candidate id when present.
+        candidate_id: Option<String>,
+        /// Scrubbed and bounded host diagnostics.
+        detail: Option<String>,
     },
     /// Host or provider error already scrubbed at the stream boundary.
     Error {
@@ -1279,6 +1302,15 @@ impl RecordingTurnTrace {
                     format!("Host phase: {phase:?}"),
                     "running",
                 )),
+                StreamEvent::MultiModelStage {
+                    stage,
+                    phase,
+                    status,
+                    ..
+                } => Some(DeveloperDetailDraft::stage(
+                    format!("Multi-model stage: {stage}"),
+                    status.clone().unwrap_or_else(|| phase.clone()),
+                )),
                 StreamEvent::PermissionRequired {
                     tool_name,
                     risk,
@@ -1426,6 +1458,20 @@ impl RecordingTurnTrace {
             },
             StreamEvent::TurnPhase { phase } => TracedHostEvent::TurnPhase {
                 phase: format!("{phase:?}"),
+            },
+            StreamEvent::MultiModelStage {
+                stage,
+                phase,
+                status,
+                candidate_id,
+                ..
+            } => TracedHostEvent::MultiModelStage {
+                stage: stage.clone(),
+                phase: phase.clone(),
+                status: status.clone(),
+                candidate_id: candidate_id.clone(),
+                detail: crate::events::progress_for_stream_event(event, 0)
+                    .and_then(|progress| progress.detail),
             },
             StreamEvent::Error { code, message } => TracedHostEvent::Error {
                 code: code.clone(),
@@ -2014,6 +2060,22 @@ impl ChatBackend for DryRunBackend {
 /// forwarding to it. Works over any inner backend — a real provider client
 /// (for `--trace` on an ordinary turn) or [`DryRunBackend`] (for
 /// `--dry-run`, where the inner call itself is inert).
+///
+/// # Attempt lifecycle
+///
+/// Every provider operation that is **actually started** opens a
+/// [`ProviderAttemptGuard`]. Exactly one terminal [`TracedCall`] is retained:
+///
+/// 1. Inner future resolves → success/failure (or cooperative cancel) is
+///    recorded via [`ProviderAttemptGuard::finish`].
+/// 2. Host outer deadline/cancel race drops the in-flight future → the
+///    guard's `Drop` records [`TracedOutcome::TimedOut`] or
+///    [`TracedOutcome::Cancelled`].
+///
+/// Double counting is impossible: a `SeqCst` `finalized` flag is swapped
+/// exactly once; the loser of finish-vs-Drop is a no-op. Cancellation
+/// observed *before* the attempt boundary (cancel already set at entry) does
+/// not open a guard and invents no attempt.
 pub struct TracingChatBackend {
     inner: Box<dyn ChatBackend>,
     sink: Arc<dyn TurnTraceSink>,
@@ -2045,28 +2107,109 @@ impl TracingChatBackend {
         self
     }
 
-    fn record(
+    fn open_attempt<'a>(
         &self,
-        started: Instant,
         messages: &[ChatMessage],
         tools: &[ToolSpec],
-        result: &CoreResult<ChatCompletion>,
-    ) {
+        cancel_flag: Option<&'a std::sync::atomic::AtomicBool>,
+    ) -> ProviderAttemptGuard<'a> {
         let seq = self
             .sink
             .next_provider_call_seq()
             .unwrap_or_else(|| self.seq.fetch_add(1, Ordering::SeqCst));
-        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let tool_names = tools
             .iter()
             .take(MAX_TRACED_TOOL_NAMES)
             .map(|tool| tool.name.clone())
             .collect();
+        let (stored_messages, context_used_chars, messages_capped) = traced_messages(messages);
+        // Take the retry note at the attempt boundary so a dropped in-flight
+        // future still attaches the reason that caused *this* round.
+        let application_retry_reason = self.sink.take_pending_application_retry();
+        ProviderAttemptGuard {
+            sink: Arc::clone(&self.sink),
+            seq,
+            started: Instant::now(),
+            tool_names,
+            messages: stored_messages,
+            context_used_chars,
+            messages_capped,
+            application_retry_reason,
+            developer_provider: self.developer_provider.clone(),
+            developer_model: self.developer_model.clone(),
+            developer_detail_enabled: self.sink.developer_detail_enabled(),
+            // Developer request payloads are only built on a normal finish;
+            // interrupt paths deliberately omit request/response bodies.
+            developer_request: None,
+            cancel_flag,
+            finalized: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Explicit provider-attempt lifecycle bound to one `complete` /
+/// `complete_streaming` invocation.
+///
+/// Opened only after the attempt boundary is crossed (cancel-at-entry has
+/// already returned without inventing an attempt). Exactly one of
+/// [`Self::finish`] or `Drop` emits a terminal [`TracedCall`].
+struct ProviderAttemptGuard<'a> {
+    sink: Arc<dyn TurnTraceSink>,
+    seq: usize,
+    started: Instant,
+    tool_names: Vec<String>,
+    messages: Vec<TracedMessage>,
+    context_used_chars: usize,
+    messages_capped: bool,
+    application_retry_reason: Option<String>,
+    developer_provider: Option<String>,
+    developer_model: Option<String>,
+    developer_detail_enabled: bool,
+    developer_request: Option<Vec<DeveloperPayload>>,
+    cancel_flag: Option<&'a std::sync::atomic::AtomicBool>,
+    finalized: AtomicBool,
+}
+
+impl<'a> ProviderAttemptGuard<'a> {
+    /// Attach developer-detail request payloads (opt-in sinks only). Called
+    /// only on the normal finish path; interrupt `Drop` never builds them.
+    fn with_developer_request(mut self, messages: &[ChatMessage]) -> Self {
+        if self.developer_detail_enabled {
+            self.developer_request = Some(
+                messages
+                    .iter()
+                    .take(MAX_TRACED_MESSAGES)
+                    .map(|message| {
+                        DeveloperPayload::json(&serde_json::json!({
+                            "role": message.role.as_str(),
+                            "content": message.content,
+                            "tool_call_id": message.tool_call_id,
+                            "tool_calls": message.tool_calls,
+                        }))
+                    })
+                    .collect(),
+            );
+        }
+        self
+    }
+
+    /// Record the terminal outcome of a resolved inner future.
+    ///
+    /// Safe to call at most once; a concurrent or subsequent `Drop` is a
+    /// no-op after this returns (and vice versa).
+    fn finish(self, result: &CoreResult<ChatCompletion>) {
+        if self.finalized.swap(true, Ordering::SeqCst) {
+            // Another racer already recorded (should not happen on a single
+            // task, but keep the invariant absolute).
+            return;
+        }
+        let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let outcome = match result {
             Ok(completion) => TracedOutcome::Completed {
                 finish_reason: completion.finish_reason.clone(),
                 tool_call_count: completion.tool_calls.len(),
             },
+            Err(error) if is_cancel_error(error) => TracedOutcome::Cancelled,
             Err(error) => TracedOutcome::Failed {
                 message: crate::redact::scrub_secrets(&error.to_string()),
             },
@@ -2081,61 +2224,119 @@ impl TracingChatBackend {
                 false,
             ),
         };
-        let application_retry_reason = self.sink.take_pending_application_retry();
-        let (stored_messages, context_used_chars, messages_capped) = traced_messages(messages);
         let call = TracedCall {
-            seq,
+            seq: self.seq,
             elapsed_ms,
-            tool_names,
-            messages: stored_messages,
-            context_used_chars,
-            messages_capped,
+            tool_names: self.tool_names.clone(),
+            messages: self.messages.clone(),
+            context_used_chars: self.context_used_chars,
+            messages_capped: self.messages_capped,
             outcome,
             transport,
             empty_visible_answer,
-            application_retry_reason,
+            application_retry_reason: self.application_retry_reason.clone(),
         };
-        let developer = self.sink.developer_detail_enabled().then(|| {
-            let request = messages
-                .iter()
-                .take(MAX_TRACED_MESSAGES)
-                .map(|message| {
-                    DeveloperPayload::json(&serde_json::json!({
-                        "role": message.role.as_str(),
-                        "content": message.content,
-                        "tool_call_id": message.tool_call_id,
-                        "tool_calls": message.tool_calls,
-                    }))
-                })
-                .collect();
+        let developer = self.developer_detail_enabled.then(|| {
             let response = match result {
-                Ok(completion) => DeveloperPayload::json(&serde_json::json!({
+                Ok(completion) => Some(DeveloperPayload::json(&serde_json::json!({
                     "content": completion.content,
                     "tool_calls": completion.tool_calls,
                     "finish_reason": completion.finish_reason,
                     "telemetry": completion.telemetry.to_json(),
-                })),
-                Err(error) => DeveloperPayload::text(&error.to_string()),
+                }))),
+                Err(error) if is_cancel_error(error) => None,
+                Err(error) => Some(DeveloperPayload::text(&error.to_string())),
             };
             DeveloperDetailDraft {
                 kind: DeveloperDetailKind::ProviderExchange,
                 authority: None,
-                label: format!("Model exchange (round {})", seq + 1),
+                label: format!("Model exchange (round {})", self.seq + 1),
                 provider: self.developer_provider.clone(),
                 model: self.developer_model.clone(),
-                round: Some(u32::try_from(seq).unwrap_or(u32::MAX)),
+                round: Some(u32::try_from(self.seq).unwrap_or(u32::MAX)),
                 tool_name: None,
                 offered_tools: call.tool_names.clone(),
-                request,
-                response: Some(response),
-                status: match result {
-                    Ok(_) => "completed".to_string(),
-                    Err(_) => "failed".to_string(),
+                request: self.developer_request.clone().unwrap_or_default(),
+                response,
+                status: match &call.outcome {
+                    TracedOutcome::Completed { .. } => "completed".to_string(),
+                    TracedOutcome::Failed { .. } => "failed".to_string(),
+                    TracedOutcome::Cancelled => "cancelled".to_string(),
+                    TracedOutcome::TimedOut => "timed_out".to_string(),
                 },
             }
         });
         self.sink.record_provider(call, developer);
+        // finalized is already true; Drop is a no-op.
     }
+
+    fn emit_interrupt(&self, outcome: TracedOutcome) {
+        let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // Interrupt telemetry is metadata-only: no request bodies, prompts,
+        // evidence, secrets, URLs, or provider response text.
+        let call = TracedCall {
+            seq: self.seq,
+            elapsed_ms,
+            tool_names: self.tool_names.clone(),
+            messages: Vec::new(),
+            context_used_chars: self.context_used_chars,
+            messages_capped: self.messages_capped,
+            outcome,
+            transport: crate::provider_telemetry::ProviderTransportTelemetry::default(),
+            empty_visible_answer: false,
+            application_retry_reason: self.application_retry_reason.clone(),
+        };
+        let developer = self.developer_detail_enabled.then(|| DeveloperDetailDraft {
+            kind: DeveloperDetailKind::ProviderExchange,
+            authority: None,
+            label: format!("Model exchange (round {})", self.seq + 1),
+            provider: self.developer_provider.clone(),
+            model: self.developer_model.clone(),
+            round: Some(u32::try_from(self.seq).unwrap_or(u32::MAX)),
+            tool_name: None,
+            offered_tools: call.tool_names.clone(),
+            request: Vec::new(),
+            response: None,
+            status: match &call.outcome {
+                TracedOutcome::Cancelled => "cancelled".to_string(),
+                TracedOutcome::TimedOut => "timed_out".to_string(),
+                TracedOutcome::Completed { .. } => "completed".to_string(),
+                TracedOutcome::Failed { .. } => "failed".to_string(),
+            },
+        });
+        self.sink.record_provider(call, developer);
+    }
+}
+
+impl Drop for ProviderAttemptGuard<'_> {
+    fn drop(&mut self) {
+        // Only the first of finish() / Drop records. finish() swaps true
+        // before emitting; Drop loses the race and returns.
+        if self.finalized.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let outcome = if self
+            .cancel_flag
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
+            TracedOutcome::Cancelled
+        } else {
+            // Outer deadline / operation-cap race dropped the future without
+            // a cooperative cancel signal.
+            TracedOutcome::TimedOut
+        };
+        self.emit_interrupt(outcome);
+    }
+}
+
+/// True when the resolved error is a cooperative cancel (typed or the
+/// historical `Message("cancelled")` shape from the OpenAI-compatible client).
+fn is_cancel_error(error: &crate::error::CoreError) -> bool {
+    matches!(error, crate::error::CoreError::Cancelled)
+        || matches!(
+            error,
+            crate::error::CoreError::Message(message) if message == "cancelled"
+        )
 }
 
 /// Stored message bodies (capped) plus the **full** scrubbed character sum
@@ -2181,9 +2382,13 @@ impl ChatBackend for TracingChatBackend {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> CoreResult<ChatCompletion> {
-        let started = Instant::now();
+        // Non-streaming path has no cancel flag; Drop of an aborted future
+        // records TimedOut (host deadline), never invents a cancel.
+        let attempt = self
+            .open_attempt(messages, tools, None)
+            .with_developer_request(messages);
         let result = self.inner.complete(messages, tools).await;
-        self.record(started, messages, tools, &result);
+        attempt.finish(&result);
         result
     }
 
@@ -2194,12 +2399,19 @@ impl ChatBackend for TracingChatBackend {
         on_text: &mut (dyn FnMut(String) + Send),
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> CoreResult<ChatCompletion> {
-        let started = Instant::now();
+        // Cancel already set at entry: never crossed the provider-attempt
+        // boundary. Do not invent an attempt or poll the inner backend.
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(crate::error::CoreError::Message("cancelled".into()));
+        }
+        let attempt = self
+            .open_attempt(messages, tools, cancel)
+            .with_developer_request(messages);
         let result = self
             .inner
             .complete_streaming(messages, tools, on_text, cancel)
             .await;
-        self.record(started, messages, tools, &result);
+        attempt.finish(&result);
         result
     }
 }
@@ -2390,6 +2602,256 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn success_records_exactly_one_completed_attempt() {
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let backend = TracingChatBackend::new(Box::new(DryRunBackend), sink.clone());
+        backend
+            .complete(&[msg(Role::User, "hello")], &[])
+            .await
+            .unwrap();
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0].outcome, TracedOutcome::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn cancel_at_entry_records_zero_attempts() {
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let backend = TracingChatBackend::new(Box::new(DryRunBackend), sink.clone());
+        let cancel = AtomicBool::new(true);
+        let err = backend
+            .complete_streaming(&[msg(Role::User, "nope")], &[], &mut |_| {}, Some(&cancel))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
+        assert!(
+            sink.calls().is_empty(),
+            "cancel before the attempt boundary must invent zero attempts"
+        );
+    }
+
+    #[tokio::test]
+    async fn cooperative_cancel_error_records_one_cancelled_attempt() {
+        struct Cancels;
+        #[async_trait]
+        impl ChatBackend for Cancels {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                unreachable!("streaming only")
+            }
+            async fn complete_streaming(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+                _on_text: &mut (dyn FnMut(String) + Send),
+                _cancel: Option<&AtomicBool>,
+            ) -> CoreResult<ChatCompletion> {
+                Err(crate::error::CoreError::Message("cancelled".into()))
+            }
+        }
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let backend = TracingChatBackend::new(Box::new(Cancels), sink.clone());
+        let cancel = AtomicBool::new(false);
+        let _ = backend
+            .complete_streaming(&[msg(Role::User, "hi")], &[], &mut |_| {}, Some(&cancel))
+            .await
+            .unwrap_err();
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0].outcome, TracedOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn dropping_an_in_flight_attempt_records_timed_out() {
+        let entered = Arc::new(AtomicBool::new(false));
+        struct NeverResolves {
+            entered: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl ChatBackend for NeverResolves {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                self.entered.store(true, Ordering::SeqCst);
+                std::future::pending().await
+            }
+        }
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let entered_flag = Arc::clone(&entered);
+        let backend = TracingChatBackend::new(
+            Box::new(NeverResolves {
+                entered: entered_flag,
+            }),
+            sink.clone(),
+        );
+        // Spawn so the future is polled (attempt opens), then abort to drop
+        // it mid-flight — the same shape as an outer deadline race.
+        let handle =
+            tokio::spawn(async move { backend.complete(&[msg(Role::User, "stall")], &[]).await });
+        for _ in 0..50 {
+            if entered.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            entered.load(Ordering::SeqCst),
+            "inner must start before abort"
+        );
+        handle.abort();
+        let _ = handle.await;
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0].outcome, TracedOutcome::TimedOut));
+        assert!(
+            calls[0].messages.is_empty(),
+            "interrupt path stores no request bodies"
+        );
+        let blob = serde_json::to_string(&calls[0]).unwrap();
+        assert!(!blob.contains("stall"));
+        assert!(!blob.contains("sk-"));
+        assert!(!blob.contains("http://"));
+    }
+
+    #[tokio::test]
+    async fn dropping_an_in_flight_attempt_with_cancel_set_records_cancelled() {
+        let entered = Arc::new(AtomicBool::new(false));
+        struct NeverResolves {
+            entered: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl ChatBackend for NeverResolves {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                unreachable!("streaming only")
+            }
+            async fn complete_streaming(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+                _on_text: &mut (dyn FnMut(String) + Send),
+                _cancel: Option<&AtomicBool>,
+            ) -> CoreResult<ChatCompletion> {
+                self.entered.store(true, Ordering::SeqCst);
+                std::future::pending().await
+            }
+        }
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let entered_flag = Arc::clone(&entered);
+        let backend = TracingChatBackend::new(
+            Box::new(NeverResolves {
+                entered: entered_flag,
+            }),
+            sink.clone(),
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_task = Arc::clone(&cancel);
+        let handle = tokio::spawn(async move {
+            backend
+                .complete_streaming(
+                    &[msg(Role::User, "stall-cancel")],
+                    &[],
+                    &mut |_| {},
+                    Some(cancel_for_task.as_ref()),
+                )
+                .await
+        });
+        for _ in 0..50 {
+            if entered.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(entered.load(Ordering::SeqCst));
+        // Host cancel rises while the attempt is live; abort drops the future.
+        cancel.store(true, Ordering::SeqCst);
+        handle.abort();
+        let _ = handle.await;
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0].outcome, TracedOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn finish_then_drop_never_double_counts() {
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let backend = TracingChatBackend::new(Box::new(DryRunBackend), sink.clone());
+        // Normal completion path: finish records; Drop of the guard must not
+        // add a second call.
+        backend
+            .complete(&[msg(Role::User, "once")], &[])
+            .await
+            .unwrap();
+        assert_eq!(sink.calls().len(), 1);
+        assert!(matches!(
+            sink.calls()[0].outcome,
+            TracedOutcome::Completed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_drop_and_finish_records_exactly_one_attempt() {
+        use std::sync::Barrier;
+        struct SlowThenOk {
+            release: Arc<Barrier>,
+        }
+        #[async_trait]
+        impl ChatBackend for SlowThenOk {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                // Block the async task until the test is ready; then succeed.
+                let release = Arc::clone(&self.release);
+                tokio::task::spawn_blocking(move || {
+                    release.wait();
+                })
+                .await
+                .unwrap();
+                Ok(ChatCompletion {
+                    content: "ok".into(),
+                    tool_calls: Vec::new(),
+                    finish_reason: "stop".into(),
+                    telemetry: Default::default(),
+                })
+            }
+        }
+        let release = Arc::new(Barrier::new(2));
+        let sink = Arc::new(RecordingTurnTrace::new());
+        let backend = TracingChatBackend::new(
+            Box::new(SlowThenOk {
+                release: Arc::clone(&release),
+            }),
+            sink.clone(),
+        );
+        let handle = tokio::spawn(async move {
+            backend
+                .complete(&[msg(Role::User, "race")], &[])
+                .await
+                .unwrap()
+        });
+        // Let the attempt open and park on the barrier, then release so finish
+        // and any abort/drop races still yield a single terminal record.
+        tokio::task::yield_now().await;
+        release.wait();
+        let _ = handle.await.unwrap();
+        assert_eq!(
+            sink.calls().len(),
+            1,
+            "boundary race must never double-count"
+        );
     }
 
     #[tokio::test]

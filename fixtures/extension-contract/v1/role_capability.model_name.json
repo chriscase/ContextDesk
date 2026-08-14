@@ -1,0 +1,8 @@
+{
+  "schema_id": "contextdesk.extension.role_capability.v1",
+  "role": "embedding",
+  "required_capabilities": ["embeddings", "deepseek-embed-v1"],
+  "may_propose": ["vector_scores"],
+  "may_not": ["cross_space_compare"],
+  "requires_measured_qualification": true
+}

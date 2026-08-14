@@ -831,7 +831,8 @@ fn developer_event_cap_discloses_truncation_by_dropping_overflow() {
 #[test]
 fn developer_detail_store_has_no_serialize_or_filesystem_api() {
     // Structural: DeveloperDetailStore must remain process-local only.
-    let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/turn_trace.rs"));
+    let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/turn_trace.rs"))
+        .replace("\r\n", "\n");
     // The store type documentation and surface must not grow a disk API.
     assert!(
         src.contains("deliberately no\n/// serialization or filesystem API")

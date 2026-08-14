@@ -3,6 +3,10 @@
 use super::*;
 use crate::log_analysis::embed_policy::{LogEmbedMode, LogEmbedPolicy};
 use crate::log_analysis::ingest::ingest_path_with_policy;
+use crate::log_analysis::{
+    apply_source_timezone, clear_source_timezone, load_timezone_resolution_state,
+    preview_source_timezone, ActiveTimestampBasis, LogEvent, TimestampProvenance,
+};
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -73,6 +77,134 @@ fn assessment_is_deterministic_across_calls() {
         serde_json::to_string(&a).unwrap(),
         serde_json::to_string(&b).unwrap()
     );
+}
+
+#[test]
+fn timezone_resolution_changes_assessment_state_without_erasing_local_evidence() {
+    let tmp = TempDir::new().unwrap();
+    let cache = tmp.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    let corpus = LogCorpus::create(&cache, "timezone assessment lifecycle").unwrap();
+    let source = "service/runtime.log";
+    corpus
+        .push_events(&[
+            LogEvent {
+                seq: 0,
+                ts: 0,
+                timestamp_provenance: TimestampProvenance::UnresolvedLocal,
+                active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                unresolved_local_timestamp: Some("2026-04-15 08:10:11".into()),
+                level: "warn".into(),
+                service: None,
+                host: None,
+                template_id: 1,
+                params: vec![],
+                trace_id: None,
+                message: "first".into(),
+                source: source.into(),
+            },
+            LogEvent {
+                seq: 1,
+                ts: 1,
+                timestamp_provenance: TimestampProvenance::UnresolvedLocal,
+                active_timestamp_basis: ActiveTimestampBasis::OrderOnly,
+                unresolved_local_timestamp: Some("2026-04-15 08:10:12".into()),
+                level: "warn".into(),
+                service: None,
+                host: None,
+                template_id: 1,
+                params: vec![],
+                trace_id: None,
+                message: "second".into(),
+                source: source.into(),
+            },
+        ])
+        .unwrap();
+    corpus.flush().unwrap();
+    let corpus_id = corpus.id().to_string();
+
+    let before = assess_logging_quality(&corpus).unwrap();
+    assert_eq!(before.metrics.wall_event_count, 0);
+    assert_eq!(before.metrics.order_only_event_count, 2);
+    assert_eq!(before.metrics.unresolved_local_event_count, 2);
+    assert_eq!(
+        before.metrics.active_timestamp_basis_counts,
+        BTreeMap::from([("order_only".into(), 2)])
+    );
+    assert!(before
+        .findings
+        .iter()
+        .any(|finding| finding.id == "lq.timestamp.unresolved_local_share"));
+    drop(corpus);
+
+    let initial = load_timezone_resolution_state(&cache, &corpus_id).unwrap();
+    let preview = preview_source_timezone(
+        &cache,
+        &corpus_id,
+        initial.scope.event_revision,
+        source,
+        "Asia/Tokyo",
+    )
+    .unwrap();
+    let applied = apply_source_timezone(
+        &cache,
+        &corpus_id,
+        initial.scope.event_revision,
+        source,
+        "Asia/Tokyo",
+        &preview.declaration_fingerprint,
+        1_700_000_000,
+    )
+    .unwrap();
+
+    let state = load_timezone_resolution_state(&cache, &corpus_id).unwrap();
+    assert_eq!(state.scope.event_revision, applied.revision);
+    assert_eq!(state.sources[0].resolved_local_records, 2);
+    assert_eq!(state.sources[0].unresolved_local_records, 0);
+
+    let resolved_corpus = LogCorpus::open(&cache, &corpus_id).unwrap();
+    let after = assess_logging_quality(&resolved_corpus).unwrap();
+    assert_eq!(after.metrics.wall_event_count, 2);
+    assert_eq!(after.metrics.order_only_event_count, 0);
+    assert_eq!(after.metrics.unresolved_local_event_count, 0);
+    assert_eq!(
+        after.metrics.active_timestamp_basis_counts,
+        BTreeMap::from([("resolved_local".into(), 2)])
+    );
+    assert_eq!(after.sources[0].unresolved_local_event_count, 0);
+    assert!(!after
+        .findings
+        .iter()
+        .any(|finding| finding.id == "lq.timestamp.unresolved_local_share"));
+    assert!(
+        resolved_corpus.with_events(|events| events.iter().all(|event| {
+            event.active_timestamp_basis == ActiveTimestampBasis::ResolvedLocal
+                && event.unresolved_local_timestamp.is_some()
+        }))
+    );
+    drop(resolved_corpus);
+
+    clear_source_timezone(
+        &cache,
+        &corpus_id,
+        applied.revision,
+        source,
+        applied.revision,
+    )
+    .unwrap();
+    let cleared_corpus = LogCorpus::open(&cache, &corpus_id).unwrap();
+    let cleared = assess_logging_quality(&cleared_corpus).unwrap();
+    assert_eq!(cleared.metrics.wall_event_count, 0);
+    assert_eq!(cleared.metrics.order_only_event_count, 2);
+    assert_eq!(cleared.metrics.unresolved_local_event_count, 2);
+    assert_eq!(
+        cleared.metrics.active_timestamp_basis_counts,
+        BTreeMap::from([("order_only".into(), 2)])
+    );
+    assert!(cleared
+        .findings
+        .iter()
+        .any(|finding| finding.id == "lq.timestamp.unresolved_local_share"));
 }
 
 #[test]

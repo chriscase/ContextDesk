@@ -23,7 +23,14 @@ use crate::human_hierarchy::{
 use crate::render::{
     ChatOutcomeSummary, ChatStatusRenderer, TerminalCapabilities, TerminalTextSanitizer,
 };
+use cd_core::capability_qualification::{
+    capability_contract_verdict, load_qualification_store, qualification_store_path,
+    CapabilityContract, ContractVerdict, QualificationKey, QualificationStore,
+};
 use cd_core::config::AppConfig;
+use cd_core::deadline_controls::{
+    apply_turn_override, format_deadline_ms, parse_deadline_duration,
+};
 use cd_core::events::StreamEvent;
 use cd_core::keychain_store::SecretStore;
 use cd_core::log_analysis::LogCorpus;
@@ -51,6 +58,7 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 pub async fn run(
     args: &ChatArgs,
     cache_root: &Path,
+    qualification_config_dir: &Path,
     secrets: &dyn SecretStore,
     cfg: &AppConfig,
     sessions: &SessionStore,
@@ -60,8 +68,32 @@ pub async fn run(
     profile_override: Option<&str>,
     model_override: Option<&str>,
     implicit_chat: bool,
+    // Global `--deadline` (never persisted). Parsed before any host I/O.
+    deadline_override: Option<&str>,
+    // Global `--reasoning-effort` (never persisted). Parsed before host I/O.
+    effort_override: Option<&str>,
 ) -> CliResult<()> {
     validate_question(args, format)?;
+    // Parse the one-turn deadline before any secret-store, corpus, session,
+    // or provider work so an invalid value fails closed with zero side effects.
+    let deadline_override_ms = match deadline_override {
+        Some(raw) => match parse_deadline_duration(raw) {
+            Ok(ms) => Some(ms),
+            Err(error) => {
+                return fail_before_turn(format, CliError::user(error.to_string()));
+            }
+        },
+        None => None,
+    };
+    let effort_override_level = match effort_override {
+        Some(raw) => match cd_core::reasoning_effort::ReasoningEffortLevel::parse(raw) {
+            Ok(level) => Some(level),
+            Err(error) => {
+                return fail_before_turn(format, CliError::user(error.to_string()));
+            }
+        },
+        None => None,
+    };
     let question = args.question.join(" ");
     // `full` exposes bounded, redacted conversation and tool-call content —
     // still never a secret or pre-redaction value, but real turn content
@@ -182,6 +214,10 @@ pub async fn run(
     let stdout_is_tty = io::stdout().is_terminal();
     let jsonl = matches!(format, OutputFormat::Jsonl);
     let text = matches!(format, OutputFormat::Text);
+    // Corpus-linked answers get a finished report so the question, model, and
+    // validation tier remain visible together. Ordinary chat keeps its
+    // existing streaming projection.
+    let render_investigation = text && corpus_id.is_some();
 
     // The renderer must exist and announce itself BEFORE any fallible setup
     // step, not just before the turn itself — `tool_host` below can fail
@@ -212,6 +248,48 @@ pub async fn run(
         }
     };
 
+    // Per-turn override: explicit for this host only. Never writes AppConfig;
+    // a later turn without --deadline reloads the saved policy.
+    if let Some(ms) = deadline_override_ms {
+        let mut budget = host.router_budget().clone();
+        if let Err(error) = apply_turn_override(&mut budget, ms) {
+            let err = CliError::user(error.to_string());
+            if jsonl {
+                print_jsonl_failure(&err, "", None);
+            } else if matches!(format, OutputFormat::Json) {
+                print_json_failure(&err, None);
+            }
+            if text {
+                chat_renderer.finish(ChatOutcomeSummary::Failed {
+                    message: &err.message,
+                });
+            }
+            return Err(err);
+        }
+        host.set_router_budget(budget);
+    }
+    if text && args.dry_run {
+        let budget = host.router_budget();
+        if deadline_override_ms.is_some() {
+            eprintln!(
+                "deadline: one-turn override {} ({} ms); not saved to config",
+                format_deadline_ms(budget.deadline_ms),
+                budget.deadline_ms
+            );
+        } else {
+            let policy = if budget.deadline_is_explicit {
+                "custom"
+            } else {
+                "auto"
+            };
+            eprintln!(
+                "deadline: saved policy={policy}, stored ceiling={} ({} ms); ContextDesk may finish sooner",
+                format_deadline_ms(budget.deadline_ms),
+                budget.deadline_ms
+            );
+        }
+    }
+
     // Shared capture path: same RecordingTurnTrace Tauri attaches.
     let want_capture = effective_trace.is_some() || args.activity.is_some();
     let recorder = want_capture.then(|| Arc::new(RecordingTurnTrace::new()));
@@ -224,6 +302,7 @@ pub async fn run(
     let host_event_sink = recorder.clone();
     let observed_session_id = Arc::new(Mutex::new(session_id.clone()));
     let live_session_id = observed_session_id.clone();
+    let started = Instant::now();
     let mut answer_started = false;
     let mut buffered_answer = String::new();
     let mut terminal_text = TerminalTextSanitizer::for_current_console();
@@ -236,11 +315,12 @@ pub async fn run(
             sink.record_host_event(&event, &kinds);
         }
         if jsonl {
-            emit_jsonl(&event);
+            let event_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            emit_jsonl(&event, event_elapsed_ms);
         } else if text {
             if let StreamEvent::TextDelta { text } = &event {
                 let clean = terminal_text.push(text);
-                if implicit_chat {
+                if implicit_chat || render_investigation {
                     buffered_answer.push_str(&clean);
                 } else {
                     chat_renderer.on_event(&event);
@@ -289,13 +369,20 @@ pub async fn run(
         }
     };
 
-    let started = Instant::now();
+    // Contribution roles use the same secret-free qualification store as the
+    // reviewer path. A missing or malformed store remains an honest
+    // unqualified result; it never triggers a probe or provider call here.
+    let contribution_qualification_store =
+        load_qualification_store(&qualification_store_path(qualification_config_dir)).ok();
     let cancel = Arc::new(AtomicBool::new(false));
     // Scoped so the pinned turn future (and its mutable borrow of `host`)
     // is dropped as soon as `result` is settled — `build_trace_lines` below
     // needs `host.model_context_budgets()`, which a live borrow would block.
     let result = {
-        let turn = run_chat_workflow(
+        // Keep the composite workflow future off the CLI main thread's stack.
+        // Windows reserves only 1 MiB there, and stack-pinning this future can
+        // overflow while polling the agent pipeline even for a single-model turn.
+        let mut turn = Box::pin(run_chat_workflow(
             &mut host,
             secrets,
             cfg,
@@ -310,12 +397,16 @@ pub async fn run(
                 dry_run: args.dry_run,
                 trace_sink,
                 user_selection: args.user_selection.as_deref(),
+                multi_model_mode: args.mode.to_core(),
+                reviewer_qualified: reviewer_qualification(cfg, qualification_config_dir),
+                contribution_qualification: contribution_qualification_store.as_ref(),
+                contribution_runtime: None,
+                reasoning_effort_override: effort_override_level,
             },
             Some(cancel.clone()),
             Some(&mut live_sink),
             decide_permission,
-        );
-        tokio::pin!(turn);
+        ));
 
         // Mirrors `commands::doctor::execute_live_turns`'s own race exactly:
         // on Ctrl-C, set the cooperative cancel flag, give the turn a
@@ -327,14 +418,14 @@ pub async fn run(
         // report the wrong exit code and render a `done` line for a turn
         // the operator explicitly interrupted.
         tokio::select! {
-            result = &mut turn => result.map_err(map_workflow_error),
+            result = turn.as_mut() => result.map_err(map_workflow_error),
             _ = tokio::signal::ctrl_c() => {
                 cancel.store(true, Ordering::SeqCst);
                 if text {
                     chat_renderer.clear_for_interrupt();
                 }
                 eprintln!("cancelling - waiting for the turn to wind down...");
-                let _ = tokio::time::timeout(INTERRUPT_GRACE, &mut turn).await;
+                let _ = tokio::time::timeout(INTERRUPT_GRACE, turn.as_mut()).await;
                 Err(CliError::cancelled("chat turn cancelled"))
             }
         }
@@ -462,11 +553,16 @@ pub async fn run(
                 .map(StreamLine::Activity)
                 .collect()
         });
-    let withheld_error = withheld_cli_error(&outcome.events);
+    let withheld_error =
+        withheld_cli_error(&outcome.events).or_else(|| failed_turn_cli_error(&outcome.events));
 
     match format {
         OutputFormat::Text => {
-            if withheld_error.is_none() && !outcome.final_text.is_empty() && !implicit_chat {
+            if withheld_error.is_none()
+                && !outcome.final_text.is_empty()
+                && !implicit_chat
+                && !render_investigation
+            {
                 println!();
             }
             // Status line first — never interleave with trace/activity sections.
@@ -475,19 +571,67 @@ pub async fn run(
                     message: &error.message,
                 });
             } else {
-                let grounding = grounding_status(corpus_id.as_deref(), &outcome.events);
+                let typed_answer = investigation_answer_from_events(&outcome.events).is_some();
+                let grounding = if corpus_id.is_some()
+                    && !typed_answer
+                    && !outcome.final_text.trim().is_empty()
+                {
+                    "provisional"
+                } else {
+                    grounding_status(corpus_id.as_deref(), &outcome.events)
+                };
                 chat_renderer.finish(ChatOutcomeSummary::Ok {
                     session_id: &outcome.session_id,
                     grounding,
                 });
             }
-            if implicit_chat && withheld_error.is_none() {
+            if render_investigation && withheld_error.is_none() {
+                let answer = if buffered_answer.trim().is_empty() {
+                    &outcome.final_text
+                } else {
+                    &buffered_answer
+                };
+                let typed_answer = investigation_answer_from_events(&outcome.events).is_some();
+                let grounding = if typed_answer {
+                    grounding_status(corpus_id.as_deref(), &outcome.events)
+                } else {
+                    "provisional"
+                };
+                print!(
+                    "{}",
+                    crate::answer_render::render_investigation(
+                        &question,
+                        answer,
+                        &outcome.chat_model,
+                        elapsed_ms,
+                        typed_answer,
+                        grounding,
+                        color,
+                    )
+                );
+            } else if implicit_chat && withheld_error.is_none() {
                 let answer = if buffered_answer.trim().is_empty() {
                     &outcome.final_text
                 } else {
                     &buffered_answer
                 };
                 print!("{}", crate::answer_render::render(answer, color));
+            }
+            // Honest one-line multi-model status to stderr when review was
+            // requested this turn (configured or executed differs from single).
+            if outcome.multi_model_configured != cd_core::multi_model::MultiModelMode::Single
+                || outcome.multi_model_executed != cd_core::multi_model::ExecutedMode::Single
+            {
+                let reason = outcome
+                    .multi_model_entry_degradation
+                    .map(|d| format!(" ({})", d.detail()))
+                    .unwrap_or_default();
+                eprintln!(
+                    "multi-model: configured={}, executed={}{}",
+                    outcome.multi_model_configured.as_str(),
+                    outcome.multi_model_executed.as_str(),
+                    reason
+                );
             }
             if let Some(lines) = &trace_lines {
                 let level = effective_trace.unwrap_or(TraceLevel::Summary);
@@ -570,6 +714,13 @@ pub async fn run(
                 print_json_failure(error, activity_record.as_ref());
             } else {
                 #[derive(Serialize)]
+                struct MultiModelSummary<'a> {
+                    configured_mode: &'a str,
+                    executed_mode: &'a str,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    entry_degradation: Option<&'a str>,
+                }
+                #[derive(Serialize)]
                 struct ChatSummaryWithActivity<'a> {
                     session_id: &'a str,
                     final_text: &'a str,
@@ -580,8 +731,27 @@ pub async fn run(
                     trace: Option<Vec<StreamLine<'static>>>,
                     #[serde(skip_serializing_if = "Option::is_none")]
                     activity: Option<&'a cd_core::activity::TurnActivityRecord>,
+                    /// Exact host-validated envelope. `final_text` is only a
+                    /// display projection and is never parsed as authority.
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    investigation_answer:
+                        Option<&'a cd_core::investigation_answer::AnswerEnvelopeV1>,
+                    /// Honest configured-vs-executed multi-model mode.
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    multi_model: Option<MultiModelSummary<'a>>,
                 }
                 let context_used = context_used_from_events(&outcome.events);
+                let investigation_answer = investigation_answer_from_events(&outcome.events);
+                let multi_model = (outcome.multi_model_configured
+                    != cd_core::multi_model::MultiModelMode::Single
+                    || outcome.multi_model_executed != cd_core::multi_model::ExecutedMode::Single)
+                    .then(|| MultiModelSummary {
+                        configured_mode: outcome.multi_model_configured.as_str(),
+                        executed_mode: outcome.multi_model_executed.as_str(),
+                        entry_degradation: outcome
+                            .multi_model_entry_degradation
+                            .map(|d| d.as_str()),
+                    });
                 let envelope = Envelope::ok(
                     "chat",
                     ChatSummaryWithActivity {
@@ -590,6 +760,8 @@ pub async fn run(
                         context_used,
                         trace: trace_lines,
                         activity: activity_record.as_ref(),
+                        investigation_answer,
+                        multi_model,
                     },
                 );
                 println!(
@@ -621,6 +793,84 @@ fn withheld_cli_error(events: &[StreamEvent]) -> Option<CliError> {
     } else {
         CliError::new(ExitCategory::NotReady, message)
     })
+}
+
+/// A turn the shared classifier calls `Failed` produced no answer, so the CLI
+/// must not exit 0 for it.
+///
+/// Withholding (handled above) is ContextDesk declining to deliver; this is
+/// the provider never answering — `provider_rate_limited`,
+/// `provider_unauthorized`, `provider_unavailable`, `provider_failed`,
+/// `provider_not_wired`, `ollama_unreachable`. Those terminals used to reach
+/// the CLI as an opaque `Err`; now that they are typed events, a script that
+/// only checks the exit code would otherwise read a dead provider as a
+/// successful run. Classification is delegated to
+/// [`cd_core::activity::status_for_turn_reason`] so the CLI and the activity
+/// journal can never disagree about which terminals are failures.
+fn failed_turn_cli_error(events: &[StreamEvent]) -> Option<CliError> {
+    let reason = events.iter().rev().find_map(|event| match event {
+        StreamEvent::TurnCompleted { reason } => Some(reason.clone()),
+        _ => None,
+    })?;
+    if cd_core::activity::status_for_turn_reason(&reason)
+        != cd_core::activity::ActivityStatus::Failed
+    {
+        return None;
+    }
+    let message = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            StreamEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| format!("The turn failed ({reason})."));
+    Some(CliError::provider(message))
+}
+
+/// Return only the typed host event. In particular, no `TextDelta` is parsed
+/// as JSON here: visible transcript text is never evidence authority.
+fn investigation_answer_from_events(
+    events: &[StreamEvent],
+) -> Option<&cd_core::investigation_answer::AnswerEnvelopeV1> {
+    events.iter().rev().find_map(|event| match event {
+        StreamEvent::InvestigationAnswer { envelope } => Some(envelope),
+        _ => None,
+    })
+}
+
+/// Read the shared, secret-free qualification evidence for the configured
+/// reviewer. A missing, stale, cancelled, or malformed store is deliberately
+/// treated as unqualified/unverified by returning `None`; it must never make
+/// review appear authorized merely because a reviewer is named in config.
+fn reviewer_qualification(cfg: &AppConfig, config_dir: &Path) -> Option<bool> {
+    let path = qualification_store_path(config_dir);
+    let store = load_qualification_store(&path).ok()?;
+    reviewer_qualification_from_store(cfg, &store)
+}
+
+fn reviewer_qualification_from_store(cfg: &AppConfig, store: &QualificationStore) -> Option<bool> {
+    let reviewer = cfg.multi_model.reviewer.as_ref()?;
+    let profile = cfg
+        .providers
+        .profiles
+        .iter()
+        .find(|profile| profile.id == reviewer.profile_id)?;
+    let model = reviewer
+        .model
+        .as_deref()
+        .unwrap_or(&profile.chat_model)
+        .trim();
+    if model.is_empty() {
+        return Some(false);
+    }
+    let key =
+        QualificationKey::with_provider_kind(&profile.id, &profile.base_url, model, profile.kind);
+    let report = store.get(&key);
+    Some(matches!(
+        capability_contract_verdict(report, CapabilityContract::JsonProposal),
+        ContractVerdict::Qualified
+    ))
 }
 
 pub fn validate_question(args: &ChatArgs, format: OutputFormat) -> CliResult<()> {
@@ -730,6 +980,94 @@ mod implicit_resolution_tests {
     }
 }
 
+#[cfg(test)]
+mod reviewer_qualification_tests {
+    use super::*;
+    use cd_core::capability_qualification::{
+        CapabilityCheckResult, CapabilityKind, CapabilityStatus, QualificationReport,
+    };
+    use cd_core::config::ReviewerRoleConfig;
+    use cd_core::providers::ProviderProfile;
+
+    fn profile(id: &str) -> ProviderProfile {
+        let mut profile = ProviderProfile::ollama_local();
+        profile.id = id.to_string();
+        profile.chat_model = "reviewer-model".to_string();
+        profile
+    }
+
+    fn config() -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.providers.profiles = vec![profile("reviewer")];
+        cfg.multi_model.reviewer = Some(ReviewerRoleConfig {
+            profile_id: "reviewer".into(),
+            model: None,
+            require_qualified: true,
+            allow_remote: false,
+        });
+        cfg
+    }
+
+    fn report(cfg: &AppConfig) -> QualificationReport {
+        let profile = &cfg.providers.profiles[0];
+        QualificationReport {
+            key: QualificationKey::with_provider_kind(
+                &profile.id,
+                &profile.base_url,
+                &profile.chat_model,
+                profile.kind,
+            ),
+            checks: vec![
+                CapabilityCheckResult {
+                    kind: CapabilityKind::BasicGeneration,
+                    status: CapabilityStatus::Pass,
+                    elapsed_ms: 1,
+                    tested_at: 1,
+                    reason: "pass".into(),
+                    request_mode: Some("plain".into()),
+                    dialect: Some("ollama".into()),
+                    schema_strict: None,
+                    schema_probe_id: None,
+                },
+                CapabilityCheckResult {
+                    kind: CapabilityKind::StructuredOutput,
+                    status: CapabilityStatus::Pass,
+                    elapsed_ms: 1,
+                    tested_at: 1,
+                    reason: "pass".into(),
+                    // Production reviewer uses plain/prompted JSON — not native json_object.
+                    request_mode: Some("prompted_json".into()),
+                    dialect: Some("ollama".into()),
+                    schema_strict: None,
+                    schema_probe_id: None,
+                },
+            ],
+            role_hint: "chat".into(),
+            cancelled: false,
+            stale: false,
+            finished_at: 1,
+        }
+    }
+
+    #[test]
+    fn reviewer_qualification_uses_shared_json_contract() {
+        let cfg = config();
+        let mut store = QualificationStore::default();
+        store.put(report(&cfg));
+        assert_eq!(reviewer_qualification_from_store(&cfg, &store), Some(true));
+    }
+
+    #[test]
+    fn stale_reviewer_evidence_never_authorizes_review() {
+        let cfg = config();
+        let mut evidence = report(&cfg);
+        evidence.stale = true;
+        let mut store = QualificationStore::default();
+        store.put(evidence);
+        assert_eq!(reviewer_qualification_from_store(&cfg, &store), Some(false));
+    }
+}
+
 /// Terminal lines for a failed `--jsonl` streaming command: one
 /// `StreamLine::Error` naming the failure, then `StreamLine::Done{ok:false}`.
 /// The only place these two lines are constructed, so "every stdout line
@@ -822,7 +1160,18 @@ fn print_json_failure(error: &CliError, activity: Option<&cd_core::activity::Tur
     );
 }
 
-fn emit_jsonl(event: &StreamEvent) {
+fn progress_stream_line(event: &StreamEvent, elapsed_ms: u64) -> Option<StreamLine<'static>> {
+    cd_core::events::progress_for_stream_event(event, elapsed_ms).map(StreamLine::Progress)
+}
+
+fn emit_jsonl(event: &StreamEvent, elapsed_ms: u64) {
+    if let Some(progress) = progress_stream_line(event, elapsed_ms) {
+        let wrapped = JsonlMetaLine::wrap("", "live", "progress", 0, progress);
+        println!(
+            "{}",
+            serde_json::to_string(&wrapped).expect("StreamLine is always serializable")
+        );
+    }
     let line = match event {
         StreamEvent::TextDelta { text } => Some((
             "text_delta",
@@ -842,10 +1191,9 @@ fn emit_jsonl(event: &StreamEvent) {
                 summary,
             },
         )),
-        // A Started event has no outcome yet. Rendering its absent `ok` as
-        // false makes one successful tool call look like a failure followed
-        // by a success. JSONL exposes only the terminal tool outcome; full
-        // lifecycle detail remains available through trace_tool.
+        // A Started event has no outcome yet. Its lifecycle is exposed by the
+        // progress line above; keep the legacy terminal `tool` result shape so
+        // absent `ok` is never misreported as false.
         StreamEvent::Tool { .. } => None,
         StreamEvent::PermissionRequired {
             tool_name,
@@ -869,6 +1217,26 @@ fn emit_jsonl(event: &StreamEvent) {
         StreamEvent::Error { code, message } => Some((
             "error",
             crate::envelope::StreamLine::Error { code, message },
+        )),
+        StreamEvent::InvestigationAnswer { envelope } => Some((
+            "investigation_answer",
+            crate::envelope::StreamLine::InvestigationAnswer { envelope },
+        )),
+        StreamEvent::MultiModelStage {
+            stage,
+            phase,
+            status,
+            detail,
+            candidate_id,
+        } => Some((
+            "multi_model_stage",
+            crate::envelope::StreamLine::MultiModelStage {
+                stage: stage.clone(),
+                phase: phase.clone(),
+                status: status.clone(),
+                detail: detail.clone(),
+                candidate_id: candidate_id.clone(),
+            },
         )),
         _ => None,
     };
@@ -1048,12 +1416,18 @@ fn build_trace_lines(
         tools_offered,
         // Prefer the sum of actual backend-call time when a trace sink was
         // active (it is, whenever this function runs); fall back to the
-        // whole-command wall clock so the field is never simply absent.
+        // whole-command wall clock so the legacy field is never simply
+        // absent. The two explicitly scoped fields below must never perform
+        // this substitution: a zero-duration provider call and no provider
+        // call are both valid observations, while turn wall time remains a
+        // separate measurement.
         elapsed_ms: if call_elapsed_ms > 0 {
             call_elapsed_ms
         } else {
             elapsed_ms
         },
+        turn_elapsed_ms: elapsed_ms,
+        provider_call_elapsed_ms_sum: call_elapsed_ms,
         grounding: grounding_status(corpus_id, &outcome.events).to_string(),
         grounding_scope: if corpus_id.is_some() {
             "citation_identity_only".to_string()
@@ -1094,6 +1468,9 @@ fn build_trace_lines(
                     None,
                 ),
                 TracedOutcome::Failed { message } => ("failed", None, None, Some(message.clone())),
+                // Host cancel/deadline terminals: class only, no invented bodies.
+                TracedOutcome::Cancelled => ("cancelled", None, None, None),
+                TracedOutcome::TimedOut => ("timed_out", None, None, None),
             };
             let round_key = u32::try_from(call.seq).unwrap_or(u32::MAX);
             let context = TraceContextLine {
@@ -1165,6 +1542,43 @@ mod grounding_tests {
             code: code.to_string(),
             message: "message".to_string(),
         }
+    }
+
+    #[test]
+    fn jsonl_progress_exposes_tool_start_reviewer_stage_and_elapsed_time() {
+        let tool = progress_stream_line(
+            &StreamEvent::Tool {
+                id: "t1".into(),
+                name: "broad_log_triage".into(),
+                phase: ToolPhase::Started,
+                summary: "Preparing bounded triage brief".into(),
+                detail: None,
+                ok: None,
+            },
+            412,
+        )
+        .expect("tool start progress");
+        let tool = serde_json::to_value(tool).expect("progress JSON");
+        assert_eq!(tool["type"], "progress");
+        assert_eq!(tool["category"], "tool");
+        assert_eq!(tool["phase"], "started");
+        assert_eq!(tool["elapsed_ms"], 412);
+
+        let reviewer = progress_stream_line(
+            &StreamEvent::MultiModelStage {
+                stage: "reviewer".into(),
+                phase: "started".into(),
+                status: None,
+                detail: "reviewing candidate findings".into(),
+                candidate_id: None,
+            },
+            913,
+        )
+        .expect("reviewer progress");
+        let reviewer = serde_json::to_value(reviewer).expect("progress JSON");
+        assert_eq!(reviewer["category"], "multi_model");
+        assert_eq!(reviewer["stage"], "reviewer");
+        assert_eq!(reviewer["elapsed_ms"], 913);
     }
 
     #[test]
@@ -1260,7 +1674,11 @@ mod grounding_tests {
             provider_profile_id: "profile-a".into(),
             chat_model: "model-a".into(),
             corpus_revision: Some(3),
+            corpus_snapshot_revision: None,
             history_messages: 3,
+            multi_model_configured: cd_core::multi_model::MultiModelMode::Single,
+            multi_model_executed: cd_core::multi_model::ExecutedMode::Single,
+            multi_model_entry_degradation: None,
         };
         let calls = vec![TracedCall {
             seq: 0,
@@ -1301,6 +1719,76 @@ mod grounding_tests {
             summary.tool_names,
             vec!["broad_log_triage", "search_logs"],
             "legacy union remains backward compatible"
+        );
+    }
+
+    #[test]
+    fn trace_keeps_whole_turn_elapsed_separate_from_provider_latency() {
+        let outcome = ChatWorkflowOutcome {
+            session_id: "session-a".into(),
+            turn_id: "turn-a".into(),
+            events: vec![StreamEvent::TurnCompleted {
+                reason: "budget_time".into(),
+            }],
+            final_text: String::new(),
+            provider_profile_id: "profile-a".into(),
+            chat_model: "model-a".into(),
+            corpus_revision: None,
+            corpus_snapshot_revision: None,
+            history_messages: 1,
+            multi_model_configured: cd_core::multi_model::MultiModelMode::Single,
+            multi_model_executed: cd_core::multi_model::ExecutedMode::Single,
+            multi_model_entry_degradation: None,
+        };
+        let calls = vec![TracedCall {
+            seq: 0,
+            elapsed_ms: 41_300,
+            tool_names: vec![],
+            messages: vec![],
+            context_used_chars: 100,
+            messages_capped: false,
+            outcome: TracedOutcome::Failed {
+                message: "turn deadline reached".into(),
+            },
+            transport: Default::default(),
+            empty_visible_answer: false,
+            application_retry_reason: None,
+        }];
+
+        let lines = build_trace_lines(
+            TraceLevel::Summary,
+            false,
+            Some("corpus-a"),
+            &outcome,
+            &calls,
+            76_800,
+            1_000,
+        );
+        let StreamLine::TraceSummary(summary) = &lines[0] else {
+            panic!("expected trace summary")
+        };
+
+        assert_eq!(summary.turn_elapsed_ms, 76_800);
+        assert_eq!(summary.provider_call_elapsed_ms_sum, 41_300);
+        assert_eq!(summary.elapsed_ms, 41_300, "legacy alias is preserved");
+        let wire = serde_json::to_value(&lines[0]).expect("trace summary serializes");
+        assert_eq!(wire["elapsed_ms"], 41_300);
+        assert_eq!(wire["turn_elapsed_ms"], 76_800);
+        assert_eq!(wire["provider_call_elapsed_ms_sum"], 41_300);
+        let rendered = render_trace_hierarchy(&lines, TraceLevel::Summary, HierarchyStyle::plain());
+        assert!(rendered.contains("turn_elapsed_ms=76800  provider_call_elapsed_ms_sum=41300"));
+        assert!(!rendered.contains("`-- elapsed_ms=41300"));
+
+        let no_call_lines =
+            build_trace_lines(TraceLevel::Summary, true, None, &outcome, &[], 8, 1_000);
+        let StreamLine::TraceSummary(no_call_summary) = &no_call_lines[0] else {
+            panic!("expected trace summary")
+        };
+        assert_eq!(no_call_summary.turn_elapsed_ms, 8);
+        assert_eq!(no_call_summary.provider_call_elapsed_ms_sum, 0);
+        assert_eq!(
+            no_call_summary.elapsed_ms, 8,
+            "legacy no-call fallback is preserved"
         );
     }
 
@@ -1347,7 +1835,11 @@ mod grounding_tests {
             provider_profile_id: "p".into(),
             chat_model: "m".into(),
             corpus_revision: None,
+            corpus_snapshot_revision: None,
             history_messages: 1,
+            multi_model_configured: cd_core::multi_model::MultiModelMode::Single,
+            multi_model_executed: cd_core::multi_model::ExecutedMode::Single,
+            multi_model_entry_degradation: None,
         };
         let lines = build_trace_lines(
             TraceLevel::Summary,

@@ -1,8 +1,8 @@
-//! Readable terminal projection for an implicit one-command answer.
+//! Readable terminal projections for ordinary and corpus-linked answers.
 //!
 //! This is presentation only: it receives the exact terminal answer emitted by
-//! the production chat workflow. JSON/JSONL and explicit `chat` streaming never
-//! pass through it.
+//! the production chat workflow. JSON/JSONL never pass through it; ordinary
+//! unlinked `chat` keeps its existing streaming projection.
 
 use crate::config::ColorMode;
 use crate::render::{TerminalCapabilities, TerminalTextSanitizer};
@@ -11,7 +11,17 @@ use std::io::{self, IsTerminal};
 const CYAN: &str = "\x1b[1;36m";
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
+const YELLOW: &str = "\x1b[1;33m";
 const RESET: &str = "\x1b[0m";
+
+struct InvestigationRenderOptions<'a> {
+    model: &'a str,
+    elapsed_ms: u64,
+    typed_envelope: bool,
+    grounding: &'a str,
+    width: usize,
+    ansi: bool,
+}
 
 pub fn render(markdown: &str, color: ColorMode) -> String {
     let mut sanitizer = TerminalTextSanitizer::for_current_console();
@@ -19,6 +29,158 @@ pub fn render(markdown: &str, color: ColorMode) -> String {
     let caps = TerminalCapabilities::detect(color);
     let ansi = io::stdout().is_terminal() && caps.color;
     render_with(&clean, terminal_width(), ansi)
+}
+
+/// Render a corpus-linked answer as a small investigation report.
+///
+/// The model's text remains the answer body; this wrapper adds only host-owned
+/// provenance and validation facts. In particular, a missing typed envelope is
+/// shown as `PROVISIONAL` rather than silently presented as a host-validated
+/// answer. JSON/JSONL callers keep their existing machine-readable contract.
+pub fn render_investigation(
+    question: &str,
+    answer: &str,
+    model: &str,
+    elapsed_ms: u64,
+    typed_envelope: bool,
+    grounding: &str,
+    color: ColorMode,
+) -> String {
+    let caps = TerminalCapabilities::detect(color);
+    let ansi = io::stdout().is_terminal() && caps.color;
+    render_investigation_with(
+        question,
+        answer,
+        InvestigationRenderOptions {
+            model,
+            elapsed_ms,
+            typed_envelope,
+            grounding,
+            width: terminal_width(),
+            ansi,
+        },
+    )
+}
+
+fn render_investigation_with(
+    question: &str,
+    answer: &str,
+    options: InvestigationRenderOptions<'_>,
+) -> String {
+    let InvestigationRenderOptions {
+        model,
+        elapsed_ms,
+        typed_envelope,
+        grounding,
+        width,
+        ansi,
+    } = options;
+    let width = width.clamp(48, 120);
+    let inner = width.saturating_sub(4).max(24);
+    let validation = if typed_envelope {
+        "HOST-VALIDATED"
+    } else {
+        "PROVISIONAL — human review recommended"
+    };
+    let elapsed = format_duration(elapsed_ms);
+    let question = sanitize_inline(question);
+    let model = sanitize_inline(model);
+    let grounding = sanitize_inline(grounding);
+    let mut out = String::new();
+
+    out.push('+');
+    out.push_str(&"-".repeat(width.saturating_sub(2)));
+    out.push_str("+\n");
+    boxed_field(&mut out, "Question", &question, inner, ansi, CYAN);
+    boxed_field(&mut out, "Analyst", &model, inner, ansi, CYAN);
+    boxed_field(
+        &mut out,
+        "Validation",
+        validation,
+        inner,
+        ansi,
+        if typed_envelope { CYAN } else { YELLOW },
+    );
+    boxed_field(&mut out, "Grounding", &grounding, inner, ansi, CYAN);
+    boxed_field(&mut out, "Elapsed", &elapsed, inner, ansi, CYAN);
+    out.push('+');
+    out.push_str(&"-".repeat(width.saturating_sub(2)));
+    out.push_str("+\n\n");
+
+    if ansi {
+        out.push_str(BOLD);
+    }
+    out.push_str("INVESTIGATION ANSWER");
+    if ansi {
+        out.push_str(RESET);
+    }
+    out.push('\n');
+    out.push_str(&"─".repeat("INVESTIGATION ANSWER".len().min(width)));
+    out.push('\n');
+    out.push_str(&render_with(answer, width, ansi));
+    out
+}
+
+fn boxed_field(out: &mut String, label: &str, value: &str, width: usize, ansi: bool, color: &str) {
+    let prefix_plain = format!("| {label}: ");
+    let continuation = format!("| {}  ", " ".repeat(label.chars().count()));
+    let available = width.saturating_sub(prefix_plain.chars().count()).max(8);
+    let lines = wrap_words(value, available);
+    for (index, line) in lines.iter().enumerate() {
+        let prefix = if index == 0 {
+            prefix_plain.as_str()
+        } else {
+            continuation.as_str()
+        };
+        out.push_str(prefix);
+        if ansi && index == 0 {
+            out.push_str(color);
+        }
+        out.push_str(line);
+        if ansi && index == 0 {
+            out.push_str(RESET);
+        }
+        out.push_str("|\n");
+    }
+}
+
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for word in text.split_whitespace() {
+        let chunks: Vec<String> = word
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(width.max(1))
+            .map(|chunk| chunk.iter().collect())
+            .collect();
+        for (chunk_index, chunk) in chunks.iter().enumerate() {
+            let current = lines.last_mut().expect("at least one line");
+            if chunk_index > 0 {
+                lines.push(chunk.clone());
+            } else if current.is_empty() {
+                current.push_str(chunk);
+            } else if current.chars().count() + 1 + chunk.chars().count() > width {
+                lines.push(chunk.clone());
+            } else {
+                current.push(' ');
+                current.push_str(chunk);
+            }
+        }
+    }
+    lines
+}
+
+fn sanitize_inline(value: &str) -> String {
+    let mut sanitizer = TerminalTextSanitizer::with_ascii(true);
+    sanitizer.push(value).replace(['\n', '\r', '\t'], " ")
+}
+
+fn format_duration(elapsed_ms: u64) -> String {
+    if elapsed_ms < 1_000 {
+        format!("{elapsed_ms} ms")
+    } else {
+        format!("{:.1} s", elapsed_ms as f64 / 1_000.0)
+    }
 }
 
 fn terminal_width() -> usize {
@@ -256,5 +418,65 @@ mod tests {
             .replace(DIM, "")
             .replace(RESET, "");
         assert_eq!(plain, colored);
+    }
+
+    #[test]
+    fn investigation_report_labels_provisional_answers_and_provenance() {
+        let report = render_investigation_with(
+            "What caused the service failures?",
+            "# Observations\n\n- The service became unavailable.\n- Requests failed afterward.\n\n## Missing evidence\n\n- Service-side logs.",
+            InvestigationRenderOptions {
+                model: "qwen-3.6-27b",
+                elapsed_ms: 85_800,
+                typed_envelope: false,
+                grounding: "grounded",
+                width: 72,
+                ansi: false,
+            },
+        );
+        assert!(report.contains("Question: What caused the service failures?"));
+        assert!(report.contains("Analyst: qwen-3.6-27b"));
+        assert!(report.contains("PROVISIONAL"));
+        assert!(report.contains("Grounding: grounded"));
+        assert!(report.contains("Observations"));
+        assert!(report.contains("Missing evidence"));
+        assert!(!report.contains('\u{1b}'));
+        assert!(report.lines().all(|line| line.chars().count() <= 72));
+    }
+
+    #[test]
+    fn investigation_report_marks_typed_answer_validated() {
+        let report = render_investigation_with(
+            "Question",
+            "Answer",
+            InvestigationRenderOptions {
+                model: "model",
+                elapsed_ms: 42,
+                typed_envelope: true,
+                grounding: "grounded",
+                width: 60,
+                ansi: false,
+            },
+        );
+        assert!(report.contains("HOST-VALIDATED"));
+        assert!(!report.contains("PROVISIONAL"));
+        assert!(report.contains("42 ms"));
+    }
+
+    #[test]
+    fn investigation_report_wraps_opaque_identifiers_without_overflow() {
+        let report = render_investigation_with(
+            "Question",
+            "Answer",
+            InvestigationRenderOptions {
+                model: "model-with-an-opaque-identifier-that-is-longer-than-the-box",
+                elapsed_ms: 42,
+                typed_envelope: false,
+                grounding: "provisional",
+                width: 48,
+                ansi: false,
+            },
+        );
+        assert!(report.lines().all(|line| line.chars().count() <= 48));
     }
 }

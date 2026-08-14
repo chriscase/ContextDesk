@@ -602,6 +602,7 @@ dependencies = [
 name = "cd-workflow"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cd-core",
  "chrono",
  "libc",
@@ -610,6 +611,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 

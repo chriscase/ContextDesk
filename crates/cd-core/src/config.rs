@@ -139,7 +139,7 @@ impl ConfluenceSettings {
 /// On-disk application configuration (no raw API keys / PATs).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
-    /// Provider profiles (keychain refs only).
+    /// Provider profiles (credential references only; never inline secrets).
     pub providers: ProviderConfig,
     /// Last workspace metadata (roots as strings).
     pub workspace: Option<WorkspaceConfig>,
@@ -235,6 +235,277 @@ pub struct AppConfig {
     /// bodies retained.
     #[serde(default)]
     pub activity: ActivitySettings,
+    /// Optional retrieval roles (semantic embedding, reranking).
+    ///
+    /// Absent in files written before this existed, so it takes
+    /// [`RetrievalSettings::default`] — both roles unconfigured, meaning the
+    /// structured/keyword baseline runs alone.
+    #[serde(default)]
+    pub retrieval: RetrievalSettings,
+    /// Optional multi-model investigation settings (reviewer-first V1).
+    ///
+    /// Absent in files written before this existed, so it takes
+    /// [`MultiModelSettings::default`] — mode `single`, no reviewer, meaning
+    /// the established single-model path runs unchanged.
+    #[serde(default)]
+    pub multi_model: MultiModelSettings,
+    /// Optional reasoning-effort policy (omit = provider default).
+    ///
+    /// Absent in files written before this field existed → omit. Explicit
+    /// levels affect cost/latency only and are **not** a readiness badge.
+    #[serde(default)]
+    pub reasoning_effort: crate::reasoning_effort::ReasoningEffortSettings,
+    /// Optional host-grounded contribution roles. Disabled by default; when
+    /// enabled, every role still requires exact qualification and explicit
+    /// egress policy before it can receive a host packet.
+    #[serde(default)]
+    pub contributions: ContributionSettings,
+    /// Optional host-grounded fast-triage route settings.
+    ///
+    /// Absent in files written before this existed, so it takes
+    /// [`FastTriageSettings::default`] — disabled, with no route evidence and
+    /// no fallback, meaning every established path runs unchanged.
+    #[serde(default)]
+    pub fast_triage: FastTriageSettings,
+}
+
+/// Host-grounded fast-triage route configuration.
+///
+/// The route is off by default and, even when enabled, runs only when a
+/// persisted record in [`FastTriageSettings::routes`] matches the turn's exact
+/// profile, model, workflow contract, and host contract fingerprint. There is
+/// deliberately no "enable for fast models" switch, no model-name pattern, and
+/// no gateway field: those are exactly the shortcuts this route must not take.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FastTriageSettings {
+    /// Master switch. `false` (the default) means the route never runs, whatever
+    /// evidence is persisted.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Persisted per-(profile, model, workflow) route evidence. An empty list
+    /// means no route is authorized, which is the honest default.
+    #[serde(default)]
+    pub routes: Vec<crate::fast_triage::FastTriageRouteRecord>,
+    /// Optional fallback role for the one visible escalation. `None` means a
+    /// failed fast answer is reported as an escalation request rather than
+    /// silently retried somewhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<FastTriageFallbackConfig>,
+}
+
+/// Fallback role assignment for the one visible fast-triage escalation.
+///
+/// Provider-neutral: it names an existing provider profile id, never a provider
+/// kind and never a raw secret, so credentials stay behind that profile's own
+/// explicit `api_key_ref`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FastTriageFallbackConfig {
+    /// Existing provider profile id to fill the fallback role.
+    pub profile_id: String,
+    /// Model id override; `None` uses the profile's chat model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Explicit authorization to send this turn's evidence packet to the
+    /// fallback. Default false: a configured-but-unauthorized fallback is
+    /// reported as such and never called.
+    #[serde(default)]
+    pub authorized: bool,
+    /// Explicit acknowledgment that this fallback may egress to a remote
+    /// provider. Default false; ignored for local-only providers.
+    #[serde(default)]
+    pub allow_remote: bool,
+}
+
+/// Multi-model investigation configuration. Additive; the default is the
+/// single-model floor. A reviewer references an existing provider **profile
+/// id** — never a provider kind and never a raw secret — so credentials stay
+/// behind the profile's own explicit `api_key_ref`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiModelSettings {
+    /// Default mode for new investigation turns. `single` unless the user
+    /// opts in. A per-turn override may still request review.
+    #[serde(default)]
+    pub mode: crate::multi_model::MultiModelMode,
+    /// Reviewer role assignment. `None` means no reviewer is configured, so
+    /// review mode degrades to single with `reviewer_unconfigured`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<ReviewerRoleConfig>,
+    /// Per-turn ceilings for the multi-model path.
+    #[serde(default)]
+    pub budget: MultiModelBudgetConfig,
+}
+
+/// Persisted configuration for the provider-neutral contribution route.
+///
+/// This is deliberately separate from reviewer-first `multi_model`: users can
+/// opt into several bounded cheap contributors without changing the existing
+/// single/reviewer default. Profiles are references only; credentials remain
+/// behind each profile's configured secret source.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContributionSettings {
+    /// Master switch. `false` preserves the established path byte-for-byte.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Explicit role assignments. Empty means the route cannot run.
+    #[serde(default)]
+    pub roles: Vec<ContributionRoleConfig>,
+    /// Hard routing policy for contributor count, rounds, context, and review.
+    #[serde(default)]
+    pub policy: crate::multi_model::ContributionRoutingPolicy,
+    /// Per-turn model/context budget.
+    #[serde(default)]
+    pub budget: MultiModelBudgetConfig,
+    /// Bounded host neighborhood packet expansion.
+    #[serde(default)]
+    pub neighborhood: crate::fast_triage::FastTriageNeighborhoodBudget,
+}
+
+/// One explicit contributor assignment. The role and profile/model identity
+/// are host configuration; the model never selects or changes them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContributionRoleConfig {
+    /// Functional contribution role.
+    pub role: crate::multi_model::ContributionRole,
+    /// Existing provider profile id.
+    pub profile_id: String,
+    /// Optional exact model id override; absent uses the profile model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Require the exact prompted-JSON contribution contract to be measured.
+    #[serde(default = "default_true")]
+    pub require_qualified: bool,
+    /// Explicit acknowledgment for remote evidence-packet egress.
+    #[serde(default)]
+    pub allow_remote: bool,
+}
+
+/// Reviewer role assignment. Provider-neutral: it names a profile id, not a
+/// provider kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewerRoleConfig {
+    /// Existing provider profile id to fill the reviewer role. May equal the
+    /// investigator's profile (same model, reviewer prompt) or differ.
+    pub profile_id: String,
+    /// Model id override; `None` uses the profile's chat model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Require a measured capability qualification before using this model as
+    /// a reviewer. Default true: an unverified reviewer degrades honestly
+    /// rather than being trusted on a name.
+    #[serde(default = "default_true")]
+    pub require_qualified: bool,
+    /// Explicit acknowledgment that this reviewer may send stage data to a
+    /// remote provider. Default false: a remote reviewer without this degrades
+    /// with `reviewer_egress_not_acknowledged`. Ignored for local providers.
+    #[serde(default)]
+    pub allow_remote: bool,
+}
+
+/// Persisted per-turn budget for the multi-model path. Deterministic units the
+/// host always has (model rounds and model-facing characters). No currency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiModelBudgetConfig {
+    /// Hard ceiling on model calls across all stages.
+    #[serde(default = "default_multi_model_rounds")]
+    pub max_total_provider_rounds: u32,
+    /// Per-stage semantic-correction cap (independent of transport retries).
+    #[serde(default = "default_multi_model_corrections")]
+    pub max_semantic_corrections_per_stage: u8,
+    /// Optional deterministic usage ceiling: total model-facing characters sent
+    /// across all stages. `None` = no usage gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_chars_total: Option<u64>,
+}
+
+impl Default for MultiModelBudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_total_provider_rounds: default_multi_model_rounds(),
+            max_semantic_corrections_per_stage: default_multi_model_corrections(),
+            max_context_chars_total: None,
+        }
+    }
+}
+
+const fn default_multi_model_rounds() -> u32 {
+    12
+}
+
+const fn default_multi_model_corrections() -> u8 {
+    1
+}
+
+/// Optional retrieval-role configuration.
+///
+/// Model names here are CONFIGURATION, never behavior: `bge-m3` and
+/// `qwen3-reranker-0.6b` are documentation examples, not defaults. An absent,
+/// disabled, or failing role always leaves the structured/keyword baseline
+/// usable. Whether a configured role is *verified* (capability), *healthy*
+/// (answered a probe just now), or *measurably better* (benchmark) are three
+/// separate facts reported by the retrieval status surface — configuration
+/// alone never claims any of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetrievalSettings {
+    /// Optional semantic-embedding role (e.g. model `bge-m3`).
+    #[serde(default)]
+    pub embedding: Option<RetrievalRoleModel>,
+    /// Optional reranking role (e.g. model `qwen3-reranker-0.6b`).
+    #[serde(default)]
+    pub reranker: Option<RetrievalRoleModel>,
+}
+
+/// Wire protocol for a retrieval embedding role.
+///
+/// Explicit configuration — never inferred from the URL host alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbedWireKind {
+    /// OpenAI-compatible `POST …/embeddings` with batched `input` (production
+    /// default for remote employer gateways).
+    #[default]
+    OpenAiCompatible,
+    /// Local Ollama `POST /api/embeddings` (single prompt per call).
+    Ollama,
+}
+
+/// One configured optional retrieval role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetrievalRoleModel {
+    /// Explicit opt-in; a configured-but-disabled role is reported as
+    /// `disabled`, distinct from unconfigured or unverified.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Endpoint base URL (scheme+host+port). Never carries credentials.
+    pub base_url: String,
+    /// Model identity requested from the endpoint.
+    pub model: String,
+    /// Explicit wire dialect for this role. Supported values are
+    /// `ollama_embeddings`, `openai_embeddings`, `vercel_v4_embeddings`, and
+    /// `tei_rerank_v1`/`vercel_v4_rerank_v1`; an omitted value preserves
+    /// legacy endpoint defaults.
+    /// The value is a parser selector only — it never makes a model verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialect: Option<String>,
+    /// Explicit acknowledgment that query-time retrieval inputs may leave this
+    /// machine for a non-loopback endpoint. Defaults to false so adding a
+    /// remote role cannot silently create cloud egress. Loopback endpoints
+    /// remain usable without this acknowledgment.
+    #[serde(default)]
+    pub allow_remote: bool,
+    /// Optional credential REFERENCE for a bearer credential — either an
+    /// explicit Keychain id or a protected `file:` path, never the secret
+    /// itself (`refuse_raw_secret_refs` enforces this on load/save).
+    #[serde(default)]
+    pub api_key_ref: Option<String>,
+    /// Explicit embed wire for the embedding role. Default
+    /// [`EmbedWireKind::OpenAiCompatible`]. Ignored for the reranker role.
+    #[serde(default)]
+    pub embed_wire: EmbedWireKind,
+    /// Explicit rerank response dialect for the reranker role. Default
+    /// [`crate::rerank::RerankDialect::TeiCohere`]. Never inferred from URL.
+    /// Ignored for the embedding role.
+    #[serde(default)]
+    pub rerank_dialect: crate::rerank::RerankDialect,
 }
 
 /// What the Activity Inspector captures.
@@ -344,6 +615,18 @@ pub fn ensure_config_dir(branding: &Branding) -> CoreResult<PathBuf> {
 
 fn refuse_raw_secret_refs(cfg: &AppConfig) -> CoreResult<()> {
     use crate::keychain_store::looks_like_raw_secret;
+    for role in [&cfg.retrieval.embedding, &cfg.retrieval.reranker]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(reference) = &role.api_key_ref {
+            if looks_like_raw_secret(reference) {
+                return Err(CoreError::Config(
+                    "refusing config that embeds raw secrets in retrieval api_key_ref".into(),
+                ));
+            }
+        }
+    }
     for p in &cfg.providers.profiles {
         if let Some(r) = &p.api_key_ref {
             if looks_like_raw_secret(r) {
@@ -695,5 +978,175 @@ mod tests {
         // Path-shaped refs are OK
         cfg.providers.profiles[0].api_key_ref = Some("provider/openai-compatible/api_key".into());
         assert!(save_config(&path, &cfg).is_ok());
+    }
+
+    #[test]
+    fn a_config_without_the_retrieval_section_still_loads() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &cfg).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("retrieval");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.retrieval, RetrievalSettings::default());
+        assert!(loaded.retrieval.embedding.is_none());
+        assert!(loaded.retrieval.reranker.is_none());
+
+        // Round-trips once configured (model names are configuration only).
+        cfg.retrieval.reranker = Some(RetrievalRoleModel {
+            enabled: false,
+            base_url: "http://127.0.0.1:8080".into(),
+            model: "qwen3-reranker-0.6b".into(),
+            dialect: None,
+            allow_remote: false,
+            api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
+        });
+        save_config(&path, &cfg).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(
+            loaded.retrieval.reranker.as_ref().map(|r| r.model.as_str()),
+            Some("qwen3-reranker-0.6b")
+        );
+    }
+
+    #[test]
+    fn a_config_without_the_multi_model_section_still_loads_as_single() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &cfg).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("multi_model");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.contributions, ContributionSettings::default());
+        assert_eq!(loaded.multi_model, MultiModelSettings::default());
+        assert_eq!(
+            loaded.multi_model.mode,
+            crate::multi_model::MultiModelMode::Single
+        );
+        assert!(loaded.multi_model.reviewer.is_none());
+        assert_eq!(
+            loaded.multi_model.budget.max_semantic_corrections_per_stage,
+            1
+        );
+
+        // A reviewer references a profile id and never carries a raw secret.
+        cfg.multi_model.mode = crate::multi_model::MultiModelMode::Review;
+        cfg.multi_model.reviewer = Some(ReviewerRoleConfig {
+            profile_id: "ollama-local".into(),
+            model: None,
+            require_qualified: true,
+            allow_remote: false,
+        });
+        save_config(&path, &cfg).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(
+            loaded.multi_model.mode,
+            crate::multi_model::MultiModelMode::Review
+        );
+        assert_eq!(
+            loaded
+                .multi_model
+                .reviewer
+                .as_ref()
+                .map(|r| r.profile_id.as_str()),
+            Some("ollama-local")
+        );
+        assert!(
+            loaded
+                .multi_model
+                .reviewer
+                .as_ref()
+                .unwrap()
+                .require_qualified
+        );
+    }
+
+    #[test]
+    fn a_config_without_the_fast_triage_section_still_loads_as_disabled() {
+        use crate::fast_triage::{
+            FastTriageRouteRecord, FastTriageRouteVerdict, FastTriageWorkflowContract,
+        };
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &cfg).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("fast_triage");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.fast_triage, FastTriageSettings::default());
+        assert!(!loaded.fast_triage.enabled);
+        assert!(loaded.fast_triage.routes.is_empty());
+        assert!(loaded.fast_triage.fallback.is_none());
+
+        // Route evidence and a fallback round-trip, and both reference profile
+        // and model ids only — never a gateway or a secret.
+        cfg.fast_triage.enabled = true;
+        cfg.fast_triage.routes = vec![FastTriageRouteRecord {
+            profile_id: "ollama-local".into(),
+            model_id: "some-configured-model".into(),
+            workflow_contract: FastTriageWorkflowContract::HostGroundedSynthesisCompletePacket,
+            verdict: FastTriageRouteVerdict::Qualified,
+            contract_fingerprint: "a".repeat(64),
+        }];
+        cfg.fast_triage.fallback = Some(FastTriageFallbackConfig {
+            profile_id: "ollama-local".into(),
+            model: None,
+            authorized: false,
+            allow_remote: false,
+        });
+        save_config(&path, &cfg).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(loaded.fast_triage, cfg.fast_triage);
+        // A configured fallback is not an authorized one.
+        assert!(!loaded.fast_triage.fallback.as_ref().unwrap().authorized);
+    }
+
+    #[test]
+    fn refuses_raw_secret_in_retrieval_api_key_ref() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
+        cfg.retrieval.embedding = Some(RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "bge-m3".into(),
+            dialect: None,
+            allow_remote: false,
+            api_key_ref: Some("sk-proj-not-a-reference".into()),
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
+        });
+        assert!(save_config(&path, &cfg).is_err());
+        cfg.retrieval.embedding.as_mut().unwrap().api_key_ref =
+            Some("provider/embedding/api_key".into());
+        assert!(save_config(&path, &cfg).is_ok());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !written.contains("sk-proj"),
+            "raw secret never reaches disk"
+        );
     }
 }

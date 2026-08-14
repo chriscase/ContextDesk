@@ -14,6 +14,11 @@ chapter is the deeper engineering method: how to run, grade, transfer, and
 reimplement a deterministic product/model evaluation without leaking the
 answer key into the system under test.
 
+The accepted design for separating compatibility, retrieval, answer, and
+multi-model orchestration evidence is
+[`QUALITY_EVAL_HARNESS.md`](../../benchmarks/QUALITY_EVAL_HARNESS.md). Its
+quality-run implementation is planned, not shipped.
+
 ## 1. Problem
 
 A convincing demo is not proof that a log investigation product or model works.
@@ -57,6 +62,7 @@ Out of scope:
 | Ordinary chat isolation | **Shipped** | [`agent.rs`](../../../crates/cd-core/src/agent.rs) and [context assembly method](DETERMINISTIC_CONTEXT_ASSEMBLY.md) | Repeat native proof per supported host |
 | Tools-disabled linked-chat refusal | **Shipped** | [`research.rs`](../../../crates/cd-core/src/research.rs) | Cannot pass a grounded linked-log evaluation |
 | Tools-enabled provider/model evaluation | **Partial** | Bounded tool loop and evidence validation ship in [`agent.rs`](../../../crates/cd-core/src/agent.rs) | Requires a real tools-enabled profile; provider quality is environment-dependent |
+| Role-specific provider/model compatibility qualification | **Local integration** | Shared evidence projection in [`capability_qualification.rs`](../../../crates/cd-core/src/capability_qualification.rs), live adapters in [`capability_qualification.rs`](../../../crates/cd-workflow/src/capability_qualification.rs), dialect-honest multi-mode ladder, transport-protocol identity, exact-mode+dialect authorization and readiness (schema v4; [chat contract](../../testing/OPENAI_CHAT_CONTRACT_V2.md)), and GUI/CLI `Discover → Verify → Choose` surfaces | Hermetic protocol/kind isolation, mode honesty, and fail-closed probes are proven; live gateway support and ordinary chat/attachment/multimodal quality require distinct evidence |
 | Quick in-app demo guide | **Local integration** | [demo Help page](../../help/log-analysis/demo-datasets.md), explicit fenced-command copy, and #732 optional first-run 25k install | Other fixtures and optional metrics remain source-checkout inputs |
 | Deep in-app handbook chapter/export | **Shipped** | This chapter, [`handbook.rs`](../../../desktop/src-tauri/src/handbook.rs), current-main proof on #719 | Live provider evaluation remains environment-dependent |
 
@@ -299,6 +305,32 @@ alone.
 `UTF8_café_λ` are runtime data, not hidden conclusions.
 
 ### 6.4 Run ordinary-chat and capability controls
+
+Compatibility qualification and quality evaluation are separate lanes. A
+qualification record belongs to one exact provider profile, endpoint
+fingerprint, model id, role contract, and probe schema. Name-based role hints
+may help a person choose probes, but cannot produce measured evidence. A
+triage-compatible result establishes only synthetic generation, native tool
+call, tool-result continuation, and structured-output contracts; it does not
+establish answer usefulness, ordinary chat, attachments, multimodal input,
+context length, or value for money.
+
+The local integration flow is `Discover → Verify → Choose`. Discovery records a
+secret-free catalog snapshot. Verification is an explicit token-spending
+action over selected models and saves completed results independently. Choice
+remains human-controlled: a current role-specific result may order otherwise
+ordinary options, but cannot replace a pin or default. Startup reuses the
+catalog probe it already performs to identify additions and removals without
+automatically running qualification.
+
+Multiple gateways remain separate provider profiles. Their catalogs and
+measurements cannot be joined by model name because endpoint, authentication,
+privacy, retention, and cost policy may differ. Wire-format and credential
+differences belong behind protocol/authentication adapters. Grok's session-file
+authentication is one such adapter, not a separate evidence system. Future
+per-mode routing may select different gateway/model pairs for triage, ordinary
+chat, embeddings, reranking, or attachments, but cross-gateway fallback must
+remain explicit rather than silently changing the egress boundary.
 
 Ask an ordinary chat a corpus-specific question before attaching any corpus.
 Pass only if it does not retrieve or imply access to the Explorer corpus.

@@ -74,7 +74,11 @@ async fn run(cli: Cli, invocation: InvocationMode) -> i32 {
     };
     let overrides = CliOverrides {
         output_format: format_override,
-        color: cli.global.color,
+        color: if cli.global.no_color {
+            Some(config::ColorMode::Never)
+        } else {
+            cli.global.color
+        },
         default_provider_profile: cli.global.profile.clone(),
         default_chat_model: cli.global.model.clone(),
         import_embed: None,
@@ -100,6 +104,8 @@ async fn run(cli: Cli, invocation: InvocationMode) -> i32 {
         format,
         &mut cli_state,
         invocation,
+        cli.global.deadline.as_deref(),
+        cli.global.reasoning_effort.as_deref(),
     )
     .await;
 
@@ -120,7 +126,11 @@ async fn run_state_free(cli: &Cli) -> Option<i32> {
     } else {
         cli.global.format.unwrap_or(OutputFormat::Text)
     };
-    let color = cli.global.color.unwrap_or(config::ColorMode::Auto);
+    let color = if cli.global.no_color {
+        config::ColorMode::Never
+    } else {
+        cli.global.color.unwrap_or(config::ColorMode::Auto)
+    };
     match &cli.command {
         Command::Normalize(args) => {
             let result = commands::normalize::run(args, format, color).await;
@@ -146,6 +156,35 @@ async fn run_state_free(cli: &Cli) -> Option<i32> {
                 &cd_core::branding::Branding::embedded(),
             )),
         )),
+        Command::Eval { action } => {
+            let result = commands::eval::run(action);
+            let verdict = result
+                .as_ref()
+                .ok()
+                .filter(|output| output.failed_verdict())
+                .map(|_| ExitCategory::NotReady);
+            Some(emit_completed(format, color, "eval", result, verdict))
+        }
+        Command::TriagePolicy {
+            action: cli::TriagePolicyAction::Qualify(_),
+        } => None,
+        Command::TriagePolicy { action } => {
+            let result = commands::triage_policy::run(action);
+            let verdict = result
+                .as_ref()
+                .ok()
+                .filter(|output| !output.accepted())
+                .map(|_| ExitCategory::NotReady);
+            Some(emit_completed(
+                format,
+                color,
+                "triage_policy",
+                result,
+                verdict,
+            ))
+        }
+        Command::Triage { action } => commands::triage::state_free(action)
+            .map(|result| emit_triage_run(format, color, result)),
         _ => None,
     }
 }
@@ -160,6 +199,10 @@ async fn dispatch(
     format: OutputFormat,
     cli_state: &mut cd_workflow::session::CliState,
     invocation: InvocationMode,
+    // Global `--deadline` for chat only; other commands ignore it.
+    deadline_override: Option<&str>,
+    // Global `--reasoning-effort` for chat only; never persisted.
+    effort_override: Option<&str>,
 ) -> i32 {
     match command {
         Command::Import(args) => {
@@ -176,8 +219,38 @@ async fn dispatch(
             }
             emit(format, resolved.color.value, "import", result)
         }
-        Command::Normalize(_) | Command::Normalized { .. } => {
+        Command::Normalize(_) | Command::Normalized { .. } | Command::Eval { .. } => {
             unreachable!("state-free commands return before stateful dispatch")
+        }
+        Command::TriagePolicy {
+            action: cli::TriagePolicyAction::Qualify(args),
+        } => {
+            let secrets = adapters::secret_store();
+            let result = commands::triage_policy::qualify(args, paths, app_cfg, &secrets).await;
+            let verdict = result
+                .as_ref()
+                .ok()
+                .filter(|output| !output.accepted())
+                .map(|_| ExitCategory::NotReady);
+            emit_completed(
+                format,
+                resolved.color.value,
+                "triage_policy",
+                result,
+                verdict,
+            )
+        }
+        Command::TriagePolicy { .. } => {
+            unreachable!("provider-free triage policy commands return before stateful dispatch")
+        }
+        Command::Triage { action } => {
+            let secrets = adapters::secret_store();
+            let result = match action {
+                cli::TriageAction::Run(args) => {
+                    commands::triage::run_stateful(args, paths, app_cfg, &secrets).await
+                }
+            };
+            emit_triage_run(format, resolved.color.value, result)
         }
         Command::Corpus { action } => {
             let result = commands::corpus::run(action, &paths.cache_root);
@@ -214,6 +287,7 @@ async fn dispatch(
             let result = commands::chat::run(
                 args,
                 &paths.cache_root,
+                &paths.config_dir,
                 &secrets,
                 app_cfg,
                 &sessions,
@@ -223,6 +297,8 @@ async fn dispatch(
                 resolved.default_provider_profile.value.as_deref(),
                 resolved.default_chat_model.value.as_deref(),
                 invocation == InvocationMode::ImplicitChat,
+                deadline_override,
+                effort_override,
             )
             .await;
             match result {
@@ -322,6 +398,105 @@ async fn dispatch(
             );
             emit(format, resolved.color.value, "exception_episodes", result)
         }
+        Command::RetrievalStatus(args) => {
+            let secrets = adapters::secret_store();
+            let result = commands::retrieval_status::run(
+                args,
+                &paths.cache_root,
+                app_cfg,
+                &cli_state.current_corpus_id,
+                &secrets,
+            );
+            emit(format, resolved.color.value, "retrieval_status", result)
+        }
+        Command::RetrievalDiagnose(args) => {
+            let secrets = adapters::secret_store();
+            let result = commands::retrieval_diagnose::run(
+                args,
+                &paths.cache_root,
+                app_cfg,
+                &cli_state.current_corpus_id,
+                &secrets,
+            )
+            .await;
+            let verdict = result
+                .as_ref()
+                .ok()
+                .filter(|output| output.failed_verdict())
+                .map(|_| ExitCategory::NotReady);
+            emit_completed(
+                format,
+                resolved.color.value,
+                "retrieval_diagnose",
+                result,
+                verdict,
+            )
+        }
+        Command::RetrievalReanalyze(args) => {
+            let secrets = adapters::secret_store();
+            let result = commands::retrieval_reanalyze::run(
+                args,
+                &paths.cache_root,
+                app_cfg,
+                &cli_state.current_corpus_id,
+                &secrets,
+            )
+            .await;
+            emit(format, resolved.color.value, "retrieval_reanalyze", result)
+        }
+        Command::Models(args) => {
+            let secrets = adapters::secret_store();
+            let result = commands::models::run(
+                args,
+                paths,
+                app_cfg,
+                resolved.default_provider_profile.value.as_deref(),
+                resolved.default_chat_model.value.as_deref(),
+                &secrets,
+            )
+            .await;
+            emit(format, resolved.color.value, "models", result)
+        }
+        Command::Gateway { action } => match action {
+            cli::GatewayAction::Diagnose(args) => {
+                let secrets = adapters::secret_store();
+                let sessions = adapters::session_store(paths);
+                let result = commands::gateway::run(
+                    args,
+                    paths,
+                    app_cfg,
+                    &secrets,
+                    &sessions,
+                    format,
+                    resolved.color.value,
+                    resolved.default_provider_profile.value.as_deref(),
+                    resolved.default_chat_model.value.as_deref(),
+                )
+                .await;
+                match result {
+                    // `commands::gateway::run` already rendered every case line
+                    // and the terminal verdict/envelope itself for every format
+                    // — mirrors `doctor`'s own bespoke streaming path — so the
+                    // exit code reflects the compatibility verdicts, not merely
+                    // "did the command run."
+                    Ok(report) => {
+                        if report.cancelled {
+                            ExitCategory::Cancelled.code()
+                        } else if commands::gateway::report_requires_not_ready(&report) {
+                            ExitCategory::NotReady.code()
+                        } else {
+                            0
+                        }
+                    }
+                    Err(e) if format == OutputFormat::Jsonl => e.category.code(),
+                    Err(e) => emit_error(format, "gateway_diagnose", e),
+                }
+            }
+            cli::GatewayAction::Ledger(args) => {
+                let result = commands::gateway_ledger::run(args);
+                emit(format, resolved.color.value, "gateway_ledger", result)
+            }
+        },
     }
 }
 
@@ -369,6 +544,57 @@ fn emit_completed<T: Render>(
 ) -> i32 {
     let code = emit(format, color, command, result);
     completed_verdict_exit(code, verdict)
+}
+
+/// Render a typed state-free triage refusal. Unlike a completed verdict,
+/// `not_implemented` must not look like a successful command to machine
+/// clients even though the typed data explains exactly which request was
+/// accepted.
+fn emit_triage_run(
+    format: OutputFormat,
+    color: config::ColorMode,
+    result: Result<commands::triage::TriageRunOutput, CliError>,
+) -> i32 {
+    match result {
+        Ok(output) if output.unsupported() => {
+            let reason = output
+                .reason_codes
+                .first()
+                .map(String::as_str)
+                .unwrap_or("triage_route_unavailable");
+            let message = if reason == "standard_uses_established_path" {
+                "Standard triage uses the established chat path; use `contextdesk chat`"
+            } else {
+                "the requested Triage V2 route is unavailable on this build"
+            };
+            let error = CliError::not_implemented(message);
+            match format {
+                OutputFormat::Text => {
+                    println!("{}", presentation::present(&output.render_text(), color));
+                }
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    let envelope = Envelope {
+                        schema_version: envelope::ENVELOPE_SCHEMA_VERSION,
+                        ok: false,
+                        command: "triage_run",
+                        data: Some(output.render_json()),
+                        error: Some(envelope::ErrorEnvelope {
+                            kind: error.category.kind(),
+                            message: error.message.clone(),
+                        }),
+                    };
+                    println!(
+                        "{}",
+                        serde_json::to_string(&envelope)
+                            .expect("triage unsupported envelope is serializable")
+                    );
+                }
+            }
+            error.category.code()
+        }
+        Ok(output) => emit(format, color, "triage_run", Ok(output)),
+        Err(error) => emit_error(format, "triage_run", error),
+    }
 }
 
 fn completed_verdict_exit(base_code: i32, verdict: Option<ExitCategory>) -> i32 {

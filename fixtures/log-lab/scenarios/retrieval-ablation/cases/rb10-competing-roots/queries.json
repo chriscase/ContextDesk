@@ -1,0 +1,124 @@
+{
+  "case_id": "rb10-competing-roots",
+  "queries": [
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "catalog",
+          "slow",
+          "cache"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "broad",
+      "query_id": "rb10-competing-roots-q1",
+      "question": "Why did catalog lookups slow down?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "cache",
+          "ttl",
+          "eviction"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "causal",
+      "query_id": "rb10-competing-roots-q2",
+      "question": "What emptied the cache?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "cache",
+          "miss",
+          "slow"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "symptom",
+      "query_id": "rb10-competing-roots-q3",
+      "question": "Show the slow cache-miss lookups."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "chg-D080531E"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "identifier",
+      "query_id": "rb10-competing-roots-q4",
+      "question": "Show change chg-D080531E."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "database",
+          "slow"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "negative",
+      "query_id": "rb10-competing-roots-q5",
+      "question": "Did the database slow down?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "ttl",
+          "eviction",
+          "cache"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "competing",
+      "query_id": "rb10-competing-roots-q6",
+      "question": "Is the TTL change or the eviction storm the better-supported cause?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "ttl",
+          "eviction",
+          "applied"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "chronology",
+      "query_id": "rb10-competing-roots-q7",
+      "question": "Which candidate cause appears first, and is the gap decisive?"
+    }
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_queries.v1",
+  "schema_version": 1,
+  "suite_id": "contextdesk.log_lab.retrieval_ablation"
+}

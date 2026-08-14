@@ -1,0 +1,188 @@
+{
+  "schema_id": "contextdesk.gateway_diagnostic.v1",
+  "schema_version": 2,
+  "run_id": "gwdx-fixture-deepseek-505c3793",
+  "build": {
+    "version": "0.1.0",
+    "long_version": "505c37933440eff305ebb32b99347c42965ff957"
+  },
+  "started_at_unix_ms": 1786463000000,
+  "finished_at_unix_ms": 1786463058000,
+  "level": "basic",
+  "profile_pseudonym": "p-fixtureprof01",
+  "model_pseudonym": "p-fixturemodel1",
+  "model_label": "deepseek/deepseek-v4-flash",
+  "gateway_label": "Vercel AI Gateway",
+  "role_hint": "chat",
+  "endpoint_fingerprint": "fp-fixture-endpoint-01",
+  "credentials_read": true,
+  "deadline_secs": 600,
+  "requests_planned_max": 23,
+  "requests_made": 19,
+  "cases": [
+    {
+      "case_id": "ordinary_generation",
+      "description": "Ordinary generation",
+      "direct": {
+        "executed": true,
+        "passed": true,
+        "detail": "direct generation passed",
+        "elapsed_ms": 900,
+        "attempts": 1,
+        "requests_used": 1
+      },
+      "product": {
+        "executed": true,
+        "passed": true,
+        "detail": "product generation passed",
+        "elapsed_ms": 1864,
+        "attempts": 1,
+        "requests_used": 1
+      },
+      "scorer": {
+        "executed": false,
+        "passed": false,
+        "detail": "not applicable",
+        "elapsed_ms": 0,
+        "attempts": 0,
+        "requests_used": 0
+      },
+      "classification": "compatible"
+    },
+    {
+      "case_id": "structured_response",
+      "description": "Structured response",
+      "direct": {
+        "executed": true,
+        "passed": true,
+        "detail": "direct structured passed",
+        "elapsed_ms": 800,
+        "attempts": 1,
+        "requests_used": 1
+      },
+      "product": {
+        "executed": true,
+        "passed": true,
+        "detail": "product structured passed",
+        "elapsed_ms": 1612,
+        "attempts": 1,
+        "requests_used": 1
+      },
+      "scorer": {
+        "executed": false,
+        "passed": false,
+        "detail": "not applicable",
+        "elapsed_ms": 0,
+        "attempts": 0,
+        "requests_used": 0
+      },
+      "classification": "compatible"
+    },
+    {
+      "case_id": "tool_call_continuation",
+      "description": "Tool call + continuation",
+      "direct": {
+        "executed": true,
+        "passed": false,
+        "detail": "failure category: response_contract; raw provider detail omitted",
+        "elapsed_ms": 1200,
+        "attempts": 1,
+        "requests_used": 1
+      },
+      "product": {
+        "executed": true,
+        "passed": true,
+        "detail": "product tool workflow grounded",
+        "elapsed_ms": 11387,
+        "attempts": 1,
+        "requests_used": 2
+      },
+      "scorer": {
+        "executed": false,
+        "passed": false,
+        "detail": "not applicable",
+        "elapsed_ms": 0,
+        "attempts": 0,
+        "requests_used": 0
+      },
+      "classification": "retry_required"
+    },
+    {
+      "case_id": "selected_context",
+      "description": "Selected context",
+      "direct": {
+        "executed": false,
+        "passed": false,
+        "detail": "not applicable",
+        "elapsed_ms": 0,
+        "attempts": 0,
+        "requests_used": 0
+      },
+      "product": {
+        "executed": true,
+        "passed": true,
+        "detail": "product selected context passed",
+        "elapsed_ms": 3107,
+        "attempts": 1,
+        "requests_used": 1
+      },
+      "scorer": {
+        "executed": true,
+        "passed": true,
+        "detail": "scorer passed",
+        "elapsed_ms": 5,
+        "attempts": 1,
+        "requests_used": 0
+      },
+      "classification": "compatible"
+    },
+    {
+      "case_id": "linked_log_triage",
+      "description": "Linked-log multi-stage triage",
+      "direct": {
+        "executed": false,
+        "passed": false,
+        "detail": "not applicable",
+        "elapsed_ms": 0,
+        "attempts": 0,
+        "requests_used": 0
+      },
+      "product": {
+        "executed": true,
+        "passed": true,
+        "detail": "product triage completed",
+        "elapsed_ms": 39748,
+        "attempts": 1,
+        "requests_used": 4
+      },
+      "scorer": {
+        "executed": true,
+        "passed": true,
+        "detail": "typed scorer passed",
+        "elapsed_ms": 12,
+        "attempts": 1,
+        "requests_used": 0
+      },
+      "classification": "compatible"
+    }
+  ],
+  "verdicts": {
+    "gateway_model_compatible": false,
+    "product_workflow_compatible": true,
+    "answers_useful": true,
+    "gateway_model_status": "fail",
+    "product_workflow_status": "pass",
+    "answers_useful_status": "pass"
+  },
+  "cleanup": {
+    "corpora_created": 2,
+    "corpora_removed": 2,
+    "sessions_created": 3,
+    "sessions_removed": 3,
+    "failures": []
+  },
+  "cancelled": false,
+  "deadline_exceeded": false,
+  "artifact_dir": null,
+  "private_capture_written": false
+}

@@ -120,6 +120,109 @@ MUTATIONS = [
         replacement="        if let Err(e) = Ok::<(), std::io::Error>(()) {\n",
         test_filter="legacy_cleanup_failure_surfaces_and_blocks_attach",
     ),
+    # --- host-grounded fast triage -----------------------------------------
+    # Each of these removes exactly one promise the route makes, so a survivor
+    # would mean the promise is documented but not enforced.
+    Mutation(
+        name="fast_triage_validator_bypass",
+        file="crates/cd-core/src/fast_triage/validate.rs",
+        needle="""    if categories.is_empty() {
+        FastTriageValidation::Accepted(Box::new(envelope))
+    } else {
+        FastTriageValidation::Rejected(categories.into_iter().collect())
+    }
+""",
+        replacement="    FastTriageValidation::Accepted(Box::new(envelope))\n",
+        test_filter="each_recorded_causal_failure_is_caught_with_its_own_category",
+    ),
+    Mutation(
+        name="fast_triage_second_correction",
+        file="crates/cd-core/src/fast_triage/route.rs",
+        needle="        self.max_corrections.min(FAST_TRIAGE_MAX_CORRECTIONS)\n",
+        replacement="        self.max_corrections\n",
+        test_filter="the_correction_is_bounded_at_one_however_config_is_set",
+    ),
+    Mutation(
+        name="fast_triage_escalation_evidence_mutation",
+        file="crates/cd-core/src/fast_triage/route.rs",
+        needle="""    let escalation_messages = fast_triage_messages(
+        inputs.user_text,
+        packet,
+        &evidence_block,
+        categories.first().copied(),
+    );
+""",
+        replacement="""    let escalation_messages = fast_triage_messages(
+        inputs.user_text,
+        packet,
+        &fast_triage_evidence_block(packet),
+        categories.first().copied(),
+    );
+""",
+        test_filter="an_authorized_escalation_succeeds_with_a_byte_identical_packet",
+    ),
+    Mutation(
+        name="fast_triage_silent_gateway_switch",
+        file="crates/cd-core/src/fast_triage/route.rs",
+        needle="        (Some(fallback), Some(backend)) if fallback.authorized => Some((fallback, backend)),\n",
+        replacement="        (Some(fallback), Some(backend)) => Some((fallback, backend)),\n",
+        test_filter="an_unauthorized_fallback_is_never_called",
+    ),
+    Mutation(
+        name="fast_triage_reasoning_into_visible_answer",
+        file="crates/cd-core/src/fast_triage/terminal.rs",
+        needle="        let (reasoning, visible) = split_complete_reasoning_prefix(raw);\n",
+        replacement="        let (reasoning, visible) = (String::new(), raw.trim().to_string());\n",
+        test_filter="a_reasoning_only_terminal_is_empty_not_a_pass",
+    ),
+    Mutation(
+        name="fast_triage_reasoning_into_debug_projection",
+        file="crates/cd-core/src/fast_triage/terminal.rs",
+        needle="            .field(\"reasoning_chars\", &self.reasoning.chars().count())\n",
+        replacement="            .field(\"reasoning_chars\", &self.reasoning)\n",
+        test_filter="reasoning_stays_in_its_own_channel_and_never_becomes_visible",
+    ),
+    # --- provider-neutral contribution reconciliation ---------------------
+    # These invert one host-owned promise each.  The focused tests below are
+    # intentionally small so the mutation lane can run independently of the
+    # broader historical mutation campaign.
+    Mutation(
+        name="contribution_symptom_cause_gate",
+        file="crates/cd-core/src/multi_model/contributions.rs",
+        needle="""            if row.role == EvidenceRole::Symptom
+                && matches!(
+                    claim.kind,
+                    ContributionClaimKind::CausalCandidate
+                        | ContributionClaimKind::CompetingExplanation
+                )
+            {
+                return Err(ContributionValidationError::RoleMismatch);
+            }
+""",
+        replacement="            if false {\n                return Err(ContributionValidationError::RoleMismatch);\n            }\n",
+        test_filter="host_labelled_symptom_cannot_be_proposed_as_causal_candidate",
+    ),
+    Mutation(
+        name="contribution_abstention_counts_as_support",
+        file="crates/cd-core/src/multi_model/contributions.rs",
+        needle="        if !contribution.abstained {\n",
+        replacement="        if true {\n",
+        test_filter="explicit_abstention_is_not_reported_as_support",
+    ),
+    Mutation(
+        name="contribution_missing_role_coverage_ignored",
+        file="crates/cd-core/src/multi_model/contributions.rs",
+        needle="    let missing_role_coverage = !has_observation_claim || !has_causal_claim;\n",
+        replacement="    let missing_role_coverage = false;\n",
+        test_filter="dropout_is_explicit_and_does_not_hide_a_useful_partial_result",
+    ),
+    Mutation(
+        name="contribution_dropout_not_escalated",
+        file="crates/cd-core/src/multi_model/contributions.rs",
+        needle="    let has_dropout = attempts\n        .iter()\n        .any(|attempt| attempt.availability != ContributionAvailability::Completed);\n",
+        replacement="    let has_dropout = false;\n",
+        test_filter="complete_role_coverage_with_dropout_recommends_escalation",
+    ),
 ]
 
 
@@ -203,12 +306,24 @@ def main() -> int:
         default="HEAD",
         help="commit whose mutation-target bytes must match the worktree",
     )
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        help="run only the named mutation(s); may be repeated",
+    )
     args = parser.parse_args()
+
+    mutations = [
+        mutation for mutation in MUTATIONS if not args.only or mutation.name in args.only
+    ]
+    if not mutations:
+        parser.error("--only did not match any mutation name")
 
     tested_sha = subprocess.check_output(
         ["git", "rev-parse", args.tested_sha], cwd=ROOT, text=True
     ).strip()
-    target_files = sorted({mutation.file for mutation in MUTATIONS})
+    target_files = sorted({mutation.file for mutation in mutations})
     target_diff = subprocess.run(
         ["git", "diff", "--quiet", tested_sha, "--", *target_files],
         cwd=ROOT,
@@ -221,7 +336,7 @@ def main() -> int:
         )
 
     results = []
-    for mutation in MUTATIONS:
+    for mutation in mutations:
         print(f"MUTATE {mutation.name}", flush=True)
         result = run_mutation(mutation, args.timeout)
         results.append(result)

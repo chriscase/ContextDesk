@@ -9,7 +9,7 @@
 #   EXACT_HEAD_KEEP=1 EXACT_HEAD_OUT=/path/to/keep ./scripts/exact_head_cli_acceptance.sh
 #
 # Env:
-#   CARGO_TARGET_DIR  shared target (default: <repo>/target) — never cleaned
+#   CARGO_TARGET_DIR  worktree-scoped target (default: <repo>/target) — never cleaned
 #   EXACT_HEAD_OUT    directory for captured step artifacts (default: mktemp)
 #   EXACT_HEAD_KEEP   if 1, retain EXACT_HEAD_OUT / run home
 #   EXACT_HEAD_FORCE_BUILD  if 1, always rebuild before stamp
@@ -17,6 +17,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export EXACT_HEAD_REPO_ROOT="$ROOT"
+
+# Match the full gate's worktree-scoped cache policy. Explicit
+# CARGO_TARGET_DIR, CI, or the opt-out variable retains full control.
+if [[ -z "${CARGO_TARGET_DIR:-}" && "${CI:-}" != "true" &&
+      "${CONTEXTDESK_DISABLE_SHARED_BUILD_CACHE:-0}" != "1" &&
+      -x "$ROOT/scripts/local-build-cache.sh" ]]; then
+  if [[ -n "${CONTEXTDESK_BUILD_CACHE_ROOT:-}" ||
+        -d "${HOME:-}/Library/Caches/ContextDesk/build-v1" ||
+        -d "${XDG_CACHE_HOME:-${HOME:-}/.cache}/contextdesk/build-v1" ]]; then
+    eval "$("$ROOT/scripts/local-build-cache.sh" activate)"
+  fi
+fi
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 export PATH="${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"

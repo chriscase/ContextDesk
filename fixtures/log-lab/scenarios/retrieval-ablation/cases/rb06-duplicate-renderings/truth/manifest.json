@@ -1,0 +1,201 @@
+{
+  "base_ts": 1740211440,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.3,
+      "min_recall_at_25": 0.6,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb06-duplicate-renderings",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 201,
+      "expected_token_records": 2,
+      "group_id": "rb06-duplicate-renderings-g01",
+      "incident_id": "rb06-duplicate-renderings-inc1",
+      "notes": "single settlement failure rendered twice: full stack + wrapped stderr flood",
+      "role": "trigger",
+      "sources": [
+        "app/service.log",
+        "wrapper/service.stderr"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "txn-9B74CB61",
+      "ts": 1740214440
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb06-duplicate-renderings-g02",
+      "incident_id": null,
+      "notes": "unrelated exception; must remain a separate finding",
+      "role": "neutral",
+      "sources": [
+        "app/service.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "txn-43336AB3",
+      "ts": 1740214640
+    }
+  ],
+  "expected": {
+    "bytes": 69865,
+    "events": 552,
+    "excluded_files": [],
+    "files": 3,
+    "files_by_path": {
+      "api/traffic.jsonl": {
+        "bytes": 50661,
+        "events": 300,
+        "sha256": "c6009ff69364440c332e0903875e6551ae538f630dff89ade84c0bd13aa1b381"
+      },
+      "app/service.log": {
+        "bytes": 3550,
+        "events": 52,
+        "sha256": "24406924b31f91411bed7083c88c1d5d1a6e07f7b903392b502216bb28c1283a"
+      },
+      "wrapper/service.stderr": {
+        "bytes": 15654,
+        "events": 200,
+        "sha256": "5a69a8504647b6b661950cef89f3958bd162310bd932accdd60f994ae1a7eb8f"
+      }
+    },
+    "severities": {
+      "error": 202,
+      "info": 350
+    },
+    "source_count": 3,
+    "sources": {
+      "api/traffic.jsonl": 300,
+      "app/service.log": 52,
+      "wrapper/service.stderr": 200
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "roughly two hundred settlement failures occurred",
+    "the stderr flood is a distinct second incident"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "6226737407daad00dca11d7d330825cceb1bc231cbad866acf9dfb007616ead8",
+  "incidents": [
+    {
+      "incident_id": "rb06-duplicate-renderings-inc1",
+      "root_cause_status": "established",
+      "summary": "One settlement post failure produced an application stack trace and ~200 wrapped stderr records; it is a single semantic occurrence.",
+      "trigger_group_ids": [
+        "rb06-duplicate-renderings-g01"
+      ],
+      "window_from_ts": 1740214440,
+      "window_to_ts": 1740214700
+    }
+  ],
+  "intended_probe": "one failure appears as a multiline application exception plus hundreds of separately wrapped stderr records",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb06-duplicate-renderings-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb06-duplicate-renderings-g01"
+        }
+      ]
+    },
+    "rb06-duplicate-renderings-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb06-duplicate-renderings-g01"
+        }
+      ]
+    },
+    "rb06-duplicate-renderings-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb06-duplicate-renderings-g01"
+        }
+      ]
+    },
+    "rb06-duplicate-renderings-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb06-duplicate-renderings-g01"
+        }
+      ]
+    },
+    "rb06-duplicate-renderings-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb06-duplicate-renderings-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb06-duplicate-renderings-g01"
+        }
+      ]
+    },
+    "rb06-duplicate-renderings-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb06-duplicate-renderings-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb06-duplicate-renderings-g02"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "wrapper restart policy is not in the corpus"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the application stack trace and the stderr flood are renderings of one occurrence",
+    "raw record volume must not be reported as occurrence count",
+    "the cache warmup exception is a separate, unrelated finding"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "8dd77f9d5426dcf4f0c46e3cdd516b8b5300039825bb0048e35067c53b1c5db6",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Duplicate renderings"
+}

@@ -2,12 +2,13 @@
 mod log_lab_generator;
 
 use log_lab_generator::{
-    generate_behavior, generate_compact, generate_scale, generate_triage_stress,
-    is_behavior_profile, triage_stress_estimated_bytes, write_performance_template,
-    write_triage_stress_performance_template, BehaviorControls, DEFAULT_LARGE_EVENT_COUNT,
-    DEFAULT_TRIAGE_STRESS_EVENT_COUNT, LARGE_PROFILE, MEDIUM_EVENT_COUNT, MEDIUM_PROFILE,
-    PAGING_STRESS_PROFILE, SEVEN_DAY_PROFILE, SMALL_PROFILE, TRIAGE_STRESS_PROFILE,
-    TRIAGE_STRESS_SOURCE_COUNT, UI_MEDIUM_PROFILE,
+    generate_behavior, generate_compact, generate_retrieval_ablation, generate_scale,
+    generate_triage_stress, is_behavior_profile, triage_stress_estimated_bytes,
+    write_performance_template, write_triage_stress_performance_template, BehaviorControls, RaTier,
+    DEFAULT_LARGE_EVENT_COUNT, DEFAULT_TRIAGE_STRESS_EVENT_COUNT, LARGE_PROFILE,
+    MEDIUM_EVENT_COUNT, MEDIUM_PROFILE, PAGING_STRESS_PROFILE, RA_DEFAULT_SEED, RA_PROFILE,
+    SEVEN_DAY_PROFILE, SMALL_PROFILE, TRIAGE_STRESS_PROFILE, TRIAGE_STRESS_SOURCE_COUNT,
+    UI_MEDIUM_PROFILE,
 };
 use std::path::PathBuf;
 use std::time::Instant;
@@ -28,8 +29,17 @@ fn run() -> log_lab_generator::LabResult<()> {
     let mut source_count: Option<usize> = None;
     let mut estimate_only = false;
     let mut record_perf = false;
+    let mut tier = "small".to_string();
+    let mut seed = RA_DEFAULT_SEED;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--tier" => {
+                tier = args.next().ok_or("--tier requires small|medium|large")?;
+            }
+            "--seed" => {
+                let value = args.next().ok_or("--seed requires a u64 value")?;
+                seed = value.parse()?;
+            }
             "--output" => {
                 let value = args.next().ok_or("--output requires a path")?;
                 output = Some(PathBuf::from(value));
@@ -57,6 +67,43 @@ fn run() -> log_lab_generator::LabResult<()> {
             }
             other => return Err(format!("unknown argument: {other}").into()),
         }
+    }
+
+    if profile == RA_PROFILE {
+        let tier = RaTier::parse(&tier)?;
+        // Rough per-event byte cost measured on the committed small tier.
+        let approx_events: u64 = match tier {
+            RaTier::Small => 12_000,
+            RaTier::Medium => 250_000,
+            RaTier::Large => 1_025_000,
+        };
+        let approx_bytes = approx_events.saturating_mul(185);
+        if estimate_only {
+            println!(
+                "ESTIMATE profile={RA_PROFILE} tier={tier} seed={seed} approx_events={approx_events} approx_bytes={approx_bytes} approx_mib={:.1}",
+                approx_bytes as f64 / (1024.0 * 1024.0)
+            );
+            println!(
+                "policy: medium/large retrieval-ablation corpora are generated on demand into ignored directories; never commit generated bulk trees."
+            );
+            return Ok(());
+        }
+        if matches!(tier, RaTier::Large) {
+            eprintln!(
+                "WARNING: large tier generates ~{approx_events} events (~{:.1} MiB). Output must stay outside Git.",
+                approx_bytes as f64 / (1024.0 * 1024.0)
+            );
+        }
+        let output = output.ok_or("--output is required (unless --estimate-only)")?;
+        let started = Instant::now();
+        let summary = generate_retrieval_ablation(&output, tier, seed)?;
+        let generation_ms = started.elapsed().as_millis();
+        println!(
+            "PASS profile={RA_PROFILE} tier={} seed={} cases={} files={} events={} bytes={} corpus_identity_sha256={} generation_ms={generation_ms}",
+            summary.tier, summary.seed, summary.cases, summary.files, summary.events,
+            summary.bytes, summary.corpus_identity_sha256
+        );
+        return Ok(());
     }
 
     if profile == TRIAGE_STRESS_PROFILE {
@@ -225,8 +272,11 @@ Profiles:
   seven-day        Seven-day sparse/burst (event count independent of span)
   paging-stress    Boundary sentinels for bidirectional paging/eviction
   triage-stress    Error-heavy 250k broad-triage corpus (local-only)
+  retrieval-ablation  Hidden-truth retrieval benchmark suite (20 cases)
 
 Options:
+  --tier T         retrieval-ablation tier: small|medium|large (default small)
+  --seed N         retrieval-ablation neutral-surface seed (default fixed)
   --events N       Override event count
   --span-secs N    Override wall-clock span (behavior profiles only)
   --sources N      Override source count 1–10 (behavior profiles only)

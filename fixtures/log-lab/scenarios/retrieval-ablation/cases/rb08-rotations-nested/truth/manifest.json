@@ -1,0 +1,280 @@
+{
+  "base_ts": 1740384240,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.3,
+      "min_recall_at_25": 0.6,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb08-rotations-nested",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb08-rotations-nested-g01",
+      "incident_id": null,
+      "notes": "anchor in the dated rotation",
+      "role": "neutral",
+      "sources": [
+        "svc/app/service.log.2025-02-14",
+        "bundle.zip!/svc/app/service.log.2025-02-14"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "inv-2D88A258",
+      "ts": 1740384740
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb08-rotations-nested-g02",
+      "incident_id": "rb08-rotations-nested-inc1",
+      "notes": "the causal record lives in the rotated .1 segment",
+      "role": "trigger",
+      "sources": [
+        "svc/app/service.log.1",
+        "bundle.zip!/svc/app/service.log.1"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "inv-7D6FE896",
+      "ts": 1740385740
+    },
+    {
+      "expected_occurrences": 6,
+      "expected_raw_records": 6,
+      "expected_token_records": 6,
+      "group_id": "rb08-rotations-nested-g03",
+      "incident_id": "rb08-rotations-nested-inc1",
+      "notes": "current segment shows the stuck-export symptoms",
+      "role": "symptom",
+      "sources": [
+        "svc/app/service.log",
+        "bundle.zip!/svc/app/service.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "inv-3F495E7D",
+      "ts": 1740386440
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb08-rotations-nested-g04",
+      "incident_id": null,
+      "notes": "same basename, different nested region",
+      "role": "neutral",
+      "sources": [
+        "regions/east/svc/app/service.log",
+        "bundle.zip!/regions/east/svc/app/service.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "inv-71A1A8E3",
+      "ts": 1740385440
+    }
+  ],
+  "expected": {
+    "bytes": 69120,
+    "events": 1012,
+    "excluded_files": [],
+    "files": 8,
+    "files_by_path": {
+      "bundle.zip!/regions/east/svc/app/service.log": {
+        "bytes": 8266,
+        "events": 121,
+        "sha256": "e8b609842139eea344de412b6e06c694a5c69a1098e107024a06f5819d092a2e"
+      },
+      "bundle.zip!/svc/app/service.log": {
+        "bytes": 11830,
+        "events": 173,
+        "sha256": "3522c1710b95c69f7d40118bb8c3502f4ec783a3f6c3d4d5d1eda6517d23fb5a"
+      },
+      "bundle.zip!/svc/app/service.log.1": {
+        "bytes": 8250,
+        "events": 121,
+        "sha256": "ed2c0ddb9fccbac99de7088e0fe18a402652d898510c26395ced82447877ca67"
+      },
+      "bundle.zip!/svc/app/service.log.2025-02-14": {
+        "bytes": 6214,
+        "events": 91,
+        "sha256": "40dc0827b2a38eda5d6d5f76b38fa831dbbb2aacc72360ea4f3df77430ffb486"
+      },
+      "regions/east/svc/app/service.log": {
+        "bytes": 8266,
+        "events": 121,
+        "sha256": "e8b609842139eea344de412b6e06c694a5c69a1098e107024a06f5819d092a2e"
+      },
+      "svc/app/service.log": {
+        "bytes": 11830,
+        "events": 173,
+        "sha256": "3522c1710b95c69f7d40118bb8c3502f4ec783a3f6c3d4d5d1eda6517d23fb5a"
+      },
+      "svc/app/service.log.1": {
+        "bytes": 8250,
+        "events": 121,
+        "sha256": "ed2c0ddb9fccbac99de7088e0fe18a402652d898510c26395ced82447877ca67"
+      },
+      "svc/app/service.log.2025-02-14": {
+        "bytes": 6214,
+        "events": 91,
+        "sha256": "40dc0827b2a38eda5d6d5f76b38fa831dbbb2aacc72360ea4f3df77430ffb486"
+      }
+    },
+    "severities": {
+      "error": 2,
+      "info": 1000,
+      "warn": 10
+    },
+    "source_count": 8,
+    "sources": {
+      "bundle.zip!/regions/east/svc/app/service.log": 121,
+      "bundle.zip!/svc/app/service.log": 173,
+      "bundle.zip!/svc/app/service.log.1": 121,
+      "bundle.zip!/svc/app/service.log.2025-02-14": 91,
+      "regions/east/svc/app/service.log": 121,
+      "svc/app/service.log": 173,
+      "svc/app/service.log.1": 121,
+      "svc/app/service.log.2025-02-14": 91
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the east region outage caused the delays"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "c305027c262dccb76d14c47300aa625673d4398f824fe0060d7ad0f040af5196",
+  "incidents": [
+    {
+      "incident_id": "rb08-rotations-nested-inc1",
+      "root_cause_status": "established",
+      "summary": "A wedged ledger export in the rotated segment left current-batch invoices waiting; the east region shows only routine drift.",
+      "trigger_group_ids": [
+        "rb08-rotations-nested-g02"
+      ],
+      "window_from_ts": 1740385740,
+      "window_to_ts": 1740386900
+    }
+  ],
+  "intended_probe": "rotated suffixes, nested directories with shared basenames, and ZIP/folder parity keep stable source identity",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb08-rotations-nested-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb08-rotations-nested-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb08-rotations-nested-g03"
+        }
+      ]
+    },
+    "rb08-rotations-nested-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb08-rotations-nested-g02"
+        }
+      ]
+    },
+    "rb08-rotations-nested-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb08-rotations-nested-g03"
+        }
+      ]
+    },
+    "rb08-rotations-nested-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb08-rotations-nested-g02"
+        }
+      ]
+    },
+    "rb08-rotations-nested-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb08-rotations-nested-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb08-rotations-nested-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb08-rotations-nested-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb08-rotations-nested-g04"
+        }
+      ]
+    },
+    "rb08-rotations-nested-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb08-rotations-nested-g01"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb08-rotations-nested-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb08-rotations-nested-g03"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "nothing in the corpus explains why the export lock was not released"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the causal record is in the rotated .1 segment, before the current file begins",
+    "the nested east service.log is a different source than svc/app/service.log",
+    "folder and archive copies carry identical content under distinct identities"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "9fb51af06f18179e78114255b632f437c7dc58f16ffa3c0b33e01471f2d5e68b",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Rotations and nested sources"
+}

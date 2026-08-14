@@ -1,0 +1,125 @@
+{
+  "case_id": "rb19-severity-isolated",
+  "queries": [
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "checkout",
+          "failed",
+          "payment"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "broad",
+      "query_id": "rb19-severity-isolated-q1",
+      "question": "Why are checkouts failing?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "certificate",
+          "expired",
+          "handshake"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "causal",
+      "query_id": "rb19-severity-isolated-q2",
+      "question": "What caused the checkout failures?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "checkout",
+          "failed",
+          "declined"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "symptom",
+      "query_id": "rb19-severity-isolated-q3",
+      "question": "Show failed checkouts."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "cert-DB452DD0"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "identifier",
+      "query_id": "rb19-severity-isolated-q4",
+      "question": "Find cert-DB452DD0."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "watchdog",
+          "checkout",
+          "failed"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "negative",
+      "query_id": "rb19-severity-isolated-q5",
+      "question": "Did the host watchdog crash cause the checkout failures?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "watchdog",
+          "certificate",
+          "expired"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "competing",
+      "query_id": "rb19-severity-isolated-q6",
+      "question": "Is the watchdog FATAL or the certificate the better explanation?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "watchdog",
+          "checkout",
+          "certificate"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "chronology",
+      "query_id": "rb19-severity-isolated-q7",
+      "question": "Does the FATAL line up with the checkout failures in time?"
+    }
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_queries.v1",
+  "schema_version": 1,
+  "suite_id": "contextdesk.log_lab.retrieval_ablation"
+}

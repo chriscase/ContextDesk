@@ -1,0 +1,2 @@
+{"host":"queue-02.example","level":"warn","message":"queue redrive triggered queue=orders-dlq messages=18342 redrive=rd-3FEABBF9","service":"queue-redrive","trace_id":"trace-60ea52d5","ts":1741250590}
+{"host":"queue-02.example","level":"warn","message":"queue redrive triggered queue=orders-dlq messages=18342 redrive=rd-3FEABBF9","service":"queue-redrive","trace_id":"trace-60ea52d5","ts":1741250890}

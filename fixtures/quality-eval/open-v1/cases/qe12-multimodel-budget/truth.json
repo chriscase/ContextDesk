@@ -1,0 +1,74 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe12-multimodel-budget",
+  "title": "Partial multi-model role dropout and host-budget exhaustion",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "Report multi-model role completion for the outage.",
+      "relevant_ids": [
+        "d01",
+        "d02"
+      ],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 1
+      },
+      "must_include_ids": [
+        "d01"
+      ],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 2
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": [
+        "lease"
+      ],
+      "trigger_tokens": [
+        "lease window"
+      ],
+      "symptom_tokens": [
+        "amber-sync aborted"
+      ],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": [
+        "d01"
+      ],
+      "forbidden_evidence_ids": [],
+      "requires_abstention": false,
+      "forbidden_conclusion_tokens": [],
+      "diagnostic": {
+        "allowed_categories": [
+          "compatible_success",
+          "budget_exhausted",
+          "role_partial_completion"
+        ],
+        "expected_usefulness_policy": "",
+        "require_honest_usefulness": false,
+        "separate_transport_from_grounding": false,
+        "require_citeable_on_tool_progress": false,
+        "require_tool_withdrawal_after_non_progress": false,
+        "required_roles": [
+          "investigator",
+          "reviewer",
+          "synthesizer"
+        ],
+        "budget_exhaustion_forbids_useful": true,
+        "require_share_safe_export": true
+      }
+    }
+  ],
+  "candidate_expectations": {
+    "good_roles_complete": "pass",
+    "good_budget_exhausted_honest": "pass",
+    "mut_role_dropped_silent": "fail",
+    "mut_budget_claimed_useful": "fail"
+  },
+  "incidents": {}
+}

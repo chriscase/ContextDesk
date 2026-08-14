@@ -28,6 +28,34 @@ export type ChatMsg = {
   trail?: string[];
   streaming?: boolean;
   meta?: MessageMetaDto;
+  /** Host-authored multi-model stage progress / degradation lines for this
+   * turn. Counts, ids, and reasons only — never model text. */
+  multiModelStages?: MultiModelStageView[];
+  /** Process-lifetime readable projection of the exact engine activity for
+   * this turn. It explains execution and never becomes corpus evidence. */
+  turnProgress?: TurnProgressView[];
+};
+
+/** One host-authored multi-model stage line (from the `multi_model_stage`
+ * event). All fields are host labels — safe to render as text. */
+export type MultiModelStageView = {
+  stage: string;
+  phase: string;
+  status?: string;
+  detail: string;
+  candidateId?: string;
+};
+
+/** Shared core-authored progress projection (`turn_progress` IPC event). */
+export type TurnProgressView = {
+  category: string;
+  stage: string;
+  phase: string;
+  label: string;
+  detail?: string;
+  status?: string;
+  candidateId?: string;
+  elapsedMs: number;
 };
 
 function isHttpUrl(s: string): boolean {
@@ -74,10 +102,44 @@ export function applyEventsToMessage(
   let meta: MessageMetaDto | undefined = base.meta
     ? { ...base.meta }
     : undefined;
+  const multiModelStages: MultiModelStageView[] = [
+    ...(base.multiModelStages ?? []),
+  ];
+  const turnProgress: TurnProgressView[] = [...(base.turnProgress ?? [])];
 
   for (const ev of events) {
     const p = ev.payload;
     switch (ev.kind) {
+      case "turn_progress": {
+        const elapsedMs = Number(p.elapsed_ms);
+        if (!Number.isFinite(elapsedMs) || elapsedMs < 0) break;
+        const label = String(p.label ?? "").trim();
+        if (!label) break;
+        turnProgress.push({
+          category: String(p.category ?? "turn"),
+          stage: String(p.stage ?? "turn"),
+          phase: String(p.phase ?? "progress"),
+          label,
+          detail: p.detail != null ? String(p.detail) : undefined,
+          status: p.status != null ? String(p.status) : undefined,
+          candidateId:
+            p.candidate_id != null ? String(p.candidate_id) : undefined,
+          elapsedMs,
+        });
+        break;
+      }
+      case "multi_model_stage": {
+        // Host-authored progress/degradation. Every field is a host label,
+        // so it is safe to display as plain text.
+        multiModelStages.push({
+          stage: String(p.stage ?? ""),
+          phase: String(p.phase ?? ""),
+          status: p.status != null ? String(p.status) : undefined,
+          detail: String(p.detail ?? ""),
+          candidateId: p.candidate_id != null ? String(p.candidate_id) : undefined,
+        });
+        break;
+      }
       case "turn_started": {
         // Host-fact model from StreamEvent::TurnStarted (#155 / #90).
         const hostModel = p.model != null ? String(p.model).trim() : "";
@@ -199,6 +261,8 @@ export function applyEventsToMessage(
       trail: trail.length ? trail : undefined,
       streaming: false,
       meta,
+      multiModelStages: multiModelStages.length ? multiModelStages : undefined,
+      turnProgress: turnProgress.length ? turnProgress : undefined,
     },
     permission,
   };
@@ -214,7 +278,11 @@ export function shouldProcessEventWhileStopped(
   kind: string,
 ): boolean {
   if (!stopped) return true;
-  return kind === "turn_completed" || kind === "error";
+  return (
+    kind === "turn_completed" ||
+    kind === "error" ||
+    kind === "multi_model_stage"
+  );
 }
 
 /**

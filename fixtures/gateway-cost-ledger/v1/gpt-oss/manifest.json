@@ -1,0 +1,12 @@
+{
+  "schema_id": "contextdesk.gateway_diagnostic_manifest.v1",
+  "schema_version": 1,
+  "run_id": "gwdx-fixture-gptoss-d39688c7",
+  "files": [
+    {
+      "name": "report.json",
+      "sha256": "0f179796941382eb6868bb954bc1b087a203dd63aa465126fbc8bed8a5c35ed9",
+      "bytes": 4782
+    }
+  ]
+}

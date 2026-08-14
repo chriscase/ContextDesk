@@ -75,6 +75,38 @@ describe("curation wire validation", () => {
     ).toThrow(/identity does not match/);
   });
 
+  it("accepts role-specific readiness and rejects invented readiness states", () => {
+    const option = {
+      id: "deepseek-v4-flash",
+      label: "deepseek-v4-flash",
+      selection_key: modelSelectionKey("p", "deepseek-v4-flash"),
+      provider_id: "p",
+      provider_label: "Gateway",
+      group: "Gateway",
+      is_default: false,
+      tools_enabled: true,
+      tools_disabled_reason: null,
+      availability: "discovered",
+      availability_detail: null,
+      readiness: {
+        role: "chat",
+        state: "verified",
+        basis: "measured",
+        tested_at: 100,
+        detail: "Synthetic contracts passed.",
+      },
+      hidden: false,
+      hidden_by: null,
+      pinned_rank: null,
+    };
+    expect(parseModelOptions([option])).toHaveLength(1);
+    expect(() =>
+      parseModelOptions([
+        { ...option, readiness: { ...option.readiness, state: "excellent" } },
+      ]),
+    ).toThrow(/readiness\.state/);
+  });
+
   it("requires the drift-detection token", () => {
     expect(() =>
       parseCurationImpact({

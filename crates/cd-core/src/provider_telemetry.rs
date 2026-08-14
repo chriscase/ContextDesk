@@ -87,6 +87,10 @@ pub struct ProviderTransportTelemetry {
     /// Reasoning tokens when supplied (OpenAI details or gateway extension).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// Character count observed in a separate reasoning/analysis channel.
+    /// The channel text itself is never retained or serialized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content_chars: Option<u64>,
     /// Cached prompt tokens when supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
@@ -96,6 +100,14 @@ pub struct ProviderTransportTelemetry {
     /// Actual gateway/request cost when supplied (never invented as 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
+    /// Requested reasoning-effort policy label (`omit` or level). Share-safe;
+    /// never a prompt, body, header, URL, or secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_requested: Option<String>,
+    /// Exact effort request applied on the wire (`omit` or level). Share-safe;
+    /// not proof the remote model honored it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_effective: Option<String>,
 }
 
 /// Sum a per-round numeric metric only when **every** round reports it.
@@ -153,9 +165,12 @@ impl ProviderTransportTelemetry {
             && self.prompt_tokens.is_none()
             && self.completion_tokens.is_none()
             && self.reasoning_tokens.is_none()
+            && self.reasoning_content_chars.is_none()
             && self.cached_tokens.is_none()
             && self.total_tokens.is_none()
             && self.cost.is_none()
+            && self.reasoning_effort_requested.is_none()
+            && self.reasoning_effort_effective.is_none()
     }
 
     /// Merge later patches without inventing values. Later `Some` wins;
@@ -187,6 +202,12 @@ impl ProviderTransportTelemetry {
         if other.reasoning_tokens.is_some() {
             self.reasoning_tokens = other.reasoning_tokens;
         }
+        self.reasoning_content_chars =
+            match (self.reasoning_content_chars, other.reasoning_content_chars) {
+                (Some(a), Some(b)) => a.checked_add(b),
+                (None, Some(b)) => Some(b),
+                (current, None) => current,
+            };
         if other.cached_tokens.is_some() {
             self.cached_tokens = other.cached_tokens;
         }
@@ -195,6 +216,13 @@ impl ProviderTransportTelemetry {
         }
         if other.cost.is_some() {
             self.cost = other.cost;
+        }
+        // Share-safe effort labels: later Some wins; None never clears.
+        if other.reasoning_effort_requested.is_some() {
+            self.reasoning_effort_requested = other.reasoning_effort_requested.clone();
+        }
+        if other.reasoning_effort_effective.is_some() {
+            self.reasoning_effort_effective = other.reasoning_effort_effective.clone();
         }
     }
 
@@ -244,6 +272,46 @@ fn json_u64(value: &Value) -> Option<u64> {
                 }
             })
         })
+}
+
+/// Count known reasoning-channel fields without retaining their contents.
+/// DeepSeek, Qwen, and several OpenAI-compatible gateways use one of these
+/// names when reasoning is separated from user-visible assistant text.
+fn reasoning_content_chars_from_value(v: &Value) -> Option<u64> {
+    const CHANNEL_KEYS: &[&str] = &[
+        "reasoning_content",
+        "reasoning",
+        "analysis",
+        "thinking",
+        "thinking_content",
+    ];
+
+    fn add_object(value: &Value, total: &mut u64, found: &mut bool) {
+        for key in CHANNEL_KEYS {
+            let Some(text) = value.get(*key).and_then(Value::as_str) else {
+                continue;
+            };
+            *found = true;
+            let chars = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
+            *total = total.checked_add(chars).unwrap_or(u64::MAX);
+        }
+    }
+
+    let mut total = 0u64;
+    let mut found = false;
+    add_object(v, &mut total, &mut found);
+    if let Some(choices) = v.get("choices").and_then(Value::as_array) {
+        for choice in choices {
+            add_object(choice, &mut total, &mut found);
+            if let Some(message) = choice.get("message") {
+                add_object(message, &mut total, &mut found);
+            }
+            if let Some(delta) = choice.get("delta") {
+                add_object(delta, &mut total, &mut found);
+            }
+        }
+    }
+    found.then_some(total)
 }
 
 fn json_cost(value: &Value) -> Option<f64> {
@@ -355,6 +423,8 @@ pub fn extract_transport_telemetry_from_value(v: &Value) -> ProviderTransportTel
             .and_then(json_cost);
     }
 
+    out.reasoning_content_chars = reasoning_content_chars_from_value(v);
+
     out
 }
 
@@ -459,6 +529,10 @@ pub struct ProviderTurnTelemetry {
     /// Aggregated reasoning tokens when reported on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// Aggregated character count observed in separate reasoning/analysis
+    /// channels. Channel text is never retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content_chars: Option<u64>,
     /// Aggregated cached prompt tokens when reported on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
@@ -554,6 +628,31 @@ mod tests {
     }
 
     #[test]
+    fn separate_reasoning_channel_is_counted_without_retaining_text() {
+        let v = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "reasoning_content": "private reasoning that must not be retained",
+                    "content": "visible answer"
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let tel = extract_transport_telemetry_from_value(&v);
+        assert_eq!(
+            tel.reasoning_content_chars,
+            Some(
+                "private reasoning that must not be retained"
+                    .chars()
+                    .count() as u64
+            )
+        );
+        let dumped = serde_json::to_string(&tel).unwrap();
+        assert!(!dumped.contains("private reasoning"));
+        assert!(!dumped.contains("visible answer"));
+    }
+
+    #[test]
     fn missing_metadata_stays_explicitly_unknown() {
         let tel = extract_transport_telemetry_from_value(&json!({
             "choices": [{"message": {"content": ""}, "finish_reason": "length"}]
@@ -631,6 +730,36 @@ mod tests {
         let long = "m".repeat(MAX_TELEMETRY_STRING_CHARS + 50);
         let bounded = sanitize_configured_identity(&long);
         assert_eq!(bounded.chars().count(), MAX_TELEMETRY_STRING_CHARS);
+    }
+
+    #[test]
+    fn merge_from_preserves_reasoning_effort_labels() {
+        let mut base = ProviderTransportTelemetry {
+            reasoning_effort_requested: Some("high".into()),
+            reasoning_effort_effective: Some("high".into()),
+            prompt_tokens: Some(1),
+            ..Default::default()
+        };
+        // Later body usage must not wipe effort labels.
+        let body_only = ProviderTransportTelemetry {
+            completion_tokens: Some(2),
+            ..Default::default()
+        };
+        base.merge_from(&body_only);
+        assert_eq!(base.reasoning_effort_requested.as_deref(), Some("high"));
+        assert_eq!(base.reasoning_effort_effective.as_deref(), Some("high"));
+        assert_eq!(base.completion_tokens, Some(2));
+        assert_eq!(base.prompt_tokens, Some(1));
+
+        // Later Some wins.
+        let later = ProviderTransportTelemetry {
+            reasoning_effort_requested: Some("low".into()),
+            reasoning_effort_effective: Some("low".into()),
+            ..Default::default()
+        };
+        base.merge_from(&later);
+        assert_eq!(base.reasoning_effort_requested.as_deref(), Some("low"));
+        assert!(!base.is_empty());
     }
 
     #[test]

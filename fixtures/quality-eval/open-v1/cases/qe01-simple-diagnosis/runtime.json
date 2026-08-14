@@ -1,0 +1,140 @@
+{
+  "schema_id": "contextdesk.quality_eval.runtime.v1",
+  "case_id": "qe01-simple-diagnosis",
+  "documents": [
+    {
+      "id": "d01",
+      "text": "kind=config_error level=error service=control pattern=BoundaryInvariantViolation lease window 250 below supported minimum 1000 revision r17"
+    },
+    {
+      "id": "d02",
+      "text": "kind=exception_header level=error service=worker pattern=LeaseEpochMismatch expected epoch differs from observed epoch"
+    },
+    {
+      "id": "d03",
+      "text": "kind=application_error level=error service=api pattern=RequestAborted operation amber-sync reason worker unavailable"
+    },
+    {
+      "id": "d04",
+      "text": "kind=status_event level=info service=api pattern=health probe status ok"
+    }
+  ],
+  "questions": {
+    "q1": "What configuration problem initiated the amber-sync failures?"
+  },
+  "packets": [
+    {
+      "packet_id": "fixed",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=config_error level=error service=control pattern=BoundaryInvariantViolation lease window 250 below supported minimum 1000 revision r17"
+        },
+        {
+          "id": "d02",
+          "text": "kind=exception_header level=error service=worker pattern=LeaseEpochMismatch expected epoch differs from observed epoch"
+        },
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=api pattern=RequestAborted operation amber-sync reason worker unavailable"
+        }
+      ]
+    },
+    {
+      "packet_id": "oracle",
+      "documents": [
+        {
+          "id": "d01",
+          "text": "kind=config_error level=error service=control pattern=BoundaryInvariantViolation lease window 250 below supported minimum 1000 revision r17"
+        }
+      ]
+    },
+    {
+      "packet_id": "product_path",
+      "documents": [
+        {
+          "id": "d02",
+          "text": "kind=exception_header level=error service=worker pattern=LeaseEpochMismatch expected epoch differs from observed epoch"
+        },
+        {
+          "id": "d03",
+          "text": "kind=application_error level=error service=api pattern=RequestAborted operation amber-sync reason worker unavailable"
+        }
+      ]
+    }
+  ],
+  "rankings": [
+    {
+      "query_id": "q1",
+      "ranked_ids": ["d01", "d02", "d03", "d04"],
+      "k": 4
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "good_fixed",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "BoundaryInvariantViolation lease window 250 below minimum 1000",
+          "evidence_ids": ["d01"],
+          "role": "trigger"
+        },
+        {
+          "text": "RequestAborted amber-sync after worker unavailable",
+          "evidence_ids": ["d03"],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "Invalid lease window configuration on r17 initiated worker mismatch and amber-sync aborts.",
+      "confidence": "medium"
+    },
+    {
+      "candidate_id": "mut_missing_citation",
+      "task_id": "t1",
+      "packet_id": "fixed",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "BoundaryInvariantViolation lease window 250",
+          "evidence_ids": [],
+          "role": "trigger"
+        }
+      ],
+      "conclusion": "Invalid lease window configuration initiated the failures.",
+      "confidence": "high"
+    },
+    {
+      "candidate_id": "good_oracle",
+      "task_id": "t1",
+      "packet_id": "oracle",
+      "asserts_root_cause_established": true,
+      "claims": [
+        {
+          "text": "BoundaryInvariantViolation lease window 250 below minimum",
+          "evidence_ids": ["d01"],
+          "role": "trigger"
+        }
+      ],
+      "conclusion": "Lease window boundary violation on r17 is the initiating configuration fault.",
+      "confidence": "medium"
+    },
+    {
+      "candidate_id": "good_product_path_abstention",
+      "task_id": "t1",
+      "packet_id": "product_path",
+      "asserts_root_cause_established": false,
+      "claims": [
+        {
+          "text": "RequestAborted amber-sync after worker unavailable",
+          "evidence_ids": ["d03"],
+          "role": "symptom"
+        }
+      ],
+      "conclusion": "RequestAborted for amber-sync is established, but the initiating configuration is not established from this packet.",
+      "confidence": "low"
+    }
+  ]
+}

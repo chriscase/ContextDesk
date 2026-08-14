@@ -8,7 +8,18 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { WireImportPreviewPlan, WireProcessProgress } from "@contextdesk/contracts";
+import {
+  parseCompiledTriagePolicyV2,
+  parseTriageReplayV1,
+  parseTriageRoleQualificationResultV1,
+  parseTriageRunEventV2,
+  type TriageReplayV1,
+  type TriageRoleQualificationRequestV1,
+  type TriageRoleQualificationResultV1,
+  type TriageRunEventV2,
+  type WireImportPreviewPlan,
+  type WireProcessProgress,
+} from "@contextdesk/contracts";
 import {
   EngineError,
   classifyEngineMessage,
@@ -16,6 +27,7 @@ import {
   type EventRevisionReport,
   type ImportRunReport,
   type ImportRunRequest,
+  type TriageService,
   type TimezoneApplyRequest,
   type TimezonePreview,
   type TimezoneState,
@@ -56,6 +68,158 @@ async function call<T>(
   } catch (error) {
     throw toEngineError(error);
   }
+}
+
+function parseTriageReplay(value: unknown): TriageReplayV1 {
+  try {
+    return parseTriageReplayV1(structuredClone(value));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new EngineError("invalid", `invalid triage replay: ${message}`);
+  }
+}
+
+function parseTriageEvent(value: unknown): TriageRunEventV2 {
+  try {
+    return parseTriageRunEventV2(structuredClone(value));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new EngineError("failed", `invalid triage event from host: ${message}`);
+  }
+}
+
+/**
+ * Tauri adapter for the trusted host V2 runner.
+ *
+ * Rust owns policy selection, qualification, provider construction, packet
+ * identity, validation, cancellation, and replay. TypeScript only validates
+ * the returned DTOs and forwards the one ordered event stream.
+ */
+function createTauriTriageService(transport: TauriTransport): TriageService {
+  const listeners = new Set<(event: TriageRunEventV2) => void>();
+  let globalUnlisten: (() => void) | null = null;
+  let globalListenPending: Promise<void> | null = null;
+
+  const ensureGlobalListener = async (): Promise<void> => {
+    if (globalUnlisten || globalListenPending) {
+      return globalListenPending ?? Promise.resolve();
+    }
+    globalListenPending = transport
+      .listen("triage-run-event", (event) => {
+        const parsed = parseTriageEvent(event.payload);
+        for (const listener of listeners) listener(parsed);
+      })
+      .then((stop) => {
+        globalUnlisten = stop;
+      })
+      .finally(() => {
+        globalListenPending = null;
+      });
+    return globalListenPending;
+  };
+
+  return {
+    capability: {
+      supported: true,
+      replay: true,
+    },
+    preflight: async (request) => {
+      const compiled = await call<unknown>(transport, "triage_preflight_v2", { request });
+      try {
+        return parseCompiledTriagePolicyV2(structuredClone(compiled));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new EngineError("failed", `invalid triage preflight from host: ${message}`);
+      }
+    },
+    qualify: async (
+      request: TriageRoleQualificationRequestV1,
+    ): Promise<TriageRoleQualificationResultV1> => {
+      const result = await call<unknown>(transport, "triage_qualify_role_v2", { request });
+      try {
+        return parseTriageRoleQualificationResultV1(structuredClone(result));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new EngineError("failed", `invalid triage role qualification from host: ${message}`);
+      }
+    },
+    run: async (request, options = {}) => {
+      if (options.signal?.aborted) {
+        throw new EngineError("cancelled", "triage run cancelled before provider work");
+      }
+      const delivered = new Set<number>();
+      const runListener = await transport.listen("triage-run-event", (event) => {
+        const parsed = parseTriageEvent(event.payload);
+        if (parsed.run_id !== request.run_id || delivered.has(parsed.sequence)) return;
+        delivered.add(parsed.sequence);
+        options.onEvent?.(parsed);
+      });
+      const abort = () => {
+        void call<boolean>(transport, "triage_cancel_v2", {
+          request: {
+            schema_id: "contextdesk.triage.cancellation.v1",
+            run_id: request.run_id,
+            cancellation_id: request.cancellation_id,
+          },
+        });
+      };
+      options.signal?.addEventListener("abort", abort, { once: true });
+      try {
+        const terminal = parseTriageEvent(
+          await call<TriageRunEventV2>(transport, "triage_run_v2", { request }),
+        );
+        if (terminal.run_id !== request.run_id) {
+          throw new EngineError("failed", "triage terminal run identity mismatch");
+        }
+        if (!delivered.has(terminal.sequence)) {
+          options.onEvent?.(terminal);
+        }
+        return terminal;
+      } finally {
+        options.signal?.removeEventListener("abort", abort);
+        runListener();
+      }
+    },
+    replay: async (replay, options = {}) => {
+      const parsedReplay = parseTriageReplay(replay);
+      if (options.signal?.aborted) {
+        throw new EngineError("cancelled", "triage replay consumption cancelled");
+      }
+      const delivered = new Set<number>();
+      const stop = await transport.listen("triage-run-event", (event) => {
+        const parsed = parseTriageEvent(event.payload);
+        if (parsed.run_id !== parsedReplay.run_id || delivered.has(parsed.sequence)) return;
+        delivered.add(parsed.sequence);
+        options.onEvent?.(parsed);
+      });
+      try {
+        const terminal = parseTriageEvent(
+          await call<TriageRunEventV2>(transport, "triage_replay", {
+            replay: parsedReplay,
+          }),
+        );
+        if (terminal.run_id !== parsedReplay.run_id) {
+          throw new EngineError("failed", "triage replay terminal run identity mismatch");
+        }
+        return terminal;
+      } finally {
+        stop?.();
+      }
+    },
+    cancel: (request) =>
+      call<boolean>(transport, "triage_cancel_v2", { request }),
+    onRunEvent: (listener) => {
+      listeners.add(listener);
+      void ensureGlobalListener();
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0 && globalUnlisten) {
+          globalUnlisten();
+          globalUnlisten = null;
+        }
+      };
+    },
+  };
 }
 
 /** Host ingest report shape (subset the flow consumes; camelCase wire). */
@@ -133,5 +297,6 @@ export function createTauriEngineClient(
         };
       },
     },
+    triage: createTauriTriageService(transport),
   };
 }

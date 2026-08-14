@@ -1,0 +1,126 @@
+{
+  "case_id": "rb15-recovery-evidence",
+  "queries": [
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "store",
+          "failed",
+          "failover"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "broad",
+      "query_id": "rb15-recovery-evidence-q1",
+      "question": "What happened to the store tier?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "failover",
+          "fenced",
+          "leader"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "causal",
+      "query_id": "rb15-recovery-evidence-q2",
+      "question": "Why did store writes fail?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "write",
+          "failed",
+          "leader"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "symptom",
+      "query_id": "rb15-recovery-evidence-q3",
+      "question": "Show failed store writes."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "promo-6BFEB62C"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "identifier",
+      "query_id": "rb15-recovery-evidence-q4",
+      "question": "Show promotion promo-6BFEB62C."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "quorum",
+          "lost"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "negative",
+      "query_id": "rb15-recovery-evidence-q5",
+      "question": "Was quorum lost?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "fenced",
+          "failover",
+          "write",
+          "failed"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "competing",
+      "query_id": "rb15-recovery-evidence-q6",
+      "question": "Did anything besides the fencing explain the failed writes?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "caught",
+          "up",
+          "normalized",
+          "promoted"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "chronology",
+      "query_id": "rb15-recovery-evidence-q7",
+      "question": "When did the system recover, and how do we know?"
+    }
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_queries.v1",
+  "schema_version": 1,
+  "suite_id": "contextdesk.log_lab.retrieval_ablation"
+}

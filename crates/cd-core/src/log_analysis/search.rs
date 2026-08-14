@@ -7,6 +7,10 @@ use super::{ActiveTimestampBasis, TimestampProvenance};
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
 use crate::memory::embed_blocking;
+use crate::rerank::{
+    cap_rerank_document, rerank_blocking, validate_rerank_scores, RerankBackend,
+    RERANK_DEFAULT_TIMEOUT_MS, RERANK_MAX_DOCUMENTS,
+};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
@@ -158,7 +162,15 @@ pub struct SearchLogsQuery {
     pub semantic: bool,
     /// Max results.
     pub k: usize,
+    /// Optional bounded candidate pool used before reranking. When absent,
+    /// the final result budget is also the candidate budget. The host clamps
+    /// this to the final budget within 1..=100 so model-originated requests cannot
+    /// create unbounded retrieval work.
+    pub candidate_k: Option<usize>,
 }
+
+/// Maximum number of template candidates that may enter reranking.
+pub const MAX_SEARCH_CANDIDATE_K: usize = 100;
 
 /// One search hit with citeable template id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +195,11 @@ pub struct SearchHit {
     /// query text, rendered output, or message payload.
     #[serde(default)]
     pub evidence: Vec<SearchEvidenceIdentity>,
+    /// Relevance score from the optional reranker, when that stage completed
+    /// with a valid score for this hit. This is query relevance only, never a
+    /// causal or confidence score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f32>,
 }
 
 /// Structured identity for one actual event row returned by log search.
@@ -237,15 +254,73 @@ pub fn search_logs_with_excluded_templates(
     embed: Option<&dyn EmbedBackend>,
     excluded_template_ids: &[u64],
 ) -> CoreResult<Vec<SearchHit>> {
+    search_logs_with_excluded_templates_and_rerank(
+        corpus,
+        q,
+        embed,
+        excluded_template_ids,
+        None,
+        RERANK_DEFAULT_TIMEOUT_MS,
+    )
+}
+
+/// Hybrid log search with an optional bounded reranking stage.
+///
+/// Reranking only reorders the already-selected template hits. It never
+/// removes candidates, changes their trusted evidence identities, or turns a
+/// failed/invalid provider response into a success. A missing or invalid
+/// score vector leaves the exact pre-rerank order intact.
+pub fn search_logs_with_excluded_templates_and_rerank(
+    corpus: &LogCorpus,
+    q: &SearchLogsQuery,
+    embed: Option<&dyn EmbedBackend>,
+    excluded_template_ids: &[u64],
+    rerank: Option<&dyn RerankBackend>,
+    rerank_timeout_ms: u64,
+) -> CoreResult<Vec<SearchHit>> {
+    search_logs_with_excluded_templates_and_timeouts(
+        corpus,
+        q,
+        embed,
+        excluded_template_ids,
+        rerank,
+        5_000,
+        rerank_timeout_ms,
+    )
+}
+
+/// Hybrid log search with caller-owned embedding and reranking transport
+/// ceilings. The legacy entry point retains its standalone 5-second embedding
+/// default; turn-owned hosts pass their effective whole-turn budget here.
+pub fn search_logs_with_excluded_templates_and_timeouts(
+    corpus: &LogCorpus,
+    q: &SearchLogsQuery,
+    embed: Option<&dyn EmbedBackend>,
+    excluded_template_ids: &[u64],
+    rerank: Option<&dyn RerankBackend>,
+    embed_timeout_ms: u64,
+    rerank_timeout_ms: u64,
+) -> CoreResult<Vec<SearchHit>> {
     let excluded = normalize_excluded_template_ids(excluded_template_ids)?;
-    // A configured model does not make a keyword-only corpus semantic. Gate on
-    // persisted/derived vector availability so tools and UI cannot overclaim.
-    let embed = if corpus.embedding_status().embedded_templates > 0 {
-        embed
-    } else {
-        None
-    };
-    let k = q.k.clamp(1, 100);
+    // A configured model does not make a keyword-only corpus semantic. Require
+    // an explicit semantic request, one measured non-zero dimension count, an
+    // exact stored/query model binding, AND a bound typed embedding space
+    // (legacy corpora and any drifting identity field fail closed). Query-vector
+    // dimensions are checked again below before cosine search.
+    let embedding_status = corpus.embedding_status();
+    let embed = embed.filter(|backend| {
+        q.semantic
+            && embedding_status.embedded_templates > 0
+            && embedding_status.embedded_dims.is_some_and(|dims| dims > 0)
+            && embedding_status.model_id.as_deref() == Some(backend.identity().as_str())
+            && crate::embedding_space::evaluate_space_binding(
+                embedding_status.space.as_ref(),
+                &backend.space(),
+            )
+            .is_bound()
+    });
+    let k = q.k.clamp(1, MAX_SEARCH_CANDIDATE_K);
+    let candidate_k = q.candidate_k.unwrap_or(k).clamp(k, MAX_SEARCH_CANDIDATE_K);
     // Structured filter → allowed template ids + exemplar messages
     let mut allowed: HashSet<u64> = HashSet::new();
     let mut representative_exemplars: std::collections::HashMap<u64, Vec<SearchExemplar>> =
@@ -382,13 +457,18 @@ pub fn search_logs_with_excluded_templates(
     }
 
     let mut sem_scores: std::collections::HashMap<u64, f32> = std::collections::HashMap::new();
-    if q.semantic || q.query.is_some() {
+    if q.semantic {
         if let (Some(backend), Some(query)) = (embed, q.query.as_deref()) {
-            if let Some(qvec) = embed_blocking(backend, query, 5_000) {
-                let ranked =
-                    corpus.search_templates(&qvec, k.saturating_mul(3).max(k), Some(&allowed))?;
-                for (tid, s) in ranked {
-                    sem_scores.insert(tid, s);
+            if let Some(qvec) = embed_blocking(backend, query, embed_timeout_ms.max(1)) {
+                if embedding_status.embedded_dims == u32::try_from(qvec.len()).ok() {
+                    let ranked = corpus.search_templates(
+                        &qvec,
+                        candidate_k.saturating_mul(3).max(candidate_k),
+                        Some(&allowed),
+                    )?;
+                    for (tid, s) in ranked {
+                        sem_scores.insert(tid, s);
+                    }
                 }
             }
         }
@@ -447,6 +527,17 @@ pub fn search_logs_with_excluded_templates(
             .into_iter()
             .map(|exemplar| (exemplar.text, exemplar.identity))
             .unzip();
+
+        // A structured filter is authoritative over event membership. A
+        // template admitted by pattern text alone must not survive when no
+        // event in that template satisfied the filter: its corpus-wide count
+        // would otherwise look like a grounded match while there is no
+        // citeable identity to support it. Keep the search result fail-closed
+        // at the retrieval boundary rather than making the agent discover the
+        // contradiction later.
+        if !no_struct && evidence.is_empty() {
+            continue;
+        }
         hits.push(SearchHit {
             template_id: tid,
             pattern: row.info.pattern.clone(),
@@ -457,6 +548,7 @@ pub fn search_logs_with_excluded_templates(
             severity: row.info.severity,
             exemplars,
             evidence,
+            rerank_score: None,
         });
     }
     hits.sort_by(|a, b| {
@@ -465,6 +557,44 @@ pub fn search_logs_with_excluded_templates(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.template_id.cmp(&b.template_id))
     });
+    hits.truncate(candidate_k);
+
+    // Rerank only the bounded prefix, after deterministic keyword/semantic
+    // retrieval has established the candidate set. The provider receives
+    // capped, rendered template text; trusted evidence stays host-owned.
+    if let (Some(backend), Some(query)) = (rerank, q.query.as_deref()) {
+        let count = hits.len().min(RERANK_MAX_DOCUMENTS);
+        if count > 0 && !query.trim().is_empty() {
+            let documents = hits[..count]
+                .iter()
+                .map(|hit| {
+                    let exemplar = hit.exemplars.first().map(String::as_str).unwrap_or("");
+                    cap_rerank_document(&format!(
+                        "template={} pattern={} exemplar={}",
+                        hit.template_id, hit.pattern, exemplar
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if let Some(scores) =
+                rerank_blocking(backend, query, &documents, rerank_timeout_ms.max(1))
+            {
+                if validate_rerank_scores(&scores, count).is_ok() {
+                    for (hit, score) in hits[..count].iter_mut().zip(scores) {
+                        hit.rerank_score = Some(score);
+                    }
+                    hits[..count].sort_by(|left, right| {
+                        right
+                            .rerank_score
+                            .unwrap_or(f32::NEG_INFINITY)
+                            .total_cmp(&left.rerank_score.unwrap_or(f32::NEG_INFINITY))
+                    });
+                }
+            }
+        }
+    }
+    // The final answer budget applies after the wider candidate pool has had
+    // a chance to be reranked. `sort_by` is stable, so equal rerank scores
+    // retain the deterministic pre-rerank order.
     hits.truncate(k);
     Ok(hits)
 }
@@ -477,6 +607,77 @@ mod tests {
     use crate::log_analysis::ingest::ingest_path;
     use crate::log_analysis::store::{template_content_hash, TemplateRow};
     use std::io::Write;
+
+    struct RankedSemanticEmbed {
+        calls: std::sync::atomic::AtomicU64,
+    }
+
+    impl RankedSemanticEmbed {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmbedBackend for RankedSemanticEmbed {
+        async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    let text = text.to_ascii_lowercase();
+                    if text.contains("semantic-query") || text.contains("decisive") {
+                        vec![1.0, 0.0]
+                    } else {
+                        vec![0.0, 1.0]
+                    }
+                })
+                .collect())
+        }
+
+        fn identity(&self) -> String {
+            "ranked-semantic-embed (deterministic synthetic; tests only, not a capability)".into()
+        }
+    }
+
+    #[test]
+    fn semantic_false_never_calls_the_embedding_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("events.log");
+        std::fs::write(&logs, "level=info msg=early routine noise\n").unwrap();
+        let backend = RankedSemanticEmbed::new();
+        let report = ingest_path(
+            dir.path(),
+            &logs,
+            "semantic-off",
+            Some(&backend),
+            "legacy-label",
+        )
+        .unwrap();
+        backend.calls.store(0, std::sync::atomic::Ordering::SeqCst);
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+
+        let hits = search_logs(
+            &corpus,
+            &SearchLogsQuery {
+                query: Some("routine".into()),
+                semantic: false,
+                k: 5,
+                ..Default::default()
+            },
+            Some(&backend),
+        )
+        .unwrap();
+
+        assert!(!hits.is_empty());
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a query string alone must not activate semantic egress/work"
+        );
+    }
 
     #[test]
     fn search_logs_respects_k_and_does_not_scale_with_unrelated_corpus_size() {
@@ -537,6 +738,83 @@ mod tests {
                 .iter()
                 .any(|h| h.pattern.to_lowercase().contains("heartbeat")),
             "unrelated corpus templates must not enter matching hits"
+        );
+    }
+
+    /// The exact boundary behind a "1 result, zero citeable evidence" search.
+    ///
+    /// The structured filter above (time/level/service/trace) is applied to
+    /// **events**; the template-pattern keyword loop then admits a template on
+    /// pattern text alone. A template whose pattern matches the query is
+    /// therefore returned as a hit even when *every one of its events* was
+    /// excluded by the structured filter — with `count` carrying the
+    /// corpus-wide occurrence total, and `evidence` empty because no event
+    /// survived to supply an identity.
+    ///
+    /// This is the host-side condition that a grounded turn cannot recover
+    /// from: `result_count > 0` while `evidence.is_empty()`. The agent loop's
+    /// evidence gate (`agent.rs`, `log_result_count > 0 && !log_evidence
+    /// .is_empty()`) correctly refuses it, so this test pins the shape rather
+    /// than blessing it — the hit must never be allowed to carry a fabricated
+    /// identity to satisfy the gate.
+    #[test]
+    fn a_pattern_matched_template_can_outlive_its_time_filtered_events_with_no_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("svc.log")).unwrap();
+        for i in 0..4 {
+            // Wall-clock timestamps far outside the window queried below.
+            writeln!(
+                f,
+                r#"{{"timestamp":"2027-01-15T08:0{i}:00Z","level":"error","message":"payment reconciliation stalled for shard {i}"}}"#
+            )
+            .unwrap();
+        }
+        drop(f);
+        let report = ingest_path(dir.path(), &logs, "s", None, "c").unwrap();
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+
+        let unfiltered = search_logs(
+            &corpus,
+            &SearchLogsQuery {
+                query: Some("payment reconciliation stalled".into()),
+                semantic: false,
+                k: 8,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let grounded = unfiltered
+            .first()
+            .expect("unfiltered search must return the matching template");
+        assert!(
+            !grounded.evidence.is_empty(),
+            "without a structured filter the same query must carry citeable identities"
+        );
+
+        // Same query, but a structured time window that excludes every event.
+        // 0..604_800 is the epoch-relative week a model can synthesize when it
+        // fills in every optional parameter instead of omitting them.
+        let filtered = search_logs(
+            &corpus,
+            &SearchLogsQuery {
+                query: Some("payment reconciliation stalled".into()),
+                semantic: false,
+                k: 8,
+                time_from: Some(0),
+                time_to: Some(604_800),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            filtered.is_empty(),
+            "a pattern-only template with no event surviving the structured \
+             filter must be excluded at the retrieval boundary: {filtered:?}"
         );
     }
 
@@ -671,6 +949,211 @@ mod tests {
             corpus.embedding_status().state,
             super::super::store::EmbeddingState::KeywordOnly
         );
+    }
+
+    struct PreferRerank;
+
+    #[async_trait::async_trait]
+    impl RerankBackend for PreferRerank {
+        async fn rerank(&self, _query: &str, documents: &[String]) -> CoreResult<Vec<f32>> {
+            Ok(documents
+                .iter()
+                .map(|document| {
+                    if document.contains("preferred") {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect())
+        }
+
+        fn identity(&self) -> String {
+            "synthetic-prefer-rerank (tests only)".into()
+        }
+    }
+
+    struct InvalidRerank;
+
+    #[async_trait::async_trait]
+    impl RerankBackend for InvalidRerank {
+        async fn rerank(&self, _query: &str, _documents: &[String]) -> CoreResult<Vec<f32>> {
+            Ok(vec![f32::NAN])
+        }
+
+        fn identity(&self) -> String {
+            "synthetic-invalid-rerank (tests only)".into()
+        }
+    }
+
+    struct EqualRerank;
+
+    #[async_trait::async_trait]
+    impl RerankBackend for EqualRerank {
+        async fn rerank(&self, _query: &str, documents: &[String]) -> CoreResult<Vec<f32>> {
+            Ok(vec![1.0; documents.len()])
+        }
+
+        fn identity(&self) -> String {
+            "synthetic-equal-rerank (tests only)".into()
+        }
+    }
+
+    #[test]
+    fn wider_candidate_pool_allows_reranker_to_promote_k_plus_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("wider-pool.log");
+        std::fs::write(
+            &log,
+            "level=error message=secondary marker\nlevel=error message=preferred marker\n",
+        )
+        .unwrap();
+        let report = ingest_path(dir.path(), &log, "wider-pool", None, "none").unwrap();
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        let query = SearchLogsQuery {
+            query: Some("marker".into()),
+            semantic: false,
+            k: 1,
+            candidate_k: Some(2),
+            ..Default::default()
+        };
+        let hits = search_logs_with_excluded_templates_and_rerank(
+            &corpus,
+            &query,
+            None,
+            &[],
+            Some(&PreferRerank),
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].pattern.contains("preferred"), "{hits:?}");
+    }
+
+    #[test]
+    fn equal_rerank_scores_preserve_pre_rerank_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("equal-rerank.log");
+        std::fs::write(
+            &log,
+            "level=error message=alpha marker\nlevel=error message=beta marker\n",
+        )
+        .unwrap();
+        let report = ingest_path(dir.path(), &log, "equal-rerank", None, "none").unwrap();
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        let query = SearchLogsQuery {
+            query: Some("marker".into()),
+            semantic: false,
+            k: 2,
+            candidate_k: Some(2),
+            ..Default::default()
+        };
+        let baseline = search_logs(&corpus, &query, None).unwrap();
+        let reranked = search_logs_with_excluded_templates_and_rerank(
+            &corpus,
+            &query,
+            None,
+            &[],
+            Some(&EqualRerank),
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(
+            reranked
+                .iter()
+                .map(|hit| hit.template_id)
+                .collect::<Vec<_>>(),
+            baseline
+                .iter()
+                .map(|hit| hit.template_id)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn rerank_reorders_existing_hits_without_changing_evidence_or_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("rerank.log");
+        std::fs::write(
+            &log,
+            "level=error message=secondary marker\nlevel=error message=preferred marker\n",
+        )
+        .unwrap();
+        let report = ingest_path(dir.path(), &log, "rerank", None, "none").unwrap();
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        let query = SearchLogsQuery {
+            query: Some("marker".into()),
+            semantic: false,
+            k: 10,
+            ..Default::default()
+        };
+        let baseline = search_logs(&corpus, &query, None).unwrap();
+        let reranked = search_logs_with_excluded_templates_and_rerank(
+            &corpus,
+            &query,
+            None,
+            &[],
+            Some(&PreferRerank),
+            1_000,
+        )
+        .unwrap();
+
+        assert_eq!(reranked.len(), baseline.len());
+        assert!(!reranked.is_empty());
+        assert!(reranked.iter().all(|hit| hit.rerank_score.is_some()));
+        assert!(reranked[0].pattern.contains("preferred"));
+
+        let mut baseline_evidence = baseline
+            .iter()
+            .map(|hit| (hit.template_id, hit.evidence.clone()))
+            .collect::<Vec<_>>();
+        let mut reranked_evidence = reranked
+            .iter()
+            .map(|hit| (hit.template_id, hit.evidence.clone()))
+            .collect::<Vec<_>>();
+        baseline_evidence.sort_by_key(|(id, _)| *id);
+        reranked_evidence.sort_by_key(|(id, _)| *id);
+        assert_eq!(reranked_evidence, baseline_evidence);
+    }
+
+    #[test]
+    fn invalid_rerank_keeps_the_deterministic_pre_rerank_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("invalid-rerank.log");
+        std::fs::write(
+            &log,
+            "level=error message=alpha marker\nlevel=error message=beta marker\n",
+        )
+        .unwrap();
+        let report = ingest_path(dir.path(), &log, "invalid-rerank", None, "none").unwrap();
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        let query = SearchLogsQuery {
+            query: Some("marker".into()),
+            semantic: false,
+            k: 10,
+            ..Default::default()
+        };
+        let baseline = search_logs(&corpus, &query, None).unwrap();
+        let degraded = search_logs_with_excluded_templates_and_rerank(
+            &corpus,
+            &query,
+            None,
+            &[],
+            Some(&InvalidRerank),
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(
+            degraded
+                .iter()
+                .map(|hit| hit.template_id)
+                .collect::<Vec<_>>(),
+            baseline
+                .iter()
+                .map(|hit| hit.template_id)
+                .collect::<Vec<_>>()
+        );
+        assert!(degraded.iter().all(|hit| hit.rerank_score.is_none()));
     }
 
     #[test]

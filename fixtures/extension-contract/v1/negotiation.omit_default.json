@@ -1,0 +1,11 @@
+{
+  "schema_id": "contextdesk.extension.negotiation.v1",
+  "dialect": "openai_compatible",
+  "surface": "chat_completions",
+  "capabilities": [
+    { "kind": "plain_chat", "request": "require" },
+    { "kind": "json_object", "request": "omit" },
+    { "kind": "reasoning_effort", "request": "omit" },
+    { "kind": "deadline", "request": "prefer" }
+  ]
+}

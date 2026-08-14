@@ -18,6 +18,20 @@ set -o pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Prefer the marked worktree-scoped cache target for local release gates.
+# Compiler objects remain reusable through sccache without allowing divergent
+# worktrees to share Cargo fingerprints. Callers can opt out for an unusual
+# toolchain/target with the legacy CONTEXTDESK_DISABLE_SHARED_BUILD_CACHE=1
+# switch or by explicitly setting CARGO_TARGET_DIR. CI keeps its own cache.
+if [[ -z "${CARGO_TARGET_DIR:-}" && "${CI:-}" != "true" &&
+      "${CONTEXTDESK_DISABLE_SHARED_BUILD_CACHE:-0}" != "1" &&
+      -x "$ROOT/scripts/local-build-cache.sh" ]]; then
+  if [[ -n "${CONTEXTDESK_BUILD_CACHE_ROOT:-}" ||
+        -d "${HOME:-}/Library/Caches/ContextDesk/build-v1" ||
+        -d "${XDG_CACHE_HOME:-${HOME:-}/.cache}/contextdesk/build-v1" ]]; then
+    eval "$("$ROOT/scripts/local-build-cache.sh" activate)"
+  fi
+fi
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 export PATH="${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
 export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
@@ -118,6 +132,9 @@ run_step cli_activity_parity \
 
 run_step cli_public_acceptance_full_path \
   cargo test -p cd-cli --test cli_public_acceptance_lab full_path -- --nocapture
+
+run_step desktop_tauri_tests \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --all-targets
 
 # Consolidator: preserve exact-head identity; keep artifacts if EXACT_HEAD_OUT set.
 export EXACT_HEAD_OUT="${EXACT_HEAD_OUT:-$OUT_DIR/cli-accept}"

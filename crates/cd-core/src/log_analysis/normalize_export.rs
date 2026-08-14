@@ -17,7 +17,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::normalized_log_events::{
     is_valid_w3c_trace_id, validate_stream, EventTime, NormalizedLogEvent, NormalizedLogHeader,
     ProducerIdentity, ProducerRedactionClaim, Severity, SeverityConfidence, SeverityProvenance,
-    TimeBasis, TimeResolution, NORMALIZED_LOG_EVENTS_READER_VERSION,
+    TimeBasis, TimeResolution, MAX_MESSAGE_CHARS, NORMALIZED_LOG_EVENTS_READER_VERSION,
     NORMALIZED_LOG_EVENTS_SCHEMA_ID,
 };
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const NORMALIZE_PRODUCER_NAME: &str = "contextdesk-normalize";
 /// Producer version for this export path.
 pub const NORMALIZE_PRODUCER_VERSION: &str = "1.0.0";
+
+/// Typed attribute carried when the rendered message had to be bounded for
+/// the normalized v1 contract. The retained canonical already carries its
+/// independent `canonicalTruncated` disclosure.
+const MESSAGE_TRUNCATED_ATTRIBUTE: &str = "contextdesk.message_truncated";
 
 /// How to resolve zone-less local timestamps for normalize export.
 #[derive(Debug, Clone, Default)]
@@ -290,11 +295,19 @@ pub fn map_event_to_normalized(
             && matches!(severity.confidence, SeverityConfidence::Low)),
         "schema_mapped + low is illegal"
     );
+    let (message, message_truncated) = bound_normalized_message(&event.message);
+    let mut attributes = serde_json::Map::new();
+    if message_truncated {
+        attributes.insert(
+            MESSAGE_TRUNCATED_ATTRIBUTE.to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
     Ok(NormalizedLogEvent {
         source_seq: event.seq,
         time,
         severity,
-        message: event.message.clone(),
+        message,
         // Raw intake accepts vendor correlation strings. The normalized v1
         // `traceId` field is narrower: only a non-zero lowercase 32-hex W3C
         // identifier may cross this boundary. Omit everything else rather
@@ -306,13 +319,23 @@ pub fn map_event_to_normalized(
             .map(str::to_owned),
         span_id: None,
         correlations: Vec::new(),
-        attributes: serde_json::Map::new(),
+        attributes,
         logger: None,
         service: event.service.clone(),
         host: event.host.clone(),
         canonical,
         canonical_truncated: original_truncated,
     })
+}
+
+/// Bound a rendered message by Unicode scalar count, matching the normalized
+/// validator's `MAX_MESSAGE_CHARS` rule. This is deliberately separate from
+/// the retained canonical's byte bound.
+fn bound_normalized_message(message: &str) -> (String, bool) {
+    let mut chars = message.chars();
+    let bounded: String = chars.by_ref().take(MAX_MESSAGE_CHARS).collect();
+    let truncated = chars.next().is_some();
+    (bounded, truncated)
 }
 
 fn map_event_time(event: &LogEvent, policy: &NormalizeTimezonePolicy) -> CoreResult<EventTime> {
@@ -737,10 +760,25 @@ pub fn validate_jsonl_file(path: &Path) -> CoreResult<()> {
     let reader = std::io::BufReader::new(file);
     let report = validate_stream(reader)?;
     if !report.ok {
+        let diagnostic_summary = report
+            .diagnostics
+            .iter()
+            .take(8)
+            .map(|diagnostic| {
+                let code = serde_json::to_value(diagnostic.code)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".to_string());
+                match diagnostic.location.as_deref() {
+                    Some(location) => format!("{code}@{location}"),
+                    None => code,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         return Err(CoreError::Policy(format!(
-            "normalized JSONL failed validation: {} ({} diagnostics)",
-            path.display(),
-            report.diagnostics.len()
+            "normalized JSONL failed validation ({} diagnostics; codes={diagnostic_summary})",
+            report.diagnostics_total
         )));
     }
     Ok(())
@@ -1062,6 +1100,70 @@ mod tests {
     }
 
     #[test]
+    fn oversized_rendered_message_is_bounded_and_disclosed() {
+        use crate::normalized_log_events::{validate_event, MAX_MESSAGE_CHARS};
+
+        let mut event = base_event();
+        event.message = "x".repeat(MAX_MESSAGE_CHARS + 17);
+        let normalized = map_event_to_normalized(
+            &event,
+            Some("retained original was already bounded"),
+            true,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+
+        assert_eq!(normalized.message.chars().count(), MAX_MESSAGE_CHARS);
+        assert_eq!(
+            normalized.attributes.get(MESSAGE_TRUNCATED_ATTRIBUTE),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(normalized.canonical_truncated);
+
+        let mut diagnostics = Vec::new();
+        validate_event(&normalized, 0, 2, &mut diagnostics);
+        assert!(
+            diagnostics.is_empty(),
+            "bounded normalized event must conform: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn ordinary_message_is_unchanged_without_truncation_attribute() {
+        let event = base_event();
+        let normalized = map_event_to_normalized(
+            &event,
+            Some("ordinary original"),
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+
+        assert_eq!(normalized.message, event.message);
+        assert!(!normalized
+            .attributes
+            .contains_key(MESSAGE_TRUNCATED_ATTRIBUTE));
+    }
+
+    #[test]
+    fn interleaved_corpus_sequences_restart_for_each_source() {
+        let mut rows = Vec::new();
+        for (seq, source) in [(0, "a.log"), (1, "b.log"), (2, "a.log"), (3, "b.log")] {
+            let mut event = base_event();
+            event.seq = seq;
+            event.source = source.to_string();
+            rows.push((event, Some(format!("line {seq}")), false, false));
+        }
+
+        let batches = build_source_batches(&rows, &NormalizeTimezonePolicy::default()).unwrap();
+        assert_eq!(batches.len(), 2);
+        for batch in batches {
+            let seqs: Vec<_> = batch.events.iter().map(|event| event.source_seq).collect();
+            assert_eq!(seqs, vec![0, 1], "source {}", batch.source_id);
+        }
+    }
+
+    #[test]
     fn trace_id_is_emitted_only_when_it_is_valid_w3c_shape() {
         let valid = "0123456789abcdef0123456789abcdef";
         let malformed = [
@@ -1300,6 +1402,48 @@ mod tests {
         let err = publish_staging(&staging, &out).unwrap_err();
         assert!(err.to_string().contains("overwrite") || err.to_string().contains("non-empty"));
         assert!(out.join("exists.txt").exists());
+    }
+
+    #[test]
+    fn generated_validation_failure_reports_safe_codes_without_staging_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("private-customer-source.jsonl");
+        let header = NormalizedLogHeader {
+            schema_id: NORMALIZED_LOG_EVENTS_SCHEMA_ID.into(),
+            min_reader_version: NORMALIZED_LOG_EVENTS_READER_VERSION,
+            source_id: "source-a".into(),
+            producer: ProducerIdentity {
+                name: "test".into(),
+                version: "1".into(),
+            },
+            redaction: None,
+            source_label: None,
+        };
+        let mut event = map_event_to_normalized(
+            &base_event(),
+            Some("line"),
+            false,
+            &NormalizeTimezonePolicy::default(),
+        )
+        .unwrap();
+        event.source_seq = 7;
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&header).unwrap(),
+                serde_json::to_string(&event).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let error = validate_jsonl_file(&path).unwrap_err().to_string();
+        assert!(error.contains("sequence_not_contiguous"), "{error}");
+        assert!(!error.contains("private-customer-source"), "{error}");
+        assert!(
+            !error.contains(&tmp.path().display().to_string()),
+            "{error}"
+        );
     }
 
     /// Unit-level: first page with after_seq=None must request seq from 0 upward

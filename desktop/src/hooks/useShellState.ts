@@ -19,6 +19,7 @@ import {
   type BrandingDto,
   type MemoryFileDto,
   type ModelOptionDto,
+  type ModelReadiness,
 } from "../lib/host";
 import {
   runClientPreflight,
@@ -227,6 +228,25 @@ export function useShellState() {
     }
   }, []);
 
+  /** Apply one secret-free qualification result to rows already in memory.
+   * This deliberately avoids model discovery, provider I/O, and another
+   * credential lookup after an explicit qualification run.
+   */
+  const updateModelReadiness = useCallback(
+    (profileId: string, modelId: string, readiness: ModelReadiness | null) => {
+      setModelOptions((current) =>
+        current.map((model) => {
+          if (model.provider_id !== profileId || model.id !== modelId) return model;
+          if (readiness) return { ...model, readiness };
+          const next = { ...model };
+          delete next.readiness;
+          return next;
+        }),
+      );
+    },
+    [],
+  );
+
   const refreshMemory = useCallback(
     async (opts?: { kind?: string | null; includeSuperseded?: boolean }) => {
       try {
@@ -372,6 +392,7 @@ export function useShellState() {
         baseUrl: p.base_url || s.baseUrl,
         chatModel: p.chat_model || s.chatModel,
         hasApiKey: p.has_key,
+        apiKeyFilePath: p.api_key_file_path ?? undefined,
         toolsEnabled: p.tools_enabled ?? true,
         localOnly: kind === "ollama",
       }));
@@ -571,6 +592,7 @@ export function useShellState() {
     defaultModelKey,
     setDefaultModelKey,
     refreshChatModels,
+    updateModelReadiness,
     memoryDocs,
     memoryPath,
     setMemoryPath,

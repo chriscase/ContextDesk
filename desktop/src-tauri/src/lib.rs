@@ -8,6 +8,7 @@ mod log_diagnostics;
 mod logging_quality_host;
 
 use cd_core::branding::Branding;
+use cd_core::capability_qualification::CatalogChange;
 use cd_core::chat::{ChatMessage, Role as ChatRole};
 use cd_core::config::{
     config_path, ensure_config_dir, load_config, save_config, AppConfig, ConfluenceSettings,
@@ -16,8 +17,8 @@ use cd_core::config::{
 use cd_core::discovery::{discover_local, ollama_reachable, LocalCandidate};
 use cd_core::help::{HelpIndex, HelpPage, HelpSearchHit, HelpSection};
 use cd_core::keychain_store::{
-    key_ref_confluence_pat, key_ref_for_profile, key_ref_x_api_key, looks_like_raw_secret,
-    KeychainSecretStore, SecretStore,
+    file_secret_ref, key_ref_confluence_pat, key_ref_for_profile, key_ref_x_api_key,
+    looks_like_raw_secret, read_file_secret_ref, ReferencedSecretStore, SecretStore,
 };
 use cd_core::memory_fs::{list_memory_files, read_workspace_file, write_memory_file, MemoryFile};
 use cd_core::model_curation::{
@@ -25,7 +26,10 @@ use cd_core::model_curation::{
     CurationImpactDto, CurationSummaryDto, ModelAvailability, ModelOptionDto,
 };
 use cd_core::permissions::PermissionDecision;
-use cd_core::preflight::{run_preflight, PreflightInput, PreflightReport};
+use cd_core::preflight::{
+    run_preflight, PreflightCategory, PreflightInput, PreflightItem, PreflightLevel,
+    PreflightReport,
+};
 use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
 use cd_core::providers::{
     ProviderConfig, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
@@ -350,7 +354,7 @@ impl LogCorpusHandleCache {
 struct AppState {
     branding: Branding,
     config: Mutex<AppConfig>,
-    secrets: KeychainSecretStore,
+    secrets: ReferencedSecretStore,
     /// Shared hash-chain state for host/tool/backup audit writes.
     audit_log: Option<cd_core::audit::AuditLog>,
     /// Session id -> chat history
@@ -430,9 +434,16 @@ struct AppState {
     help: Mutex<Option<Arc<HelpIndex>>>,
     /// Read-only engineering docs. Deliberately separate from Help and ToolHost.
     handbook: Mutex<Option<Arc<HandbookIndex>>>,
-    /// In-process capability qualification cache (#724). Memory-only; absent after restart.
+    /// Explicit capability qualification evidence (#724), shared with the CLI.
     /// Keyed by profile + endpoint fingerprint + exact model + schema version (#650 isolation).
     qualification_store: Mutex<cd_core::capability_qualification::QualificationStore>,
+    /// Secret-free evidence file. Viewing it never resolves credentials or contacts a provider.
+    qualification_store_path: PathBuf,
+    /// Exact host-owned Triage Policy V2 role qualification, kept separate
+    /// from generic capability evidence so a transport pass cannot authorize
+    /// an incompatible packet/validator workflow.
+    triage_role_qualification_store:
+        Mutex<cd_core::triage_role_qualification::TriageRoleQualificationStoreV1>,
     /// One-shot exact Log Explorer navigation targets (#698 exact-nav).
     /// Keyed by corpus id. `take` delivers once; cleared on take, discard, or window destroy.
     log_explorer_nav_targets: Mutex<LogExplorerNavTargetStore>,
@@ -930,8 +941,9 @@ fn build_linked_log_fallback_host(
         state.audit_log.clone(),
     );
     let cfg = state.config.lock().expect("config").clone();
-    host.set_router_budget(cfg.router);
-    host.set_model_context_budgets(cfg.model_context_budgets);
+    host.set_router_budget(cfg.router.clone());
+    host.set_model_context_budgets(cfg.model_context_budgets.clone());
+    apply_configured_retrieval_roles(&mut host, &cfg, &state.secrets);
     host.set_log_analysis(true, Some(cache));
     if let Ok(store) = investigation_store(state) {
         host.set_investigation_store_dir(Some(store.root().to_path_buf()));
@@ -1535,6 +1547,7 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
     } else {
         host.set_embed_backend(None);
     }
+    apply_configured_retrieval_roles(host, cfg, &state.secrets);
     if cfg.x.enabled {
         let bearer = state.secrets.get(&key_ref_x_api_key()).ok().flatten();
         host.set_x_search(true, bearer);
@@ -1575,6 +1588,62 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
                 if let Err(e) = host.attach_module(m, &grants, &resolve) {
                     tracing::warn!(module_id = %id, error = %e, "enabled module attach failed");
                 }
+            }
+        }
+    }
+}
+
+/// Attach explicitly enabled retrieval roles to the same production ToolHost
+/// used by ordinary and linked-log turns. The role factories own dialect and
+/// SSRF policy; this host only decides where the already-validated adapters
+/// are used. A failed optional role is logged and leaves the existing local
+/// or keyword fallback in place.
+fn apply_configured_retrieval_roles(
+    host: &mut ToolHost,
+    cfg: &AppConfig,
+    secrets: &ReferencedSecretStore,
+) {
+    if let Some(role) = cfg.retrieval.embedding.as_ref().filter(|role| role.enabled) {
+        let backend = if cfg.router.deadline_is_explicit {
+            cd_workflow::retrieval::build_embedding_backend_with_timeout(
+                role,
+                Some(secrets),
+                cfg.router.deadline_ms,
+            )
+        } else {
+            cd_workflow::retrieval::build_embedding_backend(role, Some(secrets))
+        };
+        match backend {
+            Ok(backend) => {
+                host.set_embed_backend_with_model(Some(Arc::clone(&backend)), &role.model);
+                // Linked-log search and ingest use the same configured model
+                // identity, so existing vectors fail closed until re-analysis
+                // has established a matching corpus binding.
+                host.set_log_embed_backend(Some(backend), &role.model);
+                tracing::info!(model = %role.model, "configured retrieval embedding role attached");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "configured retrieval embedding role unavailable; keeping fallback");
+            }
+        }
+    }
+    if let Some(role) = cfg.retrieval.reranker.as_ref().filter(|role| role.enabled) {
+        let backend = if cfg.router.deadline_is_explicit {
+            cd_workflow::retrieval::build_rerank_backend_with_timeout(
+                role,
+                Some(secrets),
+                cfg.router.deadline_ms,
+            )
+        } else {
+            cd_workflow::retrieval::build_rerank_backend(role, Some(secrets))
+        };
+        match backend {
+            Ok(backend) => {
+                host.set_log_rerank_backend(Some(backend));
+                tracing::info!(model = %role.model, "configured retrieval reranker role attached");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "configured retrieval reranker role unavailable; preserving pre-rerank order");
             }
         }
     }
@@ -1795,6 +1864,64 @@ fn session_context_import_zip(
 #[tauri::command]
 fn get_config(state: State<'_, AppState>) -> AppConfig {
     state.config.lock().expect("config lock").clone()
+}
+
+/// Non-secret multi-model settings for the Settings surface. The reviewer
+/// references a provider profile id; no credential ever crosses IPC.
+#[derive(Clone, Serialize)]
+struct MultiModelSettingsDto {
+    /// `"single"` | `"review"` | `"contributions"`.
+    mode: String,
+    /// Reviewer provider profile id, if configured.
+    reviewer_profile_id: Option<String>,
+    /// Reviewer model override, if any.
+    reviewer_model: Option<String>,
+    /// Whether a remote reviewer has been acknowledged.
+    reviewer_allow_remote: bool,
+    /// Whether the reviewer must be measured-qualified.
+    reviewer_require_qualified: bool,
+}
+
+#[tauri::command]
+fn get_multi_model_settings(state: State<'_, AppState>) -> MultiModelSettingsDto {
+    let cfg = state.config.lock().expect("config lock");
+    let mm = &cfg.multi_model;
+    let mode = if cfg.contributions.enabled {
+        cd_core::multi_model::MultiModelMode::Contributions
+    } else {
+        mm.mode
+    };
+    MultiModelSettingsDto {
+        mode: mode.as_str().to_string(),
+        reviewer_profile_id: mm.reviewer.as_ref().map(|r| r.profile_id.clone()),
+        reviewer_model: mm.reviewer.as_ref().and_then(|r| r.model.clone()),
+        reviewer_allow_remote: mm.reviewer.as_ref().is_some_and(|r| r.allow_remote),
+        reviewer_require_qualified: mm.reviewer.as_ref().is_none_or(|r| r.require_qualified),
+    }
+}
+
+/// Set the default multi-model mode (`single`/`review`/`contributions`). Persists and rebuilds
+/// the host. Reviewer assignment is edited via the provider config; this is
+/// the on/off toggle the composer honors by default.
+#[tauri::command]
+fn set_multi_model_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
+    let new_mode = match mode.as_str() {
+        "review" => cd_core::multi_model::MultiModelMode::Review,
+        "single" => cd_core::multi_model::MultiModelMode::Single,
+        "contributions" => cd_core::multi_model::MultiModelMode::Contributions,
+        other => return Err(format!("unknown multi-model mode: {other}")),
+    };
+    let mut cfg = state.config.lock().expect("config lock").clone();
+    cfg.multi_model.mode = new_mode;
+    cfg.contributions.enabled = matches!(
+        new_mode,
+        cd_core::multi_model::MultiModelMode::Contributions
+    );
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    *state.config.lock().expect("config lock") = cfg;
+    let _ = ensure_host(&state);
+    Ok(())
 }
 
 #[tauri::command]
@@ -2383,8 +2510,22 @@ fn set_provider_secret(
 
 #[tauri::command]
 fn provider_has_secret(state: State<'_, AppState>, profile_id: String) -> Result<bool, String> {
-    let r = key_ref_for_profile(&profile_id);
-    state.secrets.has(&r).map_err(|e| e.to_string())
+    let cfg = state.config.lock().expect("config lock");
+    let Some(profile) = cfg
+        .providers
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+    else {
+        return Ok(false);
+    };
+    if profile.kind == ProviderKind::XaiGrokBuild {
+        return Ok(cd_core::grok_auth::detect_grok_session().is_some());
+    }
+    let Some(reference) = profile.api_key_ref.as_deref() else {
+        return Ok(false);
+    };
+    state.secrets.has(reference).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -2394,8 +2535,11 @@ struct SaveProviderReq {
     base_url: String,
     chat_model: String,
     label: Option<String>,
-    /// Optional new API key; empty/null keeps existing keychain entry.
+    /// Optional new API key; empty/null keeps the existing explicit reference.
     api_key: Option<String>,
+    /// Optional protected credential file. Mutually exclusive with `api_key`.
+    #[serde(default)]
+    api_key_file: Option<String>,
     /// When true, refuse non-loopback remote bases (local-only profile).
     #[serde(default)]
     local_only: Option<bool>,
@@ -2414,8 +2558,10 @@ struct ProviderDto {
     base_url: String,
     chat_model: String,
     label: String,
-    /// Keychain ref id only — never the secret.
+    /// Credential ref id only — never the secret.
     api_key_ref: Option<String>,
+    /// Protected credential path when that source was explicitly selected.
+    api_key_file_path: Option<String>,
     has_key: bool,
     /// Native tool calling enabled for this profile (#327).
     tools_enabled: bool,
@@ -2436,6 +2582,11 @@ fn provider_to_dto(p: &ProviderProfile, has_key: bool) -> ProviderDto {
         chat_model: p.chat_model.clone(),
         label: p.label.clone(),
         api_key_ref: p.api_key_ref.clone(),
+        api_key_file_path: p
+            .api_key_ref
+            .as_deref()
+            .and_then(|reference| reference.strip_prefix("file:"))
+            .map(str::to_string),
         has_key,
         tools_enabled: p.capabilities.tools,
         deadline_preference: match p.deadline_preference {
@@ -2447,7 +2598,139 @@ fn provider_to_dto(p: &ProviderProfile, has_key: bool) -> ProviderDto {
     }
 }
 
-/// Persist active provider profile (refs only) and optionally store API key in keychain.
+fn select_provider_credential_reference(
+    profile_id: &str,
+    kind: ProviderKind,
+    existing_reference: Option<String>,
+    api_key: Option<&str>,
+    api_key_file: Option<&str>,
+    secrets: &dyn SecretStore,
+) -> Result<Option<String>, String> {
+    let raw_key = api_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty() && !key.chars().all(|c| c == '•'));
+    let key_file = api_key_file.map(str::trim).filter(|path| !path.is_empty());
+    if raw_key.is_some() && key_file.is_some() {
+        return Err("choose either a pasted API key or a protected key file, not both".into());
+    }
+    if matches!(kind, ProviderKind::XaiGrokBuild) && (raw_key.is_some() || key_file.is_some()) {
+        return Err("Grok Build uses its CLI session; do not configure an API key here".into());
+    }
+
+    if let Some(path) = key_file {
+        let reference = file_secret_ref(&PathBuf::from(path)).map_err(|e| e.to_string())?;
+        // Validate the contents now so Save cannot appear successful with an
+        // unreadable or empty credential. This path never consults Keychain.
+        read_file_secret_ref(&reference).map_err(|e| e.to_string())?;
+        return Ok(Some(reference));
+    }
+    if let Some(key) = raw_key {
+        if !(looks_like_raw_secret(key) || key.len() >= 8) {
+            return Err("API key is too short".into());
+        }
+        let reference = key_ref_for_profile(profile_id);
+        secrets.set(&reference, key).map_err(|e| e.to_string())?;
+        return Ok(Some(reference));
+    }
+    if matches!(kind, ProviderKind::XaiGrokBuild) {
+        Ok(None)
+    } else {
+        Ok(existing_reference)
+    }
+}
+
+#[cfg(test)]
+mod provider_credential_source_tests {
+    use super::*;
+    use cd_core::error::CoreResult;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct CountingSecrets {
+        reads: AtomicUsize,
+        writes: AtomicUsize,
+    }
+
+    impl SecretStore for CountingSecrets {
+        fn get(&self, _reference: &str) -> CoreResult<Option<String>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        fn set(&self, _reference: &str, _secret: &str) -> CoreResult<()> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn delete(&self, _reference: &str) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_file_selection_never_touches_secret_store() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.key");
+        std::fs::write(&path, "synthetic-provider-key\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let secrets = CountingSecrets::default();
+
+        let selected = select_provider_credential_reference(
+            "work",
+            ProviderKind::OpenAiCompatible,
+            None,
+            None,
+            Some(path.to_str().unwrap()),
+            &secrets,
+        )
+        .unwrap();
+
+        assert_eq!(selected, Some(format!("file:{}", path.display())));
+        assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(secrets.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn absent_source_preserves_only_an_explicit_existing_reference() {
+        let secrets = CountingSecrets::default();
+        let selected = select_provider_credential_reference(
+            "work",
+            ProviderKind::OpenAiCompatible,
+            None,
+            None,
+            None,
+            &secrets,
+        )
+        .unwrap();
+
+        assert_eq!(selected, None);
+        assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(secrets.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn pasted_key_and_file_are_rejected_before_any_secret_store_access() {
+        let secrets = CountingSecrets::default();
+        let error = select_provider_credential_reference(
+            "work",
+            ProviderKind::OpenAiCompatible,
+            None,
+            Some("synthetic-provider-key"),
+            Some("/tmp/provider.key"),
+            &secrets,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("either a pasted API key or a protected key file"));
+        assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(secrets.writes.load(Ordering::SeqCst), 0);
+    }
+}
+
+/// Persist the active provider and its explicit Keychain or protected-file reference.
 #[tauri::command]
 fn save_active_provider(
     state: State<'_, AppState>,
@@ -2482,37 +2765,25 @@ fn save_active_provider(
         }
     }
 
-    let mut api_key_ref: Option<String> = None;
-    // Grok uses session file, not keychain paste; other needs_api_key kinds accept keychain.
-    if !matches!(kind, ProviderKind::XaiGrokBuild) {
-        if let Some(key) = req.api_key.as_ref() {
-            let key = key.trim();
-            if !key.is_empty()
-                && !key.chars().all(|c| c == '•')
-                && (looks_like_raw_secret(key) || key.len() >= 8)
-            {
-                let r = key_ref_for_profile(&id);
-                state.secrets.set(&r, key).map_err(|e| e.to_string())?;
-                api_key_ref = Some(r);
-            }
-        }
-    }
+    let existing_api_key_ref = state
+        .config
+        .lock()
+        .expect("config lock")
+        .providers
+        .profiles
+        .iter()
+        .find(|profile| profile.id == id)
+        .and_then(|profile| profile.api_key_ref.clone());
+    let api_key_ref = select_provider_credential_reference(
+        &id,
+        kind,
+        existing_api_key_ref,
+        req.api_key.as_deref(),
+        req.api_key_file.as_deref(),
+        &state.secrets,
+    )?;
 
     let mut cfg = state.config.lock().expect("config lock");
-    // Keep existing ref if no new key provided (non-Grok).
-    if api_key_ref.is_none() && !matches!(kind, ProviderKind::XaiGrokBuild) {
-        if let Some(existing) = cfg.providers.profiles.iter().find(|p| p.id == id) {
-            api_key_ref = existing.api_key_ref.clone();
-        }
-    }
-    // If still none but key exists under standard ref, record the ref.
-    let r = key_ref_for_profile(&id);
-    if api_key_ref.is_none()
-        && !matches!(kind, ProviderKind::XaiGrokBuild)
-        && state.secrets.has(&r).unwrap_or(false)
-    {
-        api_key_ref = Some(r.clone());
-    }
 
     let local_only = req.local_only.unwrap_or(desc.is_local);
     if local_only && !base_url.is_empty() {
@@ -2643,41 +2914,47 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
     let mut ollama_ok = None;
     let mut provider_ok = None;
     let mut provider_probe_detail = None;
+    let mut catalog_change = None;
     let mut key_present = None;
     if let Some(p) = &active {
         let desc = cd_core::providers::descriptor_for(p.kind);
         if p.kind == ProviderKind::Ollama {
-            ollama_ok = Some(ollama_reachable(&p.base_url).await);
+            let probe = cd_core::discovery::probe_provider_catalog(p, None).await;
+            let reachable = probe.outcome.is_reachable();
+            ollama_ok = Some(reachable);
+            provider_ok = Some(reachable);
+            provider_probe_detail = Some(match &probe.outcome {
+                cd_core::discovery::ProbeOutcome::Reachable { reason }
+                | cd_core::discovery::ProbeOutcome::KeyRejected { reason }
+                | cd_core::discovery::ProbeOutcome::Unreachable { reason } => reason.clone(),
+            });
+            catalog_change = record_preflight_catalog(&state, p, &probe)?;
         } else if p.kind == ProviderKind::XaiGrokBuild {
             key_present = Some(cd_core::grok_auth::detect_grok_session().is_some());
             // #126: real probe (session + models list), not structural URL only.
-            let outcome = cd_core::discovery::probe_provider(p, None).await;
-            provider_ok = Some(outcome.is_reachable());
-            provider_probe_detail = Some(match &outcome {
+            let probe = cd_core::discovery::probe_provider_catalog(p, None).await;
+            provider_ok = Some(probe.outcome.is_reachable());
+            provider_probe_detail = Some(match &probe.outcome {
                 cd_core::discovery::ProbeOutcome::Reachable { reason }
                 | cd_core::discovery::ProbeOutcome::KeyRejected { reason }
                 | cd_core::discovery::ProbeOutcome::Unreachable { reason } => reason.clone(),
             });
+            catalog_change = record_preflight_catalog(&state, p, &probe)?;
         } else if desc.needs_api_key {
-            let ref_id = p
+            let api_key = p
                 .api_key_ref
-                .clone()
-                .unwrap_or_else(|| key_ref_for_profile(&p.id));
-            let has = state.secrets.has(&ref_id).unwrap_or(false);
-            key_present = Some(has);
+                .as_deref()
+                .and_then(|reference| state.secrets.get(reference).ok().flatten());
+            key_present = Some(api_key.is_some());
             // #126: live HTTP probe — same TriageTool-parity path as Discover (corp private OK).
-            let api_key = if has {
-                state.secrets.get(&ref_id).ok().flatten()
-            } else {
-                None
-            };
-            let outcome = cd_core::discovery::probe_provider(p, api_key).await;
-            provider_ok = Some(outcome.is_reachable());
-            provider_probe_detail = Some(match &outcome {
+            let probe = cd_core::discovery::probe_provider_catalog(p, api_key).await;
+            provider_ok = Some(probe.outcome.is_reachable());
+            provider_probe_detail = Some(match &probe.outcome {
                 cd_core::discovery::ProbeOutcome::Reachable { reason }
                 | cd_core::discovery::ProbeOutcome::KeyRejected { reason }
                 | cd_core::discovery::ProbeOutcome::Unreachable { reason } => reason.clone(),
             });
+            catalog_change = record_preflight_catalog(&state, p, &probe)?;
         }
     }
     let data_ok = ensure_config_dir(&state.branding).is_ok();
@@ -2698,7 +2975,7 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
             .map(|h| h.durable_memory_active())
             .unwrap_or(false)
     };
-    Ok(run_preflight(PreflightInput {
+    let mut report = run_preflight(PreflightInput {
         workspace: ws.as_ref(),
         providers: &cfg.providers,
         data_dir_writable: data_ok,
@@ -2711,7 +2988,69 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
         grok_session_present,
         connectors: &cfg.connectors,
         durable_memory_active: Some(mem_active),
-    }))
+    });
+    if let Some(change) = catalog_change.filter(CatalogChange::changed) {
+        let added_preview = catalog_model_preview(&change.added);
+        let detail = if change.added.is_empty() {
+            format!(
+                "{} model(s) were removed. Existing evidence for unchanged models was preserved.",
+                change.removed.len()
+            )
+        } else {
+            format!(
+                "{} added ({}); {} removed. Review the additions and qualify only the models you may use. Existing evidence for unchanged models was preserved.",
+                change.added.len(),
+                added_preview,
+                change.removed.len()
+            )
+        };
+        report.items.push(PreflightItem {
+            id: "provider.catalog_changed".into(),
+            title: "Model catalog changed".into(),
+            level: PreflightLevel::Warn,
+            detail,
+            fix_action: Some("ai".into()),
+            category: PreflightCategory::Launch,
+        });
+    }
+    Ok(report)
+}
+
+/// Reuse startup/pre-flight discovery as a zero-extra-request catalog drift
+/// detector. Behavioral qualification remains an explicit user action.
+fn record_preflight_catalog(
+    state: &AppState,
+    profile: &ProviderProfile,
+    probe: &cd_core::discovery::ProviderCatalogProbe,
+) -> Result<Option<CatalogChange>, String> {
+    if !probe.outcome.is_reachable() || probe.model_ids.is_empty() {
+        return Ok(None);
+    }
+    let mut store = state
+        .qualification_store
+        .lock()
+        .expect("qualification_store");
+    let change = store.note_catalog(
+        &profile.id,
+        &profile.base_url,
+        probe.model_ids.iter().cloned(),
+    );
+    cd_core::capability_qualification::save_qualification_store(
+        &state.qualification_store_path,
+        &store,
+    )
+    .map_err(|error| format!("save discovered model catalog: {error}"))?;
+    Ok(Some(change))
+}
+
+fn catalog_model_preview(model_ids: &[String]) -> String {
+    const LIMIT: usize = 5;
+    let shown = model_ids.iter().take(LIMIT).cloned().collect::<Vec<_>>();
+    if model_ids.len() > LIMIT {
+        format!("{} and {} more", shown.join(", "), model_ids.len() - LIMIT)
+    } else {
+        shown.join(", ")
+    }
 }
 
 #[tauri::command]
@@ -2798,6 +3137,76 @@ fn set_router_budget(
     drop(cfg);
     let _ = ensure_host(&state);
     Ok(budget)
+}
+
+/// Share-safe DTO for reasoning-effort settings (omit or level token).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReasoningEffortDto {
+    /// `omit` or level token (`none`/`low`/…).
+    policy: String,
+    /// Present when explicit.
+    level: Option<String>,
+}
+
+#[tauri::command]
+fn get_reasoning_effort(state: State<'_, AppState>) -> ReasoningEffortDto {
+    let cfg = state.config.lock().expect("config");
+    match cfg.reasoning_effort.level {
+        None => ReasoningEffortDto {
+            policy: "omit".into(),
+            level: None,
+        },
+        Some(level) => ReasoningEffortDto {
+            policy: "explicit".into(),
+            level: Some(level.as_str().into()),
+        },
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SetReasoningEffortReq {
+    /// Empty / "omit" / "auto" → provider default. Else a level token.
+    level: Option<String>,
+}
+
+#[tauri::command]
+fn set_reasoning_effort(
+    state: State<'_, AppState>,
+    req: SetReasoningEffortReq,
+) -> Result<ReasoningEffortDto, String> {
+    let mut cfg_guard = state.config.lock().expect("config");
+    // Mutate a clone first. If persistence fails, the running host keeps the
+    // exact prior policy instead of diverging from config.json.
+    let mut cfg = cfg_guard.clone();
+    match req
+        .level
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None | Some("omit") | Some("auto") => cfg.reasoning_effort.apply_omit(),
+        Some(raw) => {
+            let level = cd_core::reasoning_effort::ReasoningEffortLevel::parse(raw)
+                .map_err(|e| e.to_string())?;
+            cfg.reasoning_effort.apply_level(level);
+        }
+    }
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    let dto = match cfg.reasoning_effort.level {
+        None => ReasoningEffortDto {
+            policy: "omit".into(),
+            level: None,
+        },
+        Some(level) => ReasoningEffortDto {
+            policy: "explicit".into(),
+            level: Some(level.as_str().into()),
+        },
+    };
+    *cfg_guard = cfg;
+    drop(cfg_guard);
+    let _ = ensure_host(&state);
+    Ok(dto)
 }
 
 /// Open an http(s) URL in the **system** default browser.
@@ -3344,6 +3753,11 @@ struct AgentTurnReq {
     /// Explorer viewport, ambient memory, or other host observations.
     #[serde(default)]
     user_selection: Option<String>,
+    /// Multi-model mode for this turn: `"single"` (default), `"review"`, or
+    /// `"contributions"`. Each opt-in route degrades honestly when its
+    /// configured, qualified roles are unavailable.
+    #[serde(default)]
+    multi_model_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4000,6 +4414,21 @@ fn event_to_dto_with_linked_corpus(
     dto
 }
 
+/// Add the host-measured turn clock to core's shared human-progress
+/// projection. The source `StreamEvent` is still sent separately and remains
+/// authoritative; this DTO is presentation metadata only.
+fn progress_dto_for_event(
+    event: &cd_core::events::StreamEvent,
+    turn_started_at: tokio::time::Instant,
+) -> Option<EventDto> {
+    let elapsed_ms = u64::try_from(turn_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let progress = cd_core::events::progress_for_stream_event(event, elapsed_ms)?;
+    Some(EventDto {
+        kind: "turn_progress".into(),
+        payload: serde_json::to_value(progress).ok()?,
+    })
+}
+
 struct AdmittedAgentTurn<'a> {
     owners: &'a Mutex<HashMap<String, u64>>,
     cancels: &'a Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
@@ -4637,6 +5066,10 @@ async fn agent_turn(
             return Ok(());
         }
     };
+    // Authoritative turn identity is host-generated and never derived from a
+    // renderer transcript id. Client ids remain presentation correlation
+    // labels only.
+    let turn_id = format!("{}::{}", req.session_id, uuid::Uuid::new_v4());
     // Register the sensitive-capture generation immediately after turn
     // admission, before any fallible preflight or await. Its Drop covers
     // every completion/error/cancel path, and an Off/trash command can reach
@@ -4683,8 +5116,13 @@ async fn agent_turn(
     // The shared workflow resolver owns the exact model override, tools
     // capability, keychain lookup, and deadline sequence used by the CLI.
     // Tauri keeps its host-shaped missing-profile terminal above.
-    let resolved = cd_workflow::provider::resolve_turn_inputs_from_profile(
-        &state.secrets,
+    // Scope provider credentials to this admitted turn and share the cache
+    // with optional reviewer setup. Host connector credentials remain on
+    // their existing independent initialization path.
+    let provider_credentials =
+        cd_workflow::provider::TurnProviderCredentialCache::new(&state.secrets);
+    let resolved = cd_workflow::provider::resolve_turn_inputs_from_profile_with_credential_cache(
+        &provider_credentials,
         &cfg,
         profile,
         req.chat_model.as_deref(),
@@ -4694,11 +5132,90 @@ async fn agent_turn(
     let turn_started_at = tokio::time::Instant::now();
     let deadline_plan = resolved.deadline_plan;
 
+    let contributions_requested = match req.multi_model_mode.as_deref() {
+        Some("single") => false,
+        Some("contributions") => true,
+        _ => {
+            cfg.contributions.enabled
+                || cfg.multi_model.mode == cd_core::multi_model::MultiModelMode::Contributions
+        }
+    };
+    // Resolve the multi-model reviewer runtime for this turn (opt-in via
+    // req.multi_model_mode). The desktop host resolves the reviewer's measured
+    // qualification from its own store; a name is never a qualification.
+    let requested_review_mode = match req.multi_model_mode.as_deref() {
+        Some("review") => cd_core::multi_model::MultiModelMode::Review,
+        Some("single") => cd_core::multi_model::MultiModelMode::Single,
+        // No per-turn override → the configured default (a Settings toggle).
+        _ => cfg.multi_model.mode,
+    };
+    let reviewer_qualified = cfg.multi_model.reviewer.as_ref().and_then(|rev| {
+        let prof = cfg
+            .providers
+            .profiles
+            .iter()
+            .find(|p| p.id == rev.profile_id)?;
+        let model = rev.model.as_deref().unwrap_or(&prof.chat_model);
+        let key = cd_core::capability_qualification::QualificationKey::with_provider_kind(
+            &prof.id,
+            &prof.base_url,
+            model,
+            prof.kind,
+        );
+        let store = state.qualification_store.lock().ok()?;
+        let report = store.get(&key)?;
+        use cd_core::capability_qualification::{
+            capability_contract_verdict, CapabilityContract, ContractVerdict,
+        };
+        Some(matches!(
+            capability_contract_verdict(Some(report), CapabilityContract::JsonProposal),
+            ContractVerdict::Qualified
+        ))
+    });
+    let review_context_budget = cfg
+        .model_context_budgets
+        .resolve(Some(resolved.profile.chat_model.as_str()));
+    let multi_model_review = cd_workflow::multi_model::resolve_reviewer_runtime(
+        &cfg,
+        &provider_credentials,
+        // Review is only meaningful for a corpus-linked investigation turn.
+        if req.log_explorer_context.is_some() && !contributions_requested {
+            requested_review_mode
+        } else {
+            cd_core::multi_model::MultiModelMode::Single
+        },
+        &resolved,
+        reviewer_qualified,
+        review_context_budget,
+    )
+    .await;
+    let contribution_qualification = state
+        .qualification_store
+        .lock()
+        .ok()
+        .map(|store| (*store).clone());
+    let contributions = cd_workflow::multi_model::resolve_contribution_runtime(
+        &cfg,
+        &provider_credentials,
+        &resolved,
+        contribution_qualification.as_ref(),
+        review_context_budget,
+        req.log_explorer_context.is_some() && contributions_requested,
+        req.multi_model_mode.as_deref() == Some("contributions"),
+    )
+    .await;
+
     // Resolve the linked corpus only from the durable session. Explorer may
     // contribute a bounded viewport brief, but neither the model nor an
     // ordinary main-chat turn request chooses or broadens corpus scope.
     let store = session_store(&state)?;
     let stored_session = load_session_for_turn(&store, &req.session_id)?;
+    let investigation_answer_reservation = reserve_investigation_answer_message(
+        stored_session.as_ref(),
+        &req.session_id,
+        &turn_id,
+        req.client_assistant_message_id.as_deref(),
+    );
     let log_explorer_context = match linked_log_turn_context(
         stored_session.as_ref(),
         window.label(),
@@ -4733,6 +5250,26 @@ async fn agent_turn(
             return Ok(());
         }
         Err(error) => return Err(error),
+    };
+    // Fast triage is meaningful only for an accepted linked-log turn. Resolve
+    // it after linked-context validation so an ordinary, rejected, or forced
+    // local turn never builds an unused fallback backend.
+    let fast_triage = if cd_workflow::fast_triage::should_resolve_fast_triage(
+        log_explorer_context.is_some(),
+        req.force_local,
+        cancel.load(std::sync::atomic::Ordering::Relaxed),
+    ) {
+        cd_workflow::fast_triage::resolve_fast_triage_runtime(
+            &cfg,
+            &provider_credentials,
+            &resolved,
+        )
+        .await
+    } else {
+        cd_workflow::fast_triage::ResolvedFastTriage {
+            runtime: None,
+            entry_degradation: None,
+        }
     };
     let linked_synthesis_retry = if req.retry_synthesis_only {
         state
@@ -4929,6 +5466,9 @@ async fn agent_turn(
                 },
             ] {
                 let _ = on_event.send(cd_core::research::event_to_dto(&event));
+                if let Some(progress) = progress_dto_for_event(&event, turn_started_at) {
+                    let _ = on_event.send(progress);
+                }
             }
             turn_prelude_emitted = true;
             let app = window.app_handle().clone();
@@ -4965,14 +5505,6 @@ async fn agent_turn(
         let mut histories = state.histories.lock().expect("hist");
         histories.entry(req.session_id.clone()).or_default().clone()
     };
-    let turn_id = req
-        .client_assistant_message_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|message_id| !message_id.is_empty())
-        .map(|message_id| format!("{}::{message_id}", req.session_id))
-        .unwrap_or_else(|| format!("{}::{}", req.session_id, uuid::Uuid::new_v4()));
-
     // One capture object timestamps both provider completions and the live
     // host stream against the real turn origin. This preserves the causal
     // model → tool → model sequence instead of concatenating two lists later.
@@ -5031,6 +5563,9 @@ async fn agent_turn(
         }
         let dto = event_to_dto_with_linked_corpus(&ev, linked_citation_corpus.as_deref());
         let _ = channel.send(dto);
+        if let Some(progress) = progress_dto_for_event(&ev, turn_started_at) {
+            let _ = channel.send(progress);
+        }
     };
 
     // #114: host was taken out of the mutex before this awaitable turn.
@@ -5131,6 +5666,9 @@ async fn agent_turn(
         host.set_log_corpus_scope(None);
         host.set_active_log_corpus(None);
     }
+    let linked_snapshot_revision = log_explorer_context
+        .as_ref()
+        .and_then(|context| host.linked_log_snapshot_revision(&context.corpus_id).ok());
     let mut next_synthesis_checkpoint = linked_synthesis_retry.clone();
     // Activity capture seam. `TracingChatBackend` wraps the same backend and
     // forwards every call unchanged, so this cannot alter execution, tool
@@ -5157,6 +5695,29 @@ async fn agent_turn(
         }
         ev
     } else {
+        // An entry-time reviewer degradation is reported once, before the turn,
+        // so the desktop knows review was requested but ran single-model and
+        // why. Mid-pipeline degradations are reported by the seam.
+        if let Some(reason) = multi_model_review.entry_degradation {
+            sink(cd_workflow::multi_model::entry_degradation_event(reason));
+        }
+        if let Some(detail) = contributions.entry_degradation {
+            sink(cd_core::events::StreamEvent::MultiModelStage {
+                stage: "summary".into(),
+                phase: "summary".into(),
+                status: Some("single".into()),
+                detail: detail.into(),
+                candidate_id: None,
+            });
+        }
+        // Preserve the disabled-by-default path. Enabled-route preparation
+        // failures are host-authored metadata; route selection still remains
+        // evidence-driven inside `cd-core`.
+        if cfg.fast_triage.enabled {
+            if let Some(reason) = fast_triage.entry_degradation {
+                sink(cd_workflow::fast_triage::entry_degradation_event(reason));
+            }
+        }
         cd_workflow::turn::run_turn(
             &mut host,
             &resolved,
@@ -5177,6 +5738,9 @@ async fn agent_turn(
                 turn_prelude_emitted,
                 applied_skill_ids: &applied_skill_ids,
                 user_selection: req.user_selection.as_deref(),
+                multi_model: multi_model_review.runtime.clone(),
+                contribution_runtime: contributions.runtime.clone(),
+                fast_triage: fast_triage.runtime.clone(),
             },
             Some(&mut sink),
             Some(&mut next_synthesis_checkpoint),
@@ -5233,6 +5797,22 @@ async fn agent_turn(
         }
         _ => Ok(false),
     };
+    // The envelope is durable only through this typed host path. A later
+    // renderer autosave is sanitized to retain this exact value (or none), so
+    // displayed JSON can never become evidence authority on a follow-up.
+    if let Ok(events) = &result {
+        let _mutation = state
+            .chat_session_mutation
+            .lock()
+            .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
+        let store = session_store(&state)?;
+        persist_investigation_answer_at(
+            &store,
+            investigation_answer_reservation.as_ref(),
+            linked_snapshot_revision,
+            events,
+        )?;
+    }
     let retry_available = {
         let mut checkpoints = state
             .linked_synthesis_checkpoints
@@ -5364,6 +5944,187 @@ fn should_persist_chat_session(session: &Session) -> bool {
     // different: the user created it from Log Explorer and the link itself is
     // durable state needed before the first agent turn.
     !session.messages.is_empty() || session.linked_corpus_id.is_some()
+}
+
+/// Key reserved for an answer envelope which crossed the typed host event
+/// boundary. The webview can read this ordinary session metadata, but a
+/// webview save never gets to create, replace, or revalidate it.
+const INVESTIGATION_ANSWER_META_KEY: &str = cd_workflow::chat::INVESTIGATION_ANSWER_META_KEY;
+
+fn preserve_host_investigation_answer_metadata(session: &mut Session, durable: Option<&Session>) {
+    let durable_by_id: HashMap<&str, &StoredMessage> = durable
+        .map(|saved| {
+            saved
+                .messages
+                .iter()
+                .map(|message| (message.id.as_str(), message))
+                .collect()
+        })
+        .unwrap_or_default();
+    let incoming_id_counts =
+        session
+            .messages
+            .iter()
+            .fold(HashMap::<String, usize>::new(), |mut counts, message| {
+                *counts.entry(message.id.clone()).or_default() += 1;
+                counts
+            });
+    for message in &mut session.messages {
+        let retained = if message.role == "assistant"
+            && incoming_id_counts.get(message.id.as_str()) == Some(&1)
+        {
+            durable_by_id
+                .get(message.id.as_str())
+                .filter(|saved| saved.role == "assistant")
+                .and_then(|saved| saved.meta.as_ref())
+                .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
+                .cloned()
+        } else {
+            None
+        };
+        if let Some(meta) = message
+            .meta
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            meta.remove(INVESTIGATION_ANSWER_META_KEY);
+            if let Some(envelope) = retained {
+                meta.insert(INVESTIGATION_ANSWER_META_KEY.into(), envelope);
+            }
+        } else if let Some(envelope) = retained {
+            message.meta = Some(serde_json::json!({ INVESTIGATION_ANSWER_META_KEY: envelope }));
+        }
+    }
+}
+
+fn clear_host_investigation_answer_metadata(session: &mut Session) {
+    for message in &mut session.messages {
+        if let Some(meta) = message
+            .meta
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            meta.remove(INVESTIGATION_ANSWER_META_KEY);
+        }
+    }
+}
+
+/// Process-local proof that one presentation row id was unused when this
+/// host-admitted turn began. The renderer chooses the correlation label, but
+/// only the host creates this ownership record and the authoritative turn id.
+#[derive(Debug)]
+struct InvestigationAnswerMessageReservation {
+    session_id: String,
+    turn_id: String,
+    assistant_message_id: String,
+}
+
+fn reserve_investigation_answer_message(
+    session: Option<&Session>,
+    session_id: &str,
+    turn_id: &str,
+    assistant_message_id: Option<&str>,
+) -> Option<InvestigationAnswerMessageReservation> {
+    let raw_assistant_message_id = assistant_message_id?;
+    let assistant_message_id = raw_assistant_message_id.trim();
+    if assistant_message_id.is_empty()
+        || assistant_message_id.len() > 128
+        || assistant_message_id != raw_assistant_message_id
+    {
+        return None;
+    }
+    if session.is_some_and(|session| {
+        session.id != session_id
+            || session
+                .messages
+                .iter()
+                .any(|message| message.id == assistant_message_id)
+    }) {
+        return None;
+    }
+    Some(InvestigationAnswerMessageReservation {
+        session_id: session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+    })
+}
+
+/// Store a typed investigation envelope only after the host itself received
+/// it from core. There is intentionally no IPC command accepting envelope
+/// JSON, and no transcript-to-envelope parser.
+fn persist_investigation_answer_at(
+    store: &SessionStore,
+    reservation: Option<&InvestigationAnswerMessageReservation>,
+    expected_snapshot_revision: Option<cd_core::investigation_answer::LogSnapshotRevisionV1>,
+    events: &[cd_core::events::StreamEvent],
+) -> Result<bool, String> {
+    let Some(expected_snapshot_revision) = expected_snapshot_revision else {
+        return Ok(false);
+    };
+    let Some(reservation) = reservation else {
+        return Ok(false);
+    };
+    let mut session = store
+        .load(&reservation.session_id)
+        .map_err(|error| error.to_string())?;
+    let Some(linked_corpus_id) = session.linked_corpus_id.as_deref() else {
+        return Ok(false);
+    };
+    let Some(envelope) = events.iter().rev().find_map(|event| match event {
+        cd_core::events::StreamEvent::InvestigationAnswer { envelope }
+            if envelope.binding.session_id == reservation.session_id
+                && envelope.binding.turn_id == reservation.turn_id
+                && envelope.binding.corpus_id == linked_corpus_id
+                && envelope.binding.revision == expected_snapshot_revision =>
+        {
+            Some(envelope)
+        }
+        _ => None,
+    }) else {
+        return Ok(false);
+    };
+    let matching_rows = session
+        .messages
+        .iter()
+        .filter(|message| message.id == reservation.assistant_message_id)
+        .count();
+    if matching_rows > 1
+        || session.messages.iter().any(|message| {
+            message.id == reservation.assistant_message_id && message.role != "assistant"
+        })
+    {
+        return Ok(false);
+    }
+    if matching_rows == 0 {
+        // Renderer persistence may race or disappear. Keep a host-owned,
+        // deliberately text-free row so later renderer presentation can
+        // merge into it without ever supplying the envelope.
+        session.messages.push(StoredMessage {
+            id: reservation.assistant_message_id.clone(),
+            role: "assistant".into(),
+            content: String::new(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+    }
+    let message = session
+        .messages
+        .iter_mut()
+        .find(|message| message.id == reservation.assistant_message_id)
+        .ok_or_else(|| "assistant message was not available after host insert".to_string())?;
+    let meta = message.meta.get_or_insert_with(|| serde_json::json!({}));
+    let Some(meta) = meta.as_object_mut() else {
+        return Err("assistant message metadata is not an object".into());
+    };
+    meta.insert(
+        INVESTIGATION_ANSWER_META_KEY.into(),
+        serde_json::json!(envelope),
+    );
+    session.touch();
+    store.save(&session).map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 /// Whether a citation id is a governed log evidence identity (#701 / #698).
@@ -5515,6 +6276,7 @@ fn save_chat_session_cas_at(
         session.linked_corpus_id = None;
         None
     };
+    preserve_host_investigation_answer_metadata(&mut session, durable.as_ref());
     sanitize_log_citation_provenance(&mut session, durable.as_ref());
     session.maybe_auto_title_from_first_user();
     session.touch();
@@ -5781,30 +6543,6 @@ fn provider_group_label(p: &ProviderProfile) -> String {
     desc.group_label.to_string()
 }
 
-/// Keep almost everything for the picker (TriageTool shows full catalogs).
-/// Only drop clear non-chat tooling entries.
-fn looks_like_chat_model_id(id: &str) -> bool {
-    let l = id.to_ascii_lowercase();
-    if l.contains("embed")
-        || l.contains("text-embedding")
-        || l.contains("whisper")
-        || l.contains("tts-")
-        || l.contains("dall-e")
-        || l.contains("moderation")
-        || l.contains("realtime")
-        || l.contains("transcri")
-        || l.contains("speech")
-    {
-        return false;
-    }
-    // "image" alone is too aggressive (filters valid vision/chat names);
-    // only drop explicit image-generation product ids.
-    if l.contains("dall") || l.starts_with("image-") || l.contains("-image-") {
-        return false;
-    }
-    true
-}
-
 fn resolve_default_model(cfg: &AppConfig) -> String {
     if let Some(m) = cfg
         .default_chat_model
@@ -5833,7 +6571,7 @@ fn resolve_default_selection(cfg: &AppConfig) -> String {
 
 async fn models_for_profile(
     profile: &ProviderProfile,
-    secrets: &KeychainSecretStore,
+    secrets: &ReferencedSecretStore,
 ) -> ProfileModelInventory {
     let api_key = profile
         .api_key_ref
@@ -5862,40 +6600,54 @@ struct ListModelsDraftReq {
     #[serde(default)]
     api_key: Option<String>,
     #[serde(default)]
+    api_key_file: Option<String>,
+    #[serde(default)]
     local_only: Option<bool>,
     #[serde(default)]
     chat_model: Option<String>,
 }
 
-/// Resolve draft/keychain key for a provider kind (never logs).
+/// Resolve an explicit draft credential or the reference recorded on the
+/// matching saved profile. Absence never synthesizes a Keychain reference.
 fn resolve_draft_api_key(
     state: &AppState,
     kind: ProviderKind,
     draft_key: Option<&str>,
-) -> Option<String> {
+    draft_file: Option<&str>,
+) -> Result<Option<String>, String> {
     if matches!(kind, ProviderKind::XaiGrokBuild | ProviderKind::Ollama) {
-        return None;
+        return Ok(None);
     }
     let draft = draft_key
         .map(str::trim)
         .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '•'))
         .map(|s| s.to_string());
-    if draft.is_some() {
-        return draft;
+    let file = draft_file.map(str::trim).filter(|path| !path.is_empty());
+    if draft.is_some() && file.is_some() {
+        return Err("choose either a pasted API key or a protected key file, not both".into());
+    }
+    if let Some(draft) = draft {
+        return Ok(Some(draft));
+    }
+    if let Some(path) = file {
+        let reference = file_secret_ref(&PathBuf::from(path)).map_err(|e| e.to_string())?;
+        return read_file_secret_ref(&reference).map_err(|e| e.to_string());
     }
     let desc = cd_core::providers::descriptor_for(kind);
     let id = desc.profile_id_slug;
-    let r = key_ref_for_profile(id);
-    if let Ok(Some(k)) = state.secrets.get(&r) {
-        return Some(k);
-    }
-    let cfg = state.config.lock().expect("config");
-    cfg.providers
+    let reference = state
+        .config
+        .lock()
+        .expect("config")
+        .providers
         .profiles
         .iter()
-        .find(|p| p.id == id)
-        .and_then(|p| p.api_key_ref.as_ref())
-        .and_then(|r| state.secrets.get(r).ok().flatten())
+        .find(|profile| profile.id == id)
+        .and_then(|profile| profile.api_key_ref.clone());
+    let Some(reference) = reference else {
+        return Ok(None);
+    };
+    state.secrets.get(&reference).map_err(|e| e.to_string())
 }
 
 /// TriageTool-parity gateway probe (plain HTTP, multi-path, Bearer + x-api-key).
@@ -5904,6 +6656,8 @@ struct ProbeAiGatewayReq {
     base_url: String,
     #[serde(default)]
     api_key: Option<String>,
+    #[serde(default)]
+    api_key_file: Option<String>,
     /// When true (default), also probe local Ollama.
     #[serde(default)]
     probe_local: Option<bool>,
@@ -5914,18 +6668,17 @@ async fn probe_ai_gateway_cmd(
     state: State<'_, AppState>,
     req: ProbeAiGatewayReq,
 ) -> Result<cd_core::ai_probe::AiProbeResult, String> {
-    let draft = req
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '•'));
-    // Prefer draft key; else try keychain for either remote flavor.
-    let key = if let Some(k) = draft {
-        Some(k.to_string())
-    } else {
-        resolve_draft_api_key(&state, ProviderKind::OpenAiCompatible, None)
-            .or_else(|| resolve_draft_api_key(&state, ProviderKind::Anthropic, None))
-    };
+    // Prefer an explicit draft source; otherwise use only a reference already
+    // recorded on a remote profile. Never probe an implicit Keychain entry.
+    let mut key = resolve_draft_api_key(
+        &state,
+        ProviderKind::OpenAiCompatible,
+        req.api_key.as_deref(),
+        req.api_key_file.as_deref(),
+    )?;
+    if key.is_none() {
+        key = resolve_draft_api_key(&state, ProviderKind::Anthropic, None, None)?;
+    }
     let probe_local = req.probe_local.unwrap_or(true);
     let result =
         cd_core::ai_probe::probe_ai_gateway(&req.base_url, key.as_deref(), probe_local).await;
@@ -5970,7 +6723,46 @@ async fn list_models_for_draft(
         kind,
         ProviderKind::OpenAiCompatible | ProviderKind::Anthropic | ProviderKind::Ollama
     ) {
-        let key = resolve_draft_api_key(&state, kind, req.api_key.as_deref());
+        let key = resolve_draft_api_key(
+            &state,
+            kind,
+            req.api_key.as_deref(),
+            req.api_key_file.as_deref(),
+        )?;
+        if kind == ProviderKind::OpenAiCompatible
+            && cd_core::discovery::is_vercel_ai_gateway(&req.base_url)
+        {
+            let profile = ProviderProfile {
+                id: "vercel-draft".into(),
+                label: "Vercel AI Gateway".into(),
+                kind,
+                base_url: req.base_url.clone(),
+                api_key_ref: None,
+                chat_model: req.chat_model.clone().unwrap_or_default(),
+                embedding_model: None,
+                embedding_base_url: None,
+                capabilities: cd_core::providers::descriptor_for(kind).default_capabilities,
+                local_only: false,
+                deadline_preference: Default::default(),
+            };
+            let probe = cd_core::discovery::probe_provider_catalog(&profile, key.clone()).await;
+            if probe.outcome.is_reachable() {
+                let mut ids = probe.model_ids;
+                if let Some(configured) = req
+                    .chat_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                {
+                    if !ids.iter().any(|model| model == configured) {
+                        ids.push(configured.to_string());
+                    }
+                }
+                ids = cd_core::model_role_hints::sort_ids_for_chat_picker(&ids);
+                ids.dedup();
+                return Ok(ids);
+            }
+        }
         let probe_local = matches!(kind, ProviderKind::Ollama)
             || req.base_url.contains("127.0.0.1")
             || req.base_url.to_lowercase().contains("localhost");
@@ -6018,7 +6810,12 @@ async fn list_models_for_draft(
         .filter(|s| !s.is_empty())
         .unwrap_or("grok-3")
         .to_string();
-    let api_key = resolve_draft_api_key(&state, kind, req.api_key.as_deref());
+    let api_key = resolve_draft_api_key(
+        &state,
+        kind,
+        req.api_key.as_deref(),
+        req.api_key_file.as_deref(),
+    )?;
     let profile = ProviderProfile {
         id: id.clone(),
         label: desc.default_label.to_string(),
@@ -6222,10 +7019,6 @@ fn get_active_provider(state: State<'_, AppState>) -> Option<ProviderDto> {
             .as_ref()
             .map(|r| state.secrets.has(r).unwrap_or(false))
             .unwrap_or(false)
-            || state
-                .secrets
-                .has(&key_ref_for_profile(&p.id))
-                .unwrap_or(false)
     };
     Some(provider_to_dto(p, has_key))
 }
@@ -6269,10 +7062,6 @@ fn set_provider_tools_enabled(
             .as_ref()
             .map(|r| state.secrets.has(r).unwrap_or(false))
             .unwrap_or(false)
-            || state
-                .secrets
-                .has(&key_ref_for_profile(&p.id))
-                .unwrap_or(false)
     };
     Ok(provider_to_dto(p, has_key))
 }
@@ -6350,10 +7139,10 @@ fn require_preview_state(cfg: &AppConfig, expected: Option<&str>) -> Result<(), 
 /// What a hypothetical curation change would do to the default selection.
 async fn curation_impact(
     cfg: &AppConfig,
-    secrets: &KeychainSecretStore,
+    secrets: &ReferencedSecretStore,
     next: &AppConfig,
 ) -> Result<CurationImpactDto, String> {
-    let before = build_model_options(cfg, secrets).await;
+    let before = build_model_options(cfg, secrets, None).await;
     let default_key = before
         .iter()
         .find(|m| m.is_default)
@@ -6368,7 +7157,7 @@ async fn curation_impact(
         .map(|k| before.iter().any(|m| &m.selection_key == k && !m.hidden))
         .unwrap_or(false);
 
-    let after = build_model_options(next, secrets).await;
+    let after = build_model_options(next, secrets, None).await;
     let visible: Vec<&ModelOptionDto> = after.iter().filter(|m| !m.hidden).collect();
     let default_still_visible = default_key
         .as_ref()
@@ -6601,10 +7390,12 @@ struct QualificationSelectReq {
     api_key: Option<String>,
 }
 
-fn resolve_qualification_target(
+/// Resolve only non-secret identity fields for cached status and clear actions.
+/// This path must never touch Keychain merely because Settings or a picker renders.
+fn resolve_qualification_identity_target(
     state: &AppState,
     req: &QualificationSelectReq,
-) -> Result<(ProviderProfile, String, Option<String>), String> {
+) -> Result<(ProviderProfile, String), String> {
     let cfg = state.config.lock().expect("config").clone();
     let profile = if let Some(pid) = req
         .profile_id
@@ -6655,22 +7446,32 @@ fn resolve_qualification_target(
     if matches!(profile.kind, ProviderKind::XaiGrokBuild) && profile.base_url.trim().is_empty() {
         profile.base_url = "https://api.x.ai/v1".into();
     }
+    Ok((profile, model))
+}
+
+/// Resolve a live probe target. Credential lookup is confined to this explicit
+/// user-triggered path and never used by cached status, clear, GUI labels, or CLI status.
+fn resolve_qualification_target(
+    state: &AppState,
+    req: &QualificationSelectReq,
+) -> Result<(ProviderProfile, String, Option<String>), String> {
+    let (profile, model) = resolve_qualification_identity_target(state, req)?;
     let api_key = if matches!(profile.kind, ProviderKind::XaiGrokBuild) {
         None
     } else {
-        resolve_draft_api_key(state, profile.kind, req.api_key.as_deref()).or_else(|| {
+        let draft = req
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty() && !key.chars().all(|c| c == '•'));
+        if let Some(draft) = draft {
+            Some(draft.to_string())
+        } else {
             profile
                 .api_key_ref
-                .as_ref()
-                .and_then(|r| state.secrets.get(r).ok().flatten())
-                .or_else(|| {
-                    state
-                        .secrets
-                        .get(&key_ref_for_profile(&profile.id))
-                        .ok()
-                        .flatten()
-                })
-        })
+                .as_deref()
+                .and_then(|reference| state.secrets.get(reference).ok().flatten())
+        }
     };
     Ok((profile, model, api_key))
 }
@@ -6681,15 +7482,19 @@ fn get_capability_qualification(
     state: State<'_, AppState>,
     req: QualificationSelectReq,
 ) -> Result<Option<capability_qualification_host::QualificationReportDto>, String> {
-    let (profile, model, _) = resolve_qualification_target(&state, &req)?;
-    let key =
-        capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
+    let (profile, model) = resolve_qualification_identity_target(&state, &req)?;
+    let key = capability_qualification_host::qualification_key_for_profile(&profile, &model);
+    let cfg = state.config.lock().expect("config").clone();
+    let tools_for_model = model_tools_enabled(&cfg, &profile, &model);
+    let gate = capability_qualification_host::gate_for_model(&profile, tools_for_model, &model);
     let mut store = state
         .qualification_store
         .lock()
         .expect("qualification_store");
-    Ok(capability_qualification_host::get_cached_report(
-        &mut store, &key,
+    Ok(capability_qualification_host::get_cached_report_with_gate(
+        &mut store,
+        &key,
+        Some(&gate),
     ))
 }
 
@@ -6702,9 +7507,8 @@ async fn start_capability_qualification(
     let (profile, model, api_key) = resolve_qualification_target(&state, &req)?;
     let cfg = state.config.lock().expect("config").clone();
     let tools_for_model = model_tools_enabled(&cfg, &profile, &model);
-    let gate = capability_qualification_host::gate_from_profile(&profile, tools_for_model);
-    let key =
-        capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
+    let gate = capability_qualification_host::gate_for_model(&profile, tools_for_model, &model);
+    let key = capability_qualification_host::qualification_key_for_profile(&profile, &model);
 
     // Single-flight cancel flag (one qualification at a time).
     let cancel = {
@@ -6741,6 +7545,7 @@ async fn start_capability_qualification(
         Vec::new()
     };
 
+    let run_gate = gate;
     let report = tokio::task::spawn_blocking(move || {
         let mut transport = capability_qualification_host::LiveQualificationTransport::new(
             backend, base_url, api_key, local_only,
@@ -6748,7 +7553,7 @@ async fn start_capability_qualification(
         .with_extra_headers(extra_headers);
         cd_core::capability_qualification::run_qualification(
             key.clone(),
-            gate,
+            run_gate,
             &mut transport,
             &cancel,
         )
@@ -6766,9 +7571,13 @@ async fn start_capability_qualification(
         .qualification_store
         .lock()
         .expect("qualification_store");
-    Ok(capability_qualification_host::put_report(
-        &mut store, report,
-    ))
+    let dto = capability_qualification_host::put_report_with_gate(&mut store, report, &gate);
+    cd_core::capability_qualification::save_qualification_store(
+        &state.qualification_store_path,
+        &store,
+    )
+    .map_err(|error| format!("save qualification evidence: {error}"))?;
+    Ok(dto)
 }
 
 /// Cooperative cancel for the in-flight qualification run.
@@ -6789,16 +7598,21 @@ fn clear_capability_qualification(
     state: State<'_, AppState>,
     req: QualificationSelectReq,
 ) -> Result<bool, String> {
-    let (profile, model, _) = resolve_qualification_target(&state, &req)?;
-    let key =
-        capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
+    let (profile, model) = resolve_qualification_identity_target(&state, &req)?;
+    let key = capability_qualification_host::qualification_key_for_profile(&profile, &model);
     let mut store = state
         .qualification_store
         .lock()
         .expect("qualification_store");
-    Ok(capability_qualification_host::clear_report(
-        &mut store, &key,
-    ))
+    let changed = capability_qualification_host::clear_report(&mut store, &key);
+    if changed {
+        cd_core::capability_qualification::save_qualification_store(
+            &state.qualification_store_path,
+            &store,
+        )
+        .map_err(|error| format!("save qualification evidence: {error}"))?;
+    }
+    Ok(changed)
 }
 
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
@@ -6819,7 +7633,7 @@ async fn models_for_profile_with_key(
             {
                 if let Ok(tags) = client.list_tags().await {
                     discovery_succeeded = true;
-                    discovered_ids.extend(tags.into_iter().filter(|m| looks_like_chat_model_id(m)));
+                    discovered_ids.extend(tags);
                 }
             }
         }
@@ -6841,12 +7655,8 @@ async fn models_for_profile_with_key(
                 ) {
                     if let Ok(listed) = client.list_models().await {
                         discovery_succeeded = true;
-                        let filtered: Vec<String> = listed
-                            .into_iter()
-                            .filter(|m| looks_like_chat_model_id(m))
-                            .collect();
-                        if filtered.len() > best.len() {
-                            best = filtered;
+                        if listed.len() > best.len() {
+                            best = listed;
                         }
                     }
                 }
@@ -6875,7 +7685,7 @@ async fn models_for_profile_with_key(
                         let client = client.with_extra_headers(creds.request_headers());
                         if let Ok(listed) = client.list_models().await {
                             discovery_succeeded = true;
-                            for m in listed.into_iter().filter(|m| looks_like_chat_model_id(m)) {
+                            for m in listed {
                                 if !discovered_ids.iter().any(|x| x == &m) {
                                     discovered_ids.push(m);
                                 }
@@ -6902,12 +7712,8 @@ async fn models_for_profile_with_key(
                 ) {
                     if let Ok(listed) = client.list_models().await {
                         discovery_succeeded = true;
-                        let filtered: Vec<String> = listed
-                            .into_iter()
-                            .filter(|m| looks_like_chat_model_id(m))
-                            .collect();
-                        if filtered.len() > best.len() {
-                            best = filtered;
+                        if listed.len() > best.len() {
+                            best = listed;
                         }
                     }
                 }
@@ -6966,7 +7772,7 @@ async fn list_chat_models(
     keep_keys: Option<Vec<String>>,
 ) -> Result<Vec<ModelOptionDto>, String> {
     let cfg = state.config.lock().expect("config").clone();
-    let mut out = build_model_options(&cfg, &state.secrets).await;
+    let mut out = build_model_options(&cfg, &state.secrets, Some(&state.qualification_store)).await;
     retain_picker_visible(&mut out, include_hidden.unwrap_or(false), keep_keys);
     Ok(out)
 }
@@ -7014,7 +7820,8 @@ fn retain_picker_visible(
 /// before confirming is byte-for-byte the one they end up with (#678).
 async fn build_model_options(
     cfg: &AppConfig,
-    secrets: &KeychainSecretStore,
+    secrets: &ReferencedSecretStore,
+    qualification_store: Option<&Mutex<cd_core::capability_qualification::QualificationStore>>,
 ) -> Vec<ModelOptionDto> {
     let default_model = resolve_default_model(cfg);
     let default_pid = cfg
@@ -7045,6 +7852,7 @@ async fn build_model_options(
                     .map(str::to_string),
                 availability: candidate.availability,
                 availability_detail: candidate.availability_detail,
+                readiness: cd_core::capability_qualification::ModelReadiness::unverified(&id),
                 hidden: hidden_by.is_some(),
                 hidden_by: hidden_by.map(|h| match h {
                     cd_core::model_curation::HiddenBy::Provider => "provider".to_string(),
@@ -7090,6 +7898,9 @@ async fn build_model_options(
                 availability_detail: Some(
                     "The configured default was not confirmed by model discovery.".into(),
                 ),
+                readiness: cd_core::capability_qualification::ModelReadiness::unverified(
+                    &default_model,
+                ),
                 // The default is always offered: it is what a new chat uses.
                 hidden: false,
                 hidden_by: None,
@@ -7101,9 +7912,32 @@ async fn build_model_options(
         );
     }
 
-    // Pinned first in explicit user order, then active provider, then alpha by
-    // group, then model id. Hidden entries sort last so a management view that
-    // asks for them still reads as a curated list.
+    if let Some(store) = qualification_store {
+        let mut store = store.lock().expect("qualification_store");
+        for option in &mut out {
+            let Some(profile) = cfg
+                .providers
+                .profiles
+                .iter()
+                .find(|profile| profile.id == option.provider_id)
+            else {
+                continue;
+            };
+            let key = cd_core::capability_qualification::QualificationKey::with_provider_kind(
+                &profile.id,
+                &profile.base_url,
+                &option.id,
+                profile.kind,
+            );
+            option.readiness =
+                cd_core::capability_qualification::model_readiness_for_selection(&mut store, &key);
+        }
+    }
+
+    // Hidden entries last. Explicit pins keep their exact order, and an
+    // explicit default stays ahead of recommendations. Within ordinary
+    // choices, current verified chat evidence is preferred without silently
+    // changing the selected/default model.
     let active_id = cfg.providers.active_id.clone().unwrap_or_default();
     out.sort_by(|a, b| {
         let a_act = a.provider_id == active_id;
@@ -7115,6 +7949,12 @@ async fn build_model_options(
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| b.is_default.cmp(&a.is_default))
+            .then_with(|| {
+                a.readiness
+                    .chat_preference_rank()
+                    .cmp(&b.readiness.chat_preference_rank())
             })
             .then_with(|| b_act.cmp(&a_act))
             .then_with(|| a.group.cmp(&b.group))
@@ -9308,6 +10148,357 @@ async fn install_demo_log_corpus(
         &cancel_registration,
     );
     Ok(result)
+}
+
+const TRIAGE_V2_CANCEL_KEY: &str = "triage_v2";
+
+fn parse_tauri_triage_request(
+    value: serde_json::Value,
+) -> Result<(cd_core::triage_sdk::TriageRequestV2, Vec<u8>), String> {
+    let bytes = serde_json::to_vec(&value).map_err(|_| "invalid triage request".to_string())?;
+    if bytes.len() > cd_core::triage_sdk::MAX_TRIAGE_WIRE_BYTES {
+        return Err("triage request exceeds the public size bound".into());
+    }
+    let text =
+        String::from_utf8(bytes.clone()).map_err(|_| "invalid triage request".to_string())?;
+    let request = cd_core::triage_sdk::parse_request_v2(&text)
+        .map_err(|_| "triage request rejected by the V2 contract".to_string())?;
+    Ok((request, bytes))
+}
+
+fn triage_policy_for_request(
+    state: &AppState,
+    cfg: &AppConfig,
+    request: &cd_core::triage_sdk::TriageRequestV2,
+) -> Result<cd_core::multi_model::triage_policy::TriagePolicyV2, String> {
+    use cd_core::multi_model::triage_policy::TriagePolicyV2;
+    use cd_core::triage_sdk::TriagePolicySelectionV2;
+    match &request.policy {
+        TriagePolicySelectionV2::Standard { model } => {
+            let profile = cfg
+                .providers
+                .profiles
+                .iter()
+                .find(|profile| profile.id == model.profile_id)
+                .ok_or_else(|| "triage provider profile is unavailable".to_string())?;
+            Ok(TriagePolicyV2::standard(
+                model.clone(),
+                !matches!(profile.kind, ProviderKind::Ollama),
+            ))
+        }
+        TriagePolicySelectionV2::Inline { document, .. } => {
+            serde_json::from_value(document.clone())
+                .map_err(|_| "inline triage policy could not be decoded".to_string())
+        }
+        TriagePolicySelectionV2::Saved {
+            policy_id,
+            policy_revision,
+        } => {
+            let store_path = ensure_config_dir(&state.branding)
+                .map_err(|_| "triage policy store is unavailable".to_string())?
+                .join("triage-policies.json");
+            let store = cd_core::triage_policy_store::TriagePolicyStoreV1::load(&store_path)
+                .map_err(|_| "triage policy store is unavailable".to_string())?;
+            store
+                .policies
+                .iter()
+                .find(|saved| saved.policy_id == *policy_id && saved.revision == *policy_revision)
+                .map(|saved| saved.policy.clone())
+                .ok_or_else(|| "requested triage policy revision is unavailable".to_string())
+        }
+    }
+}
+
+fn triage_preflight_for_policy(
+    state: &AppState,
+    cfg: &AppConfig,
+    policy: &cd_core::multi_model::triage_policy::TriagePolicyV2,
+) -> cd_core::multi_model::triage_policy::TriagePolicyPreflightV2 {
+    let role_store = state
+        .triage_role_qualification_store
+        .lock()
+        .expect("triage_role_qualification_store");
+    cd_workflow::triage_host::preflight_for_policy(cfg, policy, &role_store)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TriageRoleQualificationCommandRequest {
+    profile_id: String,
+    model_id: String,
+    kind: cd_core::multi_model::triage_policy::TriageSlotKindV2,
+    deadline_ms: u64,
+    confirm: bool,
+}
+
+/// Run one exact-role synthetic qualification through the same provider,
+/// packet, and validator seams as the CLI. The webview receives only the
+/// bounded host-authored result; raw provider output and credentials stay in
+/// the native process.
+#[tauri::command]
+async fn triage_qualify_role_v2(
+    state: State<'_, AppState>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let request: TriageRoleQualificationCommandRequest =
+        serde_json::from_value(request).map_err(|_| "invalid triage role qualification request")?;
+    if !request.confirm {
+        return Err("triage role qualification requires explicit confirmation".into());
+    }
+    let cfg = state.config.lock().expect("config").clone();
+    let profile = cfg
+        .providers
+        .profiles
+        .iter()
+        .find(|profile| profile.id == request.profile_id)
+        .cloned()
+        .ok_or_else(|| "provider profile was not found".to_string())?;
+    let config_dir =
+        ensure_config_dir(&state.branding).map_err(|_| "config directory unavailable")?;
+    let store_path =
+        cd_core::triage_role_qualification::triage_role_qualification_store_path(&config_dir);
+    cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(&store_path)
+        .map_err(|_| "triage role qualification store is unavailable")?;
+    let kind = request.kind;
+    let record = cd_workflow::triage_role_qualification::qualify_configured_role_v2(
+        &cfg,
+        &state.secrets,
+        &cd_workflow::triage_role_qualification::TriageRoleProbeRequest {
+            profile_id: request.profile_id.clone(),
+            model_id: request.model_id.clone(),
+            kind,
+            deadline_ms: request.deadline_ms,
+        },
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let qualification = record.qualification;
+    let physical_provider_calls = record.physical_provider_calls;
+    let semantic_corrections = record.semantic_corrections;
+    let reason = record.reason.clone();
+    cd_workflow::triage_role_qualification::publish_role_qualification_record(&config_dir, record)
+        .map_err(|_| "triage role qualification store could not be published")?;
+    let needs_provider = !matches!(
+        kind,
+        cd_core::multi_model::triage_policy::TriageSlotKindV2::Contributor(
+            cd_core::multi_model::triage_policy::TriageContributorRole::TimelineAnalyst
+        ) | cd_core::multi_model::triage_policy::TriageSlotKindV2::Reviewer
+    );
+    Ok(serde_json::json!({
+        "schema_id": "contextdesk.tauri.triage_role_qualification.v1",
+        "action": "qualify",
+        "accepted": qualification == cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+        "profile_id": request.profile_id,
+        "model_id": request.model_id,
+        "kind": kind,
+        "qualification": qualification,
+        "physical_provider_calls": physical_provider_calls,
+        "semantic_corrections": semantic_corrections,
+        "reason": reason,
+        "store_written": true,
+        "network": needs_provider,
+        "credentials_read": needs_provider && profile.api_key_ref.is_some(),
+        "privacy": "owner_only"
+    }))
+}
+
+fn triage_fingerprint(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    format!("sha256:{:x}", sha2::Sha256::digest(bytes))
+}
+
+/// Compile one Triage Policy V2 request using the same host qualification store
+/// and exact policy selection that a subsequent live run will use.
+#[tauri::command]
+fn triage_preflight_v2(
+    state: State<'_, AppState>,
+    request: serde_json::Value,
+) -> Result<cd_core::multi_model::triage_policy::CompiledTriagePolicyV2, String> {
+    let (request, _) = parse_tauri_triage_request(request)?;
+    let cfg = state.config.lock().expect("config").clone();
+    let policy = triage_policy_for_request(&state, &cfg, &request)?;
+    let preflight = triage_preflight_for_policy(&state, &cfg, &policy);
+    cd_workflow::triage::compile_preflight(&policy, &preflight)
+        .map_err(|_| "triage policy preflight rejected".to_string())
+}
+
+/// Execute one Enhanced/Advanced Triage Policy V2 run through the existing
+/// corpus, packet, credential, qualification, provider, validation, replay,
+/// and cleanup plumbing. Standard remains on the established chat path.
+#[tauri::command]
+async fn triage_run_v2(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request: serde_json::Value,
+) -> Result<cd_core::triage_sdk::TriageRunEventV2, String> {
+    let (request, request_bytes) = parse_tauri_triage_request(request)?;
+    let cfg = state.config.lock().expect("config").clone();
+    let mut policy = triage_policy_for_request(&state, &cfg, &request)?;
+    if let Some(deadline_ms) = request.overrides.deadline_ms {
+        policy.budget.whole_turn_deadline_ms = Some(deadline_ms);
+    }
+    if let Some(max_provider_calls) = request.overrides.max_provider_calls {
+        policy.budget.max_provider_calls = max_provider_calls;
+    }
+    let preflight = triage_preflight_for_policy(&state, &cfg, &policy);
+    cd_workflow::triage::compile_preflight(&policy, &preflight)
+        .map_err(|_| "triage policy preflight rejected".to_string())?;
+    if matches!(
+        policy.mode,
+        cd_core::multi_model::triage_policy::TriagePolicyMode::Standard
+    ) {
+        return Err("standard_uses_established_path".into());
+    }
+    let deadline_ms =
+        policy
+            .budget
+            .whole_turn_deadline_ms
+            .unwrap_or(if cfg.router.deadline_is_explicit {
+                cfg.router.deadline_ms
+            } else {
+                300_000
+            });
+    let context_char_budget = usize::try_from(policy.budget.max_context_chars)
+        .map_err(|_| "triage context budget is not representable".to_string())?;
+    let cache_root = log_cache_dir(&state)?;
+    ensure_host(&state)?;
+    let cancel_key = format!(
+        "{TRIAGE_V2_CANCEL_KEY}:{}:{}",
+        request.run_id, request.cancellation_id
+    );
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        register_exclusive_cancel(
+            &mut cancels,
+            &cancel_key,
+            Arc::clone(&cancel),
+            "a triage run is already running",
+        )?;
+    }
+    let mut host = {
+        let mut host_guard = state.host.lock().expect("host");
+        match host_guard.take() {
+            Some(host) => host,
+            None => {
+                state.cancels.lock().expect("cancels").remove(&cancel_key);
+                return Err("host not ready".into());
+            }
+        }
+    };
+    let policy_bytes =
+        serde_json::to_vec(&policy).map_err(|_| "triage policy unavailable".to_string())?;
+    let input = cd_workflow::triage_host::TriageHostRunInput {
+        run_id: request.run_id.clone(),
+        request_fingerprint: triage_fingerprint(&request_bytes),
+        policy_fingerprint: triage_fingerprint(&policy_bytes),
+        corpus_id: request.scope.corpus_id.clone(),
+        corpus_revision: request.scope.corpus_revision,
+        source_ids: request.scope.source_ids.clone(),
+        user_text: request.task.clone(),
+        cancellation_id: request.cancellation_id.clone(),
+        explicit_review_requested: false,
+        deadline_ms,
+        context_char_budget,
+        cancel: Some(Arc::clone(&cancel)),
+    };
+    let execution = async {
+        let resolved = cd_workflow::triage_host::resolve_v2_host(
+            &mut host,
+            &cache_root,
+            &cfg,
+            &state.secrets,
+            &policy,
+            &preflight,
+            &input,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        cd_workflow::triage_host::run_v2_host(
+            &mut host,
+            resolved,
+            input,
+            &cd_workflow::triage_host::HostValidatedAnswerHooks::default(),
+            Some(Arc::new({
+                let app = app.clone();
+                move |event| {
+                    // Progressive events are a convenience view; the
+                    // validated replay returned below remains authoritative.
+                    let _ = app.emit("triage-run-event", event);
+                }
+            })),
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+    .await;
+    {
+        let mut host_guard = state.host.lock().expect("host");
+        *host_guard = Some(host);
+    }
+    remove_cancel_if_owned(
+        &mut state.cancels.lock().expect("cancels"),
+        &cancel_key,
+        &cancel,
+    );
+    let result = execution?;
+    result
+        .replay
+        .events
+        .last()
+        .cloned()
+        .ok_or_else(|| "triage replay is empty".to_string())
+}
+
+/// Cancel one exact live Triage Policy V2 run.
+#[tauri::command]
+fn triage_cancel_v2(
+    state: State<'_, AppState>,
+    request: serde_json::Value,
+) -> Result<bool, String> {
+    let cancellation: cd_core::triage_sdk::TriageCancellationV1 =
+        serde_json::from_value(request).map_err(|_| "invalid triage cancellation".to_string())?;
+    cancellation
+        .validate()
+        .map_err(|_| "invalid triage cancellation".to_string())?;
+    let key = format!(
+        "{TRIAGE_V2_CANCEL_KEY}:{}:{}",
+        cancellation.run_id, cancellation.cancellation_id
+    );
+    let flag = state.cancels.lock().expect("cancels").get(&key).cloned();
+    if let Some(flag) = flag {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Consume a host-authored triage replay without executing providers.
+///
+/// The replay validator is Rust-owned and the exact V2 events are emitted on
+/// the same shared Tauri stream used by live V2 runs.
+#[tauri::command]
+async fn triage_replay(
+    app: tauri::AppHandle,
+    replay: serde_json::Value,
+) -> Result<cd_core::triage_sdk::TriageRunEventV2, String> {
+    let replay: cd_core::triage_sdk::TriageReplayV1 = serde_json::from_value(replay)
+        .map_err(|error| format!("invalid triage replay: {error}"))?;
+    replay
+        .validate()
+        .map_err(|error| format!("invalid triage replay: {error}"))?;
+    let terminal = replay
+        .events
+        .last()
+        .cloned()
+        .ok_or_else(|| "invalid triage replay: replay is empty".to_string())?;
+    for event in &replay.events {
+        app.emit("triage-run-event", event)
+            .map_err(|error| format!("triage replay event delivery failed: {error}"))?;
+    }
+    Ok(terminal)
 }
 
 /// Trusted local re-analysis of template vectors; raw events are not reparsed.
@@ -11974,6 +13165,7 @@ fn set_chat_linked_corpus_at(
             safe
         }
     };
+    let previous_corpus_id = session.linked_corpus_id.clone();
     let corpus_id = normalize_log_corpus_id(corpus_id);
     if let Some(corpus_id) = corpus_id.as_deref() {
         // Validate before mutating or saving. A failed attach leaves both an
@@ -11981,6 +13173,12 @@ fn set_chat_linked_corpus_at(
         validate_linked_log_corpus_at(cache, corpus_id)?;
     }
     session.set_linked_corpus_id(corpus_id);
+    if session.linked_corpus_id != previous_corpus_id {
+        // An envelope binds an exact corpus/revision. It remains readable
+        // only while that binding is current; a relink makes it unavailable
+        // instead of treating old transcript JSON as fresh evidence.
+        clear_host_investigation_answer_metadata(&mut session);
+    }
     store.save(&session).map_err(|e| e.to_string())?;
     Ok(session)
 }
@@ -13015,11 +14213,32 @@ pub fn run() {
     let audit_log = ensure_config_dir(&branding)
         .ok()
         .map(|dir| cd_core::audit::AuditLog::new(dir.join("audit.jsonl")));
+    let qualification_store_path = cd_core::capability_qualification::qualification_store_path(
+        path.parent().expect("config directory"),
+    );
+    let qualification_store =
+        cd_core::capability_qualification::load_qualification_store(&qualification_store_path)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "qualification evidence could not be loaded");
+                cd_core::capability_qualification::QualificationStore::default()
+            });
+    let triage_role_qualification_store_path =
+        cd_core::triage_role_qualification::triage_role_qualification_store_path(
+            path.parent().expect("config directory"),
+        );
+    let triage_role_qualification_store =
+        cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(
+            &triage_role_qualification_store_path,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "triage role qualification evidence could not be loaded");
+            cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::default()
+        });
 
     let state = AppState {
         branding,
         config: Mutex::new(config),
-        secrets: KeychainSecretStore::new(),
+        secrets: ReferencedSecretStore::new(),
         audit_log,
         histories: Mutex::new(HashMap::new()),
         host: Arc::new(Mutex::new(None)),
@@ -13059,9 +14278,9 @@ pub fn run() {
         })),
         help: Mutex::new(None),
         handbook: Mutex::new(None),
-        qualification_store: Mutex::new(
-            cd_core::capability_qualification::QualificationStore::default(),
-        ),
+        qualification_store: Mutex::new(qualification_store),
+        qualification_store_path,
+        triage_role_qualification_store: Mutex::new(triage_role_qualification_store),
         log_explorer_nav_targets: Mutex::new(LogExplorerNavTargetStore::default()),
     };
     tauri::Builder::default()
@@ -13125,6 +14344,8 @@ pub fn run() {
             session_context_purge,
             get_config,
             save_app_config,
+            get_multi_model_settings,
+            set_multi_model_mode,
             get_s3_backup_settings,
             save_s3_backup_settings,
             run_s3_workspace_backup,
@@ -13217,6 +14438,11 @@ pub fn run() {
             list_log_templates,
             ingest_log_path,
             install_demo_log_corpus,
+            triage_qualify_role_v2,
+            triage_preflight_v2,
+            triage_run_v2,
+            triage_cancel_v2,
+            triage_replay,
             cancel_log_ingest,
             get_failed_log_ingest_diagnostic,
             clear_failed_log_ingest_diagnostic,
@@ -13313,6 +14539,8 @@ pub fn run() {
             set_ambient_recall_enabled,
             get_router_budget,
             set_router_budget,
+            get_reasoning_effort,
+            set_reasoning_effort,
             list_web_research_sources,
             set_web_research_sources,
             open_external_url,
@@ -13614,6 +14842,81 @@ mod log_ingest_cancel_registry_tests {
             ),
             Err("busy".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod triage_replay_host_tests {
+    #[test]
+    fn replay_command_is_registered_and_uses_the_rust_validator_and_shared_stream() {
+        let source = include_str!("lib.rs");
+        for command in ["triage_preflight_v2", "triage_run_v2", "triage_cancel_v2"] {
+            assert!(
+                source.contains(&format!("{command},")),
+                "{command} command must be registered"
+            );
+        }
+        assert!(
+            source.contains("triage_replay,"),
+            "replay command must be registered"
+        );
+        let start = source
+            .find("async fn triage_replay(")
+            .expect("triage replay command");
+        let end = source[start..]
+            .find("\n#[tauri::command]")
+            .map(|offset| start + offset)
+            .expect("triage replay command boundary");
+        let body = &source[start..end];
+        assert!(body.contains("TriageReplayV1"));
+        assert!(body.contains(".validate()"));
+        assert!(body.contains("triage-run-event"));
+        assert!(body.contains("app.emit"));
+        assert!(body.contains(".last()"));
+        assert!(
+            !body.contains("load_config")
+                && !body.contains("SecretStore")
+                && !body.contains("keychain"),
+            "replay consumption must not load host credentials"
+        );
+    }
+
+    #[test]
+    fn live_commands_share_the_trusted_resolver_and_exact_cancel_identity() {
+        let source = include_str!("lib.rs");
+        let run_start = source
+            .find("async fn triage_run_v2(")
+            .expect("triage run command");
+        let run_end = source[run_start..]
+            .find("\n#[tauri::command]")
+            .map(|offset| run_start + offset)
+            .expect("triage run command boundary");
+        let run_body = &source[run_start..run_end];
+        for required in [
+            "triage_preflight_for_policy",
+            "resolve_v2_host",
+            "run_v2_host",
+            "state.secrets",
+            "triage-run-event",
+            "remove_cancel_if_owned",
+        ] {
+            assert!(
+                run_body.contains(required),
+                "live run must contain {required}"
+            );
+        }
+        let cancel_start = source
+            .find("fn triage_cancel_v2(")
+            .expect("triage cancel command");
+        let cancel_end = source[cancel_start..]
+            .find("\n#[tauri::command]")
+            .map(|offset| cancel_start + offset)
+            .unwrap_or(source.len() - cancel_start)
+            + cancel_start;
+        let cancel_body = &source[cancel_start..cancel_end];
+        assert!(cancel_body.contains("run_id"));
+        assert!(cancel_body.contains("cancellation_id"));
+        assert!(cancel_body.contains("AtomicBool"));
     }
 }
 
@@ -15998,15 +17301,16 @@ mod startup_host_tests {
         linked_log_preflight_at, linked_log_turn_context, load_session_for_turn,
         log_explorer_window_label, log_search_cancel_key, normalize_log_corpus_id,
         parse_log_explorer_nav_target, persist_host_terminal_turn_at,
-        persist_linked_provider_loop_terminal_at, prepare_linked_turn_with,
-        provider_profile_for_turn, request_agent_turn_cancel, restore_host_if_generation_matches,
+        persist_investigation_answer_at, persist_linked_provider_loop_terminal_at,
+        prepare_linked_turn_with, provider_profile_for_turn, request_agent_turn_cancel,
+        reserve_investigation_answer_message, restore_host_if_generation_matches,
         save_chat_session_at, save_chat_session_cas_at, set_chat_linked_corpus_at,
         take_ready_linked_host, validate_linked_log_corpus_at, wait_for_host_readiness,
         BackgroundIndexBuild, HostInitFlight, HostReadinessFailure, LinkedCheckpointStore,
         LinkedTurnPreparation, LogExplorerNavTarget, LogExplorerNavTargetStore,
-        LogExplorerTurnContextReq, StdInstant, LINKED_CHECKPOINT_ENTRY_CAP,
-        LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY,
-        LOG_REANALYZE_CANCEL_KEY,
+        LogExplorerTurnContextReq, Session, SessionStore, StdInstant, StoredMessage,
+        INVESTIGATION_ANSWER_META_KEY, LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES,
+        LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY, LOG_REANALYZE_CANCEL_KEY,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
@@ -16023,6 +17327,256 @@ mod startup_host_tests {
             .as_str()
             .expect("revision string")
             .to_string()
+    }
+
+    fn validated_investigation_envelope(
+        session_id: &str,
+        turn_id: &str,
+        corpus_id: &str,
+        revision: cd_core::investigation_answer::LogSnapshotRevisionV1,
+    ) -> cd_core::investigation_answer::AnswerEnvelopeV1 {
+        use cd_core::investigation_answer::{
+            validate_model_answer, AnswerBindingV1, EvidenceRole, HostEvidenceEntry,
+            HostEvidenceLedger, SCHEMA_V1,
+        };
+        let evidence = vec![HostEvidenceEntry {
+            evidence_id: "e1".into(),
+            candidate_id: "candidate".into(),
+            source_label: "host log".into(),
+            locator: "seq=1".into(),
+            corpus_id: corpus_id.into(),
+            revision,
+            role: EvidenceRole::Supporting,
+            content: "host-owned evidence".into(),
+        }];
+        let binding = AnswerBindingV1 {
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            corpus_id: corpus_id.into(),
+            revision,
+            ledger_digest: HostEvidenceLedger::digest(&evidence),
+        };
+        let ledger = HostEvidenceLedger::new(binding, evidence).expect("host ledger");
+        let proposal = format!(
+            r#"{{"schema":"{SCHEMA_V1}","candidates":[{{"candidate_id":"candidate","observations":[{{"claim_id":"claim","text":"observed","evidence_ids":["e1"]}}]}}]}}"#
+        );
+        validate_model_answer(&proposal, &ledger).expect("validated envelope")
+    }
+
+    #[test]
+    fn typed_investigation_envelope_requires_fresh_host_owned_message_reservation() {
+        let root = tempfile::tempdir().expect("sessions");
+        let store = SessionStore::new(root.path());
+        let mut session = Session::new("Investigation");
+        session.set_linked_corpus_id(Some("corpus-a".into()));
+        for (id, role) in [
+            ("old-assistant", "assistant"),
+            ("user-row", "user"),
+            ("already-duplicate", "assistant"),
+            ("already-duplicate", "assistant"),
+        ] {
+            session.messages.push(StoredMessage {
+                id: id.into(),
+                role: role.into(),
+                content: "prior transcript".into(),
+                tools: None,
+                citations: None,
+                trail: None,
+                meta: None,
+            });
+        }
+        let session_id = session.id.clone();
+        store.save(&session).expect("seed");
+        let turn_id = format!("{session_id}::{}", uuid::Uuid::new_v4());
+        let snapshot = cd_core::investigation_answer::LogSnapshotRevisionV1 {
+            event_revision: 7,
+            template_analysis_revision: 11,
+            suppression_revision: 13,
+        };
+        let envelope =
+            validated_investigation_envelope(&session_id, &turn_id, "corpus-a", snapshot);
+        let events = vec![StreamEvent::InvestigationAnswer {
+            envelope: envelope.clone(),
+        }];
+        for stale_id in ["old-assistant", "user-row", "already-duplicate"] {
+            assert!(
+                reserve_investigation_answer_message(
+                    Some(&session),
+                    &session_id,
+                    &turn_id,
+                    Some(stale_id),
+                )
+                .is_none(),
+                "an existing {stale_id} row cannot be reassociated"
+            );
+        }
+        assert!(
+            reserve_investigation_answer_message(Some(&session), &session_id, &turn_id, None,)
+                .is_none()
+        );
+        let reservation = reserve_investigation_answer_message(
+            Some(&session),
+            &session_id,
+            &turn_id,
+            Some("assistant-current"),
+        )
+        .expect("fresh assistant correlation id");
+        let duplicate_current_reservation = reserve_investigation_answer_message(
+            Some(&session),
+            &session_id,
+            &turn_id,
+            Some("assistant-duplicate-current"),
+        )
+        .expect("initially fresh duplicate test id");
+        let user_race_reservation = reserve_investigation_answer_message(
+            Some(&session),
+            &session_id,
+            &turn_id,
+            Some("assistant-became-user"),
+        )
+        .expect("initially fresh role-race test id");
+
+        let mut wrong_scope = store.load(&session_id).expect("linked session");
+        wrong_scope.set_linked_corpus_id(Some("corpus-b".into()));
+        store.save(&wrong_scope).expect("save wrong scope");
+        assert!(
+            !persist_investigation_answer_at(&store, Some(&reservation), Some(snapshot), &events)
+                .expect("mismatched rejection"),
+            "an event for another corpus cannot persist typed authority"
+        );
+        let mut correct_scope = store.load(&session_id).expect("wrong-scope session");
+        correct_scope.set_linked_corpus_id(Some("corpus-a".into()));
+        store.save(&correct_scope).expect("save correct scope");
+        assert!(!persist_investigation_answer_at(
+            &store,
+            Some(&reservation),
+            Some(cd_core::investigation_answer::LogSnapshotRevisionV1 {
+                template_analysis_revision: snapshot.template_analysis_revision + 1,
+                ..snapshot
+            }),
+            &events,
+        )
+        .expect("stale snapshot rejection"));
+        assert!(
+            !persist_investigation_answer_at(&store, Some(&reservation), None, &events,)
+                .expect("event-only rejection")
+        );
+
+        let mut duplicate_current = store.load(&session_id).expect("current session");
+        duplicate_current.messages.push(StoredMessage {
+            id: "assistant-became-user".into(),
+            role: "user".into(),
+            content: "must never own assistant authority".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        for _ in 0..2 {
+            duplicate_current.messages.push(StoredMessage {
+                id: "assistant-duplicate-current".into(),
+                role: "assistant".into(),
+                content: String::new(),
+                tools: None,
+                citations: None,
+                trail: None,
+                meta: None,
+            });
+        }
+        store.save(&duplicate_current).expect("save duplicate race");
+        assert!(!persist_investigation_answer_at(
+            &store,
+            Some(&user_race_reservation),
+            Some(snapshot),
+            &events,
+        )
+        .expect("user-row race rejection"));
+        assert!(!persist_investigation_answer_at(
+            &store,
+            Some(&duplicate_current_reservation),
+            Some(snapshot),
+            &events,
+        )
+        .expect("duplicate current id rejection"));
+        assert!(
+            persist_investigation_answer_at(&store, Some(&reservation), Some(snapshot), &events)
+                .expect("host persistence"),
+            "the exact linked corpus persists"
+        );
+        let mut renderer_save = store.load(&session_id).expect("reload");
+        assert!(
+            renderer_save
+                .messages
+                .iter()
+                .filter(|message| message.id != "assistant-current")
+                .all(|message| message
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
+                    .is_none()),
+            "no prior, user, or duplicate row may acquire current-turn authority"
+        );
+        let current = renderer_save
+            .messages
+            .iter_mut()
+            .find(|message| message.id == "assistant-current")
+            .expect("host-owned current assistant row");
+        current.meta = Some(serde_json::json!({
+            INVESTIGATION_ANSWER_META_KEY: { "forged": true }
+        }));
+        let saved = save_chat_session_at(&store, renderer_save).expect("renderer save");
+        let current = saved
+            .messages
+            .iter()
+            .find(|message| message.id == "assistant-current")
+            .expect("saved current row");
+        assert_eq!(
+            current
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY)),
+            Some(&serde_json::json!(envelope)),
+            "a renderer cannot replace the typed host envelope"
+        );
+        let mut new_renderer_session = Session::new("forged new");
+        new_renderer_session.messages.push(StoredMessage {
+            id: "forged".into(),
+            role: "assistant".into(),
+            content: "{}".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: Some(serde_json::json!({ INVESTIGATION_ANSWER_META_KEY: { "forged": true } })),
+        });
+        let saved_new = save_chat_session_at(&store, new_renderer_session).expect("new save");
+        assert!(saved_new.messages[0]
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
+            .is_none());
+
+        let cache = tempfile::tempdir().expect("cache");
+        let detached = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &session_id,
+            None,
+            None,
+            Some(wire_session_revision(&saved)),
+        )
+        .expect("detach linked corpus");
+        assert!(
+            detached
+                .messages
+                .iter()
+                .find(|message| message.id == "assistant-current")
+                .expect("detached current row")
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(INVESTIGATION_ANSWER_META_KEY))
+                .is_none(),
+            "detaching the host-owned corpus makes the historical envelope unavailable"
+        );
     }
 
     #[test]
@@ -18227,8 +19781,11 @@ mod chat_session_host_tests {
         assert!(agent_contract.contains("histories.entry(req.session_id.clone())"));
         assert!(agent_contract.contains("cd_workflow::turn::run_turn"));
         assert!(agent_contract.contains("client_assistant_message_id"));
-        assert!(agent_contract.contains("format!(\"{}::{message_id}\", req.session_id)"));
-        assert!(agent_contract.contains("uuid::Uuid::new_v4()"));
+        assert!(
+            agent_contract.contains("format!(\"{}::{}\", req.session_id, uuid::Uuid::new_v4())")
+        );
+        assert!(!agent_contract.contains("format!(\"{}::{message_id}\", req.session_id)"));
+        assert!(agent_contract.contains("reserve_investigation_answer_message"));
         assert!(agent_contract.contains("turn_id: Some(turn_id.clone())"));
         assert!(!agent_contract
             .contains("research_turn_with_cancel_and_context_and_checkpoint_and_trace"));
@@ -18258,6 +19815,7 @@ mod chat_session_host_tests {
             tools_disabled_reason: None,
             availability: ModelAvailability::Discovered,
             availability_detail: None,
+            readiness: cd_core::capability_qualification::ModelReadiness::unverified(key),
             hidden,
             hidden_by: hidden.then(|| "model".to_string()),
             pinned_rank: None,
@@ -18605,6 +20163,49 @@ mod chat_session_host_tests {
 #[cfg(test)]
 mod log_embedding_host_tests {
     use super::*;
+
+    #[test]
+    fn explicitly_enabled_retrieval_roles_attach_to_the_production_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = cd_core::workspace::Workspace::new("roles", vec![dir.path().to_path_buf()]);
+        let index = cd_core::index::KeywordIndex::new();
+        let mut host = ToolHost::new(workspace, index, None);
+        let mut cfg = AppConfig::default();
+        cfg.retrieval.embedding = Some(cd_core::config::RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:19001/v1".into(),
+            model: "bge-m3".into(),
+            dialect: Some("openai_embeddings".into()),
+            allow_remote: false,
+            api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
+        });
+        cfg.retrieval.reranker = Some(cd_core::config::RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:19002".into(),
+            model: "qwen3-reranker-0.6b".into(),
+            dialect: Some("tei_rerank_v1".into()),
+            allow_remote: false,
+            api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
+        });
+        let secrets = ReferencedSecretStore::new();
+
+        apply_configured_retrieval_roles(&mut host, &cfg, &secrets);
+
+        assert_eq!(
+            host.log_embed_backend()
+                .expect("embedding role attached")
+                .identity(),
+            "bge-m3"
+        );
+        assert!(
+            host.log_rerank_backend().is_some(),
+            "reranker role attached"
+        );
+    }
 
     #[test]
     fn desktop_ingest_plan_uses_dedicated_local_backend_and_bulk_threshold() {

@@ -1,0 +1,12 @@
+{
+  "schema_id": "contextdesk.gateway_diagnostic_manifest.v1",
+  "schema_version": 1,
+  "run_id": "gwdx-fixture-mixed-role-01",
+  "files": [
+    {
+      "name": "report.json",
+      "sha256": "5d40990a615f7dab9266c83137006ccf25b29bc4d65cd4221a246f1d8b82d609",
+      "bytes": 1886
+    }
+  ]
+}

@@ -85,7 +85,7 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Launch splash + pre-launch shell | Shipped | desktop/src/components/launch/SplashScreen.tsx:SplashScreen | #391–#394 |
 | Work-context preflight categories | Shipped | crates/cd-core/src/preflight.rs:work_context_items | #395 |
 | Settings IA groups (Health demoted) | Shipped | desktop/src/components/SettingsModal.tsx:NAV | #396 |
-| Rich Logs list\|detail + portable versioned corpus package (export/import) | Shipped | desktop LogPane; cd-core log_analysis::package; meta_version stats | #467 #468 #469 #470 #471 #472 |
+| Rich Logs list/detail + portable versioned corpus package (export/import) | Shipped | crates/cd-core/src/log_analysis/package.rs:export_corpus_zip | #467 #468 #469 #470 #471 #472 |
 | Human-confirmed S3-compatible workspace backup/export (Phase A) | Shipped | desktop/src-tauri/src/lib.rs:run_s3_workspace_backup | #292 #419, ADR 0006 |
 | S3-backed index source (Phase B) | Roadmap | docs/adr/0006-s3-object-storage.md:Phase B | #292 #420 |
 | Bundled offline Help browser | Shipped | desktop/src/components/panes/HelpPane.tsx:HelpPane | #434 #438 |

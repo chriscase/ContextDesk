@@ -80,6 +80,10 @@ fn round_from_call(call: &TracedCall) -> ProviderRoundTelemetry {
         TracedOutcome::Failed { message } => {
             ("failed".to_string(), None, None, Some(message.clone()))
         }
+        // Fixed terminal class strings only — never invent bodies from host
+        // cancel/deadline paths (those outcomes carry no message by design).
+        TracedOutcome::Cancelled => ("cancelled".to_string(), None, None, None),
+        TracedOutcome::TimedOut => ("timed_out".to_string(), None, None, None),
     };
     let truncated = finish_reason
         .as_deref()
@@ -142,6 +146,22 @@ fn application_retries_from_rounds(
         .collect()
 }
 
+fn sum_present_u64<F>(rounds: &[ProviderRoundTelemetry], mut get: F) -> Option<u64>
+where
+    F: FnMut(&ProviderRoundTelemetry) -> Option<u64>,
+{
+    let mut seen = false;
+    let mut total = 0u64;
+    for round in rounds {
+        let Some(value) = get(round) else {
+            continue;
+        };
+        seen = true;
+        total = total.checked_add(value)?;
+    }
+    seen.then_some(total)
+}
+
 /// Aggregate host-neutral provider-turn telemetry.
 ///
 /// This is the authoritative fold-in shared by CLI and Tauri. It never copies
@@ -173,6 +193,7 @@ pub fn aggregate_provider_turn_telemetry(
         prompt_tokens: sum_reported_u64_all(&rounds, |r| r.transport.prompt_tokens),
         completion_tokens: sum_reported_u64_all(&rounds, |r| r.transport.completion_tokens),
         reasoning_tokens: sum_reported_u64_all(&rounds, |r| r.transport.reasoning_tokens),
+        reasoning_content_chars: sum_present_u64(&rounds, |r| r.transport.reasoning_content_chars),
         cached_tokens: sum_reported_u64_all(&rounds, |r| r.transport.cached_tokens),
         total_tokens: sum_reported_u64_all(&rounds, |r| r.transport.total_tokens),
         cost: sum_reported_f64_all(&rounds, |r| r.transport.cost),
@@ -271,9 +292,12 @@ mod tests {
             prompt_tokens: Some(prompt),
             completion_tokens: Some(completion),
             reasoning_tokens: Some(reasoning),
+            reasoning_content_chars: None,
             cached_tokens: Some(cached),
             total_tokens: Some(total),
             cost: Some(cost),
+            reasoning_effort_requested: None,
+            reasoning_effort_effective: None,
         }
     }
 
@@ -749,6 +773,35 @@ mod tests {
         let dumped = a.to_json().to_string();
         assert!(!dumped.contains("Authorization"));
         assert!(!dumped.contains("sk-"));
+    }
+
+    #[test]
+    fn reasoning_channel_aggregate_is_present_when_any_round_reports_it() {
+        let mut first = ProviderTransportTelemetry {
+            reasoning_content_chars: Some(7),
+            ..Default::default()
+        };
+        let second = ProviderTransportTelemetry::default();
+        first.response_model = Some("deepseek/deepseek-v4-flash".into());
+        let calls = vec![
+            call_with_transport(0, first, "tool_calls", false),
+            call_with_transport(1, second, "stop", false),
+        ];
+        let events = vec![StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }];
+        let telemetry = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "deepseek/deepseek-v4-flash",
+            calls: &calls,
+            events: &events,
+        });
+        assert_eq!(telemetry.reasoning_content_chars, Some(7));
+        assert_eq!(
+            telemetry.rounds[0].transport.reasoning_content_chars,
+            Some(7)
+        );
+        assert_eq!(telemetry.rounds[1].transport.reasoning_content_chars, None);
     }
 
     #[test]

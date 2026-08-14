@@ -1,0 +1,125 @@
+{
+  "case_id": "rb01-lexical-easy",
+  "queries": [
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "checkout",
+          "timeout",
+          "error"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "broad",
+      "query_id": "rb01-lexical-easy-q1",
+      "question": "What problems occurred in the checkout service this afternoon?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "checkout",
+          "timeout",
+          "threshold",
+          "config"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "causal",
+      "query_id": "rb01-lexical-easy-q2",
+      "question": "What caused the checkout timeouts?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "504",
+          "timeout"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "symptom",
+      "query_id": "rb01-lexical-easy-q3",
+      "question": "Which requests failed with 504?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "txn-42894EEB"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "identifier",
+      "query_id": "rb01-lexical-easy-q4",
+      "question": "Show every event for txn-42894EEB."
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "database",
+          "outage"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "negative",
+      "query_id": "rb01-lexical-easy-q5",
+      "question": "Was there a database outage behind these failures?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "504",
+          "checkout",
+          "config",
+          "change"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "competing",
+      "query_id": "rb01-lexical-easy-q6",
+      "question": "Is there any other supported explanation for the 504s besides the timeout change?"
+    },
+    {
+      "keyword_plan": {
+        "level": null,
+        "services": [],
+        "sources": [],
+        "terms": [
+          "threshold",
+          "restored",
+          "timeout"
+        ],
+        "time_from": null,
+        "time_to": null
+      },
+      "kind": "chronology",
+      "query_id": "rb01-lexical-easy-q7",
+      "question": "What happened first, and did the system recover?"
+    }
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_queries.v1",
+  "schema_version": 1,
+  "suite_id": "contextdesk.log_lab.retrieval_ablation"
+}

@@ -1,0 +1,61 @@
+2025-02-22T08:04:00.000Z INFO worker heartbeat ok lag_ms=58
+2025-02-22T08:04:58.000Z INFO worker heartbeat ok lag_ms=80
+2025-02-22T08:05:56.000Z INFO worker heartbeat ok lag_ms=61
+2025-02-22T08:06:54.000Z INFO worker heartbeat ok lag_ms=79
+2025-02-22T08:07:52.000Z INFO worker heartbeat ok lag_ms=28
+2025-02-22T08:08:50.000Z INFO worker heartbeat ok lag_ms=25
+2025-02-22T08:09:48.000Z INFO worker heartbeat ok lag_ms=79
+2025-02-22T08:10:46.000Z INFO worker heartbeat ok lag_ms=2
+2025-02-22T08:11:44.000Z INFO worker heartbeat ok lag_ms=69
+2025-02-22T08:12:42.000Z INFO worker heartbeat ok lag_ms=36
+2025-02-22T08:13:40.000Z INFO worker heartbeat ok lag_ms=68
+2025-02-22T08:14:38.000Z INFO worker heartbeat ok lag_ms=58
+2025-02-22T08:15:36.000Z INFO worker heartbeat ok lag_ms=56
+2025-02-22T08:16:34.000Z INFO worker heartbeat ok lag_ms=75
+2025-02-22T08:17:32.000Z INFO worker heartbeat ok lag_ms=75
+2025-02-22T08:18:30.000Z INFO worker heartbeat ok lag_ms=79
+2025-02-22T08:19:28.000Z INFO worker heartbeat ok lag_ms=10
+2025-02-22T08:20:26.000Z INFO worker heartbeat ok lag_ms=63
+2025-02-22T08:21:24.000Z INFO worker heartbeat ok lag_ms=46
+2025-02-22T08:22:22.000Z INFO worker heartbeat ok lag_ms=7
+2025-02-22T08:23:20.000Z INFO worker heartbeat ok lag_ms=4
+2025-02-22T08:24:18.000Z INFO worker heartbeat ok lag_ms=36
+2025-02-22T08:25:16.000Z INFO worker heartbeat ok lag_ms=28
+2025-02-22T08:26:14.000Z INFO worker heartbeat ok lag_ms=36
+2025-02-22T08:27:12.000Z INFO worker heartbeat ok lag_ms=88
+2025-02-22T08:28:10.000Z INFO worker heartbeat ok lag_ms=34
+2025-02-22T08:29:08.000Z INFO worker heartbeat ok lag_ms=27
+2025-02-22T08:30:06.000Z INFO worker heartbeat ok lag_ms=47
+2025-02-22T08:31:04.000Z INFO worker heartbeat ok lag_ms=44
+2025-02-22T08:32:02.000Z INFO worker heartbeat ok lag_ms=29
+2025-02-22T08:33:00.000Z INFO worker heartbeat ok lag_ms=84
+2025-02-22T08:33:58.000Z INFO worker heartbeat ok lag_ms=72
+2025-02-22T08:34:56.000Z INFO worker heartbeat ok lag_ms=12
+2025-02-22T08:35:54.000Z INFO worker heartbeat ok lag_ms=21
+2025-02-22T08:36:52.000Z INFO worker heartbeat ok lag_ms=65
+2025-02-22T08:37:50.000Z INFO worker heartbeat ok lag_ms=86
+2025-02-22T08:38:48.000Z INFO worker heartbeat ok lag_ms=27
+2025-02-22T08:39:46.000Z INFO worker heartbeat ok lag_ms=18
+2025-02-22T08:40:44.000Z INFO worker heartbeat ok lag_ms=75
+2025-02-22T08:41:42.000Z INFO worker heartbeat ok lag_ms=57
+2025-02-22T08:42:40.000Z INFO worker heartbeat ok lag_ms=36
+2025-02-22T08:43:38.000Z INFO worker heartbeat ok lag_ms=47
+2025-02-22T08:44:36.000Z INFO worker heartbeat ok lag_ms=22
+2025-02-22T08:45:34.000Z INFO worker heartbeat ok lag_ms=72
+2025-02-22T08:46:32.000Z INFO worker heartbeat ok lag_ms=6
+2025-02-22T08:47:30.000Z INFO worker heartbeat ok lag_ms=77
+2025-02-22T08:48:28.000Z INFO worker heartbeat ok lag_ms=76
+2025-02-22T08:49:26.000Z INFO worker heartbeat ok lag_ms=1
+2025-02-22T08:50:24.000Z INFO worker heartbeat ok lag_ms=65
+2025-02-22T08:51:22.000Z INFO worker heartbeat ok lag_ms=62
+2025-02-22T08:54:00.000Z ERROR PaymentGatewayException: settlement post failed txn-9B74CB61
+    at post_settlement in gateway/client.go:88 
+    at charge in checkout/service.go:42
+    at process in worker/loop.go:311
+    Caused by: TimeoutError: upstream deadline exceeded
+    at await_response in gateway/transport.go:129
+    at flush in gateway/buffer.go:77
+    at run in runtime/task.go:19
+2025-02-22T08:57:20.000Z ERROR CacheWarmupException: prefetch shard unavailable txn-43336AB3
+    at warm in cache/prefetch.go:51
+    at run in runtime/task.go:19

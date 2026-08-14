@@ -1,12 +1,29 @@
 import { useEffect, useState } from "react";
 import {
+  applyPreset,
+  classifyPreset,
+  deadlinePolicyHint,
+  formatDeadlineMs,
+  parseDeadlineDuration,
+  type DeadlinePreset,
+} from "../../lib/deadlineControls";
+import {
+  effortPolicyHint,
+  levelFromDto,
+  levelToSavePayload,
+  REASONING_EFFORT_OPTIONS,
+  type ReasoningEffortLevel,
+} from "../../lib/reasoningEffort";
+import {
   hostCheckForUpdates,
   hostGetAmbientRecallEnabled,
   hostGetBranding,
   hostGetHybridRetrieval,
+  hostGetReasoningEffort,
   hostInstallUpdate,
   hostSetAmbientRecallEnabled,
   hostSetHybridRetrieval,
+  hostSetReasoningEffort,
   hostSourceGitFetch,
   hostSourceGitStatus,
   type BrandingDto,
@@ -375,38 +392,219 @@ export function GeneralSection({
           }))
         }
       />
-      <TextField
-        id={`${baseId}-deadline`}
-        label="Whole-turn ceiling (ms)"
-        hint={
-          routerBudget.deadline_is_explicit
-            ? "Your custom monotonic ceiling. Choosing, retrieval, and synthesis remain separately bounded inside it."
-            : "Adaptive: 5 minutes for local/private profiles and 2 minutes for managed profiles. Every phase remains bounded."
-        }
-        value={String(routerBudget.deadline_ms)}
-        disabled={!routerBudget.deadline_is_explicit}
-        onChange={(e) =>
-          setRouterBudget((b) => ({
-            ...b,
-            deadline_ms: Number(e.target.value) || 500,
-          }))
-        }
+      <ReasoningEffortControls baseId={baseId} />
+      <DeadlineControls
+        baseId={baseId}
+        routerBudget={routerBudget}
+        setRouterBudget={setRouterBudget}
       />
+    </div>
+  );
+}
+
+/**
+ * Reasoning-effort control: omit (provider default) or an explicit level.
+ * Affects cost/latency only — not a readiness badge.
+ */
+export function ReasoningEffortControls({ baseId }: { baseId: string }) {
+  const [level, setLevel] = useState<ReasoningEffortLevel>("omit");
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const dto = await hostGetReasoningEffort();
+        if (cancelled || !dto) return;
+        setLevel(levelFromDto(dto.policy, dto.level));
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onChange = async (next: ReasoningEffortLevel) => {
+    const previous = level;
+    setLevel(next);
+    setError(null);
+    setNote(null);
+    try {
+      const saved = await hostSetReasoningEffort(levelToSavePayload(next));
+      setLevel(levelFromDto(saved.policy, saved.level));
+      setNote(
+        next === "omit"
+          ? "Saved: provider default (no effort field)."
+          : `Saved: explicit effort “${next}”.`,
+      );
+    } catch (e) {
+      setLevel(previous);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="reasoning-effort-controls">
       <SelectField
-        id={`${baseId}-deadline-policy`}
-        label="Deadline policy"
-        hint="Adaptive is patient with local and private-network models. Custom keeps the exact ceiling you enter above."
-        value={routerBudget.deadline_is_explicit ? "explicit" : "adaptive"}
+        id={`${baseId}-reasoning-effort`}
+        label="Reasoning effort"
+        hint={effortPolicyHint(level)}
+        value={level}
         onChange={(event) =>
-          setRouterBudget((budget) => ({
-            ...budget,
-            deadline_is_explicit: event.target.value === "explicit",
-          }))
+          void onChange(event.target.value as ReasoningEffortLevel)
+        }
+        aria-describedby={
+          error ? `${baseId}-reasoning-effort-error` : undefined
         }
       >
-        <option value="adaptive">Adaptive by provider</option>
-        <option value="explicit">Custom whole-turn ceiling</option>
+        {REASONING_EFFORT_OPTIONS.map((opt) => (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
+          </option>
+        ))}
       </SelectField>
+      {error ? (
+        <p
+          id={`${baseId}-reasoning-effort-error`}
+          className="field__error"
+          role="alert"
+        >
+          {error}
+        </p>
+      ) : null}
+      {note && !error ? <p className="field__hint">{note}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * Whole-turn deadline control: Auto / Standard / Patient / Custom.
+ * Never requires users to enter raw milliseconds. Invalid custom input is
+ * shown inline and does not update the last valid budget (so Save cannot
+ * persist garbage).
+ */
+export function DeadlineControls({
+  baseId,
+  routerBudget,
+  setRouterBudget,
+}: {
+  baseId: string;
+  routerBudget: RouterBudgetDto;
+  setRouterBudget: React.Dispatch<React.SetStateAction<RouterBudgetDto>>;
+}) {
+  // Local mode so choosing Custom and typing `3m` does not snap back to
+  // Standard just because the numeric value matches a fixed preset.
+  const [preset, setPreset] = useState<DeadlinePreset>(() =>
+    classifyPreset(routerBudget),
+  );
+  const [customDraft, setCustomDraft] = useState(() =>
+    formatDeadlineMs(routerBudget.deadline_ms),
+  );
+  const [customError, setCustomError] = useState<string | null>(null);
+
+  // Re-derive from host budget when not mid-custom edit.
+  useEffect(() => {
+    const derived = classifyPreset(routerBudget);
+    setPreset((prev) =>
+      prev === "custom" && routerBudget.deadline_is_explicit ? "custom" : derived,
+    );
+    if (!(preset === "custom" && routerBudget.deadline_is_explicit)) {
+      setCustomDraft(formatDeadlineMs(routerBudget.deadline_ms));
+      setCustomError(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only react to host budget fields
+  }, [routerBudget.deadline_ms, routerBudget.deadline_is_explicit]);
+
+  const onPresetChange = (next: DeadlinePreset) => {
+    const customParsed =
+      next === "custom" ? parseDeadlineDuration(customDraft) : null;
+    setPreset(next);
+    setRouterBudget((budget) => {
+      const fields = applyPreset(
+        {
+          deadline_ms: budget.deadline_ms,
+          deadline_is_explicit: budget.deadline_is_explicit,
+        },
+        next,
+        customParsed?.ok ? customParsed.ms : undefined,
+      );
+      return { ...budget, ...fields };
+    });
+    if (next === "custom") {
+      setCustomError(customParsed && !customParsed.ok ? customParsed.error : null);
+    } else {
+      setCustomError(null);
+      if (next === "standard" || next === "patient") {
+        setCustomDraft(
+          formatDeadlineMs(
+            next === "standard" ? 180_000 : 300_000,
+          ),
+        );
+      }
+    }
+  };
+
+  const onCustomChange = (value: string) => {
+    setCustomDraft(value);
+    const parsed = parseDeadlineDuration(value);
+    if (!parsed.ok) {
+      setCustomError(parsed.error);
+      return;
+    }
+    setCustomError(null);
+    setRouterBudget((budget) => ({
+      ...budget,
+      deadline_ms: parsed.ms,
+      deadline_is_explicit: true,
+    }));
+  };
+
+  return (
+    <div className="deadline-controls">
+      <SelectField
+        id={`${baseId}-deadline-policy`}
+        label="Whole-turn time limit"
+        hint={deadlinePolicyHint(preset)}
+        value={preset}
+        onChange={(event) =>
+          onPresetChange(event.target.value as DeadlinePreset)
+        }
+        aria-describedby={
+          customError ? `${baseId}-deadline-custom-error` : undefined
+        }
+      >
+        <option value="auto">Auto (recommended)</option>
+        <option value="standard">Standard (3 minutes)</option>
+        <option value="patient">Patient (5 minutes)</option>
+        <option value="custom">Custom…</option>
+      </SelectField>
+      <TextField
+        id={`${baseId}-deadline-custom`}
+        label="Custom duration"
+        hint={
+          preset === "custom"
+            ? "Examples: 90s, 3m, 10m. Maximum 10 minutes."
+            : "Available when Custom is selected."
+        }
+        value={customDraft}
+        disabled={preset !== "custom"}
+        error={preset === "custom" ? customError : null}
+        inputMode="text"
+        autoComplete="off"
+        spellCheck={false}
+        aria-required={preset === "custom"}
+        onChange={(event) => onCustomChange(event.target.value)}
+      />
+      <p className="field__hint" id={`${baseId}-deadline-summary`}>
+        {preset === "auto"
+          ? "Auto keeps adaptive timing; it does not lock a single fixed ceiling."
+          : `Saved ceiling: ${formatDeadlineMs(routerBudget.deadline_ms)} (maximum whole-turn time; ContextDesk may finish sooner).`}
+      </p>
     </div>
   );
 }

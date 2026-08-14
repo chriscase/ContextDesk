@@ -1,0 +1,204 @@
+{
+  "base_ts": 1740643440,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.3,
+      "min_recall_at_25": 0.5,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb11-missing-trigger",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 4,
+      "expected_raw_records": 4,
+      "expected_token_records": 4,
+      "group_id": "rb11-missing-trigger-g01",
+      "incident_id": "rb11-missing-trigger-inc1",
+      "notes": "5xx spike with no in-corpus cause",
+      "role": "symptom",
+      "sources": [
+        "api/gateway.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "req-3FFAF8E2",
+      "ts": 1740645840
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb11-missing-trigger-g02",
+      "incident_id": "rb11-missing-trigger-inc1",
+      "notes": "task retries against the same unhealthy dependency",
+      "role": "symptom",
+      "sources": [
+        "worker/tasks.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "wrk-E85E963E",
+      "ts": 1740645940
+    }
+  ],
+  "expected": {
+    "bytes": 64358,
+    "events": 386,
+    "excluded_files": [],
+    "files": 2,
+    "files_by_path": {
+      "api/gateway.jsonl": {
+        "bytes": 45844,
+        "events": 254,
+        "sha256": "b142293804abc8b19197827abac7235c3fc1c2f67b3e0147830579c18602c5fa"
+      },
+      "worker/tasks.log": {
+        "bytes": 18514,
+        "events": 132,
+        "sha256": "fdc3c15bb28e89105479e3df1b12086222ac39bf1c03d300e4fc9663c75e784b"
+      }
+    },
+    "severities": {
+      "error": 4,
+      "info": 380,
+      "warn": 2
+    },
+    "source_count": 2,
+    "sources": {
+      "api/gateway.jsonl": 254,
+      "worker/tasks.log": 132
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "a specific root cause is established",
+    "the dependency failure originated inside the gateway"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "f72ac32a76ebfdc7e40504bfd20e951ff24070db2b8a62fbc055dfcefa362f75",
+  "incidents": [
+    {
+      "incident_id": "rb11-missing-trigger-inc1",
+      "root_cause_status": "unknown",
+      "summary": "Profile traffic saw 503s and task retries against an unhealthy dependency; no in-corpus record explains why the dependency became unhealthy.",
+      "trigger_group_ids": [],
+      "window_from_ts": 1740645840,
+      "window_to_ts": 1740646060
+    }
+  ],
+  "intended_probe": "only symptoms are present; the root cause must remain unknown",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb11-missing-trigger-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb11-missing-trigger-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb11-missing-trigger-g02"
+        }
+      ]
+    },
+    "rb11-missing-trigger-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb11-missing-trigger-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb11-missing-trigger-g02"
+        }
+      ]
+    },
+    "rb11-missing-trigger-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb11-missing-trigger-g01"
+        }
+      ]
+    },
+    "rb11-missing-trigger-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb11-missing-trigger-g01"
+        }
+      ]
+    },
+    "rb11-missing-trigger-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb11-missing-trigger-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb11-missing-trigger-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb11-missing-trigger-g01"
+        }
+      ]
+    },
+    "rb11-missing-trigger-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb11-missing-trigger-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb11-missing-trigger-g02"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "root cause unknown is the only supportable conclusion"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the corpus contains symptoms only",
+    "the root cause is not establishable from this corpus"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "81b8a7411194e47c754b38b0ec6825213f3d25f887b1b9648964f43f38626ec3",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Missing trigger"
+}

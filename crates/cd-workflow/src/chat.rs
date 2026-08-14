@@ -37,6 +37,13 @@
 //!   Routing Tauri through `run_chat_workflow` would make it save twice (or
 //!   prematurely, before that reconciliation) — a real regression, not a
 //!   simplification, so this was deliberately left alone.
+//! - **Why synthesis retry stays host-owned**: the desktop can retain a
+//!   bounded synthesis checkpoint in its private, memory-only store and offer
+//!   a no-retrieval retry while that checkpoint remains valid. This one-shot
+//!   CLI workflow deliberately passes no checkpoint output slot to
+//!   [`crate::turn::run_turn`]. Its terminal event must therefore say that a
+//!   retry reruns bounded retrieval; a durable CLI checkpoint is separate
+//!   follow-up work, not transcript/session persistence.
 //! - **Why permission continuation stays host-owned**: `cd_core::research`'s
 //!   turn functions surface a mid-turn `PermissionRequired` event and stop
 //!   for that tool call. A CLI process can prompt synchronously and loop
@@ -52,13 +59,17 @@
 //! What this module still gets for free from `cd_core`/other modules in this
 //! crate: [`cd_core::sessions::SessionStore`] is the SAME durable transcript
 //! store the desktop app already uses, so a session started in the GUI can
-//! continue from the CLI and vice versa; [`cd_core::keychain_store::KeychainSecretStore`]
-//! is the SAME OS keychain access, so a provider configured in the GUI works
-//! immediately from the CLI with no separate credential setup.
+//! continue from the CLI and vice versa; the shared explicit credential
+//! reference resolves through the same Keychain or protected-file source, so a
+//! provider configured in the GUI works immediately from the CLI with no
+//! separate credential setup.
 
-use crate::provider::{resolve_turn_inputs, ResolvedTurnInputs};
+use crate::provider::{
+    resolve_turn_inputs_with_credential_cache, ResolvedTurnInputs, TurnProviderCredentialCache,
+};
 use crate::turn::{bind_linked_corpus, run_turn, unbind_linked_corpus, TurnExecutionOptions};
 use cd_core::agent::LogExplorerTurnContext;
+use cd_core::capability_qualification::QualificationStore;
 use cd_core::chat::{ChatMessage, Role};
 use cd_core::config::AppConfig;
 use cd_core::error::{CoreError, CoreResult};
@@ -70,7 +81,7 @@ use cd_core::tool_host::ToolHost;
 use cd_core::turn_trace::{RecordingTurnTrace, TurnTraceSink};
 use serde_json::Value;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Bound on synchronous grant-and-continue rounds within one workflow call —
@@ -80,6 +91,7 @@ use std::sync::Arc;
 pub const MAX_PERMISSION_ROUNDS: usize = 3;
 
 /// One chat request, host-neutral.
+#[derive(Default)]
 pub struct ChatWorkflowRequest<'a> {
     /// Corpus to ground this turn in, if any. `None` runs an ordinary,
     /// unlinked turn.
@@ -104,6 +116,25 @@ pub struct ChatWorkflowRequest<'a> {
     /// Text explicitly selected by the user for this turn only. This is not
     /// inferred from linked corpus, viewport, ambient memory, or attachments.
     pub user_selection: Option<&'a str>,
+    /// Multi-model mode for this turn. `Single` (the default) runs the
+    /// established path unchanged; `Review` opts in to the reviewer pipeline
+    /// with deterministic degradation.
+    pub multi_model_mode: cd_core::multi_model::MultiModelMode,
+    /// Host-resolved reviewer qualification verdict: `Some(true)` measured
+    /// pass, `Some(false)` measured fail, `None` unverified. A caller with no
+    /// qualification store leaves this `None`; a `require_qualified` reviewer
+    /// then degrades honestly.
+    pub reviewer_qualified: Option<bool>,
+    /// Shared secret-free qualification evidence used to authorize configured
+    /// contribution roles. `None` keeps the route fail-closed.
+    pub contribution_qualification: Option<&'a QualificationStore>,
+    /// Optional host-resolved contribution runtime. Supplying this explicitly
+    /// opts the turn into the bounded provider-neutral contribution route;
+    /// leaving it `None` preserves the established Single/Review behavior.
+    pub contribution_runtime: Option<cd_core::agent::ContributionRuntime>,
+    /// Per-turn reasoning-effort override (never persisted). When set, beats
+    /// the saved AppConfig policy for this turn only.
+    pub reasoning_effort_override: Option<cd_core::reasoning_effort::ReasoningEffortLevel>,
 }
 
 /// Outcome of one workflow call.
@@ -125,10 +156,21 @@ pub struct ChatWorkflowOutcome {
     /// The linked corpus's event revision at bind time, if this turn was
     /// corpus-linked.
     pub corpus_revision: Option<u64>,
+    /// Exact event/template/suppression revision for typed answer authority.
+    pub corpus_snapshot_revision: Option<cd_core::investigation_answer::LogSnapshotRevisionV1>,
     /// Total messages in this session's chat history after the turn
     /// (system preamble + every prior + new turn) — a trace summary's
     /// "history count."
     pub history_messages: usize,
+    /// Configured multi-model mode for this turn (what was requested).
+    pub multi_model_configured: cd_core::multi_model::MultiModelMode,
+    /// Executed multi-model mode, honest about degradation. `single` when
+    /// review was not requested or degraded at entry; the seam reports
+    /// `review` / `review_degraded` via the event stream.
+    pub multi_model_executed: cd_core::multi_model::ExecutedMode,
+    /// Exact entry-time degradation reason, if review was requested but could
+    /// not run. Mid-pipeline degradations are reported on the event stream.
+    pub multi_model_entry_degradation: Option<cd_core::multi_model::DegradationReason>,
 }
 
 fn role_str(role: &Role) -> &'static str {
@@ -140,7 +182,15 @@ fn role_str(role: &Role) -> &'static str {
     }
 }
 
-fn stored_from_chat(message: &ChatMessage) -> StoredMessage {
+/// Metadata key reserved for a host-produced investigation envelope.  It is
+/// deliberately written only from [`StreamEvent::InvestigationAnswer`], never
+/// from a rendered transcript or a caller-provided JSON value.
+pub const INVESTIGATION_ANSWER_META_KEY: &str = "investigation_answer_envelope_v1";
+
+fn stored_from_chat(
+    message: &ChatMessage,
+    investigation_answer: Option<&cd_core::investigation_answer::AnswerEnvelopeV1>,
+) -> StoredMessage {
     StoredMessage {
         id: uuid::Uuid::new_v4().to_string(),
         role: role_str(&message.role).to_string(),
@@ -148,8 +198,40 @@ fn stored_from_chat(message: &ChatMessage) -> StoredMessage {
         tools: None,
         citations: None,
         trail: None,
-        meta: None,
+        meta: investigation_answer
+            .map(|envelope| serde_json::json!({ INVESTIGATION_ANSWER_META_KEY: envelope })),
     }
+}
+
+fn investigation_answer_for_turn<'a>(
+    events: &'a [StreamEvent],
+    session_id: &str,
+    turn_id: &str,
+    request_corpus_id: Option<&str>,
+    session_corpus_id: Option<&str>,
+    corpus_snapshot_revision: Option<cd_core::investigation_answer::LogSnapshotRevisionV1>,
+) -> Option<&'a cd_core::investigation_answer::AnswerEnvelopeV1> {
+    let (Some(request_corpus_id), Some(session_corpus_id), Some(corpus_snapshot_revision)) = (
+        request_corpus_id,
+        session_corpus_id,
+        corpus_snapshot_revision,
+    ) else {
+        return None;
+    };
+    if request_corpus_id != session_corpus_id {
+        return None;
+    }
+    events.iter().rev().find_map(|event| match event {
+        StreamEvent::InvestigationAnswer { envelope }
+            if envelope.binding.session_id == session_id
+                && envelope.binding.turn_id == turn_id
+                && envelope.binding.corpus_id == request_corpus_id
+                && envelope.binding.revision == corpus_snapshot_revision =>
+        {
+            Some(envelope)
+        }
+        _ => None,
+    })
 }
 
 fn has_pending_permission(events: &[StreamEvent]) -> Option<(String, String, Value)> {
@@ -194,13 +276,22 @@ pub async fn run_chat_workflow(
     live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
     mut decide_permission: impl FnMut(&str, &str, &str, &str, &str) -> PermissionDecision,
 ) -> CoreResult<ChatWorkflowOutcome> {
-    let resolved: ResolvedTurnInputs = resolve_turn_inputs(
-        secrets,
+    // Provider credentials are resolved only for this admitted workflow and
+    // shared with optional reviewer setup. Host/connector initialization
+    // deliberately remains outside this cache.
+    let provider_credentials = TurnProviderCredentialCache::new(secrets);
+    let mut resolved: ResolvedTurnInputs = resolve_turn_inputs_with_credential_cache(
+        &provider_credentials,
         cfg,
         request.explicit_profile_id,
         request.chat_model_override,
     )
     .map_err(CoreError::Message)?;
+    // Per-turn effort override never rewrites AppConfig.
+    if let Some(level) = request.reasoning_effort_override {
+        resolved.reasoning_effort =
+            cd_core::reasoning_effort::EffectiveEffortPolicy::Explicit(level);
+    }
 
     let mut session = match session_id {
         Some(id) => sessions.load(id)?,
@@ -214,6 +305,52 @@ pub async fn run_chat_workflow(
     let mut history = session.to_chat_history();
     let before_len = history.len();
 
+    // Resolve the multi-model reviewer runtime. Review is only meaningful for a
+    // corpus-linked investigation turn (the reviewer pipeline runs at the
+    // broad-triage seam), so an unlinked turn stays single-model regardless of
+    // the requested mode. The reviewer's per-call context budget matches the
+    // turn's resolved budget.
+    let review_context_budget = host
+        .model_context_budgets()
+        .resolve(Some(resolved.profile.chat_model.as_str()));
+    let contributions_requested = request.multi_model_mode
+        == cd_core::multi_model::MultiModelMode::Contributions
+        || (request.corpus_id.is_some()
+            && (cfg.contributions.enabled
+                || cfg.multi_model.mode == cd_core::multi_model::MultiModelMode::Contributions)
+            && request.multi_model_mode == cd_core::multi_model::MultiModelMode::Single);
+    let review_mode = if request.corpus_id.is_some() && !contributions_requested {
+        request.multi_model_mode
+    } else {
+        cd_core::multi_model::MultiModelMode::Single
+    };
+    let review = crate::multi_model::resolve_reviewer_runtime(
+        cfg,
+        &provider_credentials,
+        review_mode,
+        &resolved,
+        request.reviewer_qualified,
+        review_context_budget,
+    )
+    .await;
+    let multi_model_runtime = review.runtime.clone();
+    let multi_model_configured = if contributions_requested {
+        cd_core::multi_model::MultiModelMode::Contributions
+    } else {
+        review.configured_mode
+    };
+    let multi_model_entry_degradation = review.entry_degradation;
+    let contribution_resolution = crate::multi_model::resolve_contribution_runtime(
+        cfg,
+        &provider_credentials,
+        &resolved,
+        request.contribution_qualification,
+        review_context_budget,
+        request.corpus_id.is_some() && contributions_requested,
+        request.multi_model_mode == cd_core::multi_model::MultiModelMode::Contributions,
+    )
+    .await;
+    let contribution_runtime = contribution_resolution.runtime.clone();
     let binding = match request.corpus_id {
         Some(corpus_id) => Some(bind_linked_corpus(host, cache_root, corpus_id)?),
         None => None,
@@ -236,6 +373,25 @@ pub async fn run_chat_workflow(
         },
         None => None,
     };
+    // Fast triage is meaningful only for an accepted linked broad-log turn.
+    // Resolve it after binding/context validation so an ordinary or rejected
+    // chat must not construct an otherwise unused fallback.
+    let fast_triage = if crate::fast_triage::should_resolve_fast_triage(
+        linked_context.is_some(),
+        false,
+        cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed)),
+    ) {
+        crate::fast_triage::resolve_fast_triage_runtime(cfg, &provider_credentials, &resolved).await
+    } else {
+        crate::fast_triage::ResolvedFastTriage {
+            runtime: None,
+            entry_degradation: None,
+        }
+    };
+    let fast_triage_runtime = fast_triage.runtime.clone();
+    let fast_triage_entry_degradation = fast_triage.entry_degradation;
 
     let turn_id = format!("{}::{}", session_id, uuid::Uuid::new_v4());
     let mut all_events = Vec::new();
@@ -258,6 +414,35 @@ pub async fn run_chat_workflow(
         Some(sink) => sink,
         None => &mut noop_sink,
     };
+    // An entry-time reviewer degradation is reported once, before the turn, so
+    // the caller knows review was requested but is running single-model and
+    // why. Mid-pipeline degradations are reported by the seam itself.
+    if let Some(reason) = multi_model_entry_degradation {
+        let event = crate::multi_model::entry_degradation_event(reason);
+        live_sink(event.clone());
+        all_events.push(event);
+    }
+    if let Some(detail) = contribution_resolution.entry_degradation {
+        let event = StreamEvent::MultiModelStage {
+            stage: "summary".into(),
+            phase: "summary".into(),
+            status: Some("single".into()),
+            detail: detail.into(),
+            candidate_id: None,
+        };
+        live_sink(event.clone());
+        all_events.push(event);
+    }
+    // Keep the disabled-by-default path byte-identical. When an enabled route
+    // cannot prepare its optional fallback (or has no route evidence), surface
+    // the host-authored reason once; the core route still decides selection.
+    if cfg.fast_triage.enabled {
+        if let Some(reason) = fast_triage_entry_degradation {
+            let event = crate::fast_triage::entry_degradation_event(reason);
+            live_sink(event.clone());
+            all_events.push(event);
+        }
+    }
     loop {
         let events = run_turn(
             host,
@@ -275,9 +460,17 @@ pub async fn run_chat_workflow(
                 telemetry_sequence: Some(workflow_telemetry_sequence.clone()),
                 suppress_provider_telemetry_event: true,
                 user_selection: request.user_selection,
+                multi_model: multi_model_runtime.clone(),
+                fast_triage: fast_triage_runtime.clone(),
+                contribution_runtime: contribution_runtime
+                    .clone()
+                    .or_else(|| request.contribution_runtime.clone()),
                 ..TurnExecutionOptions::default()
             },
             Some(&mut *live_sink),
+            // The CLI is a one-shot host and has no private synthesis
+            // checkpoint lifecycle. `cd_core` derives retry availability
+            // from this absent slot and must not advertise GUI-only retry.
             None,
         )
         .await;
@@ -346,6 +539,7 @@ pub async fn run_chat_workflow(
     all_events.push(telemetry_event);
 
     let corpus_revision = binding.as_ref().map(|b| b.revision);
+    let corpus_snapshot_revision = binding.as_ref().map(|b| b.snapshot_revision);
     if let Some(binding) = binding {
         unbind_linked_corpus(host, binding);
     }
@@ -357,8 +551,24 @@ pub async fn run_chat_workflow(
     // `--session` is read for its real history but left byte-for-byte
     // unchanged on disk, and no session file is created when none existed.
     if !request.dry_run {
+        // The event is the sole authority boundary.  In particular, do not
+        // parse `TextDelta` back into JSON: transcript text is presentation,
+        // while this envelope was validated against this turn's fresh ledger.
+        let investigation_answer = investigation_answer_for_turn(
+            &all_events,
+            &session_id,
+            &turn_id,
+            request.corpus_id,
+            session.linked_corpus_id.as_deref(),
+            corpus_snapshot_revision,
+        );
         for message in &history[before_len..] {
-            session.messages.push(stored_from_chat(message));
+            session.messages.push(stored_from_chat(
+                message,
+                (message.role == Role::Assistant)
+                    .then_some(investigation_answer)
+                    .flatten(),
+            ));
         }
         session.maybe_auto_title_from_first_user();
         session.touch();
@@ -375,6 +585,7 @@ pub async fn run_chat_workflow(
         .collect::<Vec<_>>()
         .join("");
 
+    let multi_model_executed = executed_mode_from_events(&all_events);
     Ok(ChatWorkflowOutcome {
         session_id,
         turn_id,
@@ -382,20 +593,98 @@ pub async fn run_chat_workflow(
         provider_profile_id: resolved.profile.id.clone(),
         chat_model: resolved.profile.chat_model.clone(),
         corpus_revision,
+        corpus_snapshot_revision,
         history_messages: history.len(),
         final_text,
+        multi_model_configured,
+        multi_model_executed,
+        multi_model_entry_degradation,
     })
+}
+
+/// Derive the executed multi-model mode from the event stream's summary line.
+/// The seam and the entry-degradation both emit a `multi_model_stage` summary
+/// with a status of `single` / `review` / `review_degraded` / `contributions`;
+/// absent one, the turn was single-model.
+fn executed_mode_from_events(events: &[StreamEvent]) -> cd_core::multi_model::ExecutedMode {
+    use cd_core::multi_model::ExecutedMode;
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            StreamEvent::MultiModelStage { stage, status, .. } if stage == "summary" => {
+                match status.as_deref() {
+                    Some("review") => Some(ExecutedMode::Review),
+                    Some("review_degraded") => Some(ExecutedMode::ReviewDegraded),
+                    Some("contributions") => Some(ExecutedMode::Contributions),
+                    _ => Some(ExecutedMode::Single),
+                }
+            }
+            _ => None,
+        })
+        .unwrap_or(ExecutedMode::Single)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::resolve_turn_inputs;
     use cd_core::index::KeywordIndex;
     use cd_core::keychain_store::MemorySecretStore;
     use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
     use cd_core::workspace::Workspace;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn summary_event(status: &str) -> StreamEvent {
+        StreamEvent::MultiModelStage {
+            stage: "summary".into(),
+            phase: "summary".into(),
+            status: Some(status.into()),
+            detail: "d".into(),
+            candidate_id: None,
+        }
+    }
+
+    #[test]
+    fn executed_mode_reads_the_last_summary_status_honestly() {
+        use cd_core::multi_model::ExecutedMode;
+        // No summary at all → single.
+        assert_eq!(executed_mode_from_events(&[]), ExecutedMode::Single);
+        // A review summary → review.
+        assert_eq!(
+            executed_mode_from_events(&[summary_event("review")]),
+            ExecutedMode::Review
+        );
+        // A degraded summary → review_degraded.
+        assert_eq!(
+            executed_mode_from_events(&[summary_event("review_degraded")]),
+            ExecutedMode::ReviewDegraded
+        );
+        assert_eq!(
+            executed_mode_from_events(&[summary_event("contributions")]),
+            ExecutedMode::Contributions
+        );
+        // An entry-degradation single summary → single.
+        assert_eq!(
+            executed_mode_from_events(&[summary_event("single")]),
+            ExecutedMode::Single
+        );
+        // The LAST summary wins (a per-stage line then the terminal summary).
+        assert_eq!(
+            executed_mode_from_events(&[
+                StreamEvent::MultiModelStage {
+                    stage: "reviewer".into(),
+                    phase: "finished".into(),
+                    status: Some("completed".into()),
+                    detail: "d".into(),
+                    candidate_id: None,
+                },
+                summary_event("review"),
+            ]),
+            ExecutedMode::Review
+        );
+    }
 
     /// Genuine SSE frames — a plain JSON body with a top-level `finish_reason`
     /// would be misparsed as an SSE finish-only frame by `complete_stream_cb`
@@ -404,6 +693,198 @@ mod tests {
         "data: {\"choices\":[{\"delta\":{\"content\":\"hello from the mock model\"}}]}\n\n\
          data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
          data: [DONE]\n\n";
+
+    fn typed_answer_event(
+        session_id: &str,
+        turn_id: &str,
+        corpus_id: &str,
+        revision: cd_core::investigation_answer::LogSnapshotRevisionV1,
+    ) -> StreamEvent {
+        use cd_core::investigation_answer::{
+            AnswerBindingV1, AnswerEnvelopeV1, InvestigationAnswerV1, SCHEMA_V1,
+        };
+        StreamEvent::InvestigationAnswer {
+            envelope: AnswerEnvelopeV1 {
+                binding: AnswerBindingV1 {
+                    session_id: session_id.into(),
+                    turn_id: turn_id.into(),
+                    corpus_id: corpus_id.into(),
+                    revision,
+                    ledger_digest: "host-digest".into(),
+                },
+                evidence: Vec::new(),
+                answer: InvestigationAnswerV1 {
+                    schema: SCHEMA_V1.into(),
+                    candidates: Vec::new(),
+                    canonical_citations: Vec::new(),
+                    root_cause_established: false,
+                },
+                semantic_attempts: 0,
+            },
+        }
+    }
+
+    /// The machine contract and the human contract are different projections
+    /// of the same validated envelope, and only the typed one is authority.
+    #[test]
+    fn persistence_keeps_the_typed_envelope_exact_while_visible_text_is_markdown() {
+        use cd_core::investigation_answer::{
+            render_answer_markdown, CanonicalCitationV1, ClaimKind, ClaimStatus,
+            InvestigationCandidateV1, InvestigationClaimV1, LogSnapshotRevisionV1,
+        };
+
+        let revision = LogSnapshotRevisionV1 {
+            event_revision: 3,
+            template_analysis_revision: 2,
+            suppression_revision: 1,
+        };
+        let StreamEvent::InvestigationAnswer { mut envelope } =
+            typed_answer_event("session", "turn", "corpus-a", revision)
+        else {
+            unreachable!("fixture builds a typed answer event")
+        };
+        envelope.answer.candidates.push(InvestigationCandidateV1 {
+            candidate_id: "k1".into(),
+            claims: vec![InvestigationClaimV1 {
+                claim_id: "c1".into(),
+                claim_kind: ClaimKind::Observation,
+                text: "opaque host-validated statement".into(),
+                candidate_id: "k1".into(),
+                evidence_ids: vec!["ev1".into()],
+                status: ClaimStatus::Supported,
+            }],
+        });
+        envelope
+            .answer
+            .canonical_citations
+            .push(CanonicalCitationV1 {
+                evidence_id: "ev1".into(),
+                candidate_id: "k1".into(),
+                source_label: "one/two.jsonl".into(),
+                locator: "seq=9".into(),
+                corpus_id: "corpus-a".into(),
+                revision,
+                content: String::new(),
+            });
+
+        let markdown = render_answer_markdown(&envelope);
+        let stored = stored_from_chat(
+            &ChatMessage {
+                role: Role::Assistant,
+                content: markdown.clone(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Some(&envelope),
+        );
+
+        // Human projection: readable Markdown, never the authoritative JSON.
+        assert!(stored.content.starts_with("# Investigation answer"));
+        assert!(serde_json::from_str::<serde_json::Value>(stored.content.trim()).is_err());
+        assert!(stored.content.contains("`ev1`"), "{}", stored.content);
+
+        // Machine projection: byte-exact typed envelope under the reserved key.
+        let meta = stored.meta.expect("assistant metadata");
+        let persisted = meta
+            .get(INVESTIGATION_ANSWER_META_KEY)
+            .expect("typed envelope persisted");
+        assert_eq!(
+            persisted,
+            &serde_json::to_value(&envelope).expect("typed value")
+        );
+        let round_trip: cd_core::investigation_answer::AnswerEnvelopeV1 =
+            serde_json::from_value(persisted.clone()).expect("exact round trip");
+        assert_eq!(round_trip, envelope);
+
+        // Re-entry: the rendered text is never a path back to authority. A
+        // stream carrying only the Markdown yields no investigation answer.
+        let display_only = vec![StreamEvent::TextDelta { text: markdown }];
+        assert!(investigation_answer_for_turn(
+            &display_only,
+            "session",
+            "turn",
+            Some("corpus-a"),
+            Some("corpus-a"),
+            Some(revision),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn investigation_answer_persistence_requires_exact_linked_scope_and_revision() {
+        let revision = cd_core::investigation_answer::LogSnapshotRevisionV1 {
+            event_revision: 7,
+            template_analysis_revision: 11,
+            suppression_revision: 13,
+        };
+        let events = vec![typed_answer_event("session", "turn", "corpus-a", revision)];
+        assert!(investigation_answer_for_turn(
+            &events,
+            "session",
+            "turn",
+            Some("corpus-a"),
+            Some("corpus-a"),
+            Some(revision),
+        )
+        .is_some());
+        assert!(investigation_answer_for_turn(
+            &events,
+            "session",
+            "next-turn",
+            Some("corpus-a"),
+            Some("corpus-a"),
+            Some(revision),
+        )
+        .is_none());
+        for changed in [
+            cd_core::investigation_answer::LogSnapshotRevisionV1 {
+                event_revision: revision.event_revision + 1,
+                ..revision
+            },
+            cd_core::investigation_answer::LogSnapshotRevisionV1 {
+                template_analysis_revision: revision.template_analysis_revision + 1,
+                ..revision
+            },
+            cd_core::investigation_answer::LogSnapshotRevisionV1 {
+                suppression_revision: revision.suppression_revision + 1,
+                ..revision
+            },
+        ] {
+            assert!(investigation_answer_for_turn(
+                &events,
+                "session",
+                "turn",
+                Some("corpus-a"),
+                Some("corpus-a"),
+                Some(changed),
+            )
+            .is_none());
+        }
+        for (request_corpus, session_corpus, snapshot_revision) in [
+            (None, Some("corpus-a"), Some(revision)),
+            (Some("corpus-a"), None, Some(revision)),
+            (Some("corpus-a"), Some("corpus-b"), Some(revision)),
+            (
+                Some("corpus-a"),
+                Some("corpus-a"),
+                Some(cd_core::investigation_answer::LogSnapshotRevisionV1 {
+                    template_analysis_revision: 12,
+                    ..revision
+                }),
+            ),
+            (Some("corpus-a"), Some("corpus-a"), None),
+        ] {
+            assert!(investigation_answer_for_turn(
+                &events,
+                "session",
+                "turn",
+                request_corpus,
+                session_corpus,
+                snapshot_revision,
+            )
+            .is_none());
+        }
+    }
 
     /// End to end, offline: a `ChatWorkflowRequest` with no linked corpus
     /// reaches a real `OpenAiCompatibleClient` HTTP call (via
@@ -466,6 +947,7 @@ mod tests {
                 dry_run: false,
                 trace_sink: None,
                 user_selection: None,
+                ..ChatWorkflowRequest::default()
             },
             None,
             None,
@@ -584,6 +1066,7 @@ mod tests {
                 dry_run: false,
                 trace_sink: Some(trace_sink),
                 user_selection: None,
+                ..ChatWorkflowRequest::default()
             },
             None,
             None,
@@ -695,6 +1178,7 @@ mod tests {
                     dry_run: false,
                     trace_sink: None,
                     user_selection: selection,
+                    ..ChatWorkflowRequest::default()
                 },
                 None,
                 None,
@@ -848,6 +1332,7 @@ mod tests {
                 dry_run: false,
                 trace_sink: None,
                 user_selection: None,
+                ..ChatWorkflowRequest::default()
             },
             None,
             None,
@@ -941,6 +1426,7 @@ mod tests {
                 dry_run: true,
                 trace_sink: None,
                 user_selection: None,
+                ..ChatWorkflowRequest::default()
             },
             None,
             None,

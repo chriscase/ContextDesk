@@ -76,6 +76,20 @@ On Linux, install keyring + WebKit deps before host check (see CI `tauri-host` j
 
 **Two Cargo.lock files:** root workspace and `desktop/src-tauri/` (nested, not a root member). If you change `cd-core` crate deps, update **both** locks in the same PR so local `cargo check` / `tauri dev` does not leave a dirty tree that blocks `git pull`. See [`docs/DEV.md`](docs/DEV.md) § Clean working tree.
 
+**Do not cold-build every worktree:** before local Cargo, Tauri, or release-gate
+work, use the marked shared cache when the toolchain and target are compatible:
+
+```bash
+eval "$(scripts/local-build-cache.sh activate)"
+```
+
+The exact-head acceptance gates activate that cache automatically for local
+runs when it already exists. Set `CONTEXTDESK_DISABLE_SHARED_BUILD_CACHE=1` or
+an explicit `CARGO_TARGET_DIR` only for an intentional isolated build (for
+example, a different Rust toolchain or target triple). Never clean the shared
+target while another build is active; use `scripts/local-build-cache.sh
+inventory` and explicit dry-run cleanup for disposable worktree targets.
+
 ## Definition of done (before push / close)
 
 - [ ] Commands above all exit 0 (or equivalent CI green on your PR).
@@ -106,7 +120,7 @@ On Linux, install keyring + WebKit deps before host check (see CI `tauri-host` j
 - SQL: read-only roles, timeouts, row limits
 - MCP: opt-in, allowlisted, first-use approve
 - Grok Build session reuse: explicit user opt-in; credentials stay in Rust
-- Secrets: OS keychain only (`{slug}-secrets` service); webview never receives raw keys (see `docs/DEV.md`)
+- Secrets: OS Keychain by default (`{slug}-secrets` service). A provider may instead carry an explicit owner-only absolute `file:` reference; never guess a Keychain entry when no reference is configured. Secret contents never return to the webview (see `docs/DEV.md`).
 - CI: gitleaks on every PR — false-positive process in `docs/DEV.md` (do not disable the job)
 
 ## Tauri capability review checklist

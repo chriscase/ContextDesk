@@ -24,6 +24,7 @@ import {
   type ModelOptionDto,
 } from "../../lib/engine/modelCuration";
 import { curateModels } from "../../lib/modelCuration";
+import { modelReadinessLabel } from "../../lib/modelReadiness";
 import { nextRovingIndex } from "../../lib/a11y";
 
 /** A change awaiting the user's explicit acceptance of a new default. */
@@ -498,6 +499,7 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
                     {m.provider_label}
                     {m.is_default ? " · default" : ""}
                     {pinned ? " · pinned" : ""}
+                    {` · ${modelReadinessLabel(m)}`}
                     {m.hidden
                       ? m.hidden_by === "provider"
                         ? " · hidden with its provider"
@@ -510,6 +512,9 @@ export function ModelVisibilityPanel({ onCurationChanged }: Props = {}) {
                   </span>
                   {m.availability_detail ? (
                     <span className="field__hint">{m.availability_detail}</span>
+                  ) : null}
+                  {m.readiness?.detail ? (
+                    <span className="field__hint">{m.readiness.detail}</span>
                   ) : null}
                 </div>
                 {/*

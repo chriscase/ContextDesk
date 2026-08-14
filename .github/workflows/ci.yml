@@ -10,6 +10,12 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# Keep every main-branch run, but stop spending runner time on an obsolete PR
+# revision once a newer commit for the same PR has started CI.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   secrets:
     name: gitleaks
@@ -28,7 +34,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: check Shipped anchors in docs/CLAIMS.md
-        run: sh scripts/check_claims.sh
+        run: |
+          sh scripts/check_claims_test.sh
+          sh scripts/check_claims.sh
 
   close-proof:
     name: close-proof discipline (#254)
@@ -95,6 +103,13 @@ jobs:
           sudo rm -rf /opt/hostedtoolcache/CodeQL /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc
           df -h /
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Cache workspace crates as well as dependencies so fresh runners
+          # do not repeatedly rebuild the large local workspace.
+          # The action's normal OS/toolchain/lockfile keying remains in force.
+          cache-workspace-crates: true
+          # Preserve useful cache material when a later lint/test step fails.
+          cache-on-failure: true
       - name: fmt
         # rustfmt is OS-agnostic; still run on all three for early signal.
         run: cargo fmt --all -- --check
@@ -103,6 +118,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test workspace
         # cd-core + cd-server (incl. tenant isolation) (#160); offline, no real keychain (#178).
+        # Keep the Linux workspace suite single-threaded: the expanded
+        # retrieval/triage fixture suite can starve the hosted runner even
+        # with bounded parallelism and surface as a lost runner connection.
+        env:
+          RUST_TEST_THREADS: ${{ runner.os == 'Linux' && '1' || '4' }}
+          CARGO_BUILD_JOBS: ${{ runner.os == 'Linux' && '1' || '4' }}
         run: cargo test --workspace
       - name: embed_host example build (#170)
         # Keeps crates/cd-core/examples/embed_host from rotting.
@@ -134,6 +155,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
+          # Native dependency builds remain valid even if a later host gate fails.
+          cache-on-failure: true
       - name: fmt
         run: cargo fmt -- --check
       - name: clippy

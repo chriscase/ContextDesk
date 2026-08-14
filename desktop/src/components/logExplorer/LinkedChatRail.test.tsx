@@ -575,7 +575,7 @@ describe("LinkedChatRail", () => {
     expect(
       (
         within(selector).getByRole("option", {
-          name: "chat-only · tools unavailable",
+          name: /chat-only.*not verified.*tools unavailable/,
         }) as HTMLOptionElement
       ).disabled,
     ).toBe(true);
@@ -3226,8 +3226,14 @@ describe("LinkedChatRail", () => {
     expect(onEvent).toEqual(expect.any(Function));
     await act(async () => {
       onEvent?.({
-        kind: "turn_phase",
-        payload: { phase: "choosing_evidence" },
+        kind: "turn_progress",
+        payload: {
+          category: "phase",
+          stage: "choosing_evidence",
+          phase: "started",
+          label: "Choosing bounded evidence",
+          elapsed_ms: 120,
+        },
       });
     });
     expect(screen.getByTestId("linked-chat-phase")).toBeTruthy();
@@ -3237,6 +3243,30 @@ describe("LinkedChatRail", () => {
     const elapsed = screen.getByTestId("linked-chat-elapsed");
     expect(elapsed.getAttribute("aria-hidden")).toBe("true");
     expect(elapsed.textContent).toMatch(/\d/);
+    await act(async () => {
+      onEvent?.({
+        kind: "turn_progress",
+        payload: {
+          category: "multi_model",
+          stage: "reviewer",
+          phase: "started",
+          label: "Reviewing candidate findings",
+          detail: "reviewing 2 candidate findings",
+          candidate_id: "opaque-candidate-7",
+          elapsed_ms: 980,
+        },
+      });
+    });
+    expect(screen.getByRole("status").textContent).toMatch(
+      /Reviewing candidate findings/,
+    );
+    const timeline = screen.getByTestId("turn-progress-timeline");
+    expect(within(timeline).getByText("Choosing bounded evidence")).toBeTruthy();
+    expect(within(timeline).getByText("Reviewing candidate findings")).toBeTruthy();
+    const candidate = within(timeline).getByText("opaque-candidate-7");
+    expect(candidate.closest("details")?.hasAttribute("open")).toBe(false);
+    fireEvent.click(within(timeline).getByText("Diagnostics"));
+    expect(candidate.closest("details")?.hasAttribute("open")).toBe(true);
     await act(async () => {
       resolveTurn?.([
         { kind: "text_delta", payload: { text: "done." } },

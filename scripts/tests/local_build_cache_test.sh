@@ -82,12 +82,25 @@ activation_one="$(cd "$PRIMARY" && "$SCRIPT_UNDER_TEST" activate --cache-root "$
 mkdir -p "$LINKED/desktop/src-tauri"
 activation_two="$(cd "$LINKED/desktop/src-tauri" && \
   "$SCRIPT_UNDER_TEST" activate --cache-root "$CACHE_ROOT")"
-assert_contains "$activation_one" "CARGO_TARGET_DIR='$CACHE_ROOT/cargo-target'"
-[[ "$activation_one" == "$activation_two" ]] ||
-  fail "two worktrees did not resolve the same shared target"
-[[ -f "$CACHE_ROOT/cargo-target/.contextdesk-generated-target-v1" ]] ||
-  fail "shared target marker missing"
-printf 'ok 1 - two worktrees resolve one opt-in shared target\n'
+PRIMARY_CACHE_TARGET="$(printf '%s\n' "$activation_one" | sed -n "s/^export CARGO_TARGET_DIR='\(.*\)'$/\1/p")"
+LINKED_CACHE_TARGET="$(printf '%s\n' "$activation_two" | sed -n "s/^export CARGO_TARGET_DIR='\(.*\)'$/\1/p")"
+[[ -n "$PRIMARY_CACHE_TARGET" && -n "$LINKED_CACHE_TARGET" ]] ||
+  fail "activation did not export scoped targets"
+[[ "$PRIMARY_CACHE_TARGET" != "$LINKED_CACHE_TARGET" ]] ||
+  fail "different worktrees unsafely resolved the same target"
+[[ "$PRIMARY_CACHE_TARGET" == "$CACHE_ROOT/cargo-targets/"* ]] ||
+  fail "primary target was not cache-root scoped"
+[[ "$LINKED_CACHE_TARGET" == "$CACHE_ROOT/cargo-targets/"* ]] ||
+  fail "linked target was not cache-root scoped"
+[[ -f "$PRIMARY_CACHE_TARGET/.contextdesk-generated-target-v1" &&
+  -f "$PRIMARY_CACHE_TARGET/.contextdesk-worktree-scope-v2" &&
+  -f "$LINKED_CACHE_TARGET/.contextdesk-generated-target-v1" &&
+  -f "$LINKED_CACHE_TARGET/.contextdesk-worktree-scope-v2" ]] ||
+  fail "worktree target markers missing"
+scoped_dry_run="$($SCRIPT_UNDER_TEST cleanup --dry-run \
+  --repo-root "$LINKED" --cache-root "$CACHE_ROOT" --target "$LINKED_CACHE_TARGET")"
+assert_contains "$scoped_dry_run" "WOULD_CLEAN kind=worktree-scoped"
+printf 'ok 1 - different worktrees resolve isolated cache targets\n'
 
 PRIMARY_TARGET="$PRIMARY/target"
 mark_target "$PRIMARY_TARGET"
@@ -131,7 +144,7 @@ assert_contains "$inventory_output" "INVENTORY mode=dry-run"
 assert_contains "$inventory_output" "WORKTREE role=primary active=registered"
 assert_contains "$inventory_output" "WORKTREE role=linked active=registered dirty=yes"
 assert_contains "$inventory_output" "TARGET kind=root safe_to_regenerate=yes"
-assert_contains "$inventory_output" "TARGET kind=shared safe_to_regenerate=yes"
+assert_contains "$inventory_output" "TARGET kind=worktree-scoped safe_to_regenerate=yes"
 printf 'ok 6 - inventory distinguishes worktrees, dirt, and generated targets\n'
 
 tracked_before="$(shasum -a 256 "$LINKED/tracked.txt" | awk '{print $1}')"

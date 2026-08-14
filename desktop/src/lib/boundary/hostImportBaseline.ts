@@ -48,6 +48,7 @@ export const HOST_IMPORT_BASELINE: readonly string[] = [
   "src/components/settings/ConnectorsSection.tsx",
   "src/components/settings/GeneralSection.tsx",
   "src/components/settings/ModulesSection.tsx",
+  "src/components/settings/MultiModelReviewToggle.tsx",
   "src/components/settings/PreflightSection.tsx",
   "src/components/settings/SkillsSection.tsx",
   "src/components/settings/WorkspaceSection.tsx",

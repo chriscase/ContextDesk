@@ -34,6 +34,10 @@ REQUIRED_STEPS: tuple[tuple[str, str], ...] = (
         "cargo test -p cd-cli --test cli_public_acceptance_lab full_path",
     ),
     (
+        "desktop_tauri_tests",
+        "cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --all-targets",
+    ),
+    (
         "exact_head_cli_acceptance",
         "scripts/exact_head_cli_acceptance.sh",
     ),

@@ -1,6 +1,10 @@
 //! Chat provider clients (OpenAI-compatible, Ollama, Anthropic Messages).
 
 use crate::error::{CoreError, CoreResult};
+use crate::openai_chat_contract::{
+    build_openai_chat_request_body, extract_openai_message_channels, validate_mode_for_transmit,
+    validate_mode_response, OpenAiChatRequestMode,
+};
 use crate::ssrf::{build_pinned_client_for_url, SsrfPolicy, SystemResolver};
 use crate::tools::ToolSpec;
 use chrono::{DateTime, Utc};
@@ -16,6 +20,28 @@ const OPENAI_COMPATIBLE_MAX_429_RETRIES: u32 = 2;
 const OPENAI_COMPATIBLE_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
 const OPENAI_COMPATIBLE_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 const OPENAI_COMPATIBLE_MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// One provider-neutral constructor for "the provider answered a chat or
+/// stream request with a non-success HTTP status".
+///
+/// Every provider client routes its status failure through this so the status
+/// travels structurally (see [`CoreError::ProviderHttp`]) instead of only
+/// inside prose that each consumer would have to re-parse. The rendered text
+/// is identical to the per-client `format!` calls this replaces, so existing
+/// message contracts (and the transport oracle that pins them) still hold.
+fn provider_http_error(
+    operation: &str,
+    status: reqwest::StatusCode,
+    body: &str,
+    body_chars: usize,
+) -> CoreError {
+    CoreError::ProviderHttp {
+        operation: operation.to_string(),
+        status: status.as_u16(),
+        status_line: status.to_string(),
+        body: body.chars().take(body_chars).collect(),
+    }
+}
 
 fn bounded_openai_retry_after(
     headers: &reqwest::header::HeaderMap,
@@ -200,6 +226,10 @@ pub struct StreamAccumulator {
     /// index -> (id, name, arguments buffer)
     tool_parts: std::collections::BTreeMap<usize, (String, String, String)>,
     finish_reason: Option<String>,
+    /// True once a `data: [DONE]` sentinel has been observed. Tracked
+    /// separately from `finish_reason` because a stream may signal
+    /// completion via `[DONE]` alone (see `into_completion`).
+    saw_done: bool,
     telemetry: crate::provider_telemetry::ProviderTransportTelemetry,
 }
 
@@ -243,7 +273,9 @@ impl StreamAccumulator {
             StreamDelta::Finish(r) => {
                 self.finish_reason = Some(r);
             }
-            StreamDelta::Done => {}
+            StreamDelta::Done => {
+                self.saw_done = true;
+            }
         }
     }
 
@@ -256,7 +288,20 @@ impl StreamAccumulator {
     }
 
     /// Finish into a completion (same shape as non-stream parse).
-    pub fn into_completion(self) -> ChatCompletion {
+    ///
+    /// Fails closed when the stream ended without ever observing a finish
+    /// signal (`finish_reason` on a delta, or `data: [DONE]`). A connection
+    /// that closes cleanly mid-answer is a real, observed provider/gateway
+    /// failure mode (a crash or timeout on the far side, not a transport
+    /// error on this one) and must not be reported as a completed, validated
+    /// response with a fabricated finish reason — see
+    /// docs/testing/gateway-wire-survivors-and-gaps.md.
+    pub fn into_completion(self) -> CoreResult<ChatCompletion> {
+        if self.finish_reason.is_none() && !self.saw_done {
+            return Err(CoreError::Message(
+                "stream ended before a finish_reason or [DONE] was ever received".into(),
+            ));
+        }
         let mut tool_calls = Vec::new();
         for (_idx, (id, name, arguments)) in self.tool_parts {
             if name.is_empty() && arguments.is_empty() {
@@ -286,12 +331,12 @@ impl StreamAccumulator {
                 "tool_calls".into()
             }
         });
-        ChatCompletion {
+        Ok(ChatCompletion {
             content: self.content,
             tool_calls,
             finish_reason,
             telemetry: self.telemetry,
-        }
+        })
     }
 }
 
@@ -504,7 +549,7 @@ pub fn accumulate_openai_sse(body: &str) -> CoreResult<ChatCompletion> {
             acc.push(d);
         }
     }
-    Ok(acc.into_completion())
+    acc.into_completion()
 }
 
 /// Convert tool specs to OpenAI tools array.
@@ -539,6 +584,12 @@ pub struct OpenAiCompatibleClient {
     pub model: String,
     /// Optional extra request headers (e.g. Grok OIDC CLI markers).
     pub extra_headers: Vec<(String, String)>,
+    /// Optional reasoning-effort policy for Chat Completions requests.
+    ///
+    /// `None` / omit keeps existing wire behavior (no effort field). Explicit
+    /// levels are applied only via the dialect map in
+    /// [`crate::reasoning_effort`].
+    pub reasoning_effort: crate::reasoning_effort::EffectiveEffortPolicy,
 }
 
 impl OpenAiCompatibleClient {
@@ -549,21 +600,80 @@ impl OpenAiCompatibleClient {
         model: impl Into<String>,
         policy: &SsrfPolicy,
     ) -> CoreResult<Self> {
+        Self::new_with_timeout(
+            base_url,
+            api_key,
+            model,
+            policy,
+            std::time::Duration::from_secs(120),
+        )
+    }
+
+    /// Create a client with a caller-owned whole-request timeout.
+    ///
+    /// Turn execution passes its sanitized host deadline here so a slow but
+    /// permitted provider is not cut off by the legacy 120-second default.
+    /// Standalone discovery/probe callers can continue to use [`Self::new`].
+    pub fn new_with_timeout(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        model: impl Into<String>,
+        policy: &SsrfPolicy,
+        request_timeout: std::time::Duration,
+    ) -> CoreResult<Self> {
+        if request_timeout.is_zero() {
+            return Err(CoreError::Config(
+                "provider request timeout must be greater than zero".into(),
+            ));
+        }
         let base_url = base_url.into();
         // #141: resolve+vet+pin; no redirects (anti-rebind / SSRF).
-        let (url, http) = build_pinned_client_for_url(
-            &base_url,
-            policy,
-            &SystemResolver,
-            std::time::Duration::from_secs(120),
-        )?;
+        let (url, http) =
+            build_pinned_client_for_url(&base_url, policy, &SystemResolver, request_timeout)?;
         Ok(Self {
             http,
             base_url: url.as_str().trim_end_matches('/').to_string(),
             api_key,
             model: model.into(),
             extra_headers: Vec::new(),
+            reasoning_effort: crate::reasoning_effort::EffectiveEffortPolicy::Omit,
         })
+    }
+
+    /// Set the reasoning-effort policy for subsequent Chat Completions calls.
+    ///
+    /// Default is omit (provider default). Does not persist AppConfig.
+    pub fn with_reasoning_effort(
+        mut self,
+        policy: crate::reasoning_effort::EffectiveEffortPolicy,
+    ) -> Self {
+        self.reasoning_effort = policy;
+        self
+    }
+
+    /// Build a Chat Completions body and apply the configured effort policy.
+    ///
+    /// Uses the Completions surface only — Responses nesting is never invented
+    /// on this client path.
+    fn build_body_with_effort(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+        stream: bool,
+        mode: &OpenAiChatRequestMode,
+    ) -> CoreResult<(
+        serde_json::Value,
+        crate::reasoning_effort::EffortApplyTelemetry,
+    )> {
+        let mut body = build_openai_chat_request_body(&self.model, messages, tools, stream, mode);
+        let effort_tel = crate::reasoning_effort::apply_reasoning_effort_to_body(
+            &mut body,
+            crate::openai_chat_contract::ChatBackendDialect::OpenAiCompatible,
+            crate::reasoning_effort::ChatApiSurface::ChatCompletions,
+            self.reasoning_effort,
+        )
+        .map_err(|e| CoreError::Message(e.to_string()))?;
+        Ok((body, effort_tel))
     }
 
     /// Attach extra headers (e.g. session/OIDC). If Authorization is present, clears `api_key`.
@@ -674,23 +784,32 @@ impl OpenAiCompatibleClient {
         }
     }
 
-    /// Non-streaming chat completion.
+    /// Non-streaming chat completion (plain mode).
     pub async fn complete(
         &self,
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
     ) -> CoreResult<ChatCompletion> {
-        let mut body = json!({
-            "model": self.model,
-            "messages": messages,
-            "stream": false,
-        });
-        if let Some(specs) = tools {
-            if !specs.is_empty() {
-                body["tools"] = tools_to_openai(specs);
-                body["tool_choice"] = json!("auto");
-            }
+        self.complete_with_mode(messages, tools, &OpenAiChatRequestMode::Plain)
+            .await
+    }
+
+    /// Non-streaming chat completion with a typed request mode.
+    ///
+    /// Structured modes emit `response_format` / forced `tool_choice` via
+    /// [`crate::openai_chat_contract::build_openai_chat_request_body`]. There is
+    /// no silent mid-turn downgrade when a gateway rejects the mode.
+    pub async fn complete_with_mode(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+        mode: &OpenAiChatRequestMode,
+    ) -> CoreResult<ChatCompletion> {
+        // Fail closed before any network: forced tool / schema shape.
+        if let Err(reason) = validate_mode_for_transmit(mode, tools) {
+            return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
         }
+        let (body, effort_tel) = self.build_body_with_effort(messages, tools, false, mode)?;
         let resp = self
             .post_completion_with_429_retry(&body, "chat request", None)
             .await?;
@@ -707,15 +826,25 @@ impl OpenAiCompatibleClient {
             .await
             .map_err(|e| CoreError::Message(format!("chat body: {e}")))?;
         if !status.is_success() {
-            return Err(CoreError::Message(format!(
-                "chat HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("chat", status, &text, 300));
         }
         let mut completion = parse_openai_completion(&text)?;
+        // Strongest safe response check for native modes only (Plain unchanged).
+        let tool_names: Vec<&str> = completion
+            .tool_calls
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
+        if let Err(reason) = validate_mode_response(mode, &completion.content, &tool_names) {
+            return Err(CoreError::Message(format!(
+                "invalid_response_for_mode:{reason}"
+            )));
+        }
         // Headers first, body second so JSON `id` / usage win over header ids.
         let mut tel = header_tel;
         tel.merge_from(&completion.telemetry);
+        tel.reasoning_effort_requested = Some(effort_tel.requested);
+        tel.reasoning_effort_effective = Some(effort_tel.effective);
         completion.telemetry = tel;
         Ok(completion)
     }
@@ -729,17 +858,21 @@ impl OpenAiCompatibleClient {
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
     ) -> CoreResult<ChatCompletion> {
-        let mut body = json!({
-            "model": self.model,
-            "messages": messages,
-            "stream": true,
-        });
-        if let Some(specs) = tools {
-            if !specs.is_empty() {
-                body["tools"] = tools_to_openai(specs);
-                body["tool_choice"] = json!("auto");
-            }
+        self.complete_stream_with_mode(messages, tools, &OpenAiChatRequestMode::Plain)
+            .await
+    }
+
+    /// Streaming chat completion with a typed request mode.
+    pub async fn complete_stream_with_mode(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+        mode: &OpenAiChatRequestMode,
+    ) -> CoreResult<ChatCompletion> {
+        if let Err(reason) = validate_mode_for_transmit(mode, tools) {
+            return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
         }
+        let (body, effort_tel) = self.build_body_with_effort(messages, tools, true, mode)?;
         let resp = self
             .post_completion_with_429_retry(&body, "stream request", None)
             .await?;
@@ -756,10 +889,7 @@ impl OpenAiCompatibleClient {
             .await
             .map_err(|e| CoreError::Message(format!("stream body: {e}")))?;
         if !status.is_success() {
-            return Err(CoreError::Message(format!(
-                "stream HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("stream", status, &text, 300));
         }
         // Some gateways ignore stream=true and return a full JSON object.
         let mut completion = if text.trim_start().starts_with('{') && !text.contains("data:") {
@@ -767,8 +897,21 @@ impl OpenAiCompatibleClient {
         } else {
             accumulate_openai_sse(&text)?
         };
+        // Same native-mode response contract as non-stream complete_with_mode.
+        let tool_names: Vec<&str> = completion
+            .tool_calls
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
+        if let Err(reason) = validate_mode_response(mode, &completion.content, &tool_names) {
+            return Err(CoreError::Message(format!(
+                "invalid_response_for_mode:{reason}"
+            )));
+        }
         let mut tel = header_tel;
         tel.merge_from(&completion.telemetry);
+        tel.reasoning_effort_requested = Some(effort_tel.requested);
+        tel.reasoning_effort_effective = Some(effort_tel.effective);
         completion.telemetry = tel;
         Ok(completion)
     }
@@ -785,6 +928,28 @@ impl OpenAiCompatibleClient {
         &self,
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
+        on_delta: F,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> CoreResult<ChatCompletion>
+    where
+        F: FnMut(StreamDelta),
+    {
+        self.complete_stream_cb_with_mode(
+            messages,
+            tools,
+            &OpenAiChatRequestMode::Plain,
+            on_delta,
+            cancel,
+        )
+        .await
+    }
+
+    /// Streaming chat with typed mode and per-delta callback.
+    pub async fn complete_stream_cb_with_mode<F>(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+        mode: &OpenAiChatRequestMode,
         mut on_delta: F,
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> CoreResult<ChatCompletion>
@@ -794,36 +959,28 @@ impl OpenAiCompatibleClient {
         use crate::sse::{BoundedBodyAccumulator, SseLineDecoder};
         use futures_util::StreamExt;
 
-        let mut body = json!({
-            "model": self.model,
-            "messages": messages,
-            "stream": true,
-        });
-        if let Some(specs) = tools {
-            if !specs.is_empty() {
-                body["tools"] = tools_to_openai(specs);
-                body["tool_choice"] = json!("auto");
-            }
+        if let Err(reason) = validate_mode_for_transmit(mode, tools) {
+            return Err(CoreError::Message(format!("invalid_request_mode:{reason}")));
         }
+        let (body, effort_tel) = self.build_body_with_effort(messages, tools, true, mode)?;
         let resp = self
             .post_completion_with_429_retry(&body, "stream request", cancel)
             .await?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(CoreError::Message(format!(
-                "stream HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("stream", status, &text, 300));
         }
 
-        let header_tel = crate::provider_telemetry::capture_safe_response_headers(
+        let mut header_tel = crate::provider_telemetry::capture_safe_response_headers(
             resp.headers().iter().filter_map(|(k, v)| {
                 v.to_str()
                     .ok()
                     .map(|value| (k.as_str().to_string(), value.to_string()))
             }),
         );
+        header_tel.reasoning_effort_requested = Some(effort_tel.requested.clone());
+        header_tel.reasoning_effort_effective = Some(effort_tel.effective.clone());
 
         // Some OpenAI-compatible gateways ignore `stream=true` and return a
         // normal completion with an honest JSON content type. Parse that
@@ -847,6 +1004,16 @@ impl OpenAiCompatibleClient {
                 full_body.push(&bytes)?;
             }
             let mut completion = parse_openai_completion(&full_body.finish()?)?;
+            let tool_names: Vec<&str> = completion
+                .tool_calls
+                .iter()
+                .map(|t| t.function.name.as_str())
+                .collect();
+            if let Err(reason) = validate_mode_response(mode, &completion.content, &tool_names) {
+                return Err(CoreError::Message(format!(
+                    "invalid_response_for_mode:{reason}"
+                )));
+            }
             let mut tel = header_tel.clone();
             tel.merge_from(&completion.telemetry);
             completion.telemetry = tel;
@@ -891,6 +1058,16 @@ impl OpenAiCompatibleClient {
         // lines and route the complete body through the non-stream parser.
         if !saw_sse_data {
             let mut completion = parse_openai_completion(full_body.finish()?.trim())?;
+            let tool_names: Vec<&str> = completion
+                .tool_calls
+                .iter()
+                .map(|t| t.function.name.as_str())
+                .collect();
+            if let Err(reason) = validate_mode_response(mode, &completion.content, &tool_names) {
+                return Err(CoreError::Message(format!(
+                    "invalid_response_for_mode:{reason}"
+                )));
+            }
             let mut tel = header_tel;
             tel.merge_from(&completion.telemetry);
             completion.telemetry = tel;
@@ -911,7 +1088,18 @@ impl OpenAiCompatibleClient {
                 }
             }
         }
-        Ok(acc.into_completion())
+        let completion = acc.into_completion()?;
+        let tool_names: Vec<&str> = completion
+            .tool_calls
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
+        if let Err(reason) = validate_mode_response(mode, &completion.content, &tool_names) {
+            return Err(CoreError::Message(format!(
+                "invalid_response_for_mode:{reason}"
+            )));
+        }
+        Ok(completion)
     }
 
     /// List models via GET …/models (tries several path shapes like TriageTool).
@@ -998,6 +1186,11 @@ pub fn parse_openai_style_models_list(text: &str) -> CoreResult<Vec<String>> {
 }
 
 /// Parse OpenAI chat completion JSON (also used in tests with fixtures).
+///
+/// Reasoning channels (`reasoning_content` / `reasoning`) are never merged
+/// into [`ChatCompletion::content`]. Use
+/// [`crate::openai_chat_contract::extract_openai_message_channels`] when a
+/// caller must inspect the reasoning channel explicitly.
 pub fn parse_openai_completion(text: &str) -> CoreResult<ChatCompletion> {
     let v: Value = serde_json::from_str(text)?;
     let choice = v
@@ -1008,11 +1201,9 @@ pub fn parse_openai_completion(text: &str) -> CoreResult<ChatCompletion> {
     let message = choice
         .get("message")
         .ok_or_else(|| CoreError::Message("no message".into()))?;
-    let content = message
-        .get("content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
+    // Content channel only — reasoning must not leak into success text.
+    let channels = extract_openai_message_channels(message);
+    let content = channels.content;
     let finish = choice
         .get("finish_reason")
         .and_then(|f| f.as_str())
@@ -1020,12 +1211,17 @@ pub fn parse_openai_completion(text: &str) -> CoreResult<ChatCompletion> {
         .to_string();
     let mut tool_calls = Vec::new();
     if let Some(arr) = message.get("tool_calls").and_then(|t| t.as_array()) {
-        for tc in arr {
+        for (idx, tc) in arr.iter().enumerate() {
+            // A position-unique fallback (matching StreamAccumulator's
+            // "call_{n}" convention) — a literal "call" for every id-less
+            // tool call in one response would collide whenever there is more
+            // than one, making a tool-result continuation unable to address
+            // them individually.
             let id = tc
                 .get("id")
                 .and_then(|x| x.as_str())
-                .unwrap_or("call")
-                .to_string();
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("call_{idx}"));
             let func = tc.get("function").cloned().unwrap_or(json!({}));
             let name = func
                 .get("name")
@@ -1061,19 +1257,42 @@ pub struct OllamaClient {
 impl OllamaClient {
     /// Create with SSRF policy (loopback allowed by default).
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> CoreResult<Self> {
+        Self::new_with_timeout(base_url, model, std::time::Duration::from_secs(120))
+    }
+
+    /// Create with a caller-owned whole-request transport timeout.
+    ///
+    /// Standalone discovery/probe callers should continue to use [`Self::new`];
+    /// turn-owned provider resolution passes its effective deadline here so a
+    /// local Ollama server is not cut off by the legacy 120-second default.
+    pub fn new_with_timeout(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        request_timeout: std::time::Duration,
+    ) -> CoreResult<Self> {
+        if request_timeout.is_zero() {
+            return Err(CoreError::Config(
+                "provider request timeout must be greater than zero".into(),
+            ));
+        }
         let base_url = base_url.into();
         // Loopback Ollama: pin with default policy (allow_loopback).
         let (url, http) = build_pinned_client_for_url(
             &base_url,
             &SsrfPolicy::default(),
             &SystemResolver,
-            std::time::Duration::from_secs(120),
+            request_timeout,
         )?;
         Ok(Self {
             http,
             base_url: url.as_str().trim_end_matches('/').to_string(),
             model: model.into(),
         })
+    }
+
+    /// Configured model name (configuration identity, not a served-model echo).
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     /// List local models via /api/tags.
@@ -1129,10 +1348,7 @@ impl OllamaClient {
             .await
             .map_err(|e| CoreError::Message(format!("ollama body: {e}")))?;
         if !status.is_success() {
-            return Err(CoreError::Message(format!(
-                "ollama HTTP {status}: {}",
-                text.chars().take(200).collect::<String>()
-            )));
+            return Err(provider_http_error("ollama", status, &text, 200));
         }
         parse_ollama_chat_response(&text)
     }
@@ -1464,10 +1680,23 @@ pub fn parse_anthropic_models_list(text: &str) -> CoreResult<Vec<String>> {
 pub fn parse_anthropic_completion(text: &str) -> CoreResult<ChatCompletion> {
     let v: Value = serde_json::from_str(text)
         .map_err(|e| CoreError::Message(format!("anthropic json: {e}")))?;
+    // Anthropic's documented error envelope (`{"type":"error","error":{...}}`)
+    // has no `content` array — without this check it silently parsed as an
+    // ordinary empty-but-successful completion (content "", finish_reason
+    // defaulted to "end_turn"), indistinguishable from a legitimately empty
+    // answer. Mirrors the equivalent inline check the OpenAI-compatible SSE
+    // parser already applies (`parse_openai_sse_data`'s `v.get("error")`).
+    if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+        let message = v
+            .pointer("/error/message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("anthropic error response");
+        return Err(CoreError::Message(message.to_string()));
+    }
     let mut content = String::new();
     let mut tool_calls = Vec::new();
     if let Some(blocks) = v.get("content").and_then(|c| c.as_array()) {
-        for b in blocks {
+        for (idx, b) in blocks.iter().enumerate() {
             let ty = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match ty {
                 "text" => {
@@ -1476,11 +1705,17 @@ pub fn parse_anthropic_completion(text: &str) -> CoreResult<ChatCompletion> {
                     }
                 }
                 "tool_use" => {
+                    // A position-unique fallback (matching the streaming
+                    // accumulator's convention below) — a literal
+                    // "toolu_unknown" for every id-less block would collide
+                    // whenever a response has more than one, making a
+                    // tool-result continuation unable to address them
+                    // individually.
                     let id = b
                         .get("id")
                         .and_then(|x| x.as_str())
-                        .unwrap_or("toolu_unknown")
-                        .to_string();
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("toolu_{idx}"));
                     let name = b
                         .get("name")
                         .and_then(|n| n.as_str())
@@ -1532,6 +1767,9 @@ pub fn accumulate_anthropic_sse(body: &str) -> CoreResult<ChatCompletion> {
     let mut tools: std::collections::BTreeMap<usize, (String, String, String)> =
         std::collections::BTreeMap::new();
     let mut finish_reason = String::from("end_turn");
+    // True once message_delta (carrying stop_reason) or message_stop has
+    // been observed — see the fail-closed check below.
+    let mut saw_finish_signal = false;
     let mut current_event = String::new();
 
     for raw_line in body.lines() {
@@ -1608,9 +1846,26 @@ pub fn accumulate_anthropic_sse(body: &str) -> CoreResult<ChatCompletion> {
                         "tool_use" => "tool_calls".into(),
                         other => other.to_string(),
                     };
+                    saw_finish_signal = true;
                 }
             }
-            "message_stop" | "content_block_stop" => {}
+            "message_stop" => {
+                saw_finish_signal = true;
+            }
+            "content_block_stop" => {}
+            // Anthropic's documented mid-stream error event
+            // (`event: error` / `{"type":"error","error":{...}}`, e.g.
+            // `overloaded_error`). Previously fell through the wildcard arm
+            // below and was silently discarded — a provider-reported error
+            // must abort with an error, never be dropped in favor of
+            // whatever partial content streamed before it.
+            "error" => {
+                let message = v
+                    .pointer("/error/message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("anthropic stream error");
+                return Err(CoreError::Message(message.to_string()));
+            }
             _ => {
                 // Some servers put type only in data JSON without event: lines.
                 if v.get("type").and_then(|t| t.as_str()) == Some("content_block_delta") {
@@ -1623,6 +1878,17 @@ pub fn accumulate_anthropic_sse(body: &str) -> CoreResult<ChatCompletion> {
                 }
             }
         }
+    }
+
+    // Fails closed when the stream ended without ever observing
+    // message_delta or message_stop — see StreamAccumulator::into_completion
+    // (chat.rs) for the identical OpenAI-side invariant and rationale. A
+    // connection that closes cleanly mid-answer must not be reported as a
+    // completed response with a fabricated "end_turn".
+    if !saw_finish_signal {
+        return Err(CoreError::Message(
+            "anthropic stream ended before message_delta or message_stop was ever received".into(),
+        ));
     }
 
     let mut tool_calls = Vec::new();
@@ -1673,6 +1939,28 @@ impl AnthropicClient {
         model: impl Into<String>,
         policy: &SsrfPolicy,
     ) -> CoreResult<Self> {
+        Self::new_with_timeout(
+            base_url,
+            api_key,
+            model,
+            policy,
+            std::time::Duration::from_secs(120),
+        )
+    }
+
+    /// Create an Anthropic client with a caller-owned whole-request timeout.
+    pub fn new_with_timeout(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        model: impl Into<String>,
+        policy: &SsrfPolicy,
+        request_timeout: std::time::Duration,
+    ) -> CoreResult<Self> {
+        if request_timeout.is_zero() {
+            return Err(CoreError::Config(
+                "provider request timeout must be greater than zero".into(),
+            ));
+        }
         let raw = base_url.into();
         let base = if raw.trim().is_empty() {
             "https://api.anthropic.com".to_string()
@@ -1683,12 +1971,8 @@ impl AnthropicClient {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| CoreError::Config("Anthropic API key required".into()))?;
-        let (url, http) = build_pinned_client_for_url(
-            &base,
-            policy,
-            &SystemResolver,
-            std::time::Duration::from_secs(120),
-        )?;
+        let (url, http) =
+            build_pinned_client_for_url(&base, policy, &SystemResolver, request_timeout)?;
         Ok(Self {
             http,
             base_url: url.as_str().trim_end_matches('/').to_string(),
@@ -1732,10 +2016,7 @@ impl AnthropicClient {
             .await
             .map_err(|e| CoreError::Message(format!("anthropic body: {e}")))?;
         if !status.is_success() {
-            return Err(CoreError::Message(format!(
-                "anthropic HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("anthropic", status, &text, 300));
         }
         parse_anthropic_completion(&text)
     }
@@ -1758,10 +2039,7 @@ impl AnthropicClient {
             .await
             .map_err(|e| CoreError::Message(format!("anthropic stream body: {e}")))?;
         if !status.is_success() {
-            return Err(CoreError::Message(format!(
-                "anthropic stream HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("anthropic stream", status, &text, 300));
         }
         if text.trim_start().starts_with('{') && !text.contains("event:") && !text.contains("data:")
         {
@@ -1822,10 +2100,7 @@ impl AnthropicClient {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(CoreError::Message(format!(
-                "anthropic stream HTTP {status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
+            return Err(provider_http_error("anthropic stream", status, &text, 300));
         }
 
         // Anthropic's final tool-call reconstruction re-parses the whole
@@ -1878,6 +2153,16 @@ impl AnthropicClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ollama_transport_timeout_rejects_zero_without_network() {
+        assert!(OllamaClient::new_with_timeout(
+            "http://127.0.0.1:11434",
+            "mistral",
+            Duration::ZERO,
+        )
+        .is_err());
+    }
 
     #[test]
     fn openai_429_delay_honors_bounded_retry_after_and_conservative_fallback() {
@@ -2288,7 +2573,7 @@ data: [DONE]
                 }
             }
         }
-        let c = acc.into_completion();
+        let c = acc.into_completion().unwrap();
         let buffered = accumulate_openai_sse(SSE_TEXT_FIXTURE).unwrap();
         assert_eq!(c.content, buffered.content);
         assert_eq!(c.tool_calls.len(), buffered.tool_calls.len());
@@ -2322,7 +2607,7 @@ data: [DONE]
                 }
             }
         }
-        assert_eq!(acc.into_completion().content, "café 🎉 done");
+        assert_eq!(acc.into_completion().unwrap().content, "café 🎉 done");
     }
 
     /// The non-SSE "gateway ignored `stream=true`" fallback's exact

@@ -1,0 +1,236 @@
+{
+  "base_ts": 1740816240,
+  "baseline_expectation": {
+    "class": "limitation",
+    "gates": {
+      "max_decoy_share_at_25": 0.4,
+      "min_recall_at_25": null,
+      "queries_expected_below_floor": [
+        "rb13-multilingual-q2",
+        "rb13-multilingual-q7"
+      ]
+    },
+    "limitation_reason": "the trigger/propagation/recovery evidence is logged in German/Spanish/French; English keyword plans reach them only via identifiers"
+  },
+  "case_id": "rb13-multilingual",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb13-multilingual-g01",
+      "incident_id": "rb13-multilingual-inc1",
+      "notes": "trigger logged in German",
+      "role": "trigger",
+      "sources": [
+        "app/global.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "conn-69C614B6",
+      "ts": 1740818540
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb13-multilingual-g02",
+      "incident_id": "rb13-multilingual-inc1",
+      "notes": "propagation logged in Spanish",
+      "role": "propagation",
+      "sources": [
+        "app/global.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "retry-239D31AD",
+      "ts": 1740818600
+    },
+    {
+      "expected_occurrences": 2,
+      "expected_raw_records": 2,
+      "expected_token_records": 2,
+      "group_id": "rb13-multilingual-g03",
+      "incident_id": "rb13-multilingual-inc1",
+      "notes": "symptom logged in English",
+      "role": "symptom",
+      "sources": [
+        "app/global.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "txn-87D02EDE",
+      "ts": 1740818720
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb13-multilingual-g04",
+      "incident_id": "rb13-multilingual-inc1",
+      "notes": "recovery logged in French",
+      "role": "recovery",
+      "sources": [
+        "app/global.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "evt-232BAA6D",
+      "ts": 1740819240
+    }
+  ],
+  "expected": {
+    "bytes": 70850,
+    "events": 426,
+    "excluded_files": [],
+    "files": 1,
+    "files_by_path": {
+      "app/global.jsonl": {
+        "bytes": 70850,
+        "events": 426,
+        "sha256": "37ab0c2d7a056e56582eb7789be9c82b7db429352973c869ff5fb7944da31829"
+      }
+    },
+    "severities": {
+      "error": 3,
+      "info": 421,
+      "warn": 2
+    },
+    "source_count": 1,
+    "sources": {
+      "app/global.jsonl": 426
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "four separate incidents occurred, one per language"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "68181f8acc1efe00c56f9793665922ed6e2e62206e4c94b3e0aaaa183614e5c7",
+  "incidents": [
+    {
+      "incident_id": "rb13-multilingual-inc1",
+      "root_cause_status": "established",
+      "summary": "The order store connection dropped (logged in German), writes retried (Spanish), checkouts failed (English), and the connection was restored (French). One incident; language is surface only.",
+      "trigger_group_ids": [
+        "rb13-multilingual-g01"
+      ],
+      "window_from_ts": 1740818540,
+      "window_to_ts": 1740819300
+    }
+  ],
+  "intended_probe": "terminology-varied and non-English records measure multilingual retrieval without making language the answer",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb13-multilingual-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb13-multilingual-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb13-multilingual-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb13-multilingual-g03"
+        }
+      ]
+    },
+    "rb13-multilingual-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb13-multilingual-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb13-multilingual-g02"
+        }
+      ]
+    },
+    "rb13-multilingual-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb13-multilingual-g03"
+        }
+      ]
+    },
+    "rb13-multilingual-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb13-multilingual-g01"
+        }
+      ]
+    },
+    "rb13-multilingual-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb13-multilingual-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb13-multilingual-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb13-multilingual-g03"
+        }
+      ]
+    },
+    "rb13-multilingual-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb13-multilingual-g04"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb13-multilingual-g01"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "translation is a presentation concern; identifiers are language-neutral"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the German-language record is the earliest causal evidence",
+    "all four languages describe one incident"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "f172fe850c7b77218601ffe84168e8de475e6077c136813b670d869fbdfeac2f",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Multilingual and paraphrased evidence"
+}

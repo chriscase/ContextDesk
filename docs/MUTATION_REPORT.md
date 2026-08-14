@@ -1,5 +1,13 @@
 # High-risk mutation report — 2026-07-24
 
+> **Historical non-claim.** This report is retained as mutation-testing
+> provenance only. It does not qualify the release evidence pin
+> `c09357153e0c8953f2862c3cf3d8377ec9bc6bc7`. The recorded base commit is a
+> verifiable ancestor, but the recorded mutation-tested feature commit
+> `981d9f0a6d19ff3bb5d7196b6d8696c807836d36` is not present in this checkout's
+> git object database, so the run cannot be reproduced or treated as exact
+> release evidence here.
+
 ## Run identity
 
 - Repository: `chriscase/ContextDesk`

@@ -50,10 +50,10 @@ pub fn triage_answer_contract_system_text() -> &'static str {
      LEAD WITH THE ANSWER: begin with `Likely cause:` (or `Cause not established:`) and a concise 1-3 sentence conclusion. \
      For causal questions, explicitly distinguish the best-supported trigger, downstream symptoms, and irrelevant/noise events. \
      Do not begin with `Based on the provided logs`, restate the entire tool inventory, or narrate the analysis process.\n\
-     CAUSAL THRESHOLD: an error/failure preceding an abort is not by itself a cause. Use `Likely cause:` only when host evidence names a concrete mechanism, reason, or trigger that explains the symptoms. \
-     If records are explicitly symptom-only, or the evidence says an authoritative source/component is absent, lead with `Cause not established:` and describe the observed failure chain without promoting a symptom to root cause.\n\
-     MISSING EVIDENCE IS NOT A CAUSE: `not present in this import`, `source unavailable in the corpus`, and similar coverage statements mean ContextDesk lacks that evidence. They do NOT prove the source, service, component, or configuration was absent during the incident. \
-     Never turn an evidence-coverage gap into an operational cause. When the available failure records are explicitly symptom-only and the authoritative causal source is outside the import, you MUST lead with `Cause not established:`.\n\
+     CAUSAL THRESHOLD: an error/failure preceding an abort is not by itself a cause. Use `Likely cause:` only when host evidence names a concrete mechanism, reason, or trigger that explains the failures — in whatever wording the corpus itself uses. \
+     When the failure records show only downstream effects and no record names a mechanism that produced them, lead with `Cause not established:` and describe the observed failure chain without promoting a downstream effect to root cause.\n\
+     MISSING EVIDENCE IS NOT A CAUSE: statements that evidence is missing, uncollected, or outside the imported corpus — however the corpus phrases them — mean ContextDesk lacks that evidence. They do NOT prove the source, service, component, or configuration was absent or at fault during the incident. \
+     Never turn an evidence-coverage gap into an operational cause. When the causal mechanism could only be confirmed by evidence that is not in the corpus, you MUST lead with `Cause not established:` and name that gap under missing_or_next_evidence.\n\
      Answer with these explicit sections in order (markdown headings or JSON keys):\n\
      1) observations — only the few facts needed to support the conclusion.\n\
      2) causal_candidates — the strongest trigger first; distinguish it from symptoms.\n\
@@ -144,6 +144,10 @@ pub struct TriageKnownAnswerKey {
     /// Message token that identifies the true causal trigger, when establishable.
     #[serde(default)]
     pub true_trigger_message_token: Option<String>,
+    /// When multiple triggers are equally supported, every identifying token
+    /// must remain represented among the causal candidates.
+    #[serde(default)]
+    pub competing_trigger_message_tokens: Vec<String>,
     /// Tokens that identify downstream symptoms (not causes).
     #[serde(default)]
     pub symptom_message_tokens: Vec<String>,
@@ -805,6 +809,49 @@ pub fn score_structured_triage_answer(
         },
     });
 
+    // A real (seq, source) identity alone does not prove that the cited row
+    // supports the text of its attached claim.  Evaluate this integrity check
+    // only when host message text is available; it is not a causal classifier.
+    let mut correspondence_ok = true;
+    let mut correspondence_reason = "cited rows support their claim text".to_string();
+    if !host.messages_by_seq.is_empty() {
+        for claim in answer
+            .observations
+            .iter()
+            .chain(answer.causal_candidates.iter())
+        {
+            let (Some(seq), Some(source)) = (claim.seq, claim.source.as_ref()) else {
+                continue;
+            };
+            let Some((_, _, message)) =
+                host.messages_by_seq
+                    .iter()
+                    .find(|(candidate_seq, candidate_source, _)| {
+                        *candidate_seq == seq && candidate_source == source
+                    })
+            else {
+                continue;
+            };
+            if !claim_corresponds_to_cited_message(
+                &claim.text,
+                message,
+                seq,
+                source,
+                &host.messages_by_seq,
+            ) {
+                correspondence_ok = false;
+                correspondence_reason =
+                    format!("claim text is not supported by cited seq={seq} source={source}");
+                break;
+            }
+        }
+    }
+    dimensions.push(RubricDimension {
+        id: "claim_evidence_correspondence".into(),
+        passed: correspondence_ok,
+        reason: correspondence_reason,
+    });
+
     // 3) Trigger identification (when establishable)
     let trigger_seq = key
         .true_trigger_message_token
@@ -848,12 +895,18 @@ pub fn score_structured_triage_answer(
     });
 
     // 4) Symptom vs cause separation
-    let symptom_as_sole_cause = key.symptom_message_tokens.iter().any(|token| {
+    //
+    // Invariant: any causal candidate whose citation identity resolves (via
+    // host message text) to a host-authored `symptom_message_token` must carry
+    // an explicit safe role (`symptom` or `unknown`). A coexisting valid
+    // trigger must never mask a promoted symptom — candidate count is
+    // irrelevant. Decision inputs are host token→identity resolution and
+    // structured role placement only.
+    let symptom_promoted_as_cause = key.symptom_message_tokens.iter().any(|token| {
         find_token_seq(host, token).is_some_and(|(seq, source)| {
             answer.causal_candidates.iter().any(|c| {
                 c.seq == Some(seq)
                     && c.source.as_deref() == Some(source.as_str())
-                    && answer.causal_candidates.len() == 1
                     && !matches!(c.role.as_deref(), Some("symptom" | "unknown"))
             })
         })
@@ -867,12 +920,14 @@ pub fn score_structured_triage_answer(
                         && c.role.as_deref() == Some("trigger")
                 })
             }));
-    let separation_ok = !symptom_as_sole_cause && !earliest_as_root;
+    let separation_ok = !symptom_promoted_as_cause && !earliest_as_root;
     dimensions.push(RubricDimension {
         id: "symptom_vs_cause".into(),
         passed: separation_ok,
         reason: if separation_ok {
-            "symptoms not presented as sole proven cause; earliest≠root".into()
+            "symptoms not promoted as causal candidates; earliest≠root".into()
+        } else if symptom_promoted_as_cause {
+            "host-identified symptom cited as a non-symptom causal candidate".into()
         } else {
             "symptom/decoy treated as proven root cause".into()
         },
@@ -1057,6 +1112,172 @@ pub fn score_structured_triage_answer(
     }
 }
 
+/// Score the typed, host-validated investigation answer used by the current
+/// broad linked-triage path.
+///
+/// The legacy [`StructuredTriageAnswer`] rubric intentionally requires
+/// confidence and missing-evidence sections that do not exist in
+/// `investigation_answer.v1`. Re-parsing the rendered Markdown back into that
+/// legacy shape therefore produces a false usefulness failure even when the
+/// production path emitted a valid typed envelope. This adapter scores the
+/// current authority boundary directly while keeping the same evaluator-only
+/// known key and host facts.
+pub fn score_validated_investigation_answer(
+    envelope: &crate::investigation_answer::AnswerEnvelopeV1,
+    key: &TriageKnownAnswerKey,
+    host: &TriageHostFacts,
+) -> TriageRubricScore {
+    use crate::investigation_answer::{ClaimKind, SCHEMA_V1};
+
+    let claims = envelope
+        .answer
+        .candidates
+        .iter()
+        .flat_map(|candidate| candidate.claims.iter())
+        .collect::<Vec<_>>();
+    let evidence = envelope
+        .evidence
+        .iter()
+        .map(|entry| (entry.evidence_id.as_str(), entry))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut dimensions = Vec::new();
+
+    let shape_ok = envelope.answer.schema == SCHEMA_V1
+        && !envelope.answer.candidates.is_empty()
+        && envelope
+            .answer
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.claims.is_empty())
+        && claims.iter().all(|claim| {
+            claim.claim_kind == ClaimKind::MissingEvidence || !claim.evidence_ids.is_empty()
+        });
+    dimensions.push(RubricDimension {
+        id: "typed_contract_shape".into(),
+        passed: shape_ok,
+        reason: if shape_ok {
+            "host-validated typed candidates contain grounded claims".into()
+        } else {
+            "typed answer is empty or contains an ungrounded non-disclosure claim".into()
+        },
+    });
+
+    let citations_ok = claims.iter().all(|claim| {
+        claim.evidence_ids.iter().all(|id| {
+            evidence.get(id.as_str()).is_some_and(|entry| {
+                entry.candidate_id == claim.candidate_id
+                    && envelope
+                        .answer
+                        .canonical_citations
+                        .iter()
+                        .any(|citation| citation.evidence_id == *id)
+            })
+        })
+    });
+    dimensions.push(RubricDimension {
+        id: "typed_citation_validity".into(),
+        passed: citations_ok,
+        reason: if citations_ok {
+            "typed claim citations remain candidate-scoped and canonical".into()
+        } else {
+            "typed claim citation set is incomplete or crosses candidate scope".into()
+        },
+    });
+
+    let evidence_matches = |claim: &crate::investigation_answer::InvestigationClaimV1,
+                            wanted: &(u64, String)| {
+        claim.evidence_ids.iter().any(|id| {
+            evidence.get(id.as_str()).is_some_and(|entry| {
+                entry.locator == format!("seq={}", wanted.0) && entry.source_label == wanted.1
+            })
+        })
+    };
+    let trigger = key
+        .true_trigger_message_token
+        .as_deref()
+        .and_then(|token| find_token_seq(host, token));
+    let trigger_ok = match trigger {
+        Some(wanted) if key.root_cause_establishable => claims.iter().any(|claim| {
+            matches!(
+                claim.claim_kind,
+                ClaimKind::CausalCandidate | ClaimKind::InitiatingCause
+            ) && evidence_matches(claim, &wanted)
+        }),
+        Some(_) => !envelope.answer.root_cause_established,
+        None => !key.root_cause_establishable || !envelope.answer.root_cause_established,
+    };
+    dimensions.push(RubricDimension {
+        id: "typed_trigger_identification".into(),
+        passed: trigger_ok,
+        reason: if trigger_ok {
+            "true trigger is cited in a causal section".into()
+        } else {
+            "true trigger is absent from typed causal claims".into()
+        },
+    });
+
+    let symptom = key
+        .symptom_message_tokens
+        .iter()
+        .find_map(|token| find_token_seq(host, token));
+    let symptom_ok = match symptom {
+        Some(wanted) => {
+            let cited_as_symptom = claims.iter().any(|claim| {
+                claim.claim_kind == ClaimKind::Symptom && evidence_matches(claim, &wanted)
+            });
+            let promoted_to_cause = claims.iter().any(|claim| {
+                claim.claim_kind == ClaimKind::InitiatingCause && evidence_matches(claim, &wanted)
+            });
+            cited_as_symptom && !promoted_to_cause
+        }
+        None => true,
+    };
+    dimensions.push(RubricDimension {
+        id: "typed_symptom_separation".into(),
+        passed: symptom_ok,
+        reason: if symptom_ok {
+            "known downstream symptom is kept out of initiating-cause claims".into()
+        } else {
+            "known symptom was omitted or promoted to an initiating cause".into()
+        },
+    });
+
+    let decoy = key
+        .decoy_earliest_error_message_token
+        .as_deref()
+        .and_then(|token| find_token_seq(host, token));
+    let decoy_ok = decoy.is_none_or(|wanted| {
+        !claims.iter().any(|claim| {
+            claim.claim_kind == ClaimKind::InitiatingCause && evidence_matches(claim, &wanted)
+        })
+    });
+    dimensions.push(RubricDimension {
+        id: "typed_decoy_separation".into(),
+        passed: decoy_ok,
+        reason: if decoy_ok {
+            "known decoy is not treated as an initiating cause".into()
+        } else {
+            "known decoy was promoted to an initiating cause".into()
+        },
+    });
+
+    // V1 carries no model-owned confidence or chronology flags. The host
+    // snapshot and canonical citations are the authority for those facts, so
+    // this dimension is explicitly neutral rather than inferred from prose.
+    dimensions.push(RubricDimension {
+        id: "typed_chronology_scope".into(),
+        passed: true,
+        reason: "typed v1 has no unvalidated confidence/chronology assertion field".into(),
+    });
+
+    let passed = dimensions.iter().all(|dimension| dimension.passed);
+    TriageRubricScore {
+        case_id: key.case_id.clone(),
+        passed,
+        dimensions,
+    }
+}
+
 fn observation_is_exact_empty_evidence_disclosure(claim: &TriageClaim) -> bool {
     matches!(
         normalize_assertion_text(&claim.text).as_str(),
@@ -1088,6 +1309,85 @@ fn find_token_seq(host: &TriageHostFacts, token: &str) -> Option<(u64, String)> 
                 None
             }
         })
+}
+
+/// Material tokens used for deterministic text-to-citation binding.
+fn material_tokens(text: &str) -> BTreeSet<String> {
+    text.to_ascii_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|token| token.len() >= 4)
+        .filter(|token| {
+            !matches!(
+                *token,
+                "that"
+                    | "this"
+                    | "with"
+                    | "from"
+                    | "into"
+                    | "about"
+                    | "have"
+                    | "been"
+                    | "were"
+                    | "will"
+                    | "when"
+                    | "where"
+                    | "which"
+                    | "their"
+                    | "there"
+                    | "would"
+                    | "could"
+                    | "should"
+                    | "error"
+                    | "level"
+                    | "info"
+                    | "warn"
+                    | "debug"
+                    | "trace"
+                    | "report"
+                    | "reports"
+                    | "detected"
+            )
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// Check that a cited host row supports the claim it is attached to.
+///
+/// Containment and shared material tokens provide direct support.  A claim
+/// with no overlap is rejected only when another host row is a stronger match,
+/// retaining support for high-level inventory observations.
+fn claim_corresponds_to_cited_message(
+    claim_text: &str,
+    cited_message: &str,
+    cited_seq: u64,
+    cited_source: &str,
+    all_messages: &[(u64, String, String)],
+) -> bool {
+    let claim_lower = claim_text.to_ascii_lowercase();
+    let cited_lower = cited_message.to_ascii_lowercase();
+    if claim_lower.trim().is_empty() || cited_lower.trim().is_empty() {
+        return false;
+    }
+    if claim_lower.contains(cited_lower.trim()) || cited_lower.contains(claim_lower.trim()) {
+        return true;
+    }
+
+    let claim_tokens = material_tokens(claim_text);
+    let cited_hits = claim_tokens
+        .intersection(&material_tokens(cited_message))
+        .count();
+    if cited_hits > 0 {
+        return true;
+    }
+
+    all_messages.iter().all(|(seq, source, other_message)| {
+        (*seq == cited_seq && source == cited_source)
+            || claim_tokens
+                .intersection(&material_tokens(other_message))
+                .count()
+                <= cited_hits
+    })
 }
 
 fn answer_text_blob(answer: &StructuredTriageAnswer) -> String {
@@ -1153,6 +1453,7 @@ mod tests {
             sources_omitted: vec!["config/flags.jsonl".into()],
             decoy_earliest_error_message_token: Some("decoy".into()),
             true_trigger_message_token: Some("causal trigger".into()),
+            competing_trigger_message_tokens: Vec::new(),
             symptom_message_tokens: vec!["downstream symptom".into()],
             root_cause_establishable: true,
             forbidden_claims: vec![
@@ -1210,6 +1511,110 @@ mod tests {
         }
     }
 
+    #[test]
+    fn typed_investigation_answers_are_scored_without_rendered_markdown_reparse() {
+        use crate::investigation_answer::{
+            AnswerBindingV1, AnswerEnvelopeV1, CanonicalCitationV1, ClaimKind,
+            InvestigationAnswerV1, InvestigationCandidateV1, InvestigationClaimV1,
+            LogSnapshotRevisionV1, SCHEMA_V1,
+        };
+
+        let revision = LogSnapshotRevisionV1 {
+            event_revision: 1,
+            template_analysis_revision: 2,
+            suppression_revision: 3,
+        };
+        let binding = AnswerBindingV1 {
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            corpus_id: "c".into(),
+            revision,
+            ledger_digest: "digest".into(),
+        };
+        let evidence = vec![
+            crate::investigation_answer::HostEvidenceEntry {
+                evidence_id: "e-trigger".into(),
+                candidate_id: "c1".into(),
+                source_label: "app/worker.jsonl".into(),
+                locator: "seq=2".into(),
+                corpus_id: "c".into(),
+                revision,
+                role: crate::investigation_answer::EvidenceRole::Cause,
+                content: "causal trigger lease refused".into(),
+            },
+            crate::investigation_answer::HostEvidenceEntry {
+                evidence_id: "e-symptom".into(),
+                candidate_id: "c1".into(),
+                source_label: "app/worker.jsonl".into(),
+                locator: "seq=3".into(),
+                corpus_id: "c".into(),
+                revision,
+                role: crate::investigation_answer::EvidenceRole::Symptom,
+                content: "downstream symptom task failed".into(),
+            },
+        ];
+        let citations = evidence
+            .iter()
+            .map(|entry| CanonicalCitationV1 {
+                evidence_id: entry.evidence_id.clone(),
+                candidate_id: entry.candidate_id.clone(),
+                source_label: entry.source_label.clone(),
+                locator: entry.locator.clone(),
+                corpus_id: entry.corpus_id.clone(),
+                revision: entry.revision,
+                content: entry.content.clone(),
+            })
+            .collect();
+        let envelope = AnswerEnvelopeV1 {
+            binding,
+            evidence,
+            answer: InvestigationAnswerV1 {
+                schema: SCHEMA_V1.into(),
+                candidates: vec![InvestigationCandidateV1 {
+                    candidate_id: "c1".into(),
+                    claims: vec![
+                        InvestigationClaimV1 {
+                            claim_id: "observation".into(),
+                            claim_kind: ClaimKind::Observation,
+                            text: "The trigger was logged.".into(),
+                            candidate_id: "c1".into(),
+                            evidence_ids: vec!["e-trigger".into()],
+                            status: crate::investigation_answer::ClaimStatus::Supported,
+                        },
+                        InvestigationClaimV1 {
+                            claim_id: "cause".into(),
+                            claim_kind: ClaimKind::InitiatingCause,
+                            text: "The causal trigger was the lease refusal.".into(),
+                            candidate_id: "c1".into(),
+                            evidence_ids: vec!["e-trigger".into()],
+                            status: crate::investigation_answer::ClaimStatus::Supported,
+                        },
+                        InvestigationClaimV1 {
+                            claim_id: "symptom".into(),
+                            claim_kind: ClaimKind::Symptom,
+                            text: "The downstream symptom followed.".into(),
+                            candidate_id: "c1".into(),
+                            evidence_ids: vec!["e-symptom".into()],
+                            status: crate::investigation_answer::ClaimStatus::Supported,
+                        },
+                    ],
+                }],
+                canonical_citations: citations,
+                root_cause_established: true,
+            },
+            semantic_attempts: 0,
+        };
+
+        let score = score_validated_investigation_answer(&envelope, &sample_key(), &sample_host());
+        assert!(score.passed, "typed score failed: {:?}", score.failed_ids());
+        let mut promoted = envelope;
+        promoted.answer.candidates[0].claims[2].claim_kind = ClaimKind::InitiatingCause;
+        let mutated =
+            score_validated_investigation_answer(&promoted, &sample_key(), &sample_host());
+        assert!(!mutated.passed);
+        assert!(mutated.failed_ids().contains(&"typed_symptom_separation"));
+    }
+
     fn good_answer() -> StructuredTriageAnswer {
         StructuredTriageAnswer {
             observations: vec![TriageClaim {
@@ -1219,7 +1624,10 @@ mod tests {
                 role: Some("observation".into()),
             }],
             causal_candidates: vec![TriageClaim {
-                text: "resource lease refused".into(),
+                // Shares material tokens ("lease", "refused") with the cited
+                // seq=2 message without echoing any frozen-fixture phrase, so
+                // the full-file fixture-lexicon scan stays clean.
+                text: "lease request refused by the compute manager".into(),
                 seq: Some(2),
                 source: Some("app/worker.jsonl".into()),
                 role: Some("trigger".into()),
@@ -1453,6 +1861,243 @@ mod tests {
         assert!(score.failed_ids().contains(&"semantic_occurrence_count"));
     }
 
+    /// Causal candidate citing the host-identified symptom with a non-safe role.
+    fn symptom_claim(role: Option<&str>) -> TriageClaim {
+        TriageClaim {
+            // Shares material tokens with the cited seq=3 symptom message
+            // without embedding frozen fixture answer vocabulary.
+            text: "task failed after the pool pressure wave".into(),
+            seq: Some(3),
+            source: Some("app/worker.jsonl".into()),
+            role: role.map(str::to_string),
+        }
+    }
+
+    fn with_extra_causal(
+        base: &StructuredTriageAnswer,
+        extra: TriageClaim,
+    ) -> StructuredTriageAnswer {
+        let mut answer = base.clone();
+        answer.causal_candidates.push(extra);
+        answer
+    }
+
+    fn dim_passed(score: &TriageRubricScore, id: &str) -> bool {
+        score
+            .dimensions
+            .iter()
+            .find(|d| d.id == id)
+            .is_some_and(|d| d.passed)
+    }
+
+    /// Reproduction: valid trigger + symptom promoted to `trigger` must fail
+    /// `symptom_vs_cause`. The pre-fix `len() == 1` gate greened this shape.
+    #[test]
+    fn valid_trigger_does_not_mask_symptom_promoted_to_trigger() {
+        let key = sample_key();
+        let host = sample_host();
+        let answer = with_extra_causal(&good_answer(), symptom_claim(Some("trigger")));
+        assert!(
+            answer.causal_candidates.len() > 1,
+            "masking defect requires coexisting candidates"
+        );
+        let score = score_structured_triage_answer(&answer, &key, &host);
+        assert!(
+            score.failed_ids().contains(&"symptom_vs_cause"),
+            "promoted symptom must fail symptom_vs_cause even with a valid trigger; failed={:?} dims={:?}",
+            score.failed_ids(),
+            score.dimensions
+        );
+        // Unrelated dimensions must not be the only failures for this shape.
+        assert!(
+            dim_passed(&score, "citation_validity"),
+            "citation must remain green: {:?}",
+            score.dimensions
+        );
+        assert!(
+            dim_passed(&score, "claim_evidence_correspondence"),
+            "evidence correspondence must remain green: {:?}",
+            score.dimensions
+        );
+        assert!(
+            dim_passed(&score, "trigger_identification"),
+            "valid trigger citation must still score: {:?}",
+            score.dimensions
+        );
+    }
+
+    #[test]
+    fn correct_trigger_alone_still_passes_symptom_vs_cause() {
+        let score = score_structured_triage_answer(&good_answer(), &sample_key(), &sample_host());
+        assert!(
+            dim_passed(&score, "symptom_vs_cause"),
+            "failed={:?}",
+            score.failed_ids()
+        );
+        assert!(score.passed, "failed={:?}", score.failed_ids());
+    }
+
+    #[test]
+    fn correct_trigger_plus_explicit_symptom_role_passes() {
+        let answer = with_extra_causal(&good_answer(), symptom_claim(Some("symptom")));
+        let score = score_structured_triage_answer(&answer, &sample_key(), &sample_host());
+        assert!(
+            dim_passed(&score, "symptom_vs_cause"),
+            "explicit symptom role must pass; failed={:?} dims={:?}",
+            score.failed_ids(),
+            score.dimensions
+        );
+        assert!(
+            dim_passed(&score, "citation_validity")
+                && dim_passed(&score, "claim_evidence_correspondence"),
+            "supporting dimensions must stay green: {:?}",
+            score.dimensions
+        );
+    }
+
+    #[test]
+    fn multiple_genuine_triggers_still_pass_symptom_vs_cause() {
+        let mut key = sample_key();
+        key.true_trigger_message_token = Some("lease refused".into());
+        key.competing_trigger_message_tokens =
+            vec!["lease refused".into(), "pool pressure wave".into()];
+        // Reuse the decoy row as a second genuine trigger for this counterexample
+        // by re-labeling host message text so host tokens resolve cleanly.
+        let mut host = sample_host();
+        host.messages_by_seq[0].2 = "second trigger pool pressure wave at boundary".into();
+        let mut answer = good_answer();
+        answer.causal_candidates = vec![
+            TriageClaim {
+                text: "lease request refused by the compute manager".into(),
+                seq: Some(2),
+                source: Some("app/worker.jsonl".into()),
+                role: Some("trigger".into()),
+            },
+            TriageClaim {
+                text: "pool pressure wave at the admission boundary".into(),
+                seq: Some(1),
+                source: Some("app/worker.jsonl".into()),
+                role: Some("trigger".into()),
+            },
+        ];
+        let score = score_structured_triage_answer(&answer, &key, &host);
+        assert!(
+            dim_passed(&score, "symptom_vs_cause"),
+            "multiple genuine triggers must not be rejected as symptoms; failed={:?} dims={:?}",
+            score.failed_ids(),
+            score.dimensions
+        );
+    }
+
+    #[test]
+    fn unrelated_second_candidate_is_not_rejected_for_multiplicity() {
+        // Second candidate cites the decoy identity (not a symptom token) with
+        // role `noise`. Multiplicity alone must not fail symptom_vs_cause.
+        let mut answer = good_answer();
+        answer.causal_candidates.push(TriageClaim {
+            text: "early decoy noise from the access edge".into(),
+            seq: Some(1),
+            source: Some("app/worker.jsonl".into()),
+            role: Some("noise".into()),
+        });
+        // Align claim text with the decoy host message for correspondence.
+        let mut host = sample_host();
+        host.messages_by_seq[0].2 = "decoy early noise from the access edge".into();
+        let score = score_structured_triage_answer(&answer, &sample_key(), &host);
+        assert!(
+            dim_passed(&score, "symptom_vs_cause"),
+            "non-symptom multi-candidate answers must pass; failed={:?} dims={:?}",
+            score.failed_ids(),
+            score.dimensions
+        );
+        assert!(
+            dim_passed(&score, "citation_validity")
+                && dim_passed(&score, "claim_evidence_correspondence"),
+            "citation/correspondence must remain green: {:?}",
+            score.dimensions
+        );
+    }
+
+    #[test]
+    fn correct_trigger_plus_symptom_without_safe_role_fails_closed() {
+        let answer = with_extra_causal(&good_answer(), symptom_claim(None));
+        let score = score_structured_triage_answer(&answer, &sample_key(), &sample_host());
+        assert!(
+            score.failed_ids().contains(&"symptom_vs_cause"),
+            "absent role must fail closed; failed={:?}",
+            score.failed_ids()
+        );
+    }
+
+    #[test]
+    fn sole_symptom_as_causal_candidate_still_rejected() {
+        let mut answer = good_answer();
+        answer.causal_candidates = vec![symptom_claim(Some("trigger"))];
+        let score = score_structured_triage_answer(&answer, &sample_key(), &sample_host());
+        assert!(
+            score.failed_ids().contains(&"symptom_vs_cause"),
+            "sole promoted symptom must still fail; failed={:?}",
+            score.failed_ids()
+        );
+    }
+
+    #[test]
+    fn earliest_error_root_mutation_still_rejected() {
+        let earliest = mutation_earliest_is_root_cause(&good_answer());
+        let score = score_structured_triage_answer(&earliest, &sample_key(), &sample_host());
+        assert!(!score.passed);
+        assert!(
+            score.failed_ids().contains(&"symptom_vs_cause")
+                || score.failed_ids().contains(&"unsupported_claims"),
+            "earliest-as-root mutation must still fail; failed={:?}",
+            score.failed_ids()
+        );
+    }
+
+    #[test]
+    fn citation_chronology_unsupported_and_correspondence_retain_behavior() {
+        let key = sample_key();
+        let host = sample_host();
+        let base = good_answer();
+
+        // Citation: unknown identity still fails citation_validity.
+        let mut bad_cite = base.clone();
+        bad_cite.causal_candidates[0].seq = Some(99);
+        let score = score_structured_triage_answer(&bad_cite, &key, &host);
+        assert!(score.failed_ids().contains(&"citation_validity"));
+        assert!(
+            dim_passed(&score, "symptom_vs_cause"),
+            "citation failure must not spill into symptom_vs_cause"
+        );
+
+        // Correspondence: claim text that better matches another row still fails.
+        let mut bad_corr = base.clone();
+        bad_corr.causal_candidates[0].text = "downstream symptom task failed".into();
+        // Keep citing the trigger identity while describing the symptom row.
+        bad_corr.causal_candidates[0].seq = Some(2);
+        let score = score_structured_triage_answer(&bad_corr, &key, &host);
+        assert!(score
+            .failed_ids()
+            .contains(&"claim_evidence_correspondence"));
+
+        // Chronology honesty under order-only still fails high confidence wall-clock.
+        let mut order_key = key.clone();
+        order_key.time_quality_expected = "order_only".into();
+        let mut order_host = host.clone();
+        order_host.time_quality = "order_only".into();
+        let mut high_clock = base.clone();
+        high_clock.confidence = "high".into();
+        high_clock.asserts_confident_wall_clock_order = true;
+        let score = score_structured_triage_answer(&high_clock, &order_key, &order_host);
+        assert!(score.failed_ids().contains(&"chronology_honesty"));
+
+        // Unsupported fabricated count still fails unsupported_claims.
+        let fab = mutation_fabricated_count(&base, 42);
+        let score = score_structured_triage_answer(&fab, &key, &host);
+        assert!(score.failed_ids().contains(&"unsupported_claims"));
+        assert!(dim_passed(&score, "symptom_vs_cause"));
+    }
+
     #[test]
     fn contract_system_text_lists_required_sections() {
         let text = triage_answer_contract_system_text();
@@ -1460,8 +2105,13 @@ mod tests {
             assert!(text.contains(section), "missing {section}");
         }
         assert!(text.contains("MISSING EVIDENCE IS NOT A CAUSE"));
-        assert!(text.contains("not present in this import"));
         assert!(text.contains("Cause not established:"));
         assert!(text.contains("does not verify") || text.contains("citation identities only"));
+        // The contract states principles semantically and must never quote
+        // corpus/fixture phrases a model could pattern-match instead of
+        // reasoning about meaning. The absence checks live in
+        // tests/vocab_generalization_gates.rs, which derives the forbidden
+        // lexicon from the fixture trees so this file cannot embed the
+        // needles it is scanned for.
     }
 }

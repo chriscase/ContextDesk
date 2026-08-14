@@ -18,6 +18,9 @@ pub mod branding;
 pub mod build_identity;
 pub mod capability_qualification;
 pub mod chat;
+/// Hermetic cheap/fast-model contribution benchmark for host-grounded triage.
+/// Scripted candidates only — never live providers or readiness claims.
+pub mod cheap_model_fast_triage_benchmark;
 pub mod config;
 pub mod confluence_ro;
 pub mod connectors;
@@ -25,10 +28,21 @@ pub mod connectors;
 pub mod context_budgeting;
 /// Deterministic multi-source context plan for ordinary chat turns.
 pub mod context_plan;
+/// Friendly whole-turn deadline parse/format and policy conversion.
+pub mod deadline_controls;
 pub mod discovery;
 pub mod embed;
+pub mod embedding_space;
 pub mod error;
 pub mod events;
+/// Versioned extension contracts for future multi-model triage/retrieval
+/// (docs + pure validators; does not redesign production turn paths).
+pub mod extension_contract;
+/// Host-grounded fast-triage route: complete evidence packet, typed-only
+/// parsing, local validation, one bounded correction, one visible escalation.
+pub mod fast_triage;
+/// Provider-neutral cost/reliability ledger for share-safe gateway diagnostics.
+pub mod gateway_cost_ledger;
 pub mod git_source;
 pub mod grok_auth;
 pub mod harvest;
@@ -41,20 +55,32 @@ pub mod incident_evidence_archive;
 pub mod index;
 pub mod index_watch;
 pub mod injection;
+/// Strict host-validated typed investigation answers.
+pub mod investigation_answer;
 pub mod investigations;
 /// Keychain / in-memory credential store (module name avoids gitignore `*secret*`).
 pub mod keychain_store;
+/// Provider-neutral linked multi-stage response contracts (reasoning wrappers,
+/// fences, empty terminals, diagnostic categories).
+pub mod linked_triage_contract;
 pub mod log_analysis;
 pub mod mcp_client;
 pub mod memory;
 pub mod memory_fs;
 pub mod model_context;
 pub mod model_curation;
+/// Exact gateway-scoped model identity shared by policy and SDK contracts.
+pub mod model_ref;
 pub mod model_role_hints;
 pub mod module_registry;
 pub mod modules;
+pub mod multi_model;
+/// Multi-stage candidate admission budget (synthesis reserve, issue #869).
+pub mod multi_stage_budget;
 pub mod normalized_log_events;
 pub mod object_store;
+/// Typed OpenAI-compatible chat request modes and pure body builder.
+pub mod openai_chat_contract;
 pub mod paths;
 pub mod permissions;
 pub mod preflight;
@@ -62,7 +88,12 @@ pub mod probe;
 pub mod process_progress;
 pub mod provider_telemetry;
 pub mod providers;
+/// Hermetic model/retrieval quality-evaluation harness (issue #867).
+pub mod quality_eval;
+/// Provider-neutral reasoning-effort contract (opt-in; omit = provider default).
+pub mod reasoning_effort;
 pub mod redact;
+pub mod rerank;
 pub mod research;
 pub mod router;
 #[cfg(feature = "s3-object-store")]
@@ -79,8 +110,14 @@ pub mod ssrf;
 pub mod text;
 pub mod tool_host;
 pub mod tools;
+/// Revisioned, non-secret storage for opt-in Triage Policy V2 documents.
+pub mod triage_policy_store;
 /// Hermetic broad-triage quality contract and structured rubric.
 pub mod triage_quality;
+/// Host-owned, exact-role qualification evidence for Triage Policy V2.
+pub mod triage_role_qualification;
+/// Versioned, host-neutral SDK request, event, result, cancellation, and replay contracts.
+pub mod triage_sdk;
 pub mod turn_trace;
 pub mod vector_index;
 pub mod web_research;

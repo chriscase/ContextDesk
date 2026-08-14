@@ -6,9 +6,11 @@
 //! real invocation does, including argument parsing and stdout shape.
 //!
 //! Two things worth knowing about scope:
-//! - `$HOME` is never overridden here. The whole point of `--data-dir` is
-//!   that isolation does not need it (see
-//!   [`an_isolated_profile_never_consults_home`]).
+//! - `--data-dir` isolation does not need the OS home/profile directory (see
+//!   [`an_isolated_profile_never_consults_home`]). The black-box test below
+//!   poisons `$HOME` where that variable is meaningful; the paired unit test
+//!   in `adapters::path_tests` proves on every platform that isolated path
+//!   resolution never evaluates either shared-profile resolver.
 //! - No test in this file ever passes `--api-key-env` / `--api-key-file` /
 //!   `--api-key-stdin` to the compiled binary: that flow always calls the
 //!   real OS keychain (`adapters::secret_store()` is not injectable from
@@ -47,19 +49,22 @@ fn unique_profile_id(tag: &str, dir: &Path) -> String {
     )
 }
 
-/// `--data-dir` must skip the `$HOME` lookup entirely: an isolated profile
-/// succeeds even when the real `$HOME` is broken, while the default
-/// (desktop-shared) path genuinely depends on it and fails the same way.
-/// This is the property that makes isolation "testable without overriding
-/// HOME" — proven here by showing HOME is irrelevant, not by overriding it
-/// for the isolated case.
+/// `--data-dir` must skip shared home/profile resolution entirely. On Unix,
+/// `dirs::home_dir()` reads `$HOME`; on Windows it uses `FOLDERID_Profile`
+/// and intentionally ignores `$HOME`. This process-level test therefore
+/// combines a poisoned Unix home with exact isolated-path and non-mutation
+/// assertions. The resolver-level test in `adapters::path_tests` supplies
+/// the platform-independent negative proof that neither shared resolver is
+/// evaluated.
 #[test]
 fn an_isolated_profile_never_consults_home() {
     let data_dir = tempfile::tempdir().unwrap();
-    let broken_home = "/nonexistent/definitely-not-a-real-home-dir";
+    let poison = tempfile::tempdir().unwrap();
+    let broken_home = poison.path().join("home-is-a-file");
+    std::fs::write(&broken_home, b"must remain unchanged").unwrap();
 
     let isolated = cli()
-        .env("HOME", broken_home)
+        .env("HOME", &broken_home)
         .args([
             "--data-dir",
             data_dir.path().to_str().unwrap(),
@@ -79,18 +84,10 @@ fn an_isolated_profile_never_consults_home() {
     assert!(envelope["ok"].as_bool().unwrap());
     assert!(envelope["data"]["isolated"].as_bool().unwrap());
     assert!(data_dir.path().join("cli.toml").is_file());
-
-    // Control: the same broken HOME, without --data-dir, must fail — proving
-    // the isolated run above genuinely bypassed the HOME lookup rather than
-    // HOME happening to resolve fine in this environment either way.
-    let shared = cli()
-        .env("HOME", broken_home)
-        .args(["--json", "config", "path"])
-        .output()
-        .unwrap();
-    assert!(
-        !shared.status.success(),
-        "the desktop-shared default path must still depend on a working $HOME"
+    assert_eq!(
+        std::fs::read(&broken_home).unwrap(),
+        b"must remain unchanged",
+        "isolated startup must not mutate the poisoned home/profile sentinel"
     );
 }
 

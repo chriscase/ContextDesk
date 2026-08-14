@@ -1,0 +1,30 @@
+{
+  "$id": "https://contextdesk.example/schemas/contextdesk.log_lab.retrieval_report.v1.json",
+  "authority": "crates/cd-core/tests/support/retrieval_ablation_scoring.rs::RaReport (serde, deny_unknown_fields)",
+  "determinism": "runtime_* and *_ms fields are informational and excluded from golden comparison; every other field is deterministic for a fixed (sha, suite, seed, tier, mode)",
+  "partition": [
+    "PASS_ON_BASE",
+    "BASELINE_LIMITATION",
+    "FUTURE_CAPABILITY_UNAVAILABLE",
+    "RED_REQUIRED_FIX"
+  ],
+  "required": [
+    "schema_id",
+    "schema_version",
+    "suite_id",
+    "suite_version",
+    "contextdesk_sha",
+    "generator_version",
+    "seed",
+    "tier_requested",
+    "tier_actual_events",
+    "corpus_identity_sha256",
+    "modes",
+    "cases",
+    "partition_counts",
+    "disclosures"
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_report.v1",
+  "schema_version": 1,
+  "title": "ContextDesk retrieval-ablation report"
+}

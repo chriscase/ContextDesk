@@ -1,0 +1,8 @@
+{
+  "case": "out_of_range_index",
+  "ranking": [
+    { "index": 0, "relevanceScore": 0.9 },
+    { "index": 1, "relevanceScore": 0.5 },
+    { "index": 9, "relevanceScore": 0.1 }
+  ]
+}

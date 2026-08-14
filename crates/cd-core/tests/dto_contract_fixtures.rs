@@ -909,6 +909,7 @@ fn contract_fixtures() -> Vec<(&'static str, Value)> {
         tools_disabled_reason: None,
         availability: ModelAvailability::Discovered,
         availability_detail: None,
+        readiness: cd_core::capability_qualification::ModelReadiness::unverified("model::latest"),
         hidden: false,
         hidden_by: None,
         pinned_rank: Some(0),

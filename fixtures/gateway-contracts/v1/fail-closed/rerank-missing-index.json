@@ -1,0 +1,7 @@
+{
+  "case": "missing_index_incomplete_permutation",
+  "ranking": [
+    { "index": 0, "relevanceScore": 0.9 },
+    { "index": 2, "relevanceScore": 0.1 }
+  ]
+}

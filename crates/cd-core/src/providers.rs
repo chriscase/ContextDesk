@@ -142,7 +142,7 @@ impl ProviderCapabilities {
     }
 }
 
-/// Named provider profile (secrets stored as keychain refs, not inline).
+/// Named provider profile (secrets referenced explicitly, never inline).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderProfile {
     /// Stable id (uuid or slug).
@@ -153,7 +153,8 @@ pub struct ProviderProfile {
     pub kind: ProviderKind,
     /// Base URL (no secrets). Empty for some session-based kinds.
     pub base_url: String,
-    /// Keychain reference id (not the secret).
+    /// Credential reference id (explicit Keychain id or protected `file:`
+    /// path; never the secret).
     pub api_key_ref: Option<String>,
     /// Chat model id.
     pub chat_model: String,

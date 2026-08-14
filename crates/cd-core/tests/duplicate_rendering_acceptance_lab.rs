@@ -492,6 +492,7 @@ fn evaluation_scorer_rejects_14840_raw_records_as_semantic_occurrences() {
         sources_omitted: vec![],
         decoy_earliest_error_message_token: None,
         true_trigger_message_token: None,
+        competing_trigger_message_tokens: vec![],
         symptom_message_tokens: vec![],
         root_cause_establishable: false,
         forbidden_claims: vec!["14840_semantic_occurrences".into()],
@@ -596,6 +597,7 @@ fn product_path_brief_citations_resolve_and_fabricated_identity_is_rejected() {
         sources_omitted: vec![],
         decoy_earliest_error_message_token: None,
         true_trigger_message_token: None,
+        competing_trigger_message_tokens: vec![],
         symptom_message_tokens: vec![],
         root_cause_establishable: false,
         forbidden_claims: vec![],
@@ -884,11 +886,10 @@ fn product_path_family_a_56_family_b_3_supporting_template_projects_to_three() {
         .expect("family B 3");
     assert_ne!(fam_a.signature, fam_b.signature);
     let proj = project_template_onto_episodes(&analysis, 7777);
-    assert!(proj.complete, "{proj:?}");
-    assert_eq!(proj.occurrence_count, Some(3));
-    assert_eq!(proj.supporting_only_occurrence_count, Some(3));
-    assert_ne!(proj.occurrence_count, Some(56));
-    assert_ne!(proj.occurrence_count, Some(59));
+    assert!(!analysis.semantic_counts_certified);
+    assert!(!proj.complete, "{proj:?}");
+    assert_eq!(proj.occurrence_count, None);
+    assert_eq!(proj.supporting_only_occurrence_count, None);
 }
 
 // ─── Cap / EOF / INFO-after-50k (product scan path) ─────────────────────────
@@ -1023,6 +1024,7 @@ fn oracle_partition_all_product_path() {
         sources_omitted: vec![],
         decoy_earliest_error_message_token: None,
         true_trigger_message_token: None,
+        competing_trigger_message_tokens: vec![],
         symptom_message_tokens: vec![],
         root_cause_establishable: false,
         forbidden_claims: vec!["14840_semantic_occurrences".into()],

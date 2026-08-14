@@ -53,6 +53,7 @@ fn write_mock_profile(home: &Path, server_uri: &str) -> std::path::PathBuf {
 fn assert_pure_jsonl(stdout: &[u8]) -> Vec<Value> {
     let text = String::from_utf8_lossy(stdout);
     let known_types = [
+        "progress",
         "text_delta",
         "tool",
         "permission_required",

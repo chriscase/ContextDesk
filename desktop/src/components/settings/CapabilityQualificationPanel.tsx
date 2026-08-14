@@ -15,6 +15,7 @@ import {
   hostStartCapabilityQualification,
 } from "../../lib/host";
 import { classifyModelRole } from "../../lib/modelRoleHints";
+import type { ModelReadinessUpdate } from "../../lib/modelReadiness";
 
 export type CapabilityQualificationPanelProps = {
   baseId: string;
@@ -24,6 +25,8 @@ export type CapabilityQualificationPanelProps = {
   apiKeyDraft: string;
   /** When false, controls are disabled (no provider). */
   enabled: boolean;
+  /** Update already-listed pickers without another provider or credential request. */
+  onReadinessChanged?: ModelReadinessUpdate;
 };
 
 function statusClass(status: string): string {
@@ -50,6 +53,7 @@ export function CapabilityQualificationPanel({
   baseUrl,
   apiKeyDraft,
   enabled,
+  onReadinessChanged,
 }: CapabilityQualificationPanelProps) {
   const reactId = useId();
   const statusId = `${baseId}-cap-qual-status-${reactId}`;
@@ -57,14 +61,20 @@ export function CapabilityQualificationPanel({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const selectArgs = useCallback((): QualificationSelectArgs => {
+  const identityArgs = useCallback((): QualificationSelectArgs => {
     return {
       profileId: profileId ?? null,
       modelId: modelId.trim() || null,
       baseUrl: baseUrl.trim() || null,
+    };
+  }, [profileId, modelId, baseUrl]);
+
+  const liveArgs = useCallback((): QualificationSelectArgs => {
+    return {
+      ...identityArgs(),
       apiKey: apiKeyDraft.trim() || null,
     };
-  }, [profileId, modelId, baseUrl, apiKeyDraft]);
+  }, [identityArgs, apiKeyDraft]);
 
   // Cache peek only — never starts probes (get is local store).
   useEffect(() => {
@@ -73,21 +83,22 @@ export function CapabilityQualificationPanel({
       return;
     }
     let cancelled = false;
-    void hostGetCapabilityQualification(selectArgs()).then((cached) => {
+    void hostGetCapabilityQualification(identityArgs()).then((cached) => {
       if (!cancelled) setReport(cached);
     });
     return () => {
       cancelled = true;
     };
-  }, [enabled, modelId, baseUrl, profileId, selectArgs]);
+  }, [enabled, modelId, baseUrl, profileId, identityArgs]);
 
   const onStart = async () => {
     if (!enabled || !modelId.trim() || running) return;
     setError(null);
     setRunning(true);
     try {
-      const next = await hostStartCapabilityQualification(selectArgs());
+      const next = await hostStartCapabilityQualification(liveArgs());
       setReport(next);
+      onReadinessChanged?.(next.profile_id, next.model_id, next.readiness);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -102,7 +113,10 @@ export function CapabilityQualificationPanel({
   const onClear = async () => {
     setError(null);
     try {
-      await hostClearCapabilityQualification(selectArgs());
+      await hostClearCapabilityQualification(identityArgs());
+      if (report) {
+        onReadinessChanged?.(report.profile_id, report.model_id, null);
+      }
       setReport(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -112,7 +126,10 @@ export function CapabilityQualificationPanel({
   const onRetry = async () => {
     setError(null);
     try {
-      await hostClearCapabilityQualification(selectArgs());
+      await hostClearCapabilityQualification(identityArgs());
+      if (report) {
+        onReadinessChanged?.(report.profile_id, report.model_id, null);
+      }
       setReport(null);
     } catch {
       /* continue to start */
@@ -120,8 +137,9 @@ export function CapabilityQualificationPanel({
     if (!enabled || !modelId.trim() || running) return;
     setRunning(true);
     try {
-      const next = await hostStartCapabilityQualification(selectArgs());
+      const next = await hostStartCapabilityQualification(liveArgs());
       setReport(next);
+      onReadinessChanged?.(next.profile_id, next.model_id, next.readiness);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -201,6 +219,11 @@ export function CapabilityQualificationPanel({
           data-stale={report.stale ? "true" : "false"}
           data-cancelled={report.cancelled ? "true" : "false"}
         >
+          <p className="field__hint" data-testid="cap-qual-summary">
+            <strong>{report.readiness.state}</strong> for {report.readiness.role}
+            {" — "}
+            {report.readiness.detail}
+          </p>
           {report.stale ? (
             <p className="field__hint" role="status">
               Cached result is stale (profile, endpoint, model, or probe schema
@@ -219,6 +242,12 @@ export function CapabilityQualificationPanel({
                 <span className="cap-qual__kind">{kindLabel(c.kind)}</span>
                 <span className="cap-qual__meta">
                   {c.elapsed_ms}ms · {c.reason}
+                  {c.request_mode ? ` · mode=${c.request_mode}` : ""}
+                  {c.dialect ? ` · dialect=${c.dialect}` : ""}
+                  {c.schema_strict != null
+                    ? ` · strict=${c.schema_strict ? "true" : "false"}`
+                    : ""}
+                  {c.schema_probe_id ? ` · schema=${c.schema_probe_id}` : ""}
                 </span>
               </li>
             ))}

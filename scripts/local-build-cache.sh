@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Opt-in shared Cargo target management for ContextDesk worktrees.
+# Opt-in worktree-scoped Cargo target management for ContextDesk worktrees.
 #
 # This helper never changes global Cargo configuration. Cleanup is deliberately
 # restricted to an explicitly named, recognized Cargo target directory.
@@ -9,6 +9,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 readonly CACHE_MARKER=".contextdesk-generated-target-v1"
+readonly WORKTREE_SCOPE_MARKER=".contextdesk-worktree-scope-v2"
 readonly CARGO_CACHE_TAG_SIGNATURE="Signature: 8a477f597d28d172789f06886806bc55d"
 
 die() {
@@ -27,8 +28,8 @@ Usage:
       [--preserved-app APP]... --target TARGET [--target TARGET]...
 
 activate
-  Creates one marked shared Cargo target outside every registered worktree and
-  prints shell exports. Opt in with:
+  Creates one marked, worktree-scoped Cargo target outside every registered
+  worktree and prints shell exports. Opt in with:
     eval "$(scripts/local-build-cache.sh activate)"
 
 inventory
@@ -127,6 +128,11 @@ shell_quote() {
 default_cache_root() {
   if [[ -n "${CONTEXTDESK_BUILD_CACHE_ROOT:-}" ]]; then
     printf '%s\n' "$CONTEXTDESK_BUILD_CACHE_ROOT"
+  elif [[ "$(uname -s 2>/dev/null || true)" == "Darwin" && -n "${HOME:-}" ]]; then
+    # Prefer the platform cache location on macOS even when a shell exports
+    # XDG_CACHE_HOME. This keeps one durable cache instead of silently
+    # creating a second multi-gigabyte target under ~/.cache.
+    printf '%s/Library/Caches/ContextDesk/build-v1\n' "$HOME"
   elif [[ -n "${XDG_CACHE_HOME:-}" ]]; then
     printf '%s/contextdesk/build-v1\n' "$XDG_CACHE_HOME"
   elif [[ -n "${HOME:-}" ]]; then
@@ -196,9 +202,44 @@ prepare_cache_root() {
   mkdir -p "$cache_root"
   cache_root="$(physical_existing_dir "$cache_root")"
   refuse_path_inside_worktrees "$cache_root" "$repo_root"
-  mkdir -p "$cache_root/cargo-target"
-  : >"$cache_root/cargo-target/$CACHE_MARKER"
   printf '%s\n' "$cache_root"
+}
+
+worktree_cache_key() {
+  local repo_root="$1"
+  printf '%s' "$repo_root" | shasum -a 256 | awk '{print $1}'
+}
+
+worktree_target_path() {
+  local cache_root="$1"
+  local repo_root="$2"
+  printf '%s/cargo-targets/%s\n' "$cache_root" "$(worktree_cache_key "$repo_root")"
+}
+
+prepare_worktree_target() {
+  local cache_root="$1"
+  local repo_root="$2"
+  local target
+  local targets_root
+  targets_root="$cache_root/cargo-targets"
+  if [[ -e "$targets_root" ]]; then
+    path_has_symlink_component "$targets_root" &&
+      die "worktree target root has a symlink path component: $targets_root"
+  fi
+  mkdir -p "$targets_root"
+  targets_root="$(physical_existing_dir "$targets_root")"
+  target="$(worktree_target_path "$cache_root" "$repo_root")"
+  [[ "$(dirname "$target")" == "$targets_root" ]] ||
+    die "worktree target escaped its cache root: $target"
+  if [[ -e "$target" ]]; then
+    path_has_symlink_component "$target" &&
+      die "worktree target has a symlink path component: $target"
+  fi
+  mkdir -p "$target"
+  target="$(physical_existing_dir "$target")"
+  : >"$target/$CACHE_MARKER"
+  printf '%s\n' "$repo_root" >"$target/$WORKTREE_SCOPE_MARKER"
+  printf '%s\n' "$target"
 }
 
 cache_root_without_creating() {
@@ -250,7 +291,14 @@ registered_target_kind() {
     return 0
   fi
   if [[ "$target" == "$cache_root/cargo-target" ]]; then
-    printf 'shared\n'
+    printf 'legacy-shared\n'
+    return 0
+  fi
+  if [[ "$target" == "$cache_root/cargo-targets/"* &&
+    "$(dirname "$target")" == "$cache_root/cargo-targets" &&
+    "$(basename "$target")" =~ ^[0-9a-f]{64}$ &&
+    -f "$target/$WORKTREE_SCOPE_MARKER" ]]; then
+    printf 'worktree-scoped\n'
     return 0
   fi
   while IFS= read -r worktree; do
@@ -323,6 +371,8 @@ package_has_verified_copy() {
 command_activate() {
   local cache_root
   local repo_root
+  local sccache_bin
+  local target
   cache_root="$(default_cache_root)"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -338,8 +388,16 @@ command_activate() {
   done
   repo_root="$(resolve_repo_root "")"
   cache_root="$(prepare_cache_root "$cache_root" "$repo_root")"
+  target="$(prepare_worktree_target "$cache_root" "$repo_root")"
   printf 'export CONTEXTDESK_BUILD_CACHE_ROOT=%s\n' "$(shell_quote "$cache_root")"
-  printf 'export CARGO_TARGET_DIR=%s\n' "$(shell_quote "$cache_root/cargo-target")"
+  printf 'export CARGO_TARGET_DIR=%s\n' "$(shell_quote "$target")"
+  # sccache is optional, but when installed it gives isolated worktree targets
+  # compiler-object reuse without sharing Cargo's mutable fingerprint state.
+  if sccache_bin="$(command -v sccache 2>/dev/null)"; then
+    mkdir -p "$cache_root/sccache"
+    printf 'export RUSTC_WRAPPER=%s\n' "$(shell_quote "$sccache_bin")"
+    printf 'export SCCACHE_DIR=%s\n' "$(shell_quote "$cache_root/sccache")"
+  fi
 }
 
 inventory_target() {
@@ -438,10 +496,16 @@ command_inventory() {
   done < <(worktree_paths "$repo_root")
 
   if [[ -d "$cache_root/cargo-target" ]]; then
-    inventory_target "$cache_root/cargo-target" "shared" "$primary"
+    inventory_target "$cache_root/cargo-target" "legacy-shared-unsafe" "$primary"
   else
-    printf 'TARGET kind=shared state=missing size_kib=0 path=%s\n' \
+    printf 'TARGET kind=legacy-shared state=missing size_kib=0 path=%s\n' \
       "$(shell_quote "$cache_root/cargo-target")"
+  fi
+  if [[ -d "$cache_root/cargo-targets" ]]; then
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      inventory_target "$path" "worktree-scoped" "$primary"
+    done < <(find "$cache_root/cargo-targets" -mindepth 1 -maxdepth 1 -type d -print | LC_ALL=C sort)
   fi
 }
 
@@ -512,6 +576,7 @@ command_cleanup() {
   local package
   local copy
   local manifest
+  local scope_value
   local before
   local after
   local i
@@ -583,7 +648,7 @@ command_cleanup() {
     unrecognized)
       die "not an exact registered Cargo target directory: $target"
       ;;
-    shared | worktree-root | worktree-tauri) ;;
+    legacy-shared | worktree-scoped | worktree-root | worktree-tauri) ;;
     *)
       die "internal target classification failure: $kind"
       ;;
@@ -617,6 +682,12 @@ command_cleanup() {
   for ((i = 0; i < ${#validated_targets[@]}; i++)); do
     target="${validated_targets[$i]}"
     kind="${validated_kinds[$i]}"
+    scope_value=""
+    if [[ "$kind" == "worktree-scoped" ]]; then
+      scope_value="$(cat "$target/$WORKTREE_SCOPE_MARKER")"
+      [[ -n "$scope_value" ]] || die "empty worktree scope marker: $target"
+      contains_newline "$scope_value" && die "invalid worktree scope marker: $target"
+    fi
     before="$(du_kib "$target")"
     if [[ "$mode" == "dry-run" ]]; then
       printf 'WOULD_CLEAN kind=%s size_kib=%s path=%s\n' \
@@ -631,9 +702,13 @@ command_cleanup() {
     fi
     [[ -f "$manifest" ]] || die "Cargo manifest missing for target cleanup: $manifest"
     cargo clean --manifest-path "$manifest" --target-dir "$target"
-    if [[ "$kind" == "shared" ]]; then
+    if [[ "$kind" == "legacy-shared" ]]; then
       mkdir -p "$target"
       : >"$target/$CACHE_MARKER"
+    elif [[ "$kind" == "worktree-scoped" ]]; then
+      mkdir -p "$target"
+      : >"$target/$CACHE_MARKER"
+      printf '%s\n' "$scope_value" >"$target/$WORKTREE_SCOPE_MARKER"
     fi
     after="$(du_kib "$target")"
     printf 'CLEANED kind=%s before_kib=%s after_kib=%s path=%s\n' \

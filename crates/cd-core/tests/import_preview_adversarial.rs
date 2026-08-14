@@ -672,7 +672,7 @@ fn rotation_families_are_transport_stable_visible_and_reviewable() {
         ("XYZ_Server.log.1", STRUCTURED),
         ("XYZ_Server-2024-05-03_120000.log", STRUCTURED),
         ("XYZ_Server-20240504-120001.log", STRUCTURED),
-        ("XYZ_Server-2024-05-05T12:00:02.003.log", STRUCTURED),
+        ("XYZ_Server-2024-05-05T12-00-02.003.log", STRUCTURED),
         ("XYZ_Server-10001.log", STRUCTURED),
         ("XYZ_Server-10002.log", STRUCTURED),
         ("nested/svc-a/XYZ_Server.log", STRUCTURED),
@@ -738,7 +738,7 @@ fn rotation_families_are_transport_stable_visible_and_reviewable() {
         root_group.member_identities,
         vec![
             "XYZ_Server-2024-05-03_120000.log",
-            "XYZ_Server-2024-05-05T12:00:02.003.log",
+            "XYZ_Server-2024-05-05T12-00-02.003.log",
             "XYZ_Server-20240504-120001.log",
             "XYZ_Server.log",
             "XYZ_Server.log.1",

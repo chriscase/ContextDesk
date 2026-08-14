@@ -8,12 +8,14 @@ import {
   type CurationImpactDto,
   type CurationSummaryDto,
   type ModelOptionDto,
+  type ModelReadiness,
 } from "@contextdesk/contracts";
 export { modelSelectionKey, parseModelSelectionKey } from "@contextdesk/contracts";
 export type {
   CurationImpactDto,
   CurationSummaryDto,
   ModelOptionDto,
+  ModelReadiness,
 } from "@contextdesk/contracts";
 // Type-only (erased at build time): logDiagnosticReport imports types from here
 // as well, so this cannot create a runtime cycle.
@@ -601,6 +603,27 @@ export async function hostGetConfig(): Promise<HostConfigDto | null> {
   return invoke<HostConfigDto>("get_config");
 }
 
+/** Non-secret multi-model settings for the Settings surface. */
+export type MultiModelSettingsDto = {
+  mode: "single" | "review" | "contributions" | string;
+  reviewer_profile_id: string | null;
+  reviewer_model: string | null;
+  reviewer_allow_remote: boolean;
+  reviewer_require_qualified: boolean;
+};
+
+export async function hostGetMultiModelSettings(): Promise<MultiModelSettingsDto | null> {
+  if (!isTauri()) return null;
+  return invoke<MultiModelSettingsDto>("get_multi_model_settings");
+}
+
+export async function hostSetMultiModelMode(
+  mode: "single" | "review" | "contributions",
+): Promise<void> {
+  if (!isTauri()) return;
+  await invoke<void>("set_multi_model_mode", { mode });
+}
+
 /** Non-secret S3-compatible backup settings. Credential values never cross IPC. */
 export type S3BackupSettingsDto = {
   enabled: boolean;
@@ -898,6 +921,7 @@ export type ProviderDto = {
   chat_model: string;
   label: string;
   api_key_ref: string | null;
+  api_key_file_path?: string | null;
   has_key: boolean;
   /** Native tool calling; false after gateway rejection (#327). */
   tools_enabled?: boolean;
@@ -905,7 +929,7 @@ export type ProviderDto = {
   deadline_preference?: "auto" | "patient" | "standard";
 };
 
-/** Persist active provider profile (refs only) + optional API key to OS keychain. */
+/** Persist an active provider plus an explicit Keychain or protected-file credential source. */
 export type SkillDto = {
   id: string;
   name: string;
@@ -972,6 +996,8 @@ export async function hostSaveActiveProvider(args: {
   label?: string;
   /** Raw key once; never stored in React setup / localStorage after save. */
   apiKey?: string;
+  /** Absolute mode-600 credential file path; the host reads it directly. */
+  apiKeyFile?: string;
   localOnly?: boolean;
   /** When set, updates native tools capability (#327). */
   toolsEnabled?: boolean;
@@ -986,6 +1012,7 @@ export async function hostSaveActiveProvider(args: {
       chat_model: args.chatModel,
       label: args.label ?? null,
       api_key: args.apiKey ?? null,
+      api_key_file: args.apiKeyFile ?? null,
       local_only: args.localOnly ?? null,
       tools_enabled: args.toolsEnabled ?? null,
       deadline_preference: args.deadlinePreference ?? null,
@@ -1200,6 +1227,7 @@ export async function hostListModelsForDraft(args: {
   kind: string;
   baseUrl: string;
   apiKey?: string | null;
+  apiKeyFile?: string | null;
   localOnly?: boolean | null;
   chatModel?: string | null;
 }): Promise<string[]> {
@@ -1210,6 +1238,7 @@ export async function hostListModelsForDraft(args: {
         kind: args.kind,
         base_url: args.baseUrl,
         api_key: args.apiKey ?? null,
+        api_key_file: args.apiKeyFile ?? null,
         local_only: args.localOnly ?? null,
         chat_model: args.chatModel ?? null,
       },
@@ -1237,6 +1266,7 @@ export type AiProbeResultDto = {
 export async function hostProbeAiGateway(args: {
   baseUrl: string;
   apiKey?: string | null;
+  apiKeyFile?: string | null;
   /** Default true — also probe local Ollama. */
   probeLocal?: boolean;
 }): Promise<AiProbeResultDto | null> {
@@ -1246,6 +1276,7 @@ export async function hostProbeAiGateway(args: {
       req: {
         base_url: args.baseUrl,
         api_key: args.apiKey ?? null,
+        api_key_file: args.apiKeyFile ?? null,
         probe_local: args.probeLocal ?? true,
       },
     });
@@ -1290,6 +1321,33 @@ export type CapabilityCheckDto = {
   elapsed_ms: number;
   tested_at: number;
   reason: string;
+  /** Exact request-mode identity (plain, prompted_json, json_object, …). */
+  request_mode?: string | null;
+  /** Backend dialect (openai_compatible, ollama, anthropic). */
+  dialect?: string | null;
+  /** Schema strictness when a json_schema probe was measured. */
+  schema_strict?: boolean | null;
+  /** Schema probe name identity — never a schema body. */
+  schema_probe_id?: string | null;
+};
+
+export type ContractVerdict =
+  | "qualified"
+  | "unqualified"
+  | "inconclusive"
+  | string;
+
+/** Shared provider-neutral execution projection from the Rust host. */
+export type CapabilityContractProjection = {
+  host_grounded_generation: ContractVerdict;
+  /** Prompted JSON over plain chat (production reviewer path). */
+  validated_structured_proposal: ContractVerdict;
+  /** Native OpenAI json_object — never authorized by prompted JSON. */
+  native_json_object?: ContractVerdict;
+  native_json_schema?: ContractVerdict;
+  native_json_schema_strict?: ContractVerdict;
+  native_tool_loop: ContractVerdict;
+  forced_tool_loop?: ContractVerdict;
 };
 
 export type QualificationReportDto = {
@@ -1297,10 +1355,14 @@ export type QualificationReportDto = {
   endpoint_fingerprint: string;
   model_id: string;
   schema_version: string;
+  /** Typed transport protocol (openai_compatible / ollama / anthropic). */
+  transport_protocol?: string;
   role_hint: string;
   cancelled: boolean;
   stale: boolean;
   finished_at: number;
+  readiness: ModelReadiness;
+  contracts: CapabilityContractProjection;
   checks: CapabilityCheckDto[];
 };
 
@@ -1311,12 +1373,15 @@ export type QualificationSelectArgs = {
   apiKey?: string | null;
 };
 
-function qualificationReq(args: QualificationSelectArgs = {}) {
+function qualificationReq(
+  args: QualificationSelectArgs = {},
+  includeApiKey = false,
+) {
   return {
     profile_id: args.profileId ?? null,
     model_id: args.modelId ?? null,
     base_url: args.baseUrl ?? null,
-    api_key: args.apiKey ?? null,
+    ...(includeApiKey ? { api_key: args.apiKey ?? null } : {}),
   };
 }
 
@@ -1343,7 +1408,7 @@ export async function hostStartCapabilityQualification(
     throw new Error("Capability qualification requires the desktop host");
   }
   return invoke<QualificationReportDto>("start_capability_qualification", {
-    req: qualificationReq(args),
+    req: qualificationReq(args, true),
   });
 }
 
@@ -1854,6 +1919,28 @@ export async function hostSetRouterBudget(
   return invoke<RouterBudgetDto>("set_router_budget", { req: budget });
 }
 
+/** Reasoning effort: omit = provider default (not a readiness badge). */
+export type ReasoningEffortDto = {
+  policy: string;
+  level?: string | null;
+};
+
+export async function hostGetReasoningEffort(): Promise<ReasoningEffortDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ReasoningEffortDto>("get_reasoning_effort");
+}
+
+export async function hostSetReasoningEffort(
+  level: string | null,
+): Promise<ReasoningEffortDto> {
+  if (!isTauri()) {
+    throw new Error("Reasoning effort settings require Tauri host");
+  }
+  return invoke<ReasoningEffortDto>("set_reasoning_effort", {
+    req: { level },
+  });
+}
+
 export async function hostSetWebResearchEnabled(
   enabled: boolean,
 ): Promise<boolean> {
@@ -1934,7 +2021,30 @@ export type LogEmbeddingStatusDto = {
   totalTemplates: number;
   reason: string | null;
   updatedAt: number;
+  /**
+   * Typed embedding-space identity the stored vectors were produced under.
+   * Absent for a corpus written before typed binding existed, which is why
+   * semantic retrieval fails closed for one until re-analysis rebinds it.
+   */
+  space?: EmbeddingSpaceIdentityDto | null;
 };
+
+/** Mirrors `cd_core::embedding_space::EmbeddingSpaceIdentity`. */
+export type EmbeddingSpaceIdentityDto = {
+  schema_id: string;
+  /** SHA-256 of the normalized endpoint. Never the URL itself. */
+  endpoint_fingerprint: string;
+  model: string;
+  dialect: string;
+  representation: string;
+  instruction?: string | null;
+  preprocessing: string;
+  chunking_version: string;
+  dimensions?: number | null;
+  synthetic: boolean;
+};
+
+
 
 export type LogTopTemplateDto = {
   id: number;

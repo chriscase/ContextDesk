@@ -140,9 +140,54 @@ fn build_brief(cache: &Path, corpus_id: &str) -> cd_core::tool_host::BroadLogTri
         .expect("broad triage brief")
 }
 
+#[test]
+fn global_timeline_context_preserves_small_corpus_prelude_without_merging_candidates() {
+    let (cache, corpus_id, _corpus) = ingest_case("multi-hop-chain");
+    let brief = build_brief(cache.path(), &corpus_id);
+    let context = brief
+        .comparison_context
+        .as_ref()
+        .expect("small corpus has non-candidate chronology");
+    assert!(context.complete);
+    assert_eq!(context.candidate_id, "global_timeline_context");
+    assert!(context
+        .model_text
+        .contains("global_corpus_chronology_not_an_incident"));
+    assert!(context
+        .model_text
+        .contains("adjacency and order do not establish"));
+    assert!(context
+        .evidence
+        .iter()
+        .any(|row| row.content.contains("routing table reload complete")));
+
+    let candidate_rows = brief
+        .candidate_groups
+        .iter()
+        .flat_map(|candidate| candidate.evidence.iter())
+        .map(|row| (row.seq, row.source.as_str(), row.template_id))
+        .collect::<BTreeSet<_>>();
+    assert!(context
+        .evidence
+        .iter()
+        .all(|row| !candidate_rows.contains(&(
+            row.identity.seq,
+            row.identity.source.as_str(),
+            row.identity.template_id,
+        ))));
+}
+
+/// Scripted backend for the multi-stage path.
+///
+/// Candidate rounds use the strict candidate-scoped assessment contract. The
+/// final comparison is a strict
+/// `ModelInvestigationAnswerV1` proposal, which is the contract the shipped
+/// comparison prompt now demands, built only from the evidence identities the
+/// host made visible for each candidate. No host-owned field (citations,
+/// status, confidence, corpus, revision, session) appears in the proposal:
+/// those are exactly what `validate_model_answer` refuses.
 fn scripted_multi_stage_completions(
     brief: &cd_core::tool_host::BroadLogTriageBrief,
-    final_text: &str,
     max_rounds: usize,
 ) -> Vec<ChatCompletion> {
     let candidates = brief
@@ -156,28 +201,105 @@ fn scripted_multi_stage_completions(
     );
     let mut completions = candidates
         .iter()
-        .map(|candidate| ChatCompletion {
-            content: format!(
-                "{} is a bounded candidate; observations and causes remain separate.",
-                candidate.group_id
-            ),
-            tool_calls: vec![],
-            finish_reason: "stop".into(),
-            telemetry: Default::default(),
+        .map(|candidate| {
+            let mut evidence_seqs = candidate
+                .evidence
+                .iter()
+                .map(|identity| identity.seq)
+                .collect::<Vec<_>>();
+            evidence_seqs.sort_unstable();
+            evidence_seqs.dedup();
+            ChatCompletion {
+                content: serde_json::json!({
+                    "schema": "contextdesk.candidate_assessment.v1",
+                    "candidate_id": candidate.group_id,
+                    "classification": "supporting_evidence",
+                    "analysis": "bounded candidate; observations and causes remain separate",
+                    "evidence_seqs": evidence_seqs,
+                })
+                .to_string(),
+                tool_calls: vec![],
+                finish_reason: "stop".into(),
+                telemetry: Default::default(),
+            }
         })
         .collect::<Vec<_>>();
-    let group_ids = candidates
-        .iter()
-        .map(|candidate| candidate.group_id.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
     completions.push(ChatCompletion {
-        content: format!("{final_text}\n\nCompared independent groups: {group_ids}"),
+        content: scripted_v1_comparison_json(&candidates, brief.comparison_context.as_ref()),
         tool_calls: vec![],
         finish_reason: "stop".into(),
         telemetry: Default::default(),
     });
     completions
+}
+
+/// Host evidence id the multi-stage ledger assigns to one visible identity.
+fn scripted_evidence_id(group_id: &str, seq: u64) -> String {
+    format!("e:{group_id}:{seq}")
+}
+
+/// One strict V1 proposal covering exactly the accepted candidate set.
+fn scripted_v1_comparison_json(
+    candidates: &[&cd_core::tool_host::BroadLogTriageCandidate],
+    comparison_context: Option<&cd_core::tool_host::BroadLogTriageComparisonContext>,
+) -> String {
+    let mut candidates_json = candidates
+        .iter()
+        .map(|candidate| {
+            let mut seqs = candidate
+                .evidence
+                .iter()
+                .map(|identity| identity.seq)
+                .collect::<Vec<_>>();
+            seqs.sort_unstable();
+            seqs.dedup();
+            assert!(
+                !seqs.is_empty(),
+                "every selected candidate exposes at least one identity"
+            );
+            let evidence_ids = seqs
+                .iter()
+                .map(|seq| scripted_evidence_id(&candidate.group_id, *seq))
+                .collect::<Vec<_>>();
+            // Deliberately opaque claim text: this lab proves plumbing and
+            // host validation, never model reasoning, and must not depend on
+            // any incident vocabulary.
+            serde_json::json!({
+                "candidate_id": candidate.group_id,
+                "observations": [{
+                    "claim_id": format!("obs-{}", candidate.group_id),
+                    "text": "bounded candidate-scoped observation",
+                    "evidence_ids": evidence_ids,
+                }],
+                "initiating_causes": [{
+                    "claim_id": format!("root-{}", candidate.group_id),
+                    "text": "proposed initiating item for this candidate",
+                    "evidence_ids": [evidence_ids[0].clone()],
+                }],
+            })
+        })
+        .collect::<Vec<_>>();
+    if let Some(context) = comparison_context {
+        let evidence_ids = context
+            .evidence
+            .iter()
+            .map(|row| scripted_evidence_id(&context.candidate_id, row.identity.seq))
+            .collect::<Vec<_>>();
+        assert!(!evidence_ids.is_empty());
+        candidates_json.push(serde_json::json!({
+            "candidate_id": context.candidate_id,
+            "observations": [{
+                "claim_id": "obs-global-timeline-context",
+                "text": "bounded global chronology; incident membership is unverified",
+                "evidence_ids": evidence_ids,
+            }],
+        }));
+    }
+    serde_json::json!({
+        "schema": cd_core::investigation_answer::SCHEMA_V1,
+        "candidates": candidates_json,
+    })
+    .to_string()
 }
 
 fn assert_multi_stage_completed(events: &[StreamEvent], expected_rounds: u64) {
@@ -200,6 +322,217 @@ fn assert_multi_stage_completed(events: &[StreamEvent], expected_rounds: u64) {
     assert_eq!(value["provider_rounds"], expected_rounds);
     assert_eq!(value["accepted_groups"].as_array().map(Vec::len), Some(3));
     assert_eq!(value["rejected_groups"].as_array().map(Vec::len), Some(0));
+    assert_eq!(value["answer_authority"], "host_validated_typed");
+    assert_eq!(value["visible_projection"], "host_rendered_markdown");
+}
+
+/// The host's typed multi-stage result, or a panic naming what was emitted.
+fn multi_stage_envelope(
+    events: &[StreamEvent],
+) -> &cd_core::investigation_answer::AnswerEnvelopeV1 {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            StreamEvent::InvestigationAnswer { envelope } => Some(envelope),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("multi-stage turn emitted no typed answer: {events:?}"))
+}
+
+/// Visible assistant text for the turn.
+fn terminal_text(events: &[StreamEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// V1-native, vocabulary-neutral acceptance for the shipped multi-stage path.
+///
+/// Every assertion reads host-owned structure — candidate ids, claim kinds,
+/// claim status, canonical citations, the root boolean. None depends on an
+/// incident word, a log term, or corpus content, so renaming everything in
+/// the fixture leaves this unchanged.
+fn assert_multi_stage_v1_projection(
+    events: &[StreamEvent],
+    session_id: &str,
+    corpus_id: &str,
+    visible_evidence: &[cd_core::log_analysis::SearchEvidenceIdentity],
+    comparison_context: Option<&cd_core::tool_host::BroadLogTriageComparisonContext>,
+) {
+    use cd_core::investigation_answer::{ClaimKind, ClaimStatus};
+
+    let envelope = multi_stage_envelope(events);
+    assert_eq!(envelope.binding.session_id, session_id);
+    assert_eq!(envelope.binding.corpus_id, corpus_id);
+    // The turn identity is host-created. Its *shape* belongs to whichever host
+    // supplied it (core mints its own when none is given), so the invariant
+    // here is that one identity is non-empty and reaches every surface —
+    // the typed envelope and the tool detail's binding — not that it matches
+    // any one host's format.
+    assert!(!envelope.binding.turn_id.trim().is_empty());
+    let binding_detail = events
+        .iter()
+        .find_map(|event| match event {
+            StreamEvent::Tool {
+                name,
+                detail: Some(detail),
+                ..
+            } if name == "broad_log_triage_multi_stage" && detail.contains("final_comparison") => {
+                serde_json::from_str::<serde_json::Value>(detail).ok()
+            }
+            _ => None,
+        })
+        .expect("final comparison detail");
+    assert_eq!(
+        binding_detail["answer_binding"]["turn_id"].as_str(),
+        Some(envelope.binding.turn_id.as_str()),
+        "one host turn identity must reach both surfaces"
+    );
+    assert_eq!(
+        binding_detail["root_cause_established"].as_bool(),
+        Some(envelope.answer.root_cause_established),
+        "the tool detail must read the boolean, not assert alongside it"
+    );
+    assert!(!envelope.answer.candidates.is_empty());
+
+    // Every canonical citation is a host identity the brief actually exposed.
+    let mut visible = visible_evidence
+        .iter()
+        .map(|identity| identity.seq)
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(context) = comparison_context {
+        visible.extend(context.evidence.iter().map(|row| row.identity.seq));
+    }
+    for citation in &envelope.answer.canonical_citations {
+        assert_eq!(citation.corpus_id, envelope.binding.corpus_id);
+        assert_eq!(citation.revision, envelope.binding.revision);
+        let seq = citation
+            .locator
+            .strip_prefix("seq=")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("host locator shape changed: {:?}", citation.locator));
+        assert!(
+            visible.contains(&seq),
+            "citation {seq} was never visible in the brief"
+        );
+    }
+
+    // Claim/candidate scope survives into the host's own citations.
+    let canonical = envelope
+        .answer
+        .canonical_citations
+        .iter()
+        .map(|citation| {
+            (
+                citation.evidence_id.as_str(),
+                citation.candidate_id.as_str(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for candidate in &envelope.answer.candidates {
+        for claim in &candidate.claims {
+            assert_eq!(claim.candidate_id, candidate.candidate_id);
+            assert!(
+                !claim.evidence_ids.is_empty() || claim.claim_kind == ClaimKind::MissingEvidence
+            );
+            for id in &claim.evidence_ids {
+                assert_eq!(
+                    canonical.get(id.as_str()),
+                    Some(&candidate.candidate_id.as_str()),
+                    "evidence {id} escaped candidate {}",
+                    candidate.candidate_id
+                );
+            }
+            // This ledger assigns no `Cause` role, so an initiating cause can
+            // only ever be withheld — never silently promoted.
+            if claim.claim_kind == ClaimKind::InitiatingCause {
+                assert_eq!(claim.status, ClaimStatus::Withheld);
+            }
+        }
+    }
+    assert!(
+        !envelope.answer.root_cause_established,
+        "no host Cause provenance exists on this path"
+    );
+
+    // The visible text is the readable host projection, never raw authority.
+    let visible_text = terminal_text(events);
+    assert_eq!(
+        visible_text,
+        cd_core::investigation_answer::render_answer_markdown(envelope),
+        "hosts must display the one central projection"
+    );
+    assert!(
+        visible_text.starts_with("# Investigation answer"),
+        "{visible_text}"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(visible_text.trim()).is_err(),
+        "visible text must not be raw authoritative JSON: {visible_text}"
+    );
+    assert!(
+        !visible_text.contains("\"canonical_citations\""),
+        "{visible_text}"
+    );
+    assert!(
+        visible_text.contains("- Root cause established: no"),
+        "{visible_text}"
+    );
+    assert!(
+        visible_text.contains("- Confidence: not rated by this contract"),
+        "{visible_text}"
+    );
+    for candidate in &envelope.answer.candidates {
+        assert!(
+            visible_text.contains(&format!("## Candidate `{}`", candidate.candidate_id)),
+            "{visible_text}"
+        );
+    }
+    // Every citation the reader sees is a host canonical citation.
+    for chunk in visible_text.split("— cites ").skip(1) {
+        let line = chunk.lines().next().unwrap_or_default();
+        for token in line.split(", ") {
+            let id = token.trim().trim_matches('`');
+            assert!(
+                canonical.contains_key(id),
+                "displayed {id} is not canonical"
+            );
+        }
+    }
+    // Withheld claims stay visibly withheld.
+    for candidate in &envelope.answer.candidates {
+        for claim in &candidate.claims {
+            if claim.status == ClaimStatus::Withheld {
+                let line = visible_text
+                    .lines()
+                    .find(|line| line.contains(claim.text.trim()))
+                    .unwrap_or_else(|| panic!("claim not displayed: {visible_text}"));
+                assert!(line.contains("**[withheld]**"), "{line}");
+            }
+        }
+    }
+
+    // The machine contract stays exact beside the human one.
+    let json = cd_core::investigation_answer::authoritative_json(envelope);
+    let round_trip: serde_json::Value = serde_json::from_str(&json).expect("exact JSON");
+    assert_eq!(
+        round_trip,
+        serde_json::to_value(&envelope.answer).expect("typed value")
+    );
+    let event_json = serde_json::to_string(&StreamEvent::InvestigationAnswer {
+        envelope: envelope.clone(),
+    })
+    .expect("typed event serializes for JSON/JSONL");
+    let back: StreamEvent = serde_json::from_str(&event_json).expect("typed event round-trips");
+    match back {
+        StreamEvent::InvestigationAnswer { envelope: got } => assert_eq!(&got, envelope),
+        other => panic!("typed event changed shape: {other:?}"),
+    }
 }
 
 fn good_answer_for(key: &TriageKnownAnswerKey, host: &TriageHostFacts) -> StructuredTriageAnswer {
@@ -881,16 +1214,17 @@ fn broad_triage_context_packing_reserves_useful_headroom() {
 
 // ─── Scripted plumbing (not model quality) ─────────────────────────────────
 
+/// The shipped multi-stage path speaks `contextdesk.investigation_answer.v1`,
+/// so this exercises that contract end to end: a strict model proposal, the
+/// host-validated typed event, and the readable host projection the hosts
+/// display. The legacy structured-triage contract is exercised on the
+/// single-stage path it still governs
+/// (`single_stage_turn_still_answers_the_legacy_structured_contract`).
 #[test]
-fn scripted_broad_triage_turn_exposes_brief_and_accepts_structured_answer() {
+fn scripted_broad_triage_turn_exposes_brief_and_accepts_typed_v1_answer() {
     let case = "decoy-before-trigger";
-    let key = load_answer_key(case);
-    let (cache, corpus_id, corpus) = ingest_case(case);
-    let mut host_facts = host_facts_for(&corpus, &key);
+    let (cache, corpus_id, _corpus) = ingest_case(case);
     let visible_brief = build_brief(cache.path(), &corpus_id);
-    host_facts.evidence = visible_brief.evidence.clone();
-    let good = good_answer_for(&key, &host_facts);
-    let markdown = good.to_markdown();
 
     let mut tool_host = ToolHost::new(
         Workspace::new("triage-lab-turn", vec![cache.path().to_path_buf()]),
@@ -908,11 +1242,7 @@ fn scripted_broad_triage_turn_exposes_brief_and_accepts_structured_answer() {
 
     // Scripted path: the host prepares candidate-scoped briefs, then the
     // backend supplies one bounded draft per selected group and a comparison.
-    let backend = ScriptedBackend::new(scripted_multi_stage_completions(
-        &visible_brief,
-        &markdown,
-        4,
-    ));
+    let backend = ScriptedBackend::new(scripted_multi_stage_completions(&visible_brief, 4));
 
     let mut history = Vec::new();
     let opts = AgentOptions {
@@ -1023,25 +1353,104 @@ fn scripted_broad_triage_turn_exposes_brief_and_accepts_structured_answer() {
         "near-ceiling packing is failure: used={used}"
     );
 
-    // Score the terminal answer actually released by run_agent_turn. The
-    // in-memory fixture above is only backend input; it is not the scored path.
-    let terminal_text = events
-        .iter()
-        .filter_map(|event| match event {
-            StreamEvent::TextDelta { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<String>();
+    // Evaluate the answer actually released by run_agent_turn against the V1
+    // contract this path speaks. The scripted proposal above is only backend
+    // input; the host's typed event and its projection are what ship.
     assert!(
-        !terminal_text.trim().is_empty(),
+        !terminal_text(&events).trim().is_empty(),
         "no terminal answer emitted: {events:?}"
     );
-    let emitted = parse_structured_triage_answer(&terminal_text)
-        .unwrap_or_else(|error| panic!("parse emitted terminal answer: {error}\n{terminal_text}"));
+    assert_multi_stage_v1_projection(
+        &events,
+        "triage-lab",
+        &corpus_id,
+        &visible_brief.evidence,
+        visible_brief.comparison_context.as_ref(),
+    );
+}
+
+/// The legacy structured-triage contract still governs the single-stage
+/// synthesis path, so its end-to-end proof moves here rather than being lost:
+/// a real `run_agent_turn` whose terminal answer is parsed and scored by the
+/// hermetic rubric. A round budget below the multi-stage reservation keeps
+/// this on the established single-stage path.
+#[test]
+fn single_stage_turn_still_answers_the_legacy_structured_contract() {
+    let case = "decoy-before-trigger";
+    let key = load_answer_key(case);
+    let (cache, corpus_id, corpus) = ingest_case(case);
+    let mut host_facts = host_facts_for(&corpus, &key);
+    let visible_brief = build_brief(cache.path(), &corpus_id);
+    host_facts.evidence = visible_brief.evidence.clone();
+    let markdown = good_answer_for(&key, &host_facts).to_markdown();
+
+    let mut tool_host = ToolHost::new(
+        Workspace::new("triage-lab-single", vec![cache.path().to_path_buf()]),
+        KeywordIndex::new(),
+        None,
+    );
+    tool_host.set_log_analysis(true, Some(cache.path().to_path_buf()));
+    tool_host.set_log_corpus_scope(Some(corpus_id.clone()));
+    tool_host.set_active_log_corpus(Some(corpus_id.clone()));
+    tool_host
+        .seed_log_corpus_handle(
+            &corpus_id,
+            Arc::new(LogCorpus::open(cache.path(), &corpus_id).unwrap()),
+        )
+        .unwrap();
+    tool_host.pin_log_suppression_lens(&corpus_id).unwrap();
+
+    let backend = ScriptedBackend::new(vec![ChatCompletion {
+        content: markdown,
+        tool_calls: vec![],
+        finish_reason: "stop".into(),
+        telemetry: Default::default(),
+    }]);
+    let mut history = Vec::new();
+    let opts = AgentOptions {
+        session_id: "triage-lab-single".into(),
+        model: Some("scripted-lab".into()),
+        // Below the multi-stage reservation, so the established single-stage
+        // synthesis runs and the legacy contract is the real contract.
+        max_rounds: 2,
+        context_char_budget: DEFAULT_CONTEXT_CHAR_BUDGET,
+        ambient_recall_enabled: false,
+        log_explorer_context: Some(
+            LogExplorerTurnContext::for_main_chat(&corpus_id).expect("main chat context"),
+        ),
+        ..Default::default()
+    };
+    let events = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_agent_turn(
+            &backend,
+            &mut tool_host,
+            "Broad triage this corpus: earliest error vs likely cause?",
+            &mut history,
+            &opts,
+        ))
+        .expect("run_agent_turn");
+
+    // No typed V1 answer exists on this path — that is the separation.
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::InvestigationAnswer { .. })),
+        "single-stage synthesis must not emit a V1 envelope: {events:?}"
+    );
+    let released = terminal_text(&events);
+    assert!(
+        !released.trim().is_empty(),
+        "no terminal answer: {events:?}"
+    );
+    let emitted = parse_structured_triage_answer(&released)
+        .unwrap_or_else(|error| panic!("parse emitted terminal answer: {error}\n{released}"));
     let score = score_structured_triage_answer(&emitted, &key, &host_facts);
     assert!(
         score.passed,
-        "scripted structured answer must pass hermetic rubric; failed={:?}",
+        "scripted structured answer must pass hermetic rubric; failed={:?}\n{released}",
         score.failed_ids()
     );
 }
@@ -1125,12 +1534,8 @@ fn budget_exhaustion_final_synthesis_reserves_real_path_headroom() {
 #[test]
 fn minimum_custom_budget_reserves_proportional_headroom_on_real_agent_path() {
     let case = "decoy-before-trigger";
-    let key = load_answer_key(case);
-    let (cache, corpus_id, corpus) = ingest_case(case);
-    let mut host_facts = host_facts_for(&corpus, &key);
+    let (cache, corpus_id, _corpus) = ingest_case(case);
     let visible_brief = build_brief(cache.path(), &corpus_id);
-    host_facts.evidence = visible_brief.evidence.clone();
-    let markdown = good_answer_for(&key, &host_facts).to_markdown();
 
     let mut tool_host = ToolHost::new(
         Workspace::new("triage-lab-small-budget", vec![cache.path().to_path_buf()]),
@@ -1148,11 +1553,7 @@ fn minimum_custom_budget_reserves_proportional_headroom_on_real_agent_path() {
         .unwrap();
     tool_host.pin_log_suppression_lens(&corpus_id).unwrap();
 
-    let backend = ScriptedBackend::new(scripted_multi_stage_completions(
-        &visible_brief,
-        &markdown,
-        4,
-    ));
+    let backend = ScriptedBackend::new(scripted_multi_stage_completions(&visible_brief, 4));
     let mut history = Vec::new();
     let minimum_budget = cd_core::model_context::MIN_CONTEXT_CHAR_BUDGET;
     assert_eq!(minimum_budget, 24_000, "fixture expectation changed");

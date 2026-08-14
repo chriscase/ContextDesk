@@ -96,6 +96,21 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 /// phrases its reply.
 const SYNTHETIC_MARKER: &str = "SYNTH_DOCTOR_READINESS_CHECK";
 
+fn first_turn_question() -> String {
+    format!(
+        "Search the logs for {SYNTHETIC_MARKER} and tell me exactly what correlation id it \
+         referenced. Cite the matching event exactly as seq=N plus source=\"...\" from the \
+         bounded tool result; do not substitute a template id or event id for that citation."
+    )
+}
+
+fn continuity_question() -> String {
+    format!(
+        "Search the linked logs again for {SYNTHETIC_MARKER}. Then use the prior turn and \
+         this fresh bounded result to answer: what correlation id did that event reference?"
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
@@ -905,10 +920,7 @@ async fn execute_live_turns(
     model: &str,
     timeout: Duration,
 ) -> LiveTurnOutcome {
-    let question_one = format!(
-        "Search the logs for {SYNTHETIC_MARKER} and tell me exactly what correlation id it \
-         referenced, citing the source."
-    );
+    let question_one = first_turn_question();
     let recorder = Arc::new(RecordingTurnTrace::new());
     let trace_sink: Arc<dyn TurnTraceSink> = recorder.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -919,7 +931,9 @@ async fn execute_live_turns(
         Err(e) => return LiveTurnOutcome::SetupFailed(format!("could not build tool host: {e}")),
     };
 
-    let turn_one = run_chat_workflow(
+    // Match chat's heap-pinning discipline: Windows' 1 MiB CLI main-thread
+    // stack cannot safely poll this composite workflow future in place.
+    let mut turn_one = Box::pin(run_chat_workflow(
         &mut host,
         secrets,
         cfg,
@@ -934,6 +948,7 @@ async fn execute_live_turns(
             dry_run: false,
             trace_sink: Some(trace_sink),
             user_selection: None,
+            ..ChatWorkflowRequest::default()
         },
         Some(cancel.clone()),
         None,
@@ -941,11 +956,10 @@ async fn execute_live_turns(
         // against a corpus it just created and will delete before
         // returning — there is nothing here for an operator to confirm.
         |_tool_name, _target, _reason, _preview, _risk| PermissionDecision::AllowOnce,
-    );
-    tokio::pin!(turn_one);
+    ));
 
     let raced = tokio::select! {
-        result = tokio::time::timeout(timeout, &mut turn_one) => result,
+        result = tokio::time::timeout(timeout, turn_one.as_mut()) => result,
         _ = tokio::signal::ctrl_c() => {
             cancel.store(true, Ordering::SeqCst);
             eprintln!("doctor: interrupted — waiting for the in-flight check to stop...");
@@ -961,7 +975,7 @@ async fn execute_live_turns(
             // observe an `Ok`, its session was already saved to disk and
             // must still be captured here for cleanup, or it leaks
             // permanently into the real session store.
-            let leaked_session_id = match tokio::time::timeout(INTERRUPT_GRACE, &mut turn_one).await {
+            let leaked_session_id = match tokio::time::timeout(INTERRUPT_GRACE, turn_one.as_mut()).await {
                 Ok(Ok(outcome)) => Some(outcome.session_id),
                 _ => None,
             };
@@ -1026,8 +1040,7 @@ async fn execute_live_turns(
         .map(|s| s.messages.len())
         .unwrap_or(0);
 
-    let question_two =
-        "What correlation id did that event reference? Answer using only what we already found.";
+    let question_two = continuity_question();
     let mut host_two =
         match crate::adapters::tool_host_with_app_config(&paths.cache_root, cfg, secrets) {
             Ok(host) => host,
@@ -1051,14 +1064,14 @@ async fn execute_live_turns(
     // one's trace.
     let recorder_two = Arc::new(RecordingTurnTrace::new());
     let trace_sink_two: Arc<dyn TurnTraceSink> = recorder_two.clone();
-    let turn_two = run_chat_workflow(
+    let mut turn_two = Box::pin(run_chat_workflow(
         &mut host_two,
         secrets,
         cfg,
         sessions,
         &paths.cache_root,
         Some(&session_id),
-        question_two,
+        &question_two,
         ChatWorkflowRequest {
             corpus_id: Some(corpus_id),
             explicit_profile_id: profile_override,
@@ -1066,18 +1079,18 @@ async fn execute_live_turns(
             dry_run: false,
             trace_sink: Some(trace_sink_two),
             user_selection: None,
+            ..ChatWorkflowRequest::default()
         },
         Some(cancel.clone()),
         None,
         |_tool_name, _target, _reason, _preview, _risk| PermissionDecision::AllowOnce,
-    );
-    tokio::pin!(turn_two);
+    ));
     let raced_two = tokio::select! {
-        result = tokio::time::timeout(timeout, &mut turn_two) => result,
+        result = tokio::time::timeout(timeout, turn_two.as_mut()) => result,
         _ = tokio::signal::ctrl_c() => {
             cancel.store(true, Ordering::SeqCst);
             eprintln!("doctor: interrupted — waiting for the in-flight check to stop...");
-            let _ = tokio::time::timeout(INTERRUPT_GRACE, &mut turn_two).await;
+            let _ = tokio::time::timeout(INTERRUPT_GRACE, turn_two.as_mut()).await;
             // Unlike turn one, `session_id` here is already known and was
             // already durably saved by `run_chat_workflow` before turn two
             // even started — capture it unconditionally so cleanup can
@@ -1257,6 +1270,26 @@ mod tests {
         assert!(second_turn_included_prior_context(&calls).is_ok());
     }
 
+    #[test]
+    fn continuity_prompt_requires_fresh_grounding_and_prior_context() {
+        let question = continuity_question();
+
+        assert!(question.contains(SYNTHETIC_MARKER));
+        assert!(question.contains("Search the linked logs again"));
+        assert!(question.contains("prior turn"));
+        assert!(question.contains("correlation id"));
+    }
+
+    #[test]
+    fn first_turn_prompt_requires_the_host_validated_citation_shape() {
+        let question = first_turn_question();
+
+        assert!(question.contains(SYNTHETIC_MARKER));
+        assert!(question.contains("seq=N"));
+        assert!(question.contains("source=\"...\""));
+        assert!(question.contains("do not substitute a template id or event id"));
+    }
+
     /// Mutation test: strip the first turn's history from what the second
     /// request carried — exactly what a real history-threading regression
     /// would do — and confirm the check fails instead of silently passing.
@@ -1291,7 +1324,11 @@ mod tests {
             provider_profile_id: "p".to_string(),
             chat_model: "m".to_string(),
             corpus_revision: None,
+            corpus_snapshot_revision: None,
             history_messages: 4,
+            multi_model_configured: cd_core::multi_model::MultiModelMode::Single,
+            multi_model_executed: cd_core::multi_model::ExecutedMode::Single,
+            multi_model_entry_degradation: None,
         };
         let calls = vec![call_with_messages(&[&format!(
             "Search the logs for {SYNTHETIC_MARKER} and tell me..."
@@ -1320,7 +1357,11 @@ mod tests {
             provider_profile_id: "p".to_string(),
             chat_model: "m".to_string(),
             corpus_revision: None,
+            corpus_snapshot_revision: None,
             history_messages: 2,
+            multi_model_configured: cd_core::multi_model::MultiModelMode::Single,
+            multi_model_executed: cd_core::multi_model::ExecutedMode::Single,
+            multi_model_entry_degradation: None,
         };
         let calls = vec![call_with_messages(&[
             "a follow-up question with no prior context",

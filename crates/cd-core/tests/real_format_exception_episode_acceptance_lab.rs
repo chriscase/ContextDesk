@@ -927,6 +927,7 @@ fn anchored_real_format_56_execution_episode_oracle() {
         sources_omitted: vec![],
         decoy_earliest_error_message_token: None,
         true_trigger_message_token: None,
+        competing_trigger_message_tokens: vec![],
         symptom_message_tokens: vec![],
         root_cause_establishable: false,
         forbidden_claims: vec!["14840_semantic_occurrences".into()],

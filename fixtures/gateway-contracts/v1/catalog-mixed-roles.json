@@ -1,0 +1,36 @@
+{
+  "schema": "contextdesk.gateway_contract.catalog.v1",
+  "note": "Sanitized mixed Vercel-shaped catalog. Synthetic ids only; no auth, pricing account state, or request metadata.",
+  "models": [
+    {
+      "id": "deepseek/deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash",
+      "modelType": "language",
+      "specification": { "provider": "deepseek" }
+    },
+    {
+      "id": "openai/gpt-oss-120b",
+      "name": "GPT OSS 120B",
+      "modelType": "language",
+      "specification": { "provider": "openai" }
+    },
+    {
+      "id": "voyage/voyage-4",
+      "name": "Voyage 4",
+      "modelType": "embedding",
+      "specification": { "provider": "voyage" }
+    },
+    {
+      "id": "voyage/rerank-2.5",
+      "name": "Voyage Rerank 2.5",
+      "modelType": "reranking",
+      "specification": { "provider": "voyage" }
+    },
+    {
+      "id": "corp-private-alias-x",
+      "name": "Private Alias",
+      "modelType": null,
+      "specification": { "provider": "unknown" }
+    }
+  ]
+}

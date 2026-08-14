@@ -4,6 +4,222 @@ use serde::{Deserialize, Serialize};
 
 use crate::router::AgentPhase;
 
+/// One human-readable projection of a turn lifecycle event.
+///
+/// This is presentation metadata, not evidence and not a second execution
+/// stream. Hosts derive it from the exact [`StreamEvent`] they are already
+/// forwarding, adding only their measured turn-relative clock. Keeping this
+/// projection in core prevents CLI and desktop labels from drifting while the
+/// underlying event remains the authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnProgress {
+    /// Broad activity family (`turn`, `phase`, `tool`, or `multi_model`).
+    pub category: String,
+    /// Stable engine stage/tool/role identifier.
+    pub stage: String,
+    /// Stable lifecycle value within the stage.
+    pub phase: String,
+    /// Concise host-authored label for normal human progress UI.
+    pub label: String,
+    /// Optional bounded diagnostics already present on the source event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Optional host-authored outcome (`succeeded`, `failed`, or a
+    /// multi-model stage status).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Owning candidate for a per-candidate investigation stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    /// Wall-clock milliseconds observed since the host admitted the turn.
+    pub elapsed_ms: u64,
+}
+
+fn agent_phase_id(phase: AgentPhase) -> &'static str {
+    match phase {
+        AgentPhase::ChoosingEvidence => "choosing_evidence",
+        AgentPhase::RetrievingEvidence => "retrieving_evidence",
+        AgentPhase::SynthesizingAnswer => "synthesizing_answer",
+    }
+}
+
+fn agent_phase_label(phase: AgentPhase) -> &'static str {
+    match phase {
+        AgentPhase::ChoosingEvidence => "Choosing bounded evidence",
+        AgentPhase::RetrievingEvidence => "Retrieving bounded evidence",
+        AgentPhase::SynthesizingAnswer => "Synthesizing the answer",
+    }
+}
+
+fn multi_model_label(stage: &str, phase: &str) -> String {
+    let action = match (stage, phase) {
+        ("investigator", "started") => "Investigating candidate",
+        ("investigator", "finished") => "Candidate investigation finished",
+        ("reviewer", "started") => "Reviewing candidate findings",
+        ("reviewer", "finished") => "Review finished",
+        ("synthesizer", "started") => "Synthesizing the reviewed answer",
+        ("synthesizer", "finished") => "Reviewed synthesis finished",
+        // Multi-stage broad-triage candidate loop (#869) — same vocabulary so
+        // CLI/Desktop/activity share one projection path.
+        ("candidate", "started") => "Investigating evidence group",
+        ("candidate", "finished") => "Evidence group investigation finished",
+        ("candidate", "skipped") => "Further candidates not admitted",
+        ("comparison", "started") => "Comparing admitted candidates",
+        ("comparison", "finished") => "Candidate comparison finished",
+        ("admission", "skipped") => "Candidate admission stopped",
+        ("observation_extractor", "started") => "Extracting bounded observations",
+        ("observation_extractor", "finished") => "Observation extraction finished",
+        ("causal_proposer", "started") => "Proposing bounded causal roles",
+        ("causal_proposer", "finished") => "Causal-role proposal finished",
+        ("contradiction_checker", "started") => "Checking candidate contradictions",
+        ("contradiction_checker", "finished") => "Contradiction check finished",
+        ("evidence_gap", "started") => "Checking evidence gaps",
+        ("evidence_gap", "finished") => "Evidence-gap check finished",
+        ("contributions", "summary") => "Contribution reconciliation summary",
+        ("summary", _) => "Multi-model review summary",
+        (_, "started") => "Starting model stage",
+        (_, "finished") => "Model stage finished",
+        (_, "skipped") => "Stage skipped",
+        _ => "Multi-model activity",
+    };
+    action.to_string()
+}
+
+fn bounded_progress_label(raw: &str) -> String {
+    crate::redact::scrub_secrets(raw)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(240)
+        .collect()
+}
+
+fn bounded_progress_detail(raw: &str) -> Option<String> {
+    let scrubbed = crate::redact::scrub_secrets(raw);
+    let mut detail = scrubbed
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\n' || *character == '\t')
+        .take(4_096)
+        .collect::<String>();
+    if scrubbed.chars().count() > 4_096 {
+        detail.push('…');
+    }
+    (!detail.trim().is_empty()).then_some(detail)
+}
+
+/// Project one engine event into the shared human-progress vocabulary.
+///
+/// `elapsed_ms` is deliberately supplied by the host: [`StreamEvent`] remains
+/// replayable and free of wall-clock assumptions, while CLI JSONL and desktop
+/// IPC can expose equivalent measured progress from the same event.
+pub fn progress_for_stream_event(event: &StreamEvent, elapsed_ms: u64) -> Option<TurnProgress> {
+    let progress = match event {
+        StreamEvent::TurnStarted { .. } => TurnProgress {
+            category: "turn".into(),
+            stage: "turn".into(),
+            phase: "started".into(),
+            label: "Assembling context".into(),
+            detail: None,
+            status: None,
+            candidate_id: None,
+            elapsed_ms,
+        },
+        StreamEvent::TurnPhase { phase } => TurnProgress {
+            category: "phase".into(),
+            stage: agent_phase_id(*phase).into(),
+            phase: "started".into(),
+            label: agent_phase_label(*phase).into(),
+            detail: None,
+            status: None,
+            candidate_id: None,
+            elapsed_ms,
+        },
+        StreamEvent::Tool {
+            name,
+            phase,
+            summary,
+            detail,
+            ok,
+            ..
+        } => {
+            let (phase, prefix) = match phase {
+                ToolPhase::Started => ("started", "Running"),
+                ToolPhase::Finished => ("finished", "Finished"),
+            };
+            let subject = if summary.trim().is_empty() {
+                name.as_str()
+            } else {
+                summary.as_str()
+            };
+            TurnProgress {
+                category: "tool".into(),
+                stage: name.clone(),
+                phase: phase.into(),
+                label: bounded_progress_label(&format!("{prefix}: {subject}")),
+                detail: detail.as_deref().and_then(bounded_progress_detail),
+                status: ok.map(|ok| if ok { "succeeded" } else { "failed" }.into()),
+                candidate_id: None,
+                elapsed_ms,
+            }
+        }
+        StreamEvent::LinkedSynthesisRetry {
+            available: true, ..
+        } => TurnProgress {
+            category: "turn".into(),
+            stage: "linked_synthesis_retry".into(),
+            phase: "available".into(),
+            label: "Bounded evidence is ready for synthesis retry".into(),
+            detail: None,
+            status: None,
+            candidate_id: None,
+            elapsed_ms,
+        },
+        StreamEvent::LinkedSynthesisRetry {
+            available: false, ..
+        } => TurnProgress {
+            category: "turn".into(),
+            stage: "linked_synthesis_retry".into(),
+            phase: "unavailable".into(),
+            label: "Synthesis retry is unavailable".into(),
+            detail: None,
+            status: None,
+            candidate_id: None,
+            elapsed_ms,
+        },
+        StreamEvent::MultiModelStage {
+            stage,
+            phase,
+            status,
+            detail,
+            candidate_id,
+        } => TurnProgress {
+            category: "multi_model".into(),
+            stage: stage.clone(),
+            phase: phase.clone(),
+            // Candidate ids can be opaque and noisy. Keep them in the
+            // structured expandable diagnostics, never in the default label.
+            label: bounded_progress_label(&multi_model_label(stage, phase)),
+            detail: bounded_progress_detail(detail),
+            status: status.clone(),
+            candidate_id: candidate_id.clone(),
+            elapsed_ms,
+        },
+        StreamEvent::TurnCompleted { reason } => TurnProgress {
+            category: "turn".into(),
+            stage: "turn".into(),
+            phase: "completed".into(),
+            label: "Saving session".into(),
+            detail: None,
+            status: Some(reason.clone()),
+            candidate_id: None,
+            elapsed_ms,
+        },
+        _ => return None,
+    };
+    Some(progress)
+}
+
 /// Phase of a tool invocation in the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +266,12 @@ pub enum StreamEvent {
     TextDelta {
         /// UTF-8 chunk (may be partial markdown).
         text: String,
+    },
+    /// A complete host-validated typed answer envelope. Hosts may persist this
+    /// exact value, but must never reconstruct authority from displayed text.
+    InvestigationAnswer {
+        /// Host-owned answer, evidence ledger, and turn binding.
+        envelope: crate::investigation_answer::AnswerEnvelopeV1,
     },
     /// Optional model "thought" channel.
     ThoughtDelta {
@@ -138,6 +360,25 @@ pub enum StreamEvent {
         /// User-visible message (no secrets).
         message: String,
     },
+    /// Multi-model stage progress and end-of-turn summary. Host-authored: every
+    /// field is a host label, count, id, or degradation reason — never model
+    /// text. Hosts that do not understand it ignore it (forward-compat).
+    MultiModelStage {
+        /// Functional role (`investigator` | `reviewer` | `synthesizer`) or
+        /// `summary` for the end-of-turn line.
+        stage: String,
+        /// `started` | `finished` | `summary`.
+        phase: String,
+        /// Stage outcome, or the executed mode on the summary line.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        /// Host-authored detail (counts, ids, or a degradation reason). Never
+        /// model text.
+        detail: String,
+        /// Owning candidate id for a per-candidate investigator stage.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<String>,
+    },
 }
 
 /// Terminal [`StreamEvent::TurnCompleted`] reasons that mean the turn did
@@ -172,6 +413,28 @@ pub const WITHHELD_TURN_REASONS: &[&str] = &[
     // The provider failed after retrieval but before grounded synthesis completed.
     "linked_synthesis_provider_error",
 ];
+
+/// The `provider_*` terminals below are deliberately **not** withheld reasons.
+/// Withholding means ContextDesk had an answer and chose not to deliver it;
+/// these mean the provider never answered at all. Both produce no usable
+/// result, but only one is ContextDesk's decision, and
+/// [`crate::activity::status_for_turn_reason`] classifies them `Failed`
+/// precisely so an operator can tell the two apart.
+///
+/// Terminal reason: the provider rate limited the turn and ContextDesk's
+/// bounded transport retries were exhausted before any model round completed.
+pub const PROVIDER_RATE_LIMITED_REASON: &str = "provider_rate_limited";
+
+/// Terminal reason: the provider rejected the turn's credentials.
+pub const PROVIDER_UNAUTHORIZED_REASON: &str = "provider_unauthorized";
+
+/// Terminal reason: the provider could not serve the turn (server fault or
+/// upstream timeout).
+pub const PROVIDER_UNAVAILABLE_REASON: &str = "provider_unavailable";
+
+/// Terminal reason: the provider failed before a model round completed, for a
+/// reason with no more specific classification.
+pub const PROVIDER_FAILED_REASON: &str = "provider_failed";
 
 /// Stable [`StreamEvent::Error`] codes that mean the answer this turn
 /// produced is not log-grounded, even though the turn itself completed with
@@ -249,5 +512,84 @@ mod tests {
                 "phase": "synthesizing_answer"
             })
         );
+    }
+
+    #[test]
+    fn shared_progress_projects_phase_tool_and_reviewer_with_one_elapsed_clock() {
+        let phase = progress_for_stream_event(
+            &StreamEvent::TurnPhase {
+                phase: AgentPhase::RetrievingEvidence,
+            },
+            125,
+        )
+        .expect("phase progress");
+        assert_eq!(phase.category, "phase");
+        assert_eq!(phase.stage, "retrieving_evidence");
+        assert_eq!(phase.label, "Retrieving bounded evidence");
+        assert_eq!(phase.elapsed_ms, 125);
+
+        let tool = progress_for_stream_event(
+            &StreamEvent::Tool {
+                id: "tool-1".into(),
+                name: "broad_log_triage".into(),
+                phase: ToolPhase::Started,
+                summary: "Preparing bounded triage brief".into(),
+                detail: Some("17 identities".into()),
+                ok: None,
+            },
+            250,
+        )
+        .expect("tool-start progress");
+        assert_eq!(tool.phase, "started");
+        assert_eq!(tool.label, "Running: Preparing bounded triage brief");
+        assert_eq!(tool.detail.as_deref(), Some("17 identities"));
+
+        let reviewer = progress_for_stream_event(
+            &StreamEvent::MultiModelStage {
+                stage: "reviewer".into(),
+                phase: "started".into(),
+                status: None,
+                detail: "reviewing 3 candidate findings".into(),
+                candidate_id: None,
+            },
+            375,
+        )
+        .expect("reviewer progress");
+        assert_eq!(reviewer.category, "multi_model");
+        assert_eq!(reviewer.label, "Reviewing candidate findings");
+        assert_eq!(reviewer.elapsed_ms, 375);
+
+        let contribution = progress_for_stream_event(
+            &StreamEvent::MultiModelStage {
+                stage: "causal_proposer".into(),
+                phase: "started".into(),
+                status: None,
+                detail: "bounded contribution started".into(),
+                candidate_id: None,
+            },
+            400,
+        )
+        .expect("contribution progress");
+        assert_eq!(contribution.label, "Proposing bounded causal roles");
+
+        let unsafe_detail = format!(
+            "authorization=Bearer test-token-value {}",
+            "x".repeat(5_000)
+        );
+        let bounded = progress_for_stream_event(
+            &StreamEvent::MultiModelStage {
+                stage: "reviewer".into(),
+                phase: "finished".into(),
+                status: Some("completed".into()),
+                detail: unsafe_detail,
+                candidate_id: Some("opaque-candidate".into()),
+            },
+            500,
+        )
+        .expect("bounded reviewer progress")
+        .detail
+        .expect("non-empty diagnostics");
+        assert!(!bounded.contains("test-token-value"), "{bounded}");
+        assert!(bounded.chars().count() <= 4_097);
     }
 }

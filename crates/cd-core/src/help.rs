@@ -1583,6 +1583,10 @@ related: []
                 "dummy provider secret-shaped detail".into(),
             ))
         }
+
+        fn identity(&self) -> String {
+            "failing-embed (deterministic synthetic; tests only, not a capability)".into()
+        }
     }
 
     #[tokio::test]

@@ -31,7 +31,7 @@ pub mod types;
 
 pub use ambient::{
     inject_memory_context, inject_memory_context_with_embed, AmbientBudget, AmbientInjection,
-    AmbientRejectedItem, AmbientSelectedItem,
+    AmbientRejectedItem, AmbientSelectedItem, AMBIENT_UNTRUSTED_SOURCE,
 };
 pub use candidates::{propose_from_turn, CandidateInbox};
 pub use cue::{CandidateStatus, CueExtractOpts, CueExtractor, MemoryCandidate};

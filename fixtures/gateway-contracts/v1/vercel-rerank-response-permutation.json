@@ -1,0 +1,13 @@
+{
+  "schema": "contextdesk.gateway_contract.vercel_v4_rerank_response.v1",
+  "note": "Complete permutation for three synthetic documents. Scores are fixed; not live rankings.",
+  "model": "voyage/rerank-2.5",
+  "document_count": 3,
+  "top_n": 3,
+  "ranking": [
+    { "index": 1, "relevanceScore": 0.91 },
+    { "index": 0, "relevanceScore": 0.44 },
+    { "index": 2, "relevanceScore": 0.12 }
+  ],
+  "warnings": []
+}

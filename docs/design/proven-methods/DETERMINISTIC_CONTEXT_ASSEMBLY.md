@@ -49,7 +49,7 @@ synthesis only after required deterministic steps succeed.
 | Slow-provider phase lifecycle and synthesis-only retry         | **Shipped (agent-testable)** | One monotonic turn ceiling, bounded phases, immediate cancellation, host-only evidence checkpoint, and tool-closed retry | Native cold/slow tools-enabled provider acceptance remains on #649                                 |
 | Bounded model-picker display curation                          | **Shipped** | Profile/endpoint/model-scoped pin, hide, provider hide, restore, exact default replacement, search, and one shared render cap | Display state is not deletion, access control, provider health, or capability evidence              |
 | Name-based model-role guidance                                 | **Partial** | Versioned hints inform setup, Settings, and preflight without claiming measured capability                       | Names remain hints rather than a cross-gateway capability standard                                  |
-| Explicit synthetic capability qualification                    | **Partial** | User-triggered probes, cache key isolation, inert tools, Settings control, and mock-transport tests ship (#724) | Packaged proof against real tools-enabled/disabled profiles remains owner/environment residual        |
+| Explicit synthetic capability qualification                    | **Partial** | User-triggered probes, cache key isolation by profile/endpoint/model/**transport protocol**/schema, inert tools, Settings control, mock-transport tests (#724), dialect-honest multi-mode ladder, strict tool token/schema validation, exact-mode+dialect authorization and readiness, typed-client pre-transmit fail-closed, and DTO/CLI/desktop projection (schema v4; [chat contract](../../testing/OPENAI_CHAT_CONTRACT_V2.md)) | Packaged proof against real tools-enabled/disabled profiles remains owner/environment residual; live native mode support is gateway-dependent |
 | Ranked multi-source context planner                            | **Partial** | Deterministic eligibility and simple ranking ship                                                                | Richer planning must not weaken host policy                                                        |
 
 Issue status is descriptive, not proof by itself. The production paths and
@@ -141,6 +141,12 @@ compact citation alias whose mapping to the exact trusted source remains
 host-owned.
 
 The broad brief is a starting evidence package, not an exhaustive diagnosis.
+In the experimental candidate-scoped path, retained rendering roles outrank a
+lossy mined-template pattern for provider-round admission: a template observed
+as a rendering lead may define a candidate, while one observed only as
+supporting records remains in the trusted global evidence channel and is
+attached to its lead rather than consuming a second independent model round.
+This role decision does not certify an incident or a semantic episode count.
 When the request explicitly needs another eligible read source, the host may
 stage that governed source after the brief. Focused follow-ups use the ordinary
 bounded log tools. Tools are offered only when they are needed and eligible;
@@ -272,8 +278,12 @@ string found in untrusted content into trusted evidence.
 3. **A linked log answer is provisional until a bounded log tool succeeds.**
 4. **Evidence identity is structured.** Never scrape event identity back out of
    rendered prose when the retriever can return it directly.
-5. **Untrusted retrieval stays untrusted.** Tool results are data and are
-   boundary-wrapped; instructions inside them do not override policy.
+5. **Untrusted retrieval stays untrusted.** Tool results and host-injected
+   retrieval blocks — ambient durable-memory recall (source `ambient_memory`)
+   and plan-included snippets (source `context_plan`) — are data and are
+   boundary-wrapped with nonce-bound markers; instructions inside them do not
+   override policy. The host owns selection and provenance, but it never
+   relabels stored or retrieved content as host-authored/first-party.
 6. **Skills provide process, not incident truth.** A skill can tell the model
    how to investigate; it is not evidence that a production event occurred.
 7. **Evaluator truth is outside every attached root.** Test fixtures may know
@@ -391,6 +401,14 @@ Retrieved text should be enclosed in an unambiguous untrusted-data envelope.
 The envelope marker itself must never be interpreted as observed content or
 cited as a finding.
 
+This applies to host-side injection paths, not only tool results: ambient
+durable-memory recall and the deterministic plan's included snippets are
+emitted inside the same nonce-bound envelope (stable source labels
+`ambient_memory` and `context_plan`). Only the short framing line above the
+envelope is host-authored; truncation is applied to the inner content before
+wrapping so the closing nonce boundary is never cut, and the reported
+model-facing character counts include the envelope overhead actually sent.
+
 ### 6.5 Synthesize and validate
 
 Once required retrieval succeeds:
@@ -412,8 +430,9 @@ universal recommendations:
 | Sources considered per turn |               3 default, sanitized to 1–16 | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Rank and take bounded set                                  |
 | Tool rounds                 |              12 default, sanitized to 1–32 | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Terminal bounded completion/error                          |
 | Results per source          |               8 default, sanitized to 1–50 | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Retriever result cap                                       |
-| Whole-turn deadline         | Adaptive: 300,000 ms local/private, 120,000 ms managed; explicit 500–600,000 ms | [`router.rs`](../../../crates/cd-core/src/router.rs) | Phase timeout or visible whole-turn timeout |
-| Phase deadlines             | Choosing, retrieval, and synthesis are each capped inside the one monotonic turn ceiling | [`agent.rs`](../../../crates/cd-core/src/agent.rs) `TurnClock` | A phase cap never resets or extends the whole turn |
+| Whole-turn deadline         | Adaptive: 300,000 ms local/private, 180,000 ms managed; explicit 500–600,000 ms; product controls: Settings Auto/Standard/Patient/Custom + `config deadline` + per-turn `--deadline` ([`deadline_controls.rs`](../../../crates/cd-core/src/deadline_controls.rs), design note [`DEADLINE_CONTROLS.md`](../DEADLINE_CONTROLS.md)) | [`router.rs`](../../../crates/cd-core/src/router.rs) | Phase timeout or visible whole-turn timeout |
+| Phase deadlines             | Every uninterrupted choosing, retrieval, or synthesis operation receives its active phase cap inside the one monotonic turn ceiling | [`agent.rs`](../../../crates/cd-core/src/agent.rs) `TurnClock` | Operation caps reset; the whole-turn clock never resets or extends |
+| Provider request ceiling    | **Local integration:** provider HTTP construction inherits the sanitized whole-turn ceiling; non-stream and stream operations each make one request with no error-triggered protocol replay | [`research.rs`](../../../crates/cd-core/src/research.rs) `backend_for_with_timeout` and [`chat.rs`](../../../crates/cd-core/src/chat.rs) timeout-aware constructors | Per-operation/phase races remain tighter; transport cannot silently cut off an explicitly patient turn or double its cost |
 | Provider readiness          | Same absolute turn deadline starts before health/readiness/backend construction | [`research.rs`](../../../crates/cd-core/src/research.rs) | Stop and explicit short deadlines remain authoritative during cold local/private startup |
 | Linked corpus preflight     | Same absolute deadline and cancel signal govern corpus validation/open in a bounded blocking task | [`lib.rs`](../../../desktop/src-tauri/src/lib.rs) | Setup cannot outlive Stop or consume time outside the turn ceiling |
 | Model-facing context        |                 120,000 characters default | [`sessions.rs`](../../../crates/cd-core/src/sessions.rs)                      | Pair-safe compaction then deterministic truncation or fail |
@@ -426,7 +445,7 @@ universal recommendations:
 | View bookmark summaries     |                                         24 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Truncate                                                   |
 | Session context files       |                                200 default | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)        | Reject over cap                                            |
 | Session context bytes       |          50 MiB total; 10 MiB/file default | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)        | Reject before publication                                  |
-| Ambient memory              |      about 1,500 chars and at most 5 items | [`ambient.rs`](../../../crates/cd-core/src/memory/ambient.rs)                 | Score/echo filter and stop                                 |
+| Ambient memory              |      about 1,500 chars and at most 5 items | [`ambient.rs`](../../../crates/cd-core/src/memory/ambient.rs)                 | Score/echo filter and stop; nonce-fenced untrusted body    |
 
 Character limits are approximate model-token controls. An implementation with
 provider tokenizers should still keep deterministic byte/character safety caps
@@ -493,8 +512,18 @@ private model inventory in publishable media, or evaluator truth.
 
 ## 10. Security and privacy
 
-- Credentials remain in the trusted host or OS keychain, never the webview or
-  model context.
+- Credential contents remain in the trusted host and their selected owner
+  (OS Keychain or an explicit owner-only protected file), never the webview or
+  model context. The protected-file path may be edited in Settings, but its
+  contents never cross IPC.
+- Provider credential resolution follows the profile's explicit reference.
+  No reference means no credential; the host must not synthesize a conventional
+  Keychain id or fall back from an invalid `file:` reference to Keychain.
+- The **Local integration** provider path dereferences credentials through a
+  provider-only cache scoped to one admitted turn. Primary and reviewer roles
+  sharing the exact `api_key_ref` reuse that in-memory value; distinct refs are
+  each read once, connector/retrieval/module secret paths do not use the cache,
+  and a later turn starts empty.
 - File roots, database connections, network bases, and connector processes are
   allowlisted and policy checked.
 - Retrieved documents and tool results are prompt-injection-capable untrusted
@@ -589,11 +618,13 @@ assert the sentinel is absent from model-facing messages.
 | Cross-source read           | **Partial** | Requested governed reads can be offered after log grounding                | No unrestricted autonomous source crawl                                   |
 | Small-model staging         | **Shipped** | Constrained first log search and tool-closed synthesis path                | No guarantee every small model follows native tools                       |
 | Slow provider lifecycle     | **Shipped (agent-testable)** | Adaptive or explicit whole-turn ceiling, bounded truthful phases, immediate Stop, evidence-preserving synthesis retry | Native cold/slow tools-enabled profile acceptance remains #649 |
+| Provider transport alignment | **Local integration** | Sanitized turn deadlines reach provider HTTP clients; each backend completion mode issues exactly one protocol request | Native acceptance must confirm the previously failing slow comparison now finishes without a 120-second cutoff or automatic replay |
 | Model-picker curation       | **Shipped** | Pin/hide/restore state is profile/endpoint/model scoped, persistent, reversible, searchable, and hard-bounded across rendered bands | Not deletion, authorization, redaction, health, or capability qualification |
 | Durable transcript concurrency | **Shipped** | Host compare-and-swap rejects stale whole-session publication; newest client mutation alone may reconcile exact message ids | Not a multi-device collaborative-edit protocol |
 | Cross-corpus citation identity | **Shipped** | Governed chips retain `(source id, corpus provenance)` and activate the exact citation | Ambiguous bare inline ids fail closed rather than guessing |
 | Model-role guidance         | **Partial** | Versioned name hints are shown with typed basis and confidence; specialty and unknown ids stay selectable | No cross-gateway capability claim |
 | Measured qualification      | **Partial** | Explicit synthetic probes record pass/degraded/fail/untested per profile/endpoint/model/schema (#724) | No quality or permanent reliability claim; real packaged profile proof residual |
+| Provider credential source and lifetime | **Local integration** | Keychain and owner-only protected-file sources are explicit profile references; absent/invalid references fail without implicit Keychain access; one admitted turn owns an ephemeral provider-only cache shared by its primary and reviewer resolution | No process-global retention, no connector/retrieval/module caching, and no claim that macOS authorization dialogs map one-to-one to Rust lookups |
 | Model proposals changing UI | **Partial** | Structured `log_nav` is opt-in                                             | Rich finding proposal/approval lifecycle remains #646                     |
 | Evaluator-truth exclusion   | **Shipped** | Known-truth fixture discipline keeps the answer key outside attached roots | Not a formal noninterference proof                                        |
 

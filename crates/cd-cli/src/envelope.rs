@@ -58,6 +58,10 @@ pub enum ExitCategory {
     /// verdict), so this is not an error in the usual sense, only a
     /// process-exit-code signal a script can gate on (`contextdesk doctor
     /// && start_demo.sh`).
+    ///
+    /// `contextdesk retrieval-diagnose` reuses this for the same reason: an
+    /// inconclusive run produced an honest verdict without failing, and a
+    /// script needs to tell that apart from a usable comparison.
     NotReady = 8,
     /// A normalized stream inspection completed and found one or more files
     /// non-conforming. The report is complete; this code makes it gateable.
@@ -267,8 +271,18 @@ pub struct TraceSummaryLine {
     pub tools_executed: Vec<String>,
     /// Distinct tools offered to the provider across all recorded rounds.
     pub tools_offered: Vec<String>,
-    /// Total wall-clock time across every backend call this turn made.
+    /// Legacy total of backend-call wall time. Retained for the v1 wire
+    /// contract; new consumers should use `provider_call_elapsed_ms_sum`,
+    /// whose name makes the scope explicit.
     pub elapsed_ms: u64,
+    /// Whole CLI turn wall time, including deterministic host work, provider
+    /// setup, every provider call, validation, and session persistence.
+    pub turn_elapsed_ms: u64,
+    /// Sum of the wall-clock duration of every recorded provider call.
+    /// This is accumulated provider-call time, not turn-relative elapsed
+    /// time; if a future pipeline runs calls concurrently, the sum may exceed
+    /// `turn_elapsed_ms`.
+    pub provider_call_elapsed_ms_sum: u64,
     /// `"not_applicable"` (ordinary turn) | `"grounded"` | `"ungrounded"` —
     /// derived from whether the turn completed cleanly or ended with one of
     /// the `linked_*` evidence-validation error codes.
@@ -368,6 +382,9 @@ fn is_zero_usize(value: &usize) -> bool {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamLine<'a> {
+    /// Shared human-progress projection derived from the same engine event
+    /// delivered to text and desktop hosts.
+    Progress(cd_core::events::TurnProgress),
     TextDelta {
         text: &'a str,
     },
@@ -388,6 +405,20 @@ pub enum StreamLine<'a> {
     Error {
         code: &'a str,
         message: &'a str,
+    },
+    /// Exact host-validated investigation answer from the typed event.
+    InvestigationAnswer {
+        envelope: &'a cd_core::investigation_answer::AnswerEnvelopeV1,
+    },
+    /// Multi-model stage progress / summary. Host-authored counts and ids only.
+    MultiModelStage {
+        stage: String,
+        phase: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        detail: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<String>,
     },
     /// `--trace summary` (and above). See [`TraceSummaryLine`].
     TraceSummary(TraceSummaryLine),

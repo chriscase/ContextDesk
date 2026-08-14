@@ -21,12 +21,16 @@ export {
   type ImportService,
   type ImportSourceConfidence,
   type TimeService,
+  type TriageAdapterCapability,
+  type TriageRunOptions,
+  type TriageService,
   type TimezoneApplyRequest,
   type TimezoneDeclaration,
   type TimezonePreview,
   type TimezoneSourceStatus,
   type TimezoneState,
   type Unsubscribe,
+  unsupportedTriageService,
 } from "./engine";
 export {
   MockEngineClient,
@@ -35,9 +39,12 @@ export {
   mockPlanToken,
   MOCK_DECLARED_AT_UNIX_SECS,
   type MockScenario,
+  type MockTriageScenario,
 } from "./mock";
 export {
   engineClientConformance,
+  triageClientConformance,
   type ConformanceCheck,
   type ConformanceHarness,
+  type TriageConformanceHarness,
 } from "./conformance";

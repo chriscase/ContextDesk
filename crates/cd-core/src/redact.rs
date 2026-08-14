@@ -10,7 +10,250 @@
 
 #![allow(clippy::string_slice)]
 
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
+
+/// Maximum retained characters in one share-safe diagnostic text field.
+pub const MAX_SHARE_SAFE_DIAGNOSTIC_CHARS: usize = 240;
+
+/// Provider-neutral redaction policy for diagnostics intended to be shared.
+///
+/// This is deliberately stricter than ordinary secret scrubbing: in addition
+/// to credential shapes it removes arbitrary HTTP(S) endpoints, absolute host
+/// paths, and caller-supplied private identifiers. Failure details should be
+/// projected with [`Self::failure_summary`] so raw provider response bodies are
+/// never retained merely because their contents did not match a known secret.
+#[derive(Debug, Clone)]
+pub struct ShareSafeRedactionPolicy {
+    private_identifiers: Vec<Regex>,
+}
+
+impl Default for ShareSafeRedactionPolicy {
+    fn default() -> Self {
+        Self::new(std::iter::empty::<&str>())
+    }
+}
+
+impl ShareSafeRedactionPolicy {
+    /// Build a policy that also removes each exact private identifier,
+    /// case-insensitively. Empty identifiers are ignored.
+    pub fn new<'a>(private_identifiers: impl IntoIterator<Item = &'a str>) -> Self {
+        let private_identifiers = private_identifiers
+            .into_iter()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                RegexBuilder::new(&regex::escape(value))
+                    .case_insensitive(true)
+                    .build()
+                    .expect("escaped literal always compiles")
+            })
+            .collect();
+        Self {
+            private_identifiers,
+        }
+    }
+
+    /// Redact and bound arbitrary diagnostic text.
+    pub fn redact_text(&self, raw: &str) -> String {
+        let mut out = scrub_secrets(raw);
+        out = authorization_value_regex()
+            .replace_all(&out, "[credential-redacted]")
+            .into_owned();
+        out = bearer_value_regex()
+            .replace_all(&out, "[credential-redacted]")
+            .into_owned();
+        out = http_endpoint_regex()
+            .replace_all(&out, "[endpoint-redacted]")
+            .into_owned();
+        out = crate::turn_trace::opaque_absolute_paths(&out);
+        for identifier in &self.private_identifiers {
+            out = identifier
+                .replace_all(&out, "[identity-redacted]")
+                .into_owned();
+        }
+        truncate_diagnostic_chars(&out)
+    }
+
+    /// Return a stable, useful failure category without retaining the raw
+    /// provider error/body. Classification is intentionally coarse and based
+    /// only on the transient input; the returned string contains no excerpt.
+    pub fn failure_summary(&self, raw: &str) -> String {
+        if raw.starts_with("failure category: ") && raw.ends_with("; raw provider detail omitted") {
+            return self.redact_text(raw);
+        }
+        // Host-owned linked-triage authority summaries contain only fixed
+        // event labels and whitelisted fallback reasons. Preserve them so a
+        // share-safe diagnostic distinguishes an unentered typed path from a
+        // rejected typed answer; no provider text reaches this branch.
+        if raw.contains("typed_v1=absent; multi_stage_events=") {
+            return self.redact_text(raw);
+        }
+        if raw.contains("typed_v1 passed=") && raw.contains("failed_dimensions=[") {
+            return self.redact_text(raw);
+        }
+        let lower = raw.to_ascii_lowercase();
+        let category = if contains_any(&lower, &["cancelled", "canceled", "interrupted"]) {
+            "cancelled"
+        } else if contains_any(&lower, &["timed out", "timeout", "deadline"]) {
+            "timeout"
+        } else if contains_any(
+            &lower,
+            &[
+                "401",
+                "403",
+                "unauthorized",
+                "forbidden",
+                "authentication",
+                "authorization",
+                "api-key",
+                "api_key",
+                "api key",
+                "bearer",
+            ],
+        ) {
+            "authentication"
+        } else if contains_any(
+            &lower,
+            &["404", "not found", "unknown model", "unknown route"],
+        ) {
+            "model_or_route_not_found"
+        } else if contains_any(&lower, &["429", "rate limit", "rate-limit", "quota"]) {
+            "rate_limited"
+        } else if contains_any(
+            &lower,
+            &[
+                "parse",
+                "decode",
+                "invalid json",
+                "invalid response",
+                "schema",
+                "unexpected response",
+            ],
+        ) {
+            "invalid_response"
+        } else if contains_any(
+            &lower,
+            &[
+                "connection",
+                "connect",
+                "dns",
+                "socket",
+                "transport",
+                "tls",
+                "request failed",
+            ],
+        ) {
+            "transport"
+        } else if contains_any(
+            &lower,
+            &["500", "502", "503", "504", "upstream", "internal server"],
+        ) {
+            "upstream"
+        } else if contains_any(
+            &lower,
+            &[
+                "cleanup",
+                "was not removed",
+                "failed to write",
+                "failed to read",
+                "i/o",
+            ],
+        ) {
+            "local_io"
+        } else if lower.contains("diagnostic_fault") {
+            // Host-authored projection inconsistency: a typed envelope passed
+            // while the visible answer projection was empty. This is a
+            // diagnostic fault, not provider compatibility or usefulness
+            // evidence. Keep it after provider-signal buckets so a real
+            // transport/auth/upstream failure still wins.
+            "diagnostic_fault"
+        } else if lower.contains("tool_called=") && lower.contains("grounding=") {
+            // Host-observed grounding outcome, not a provider fault. The gateway
+            // diagnostic's tool lane reports `tool_called=<bool> grounding=<enum>`
+            // for a turn that *completed* — the provider answered, and
+            // ContextDesk's own evidence gate declined to call the answer
+            // grounded. Without this arm the string matches no provider bucket
+            // and lands in the `provider_error` fallback, which blames the
+            // gateway or model for a host-side refusal.
+            //
+            // Deliberately ordered after every provider-signal bucket above, so
+            // a real transport/auth/rate-limit/upstream signal still wins even
+            // when these host tokens are also present. Still a failure: this
+            // never converts a declined lane into a pass.
+            "host_grounding_refused"
+        } else if contains_any(
+            &lower,
+            &[
+                "no visible terminal answer",
+                "empty visible answer",
+                "empty_terminal_answer",
+            ],
+        ) {
+            // A completed workflow that emitted no user-visible answer is
+            // materially different from malformed JSON or a scorer failure.
+            // Keep this host-observed distinction while still discarding all
+            // provider text and any transcript content.
+            "empty_terminal_answer"
+        } else if contains_any(
+            &lower,
+            &[
+                "contract",
+                "marker",
+                "expected",
+                "failed_dimensions",
+                "scorer",
+                "answer",
+                "cites_current",
+            ],
+        ) {
+            "response_contract"
+        } else {
+            "provider_error"
+        };
+        format!("failure category: {category}; raw provider detail omitted")
+    }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn authorization_value_regex() -> &'static Regex {
+    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?i)\b(authorization|proxy-authorization|x-api-key|api[-_ ]?key)\b\s*[:=]\s*["']?(?:[a-z][a-z0-9_-]*\s+)?[^\s,;}\]]+"#,
+        )
+        .expect("static authorization regex compiles")
+    })
+}
+
+fn bearer_value_regex() -> &'static Regex {
+    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"(?i)\bbearer\s+[^\s,;}\]]+").expect("static bearer regex compiles")
+    })
+}
+
+fn http_endpoint_regex() -> &'static Regex {
+    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r#"(?i)\bhttps?://[^\s<>\"']+"#).expect("static endpoint regex compiles")
+    })
+}
+
+fn truncate_diagnostic_chars(value: &str) -> String {
+    let mut chars = value.chars();
+    let mut retained = chars
+        .by_ref()
+        .take(MAX_SHARE_SAFE_DIAGNOSTIC_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        retained.push('…');
+    }
+    retained
+}
 
 /// Result of scrubbing a candidate for durable storage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,6 +303,9 @@ pub fn redact_candidate(s: &str) -> RedactionResult {
     }
     if redact_bearer(&mut out) {
         push_class(&mut classes, "bearer");
+    }
+    if redact_url_embedded_credentials(&mut out) {
+        push_class(&mut classes, "url_credentials");
     }
     if redact_high_entropy(&mut out) {
         push_class(&mut classes, "high_entropy");
@@ -419,6 +665,53 @@ fn redact_bearer(out: &mut String) -> bool {
     changed
 }
 
+/// Redact credential values embedded in connection strings or URL query parameters.
+///
+/// These values are often too short for the high-entropy heuristic, but must not
+/// reach durable stores or model-visible context.
+fn redact_url_embedded_credentials(out: &mut String) -> bool {
+    const KEYS: &[&str] = &[
+        "password=",
+        "passwd=",
+        "pwd=",
+        "secret=",
+        "api_key=",
+        "apikey=",
+        "access_token=",
+        "client_secret=",
+    ];
+
+    let mut changed = false;
+    for key in KEYS {
+        let mut search_from = 0usize;
+        let mut lower = out.to_ascii_lowercase();
+        while let Some(rel) = lower[search_from..].find(key) {
+            let start = search_from + rel;
+            let value_start = start + key.len();
+            let rest = &out[value_start..];
+            let value_len = rest
+                .chars()
+                .take_while(|c| {
+                    !matches!(*c, '&' | ';' | ' ' | '\t' | '\n' | '\r' | '"' | '\'' | ')')
+                })
+                .map(char::len_utf8)
+                .sum::<usize>();
+            if value_len == 0 {
+                search_from = value_start;
+                continue;
+            }
+
+            out.replace_range(value_start..value_start + value_len, "***");
+            changed = true;
+            // Replacement text and keys are ASCII, keeping this byte position
+            // at a UTF-8 boundary for the next lowercase scan.
+            search_from = value_start + 3;
+            lower = out.to_ascii_lowercase();
+        }
+    }
+    changed
+}
+
 fn redact_high_entropy(out: &mut String) -> bool {
     let mut changed = false;
     let bytes = out.clone();
@@ -473,6 +766,16 @@ fn looks_high_entropy(tok: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrubs_connection_string_credential_values_preserving_other_parameters() {
+        let raw = "url=jdbc:postgresql://host:5432/orders?user=svc_orders&database=orders&password=hunter2-not-real";
+        let scrubbed = scrub_secrets(raw);
+        assert!(!scrubbed.contains("hunter2-not-real"), "{scrubbed}");
+        assert!(scrubbed.contains("password=***"), "{scrubbed}");
+        assert!(scrubbed.contains("user=svc_orders"), "{scrubbed}");
+        assert!(scrubbed.contains("database=orders"), "{scrubbed}");
+    }
 
     #[test]
     fn scrubs_openai_and_bearer_like_audit() {
@@ -585,6 +888,242 @@ mod tests {
         assert!(
             r.classes.iter().any(|c| c == "high_entropy") || r.text.contains("[REDACTED_SECRET]"),
             "{r:?}"
+        );
+    }
+
+    #[test]
+    fn share_safe_policy_redacts_arbitrary_endpoints_paths_headers_and_exact_ids() {
+        let profile = "private-profile-73";
+        let model = "exact/model:customer-9";
+        let policy = ShareSafeRedactionPolicy::new([profile, model]);
+        let raw = format!(
+            "profile: {profile}, model: {model}, nested={{error: {{url: \
+             https://tenant.example.test/v1/chat, fallback: \
+             http://10.0.0.8:8080/models, path: /private/tmp/customer/body.json, \
+             home: /home/alice/.config/contextdesk/config.json, \
+             mac_home: /Users/alice/Library/Application Support/ContextDesk/config.json, \
+             windows_home: C:\\Users\\alice\\AppData\\Roaming\\ContextDesk\\config.json, \
+             Authorization: Basic opaque-value, authorization=Bearer second-value, \
+             X-API-Key: third-value, api_key=fourth-value, standalone: Bearer fifth-value, \
+             }}}}"
+        );
+
+        let safe = policy.redact_text(&raw);
+        for forbidden in [
+            "https://",
+            "http://",
+            "/private/tmp",
+            "/home/alice",
+            "/Users/alice",
+            "C:\\Users\\alice",
+            "Authorization",
+            "authorization",
+            "Bearer",
+            "X-API-Key",
+            "api_key",
+            "opaque-value",
+            "second-value",
+            "third-value",
+            "fourth-value",
+            "fifth-value",
+            profile,
+            model,
+        ] {
+            assert!(!safe.contains(forbidden), "{forbidden:?} leaked in {safe}");
+        }
+        assert!(safe.contains("[endpoint-redacted]"), "{safe}");
+        assert!(safe.contains("[local-path]"), "{safe}");
+        assert!(safe.contains("[identity-redacted]"), "{safe}");
+    }
+
+    #[test]
+    fn share_safe_failure_summary_preserves_category_but_never_raw_body() {
+        let policy = ShareSafeRedactionPolicy::new(["profile-private", "model-private"]);
+        let raw = r#"provider returned 401 from https://private.example/v1:
+            {"error":{"message":"read /private/tmp/body with Authorization: Bearer arbitrary"},
+            "model":"model-private","profile":"profile-private"}"#;
+        let once = policy.failure_summary(raw);
+        assert_eq!(
+            once,
+            "failure category: authentication; raw provider detail omitted"
+        );
+        assert_eq!(
+            policy.failure_summary(&once),
+            once,
+            "policy must be idempotent"
+        );
+        for forbidden in [
+            "https://",
+            "/private/tmp",
+            "Authorization",
+            "Bearer",
+            "arbitrary",
+            "model-private",
+            "profile-private",
+            "error",
+        ] {
+            assert!(!once.contains(forbidden), "{forbidden:?} leaked in {once}");
+        }
+    }
+
+    #[test]
+    fn share_safe_failure_summary_distinguishes_empty_terminal_answer() {
+        let policy = ShareSafeRedactionPolicy::default();
+        let raw = "attempt 1: no visible terminal answer; terminal_text_chars=0, provider_rounds=4, empty_visible_answer=true, finish_reason=stop, turn_terminal=linked_invalid_grounded_answer";
+        assert_eq!(
+            policy.failure_summary(raw),
+            "failure category: empty_terminal_answer; raw provider detail omitted"
+        );
+    }
+
+    #[test]
+    fn share_safe_failure_summary_distinguishes_diagnostic_fault_from_response_contract() {
+        let policy = ShareSafeRedactionPolicy::default();
+        let raw = "typed envelope passed but visible answer projection was empty; diagnostic_fault; aggregate=all_attempts_pass";
+        assert_eq!(
+            policy.failure_summary(raw),
+            "failure category: diagnostic_fault; raw provider detail omitted"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Host grounding refusal must not be attributed to the provider.
+    //
+    // The gateway diagnostic's tool lane reports a *completed* turn that the
+    // host's own evidence gate declined, using the exact host-authored shape
+    // `tool_called=<bool> grounding=<enum>`. Before this category existed the
+    // string matched no bucket and fell through to `provider_error`, so a
+    // share-safe report blamed the gateway/model for a host-side refusal.
+    // ---------------------------------------------------------------------
+
+    /// The exact host-authored detail emitted by the tool-continuation lane.
+    fn grounding_lane_detail(tool_called: bool, grounding: &str) -> String {
+        format!("tool_called={tool_called} grounding={grounding}")
+    }
+
+    #[test]
+    fn share_safe_failure_summary_attributes_a_declined_grounding_lane_to_the_host() {
+        let policy = ShareSafeRedactionPolicy::default();
+        let summary = policy.failure_summary(&grounding_lane_detail(true, "ungrounded"));
+        assert_eq!(
+            summary,
+            "failure category: host_grounding_refused; raw provider detail omitted"
+        );
+        assert!(
+            !summary.contains("provider_error"),
+            "a completed turn declined by the host's evidence gate must never be \
+             reported as a provider fault: {summary}"
+        );
+    }
+
+    #[test]
+    fn share_safe_failure_summary_covers_every_grounding_lane_detail_the_host_can_emit() {
+        let policy = ShareSafeRedactionPolicy::default();
+        // `grounding_status` is a closed host-owned vocabulary, and the lane
+        // reports it alongside either tool_called value.
+        for tool_called in [true, false] {
+            for grounding in ["ungrounded", "grounded", "not_applicable"] {
+                let summary =
+                    policy.failure_summary(&grounding_lane_detail(tool_called, grounding));
+                assert_eq!(
+                    summary,
+                    "failure category: host_grounding_refused; raw provider detail omitted",
+                    "tool_called={tool_called} grounding={grounding} must stay host-attributed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_grounding_category_is_still_a_failure_and_retains_no_raw_detail() {
+        // Mutation guard: weakening the arm into a pass-shaped or empty summary
+        // (or one that echoes the raw lane detail) must fail here.
+        let policy = ShareSafeRedactionPolicy::new(["profile-private", "model-private"]);
+        let raw = format!(
+            "{} model=model-private profile=profile-private body={{\"hint\":\"read /private/tmp/x\"}}",
+            grounding_lane_detail(true, "ungrounded")
+        );
+        let summary = policy.failure_summary(&raw);
+        assert!(
+            summary.starts_with("failure category: "),
+            "every summary must present as a failure category: {summary}"
+        );
+        assert!(
+            summary.ends_with("; raw provider detail omitted"),
+            "every summary must disclaim the omitted detail: {summary}"
+        );
+        assert_eq!(
+            policy.failure_summary(&summary),
+            summary,
+            "policy must stay idempotent for the new category"
+        );
+        for forbidden in [
+            "tool_called=",
+            "grounding=",
+            "model-private",
+            "profile-private",
+            "/private/tmp",
+            "hint",
+        ] {
+            assert!(
+                !summary.contains(forbidden),
+                "{forbidden:?} leaked in {summary}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_provider_signal_still_outranks_the_host_grounding_tokens() {
+        // Mutation guard: hoisting the host arm above the provider buckets would
+        // mask a genuine gateway fault behind a host-attributed category. Each
+        // case carries the host tokens *and* a provider signal; the provider
+        // signal must win, so an operator never loses a real outage.
+        let policy = ShareSafeRedactionPolicy::default();
+        let host = grounding_lane_detail(true, "ungrounded");
+        for (signal, expected) in [
+            ("run cancelled by operator", "cancelled"),
+            ("deadline exceeded before terminal answer", "timeout"),
+            ("provider returned 401 unauthorized", "authentication"),
+            ("unknown model for this route", "model_or_route_not_found"),
+            ("provider returned 429 rate limit", "rate_limited"),
+            ("could not decode invalid json envelope", "invalid_response"),
+            ("tls connection reset", "transport"),
+            ("upstream returned 503", "upstream"),
+        ] {
+            let summary = policy.failure_summary(&format!("{host}; {signal}"));
+            assert_eq!(
+                summary,
+                format!("failure category: {expected}; raw provider detail omitted"),
+                "provider signal {signal:?} must outrank the host grounding tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn one_grounding_token_alone_is_not_enough_to_claim_a_host_refusal() {
+        // Mutation guard: relaxing the conjunction to a disjunction would let
+        // arbitrary text that merely mentions one token be re-attributed away
+        // from the provider. Both host-authored tokens are required.
+        let policy = ShareSafeRedactionPolicy::default();
+        for raw in [
+            "tool_called=true but the response was unusable",
+            "grounding=ungrounded per the downstream summary",
+        ] {
+            assert_eq!(
+                policy.failure_summary(raw),
+                "failure category: provider_error; raw provider detail omitted",
+                "half of the host shape must not claim a host refusal: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_failures_still_fall_back_to_provider_error() {
+        // Mutation guard: the new arm must not swallow the fallback bucket.
+        let policy = ShareSafeRedactionPolicy::default();
+        assert_eq!(
+            policy.failure_summary("something entirely unclassified happened"),
+            "failure category: provider_error; raw provider detail omitted"
         );
     }
 }

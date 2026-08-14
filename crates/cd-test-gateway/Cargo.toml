@@ -1,0 +1,17 @@
+[package]
+name = "cd-test-gateway"
+description = "Hermetic scripted HTTP/1.1 mock gateway for wire-level provider conformance and fault-injection tests. Test-support only; not shipped in any product binary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+tokio = { workspace = true, features = ["net"] }
+serde_json = { workspace = true }
+sha2 = "0.10"
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["net", "test-util"] }

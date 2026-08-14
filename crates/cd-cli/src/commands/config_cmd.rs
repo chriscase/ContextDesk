@@ -5,7 +5,7 @@
 //! - `cli.toml` (this crate's own [`crate::config`] schema) — CLI-only
 //!   behavior preferences (output format, color, the CLI's profile pointer).
 //! - the shared `AppConfig` (`cd_core::config`, same file the desktop app
-//!   reads/writes) — provider profiles (keychain refs only, never a raw
+//!   reads/writes) — provider profiles (credential refs only, never a raw
 //!   secret) and the configured default timezone.
 //!
 //! Data-location configuration is report-only here: `--data-dir` /
@@ -15,16 +15,15 @@
 //! what was chosen, never choose it itself (there is nothing to read a
 //! saved choice from until a config file exists at that location).
 //!
-//! A configured credential is committed to the OS keychain as the single
-//! last fallible step of the whole command — after both config files are
-//! written, not before — so a failure anywhere in the run can never orphan
-//! a stored secret that nothing references (see `run_init`'s doc comment).
+//! A credential selected for Keychain import is committed as the single last
+//! fallible step of the whole command. A protected-file reference is validated
+//! and saved directly and is never copied into Keychain.
 //! Every wizard prompt writes to stderr, never stdout, so an interactive
 //! run under `--json`/`--jsonl` still emits one clean, parseable envelope
 //! on stdout.
 
-use crate::adapters::{save_app_config, Paths};
-use crate::cli::{ConfigAction, ConfigInitArgs, ProviderKindArg};
+use crate::adapters::{load_app_config, save_app_config, Paths};
+use crate::cli::{ConfigAction, ConfigInitArgs, DeadlineAction, EffortAction, ProviderKindArg};
 use crate::config::{
     global_config_path, load_layer, project_config_path, save_layer, CliConfigFile, ImportSection,
     OutputSection, ResolvedConfig, WorkflowSection,
@@ -32,9 +31,18 @@ use crate::config::{
 use crate::envelope::{CliError, CliResult, Render};
 use crate::provider_probe;
 use cd_core::config::{is_valid_iana_timezone, AppConfig};
-use cd_core::keychain_store::{key_ref_for_profile, SecretStore};
+use cd_core::deadline_controls::{
+    apply_auto_policy, apply_explicit_deadline_ms, deadline_status, format_deadline_ms,
+    parse_deadline_duration, DeadlineStatus,
+};
+use cd_core::keychain_store::{
+    file_secret_ref, key_ref_for_profile, read_file_secret_ref, SecretStore,
+};
 use cd_core::providers::{
     descriptor_for, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
+};
+use cd_core::reasoning_effort::{
+    effort_status, ReasoningEffortLevel, ReasoningEffortStatus, REASONING_EFFORT_SCHEMA_V1,
 };
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use serde::Serialize;
@@ -58,12 +66,17 @@ pub struct InitOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential_configured: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_timezone: Option<String>,
     /// Human-readable outcome of the optional connectivity check — never
     /// present unless `--check-connection` (or its interactive prompt) was
     /// accepted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connectivity_check: Option<String>,
+    /// Number of model ids saved from the setup catalog request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovered_models: Option<usize>,
 }
 
 impl Render for InitOutput {
@@ -92,7 +105,9 @@ impl Render for InitOutput {
             lines.push(format!(
                 "credential: {}",
                 if self.credential_configured.unwrap_or(false) {
-                    "configured (keychain reference only)"
+                    self.credential_source
+                        .as_deref()
+                        .unwrap_or("configured reference")
                 } else {
                     "not configured"
                 }
@@ -103,6 +118,11 @@ impl Render for InitOutput {
         }
         if let Some(check) = &self.connectivity_check {
             lines.push(format!("connectivity check: {check}"));
+        }
+        if let Some(count) = self.discovered_models {
+            lines.push(format!(
+                "model catalog: {count} discovered (run `contextdesk models` for role/readiness details)"
+            ));
         }
         lines.join("\n")
     }
@@ -215,6 +235,170 @@ pub async fn run(
                 project: project.display().to_string(),
             }))
         }
+        ConfigAction::Deadline(action) => run_deadline(action, paths, app_cfg),
+        ConfigAction::Effort(action) => run_effort(action, paths, app_cfg),
+    }
+}
+
+/// Read-only / mutating reasoning-effort controls for AppConfig.reasoning_effort.
+fn run_effort(
+    action: &EffortAction,
+    paths: &Paths,
+    app_cfg: &AppConfig,
+) -> CliResult<Box<dyn Render>> {
+    match action {
+        EffortAction::Show => Ok(Box::new(EffortCommandOutput {
+            schema: REASONING_EFFORT_SCHEMA_V1,
+            action: "show",
+            status: effort_status(&app_cfg.reasoning_effort),
+            changed: false,
+        })),
+        EffortAction::Auto => {
+            let mut cfg = load_app_config(paths)?;
+            // Only the effort settings field is rewritten.
+            cfg.reasoning_effort.apply_omit();
+            save_app_config(paths, &cfg)?;
+            Ok(Box::new(EffortCommandOutput {
+                schema: REASONING_EFFORT_SCHEMA_V1,
+                action: "auto",
+                status: effort_status(&cfg.reasoning_effort),
+                changed: true,
+            }))
+        }
+        EffortAction::Set { level } => {
+            let level =
+                ReasoningEffortLevel::parse(level).map_err(|e| CliError::user(e.to_string()))?;
+            let mut cfg = load_app_config(paths)?;
+            cfg.reasoning_effort.apply_level(level);
+            save_app_config(paths, &cfg)?;
+            Ok(Box::new(EffortCommandOutput {
+                schema: REASONING_EFFORT_SCHEMA_V1,
+                action: "set",
+                status: effort_status(&cfg.reasoning_effort),
+                changed: true,
+            }))
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct EffortCommandOutput {
+    schema: &'static str,
+    action: &'static str,
+    #[serde(flatten)]
+    status: ReasoningEffortStatus,
+    changed: bool,
+}
+
+impl Render for EffortCommandOutput {
+    fn render_text(&self) -> String {
+        let mut lines = vec![
+            format!("reasoning-effort policy: {}", self.status.policy),
+            format!(
+                "level: {}",
+                self.status
+                    .level
+                    .as_deref()
+                    .unwrap_or("(omit / provider default)")
+            ),
+            self.status.note.clone(),
+        ];
+        if self.changed {
+            lines.push(format!("saved via config effort {}", self.action));
+        }
+        lines.join("\n")
+    }
+
+    fn render_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("EffortCommandOutput is always serializable")
+    }
+}
+
+/// Read-only / mutating whole-turn deadline controls for AppConfig.router.
+fn run_deadline(
+    action: &DeadlineAction,
+    paths: &Paths,
+    app_cfg: &AppConfig,
+) -> CliResult<Box<dyn Render>> {
+    match action {
+        DeadlineAction::Show => {
+            let status = deadline_status(&app_cfg.router);
+            Ok(Box::new(DeadlineCommandOutput {
+                action: "show",
+                status,
+                changed: false,
+            }))
+        }
+        DeadlineAction::Auto => {
+            // Reload so concurrent GUI edits are not clobbered beyond the two
+            // deadline fields we intentionally touch.
+            let mut cfg = load_app_config(paths)?;
+            apply_auto_policy(&mut cfg.router);
+            save_app_config(paths, &cfg)?;
+            Ok(Box::new(DeadlineCommandOutput {
+                action: "auto",
+                status: deadline_status(&cfg.router),
+                changed: true,
+            }))
+        }
+        DeadlineAction::Set { duration } => {
+            let ms =
+                parse_deadline_duration(duration).map_err(|e| CliError::user(e.to_string()))?;
+            let mut cfg = load_app_config(paths)?;
+            apply_explicit_deadline_ms(&mut cfg.router, ms)
+                .map_err(|e| CliError::user(e.to_string()))?;
+            save_app_config(paths, &cfg)?;
+            Ok(Box::new(DeadlineCommandOutput {
+                action: "set",
+                status: deadline_status(&cfg.router),
+                changed: true,
+            }))
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DeadlineCommandOutput {
+    action: &'static str,
+    #[serde(flatten)]
+    status: DeadlineStatus,
+    changed: bool,
+}
+
+impl Render for DeadlineCommandOutput {
+    fn render_text(&self) -> String {
+        let policy = if self.status.deadline_is_explicit {
+            "custom (explicit whole-turn ceiling)"
+        } else {
+            "auto (adaptive by provider class)"
+        };
+        let mut lines = vec![
+            format!("deadline policy: {policy}"),
+            format!(
+                "stored ceiling: {} ({} ms)",
+                self.status.deadline_human, self.status.deadline_ms
+            ),
+        ];
+        if !self.status.deadline_is_explicit {
+            lines.push(
+                "effective total under auto: 3m for managed profiles, 5m for local/private \
+                 (ContextDesk may finish sooner)."
+                    .into(),
+            );
+        } else {
+            lines.push(format!(
+                "this is the maximum whole-turn time ({}); ContextDesk may finish sooner.",
+                format_deadline_ms(self.status.deadline_ms)
+            ));
+        }
+        if self.changed {
+            lines.push(format!("saved via config deadline {}", self.action));
+        }
+        lines.join("\n")
+    }
+
+    fn render_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("DeadlineCommandOutput is always serializable")
     }
 }
 
@@ -321,15 +505,41 @@ async fn run_init(
         save_app_config(paths, &cfg)?;
     }
 
+    // Save the catalog before the credential, preserving the credential write
+    // as the command's final fallible step. The snapshot contains model ids
+    // plus endpoint/profile fingerprints only, never the key or raw endpoint.
+    if let Some(setup) = &provider_setup {
+        if !setup.catalog_models.is_empty() {
+            let profile =
+                setup.cfg.providers.active().ok_or_else(|| {
+                    CliError::internal("configured provider has no active profile")
+                })?;
+            let store_path =
+                cd_core::capability_qualification::qualification_store_path(&paths.config_dir);
+            let mut store =
+                cd_core::capability_qualification::load_qualification_store(&store_path)
+                    .map_err(|error| CliError::internal(format!("load model catalog: {error}")))?;
+            store.note_catalog(
+                &profile.id,
+                &profile.base_url,
+                setup.catalog_models.iter().cloned(),
+            );
+            cd_core::capability_qualification::save_qualification_store(&store_path, &store)
+                .map_err(|error| CliError::internal(format!("save model catalog: {error}")))?;
+        }
+    }
+
     // The one remaining fallible step, deliberately last: see this
     // function's doc comment for why the credential is stored here and not
     // inside `configure_provider_profile`.
     if let Some(setup) = &provider_setup {
-        if let Some(secret) = &setup.secret {
-            let key_ref = key_ref_for_profile(&setup.profile_id);
-            secrets
-                .set(&key_ref, secret)
-                .map_err(|e| CliError::internal(format!("store credential: {e}")))?;
+        if setup.persist_secret {
+            if let Some(secret) = &setup.secret {
+                let key_ref = key_ref_for_profile(&setup.profile_id);
+                secrets
+                    .set(&key_ref, secret)
+                    .map_err(|e| CliError::internal(format!("store credential: {e}")))?;
+            }
         }
     }
 
@@ -341,10 +551,17 @@ async fn run_init(
         provider_profile_id: provider_setup.as_ref().map(|s| s.profile_id.clone()),
         provider_kind: provider_setup.as_ref().map(|s| s.kind_label.to_string()),
         credential_configured: provider_setup.as_ref().map(|s| s.credential_configured),
+        credential_source: provider_setup
+            .as_ref()
+            .map(|s| s.credential_source.to_string()),
         default_timezone: timezone_written,
         connectivity_check: provider_setup
             .as_ref()
             .and_then(|s| s.probe_summary.clone()),
+        discovered_models: provider_setup
+            .as_ref()
+            .map(|setup| setup.catalog_models.len())
+            .filter(|count| *count > 0),
     }))
 }
 
@@ -455,8 +672,11 @@ struct ProviderSetupResult {
     kind_label: &'static str,
     credential_configured: bool,
     secret: Option<String>,
+    persist_secret: bool,
+    credential_source: &'static str,
     timezone: Option<String>,
     probe_summary: Option<String>,
+    catalog_models: Vec<String>,
 }
 
 async fn configure_provider_profile(
@@ -516,35 +736,7 @@ async fn configure_provider_profile(
     validate_provider_url(&base_url, &policy)
         .map_err(|e| CliError::user(format!("invalid base URL: {e}")))?;
 
-    let chat_model = if let Some(m) = &args.chat_model {
-        m.clone()
-    } else if interactive {
-        let default = if matches!(kind, ProviderKind::Ollama) {
-            "mistral"
-        } else {
-            ""
-        };
-        let prompt = if default.is_empty() {
-            "Chat model".to_string()
-        } else {
-            format!("Chat model (default {default})")
-        };
-        let raw = ask_line(stdin, stderr, &prompt)?;
-        if raw.is_empty() {
-            default.to_string()
-        } else {
-            raw
-        }
-    } else if matches!(kind, ProviderKind::Ollama) {
-        "mistral".to_string()
-    } else {
-        return Err(CliError::user(
-            "--chat-model is required for this provider kind in --non-interactive mode",
-        ));
-    };
-    if chat_model.trim().is_empty() {
-        return Err(CliError::user("a chat model id is required"));
-    }
+    let requested_chat_model = args.chat_model.clone();
 
     // An isolated profile must never collide with the desktop-shared
     // keychain entry for the same provider kind: the default id, unlike an
@@ -570,8 +762,73 @@ async fn configure_provider_profile(
     // file fails before anything else runs, but NOT stored anywhere yet —
     // see this module's `run_init` doc comment for why storing is deferred
     // to the very end of the whole command.
-    let secret = resolve_credential(args, descriptor.needs_api_key, interactive, stdin, stderr)?;
+    let direct_file_ref = args
+        .api_key_file_ref
+        .as_deref()
+        .map(file_secret_ref)
+        .transpose()
+        .map_err(|error| CliError::user(error.to_string()))?;
+    let secret = if let Some(reference) = direct_file_ref.as_deref() {
+        read_file_secret_ref(reference).map_err(|error| CliError::user(error.to_string()))?
+    } else {
+        resolve_credential(args, descriptor.needs_api_key, interactive, stdin, stderr)?
+    };
     let credential_configured = secret.is_some();
+
+    let want_check = if args.check_connection {
+        true
+    } else if interactive {
+        ask_yes_no(
+            stdin,
+            stderr,
+            "Discover available models and test the connection now? (catalog request only; never corpus content)",
+            true,
+        )?
+    } else {
+        false
+    };
+
+    // The profile holds a reference only. Direct protected files keep their
+    // exact `file:` reference; imported values use the deterministic Keychain
+    // reference and are written only at the end of `run_init`.
+    let api_key_ref = direct_file_ref
+        .clone()
+        .or_else(|| secret.as_ref().map(|_| key_ref_for_profile(&profile_id)));
+    let provisional_model = requested_chat_model.clone().unwrap_or_else(|| {
+        if matches!(kind, ProviderKind::Ollama) {
+            "mistral".into()
+        } else {
+            "catalog-probe".into()
+        }
+    });
+    let mut profile = ProviderProfile {
+        id: profile_id.clone(),
+        label: profile_label,
+        kind,
+        base_url,
+        api_key_ref,
+        chat_model: provisional_model,
+        embedding_model: None,
+        embedding_base_url: None,
+        capabilities: descriptor.default_capabilities,
+        local_only: descriptor.is_local,
+        deadline_preference: ProviderDeadlinePreference::Auto,
+    };
+    let (probe_summary, catalog_models) = if want_check {
+        let (verdict, models) =
+            provider_probe::probe_provider_catalog(&profile, secret.clone(), paths.isolated).await;
+        (Some(verdict.summary()), models)
+    } else {
+        (None, Vec::new())
+    };
+    profile.chat_model = choose_setup_chat_model(
+        requested_chat_model,
+        kind,
+        interactive,
+        &catalog_models,
+        stdin,
+        stderr,
+    )?;
 
     let timezone = if let Some(tz) = &args.default_timezone {
         if !is_valid_iana_timezone(tz) {
@@ -599,39 +856,6 @@ async fn configure_provider_profile(
         None
     };
 
-    let want_check = if args.check_connection {
-        true
-    } else if interactive {
-        ask_yes_no(
-            stdin,
-            stderr,
-            "Test connection now? (sends only the base URL and, if configured, the key — never corpus content)",
-            false,
-        )?
-    } else {
-        false
-    };
-
-    // The keychain ref this profile WILL be stored under — computed here,
-    // deterministically, from the profile id alone. Nothing is written to
-    // the keychain yet (see `run_init`); the profile can already carry the
-    // reference it will resolve to once it lands.
-    let api_key_ref = secret.as_ref().map(|_| key_ref_for_profile(&profile_id));
-
-    let profile = ProviderProfile {
-        id: profile_id.clone(),
-        label: profile_label,
-        kind,
-        base_url,
-        api_key_ref,
-        chat_model,
-        embedding_model: None,
-        embedding_base_url: None,
-        capabilities: descriptor.default_capabilities,
-        local_only: descriptor.is_local,
-        deadline_preference: ProviderDeadlinePreference::Auto,
-    };
-
     let mut cfg = app_cfg.clone();
     cfg.providers.profiles.retain(|p| p.id != profile.id);
     cfg.providers.profiles.push(profile.clone());
@@ -640,25 +864,119 @@ async fn configure_provider_profile(
         cfg.default_timezone = Some(tz.clone());
     }
 
-    let probe_summary = if want_check {
-        Some(
-            provider_probe::probe_provider(&profile, secret.clone(), paths.isolated)
-                .await
-                .summary(),
-        )
-    } else {
-        None
-    };
-
     Ok(ProviderSetupResult {
         cfg,
         profile_id,
         kind_label: descriptor.default_label,
         credential_configured,
         secret,
+        persist_secret: direct_file_ref.is_none(),
+        credential_source: if direct_file_ref.is_some() {
+            "protected_file"
+        } else if credential_configured {
+            "keychain"
+        } else {
+            "none"
+        },
         timezone,
         probe_summary,
+        catalog_models,
     })
+}
+
+fn choose_setup_chat_model(
+    requested: Option<String>,
+    kind: ProviderKind,
+    interactive: bool,
+    catalog_models: &[String],
+    stdin: &io::Stdin,
+    stderr: &mut io::Stderr,
+) -> CliResult<String> {
+    if let Some(model) = requested.map(|model| model.trim().to_string()) {
+        if model.is_empty() {
+            return Err(CliError::user("a chat model id is required"));
+        }
+        return Ok(model);
+    }
+    if !interactive {
+        if matches!(kind, ProviderKind::Ollama) {
+            return Ok("mistral".into());
+        }
+        return Err(CliError::user(
+            "--chat-model is required in --non-interactive mode; run `contextdesk models discover` to inspect the catalog",
+        ));
+    }
+
+    let mut candidates = catalog_models
+        .iter()
+        .filter(|model| {
+            matches!(
+                cd_core::model_role_hints::classify_model_role(model).role,
+                cd_core::model_role_hints::ModelRoleHint::Investigator
+                    | cd_core::model_role_hints::ModelRoleHint::Unknown
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    candidates = cd_core::model_role_hints::sort_ids_for_chat_picker(&candidates);
+    if !candidates.is_empty() {
+        if candidates.len() > 20 {
+            let filter = ask_line(
+                stdin,
+                stderr,
+                "The gateway has many chat candidates. Filter model ids (blank = first 20 recommended)",
+            )?;
+            if !filter.is_empty() {
+                let needle = filter.to_ascii_lowercase();
+                candidates.retain(|model| model.to_ascii_lowercase().contains(&needle));
+            }
+            candidates.truncate(20);
+        }
+        if !candidates.is_empty() {
+            writeln!(
+                stderr,
+                "Available chat candidates (role suggested by name):"
+            )
+            .map_err(|error| CliError::internal(error.to_string()))?;
+            for (index, model) in candidates.iter().enumerate() {
+                writeln!(stderr, "  {}) {model}", index + 1)
+                    .map_err(|error| CliError::internal(error.to_string()))?;
+            }
+            let answer = ask_line(
+                stdin,
+                stderr,
+                "Choose a model number or enter an exact model id",
+            )?;
+            if let Ok(index) = answer.parse::<usize>() {
+                if let Some(model) = index.checked_sub(1).and_then(|index| candidates.get(index)) {
+                    return Ok(model.clone());
+                }
+                return Err(CliError::user(
+                    "model selection is outside the displayed list",
+                ));
+            }
+            if !answer.is_empty() {
+                return Ok(answer);
+            }
+        }
+    }
+
+    let default = if matches!(kind, ProviderKind::Ollama) {
+        "mistral"
+    } else {
+        ""
+    };
+    let prompt = if default.is_empty() {
+        "Chat model id"
+    } else {
+        "Chat model id (default mistral)"
+    };
+    let answer = ask_line(stdin, stderr, prompt)?;
+    let model = if answer.is_empty() { default } else { &answer };
+    if model.trim().is_empty() {
+        return Err(CliError::user("a chat model id is required"));
+    }
+    Ok(model.trim().to_string())
 }
 
 /// A deterministic id suffix scoped to `config_dir`, so an isolated
@@ -893,6 +1211,7 @@ mod tests {
             profile_label: None,
             api_key_env: None,
             api_key_file: None,
+            api_key_file_ref: None,
             api_key_stdin: false,
             check_connection: false,
         }
@@ -987,6 +1306,47 @@ mod tests {
         let app_config_text = std::fs::read_to_string(&paths.app_config_path).unwrap();
         assert!(!app_config_text.contains("sk-should-land-in-keychain"));
         assert!(app_config_text.contains(&key_ref));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_init_can_keep_a_protected_file_without_touching_keychain_store() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, paths) = isolated_paths();
+        let credential_path = dir.path().join("vercel.key");
+        std::fs::write(&credential_path, "synthetic-file-credential\n").unwrap();
+        std::fs::set_permissions(&credential_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut args = base_args();
+        args.provider_kind = Some(ProviderKindArg::OpenAiCompatible);
+        args.base_url = Some("http://127.0.0.1:1/v1".into());
+        args.chat_model = Some("test-model".into());
+        args.profile_id = Some("test-profile-file-ref".into());
+        args.api_key_file_ref = Some(credential_path.clone());
+
+        let secrets = MemorySecretStore::new();
+        let out = run_init(&args, &paths, dir.path(), &AppConfig::default(), &secrets)
+            .await
+            .expect("protected-file setup must succeed");
+
+        let key_ref = key_ref_for_profile("test-profile-file-ref");
+        assert_eq!(
+            secrets.get(&key_ref).unwrap(),
+            None,
+            "direct protected-file setup must not import into the secret store"
+        );
+        let cfg = cd_core::config::load_config(&paths.app_config_path).unwrap();
+        let profile = cfg.providers.active().unwrap();
+        let expected_reference = format!("file:{}", credential_path.display());
+        assert_eq!(
+            profile.api_key_ref.as_deref(),
+            Some(expected_reference.as_str())
+        );
+        let rendered = out.render_json();
+        assert_eq!(rendered["credential_source"], "protected_file");
+        let serialized = std::fs::read_to_string(&paths.app_config_path).unwrap();
+        assert!(!serialized.contains("synthetic-file-credential"));
     }
 
     /// A rejected value (invalid timezone) must abort `run_init` before

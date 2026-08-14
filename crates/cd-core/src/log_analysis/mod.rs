@@ -17,6 +17,7 @@ pub mod exception_episodes;
 pub mod format_profile;
 pub mod frame;
 pub mod governed_citation;
+pub mod hybrid_retrieval;
 pub mod import_diagnose;
 pub mod import_preview;
 pub mod import_profile;
@@ -32,6 +33,7 @@ pub mod operational_metrics;
 pub mod package;
 pub mod parse;
 pub mod query;
+pub mod reanalysis_plan;
 pub mod reanalyze;
 pub mod redact_log;
 pub mod reviewed_format;
@@ -91,6 +93,7 @@ pub use exception_episodes::{
     EXCEPTION_EPISODE_RECORD_CAP, EXCEPTION_EPISODE_RENDER_CAP, EXCEPTION_EPISODE_ROW_WALK_CAP,
     EXCEPTION_EPISODE_SCHEMA_ID, EXCEPTION_EPISODE_SCHEMA_VERSION,
 };
+pub(crate) use exception_episodes::{classify_structural_template_pattern, StructuralTemplateRole};
 pub use format_profile::{
     fingerprint_format, BuiltInFormatProfile, BuiltInGrammar, FormatFingerprint,
     FormatFingerprintOutcome, FormatProfileIdentity, BUILT_IN_FORMAT_PROFILES,
@@ -99,6 +102,10 @@ pub use format_profile::{
 pub use governed_citation::{
     format_governed_log_citation_id, is_governed_log_citation_id, parse_governed_log_citation_id,
     GovernedLogCitationId, GovernedLogCitationKind,
+};
+pub use hybrid_retrieval::{
+    hybrid_search_events, HybridCandidate, HybridDegradation, HybridModeUsed, HybridOptions,
+    HybridOrigin, HybridOutcome, HybridTelemetry,
 };
 pub use import_diagnose::{
     diagnose_log_import, public_report_denylist_patterns, strip_variable_fields,
@@ -201,6 +208,10 @@ pub use query::{
     MAX_SHARED_TIMELINE_LANES, MAX_SOURCE_CATALOG_CURSOR_BYTES, MAX_SOURCE_CATALOG_PAGE,
     MAX_SOURCE_CATALOG_SEARCH_CHARS, MAX_TIMELINE_BUCKETS, MIN_WALL_TS,
     SHARED_TIMELINE_SEVERITY_SERIES,
+};
+pub use reanalysis_plan::{
+    plan_from_status, plan_reanalysis, ReanalysisLocality, ReanalysisPlan, ReanalysisReason,
+    LOCAL_REANALYSIS_COPY, REANALYSIS_PLAN_SCHEMA_ID, REMOTE_REANALYSIS_COPY,
 };
 pub use reanalyze::{
     reanalyze_corpus_embeddings, reanalyze_corpus_embeddings_quiet, LOCAL_REANALYZE_TEMPLATE_CAP,

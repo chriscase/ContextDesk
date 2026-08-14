@@ -1,0 +1,52 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe08-retrieval-ranking",
+  "title": "Retrieval ranking specialty with upstream versus final lists",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What configuration change caused customer jobs to be rejected, and which records show recovery?",
+      "relevant_ids": ["d01", "d02", "d03", "d04"],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 2,
+        "d03": 1,
+        "d04": 3
+      },
+      "must_include_ids": ["d01", "d04"],
+      "must_exclude_ids": ["d07"],
+      "foreign_incident_ids": ["d07"],
+      "top_k": 5
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": ["upper bound", "queue"],
+      "trigger_tokens": ["invalid upper bound", "configuration change"],
+      "symptom_tokens": ["customer jobs were rejected"],
+      "recovery_tokens": ["previous limit restored", "restored"],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": ["d01"],
+      "forbidden_evidence_ids": ["d07", "d05"],
+      "requires_abstention": false,
+      "packet_overrides": {
+        "product_path": {
+          "root_cause_establishable": false,
+          "requires_abstention": true
+        }
+      },
+      "forbidden_conclusion_tokens": []
+    }
+  ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "bad_product_path_incomplete": "fail",
+    "good_product_path_abstention": "pass"
+  },
+  "incidents": {
+    "queue-bound": ["d01", "d02", "d03", "d04"],
+    "mail-foreign": ["d07"]
+  }
+}

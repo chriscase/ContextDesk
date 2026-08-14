@@ -8,11 +8,12 @@ use cd_core::branding::Branding;
 use cd_core::config::{config_path, ensure_config_dir, load_config, save_config, AppConfig};
 use cd_core::error::CoreResult;
 use cd_core::index::KeywordIndex;
-use cd_core::keychain_store::{KeychainSecretStore, SecretStore};
+use cd_core::keychain_store::{ReferencedSecretStore, SecretStore};
 use cd_core::sessions::SessionStore;
 use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Every filesystem location this process needs, resolved once at startup.
 pub struct Paths {
@@ -37,7 +38,7 @@ pub struct Paths {
     /// True when `config_dir` came from an explicit `--data-dir` /
     /// `--profile-dir` override rather than the default, desktop-shared
     /// `~/.contextdesk`. Isolated state never touches `$HOME` — a broken or
-    /// absent `$HOME` cannot affect an isolated profile.
+    /// absent OS home/profile directory cannot affect an isolated profile.
     pub isolated: bool,
 }
 
@@ -59,6 +60,36 @@ impl Paths {
         app_config_override: Option<&std::path::Path>,
     ) -> CliResult<Self> {
         let branding = Branding::embedded();
+        Self::resolve_with_shared_paths(
+            data_dir_override,
+            app_config_override,
+            || {
+                ensure_config_dir(&branding)
+                    .map_err(|e| CliError::internal(format!("resolve config dir: {e}")))
+            },
+            || config_path(&branding).ok(),
+        )
+    }
+
+    /// Resolve paths while deferring both OS-profile lookups until the
+    /// desktop-shared branch actually needs them.
+    ///
+    /// Keeping the resolvers lazy is part of the isolation boundary: an
+    /// explicit data directory must not even evaluate code that discovers a
+    /// user's shared home/profile path. The indirection also gives tests a
+    /// platform-independent way to prove that negative property; on Windows,
+    /// `dirs::home_dir()` uses `FOLDERID_Profile` and intentionally ignores
+    /// the Unix-specific `HOME` environment variable.
+    fn resolve_with_shared_paths<SharedDir, SharedAppConfig>(
+        data_dir_override: Option<&Path>,
+        app_config_override: Option<&Path>,
+        resolve_shared_dir: SharedDir,
+        resolve_shared_app_config: SharedAppConfig,
+    ) -> CliResult<Self>
+    where
+        SharedDir: FnOnce() -> CliResult<PathBuf>,
+        SharedAppConfig: FnOnce() -> Option<PathBuf>,
+    {
         let (config_dir, isolated) = match data_dir_override {
             Some(dir) => {
                 std::fs::create_dir_all(dir).map_err(|e| {
@@ -66,17 +97,13 @@ impl Paths {
                 })?;
                 (dir.to_path_buf(), true)
             }
-            None => {
-                let dir = ensure_config_dir(&branding)
-                    .map_err(|e| CliError::internal(format!("resolve config dir: {e}")))?;
-                (dir, false)
-            }
+            None => (resolve_shared_dir()?, false),
         };
         let app_config_path = app_config_override.map(PathBuf::from).unwrap_or_else(|| {
             if isolated {
                 config_dir.join("config.json")
             } else {
-                config_path(&branding).unwrap_or_else(|_| config_dir.join("config.json"))
+                resolve_shared_app_config().unwrap_or_else(|| config_dir.join("config.json"))
             }
         });
         Ok(Self {
@@ -87,6 +114,65 @@ impl Paths {
             config_dir,
             isolated,
         })
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn isolated_paths_never_evaluate_shared_profile_resolvers() {
+        let isolated_dir = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve_with_shared_paths(
+            Some(isolated_dir.path()),
+            None,
+            || panic!("isolated resolution consulted the shared config directory"),
+            || panic!("isolated resolution consulted the shared app config path"),
+        )
+        .unwrap();
+
+        assert!(paths.isolated);
+        assert_eq!(paths.config_dir, isolated_dir.path());
+        assert_eq!(
+            paths.app_config_path,
+            isolated_dir.path().join("config.json")
+        );
+        assert_eq!(paths.cache_root, isolated_dir.path().join("cache"));
+        assert_eq!(paths.sessions_dir, isolated_dir.path().join("sessions"));
+        assert_eq!(paths.cli_state_dir, isolated_dir.path().join("cli"));
+    }
+
+    #[test]
+    fn shared_paths_evaluate_both_platform_resolvers() {
+        let shared_dir = tempfile::tempdir().unwrap();
+        let shared_app_config = shared_dir.path().join("shared-config.json");
+        let dir_called = Cell::new(false);
+        let app_config_called = Cell::new(false);
+
+        let paths = Paths::resolve_with_shared_paths(
+            None,
+            None,
+            || {
+                dir_called.set(true);
+                Ok(shared_dir.path().to_path_buf())
+            },
+            || {
+                app_config_called.set(true);
+                Some(shared_app_config.clone())
+            },
+        )
+        .unwrap();
+
+        assert!(dir_called.get(), "shared config resolver was not exercised");
+        assert!(
+            app_config_called.get(),
+            "shared app-config resolver was not exercised"
+        );
+        assert!(!paths.isolated);
+        assert_eq!(paths.config_dir, shared_dir.path());
+        assert_eq!(paths.app_config_path, shared_app_config);
     }
 }
 
@@ -121,7 +207,7 @@ pub const PROVIDER_API_KEY_ENV: &str = "CONTEXTDESK_PROVIDER_API_KEY";
 /// provider credentials for the lifetime of this process. It is never
 /// persisted and never substitutes for connector secrets.
 pub struct CliSecretStore {
-    keychain: KeychainSecretStore,
+    referenced: ReferencedSecretStore,
     provider_override: Option<String>,
 }
 
@@ -132,7 +218,7 @@ impl CliSecretStore {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         Self {
-            keychain: KeychainSecretStore::new(),
+            referenced: ReferencedSecretStore::new(),
             provider_override,
         }
     }
@@ -150,15 +236,15 @@ impl SecretStore for CliSecretStore {
         if let Some(value) = self.provider_override(reference) {
             return Ok(Some(value));
         }
-        self.keychain.get(reference)
+        self.referenced.get(reference)
     }
 
     fn set(&self, reference: &str, value: &str) -> CoreResult<()> {
-        self.keychain.set(reference, value)
+        self.referenced.set(reference, value)
     }
 
     fn delete(&self, reference: &str) -> CoreResult<()> {
-        self.keychain.delete(reference)
+        self.referenced.delete(reference)
     }
 }
 
@@ -198,6 +284,65 @@ pub fn apply_app_connectors(
     host.apply_confluence_from_settings(&app_cfg.confluence, secrets);
 }
 
+/// Attach explicitly enabled retrieval roles to the same production
+/// [`ToolHost`] used by CLI chat and linked-log turns. This mirrors the
+/// desktop host wiring but keeps the adapter/dialect/SSRF decisions in the
+/// shared workflow factory. Optional-role failures preserve the existing
+/// keyword/local fallback instead of making ordinary chat unusable.
+pub fn apply_configured_retrieval_roles(
+    host: &mut ToolHost,
+    app_cfg: &AppConfig,
+    secrets: &dyn cd_core::keychain_store::SecretStore,
+) {
+    if let Some(role) = app_cfg
+        .retrieval
+        .embedding
+        .as_ref()
+        .filter(|role| role.enabled)
+    {
+        let backend = if app_cfg.router.deadline_is_explicit {
+            cd_workflow::retrieval::build_embedding_backend_with_timeout(
+                role,
+                Some(secrets),
+                app_cfg.router.deadline_ms,
+            )
+        } else {
+            cd_workflow::retrieval::build_embedding_backend(role, Some(secrets))
+        };
+        match backend {
+            Ok(backend) => {
+                host.set_embed_backend_with_model(Some(Arc::clone(&backend)), &role.model);
+                host.set_log_embed_backend(Some(backend), &role.model);
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "configured CLI embedding role unavailable; keeping fallback");
+            }
+        }
+    }
+    if let Some(role) = app_cfg
+        .retrieval
+        .reranker
+        .as_ref()
+        .filter(|role| role.enabled)
+    {
+        let backend = if app_cfg.router.deadline_is_explicit {
+            cd_workflow::retrieval::build_rerank_backend_with_timeout(
+                role,
+                Some(secrets),
+                app_cfg.router.deadline_ms,
+            )
+        } else {
+            cd_workflow::retrieval::build_rerank_backend(role, Some(secrets))
+        };
+        match backend {
+            Ok(backend) => host.set_log_rerank_backend(Some(backend)),
+            Err(error) => {
+                tracing::warn!(error = %error, "configured CLI reranker role unavailable; preserving pre-rerank order");
+            }
+        }
+    }
+}
+
 /// ToolHost with log analysis + optional Confluence from shared AppConfig.
 pub fn tool_host_with_app_config(
     cache_root: &Path,
@@ -210,6 +355,7 @@ pub fn tool_host_with_app_config(
     // silently discard an explicit user deadline resolved by cd-workflow.
     host.set_router_budget(app_cfg.router.clone());
     apply_app_connectors(&mut host, app_cfg, secrets);
+    apply_configured_retrieval_roles(&mut host, app_cfg, secrets);
     Ok(host)
 }
 
@@ -236,7 +382,7 @@ mod credential_tests {
     #[test]
     fn process_override_is_provider_only() {
         let store = CliSecretStore {
-            keychain: KeychainSecretStore::new(),
+            referenced: ReferencedSecretStore::new(),
             provider_override: Some("ephemeral-value".to_string()),
         };
 
@@ -260,5 +406,91 @@ mod credential_tests {
         let host = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
         assert_eq!(host.router_budget().deadline_ms, 600_000);
         assert!(host.router_budget().deadline_is_explicit);
+    }
+
+    #[test]
+    fn one_turn_deadline_override_reaches_host_budget_without_persisting() {
+        use cd_core::deadline_controls::{
+            apply_turn_override, parse_deadline_duration, PATIENT_DEADLINE_MS,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.router.deadline_ms = PATIENT_DEADLINE_MS;
+        cfg.router.deadline_is_explicit = false;
+        let mut host = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
+        assert!(!host.router_budget().deadline_is_explicit);
+
+        let ms = parse_deadline_duration("10m").unwrap();
+        let mut budget = host.router_budget().clone();
+        apply_turn_override(&mut budget, ms).unwrap();
+        host.set_router_budget(budget);
+        assert_eq!(host.router_budget().deadline_ms, 600_000);
+        assert!(host.router_budget().deadline_is_explicit);
+
+        // A fresh host from the same AppConfig returns to the saved adaptive policy.
+        let next = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
+        assert!(!next.router_budget().deadline_is_explicit);
+        assert_eq!(next.router_budget().deadline_ms, PATIENT_DEADLINE_MS);
+    }
+
+    #[test]
+    fn turn_override_beats_saved_explicit_and_does_not_leak_to_next_host() {
+        use cd_core::deadline_controls::{apply_turn_override, parse_deadline_duration};
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        // Saved explicit custom ceiling (90s).
+        cfg.router.deadline_ms = 90_000;
+        cfg.router.deadline_is_explicit = true;
+        let mut host = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
+        assert_eq!(host.router_budget().deadline_ms, 90_000);
+        assert!(host.router_budget().deadline_is_explicit);
+
+        // Per-turn override wins for this host only.
+        let ms = parse_deadline_duration("3m").unwrap();
+        let mut budget = host.router_budget().clone();
+        apply_turn_override(&mut budget, ms).unwrap();
+        host.set_router_budget(budget);
+        assert_eq!(host.router_budget().deadline_ms, 180_000);
+
+        // AppConfig object (source of truth for persistence) unchanged.
+        assert_eq!(cfg.router.deadline_ms, 90_000);
+        assert!(cfg.router.deadline_is_explicit);
+
+        // Next turn / next host rebuild from saved policy — no leak.
+        let later = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
+        assert_eq!(later.router_budget().deadline_ms, 90_000);
+        assert!(later.router_budget().deadline_is_explicit);
+    }
+
+    #[test]
+    fn configured_loopback_retrieval_roles_attach_to_the_cli_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.retrieval.embedding = Some(cd_core::config::RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:1/v1".into(),
+            model: "synthetic-embed".into(),
+            dialect: Some("openai_embeddings".into()),
+            allow_remote: false,
+            api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
+        });
+        cfg.retrieval.reranker = Some(cd_core::config::RetrievalRoleModel {
+            enabled: true,
+            base_url: "http://127.0.0.1:1/v1".into(),
+            model: "synthetic-reranker".into(),
+            dialect: Some("tei_rerank_v1".into()),
+            allow_remote: false,
+            api_key_ref: None,
+            embed_wire: Default::default(),
+            rerank_dialect: Default::default(),
+        });
+
+        let host = tool_host_with_app_config(dir.path(), &cfg, &NoSecrets).unwrap();
+        assert_eq!(host.embed_model(), "synthetic-embed");
+        assert!(host.embed_backend().is_some());
+        assert!(host.log_embed_backend().is_some());
+        assert!(host.log_rerank_backend().is_some());
     }
 }

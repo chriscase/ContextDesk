@@ -62,6 +62,10 @@ pub fn event_to_dto(e: &StreamEvent) -> EventDto {
             }),
         ),
         StreamEvent::TextDelta { text } => ("text_delta", serde_json::json!({ "text": text })),
+        StreamEvent::InvestigationAnswer { envelope } => (
+            "investigation_answer",
+            serde_json::json!({ "envelope": envelope }),
+        ),
         StreamEvent::ThoughtDelta { text } => {
             ("thought_delta", serde_json::json!({ "text": text }))
         }
@@ -140,6 +144,22 @@ pub fn event_to_dto(e: &StreamEvent) -> EventDto {
         StreamEvent::Error { code, message } => (
             "error",
             serde_json::json!({ "code": code, "message": message }),
+        ),
+        StreamEvent::MultiModelStage {
+            stage,
+            phase,
+            status,
+            detail,
+            candidate_id,
+        } => (
+            "multi_model_stage",
+            serde_json::json!({
+                "stage": stage,
+                "phase": phase,
+                "status": status,
+                "detail": detail,
+                "candidate_id": candidate_id,
+            }),
         ),
     };
     EventDto {
@@ -389,19 +409,11 @@ impl ChatBackend for OpenAiBackend {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> CoreResult<ChatCompletion> {
-        // Prefer live SSE callback path; fall back to non-stream.
-        match self
-            .0
-            .complete_stream_cb(messages, Some(tools), |_| {}, None)
-            .await
-        {
-            Ok(c) => Ok(c),
-            // `complete_stream_cb` already used its full bounded 429 budget.
-            // Do not immediately replay the same turn as non-streaming and
-            // multiply a provider free-tier throttle.
-            Err(e) if e.to_string().contains("HTTP 429") => Err(e),
-            Err(_) => self.0.complete(messages, Some(tools)).await,
-        }
+        // A non-streaming backend call is exactly one non-streaming provider
+        // request. Stream capability is selected explicitly by
+        // `complete_streaming`; transport failures must never replay the same
+        // expensive prompt through a second protocol path.
+        self.0.complete(messages, Some(tools)).await
     }
 
     async fn complete_streaming(
@@ -411,8 +423,7 @@ impl ChatBackend for OpenAiBackend {
         on_text: &mut (dyn FnMut(String) + Send),
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> CoreResult<ChatCompletion> {
-        match self
-            .0
+        self.0
             .complete_stream_cb(
                 messages,
                 Some(tools),
@@ -426,22 +437,6 @@ impl ChatBackend for OpenAiBackend {
                 cancel,
             )
             .await
-        {
-            Ok(c) => Ok(c),
-            Err(e) if e.to_string().contains("cancelled") => Err(e),
-            // Keep exhausted rate limits terminal for this turn. A caller may
-            // retry deliberately after the surfaced cooldown, but automatic
-            // SSE-to-non-stream fallback must not spend another 3 attempts.
-            Err(e) if e.to_string().contains("HTTP 429") => Err(e),
-            Err(_) => {
-                // Fall back to non-stream; emit once.
-                let c = self.0.complete(messages, Some(tools)).await?;
-                if !c.content.is_empty() && c.tool_calls.is_empty() {
-                    on_text(c.content.clone());
-                }
-                Ok(c)
-            }
-        }
     }
 }
 
@@ -454,14 +449,7 @@ impl ChatBackend for AnthropicBackend {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> CoreResult<ChatCompletion> {
-        match self
-            .0
-            .complete_stream_cb(messages, Some(tools), |_| {}, None)
-            .await
-        {
-            Ok(c) => Ok(c),
-            Err(_) => self.0.complete(messages, Some(tools)).await,
-        }
+        self.0.complete(messages, Some(tools)).await
     }
 
     async fn complete_streaming(
@@ -471,8 +459,7 @@ impl ChatBackend for AnthropicBackend {
         on_text: &mut (dyn FnMut(String) + Send),
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> CoreResult<ChatCompletion> {
-        match self
-            .0
+        self.0
             .complete_stream_cb(
                 messages,
                 Some(tools),
@@ -486,17 +473,37 @@ impl ChatBackend for AnthropicBackend {
                 cancel,
             )
             .await
-        {
-            Ok(c) => Ok(c),
-            Err(e) if e.to_string().contains("cancelled") => Err(e),
-            Err(_) => {
-                let c = self.0.complete(messages, Some(tools)).await?;
-                if !c.content.is_empty() && c.tool_calls.is_empty() {
-                    on_text(c.content.clone());
-                }
-                Ok(c)
-            }
-        }
+    }
+}
+
+/// Whether lowercased provider text talks about *streaming* as a whole word.
+///
+/// A naked `contains("stream")` matches inside `upstream`, `downstream`, and
+/// `livestream` — and "upstream …" is how gateways describe a failure of the
+/// service behind them, which is the opposite of a streaming-capability
+/// problem. Only a standalone token counts.
+fn mentions_streaming(lowercased: &str) -> bool {
+    const TOKENS: [&str; 3] = ["stream", "streaming", "sse"];
+    lowercased
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| TOKENS.contains(&word))
+}
+
+/// Whether a failure could plausibly mean "this gateway refuses streaming".
+///
+/// A provider HTTP status with a standard meaning unrelated to request *shape*
+/// — rate limit, authorization, timeout, server fault — never does, whatever
+/// words happen to appear in its body. Non-HTTP failures (connect/read errors,
+/// SSE framing faults) carry no status and stay eligible, which is how
+/// genuinely stream-specific transport faults keep their existing
+/// classification.
+fn provider_status_can_mean_stream_rejection(error: &CoreError) -> bool {
+    match error.provider_http_status() {
+        Some(401 | 402 | 403 | 407 | 408 | 429) => false,
+        // 501 Not Implemented is the one server-side status that genuinely
+        // reports an unsupported request feature.
+        Some(status) if (500..=599).contains(&status) && status != 501 => false,
+        _ => true,
     }
 }
 
@@ -553,11 +560,24 @@ impl ChatBackend for CapabilityAwareBackend {
                     return Err(e);
                 }
                 // Surface stream rejection rather than silent success-with-empty.
-                let msg = e.to_string().to_lowercase();
-                if msg.contains("stream")
-                    || msg.contains("sse")
-                    || (msg.contains("not support") && !msg.contains("tool"))
-                    || (msg.contains("unsupported") && !msg.contains("tool"))
+                //
+                // The keyword probe must read what the PROVIDER said, never
+                // ContextDesk's own `stream HTTP …` operation prefix: that
+                // prefix contains "stream" for *every* status failure on the
+                // streaming endpoint, so probing the whole message relabelled
+                // rate limits, auth failures, and 5xx as "this gateway does
+                // not support streaming" and pointed the operator at the one
+                // setting that was not the problem.
+                if !provider_status_can_mean_stream_rejection(&e) {
+                    return Err(e);
+                }
+                let probe = e
+                    .provider_http_body()
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_else(|| e.to_string().to_ascii_lowercase());
+                if mentions_streaming(&probe)
+                    || (probe.contains("not support") && !probe.contains("tool"))
+                    || (probe.contains("unsupported") && !probe.contains("tool"))
                 {
                     return Err(CoreError::Message(format!(
                         "Streaming rejected by provider (capabilities.stream=true but request failed): {e}"
@@ -604,6 +624,40 @@ pub async fn backend_for(
     profile: &ProviderProfile,
     api_key: Option<String>,
 ) -> CoreResult<Box<dyn ChatBackend>> {
+    backend_for_with_timeout(profile, api_key, std::time::Duration::from_secs(120)).await
+}
+
+/// Build a provider backend whose transport ceiling follows the host-owned
+/// turn budget. Per-phase/per-operation races remain the tighter authority;
+/// this ceiling only prevents the HTTP layer from expiring earlier than a
+/// patient, explicitly configured turn.
+pub async fn backend_for_with_timeout(
+    profile: &ProviderProfile,
+    api_key: Option<String>,
+    request_timeout: std::time::Duration,
+) -> CoreResult<Box<dyn ChatBackend>> {
+    backend_for_with_timeout_and_effort(
+        profile,
+        api_key,
+        request_timeout,
+        crate::reasoning_effort::EffectiveEffortPolicy::Omit,
+    )
+    .await
+}
+
+/// Like [`backend_for_with_timeout`], with an explicit reasoning-effort policy.
+///
+/// Omission keeps wire behavior unchanged. Explicit effort on dialects without
+/// an implemented field mapping fails closed before any HTTP client is used
+/// (no foreign field leakage). Exact model/value support remains provider
+/// evidence; OpenAI-compatible values are transmitted unchanged, never
+/// silently downgraded.
+pub async fn backend_for_with_timeout_and_effort(
+    profile: &ProviderProfile,
+    api_key: Option<String>,
+    request_timeout: std::time::Duration,
+    effort: crate::reasoning_effort::EffectiveEffortPolicy,
+) -> CoreResult<Box<dyn ChatBackend>> {
     // Remote profiles may use corporate private DNS (TriageTool-style gateways).
     // SSRF still applies to model-driven tools; the user-configured base is trusted.
     let policy = if profile.local_only {
@@ -612,23 +666,70 @@ pub async fn backend_for(
         SsrfPolicy::allow_private_networks()
     };
 
+    // Fail closed for explicit effort on dialects with no Completions field.
+    if !matches!(effort, crate::reasoning_effort::EffectiveEffortPolicy::Omit) {
+        let dialect = crate::reasoning_effort::dialect_from_provider_kind(profile.kind);
+        let allowed = crate::reasoning_effort::transport_candidate_levels(
+            dialect,
+            crate::reasoning_effort::ChatApiSurface::ChatCompletions,
+        );
+        if allowed.is_empty() {
+            return Err(CoreError::Message(
+                crate::reasoning_effort::ReasoningEffortApplyError::UnsupportedDialect {
+                    dialect: dialect.as_str().into(),
+                    surface: crate::reasoning_effort::ChatApiSurface::ChatCompletions
+                        .as_str()
+                        .into(),
+                    requested: effort.as_label().into(),
+                }
+                .to_string(),
+            ));
+        }
+        if let Some(level) = effort.level() {
+            if !allowed.contains(&level) {
+                return Err(CoreError::Message(
+                    crate::reasoning_effort::ReasoningEffortApplyError::UnsupportedLevel {
+                        dialect: dialect.as_str().into(),
+                        surface: crate::reasoning_effort::ChatApiSurface::ChatCompletions
+                            .as_str()
+                            .into(),
+                        requested: level.as_str().into(),
+                        allowed: allowed.iter().map(|l| l.as_str().to_string()).collect(),
+                    }
+                    .to_string(),
+                ));
+            }
+        }
+    }
+
     match profile.kind {
         ProviderKind::Ollama => {
-            let client = OllamaClient::new(&profile.base_url, &profile.chat_model)?;
+            let client = OllamaClient::new_with_timeout(
+                &profile.base_url,
+                &profile.chat_model,
+                request_timeout,
+            )?;
             Ok(Box::new(OllamaBackend(client)))
         }
         ProviderKind::OpenAiCompatible => {
-            let client = OpenAiCompatibleClient::new(
+            let client = OpenAiCompatibleClient::new_with_timeout(
                 &profile.base_url,
                 api_key,
                 &profile.chat_model,
                 &policy,
-            )?;
+                request_timeout,
+            )?
+            .with_reasoning_effort(effort);
             Ok(Box::new(OpenAiBackend(client)))
         }
         ProviderKind::Anthropic => {
-            let client =
-                AnthropicClient::new(&profile.base_url, api_key, &profile.chat_model, &policy)?;
+            let client = AnthropicClient::new_with_timeout(
+                &profile.base_url,
+                api_key,
+                &profile.chat_model,
+                &policy,
+                request_timeout,
+            )?;
             Ok(Box::new(AnthropicBackend(client)))
         }
         ProviderKind::XaiGrokBuild => {
@@ -674,13 +775,15 @@ pub async fn backend_for(
             })
             .await?;
             let headers = creds.request_headers();
-            let client = OpenAiCompatibleClient::new(
+            let client = OpenAiCompatibleClient::new_with_timeout(
                 base,
                 None,
                 &profile.chat_model,
                 &SsrfPolicy::default(),
+                request_timeout,
             )?
-            .with_extra_headers(headers);
+            .with_extra_headers(headers)
+            .with_reasoning_effort(effort);
             Ok(Box::new(OpenAiBackend(client)))
         }
     }
@@ -865,6 +968,10 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
         &[],
         None,
         None,
+        None,
+        None,
+        None,
+        crate::reasoning_effort::EffectiveEffortPolicy::Omit,
     )
     .await
 }
@@ -904,6 +1011,11 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     applied_skill_ids: &[String],
     turn_id: Option<String>,
     user_selection: Option<&str>,
+    multi_model: Option<crate::agent::MultiModelRuntime>,
+    fast_triage: Option<crate::agent::FastTriageRuntime>,
+    contribution_runtime: Option<crate::agent::ContributionRuntime>,
+    // Effective reasoning-effort policy for this turn (omit = provider default).
+    reasoning_effort: crate::reasoning_effort::EffectiveEffortPolicy,
 ) -> CoreResult<Vec<StreamEvent>> {
     let user_selection = match user_selection.map(str::trim) {
         Some("") | None => None,
@@ -1036,7 +1148,12 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
             turn_started_at,
             deadline_plan,
             cancel_ref,
-            backend_for(profile, api_key),
+            backend_for_with_timeout_and_effort(
+                profile,
+                api_key,
+                Duration::from_millis(deadline_plan.total_ms.max(1)),
+                reasoning_effort,
+            ),
         )
         .await
         {
@@ -1120,6 +1237,9 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint_and_trace(
     opts.developer_trace = developer_trace_sink.map(crate::turn_trace::TurnTraceObserver::new);
     opts.applied_skill_ids = applied_skill_ids.to_vec();
     opts.user_selection = user_selection;
+    opts.multi_model = multi_model;
+    opts.fast_triage = fast_triage;
+    opts.contribution_runtime = contribution_runtime;
     // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
     opts.ambient_recall_enabled =
         !dry_run && host.ambient_recall_enabled() && host.durable_memory_active();
@@ -2101,6 +2221,7 @@ mod tests {
             "permission_required",
             "turn_completed",
             "error",
+            "multi_model_stage",
         ];
         let samples = [
             StreamEvent::TurnStarted {
@@ -2149,6 +2270,7 @@ mod tests {
                     prompt_tokens: None,
                     completion_tokens: None,
                     reasoning_tokens: None,
+                    reasoning_content_chars: None,
                     cached_tokens: None,
                     total_tokens: None,
                     cost: None,
@@ -2180,6 +2302,13 @@ mod tests {
                 code: "e".into(),
                 message: "m".into(),
             },
+            StreamEvent::MultiModelStage {
+                stage: "reviewer".into(),
+                phase: "finished".into(),
+                status: Some("completed".into()),
+                detail: "1 gap(s), 0 contradiction(s)".into(),
+                candidate_id: None,
+            },
         ];
         let mut kinds: Vec<String> = samples.iter().map(|e| event_to_dto(e).kind).collect();
         kinds.sort();
@@ -2191,6 +2320,147 @@ mod tests {
         );
         // Exhaustive: every StreamEvent variant appears (count match).
         assert_eq!(kinds.len(), DOCUMENTED.len());
+    }
+
+    /// A backend whose streaming call always fails with a fixed error.
+    struct StreamFailsBackend(Box<dyn Fn() -> CoreError + Send + Sync>);
+
+    #[async_trait]
+    impl ChatBackend for StreamFailsBackend {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            Err((self.0)())
+        }
+
+        async fn complete_streaming(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+            _on_text: &mut (dyn FnMut(String) + Send),
+            _cancel: Option<&std::sync::atomic::AtomicBool>,
+        ) -> CoreResult<ChatCompletion> {
+            Err((self.0)())
+        }
+    }
+
+    async fn capability_stream_failure(
+        error: impl Fn() -> CoreError + Send + Sync + 'static,
+    ) -> String {
+        let backend = CapabilityAwareBackend::new(
+            Box::new(StreamFailsBackend(Box::new(error))),
+            ProviderCapabilities {
+                stream: true,
+                ..Default::default()
+            },
+        );
+        let mut on_text = |_: String| {};
+        backend
+            .complete_streaming(&[], &[], &mut on_text, None)
+            .await
+            .expect_err("the scripted backend always fails")
+            .to_string()
+    }
+
+    /// Regression: ContextDesk's own `stream HTTP …` operation prefix contains
+    /// the word "stream" for *every* status failure on the streaming endpoint.
+    /// Probing the whole message relabelled rate limits, auth failures, and
+    /// 5xx as "this gateway does not support streaming" and pointed the
+    /// operator at the one setting that was not the problem.
+    #[tokio::test]
+    async fn provider_status_failures_are_never_relabelled_as_streaming_rejections() {
+        for (status, status_line) in [
+            (429u16, "429 Too Many Requests"),
+            (401, "401 Unauthorized"),
+            (403, "403 Forbidden"),
+            (500, "500 Internal Server Error"),
+            (503, "503 Service Unavailable"),
+        ] {
+            let status_line = status_line.to_string();
+            let message = capability_stream_failure(move || CoreError::ProviderHttp {
+                operation: "stream".into(),
+                status,
+                status_line: status_line.clone(),
+                body: r#"{"error":{"message":"provider rate limited"}}"#.into(),
+            })
+            .await;
+            assert!(
+                !message.contains("capabilities.stream"),
+                "HTTP {status} is not a streaming-capability rejection, got {message:?}"
+            );
+            assert!(
+                message.contains(&format!("HTTP {status}")),
+                "the provider's status must survive verbatim, got {message:?}"
+            );
+        }
+    }
+
+    /// A status that *can* mean "this request shape is unsupported" still
+    /// classifies as a streaming rejection when the provider's own body says
+    /// so — the fix narrows the probe, it does not remove the classification.
+    #[tokio::test]
+    async fn a_provider_that_says_it_cannot_stream_is_still_a_streaming_rejection() {
+        let message = capability_stream_failure(|| CoreError::ProviderHttp {
+            operation: "stream".into(),
+            status: 400,
+            status_line: "400 Bad Request".into(),
+            body: r#"{"error":{"message":"stream is not supported by this deployment"}}"#.into(),
+        })
+        .await;
+        assert!(message.contains("capabilities.stream"), "{message:?}");
+
+        // …and a 400 whose body is about something else is not relabelled.
+        let unrelated = capability_stream_failure(|| CoreError::ProviderHttp {
+            operation: "stream".into(),
+            status: 400,
+            status_line: "400 Bad Request".into(),
+            body: r#"{"error":{"message":"model 'x' does not exist"}}"#.into(),
+        })
+        .await;
+        assert!(!unrelated.contains("capabilities.stream"), "{unrelated:?}");
+    }
+
+    /// "upstream"/"downstream" is how a gateway names a failure of the service
+    /// behind it — the opposite of a streaming-capability problem. A naked
+    /// substring probe matched them and blamed the wrong setting.
+    #[tokio::test]
+    async fn an_upstream_failure_is_not_a_streaming_rejection() {
+        for body in [
+            r#"{"error":{"message":"upstream failed reading /srv/private/customer.log"}}"#,
+            r#"{"error":{"message":"downstream connect error or disconnect/reset before headers"}}"#,
+            r#"{"error":{"message":"livestream quota exceeded for this project"}}"#,
+        ] {
+            let message = capability_stream_failure(move || CoreError::ProviderHttp {
+                operation: "stream".into(),
+                status: 400,
+                status_line: "400 Bad Request".into(),
+                body: body.into(),
+            })
+            .await;
+            assert!(
+                !message.contains("capabilities.stream"),
+                "{body} is not a streaming-capability rejection, got {message:?}"
+            );
+        }
+        assert!(mentions_streaming("stream is not supported"));
+        assert!(mentions_streaming("sse framing rejected"));
+        assert!(mentions_streaming("streaming disabled for this deployment"));
+        assert!(!mentions_streaming("upstream connect error"));
+        assert!(!mentions_streaming("downstream reset"));
+    }
+
+    /// Non-HTTP transport faults carry no status and keep the existing
+    /// classification, so genuinely stream-specific framing errors are still
+    /// reported as stream failures.
+    #[tokio::test]
+    async fn stream_framing_faults_without_a_status_keep_their_classification() {
+        let message = capability_stream_failure(|| {
+            CoreError::Message("stream chunk: connection reset".into())
+        })
+        .await;
+        assert!(message.contains("capabilities.stream"), "{message:?}");
     }
 
     #[tokio::test]

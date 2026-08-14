@@ -19,8 +19,7 @@
 //! regardless of how the command ended.
 
 use crate::config::ColorMode;
-use cd_core::events::{StreamEvent, ToolPhase};
-use cd_core::router::AgentPhase;
+use cd_core::events::{progress_for_stream_event, StreamEvent, ToolPhase};
 use std::io::{self, IsTerminal, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -177,6 +176,16 @@ impl TerminalTextSanitizer {
                     }
                     '\r' => EscapeState::Text,
                     c if c.is_control() => EscapeState::Text,
+                    // Bidi overrides, embeddings, isolates, and directional
+                    // marks are invisible but reorder what a terminal shows,
+                    // so displayed order can disagree with the bytes. Dropping
+                    // them costs nothing legible — the bidi algorithm still
+                    // lays out RTL text on its own — and removes a whole class
+                    // of line spoofing from every provider's output, not just
+                    // from host-rendered answers.
+                    c if cd_core::investigation_answer::is_bidi_formatting_control(c) => {
+                        EscapeState::Text
+                    }
                     c => {
                         if self.ascii {
                             push_ascii_typography(&mut out, c);
@@ -240,31 +249,9 @@ fn push_ascii_typography(out: &mut String, character: char) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChatStage {
-    Connecting,
-    AssemblingContext,
-    WaitingOnModel,
-    RunningTools,
-    Regrounding,
-    SavingSession,
-}
-
-impl ChatStage {
-    fn label(self) -> &'static str {
-        match self {
-            ChatStage::Connecting => "Connecting to provider",
-            ChatStage::AssemblingContext => "Assembling context",
-            ChatStage::WaitingOnModel => "Waiting on model",
-            ChatStage::RunningTools => "Running tools",
-            ChatStage::Regrounding => "Validating grounded evidence",
-            ChatStage::SavingSession => "Saving session",
-        }
-    }
-}
-
 struct ChatStatusState {
-    stage: ChatStage,
+    /// Shared core-authored human label for the latest engine activity.
+    stage: String,
     tools_started: usize,
     tools_finished: usize,
     retries: usize,
@@ -317,7 +304,7 @@ impl ChatStatusRenderer {
         Self {
             caps,
             state: Mutex::new(ChatStatusState {
-                stage: ChatStage::Connecting,
+                stage: "Connecting to provider".into(),
                 tools_started: 0,
                 tools_finished: 0,
                 retries: 0,
@@ -359,56 +346,21 @@ impl ChatStatusRenderer {
             }
             return;
         }
-        let phase_changed = match event {
-            StreamEvent::TurnStarted { .. } => {
-                let changed = state.stage != ChatStage::AssemblingContext;
-                state.stage = ChatStage::AssemblingContext;
-                changed
-            }
-            StreamEvent::TurnPhase { phase } => {
-                let next = match phase {
-                    AgentPhase::ChoosingEvidence | AgentPhase::RetrievingEvidence => {
-                        ChatStage::AssemblingContext
-                    }
-                    AgentPhase::SynthesizingAnswer => ChatStage::WaitingOnModel,
-                };
-                let changed = state.stage != next;
-                state.stage = next;
-                changed
-            }
+        match event {
             StreamEvent::Tool {
                 phase: ToolPhase::Started,
                 ..
             } => {
                 state.tools_started += 1;
-                let changed = state.stage != ChatStage::RunningTools;
-                state.stage = ChatStage::RunningTools;
-                changed
             }
             StreamEvent::Tool {
                 phase: ToolPhase::Finished,
                 ..
             } => {
                 state.tools_finished += 1;
-                // Still "running tools" until the next distinct stage — a
-                // redraw here just refreshes the finished/started count.
-                true
             }
             StreamEvent::LinkedSynthesisRetry { .. } => {
                 state.retries += 1;
-                let changed = state.stage != ChatStage::Regrounding;
-                state.stage = ChatStage::Regrounding;
-                changed
-            }
-            StreamEvent::TurnCompleted { .. } => {
-                let changed = state.stage != ChatStage::SavingSession;
-                state.stage = ChatStage::SavingSession;
-                changed
-            }
-            StreamEvent::Error { .. } => {
-                // Terminal for this render; `finish()` writes the actual
-                // failure line — just force one last redraw of context.
-                true
             }
             StreamEvent::PermissionRequired { .. } => {
                 // `commands::chat::decide_permission` is about to print a
@@ -419,12 +371,21 @@ impl ChatStatusRenderer {
                 self.clear_in_place(&state);
                 return;
             }
-            StreamEvent::TextDelta { .. } => unreachable!("handled above"),
-            StreamEvent::ThoughtDelta { .. }
-            | StreamEvent::Citation { .. }
-            | StreamEvent::SearchTrail { .. }
-            | StreamEvent::ContextBudget { .. }
-            | StreamEvent::ProviderTelemetry { .. } => return,
+            _ => {}
+        }
+        let phase_changed = if matches!(event, StreamEvent::Error { .. }) {
+            // Terminal for this render; `finish()` writes the actual failure
+            // line — just force one last redraw of the current context.
+            true
+        } else if let Some(progress) = progress_for_stream_event(
+            event,
+            u64::try_from(state.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        ) {
+            let changed = state.stage != progress.label;
+            state.stage = progress.label;
+            changed
+        } else {
+            return;
         };
         self.redraw(&mut state, phase_changed);
     }
@@ -481,7 +442,7 @@ impl ChatStatusRenderer {
         if self.caps.color {
             line.push_str("\x1b[36m");
         }
-        line.push_str(state.stage.label());
+        line.push_str(&state.stage);
         if self.caps.color {
             line.push_str("\x1b[0m");
         }
@@ -578,6 +539,7 @@ fn human_grounding_label(grounding: &str) -> &'static str {
     match grounding {
         "grounded" => "citations checked; interpretation unverified",
         "ungrounded" => "citation check failed",
+        "provisional" => "provisional model narrative; review recommended",
         _ => "no corpus evidence check",
     }
 }
@@ -655,6 +617,62 @@ mod tests {
         assert_eq!(filter.push(" title\u{1b}\\after"), "after");
     }
 
+    /// Bidi controls are invisible and reorder a rendered line, so a value
+    /// carrying them can make a terminal show something the bytes do not say.
+    #[test]
+    fn terminal_text_filter_strips_bidi_formatting_controls() {
+        let mut filter = TerminalTextSanitizer::default();
+        assert_eq!(
+            filter.push("\u{202e}reversed\u{202c} \u{2066}iso\u{2069} \u{061c}\u{200e}\u{200f}m"),
+            "reversed iso m"
+        );
+        // Legible RTL content itself is untouched; only the controls go.
+        let mut filter = TerminalTextSanitizer::default();
+        assert_eq!(filter.push("خطأ في الاتصال"), "خطأ في الاتصال");
+    }
+
+    /// The whole host projection, carrying an adversarial value, reaches a
+    /// terminal with no control sequence and no forged line boundary.
+    #[test]
+    fn a_host_projection_carrying_hostile_values_stays_flat_in_a_terminal() {
+        use cd_core::investigation_answer::literal_display_text;
+
+        let hostile = [
+            "x\nsecond line",
+            "x\u{2028}second line",
+            "\u{1b}[31mred\u{1b}[0m",
+            "\u{1b}]8;;https://evil.example\u{7}osc\u{1b}]8;;\u{7}",
+            "\u{202e}reversed\u{202c}",
+            "bell\u{7}del\u{7f}nul\u{0}",
+            "x\u{0085}\u{000b}\u{000c}y",
+        ];
+        for raw in hostile {
+            let value = literal_display_text(raw);
+            let line = format!("- `{value}` — cites `e-a`");
+            let mut filter = TerminalTextSanitizer::default();
+            let rendered = filter.push(&line);
+            assert_eq!(
+                rendered, line,
+                "the host boundary already removed everything the terminal filter would"
+            );
+            assert_eq!(
+                rendered.lines().count(),
+                1,
+                "a dynamic value must not create a terminal line: {rendered:?}"
+            );
+            assert!(
+                !rendered.chars().any(|c| c.is_control() && c != '\n'),
+                "control character reached the terminal: {rendered:?}"
+            );
+            assert!(
+                !rendered
+                    .chars()
+                    .any(cd_core::investigation_answer::is_bidi_formatting_control),
+                "bidi control reached the terminal: {rendered:?}"
+            );
+        }
+    }
+
     #[test]
     fn ascii_terminal_mode_normalizes_problematic_typography() {
         let mut filter = TerminalTextSanitizer::ascii();
@@ -677,6 +695,10 @@ mod tests {
             human_grounding_label("not_applicable"),
             "no corpus evidence check"
         );
+        assert_eq!(
+            human_grounding_label("provisional"),
+            "provisional model narrative; review recommended"
+        );
     }
 
     #[test]
@@ -689,7 +711,7 @@ mod tests {
         // A same-stage event must not itself force a new line under
         // redirected output — only genuine phase transitions do.
         let state = renderer.state.lock().unwrap();
-        assert_eq!(state.stage, ChatStage::AssemblingContext);
+        assert_eq!(state.stage, "Assembling context");
     }
 
     #[test]
@@ -712,7 +734,7 @@ mod tests {
             ok: Some(true),
         });
         let state = renderer.state.lock().unwrap();
-        assert_eq!(state.stage, ChatStage::RunningTools);
+        assert_eq!(state.stage, "Finished: search");
         assert_eq!(state.tools_started, 1);
         assert_eq!(state.tools_finished, 1);
     }
@@ -748,7 +770,7 @@ mod tests {
         assert!(state.downgraded);
         // Counters still update — only the printing is suppressed.
         assert_eq!(state.tools_started, 1);
-        assert_eq!(state.stage, ChatStage::SavingSession);
+        assert_eq!(state.stage, "Saving session");
         // `redraw()` never ran its print branch after downgrade: the flag
         // it alone sets to `true` is unchanged from before the downgrade.
         assert_eq!(state.printed_anything, printed_before_downgrade);
@@ -765,14 +787,30 @@ mod tests {
             model_id: None,
         });
         let state = renderer.state.lock().unwrap();
-        assert_eq!(state.stage, ChatStage::Regrounding);
+        assert_eq!(state.stage, "Bounded evidence is ready for synthesis retry");
         assert_eq!(state.retries, 1);
+    }
+
+    #[test]
+    fn multi_model_reviewer_stage_uses_shared_human_label() {
+        let renderer = ChatStatusRenderer::new(caps(false, false));
+        renderer.on_event(&StreamEvent::MultiModelStage {
+            stage: "reviewer".into(),
+            phase: "started".into(),
+            status: None,
+            detail: "reviewing 2 candidate findings".into(),
+            candidate_id: None,
+        });
+        assert_eq!(
+            renderer.state.lock().unwrap().stage,
+            "Reviewing candidate findings"
+        );
     }
 
     #[test]
     fn permission_required_clears_the_in_place_line_without_starting_a_new_stage() {
         let renderer = ChatStatusRenderer::new(caps(true, false));
-        let stage_before = renderer.state.lock().unwrap().stage;
+        let stage_before = renderer.state.lock().unwrap().stage.clone();
         renderer.on_event(&StreamEvent::PermissionRequired {
             request_id: "r1".into(),
             tool_name: "write_file".into(),

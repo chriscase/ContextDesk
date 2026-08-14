@@ -1,0 +1,241 @@
+{
+  "base_ts": 1740989040,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.25,
+      "min_recall_at_25": 0.6,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb15-recovery-evidence",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb15-recovery-evidence-g01",
+      "incident_id": "rb15-recovery-evidence-inc1",
+      "notes": "primary fenced; failover initiated",
+      "role": "trigger",
+      "sources": [
+        "db/cluster.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "node-4A8213E6",
+      "ts": 1740991440
+    },
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb15-recovery-evidence-g02",
+      "incident_id": "rb15-recovery-evidence-inc1",
+      "notes": "replica promotion under way",
+      "role": "propagation",
+      "sources": [
+        "db/cluster.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "promo-6BFEB62C",
+      "ts": 1740991500
+    },
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb15-recovery-evidence-g03",
+      "incident_id": "rb15-recovery-evidence-inc1",
+      "notes": "writes fail during promotion",
+      "role": "symptom",
+      "sources": [
+        "api/store.jsonl"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "req-771CA4CB",
+      "ts": 1740991560
+    },
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb15-recovery-evidence-g04",
+      "incident_id": "rb15-recovery-evidence-inc1",
+      "notes": "explicit multi-record recovery sequence",
+      "role": "recovery",
+      "sources": [
+        "api/store.jsonl",
+        "db/cluster.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "replication caught up",
+      "ts": 1740992040
+    }
+  ],
+  "expected": {
+    "bytes": 56450,
+    "events": 388,
+    "excluded_files": [],
+    "files": 2,
+    "files_by_path": {
+      "api/store.jsonl": {
+        "bytes": 40498,
+        "events": 264,
+        "sha256": "76f2af4572fc8503f76a97a92bc3b8dbb85595d44e7882f3b3818de4c44687da"
+      },
+      "db/cluster.log": {
+        "bytes": 15952,
+        "events": 124,
+        "sha256": "f1b288e23a08c93a3b8316ce30a8ddf36590b433d130b1822e4d098ef3a0342a"
+      }
+    },
+    "severities": {
+      "error": 4,
+      "info": 383,
+      "warn": 1
+    },
+    "source_count": 2,
+    "sources": {
+      "api/store.jsonl": 264,
+      "db/cluster.log": 124
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "the recovery promotion caused the write failures"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "11049c6ea0318a14b706cb133db33a41406a82f310c9742dee1c04042823f489",
+  "incidents": [
+    {
+      "incident_id": "rb15-recovery-evidence-inc1",
+      "root_cause_status": "established",
+      "summary": "A fenced primary triggered failover; writes failed during promotion and recovered once replication caught up.",
+      "trigger_group_ids": [
+        "rb15-recovery-evidence-g01"
+      ],
+      "window_from_ts": 1740991440,
+      "window_to_ts": 1740992220
+    }
+  ],
+  "intended_probe": "startup/ready/recovery records follow failures; trigger, propagation, symptom and recovery must stay distinct",
+  "known_counts": {
+    "corpus_completeness": "complete",
+    "known_missing_references": 0,
+    "total_events_known": true
+  },
+  "per_query_relevance": {
+    "rb15-recovery-evidence-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb15-recovery-evidence-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb15-recovery-evidence-g02"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb15-recovery-evidence-g03"
+        }
+      ]
+    },
+    "rb15-recovery-evidence-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb15-recovery-evidence-g01"
+        },
+        {
+          "gain": 2,
+          "group_id": "rb15-recovery-evidence-g02"
+        }
+      ]
+    },
+    "rb15-recovery-evidence-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb15-recovery-evidence-g03"
+        }
+      ]
+    },
+    "rb15-recovery-evidence-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 2,
+          "group_id": "rb15-recovery-evidence-g02"
+        }
+      ]
+    },
+    "rb15-recovery-evidence-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb15-recovery-evidence-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 3,
+          "group_id": "rb15-recovery-evidence-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb15-recovery-evidence-g03"
+        }
+      ]
+    },
+    "rb15-recovery-evidence-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb15-recovery-evidence-g04"
+        },
+        {
+          "gain": 3,
+          "group_id": "rb15-recovery-evidence-g01"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "why the primary was fenced is not recorded"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "the fencing record is the trigger; the promotion records are propagation",
+    "the recovery sequence (promoted, caught up, normalized) closes the incident",
+    "recovery records must not be classified as the trigger"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "d44586c56628f0c3771c7a619b0bb2d8de7739e81335f20c2da11cd97c446bc7",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Recovery evidence"
+}

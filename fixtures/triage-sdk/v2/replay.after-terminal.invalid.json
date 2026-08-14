@@ -1,0 +1,137 @@
+{
+  "schema_id": "contextdesk.triage.replay.v1",
+  "run_id": "run:golden:01",
+  "request_fingerprint": "sha256:request:01",
+  "events": [
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run:golden:01",
+      "sequence": 0,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "run_started",
+        "request_fingerprint": "sha256:request:01",
+        "policy_fingerprint": "sha256:policy:01"
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run:golden:01",
+      "sequence": 1,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "packet_ready",
+        "packet_id": "packet:golden:01",
+        "packet_digest": "sha256:packet:01",
+        "evidence_count": 2
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run:golden:01",
+      "sequence": 2,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "role_attempt",
+        "attempt": {
+          "attempt_id": "attempt:01",
+          "role_slot_id": "slot:causal:01",
+          "role": {
+            "contributor": "causal_proposer"
+          },
+          "model": {
+            "profile_id": "profile:primary",
+            "model_id": "model:catalog:exact"
+          },
+          "status": "completed",
+          "elapsed_ms": 24360,
+          "input_chars": 3612,
+          "output_chars": 812
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run:golden:01",
+      "sequence": 3,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "reconciliation",
+        "summary": {
+          "state": "insufficient_evidence",
+          "configured_role_slots": 2,
+          "completed_role_slots": 1,
+          "distinct_models": 1,
+          "distinct_gateways": 1,
+          "supported_claim_ids": [
+            "claim:01"
+          ],
+          "gap_ids": [
+            "gap:missing-change"
+          ],
+          "root_cause_established": false
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run:golden:01",
+      "sequence": 4,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "validation",
+        "passed": false,
+        "reason_codes": [
+          "required_role_timed_out"
+        ]
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run:golden:01",
+      "sequence": 5,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "completed",
+        "result": {
+          "schema_id": "contextdesk.triage.result.v2",
+          "run_id": "run:golden:01",
+          "kind": "honest_partial",
+          "validation_state": "partial",
+          "packet_id": "packet:golden:01",
+          "reconciliation": {
+            "state": "insufficient_evidence",
+            "configured_role_slots": 2,
+            "completed_role_slots": 1,
+            "distinct_models": 1,
+            "distinct_gateways": 1,
+            "supported_claim_ids": [
+              "claim:01"
+            ],
+            "gap_ids": [
+              "gap:missing-change"
+            ],
+            "root_cause_established": false
+          },
+          "accepted_evidence_ids": [
+            "evidence:01",
+            "evidence:02"
+          ],
+          "reason_codes": [
+            "required_role_timed_out"
+          ]
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "run:golden:01",
+      "sequence": 6,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "failed",
+        "category": "second_terminal"
+      }
+    }
+  ]
+}

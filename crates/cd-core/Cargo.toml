@@ -89,3 +89,7 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"
 sha2 = "0.10"
 wiremock = "0.6"
 http-body = "1"
+cd-test-gateway = { path = "../cd-test-gateway" }
+# RFC-2822 Retry-After fixtures in tests/transport_semantic_attempt_oracle.rs
+# (already a primary dependency; no new build cost).
+chrono = { workspace = true }

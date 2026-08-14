@@ -1823,7 +1823,9 @@ async fn lab_agent_path_enforces_budget_not_full_history() {
     .unwrap();
 
     assert!(
-        capture.max_chars() <= budget + 4_000, // system policy can expand slightly past opts in edge cases; still << full
+        // System policy plus the nonce-bound untrusted fence on plan-injected
+        // retrieval snippets are fixed overhead past opts; still << full history.
+        capture.max_chars() <= budget + 5_000,
         "agent path over budget: {}",
         capture.max_chars()
     );

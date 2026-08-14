@@ -4,7 +4,7 @@
 
 use crate::cli::NormalizeArgs;
 use crate::config::{ColorMode, OutputFormat};
-use crate::envelope::{CliError, CliResult, Render};
+use crate::envelope::{CliError, CliResult, ExitCategory, Render};
 use crate::progress::CliProgressObserver;
 use cd_core::log_analysis::normalize_export::NormalizeTimezonePolicy;
 use cd_core::process_progress::CancelFlag;
@@ -196,27 +196,7 @@ pub async fn run(
 
     let outcome = match joined {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(core_error)) => {
-            if matches!(&core_error, cd_core::error::CoreError::Cancelled) {
-                return Err(CliError::cancelled(
-                    "normalize cancelled — destination unchanged",
-                ));
-            }
-            let message = core_error.to_string();
-            return Err(
-                if message.contains("overwrite")
-                    || message.contains("non-empty")
-                    || message.contains("nothing normalizable")
-                    || message.contains("no selected")
-                    || message.contains("strict-time")
-                    || message.contains("unsupported --output-format")
-                {
-                    CliError::user(message)
-                } else {
-                    CliError::internal(message)
-                },
-            );
-        }
+        Ok(Err(core_error)) => return Err(map_normalize_error(core_error)),
         Err(join_error) => {
             return Err(CliError::internal(format!(
                 "normalize task panicked: {join_error}"
@@ -257,4 +237,44 @@ pub async fn run(
         fail_on_partial: outcome.partial_policy_failed,
         files,
     })
+}
+
+fn map_normalize_error(core_error: cd_core::error::CoreError) -> CliError {
+    if matches!(&core_error, cd_core::error::CoreError::Cancelled) {
+        return CliError::cancelled("normalize cancelled — destination unchanged");
+    }
+    let generated_output_is_nonconforming = matches!(
+        &core_error,
+        cd_core::error::CoreError::Policy(message)
+            if message.starts_with("normalized JSONL failed validation")
+    );
+    let message = core_error.to_string();
+    if generated_output_is_nonconforming {
+        CliError::new(ExitCategory::NonConforming, message)
+    } else if message.contains("overwrite")
+        || message.contains("non-empty")
+        || message.contains("nothing normalizable")
+        || message.contains("no selected")
+        || message.contains("strict-time")
+        || message.contains("unsupported --output-format")
+    {
+        CliError::user(message)
+    } else {
+        CliError::internal(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_output_validation_failure_is_nonconforming_not_internal() {
+        let error = map_normalize_error(cd_core::error::CoreError::Policy(
+            "normalized JSONL failed validation (2 diagnostics; codes=bounds_exceeded@message)"
+                .into(),
+        ));
+        assert_eq!(error.category, ExitCategory::NonConforming);
+        assert!(error.message.contains("bounds_exceeded@message"));
+    }
 }

@@ -525,6 +525,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "cd-core",
+ "cd-test-gateway",
  "cd-workflow",
  "chrono",
  "clap",
@@ -534,6 +535,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -552,6 +554,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "cd-test-gateway",
  "chrono",
  "chrono-tz",
  "dirs 5.0.1",
@@ -617,10 +620,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cd-test-gateway"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
 name = "cd-workflow"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cd-core",
+ "cd-test-gateway",
  "chrono",
  "libc",
  "serde",
@@ -628,6 +643,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "wiremock",
  "zip 2.4.2",

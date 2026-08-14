@@ -1,0 +1,9 @@
+{
+  "schema": "contextdesk.gateway_contract.vercel_v4_embedding_response.v1",
+  "note": "Metadata only. Vectors are generated hermetically in tests (unit vector of exact dimension). Never store live floats.",
+  "model": "voyage/voyage-4",
+  "value_count": 1,
+  "dimensions": 1024,
+  "usage": { "tokens": 0 },
+  "warnings": []
+}

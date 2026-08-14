@@ -1,9 +1,10 @@
 # ContextDesk CLI
 
 For ephemeral automation or CI, set `CONTEXTDESK_PROVIDER_API_KEY` for the
-current process. It overrides provider keychain lookup only; ContextDesk does
+current process. It overrides provider credential lookup only; ContextDesk does
 not persist or print the value, and connector credentials remain isolated.
-Interactive desktop/CLI use continues to share the OS keychain by default.
+Provider profiles may also select a protected `file:` reference. Keychain
+remains available for profiles that explicitly use a Keychain reference.
 
 `cd-cli` (binary: `contextdesk`) is a thin adapter over `cd_workflow`, which
 packages host-neutral operations around the production `cd_core` engine. The
@@ -43,6 +44,7 @@ metacharacters literal. If a question begins with a command name such as
 | `--json` | | Shorthand for `--format json` |
 | `--jsonl` | | Shorthand for `--format jsonl` |
 | `--color auto\|always\|never` | `CONTEXTDESK_COLOR` | Color on stderr progress |
+| `--no-color` | | Explicit shorthand for `--color never` |
 | `--config <path>` | `CONTEXTDESK_CONFIG` | Project CLI TOML (`.contextdesk.toml`) |
 | `--app-config <path>` | `CONTEXTDESK_APP_CONFIG` | Shared `AppConfig` JSON path |
 | `--data-dir <path>` | `CONTEXTDESK_DATA_DIR` | Isolate all process state (alias `--profile-dir`) |
@@ -69,8 +71,21 @@ metacharacters literal. If a question begins with a command name such as
 | `confluence …` | Optional Confluence connector |
 | `capabilities` | Machine-readable build surface |
 | `doctor` | Demo readiness |
+| `models [discover\|verify]` | Offline model readiness by default; explicit catalog discovery and selected/all role verification when requested |
 | `logging-assessment [corpus-id]` (alias `assess`) | Deterministic logging-quality assessment with fixed finding-code improvement hints (no provider); defaults to the current corpus. |
 | `exception-episodes [corpus-id]` | Deterministic exception episode correlation (occurrence vs raw records; no provider). |
+| `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
+| `triage-policy validate\|compile\|example` | Offline, owner-only Triage Policy V2 validation over explicit policy/preflight JSON files. Retains exact profile/model identities; does not read AppConfig, credentials, Keychain, discovery state, or a corpus, and never contacts a provider. |
+| `triage-policy qualify` | One explicit, bounded synthetic role probe through the production backend; atomically saves host-owned exact-role evidence and never infers compatibility from a model name. |
+| `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
+| `gateway ledger` | Offline cost/reliability comparison over share-safe diagnostic bundles and documented historical rows. Never makes live calls; never emits readiness claims from aggregates. See [Gateway cost/reliability ledger](benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md). |
+
+For a serial, multi-corpus demonstration that reuses these same CLI paths,
+see [`scripts/demo-corpus-batch.ps1`](../scripts/demo-corpus-batch.ps1) and the
+[multi-corpus runbook](DEMO_RUNBOOK.md#c1-multi-corpus-demonstration-serial-production-cli-path).
+It is a thin acceptance/demo orchestrator, not a second provider client. Its
+preflight is offline; execution is explicit, one selected model and one turn
+per corpus, with local raw artifacts and an aggregate report.
 
 Drift check: `python3 scripts/cli-release/check_cli_docs.py` compares this list
 to a live binary when `CONTEXTDESK_BIN` is set.
@@ -278,6 +293,213 @@ probe and live turn each read is handed straight to the existing safe
 functions that already never log it — nothing in this command ever writes
 to `cli.toml` or the shared `AppConfig` either.
 
+## Triage Policy V2 (`contextdesk triage-policy`)
+
+This state-free surface previews the same pure compiler used by the reusable
+triage contracts. It is suitable for policy authoring and automation before
+any provider operation:
+
+```bash
+contextdesk triage-policy example
+contextdesk triage-policy validate --policy policy.json --preflight preflight.json
+contextdesk triage-policy compile --policy policy.json --preflight preflight.json --json
+contextdesk triage-policy qualify --profile work --model exact-model-id --role observation-extractor --yes
+```
+
+`validate` reports every configured slot as admitted, optionally degraded, or
+required/rejected. `compile` additionally returns the complete deterministic
+sequential plan and separate role-slot, exact-model, catalog-model, and gateway
+counts; those counts are explicitly not consensus. Rejected preflight is a
+completed result with exit code 8 (`not_ready`) so JSON output retains every
+typed rejection and slot disposition. Malformed or oversized input is a user
+error. Input paths are never echoed.
+
+This is an **owner-only** view, explicitly labelled `privacy: "owner_only"` in
+JSON and in human output, because exact profile and catalog-model identities are
+part of the policy and compiled plan. The command remains bounded, does not read
+or print credentials, and does not echo input paths, but its output is not a
+share-safe artifact. Review it before sharing. There is deliberately no
+pseudonymization here: the owner-local compiler must show which exact configured
+model each role would use.
+
+Standard remains the permanent simple one-model default. Enhanced and Advanced
+use the same contract with progressively visible roles, budgets, qualification,
+and egress choices; this CLI does not silently select or substitute a model.
+`qualify` is the explicit stateful probe: it makes one bounded synthetic
+request through the production backend, validates the exact packet/role
+contract, and stores the result in the local role-qualification store. Use the
+exact catalog id returned by discovery; no model-name inference occurs. Pass a
+larger `--deadline-ms` for slow gateways. A failed or unsupported probe is
+saved as negative evidence and never authorizes a live policy.
+
+## Gateway diagnostics (`contextdesk gateway diagnose`)
+
+A bounded, provider-neutral diagnostic and synthetic-workflow suite for
+**one explicitly selected model** (the existing global `--profile`/`--model`
+selection — this command never implicitly probes a whole catalog). It
+answers a narrower, more structural question than `doctor`: not "is
+everything ready for a demo," but "for this exact model, does a gap sit at
+the gateway/model layer, ContextDesk's own product-path integration, or
+answer usefulness?"
+
+```bash
+contextdesk --profile work --model my-model gateway diagnose
+contextdesk --profile work --model my-model gateway diagnose --yes --jsonl
+contextdesk --profile work --model my-model gateway diagnose --yes --raw --raw-i-understand
+```
+
+Every check reuses an existing production path — never a second HTTP
+client, a second agent loop, or a diagnostic-only imitation of triage:
+
+| Lane | Reuses |
+| --- | --- |
+| Direct (smallest known-valid request through the raw provider backend) | `cd_workflow::capability_qualification::LiveQualificationTransport` + `cd_core::capability_qualification::run_qualification` — the same machinery `models verify` uses |
+| Product (the equivalent case through the real ContextDesk workflow) | `cd_workflow::chat::run_chat_workflow`, `cd_core::turn_trace::RecordingTurnTrace`, the same disposable-corpus pattern `doctor` uses |
+| Triage scoring | `cd_core::triage_quality::score_validated_investigation_answer` at the typed `investigation_answer.v1` authority boundary; legacy Markdown parsing remains only as a compatibility fallback |
+
+**Basic-level cases** (default; `--level extended` re-attempts each
+product-path case once more to observe retry/correction stability, never
+expanding to more of the catalog): for a chat-role model,
+`ordinary_generation`, `structured_response`, `tool_call_continuation`,
+`attachment_selected_context`, and `linked_log_triage`. For a model whose
+name hints at an embedding or reranker role, only
+`embedding_or_rerank_contract` runs — chat-shaped requests are never sent
+to a model not qualified for that role, and specialty requests are never
+sent to a model not selected for that role.
+
+`linked_log_triage` seeds a disposable corpus containing an initiating
+trigger, a louder downstream symptom, an independent ERROR decoy, WARN noise,
+and a recovery event — the known-truth key (trigger/symptom/decoy tokens,
+whether root cause is establishable) lives only in the host-side scorer, never
+in model-visible input — then scores the host-validated typed answer for
+citation identity, trigger-vs-symptom separation, decoy separation, and
+honest abstention rather than exact wording. The diagnostic prompt itself must
+remain free of evaluator IDs so it exercises the same broad-triage classifier
+as a real user request.
+
+**Classification** (evidence, not infallible proof of a single cause) per
+case: both lanes failed (`gateway_or_model_likely`), the direct lane passed
+but the product lane failed (`product_integration_likely`), both executed
+but a typed scorer failed (`usefulness_gap`), a correction/retry was needed
+(`retry_required`), a host projection was internally inconsistent
+(`diagnostic_fault`), or `compatible`. Three verdicts stay separate in the
+final report — `gateway_model_compatible`, `product_workflow_compatible`,
+`answers_useful` — and each has an explicit `*_status` of `pass`, `fail`, or
+`inconclusive`. A diagnostic fault is not provider or usefulness evidence; the
+affected dimensions remain inconclusive. The legacy Boolean fields are true
+only for `pass`; a timeout or all-skipped run is therefore never reported as a
+compatibility success. In extended mode every planned attempt must pass: a
+mixed fail/pass sequence is explicitly fail-closed and remains
+`retry_required`, never a usefulness pass. A quality gap never downgrades or
+upgrades either compatibility verdict.
+
+**Consent gate.** Before any network call, the planned case list, the
+maximum request bound, the active deadline (`--timeout`, default 180s), and
+the artifact classes this run will produce are shown; the operation then
+requires an interactive `y` or `--yes` (required for any non-interactive
+use, including `--json`/`--jsonl`).
+
+**Deadline policy.** The deadline always bounds the whole diagnostic run.
+When `--timeout` is omitted, each case also has a 45-second safety ceiling so
+one accidentally stalled case cannot consume the default 180-second run. An
+explicit `--timeout N` is treated as an intentional allowance for slow
+gateways: each case may use the operation's remaining time, but can never run
+past the explicit whole-run deadline. For example, `--timeout 600` no longer
+silently imposes a 45-second case timeout. Request counts, attempt counts,
+cooperative cancellation, cleanup, and activity tracing remain bounded and
+unchanged.
+
+**Credentials.** The selected profile's credential is resolved once for
+the direct lane via the existing `SecretStore`/`ReferencedSecretStore`
+path (works with a protected-file reference — no Keychain required); the
+product lane resolves its own credential internally via
+`cd_workflow::provider`'s existing per-turn cache, the same reused
+mechanism every other live-turn command already uses, never a second
+implementation. A credential value is never printed, logged, or written to
+either artifact.
+
+**Cleanup** of every disposable corpus/session this run created is
+attempted on every exit path — success, a case failure, the overall
+deadline, or Ctrl-C — and its own outcome (`cleanup.failures`) is reported,
+not only a stderr warning. This command never mutates a pre-existing
+corpus, session, or provider default.
+
+**Artifacts.** A versioned, checksummed diagnostic directory
+(`report.json` + `manifest.json` with a SHA-256 per file) is always
+written, share-safe by default: no credentials, Authorization headers, raw
+environment values, absolute paths, raw endpoint URLs, or exact private
+profile/model ids — the profile and model identity are stable, run-local
+pseudonyms, and the endpoint is a fingerprint
+(`cd_core::capability_qualification::fingerprint_endpoint`), the same hash
+`models verify`'s own reports already use. All lane/cleanup detail crosses one
+provider-neutral `ShareSafeRedactionPolicy` boundary before text/JSONL output
+and again before artifact serialization. Failed lanes retain a stable category
+(`authentication`, `rate_limited`, `timeout`, `transport`, `invalid_response`,
+`upstream`, `response_contract`, or a coarse fallback) but omit the raw
+provider body. The persisted share-safe report omits the absolute host path;
+local text/JSONL output may include the absolute artifact location so the
+operator can open it, and should not be shared as an artifact. `--raw --raw-i-understand`
+additionally writes an owner-only (`0600`/`0700` on Unix), local-only
+`private/capture.json` with bounded synthetic case detail — never
+credentials — that the share-safe bundle never references by content.
+
+**Remaining privacy limits.** This policy is a diagnostic-artifact boundary,
+not a general PII or proprietary-text classifier. It removes credential/header
+shapes, arbitrary HTTP(S) endpoints, absolute POSIX/Windows paths, and the exact
+selected profile/model identifiers; it intentionally does not attempt to find
+names, email addresses, ticket numbers, relative paths, or other tenant data in
+otherwise safe host-authored prose. Raw failure bodies are omitted rather than
+trying to make arbitrary bodies safe. Endpoint fingerprints are deterministic,
+so someone who already has a small candidate endpoint list can compare hashes.
+Review artifacts before external sharing when those residual correlation risks
+matter.
+
+**Output.** Text prints a `[PASS]`/`[WARN]`/`[FAIL]`/`[FAULT]`/`[SKIP]` line per case
+as it completes (colored when the terminal supports it and `NO_COLOR` is
+unset; the bracketed label is always present regardless of color, and
+`--color never`/redirected output/`TERM=dumb` fall back to plain ASCII).
+`--jsonl` streams a `{"type":"plan",...}` line first, one
+`{"type":"case",...}` line per completed case, then exactly one terminal
+`{"type":"verdict",...}` line (or `{"type":"cancelled",...}` on Ctrl-C) —
+never any ANSI bytes. `--json` prints one envelope with the full report.
+Exit code: `0` when both compatibility verdicts hold and no measured
+usefulness failure exists, `8` (`not_ready`) when either compatibility verdict
+does not hold or `answers_useful_status=fail`, and `130` (`cancelled`) on
+Ctrl-C. An `answers_useful_status=inconclusive` result is allowed for roles
+without an answer scorer; it is not a pass claim.
+
+**Known limitations.** The embedding/reranker product lane has explicit
+Ollama, OpenAI-compatible, and Vercel v4 embedding dialects plus explicit
+TEI and Vercel v4 reranker dialects. Remote retrieval is default-deny: a
+configured role must carry an explicit `allow_remote` acknowledgment before
+query or candidate text can leave the machine; loopback Ollama does not need
+that acknowledgment. A role that lacks it is reported as
+`egress_not_acknowledged` and the keyword/structured baseline remains usable.
+These are compatibility and safety contracts, not claims of semantic quality;
+live employer-model quality still requires a consented diagnostic run.
+
+## Gateway cost/reliability ledger (`contextdesk gateway ledger`)
+
+Offline comparison of **already share-safe** gateway diagnostic bundles and
+documented historical benchmark rows. This command never contacts a gateway,
+never reads credentials, and never invents live observations.
+
+```bash
+contextdesk gateway ledger \
+  --input fixtures/gateway-cost-ledger/v1/deepseek \
+  --input fixtures/gateway-cost-ledger/v1/gpt-oss \
+  --input fixtures/gateway-cost-ledger/v1/historical/row-01.json \
+  --out /tmp/ledger-comparison.json
+```
+
+Each `--input` may be a diagnostic bundle directory (`report.json` + optional
+`manifest.json`), a report JSON file, or a historical row JSON file. The
+comparison reports per-model runs, pass rates by diagnostic dimension (with
+`inconclusive` preserved separately), median latency, cost/token summaries,
+and confidence caveats. Missing cost/tokens stay **unknown**, never zero.
+Aggregates never emit readiness or verified claims. See
+[GATEWAY_COST_RELIABILITY_LEDGER_V1.md](benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md).
+
 ## Isolated profiles (`--data-dir` / `--profile-dir`)
 
 ```bash
@@ -292,10 +514,12 @@ and CLI state (`<data-dir>/{config.json,cli.toml,cache,sessions,cli}`) —
 under exactly the directory given, created if absent. Omit it to keep the
 default: state shared with the desktop app under `~/.contextdesk`.
 
-This is a filesystem-only boundary — credentials never live on disk at all,
-they stay in the OS keychain (see [Configuration](#configuration)) — so a
-provider credential is always a keychain entry scoped by *profile id*, not
-by `--data-dir`. `config init` accounts for that: an isolated profile's
+By default, imported credentials stay in the OS keychain (see
+[Configuration](#configuration)), so those entries are scoped by *profile id*,
+not by `--data-dir`. A profile configured with `--api-key-file-ref` instead
+holds only an absolute reference to the selected owner-only file; no Keychain
+entry is read or written for that profile. For Keychain-backed profiles,
+`config init` accounts for isolation: an isolated profile's
 *default* id (no explicit `--profile-id`) is itself derived from the data
 dir, so the single most common invocation (no `--profile-id`) can never
 silently read or overwrite the desktop-shared profile's keychain entry for
@@ -338,9 +562,10 @@ The same root also holds the durable **reviewed-format** store when used by impo
 
 The CLI has its own, separate, versioned TOML configuration for CLI-only
 preferences (output format, color, a preferred provider profile/model). It
-never holds credentials or provider secrets: those live exclusively in the
-OS keychain, referenced (never embedded) from the shared `config.json` by a
-path-like id such as `provider/<profile-id>/api_key`
+never holds credentials or provider secrets. The shared `config.json` stores
+only an explicit reference: either a Keychain id such as
+`provider/<profile-id>/api_key` or an absolute protected-file reference such as
+`file:/Users/you/.contextdesk/credentials/vercel.key`
 (`cd_core::keychain_store::looks_like_raw_secret` refuses to save a config
 that embeds anything else). See `crates/cd-cli/src/config.rs` for the CLI's
 own TOML schema.
@@ -363,7 +588,40 @@ contextdesk config init --project      # writes ./.contextdesk.toml instead
 contextdesk config validate [path]
 contextdesk config show                # effective config + which layer won each field
 contextdesk config path
+contextdesk config deadline show       # whole-turn deadline policy (read-only)
+contextdesk config deadline auto       # adaptive by provider class
+contextdesk config deadline set 10m    # explicit whole-turn ceiling (90s, 3m, 10m, …)
 ```
+
+### Whole-turn deadline
+
+The whole-turn deadline is the **maximum** time one chat turn may run. ContextDesk
+may finish sooner. Choosing, retrieval, and synthesis stay separately bounded
+inside that ceiling (see the Proven Methods handbook).
+
+**Precedence (effective ceiling for one turn):**
+
+1. Per-turn CLI override (`chat --deadline` / direct-question `--deadline`)
+2. Saved explicit policy (`config deadline set …`)
+3. Adaptive policy (`config deadline auto`) — 3 minutes for managed providers,
+   5 minutes for local/private-network profiles
+
+Adaptive *latency learning* is **not** implemented; these commands only set
+policy. Duration grammar: a positive whole number plus unit `ms`, `s`, or `m`
+(examples: `500ms`, `90s`, `3m`, `10m`). Decimals, negatives, mixed units, and
+values outside **500ms–10m** are rejected without clamping. `set` and `auto`
+change only `router.deadline_ms` / `router.deadline_is_explicit` in the shared
+`AppConfig`; they never rewrite credentials, profiles, or corpus settings.
+
+```bash
+contextdesk config deadline show
+contextdesk config deadline set 10m
+contextdesk chat --deadline 3m --dry-run "what happened?"
+contextdesk --deadline 90s "what happened?"   # direct-question shorthand
+```
+
+`--deadline` applies **only to that turn** and never writes config. Invalid
+durations fail before credential resolution or provider contact.
 
 ### The `config init` wizard
 
@@ -403,12 +661,14 @@ contextdesk config init --non-interactive \
 - **Credential**: never accepted as a literal flag value (that would leak
   via shell history / `ps`). Pick exactly one of `--api-key-env <VAR>`
   (read the named environment variable's current value, trimmed),
-  `--api-key-file <path>` (read and trim the file's contents), or
+  `--api-key-file <path>` (read once and import into Keychain),
+  `--api-key-file-ref <path>` (validate and use that owner-only mode-600 file
+  directly without Keychain), or
   `--api-key-stdin` (read and trim one line from stdin) — read once, held
-  in memory, then committed to the OS keychain only as the single last
+  in memory. Imported sources are committed to the OS keychain only as the single last
   fallible step of the whole command, strictly after both config files
   (`cli.toml` and the shared `AppConfig`) have already been written
-  successfully. Omit all three to leave the profile without a credential
+  successfully. Omit all four to leave the profile without a credential
   (configurable later). This ordering means a rejected value anywhere in
   the run (a bad URL, an invalid timezone, a mistyped interactive y/n)
   never orphans a stored secret that nothing references; the only residual
@@ -460,14 +720,28 @@ On failure, `ok` is `false`, `data` is `null`, and `error` is
 
 ### Streaming lines (`--jsonl`)
 
+When a linked investigation completes, JSON output includes `investigation_answer` and JSONL
+emits an `investigation_answer` line containing the same host-validated `AnswerEnvelopeV1`.
+`final_text` is the host's deterministic Markdown projection of that envelope — readable
+output, not authority. Scripts must read `investigation_answer`; they must not parse
+`final_text`, or feed it (or a displayed envelope) back into a later chat turn as evidence
+authority. Every new turn creates a fresh ledger.
+
 Every streaming command's own `type`-tagged vocabulary is closed and
 command-specific — a reader must not assume one shared line grammar across
 commands, only that every line always parses independently and the last
 line is always the terminal one.
 
-`chat`: `text_delta`, `tool`, `permission_required`, `turn_completed`,
-`error`, `trace_summary`, `trace_context`, `trace_tool`, `activity`,
-`context_used`, `done`. The line
+`chat`: `progress`, `text_delta`, `tool`, `permission_required`,
+`turn_completed`, `error`, `investigation_answer`, `multi_model_stage`,
+`trace_summary`, `trace_context`, `trace_tool`, `activity`, `context_used`,
+`done`. A `progress` line is the shared human-progress projection of the same
+engine event sent to normal text and desktop hosts. It carries `category`
+(`turn`, `phase`, `tool`, or `multi_model`), stable `stage` / `phase`, a concise
+host label, `elapsed_ms`, and optional bounded diagnostics. Tool `started`
+activity therefore arrives before its legacy terminal `tool` result, and
+investigator/reviewer/synthesizer activity is visible while those stages run.
+The line
 tagged `done` is always last and appears exactly once — that holds on a
 successful turn and on a failed one alike. On failure, the last two lines
 are always `error` (the failure, `code`/`message`) then `done` with
@@ -544,11 +818,15 @@ contextdesk config init [--project] [--interactive|--non-interactive] [--force]
                         [--skip-provider] [--provider-kind <kind>] [--base-url <url>]
                         [--chat-model <id>] [--default-timezone <iana-id>]
                         [--profile-id <id>] [--profile-label <label>]
-                        [--api-key-env <var>|--api-key-file <path>|--api-key-stdin]
+                        [--api-key-env <var>|--api-key-file <path>|--api-key-file-ref <path>|--api-key-stdin]
                         [--check-connection]
 contextdesk config validate|show|path
 contextdesk capabilities
 contextdesk doctor [--timeout <seconds>] [--skip-live-turn]
+contextdesk models
+contextdesk models discover
+contextdesk models verify <model-id> [<model-id> ...]
+contextdesk models verify --all [--role chat|embedding|reranker|unknown] [--match <text>] --yes
 contextdesk logging-assessment [corpus-id] [--report-format json|markdown] [--output <file>]
 contextdesk exception-episodes [corpus-id]
 # Friendly aliases: ask=chat, search=explore, assess=logging-assessment,
@@ -559,6 +837,45 @@ Global flags (available on every subcommand): `--format`, `--json`,
 `--jsonl`, `--color`, `--config <path>`, `--app-config <path>`,
 `--data-dir <path>` (alias `--profile-dir`), `--profile <id>`, `--model
 <id>`.
+
+## Model readiness
+
+`contextdesk models` is an offline view of the same role-specific readiness
+shown in GUI model pickers. It reads AppConfig and the secret-free local
+qualification evidence file; it does not contact a provider, enumerate a live
+catalog, or read Keychain. JSON output reports `offline: true` and
+`credentials_read: false` explicitly.
+
+`contextdesk models discover` explicitly resolves the selected profile's
+credential once, fetches its live catalog, classifies each id as a **name hint**
+for chat, embedding, reranking, or unknown, and saves the secret-free inventory
+for both the CLI and desktop app. Interactive `config init` offers this catalog
+request immediately after gateway and credential entry, then lets the user
+choose a chat candidate instead of requiring a memorized model id.
+
+`contextdesk models verify` runs only synthetic compatibility requests. Exact
+ids are the simplest way to test a handful on a large gateway. `--all` applies
+after optional `--role` and `--match` filters, is sequential and cancellable,
+and requires confirmation (`--yes` in non-interactive use). Bare interactive
+selection narrows catalogs over 30 entries before showing numbered choices.
+Completed results are saved after each model, so cancellation preserves useful
+partial evidence. Multi-model runs are paced between models and stop if a
+gateway reports rate limiting; an empty discovery response never replaces the
+last good catalog or stales its evidence.
+
+Startup/pre-flight reuses the catalog request it already performs as a drift
+check. Added models appear unverified; removed models' prior evidence becomes
+stale; unchanged exact-model evidence remains current. A changed catalog gets
+its own preflight warning with an **Open AI settings** action. Catalog change
+never silently starts token-spending verification.
+
+`verified` means the current exact profile, endpoint fingerprint, model id,
+role contract, and probe schema passed synthetic compatibility checks. The
+current chat-role suite is specifically a **triage/investigation compatibility**
+suite. It is not a claim about answer quality, ordinary-chat quality, text or
+multimodal attachments, context length, or cost. Use CLI Verify or GUI
+**Qualify selected model…** to create or refresh evidence. Pins and defaults
+remain user-controlled even when another model is verified.
 
 ## Exception episodes and duplicate renderings
 
@@ -581,7 +898,14 @@ It reports v2 layers with typed completeness:
    execution evidence (trace/request/thread) with fail-closed boundaries.
 4. **Strongly supported derived episodes** — chain↔stderr unique matches
    (forced/reciprocal only); never bare “N incidents”.
-5. **Families** — bounded groups of episodes sharing a root signature.
+5. **Families** — bounded signature buckets of retained correlation groups.
+
+For schema compatibility, JSON fields named `occurrenceCount` and
+`semanticOccurrences` count **retained correlation groups**. Those groups
+include uncorrelated standalone renderings when matching fails closed; they are
+not semantic-episode or independent-incident totals unless
+`semantic_counts_certified=true`. Human and model-facing text labels them as
+retained groups and withholds the certified semantic total otherwise.
 
 Completeness fields separate `scan_complete`, `renderings_complete`,
 `correlation_complete`, `citations_complete`, `structural_coverage_complete`,
@@ -602,9 +926,9 @@ unverified.
 
 This distinction matters for application servers that emit one exception as
 both a normal multiline log entry and hundreds of individually wrapped stderr
-frames. ContextDesk preserves all those records while reporting the supported
-incident count separately, so record amplification is not presented as
-hundreds of independent outages.
+frames. ContextDesk preserves all those records while reporting strongly
+supported derived episodes separately. It never presents retained groups or
+record amplification as independent outages.
 
 ## Ingest-pipeline provenance (stale corpora)
 
@@ -738,12 +1062,30 @@ than inventing them.
   messages include round *N*'s tool results, already folded into history the
   same way a real turn folds them. Each line may also carry additive
   `provider_round_telemetry` for that round.
+
+Trace summary timing keeps two scopes explicit: `turn_elapsed_ms` is the
+whole CLI turn wall time, while `provider_call_elapsed_ms_sum` adds the
+durations of all recorded provider calls. The latter is accumulated call
+time, not a turn-relative timestamp, and may exceed turn wall time if provider
+calls execute concurrently. The older `elapsed_ms` field remains as a v1
+compatibility alias for its historical provider-call-total behavior; new
+consumers should use the explicitly named fields.
+
 - **`full`** (adds `trace_tool`, one line per tool call the turn actually
   made): id/name/ok/summary/detail — the same bounded data a UI's tool
   lifecycle display already has, correlated by round rather than dropped.
   Requires `--trace-ack`: refused otherwise with a `user_error` naming what
   full trace exposes. Raw JSON tool-call *arguments* are not part of any
   trace level — only the outcome (summary/detail) already surfaced to a UI.
+
+  When bounded multi-stage comparison exhausts its one semantic correction,
+  the finished `broad_log_triage_multi_stage` tool detail is a JSON object with
+  schema `contextdesk.multi_stage_triage.v1`, stage `final_comparison`, outcome
+  `validation_failed`, ordered content-free `validation_errors`, and the
+  host-counted `semantic_attempts` and `provider_rounds`. These categories
+  identify failures such as `parse`, `wrong_scope`, or `unknown_evidence`
+  without retaining the rejected model proposal, evidence text, paths,
+  headers, credentials, or provider error bodies.
 
 No trace level, at any depth, ever includes a credential, an HTTP
 authorization header, or pre-redaction content. Every captured message is
@@ -757,7 +1099,7 @@ capture point in the first place: the traced boundary
 credential.
 
 ```json
-{"type":"trace_summary","provider_profile_id":"ollama-local","chat_model":"mistral","corpus_id":null,"corpus_revision":null,"dry_run":true,"history_messages":3,"retrieved_evidence":0,"evidence_ids":[],"context_budget_chars":120000,"context_used_chars":828,"tool_names":["search_kb"],"tools_executed":[],"tools_offered":["search_kb"],"elapsed_ms":2,"grounding":"not_applicable","grounding_scope":"not_applicable","interpretation_validated":false}
+{"type":"trace_summary","provider_profile_id":"ollama-local","chat_model":"mistral","corpus_id":null,"corpus_revision":null,"dry_run":true,"history_messages":3,"retrieved_evidence":0,"evidence_ids":[],"context_budget_chars":120000,"context_used_chars":828,"tool_names":["search_kb"],"tools_executed":[],"tools_offered":["search_kb"],"elapsed_ms":2,"turn_elapsed_ms":7,"provider_call_elapsed_ms_sum":2,"grounding":"not_applicable","grounding_scope":"not_applicable","interpretation_validated":false}
 ```
 
 ## `chat --activity` / `--context-selection`
@@ -876,6 +1218,16 @@ PowerShell, set its output encoding first:
 $OutputEncoding = [Console]::OutputEncoding
 ```
 
+For a corpus-linked text turn, the CLI buffers the finished answer and emits
+a compact investigation report: the question, analyst model, elapsed time,
+grounding state, validation tier, and the model's formatted observations,
+candidate causes, symptoms, competing explanations, recovery signals, and
+missing evidence. A typed host envelope is labeled `HOST-VALIDATED`; a
+nonempty narrative without that envelope is still shown as
+`PROVISIONAL — human review recommended` rather than discarded. This report
+is presentation-only: `--json` and `--jsonl` retain their stable envelope
+and streaming contracts.
+
 Ctrl-C during `chat` sets the same
 cooperative cancel flag `run_chat_workflow` already accepts (the same
 mechanism `contextdesk doctor`'s own live-turn checks use, see
@@ -925,6 +1277,12 @@ closed as a `conflict` rather than partially applying.
   `cd_workflow::chat::run_chat_workflow`; it does not yet expose the desktop
   app's fuller tool surface (clustering, timeline, anomalies) as CLI
   subcommands of their own.
+- `chat` is a one-shot host and does not retain the desktop app's private,
+  memory-only synthesis checkpoint. If synthesis times out or the provider
+  fails after retrieval, the CLI terminal reports that no synthesis-only
+  retry is available and that rerunning the investigation repeats bounded
+  retrieval. A durable CLI synthesis retry remains tracked under #759;
+  `--session` persists conversation history, not this ephemeral checkpoint.
 - `chat --dry-run` forces ambient-memory recall off even when the profile
   would otherwise use it. Durable-memory injection embeds the query, and an
   `EmbedBackend` can itself be remote, which would violate the guarantee that
@@ -953,9 +1311,10 @@ closed as a `conflict` rather than partially applying.
   last, so rejected configuration never stores an orphaned credential. If
   the keychain write itself fails after both config files land, re-run
   `config init --force` with the same profile id to repair the reference.
-- `--data-dir` isolates filesystem state only. Provider credentials always
-  live in the OS keychain. The generated profile id is scoped by data dir,
-  but an explicit `--profile-id` opts out by design; `xai-grok-build` uses a
+- `--data-dir` isolates ContextDesk-managed filesystem state. Provider
+  credentials use the profile's explicit Keychain or protected-file reference.
+  The generated Keychain profile id is scoped by data dir, but an explicit
+  `--profile-id` opts out by design; `xai-grok-build` uses a
   machine-wide session that cannot be isolated and is therefore refused by
   `--check-connection` under an isolated data directory.
 - The desktop Tauri `agent_turn` command does not yet call

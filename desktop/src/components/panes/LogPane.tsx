@@ -48,6 +48,7 @@ import {
   type LogTimezoneStateDto,
   type ProcessProgressDto,
 } from "../../lib/host";
+import { reanalysisLocalityCopy } from "../../lib/reanalysisCopy";
 import {
   dialogConfirm,
   openDirectoryDialog,
@@ -1026,8 +1027,12 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   async function onReanalyze() {
     if (!activeId) return;
     const corpusId = activeId;
+    // The desktop flow always runs the in-process ONNX model, so the locality
+    // sentence comes from the shared constant rather than inline prose: if this
+    // ever wires a remote embedder, the copy has to change with it instead of
+    // quietly becoming untrue.
     const ok = await dialogConfirm(
-      "Re-analyze this corpus with the local ONNX model? Log content stays on this machine, events are not reparsed, and the current keyword corpus remains usable until the new index is complete.",
+      `Re-analyze this corpus with the local ONNX model? ${reanalysisLocalityCopy(false)} Events are not reparsed, and the current keyword corpus remains usable until the new index is complete.`,
       { title: "Local template re-analysis" },
     );
     if (!ok) return;

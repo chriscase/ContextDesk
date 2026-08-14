@@ -1,0 +1,32 @@
+{
+  "$id": "https://contextdesk.example/schemas/contextdesk.log_lab.retrieval_run_record.v1.json",
+  "accounting": "None = unknown (blocks when the capability was claimed); Some(0) = measured zero",
+  "authority": "crates/cd-core/tests/support/retrieval_ablation.rs::RaRunRecord (serde, deny_unknown_fields)",
+  "mode_states": [
+    "executed",
+    "unavailable"
+  ],
+  "modes": [
+    "structured_keyword",
+    "hybrid_embedding",
+    "hybrid_embedding_reranked",
+    "full_multistage"
+  ],
+  "required": [
+    "schema_id",
+    "schema_version",
+    "suite_id",
+    "suite_version",
+    "case_id",
+    "tier_claimed",
+    "mode",
+    "mode_status",
+    "engine",
+    "corpus",
+    "calls",
+    "queries"
+  ],
+  "schema_id": "contextdesk.log_lab.retrieval_run_record.v1",
+  "schema_version": 1,
+  "title": "ContextDesk retrieval-ablation run record"
+}

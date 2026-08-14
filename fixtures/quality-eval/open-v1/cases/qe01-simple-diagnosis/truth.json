@@ -1,0 +1,51 @@
+{
+  "schema_id": "contextdesk.quality_eval.truth.v1",
+  "case_id": "qe01-simple-diagnosis",
+  "title": "Straightforward single-incident diagnosis",
+  "queries": [
+    {
+      "query_id": "q1",
+      "question": "What configuration problem initiated the amber-sync failures?",
+      "relevant_ids": ["d01", "d02", "d03"],
+      "graded_gains": {
+        "d01": 3,
+        "d02": 2,
+        "d03": 1
+      },
+      "must_include_ids": ["d01"],
+      "must_exclude_ids": [],
+      "foreign_incident_ids": [],
+      "top_k": 4
+    }
+  ],
+  "answers": [
+    {
+      "task_id": "t1",
+      "root_cause_establishable": true,
+      "required_fact_tokens": ["lease", "boundary", "250"],
+      "trigger_tokens": ["BoundaryInvariant", "lease window"],
+      "symptom_tokens": ["RequestAborted", "amber-sync"],
+      "recovery_tokens": [],
+      "independent_incident_tokens": [],
+      "required_evidence_ids": ["d01"],
+      "forbidden_evidence_ids": ["d04"],
+      "requires_abstention": false,
+      "packet_overrides": {
+        "product_path": {
+          "root_cause_establishable": false,
+          "requires_abstention": true
+        }
+      },
+      "forbidden_conclusion_tokens": ["validation bypass"]
+    }
+  ],
+  "candidate_expectations": {
+    "good_fixed": "pass",
+    "mut_missing_citation": "fail",
+    "good_oracle": "pass",
+    "good_product_path_abstention": "pass"
+  },
+  "incidents": {
+    "amber-sync": ["d01", "d02", "d03"]
+  }
+}

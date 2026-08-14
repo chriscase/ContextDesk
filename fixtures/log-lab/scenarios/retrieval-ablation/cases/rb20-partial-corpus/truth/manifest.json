@@ -1,0 +1,200 @@
+{
+  "base_ts": 1741421040,
+  "baseline_expectation": {
+    "class": "pass",
+    "gates": {
+      "max_decoy_share_at_25": 0.3,
+      "min_recall_at_25": 0.6,
+      "queries_expected_below_floor": []
+    },
+    "limitation_reason": null
+  },
+  "case_id": "rb20-partial-corpus",
+  "case_version": 1,
+  "competing_explanations": [],
+  "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach truth or queries to model context.",
+  "evaluator_only": true,
+  "evidence_groups": [
+    {
+      "expected_occurrences": 1,
+      "expected_raw_records": 1,
+      "expected_token_records": 1,
+      "group_id": "rb20-partial-corpus-g01",
+      "incident_id": "rb20-partial-corpus-inc1",
+      "notes": "the current segment references checkpoint data from the rotated-away middle segment",
+      "role": "symptom",
+      "sources": [
+        "batch/runner.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "chk-3C47E8D5",
+      "ts": 1741423640
+    },
+    {
+      "expected_occurrences": 3,
+      "expected_raw_records": 3,
+      "expected_token_records": 3,
+      "group_id": "rb20-partial-corpus-g02",
+      "incident_id": "rb20-partial-corpus-inc1",
+      "notes": "restart storm after the missing checkpoint",
+      "role": "symptom",
+      "sources": [
+        "batch/runner.log"
+      ],
+      "timestamp_certainty": "wall",
+      "token": "run-58CF743E",
+      "ts": 1741423740
+    }
+  ],
+  "expected": {
+    "bytes": 26585,
+    "events": 384,
+    "excluded_files": [],
+    "files": 2,
+    "files_by_path": {
+      "batch/runner.log": {
+        "bytes": 14855,
+        "events": 214,
+        "sha256": "d624f12877dd0d51b1205b5f85dfc8318c62995b152e1a31a96f9568a1049468"
+      },
+      "batch/runner.log.2": {
+        "bytes": 11730,
+        "events": 170,
+        "sha256": "c46a78bf61f758cce6ec69c05eabb4b83aa5842fef9bff45aa3f15e3de2c73ca"
+      }
+    },
+    "severities": {
+      "error": 3,
+      "info": 380,
+      "warn": 1
+    },
+    "source_count": 2,
+    "sources": {
+      "batch/runner.log": 214,
+      "batch/runner.log.2": 170
+    },
+    "time_quality": "wall"
+  },
+  "forbidden_claims": [
+    "an exact total of processed batch items",
+    "complete coverage of the batch runner's day"
+  ],
+  "generator_version": "contextdesk.log_lab.retrieval_ablation.generator.v1",
+  "import_tree_sha256": "27d82c96079db9ef7b2da4497e32a2556b1e457b36b0b176bd91fa768a794989",
+  "incidents": [
+    {
+      "incident_id": "rb20-partial-corpus-inc1",
+      "root_cause_status": "unknown",
+      "summary": "Jobs restarted after checkpoint data vanished with the rotated-away middle segment; the cause of the original checkpoint loss is in the missing segment.",
+      "trigger_group_ids": [],
+      "window_from_ts": 1741423640,
+      "window_to_ts": 1741423920
+    }
+  ],
+  "intended_probe": "retention gaps prevent complete analysis; exact totals and complete coverage must not be claimed",
+  "known_counts": {
+    "corpus_completeness": "partial_lower_bound",
+    "known_missing_references": 1,
+    "total_events_known": false
+  },
+  "per_query_relevance": {
+    "rb20-partial-corpus-q1": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb20-partial-corpus-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb20-partial-corpus-g02"
+        }
+      ]
+    },
+    "rb20-partial-corpus-q2": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb20-partial-corpus-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb20-partial-corpus-g02"
+        }
+      ]
+    },
+    "rb20-partial-corpus-q3": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb20-partial-corpus-g02"
+        }
+      ]
+    },
+    "rb20-partial-corpus-q4": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb20-partial-corpus-g01"
+        }
+      ]
+    },
+    "rb20-partial-corpus-q5": {
+      "answerable": false,
+      "contaminating_groups": [],
+      "relevant": []
+    },
+    "rb20-partial-corpus-q6": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb20-partial-corpus-g01"
+        },
+        {
+          "gain": 1,
+          "group_id": "rb20-partial-corpus-g02"
+        }
+      ]
+    },
+    "rb20-partial-corpus-q7": {
+      "answerable": true,
+      "contaminating_groups": [],
+      "relevant": [
+        {
+          "gain": 1,
+          "group_id": "rb20-partial-corpus-g01"
+        }
+      ]
+    }
+  },
+  "permitted_uncertainty": [
+    "the middle segment's contents are unknowable from this corpus"
+  ],
+  "privacy": {
+    "marker": "LOG-LAB-INVALID",
+    "secret_tokens": []
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+  "required_claims": [
+    "segment 2 of 3 is absent; every total derived from this corpus is a lower bound",
+    "the restart storm follows the gap reference"
+  ],
+  "retrieval_exclusions": [],
+  "schema_id": "contextdesk.log_lab.retrieval_truth.v1",
+  "schema_version": 1,
+  "seed": 92026080701,
+  "semantic_truth_digest": "aac7e1ca65b96fa4790d2ec1ddb1516a8f3eee8096854aa8834e164817613d0e",
+  "suite_id": "contextdesk.log_lab.retrieval_ablation",
+  "suite_version": 1,
+  "tier": "small",
+  "title": "Partial lower-bound corpus"
+}

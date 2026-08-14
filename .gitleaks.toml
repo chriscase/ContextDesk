@@ -27,3 +27,25 @@ id = "generic-api-key"
   regexTarget = "line"
   regexes = ['''"planToken": "[0-9a-f]{64}",''']
   paths = ['''^fixtures/contracts/import_preview_plan\.v1\.json$''']
+
+  # Retrieval-ablation truth manifests reference events by correlation-style
+  # message tokens (`ord-…`, `req-…`, `txn-…`, `inv-…`, `shard-…`, `chk-…`).
+  # These are frozen benchmark evidence identifiers, not key material; the
+  # `"token"` field name trips the generic rule. Fixtures are byte-frozen by
+  # retrieval_ablation_lab.rs, so redacting the sample is not an option.
+  [[rules.allowlists]]
+  description = "Retrieval-ablation truth-manifest message tokens (correlation ids, not credentials)"
+  condition = "AND"
+  regexTarget = "line"
+  regexes = ['''"token": "[a-z]{2,8}-[0-9A-F]{8}",?''']
+  paths = ['''^fixtures/log-lab/scenarios/retrieval-ablation/cases/[a-z0-9-]+/truth/manifest\.json$''']
+
+  # rb14-secrets-malformed deliberately contains synthetic auth-service log
+  # lines ("token issued subject=svc-<hex8> ttl=…") to exercise secret-aware
+  # handling. The subjects are synthetic service ids; nothing authenticates.
+  [[rules.allowlists]]
+  description = "rb14 synthetic token-service log lines (benchmark fixture, not credentials)"
+  condition = "AND"
+  regexTarget = "line"
+  regexes = ['''token issued subject=svc-[0-9a-f]{8} ttl=\d+''']
+  paths = ['''^fixtures/log-lab/scenarios/retrieval-ablation/cases/rb14-secrets-malformed/import/auth/tokens\.jsonl$''']

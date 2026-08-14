@@ -1,0 +1,12 @@
+{
+  "schema_id": "contextdesk.extension.role_outcome.v1",
+  "role": "observation_extractor",
+  "state": "supported",
+  "packet_id": "pkt-synthetic-001",
+  "corroboration_count": 2,
+  "open_readings": 0,
+  "root_cause_established": false,
+  "reason_codes": ["host_ids_only"],
+  "latency_label_ms": 400,
+  "token_budget_label": 512
+}

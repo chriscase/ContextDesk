@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   hostExportHandbookDocument,
   hostClearFailedLogIngestDiagnostic,
+  hostClearCapabilityQualification,
   hostGetFailedLogIngestDiagnostic,
+  hostGetCapabilityQualification,
   hostGetHandbookPage,
   hostInstallDemoLogCorpus,
   hostLogCountEvents,
@@ -14,7 +16,9 @@ import {
   hostLogSourceCatalog,
   hostPrepareLogDiagnosticReport,
   hostReleaseLogDiagnosticReport,
+  hostSaveActiveProvider,
   hostSaveLogDiagnosticReport,
+  hostStartCapabilityQualification,
   modelSelectionKey,
   normalizeProviderKind,
   parseModelSelectionKey,
@@ -31,6 +35,79 @@ beforeEach(() => {
   invokeMock.mockReset();
   (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ =
     {};
+});
+
+describe("capability qualification credential boundary", () => {
+  it("sends a draft key only for an explicit live start", async () => {
+    invokeMock
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce({ readiness: "verified" });
+    const args = {
+      profileId: "work",
+      modelId: "private-chat",
+      baseUrl: "https://gateway.example.test/v1",
+      apiKey: "draft-key",
+    };
+
+    await hostGetCapabilityQualification(args);
+    await hostClearCapabilityQualification(args);
+    await hostStartCapabilityQualification(args);
+
+    expect(invokeMock.mock.calls).toEqual([
+      [
+        "get_capability_qualification",
+        {
+          req: {
+            profile_id: "work",
+            model_id: "private-chat",
+            base_url: "https://gateway.example.test/v1",
+          },
+        },
+      ],
+      [
+        "clear_capability_qualification",
+        {
+          req: {
+            profile_id: "work",
+            model_id: "private-chat",
+            base_url: "https://gateway.example.test/v1",
+          },
+        },
+      ],
+      [
+        "start_capability_qualification",
+        {
+          req: {
+            profile_id: "work",
+            model_id: "private-chat",
+            base_url: "https://gateway.example.test/v1",
+            api_key: "draft-key",
+          },
+        },
+      ],
+    ]);
+  });
+});
+
+describe("provider credential source boundary", () => {
+  it("sends a protected file path without manufacturing a pasted key", async () => {
+    invokeMock.mockResolvedValueOnce({ has_key: true });
+
+    await hostSaveActiveProvider({
+      kind: "openai_compatible",
+      baseUrl: "https://gateway.example.test/v1",
+      chatModel: "deepseek-v4-flash",
+      apiKeyFile: "/private/tmp/provider.key",
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("save_active_provider", {
+      req: expect.objectContaining({
+        api_key: null,
+        api_key_file: "/private/tmp/provider.key",
+      }),
+    });
+  });
 });
 
 describe("split Log Explorer event queries", () => {

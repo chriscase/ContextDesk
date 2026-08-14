@@ -55,6 +55,8 @@ export type AppSetupState = {
   chatModel: string;
   baseUrl: string;
   hasApiKey: boolean;
+  /** Optional absolute protected credential file path; never contains the key. */
+  apiKeyFilePath?: string;
   /** Native tool calling; false after gateway rejection (#327). Default true. */
   toolsEnabled?: boolean;
   /** Refuse non-loopback bases (local-only profile). */

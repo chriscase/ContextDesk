@@ -1,0 +1,9 @@
+{
+  "schema_id": "contextdesk.gateway_diagnostic_projection_replay.v1",
+  "case_id": "linked_log_triage",
+  "final_text_chars": 0,
+  "typed_envelope_present": true,
+  "typed_score_passed": true,
+  "expected_classification": "diagnostic_fault",
+  "expected_reason": "typed envelope and visible answer projection disagree"
+}

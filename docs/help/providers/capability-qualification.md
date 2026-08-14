@@ -17,8 +17,9 @@ related:
 # Qualify model capabilities
 
 ContextDesk can **measure** a few host-observable contracts for the exact
-provider profile, endpoint, and model you selected. Measurement is always
-**explicit**: nothing runs merely because Settings or preflight opened.
+provider profile, endpoint, and model you selected. Behavioral measurement is
+always **explicit**: startup/pre-flight may refresh the lightweight model
+catalog, but it never silently runs token-spending qualification.
 
 ![Synthetic probes contact only the configured provider and never send workspace or company data](../assets/provider-routing-flow.svg)
 
@@ -35,7 +36,7 @@ the synthetic contracts ContextDesk cares about?” — not “is this model goo
 | Offer | Role **name hints** (#723) only select which probes to offer | No network |
 | Start | You click **Qualify selected model…** | Contacts configured provider only |
 | Run | Synthetic prompts and inert tool `cd_qualify_echo` only | No logs, memory, workspace paths, or secrets in probe text |
-| Cache | Result keyed by profile + endpoint fingerprint + model + schema | Local process cache; siblings never overwrite each other |
+| Save | Result keyed by profile + endpoint fingerprint + model + schema | Secret-free local evidence shared by GUI and CLI; siblings never overwrite each other |
 | Cancel | Stops further probes; remaining checks stay `untested` | Truthful status |
 | Clear / Retry | Drop one exact model result, then re-run | Same isolation rules |
 
@@ -45,12 +46,47 @@ Each check is `pass`, `degraded`, `fail`, or `untested`, with elapsed time and a
 secret-free reason. Profile-level disabled tools or streaming remain
 **authoritative** over any probe.
 
+Model pickers summarize those checks as **verified**, **limited**, **failed**,
+**stale**, or **unverified** for the measured role. A triage model is verified
+only when basic generation, native tool calls, tool-result continuation, and
+structured output pass. Basic generation with a failed investigation contract is
+limited, not verified. Embedding and reranking results stay role-specific and
+are never promoted as preferred chat models.
+
+Pinned models and the explicit default remain first. Current verified chat
+models are preferred only among the remaining ordinary choices; ContextDesk
+does not silently replace the user's selection or default.
+
+`contextdesk models` reads the same saved evidence entirely offline.
+`contextdesk models discover` refreshes the gateway catalog, and
+`contextdesk models verify <ids...>` verifies a selected handful (or a
+confirmed filtered `--all`). Merely viewing cached status or clearing one
+result does not resolve a credential; only explicit live actions do.
+All-model runs are serial and paced, stop on an observed rate limit, and save
+each completed result. An empty discovery response leaves the previous catalog
+and its evidence untouched.
+
+On large catalogs such as Vercel, use exact ids or filter by suggested role and
+id text. Name-based role classification is only a selection aid. Vercel
+embedding and reranking checks use its native v4 contracts; generic gateways
+use their OpenAI-compatible embedding or standard `/rerank` contracts.
+
+Startup/pre-flight compares the successful catalog with the last saved
+snapshot. Newly added models are unverified, removed models become stale, and
+unchanged models keep their exact evidence. A catalog change appears as a
+separate preflight warning with an **Open AI settings** action. The app offers
+re-verification but does not change the user's default or spend model tokens
+automatically.
+
 ## What never happens
 
 - Name hints alone never mark a capability `pass`.
-- Qualification does not enumerate full model inventories into shareable
-  diagnostics.
+- A stale or cancelled result never receives a verified badge.
+- Saved catalogs remain local; ordinary exported diagnostics do not include
+  the full private inventory.
 - One probe does not claim quality, context length, or permanent reliability.
+- Triage verification does not claim ordinary-chat, attachment, or multimodal
+  compatibility.
 - Probe tools cannot read files, corpora, memory, connectors, or arbitrary URLs.
 
 ## Residuals

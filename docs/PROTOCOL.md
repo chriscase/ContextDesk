@@ -33,6 +33,7 @@ Produced by `cd_core::research::event_to_dto` — **snake_case** names:
 | `permission_required` | `request_id`, `tool_name`, `target`, `reason`, `preview`, `risk`, `arguments` |
 | `turn_completed` | `reason` |
 | `error` | `code`, `message` (safe) |
+| `multi_model_stage` | Host-authored `stage` (`investigator`/`reviewer`/`synthesizer`/`summary`), `phase` (`started`/`finished`/`summary`), `status`, `detail`, optional `candidate_id`. Counts/ids/degradation reasons only — never model text |
 
 Server SSE (when used) reuses the same DTO shape; full team protocol design is tracked under remediation epic **#98**.
 
@@ -155,6 +156,25 @@ receive a monotonic server `updated_at`; supersession creates a replacement row 
 preserves both links. Client timestamps more than five minutes in the future are
 rejected. This is the server contract only; the desktop cache/offline worker remains
 open under #287.
+
+### Typed investigation answers
+
+`StreamEvent::InvestigationAnswer` carries an `AnswerEnvelopeV1` only after core validates a
+model proposal against the host-built evidence ledger for that exact session, turn, corpus, and
+revision. Hosts may persist the exact envelope in assistant-message metadata and may project it
+to human text, JSON, JSONL, or IPC. The human projection is produced centrally by
+`cd_core::investigation_answer::render_answer_markdown`, so CLI and desktop display the same
+deterministic Markdown; the accompanying `TextDelta` carries that Markdown, never the
+authoritative JSON. In that projection every dynamic value — model-authored claim text and
+corpus-derived identifiers, labels, locators, and excerpts alike — is reduced to a single line
+free of control, ANSI/OSC, and bidi material and emitted inside a code span, so only the host
+can author a heading, status line, candidate, evidence section, withheld marker, citation, or
+link. Hosts rendering that Markdown must treat code spans as literal. Those projections are display/read APIs only: hosts must not parse displayed
+transcript text or JSON, or accept client-supplied envelope JSON, to create or revalidate
+authority. Authoritative turn ids and message-row ownership are host-created; renderer message ids
+are correlation labels and cannot select a prior transcript row for new authority. A subsequent
+turn builds a fresh ledger. If an envelope's session/corpus/revision no longer matches host state,
+it is unavailable (or explicitly stale), never silently reused.
 
 ### Telegram chat bridge
 

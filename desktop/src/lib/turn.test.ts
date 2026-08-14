@@ -144,6 +144,56 @@ describe("applyEventsToMessage", () => {
     expect(live.citations?.map((c) => c.id)).toEqual(batch.citations?.map((c) => c.id));
   });
 
+  it("retains the shared elapsed progress projection in causal order", () => {
+    const events: EventDto[] = [
+      {
+        kind: "turn_progress",
+        payload: {
+          category: "phase",
+          stage: "retrieving_evidence",
+          phase: "started",
+          label: "Retrieving bounded evidence",
+          elapsed_ms: 120,
+        },
+      },
+      {
+        kind: "turn_progress",
+        payload: {
+          category: "multi_model",
+          stage: "reviewer",
+          phase: "started",
+          label: "Reviewing candidate findings",
+          detail: "reviewing 2 candidate findings",
+          candidate_id: "opaque-candidate",
+          elapsed_ms: 980,
+        },
+      },
+    ];
+    const message = applyEventsToMessage(base(), events).msg;
+    expect(message.turnProgress).toEqual([
+      {
+        category: "phase",
+        stage: "retrieving_evidence",
+        phase: "started",
+        label: "Retrieving bounded evidence",
+        detail: undefined,
+        status: undefined,
+        candidateId: undefined,
+        elapsedMs: 120,
+      },
+      {
+        category: "multi_model",
+        stage: "reviewer",
+        phase: "started",
+        label: "Reviewing candidate findings",
+        detail: "reviewing 2 candidate findings",
+        status: undefined,
+        candidateId: "opaque-candidate",
+        elapsedMs: 980,
+      },
+    ]);
+  });
+
   it("turn_started sets host_confirmed model provenance (#155)", () => {
     const { msg } = applyEventsToMessage(
       base({
