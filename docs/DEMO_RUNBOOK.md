@@ -217,7 +217,7 @@ omit `-AllowImport` (the script still requires `-Execute` for provider calls):
   -DataDir "$env:LOCALAPPDATA\ContextDesk\demo-batch-existing" `
   -CorpusId "<exact-corpus-id-1>", "<exact-corpus-id-2>" `
   -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-batch-run') `
-  -Execute -Model "qwen-3.6-27b" -Deadline 10m
+  -Execute -Model "<exact-model-id>" -Deadline 10m
 ```
 
 Each case receives exactly one `--mode single` turn with `--trace summary`
