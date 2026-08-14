@@ -90,6 +90,19 @@ def main() -> int:
     env_err = load("envelope.err.json")
     check("envelope.err not ok", env_err.get("ok") is False)
     check("envelope.err has error.kind", bool((env_err.get("error") or {}).get("kind")))
+    env_err_details = load("envelope.err.details.json")
+    check("envelope.err.details not ok", env_err_details.get("ok") is False)
+    err_details = (env_err_details.get("error") or {}).get("details") or {}
+    check(
+        "envelope.err.details carries typed import outcome",
+        err_details.get("schemaId") == "contextdesk.import_outcome.v1"
+        and err_details.get("class") == "rejected"
+        and err_details.get("published") is False,
+    )
+    check(
+        "rejected details never name a corpus",
+        "corpusId" not in err_details,
+    )
     verdict = load("envelope.completed-verdict.json")
     check("completed verdict keeps ok report", (verdict.get("envelope") or {}).get("ok") is True)
     check("completed verdict process exit", verdict.get("process_exit") in (8, 9, 10))

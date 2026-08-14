@@ -20,18 +20,25 @@
     inspect them before sharing. No credentials, headers, endpoint URLs, prompts,
     or provider bodies are copied into the aggregate report.
 
+    There is no default model. -Execute requires an exact model id from the
+    configured gateway's discovered catalog (run `contextdesk models`, or
+    `contextdesk models discover` to refresh it) — the harness never guesses a
+    deployment on the operator's behalf. `<exact-model-id>` below is a
+    placeholder for that exact id, not a literal value.
+
 .EXAMPLE
     .\demo-corpus-batch.ps1 -Cli .\contextdesk.exe `
       -DataDir "$env:LOCALAPPDATA\ContextDesk\demo-batch" `
       -Source .\case-a.zip, .\case-b `
       -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-output') -Execute -AllowImport `
-      -Model 'qwen-3.6-27b' -Deadline 10m
+      -Model '<exact-model-id>' -Deadline 10m
 
 .EXAMPLE
     .\demo-corpus-batch.ps1 -Cli .\contextdesk.exe `
       -DataDir "$env:LOCALAPPDATA\ContextDesk\acceptance-rc2" `
       -CorpusId '019fe3a6-58db-7800-874e-a4ccafffd07b' `
-      -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-output') -Execute -Model 'deepseek-v4-flash'
+      -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-output') -Execute `
+      -Model '<exact-model-id>'
 ##>
 
 [CmdletBinding()]
@@ -48,7 +55,8 @@ param(
 
     [string[]] $CorpusId = @(),
 
-    [string] $Model = 'qwen-3.6-27b',
+    # No default: -Execute must name an exact discovered model id explicitly.
+    [string] $Model = '',
 
     [string] $Deadline = '10m',
 
@@ -228,7 +236,7 @@ if ($Source.Count -gt 0 -and $Execute -and -not $AllowImport) {
     throw 'Source execution changes durable state; add -AllowImport explicitly, or omit -Execute for provider-free preflight.'
 }
 if ($Execute -and [string]::IsNullOrWhiteSpace($Model)) {
-    throw 'An exact discovered model id is required for -Execute.'
+    throw 'An exact discovered model id is required for -Execute. Run `contextdesk models` (or `contextdesk models discover`) and pass one catalog id via -Model.'
 }
 
 # Canonicalize and deduplicate source paths before any work begins. This avoids

@@ -135,9 +135,103 @@ directory is cleaned up via `Drop` regardless of where cancellation lands)
 and the same import can be retried immediately. The final summary reports
 exactly what happened — entries examined, sources selected vs.
 ignored/unsupported/excluded/failed, events imported, templates, detected
-formats, timestamp provenance, whether the import was partial, any
+formats, timestamp provenance, the typed import outcome (see
+[Import outcome contract](#import-outcome-contract) below), any
 reviewed formats that were applied, and any sources still needing a
 timezone declaration.
+
+### Import outcome contract
+
+Every import attempt ends in exactly one typed outcome class, reported
+identically to the operator and to scripts:
+
+- `complete` — every discovered source intended for import was read
+  through EOF and published. No failed or excluded source, no malformed
+  record. Intentional noise filtering (directories, hidden files,
+  unselected entries) counts as ignored and never downgrades this class.
+- `partial` — a corpus **was** published, but it does not contain
+  everything the source offered. The report names what is missing.
+- `rejected` — nothing was published; the corpus library is unchanged.
+
+Text mode leads with the verdict (`Import complete`, `Import complete
+with defects (PARTIAL)`, or an error that names the failing source and
+states `nothing was published — the library is unchanged`) and appends an
+`Import outcome:` summary block whenever the run was not defect-free.
+
+In `--json` mode the same typed document
+(`schemaId: "contextdesk.import_outcome.v1"`) travels on both arms of the
+envelope: at `data.outcome` when a corpus was published (`complete` or
+`partial`), and at `error.details` when the import was `rejected`. So a
+failing script gets the same machine-readable facts it would have had on
+success. The document carries:
+
+- `class` and `published` (`true` only when a corpus was atomically
+  published; a `rejected` report never carries a `corpusId`);
+- `counts` — `sourcesDiscovered`, `sourcesImported`, `sourcesFailed`,
+  `sourcesExcluded`, `sourcesIgnored`, `recordsImported`,
+  `recordsMalformed`;
+- `defects` — located defects, deterministically ordered, bounded at 64
+  entries. Each has a stable `code`, a `severity` (`fatal` stopped the
+  run; `degraded` reduced coverage), a structural `source` locator
+  (`identity` such as `outer.zip!/inner.zip!/app.log`, plus
+  `archiveChain`, `member`, `archiveDepth`), and — for record-level
+  defects — a `location` (1-based `line`, `byteOffset`);
+- `defectCounts` — complete per-code totals, never truncated even when
+  the located list hits its bound;
+- `privacy` — the report's own redaction statement
+  (`redactionMode: "identity_structural_only"`): source identities are
+  secret-scrubbed, record positions are ordinals and byte offsets, and no
+  log record, parsed field, or operating-system error text is included;
+- `manifestDigest` — a deterministic `sha256:` digest over the classified
+  content. Two imports of the same bytes agree, so runs are comparable.
+
+Defect codes are a closed, stable vocabulary — `archive_unreadable`,
+`nested_archive_staging_failed`, `archive_depth_exceeded`,
+`archive_member_unstable`, `member_metadata_failed`, `member_open_failed`,
+`member_read_failed`, `member_too_large`, `member_binary`, `member_empty`,
+`member_symlink`, `member_non_regular`, `malformed_structured_record`,
+`unclassified` — and each code is the entire machine-readable explanation;
+free-form OS/parser strings are deliberately excluded from the report.
+
+Exit codes are unchanged by this contract: a `partial` import exits `0`
+because a corpus was published — gate on `data.outcome.class`, not on the
+exit code — while a `rejected` import exits nonzero (`1` when the source
+held nothing importable, `70` otherwise) with `error.details` carrying the
+same document. The legacy `data.partial` bool remains for existing
+scripts, but it reflects only source-level omissions: a corpus whose only
+defects are record-level (malformed records in an otherwise readable
+member) reports `partial: false` alongside `outcome.class: "partial"`, so
+the typed class is the authority.
+
+Generic, abbreviated shapes:
+
+```json
+"data": {
+  "corpus_id": "<uuid>",
+  "outcome": {
+    "schemaId": "contextdesk.import_outcome.v1", "schemaVersion": 1,
+    "class": "partial", "published": true, "corpusId": "<uuid>",
+    "counts": { "recordsMalformed": 2, "...": 0 },
+    "defects": [{
+      "code": "malformed_structured_record", "severity": "degraded",
+      "source": { "identity": "logs/app.jsonl", "archiveChain": [],
+                  "member": "app.jsonl", "archiveDepth": 0 },
+      "location": { "line": 2, "byteOffset": 27 }, "occurrences": 2
+    }],
+    "defectCounts": { "malformed_structured_record": 2 },
+    "privacy": { "redactionMode": "identity_structural_only", "...": "..." },
+    "manifestDigest": "sha256:<hex>"
+  }
+}
+```
+
+```json
+"error": {
+  "kind": "internal",
+  "message": "zip open: invalid Zip archive\n\nfailing source: bundles/inner.zip (archive_unreadable)\nnothing was published — the library is unchanged",
+  "details": { "class": "rejected", "published": false, "...": "..." }
+}
+```
 
 State shared with the desktop app (provider profiles, the configured
 default timezone, imported corpora, chat sessions) lives in the same files
@@ -716,7 +810,12 @@ renderer entirely and are byte-for-byte governed by the existing contracts.
 ```
 
 On failure, `ok` is `false`, `data` is `null`, and `error` is
-`{ "kind": "<exit-code kind>", "message": "..." }`.
+`{ "kind": "<exit-code kind>", "message": "..." }`, optionally extended by
+a `details` field. `details` is present only when the failing command has
+a typed detail document of its own — today that is a rejected `import`,
+which carries the [import outcome contract](#import-outcome-contract)
+document — and is omitted entirely otherwise, so the envelope shape is
+unchanged for every other error.
 
 ### Streaming lines (`--jsonl`)
 

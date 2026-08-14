@@ -64,6 +64,57 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
             self.assertIn(needle, self.source)
         self.assertNotIn("$args.Add('--auto-approve')", self.source)
 
+    def test_model_has_no_hard_coded_default(self) -> None:
+        # The harness must never silently choose a deployment on the operator's
+        # behalf: -Model has no default, -Execute fails closed without one, and
+        # the documented examples use an explicit placeholder instead of a
+        # concrete model id.
+        self.assertIn("[string] $Model = ''", self.source)
+        self.assertIn("An exact discovered model id is required for -Execute.", self.source)
+        self.assertIn("<exact-model-id>", self.source)
+        lowered = self.source.lower()
+        for vendor_fragment in ("qwen", "deepseek", "llama", "mistral", "gemini", "gpt-"):
+            self.assertNotIn(
+                vendor_fragment,
+                lowered,
+                f"reusable demo procedure must not bake in a concrete model id ({vendor_fragment})",
+            )
+
+    def test_execute_without_model_fails_closed_when_pwsh_available(self) -> None:
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            self.skipTest("PowerShell is not installed on this development host")
+        with tempfile.TemporaryDirectory(dir=ROOT.parent) as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            cli = root / "fake-contextdesk.ps1"
+            cli.write_text("param()\n", encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    pwsh,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-File",
+                    str(SCRIPT),
+                    "-Cli",
+                    str(cli),
+                    "-DataDir",
+                    str(data_dir),
+                    "-CorpusId",
+                    "019fe3a6-58db-7800-874e-a4ccafffd07b",
+                    "-Execute",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "An exact discovered model id is required for -Execute.",
+                completed.stderr + completed.stdout,
+            )
+
     def test_harness_checks_existing_timezone_before_live_turn(self) -> None:
         self.assertIn("timezone", self.source)
         self.assertIn("unresolved_local_records", self.source)

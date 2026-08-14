@@ -111,7 +111,17 @@ Failure:
 }
 ```
 
-Fixture: `fixtures/cli-client-protocol/envelope.ok.json`, `envelope.err.json`.
+`error` may additionally carry an optional `details` object when the
+failing command has a typed detail document of its own; today that is a
+rejected `import`, whose `details` is the import outcome document
+(`schemaId: "contextdesk.import_outcome.v1"`, `class: "rejected"`,
+`published: false`, plus bounded redacted defect locators — see
+[CLI.md](CLI.md#import-outcome-contract)). `details` is omitted entirely
+otherwise; clients must treat its absence as normal and must not require
+it.
+
+Fixture: `fixtures/cli-client-protocol/envelope.ok.json`, `envelope.err.json`,
+`envelope.err.details.json`.
 
 ### Completed verdict envelope (`ok:true` + nonzero exit)
 

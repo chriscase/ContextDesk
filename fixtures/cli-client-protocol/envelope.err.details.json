@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "command": "import",
+  "error": {
+    "kind": "internal",
+    "message": "zip open: invalid Zip archive\n\nfailing source: bundles/inner.zip (archive_unreadable)\nnothing was published — the library is unchanged",
+    "details": {
+      "schemaId": "contextdesk.import_outcome.v1",
+      "schemaVersion": 1,
+      "class": "rejected",
+      "published": false,
+      "counts": {
+        "sourcesDiscovered": 0,
+        "sourcesImported": 0,
+        "sourcesFailed": 0,
+        "sourcesExcluded": 0,
+        "sourcesIgnored": 0,
+        "recordsImported": 0,
+        "recordsMalformed": 0
+      },
+      "defects": [
+        {
+          "code": "archive_unreadable",
+          "severity": "fatal",
+          "source": {
+            "identity": "bundles/inner.zip",
+            "archiveChain": [],
+            "member": "inner.zip",
+            "archiveDepth": 0
+          },
+          "occurrences": 1
+        }
+      ],
+      "defectCounts": {
+        "archive_unreadable": 1
+      },
+      "privacy": {
+        "redactionMode": "identity_structural_only",
+        "policySummary": "Source and archive member identities are reported after secret scrubbing. Record positions are ordinals and byte offsets. No log record, message, parsed field, or operating-system error text is included.",
+        "defectsTruncated": false
+      },
+      "manifestDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  }
+}

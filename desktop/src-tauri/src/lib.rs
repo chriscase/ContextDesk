@@ -2,6 +2,7 @@
 
 mod capability_qualification_host;
 mod handbook;
+mod import_error;
 mod investigation_report_export;
 mod log_diagnostic_report;
 mod log_diagnostics;
@@ -9702,7 +9703,7 @@ async fn run_log_ingest(
         };
         result.map_err(|error| match error {
             cd_core::error::CoreError::Cancelled => LogIngestRunError::Cancelled,
-            other => LogIngestRunError::Failed(other.to_string()),
+            other => LogIngestRunError::Failed(import_error::user_facing_import_error(&other)),
         })
     })
     .await;
@@ -10886,7 +10887,11 @@ async fn log_preview_import(
             std::path::Path::new(&path),
             Some(&cancel),
         )
-        .map_err(|error| error.to_string())
+        // Never a bare `to_string()`: a preview-stage failure carries the
+        // failing member's raw identity behind the engine's transport
+        // marker, which must be stripped and re-stated through the
+        // redacted locator before it can reach the WebView.
+        .map_err(|error| import_error::user_facing_import_error(&error))
     })
     .await
     .map_err(|error| format!("import preview task join: {error}"));
@@ -10941,7 +10946,9 @@ async fn log_run_import(
             &selected,
             Some(&verify_cancel),
         )
-        .map_err(|error| error.to_string())
+        // Plan verification re-runs the annotating preview walk, so its
+        // errors need the same sanitation as `log_preview_import`.
+        .map_err(|error| import_error::user_facing_import_error(&error))
     })
     .await
     .map_err(|error| format!("import plan verification task join: {error}"));

@@ -140,7 +140,19 @@ $BIN --data-dir "$DATA" --json import ./fixtures/cli-release-demo
 
 **Expect:** JSON envelope `ok: true`, `command: "import"`,
 `data.events_imported: 6`, `data.sources_selected: 1`,
-`data.timezone_ambiguous_sources: []`.
+`data.timezone_ambiguous_sources: []`, and the typed outcome
+`data.outcome.class: "complete"` with `data.outcome.published: true` and an
+empty `data.outcome.defects` list.
+
+Every import ends in exactly one typed outcome class — `complete`,
+`partial` (a corpus was published but content is missing; `data.outcome`
+names each defect by stable code and redacted source locator), or
+`rejected` (nothing was published; the same document arrives at
+`error.details` on the failure envelope). If a demo import reports
+`partial` or `rejected`, read the `Import outcome:` block (text mode) or
+`data.outcome`/`error.details` (JSON) before continuing — do not present a
+partial corpus as the whole source. Details:
+[CLI.md — Import outcome contract](CLI.md#import-outcome-contract).
 
 ```bash
 $BIN --data-dir "$DATA" --json corpus list

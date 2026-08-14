@@ -93,6 +93,7 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Agent search_help/read_help grounding | Shipped | crates/cd-core/src/help.rs:help_tool_specs | #434 #439 |
 | Versioned accepted-state investigation report projection + deterministic Markdown render | Shipped | crates/cd-core/src/investigations/report.rs:assemble_investigation_report | #532 (INVESTIGATION_LOOP §6.6 subset; fuller vocabulary/patches/HTML/PDF remain #532) |
 | Report-section SoftWrite proposal queue (Accept / Edit-and-accept / Dismiss-with-reason) | Shipped | crates/cd-core/src/investigations/report.rs:propose_report_section | #532 (mirrors #646 proposed-finding contract; ranking/walkthrough remain #646) |
+| Typed import outcome contract (complete/partial/rejected, bounded redacted defects) | Shipped | crates/cd-core/src/log_analysis/import_outcome.rs:ImportOutcomeReport | CLI.md Import outcome contract |
 
 ## Human checklist
 

@@ -192,6 +192,10 @@ BIN=./target/release/contextdesk
 DATA="$(mktemp -d)"
 
 # 2. Import and inspect a corpus without contacting a provider.
+#    Every import ends in one typed outcome — complete, partial (published
+#    with named defects), or rejected (nothing published) — reported at
+#    data.outcome on success and error.details on a rejection; see
+#    docs/CLI.md ("Import outcome contract").
 $BIN --data-dir "$DATA" --json import ./fixtures/cli-release-demo
 $BIN --data-dir "$DATA" --json corpus list
 $BIN --data-dir "$DATA" --json explore "timeout" --k 10
