@@ -6,7 +6,7 @@
 ## Goals
 
 1. Real **product launch moment** before main chrome (not “auto-open Settings → Preflight”).
-2. **Animated splash** with custom ContextDesk SVG (NexaDeck-like choreography).
+2. **Animated splash** with custom ContextDesk SVG (reference choreography).
 3. **Pre-launch** first-run: Workspace → AI → Ready → Enter.
 4. **Work-context** health pills on Ready (and reusable Health in Settings).
 5. **Settings** as ongoing config with clearer IA after launch.
@@ -43,7 +43,7 @@ splash → identity (stub: local desk) → pre-launch | skip → main chrome
 ### Include (`category: work`)
 
 | Source | Notes |
-|--------|--------|
+|--------|-------|
 | Files (workspace roots) | Same as launch workspace item when roots set |
 | Durable memory | Store attached / path ready |
 | Confluence RO | If enabled in settings |
@@ -69,12 +69,12 @@ splash → identity (stub: local desk) → pre-launch | skip → main chrome
 
 Optional sources that are off show as **off**, not fail.
 
-## NexaDeck port matrix
+## Reference port matrix
 
 | Port | How |
 |------|-----|
 | SplashScreen API + CSS motion | Vendor under `desktop/src/components/launch/` |
-| WizardStepIndicator / step rail | Vendor / reimplement thin |
+| WizardStepIndicator / step rail | Reuse or reimplement a thin version |
 | Phase flags in App | Same shape as MainApp |
 | Dark full-bleed aesthetic | CSS tokens; CD branding |
 
