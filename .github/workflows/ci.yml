@@ -104,8 +104,11 @@ jobs:
           df -h /
       - uses: Swatinem/rust-cache@v2
         with:
-          # The action still caches dependencies only (not workspace crates).
-          # Preserve that useful work when a later lint/test step fails.
+          # Cache workspace crates as well as dependencies so fresh runners
+          # do not repeatedly rebuild the large local workspace.
+          # The action's normal OS/toolchain/lockfile keying remains in force.
+          cache-workspace-crates: true
+          # Preserve useful cache material when a later lint/test step fails.
           cache-on-failure: true
       - name: fmt
         # rustfmt is OS-agnostic; still run on all three for early signal.
