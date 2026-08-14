@@ -49,6 +49,18 @@ the product remains rename-friendly through [`branding.toml`](branding.toml).
 | **Identity**    | Rename via [`branding.toml`](branding.toml) (full runtime slug paths tracked in [#179](https://github.com/chriscase/ContextDesk/issues/179))                |
 | **Phase 1 DoD** | [Issue #65](https://github.com/chriscase/ContextDesk/issues/65) · [Roadmap](docs/ROADMAP.md) · [Backlog audit](docs/BACKLOG_AUDIT.md)                       |
 
+### Platform verification snapshot
+
+The current release evidence is platform-specific and deliberately conservative:
+
+| Platform | Current evidence |
+| --- | --- |
+| **Windows** | **Verified green** for the release source-build and workspace/server smoke gates. |
+| **macOS** | **Verified green** for the release source-build and workspace/server smoke gates. |
+| **Ubuntu / Linux** | **Not fully verified** for the complete Rust workspace in the latest release run: the hosted runner disconnected during the long workspace test without exposing a test assertion or log artifact. The separate Ubuntu Tauri host check passed. See [#874](https://github.com/chriscase/ContextDesk/issues/874) for the bounded-shard and per-shard diagnostics follow-up. |
+
+This is a CI evidence status, not a claim that the application cannot run on Ubuntu/Linux.
+
 ## Documentation map
 
 | Need | Start here |
