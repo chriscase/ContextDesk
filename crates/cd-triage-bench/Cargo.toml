@@ -1,0 +1,24 @@
+[package]
+name = "cd-triage-bench"
+description = "Headless source-neutral incident-triage evaluation bench: cases, immutable evidence snapshots, imported runs, adjudication, and honest comparison reports. No GUI, network, keychain, or ContextDesk engine dependency."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cd-triage-bench"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+sha2 = "0.10"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"

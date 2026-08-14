@@ -630,6 +630,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cd-triage-bench"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "chrono",
+ "clap",
+ "predicates",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cd-workflow"
 version = "0.1.0"
 dependencies = [

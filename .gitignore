@@ -108,6 +108,9 @@ logs/
 # Hermetic triage quality lab (synthetic only).
 !fixtures/triage-root-cause-lab/**
 !fixtures/triage-root-cause-lab/**/*.log
+# Headless triage evaluation bench sample evidence (synthetic only).
+!crates/cd-triage-bench/fixtures/**
+!crates/cd-triage-bench/fixtures/**/*.log
 
 # Python bytecode from the reference producer examples.
 __pycache__/
