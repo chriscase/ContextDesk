@@ -147,13 +147,14 @@ jobs:
   rust-ubuntu-shard:
     name: rust tests (ubuntu shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # A shard runs a quarter of a suite that took 70-80 minutes as one step,
-    # but on a cold cache it also compiles the dependency graph itself (the
-    # clippy step that used to warm it lives in the `rust` job). Generous
-    # enough that a cold run is not a false failure, hard enough that a hang
-    # cannot sit for hours; per-unit timeouts inside the shard catch a single
-    # stuck test binary long before this.
-    timeout-minutes: 90
+    # A warm shard is a quarter of a suite that took 70-80 minutes as one
+    # step. A cold one also compiles the whole dependency graph itself — the
+    # clippy step that used to warm it lives in the `rust` job — and does it at
+    # CARGO_BUILD_JOBS=1: locally, that build takes ten minutes with four build
+    # jobs, so serialized it is the dominant cost of a cold run. Hence a cap
+    # that a cold run cannot trip by being slow, well under the 6h default. A
+    # hang is caught long before this by the per-unit timeout inside the shard.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
