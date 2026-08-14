@@ -205,7 +205,7 @@ because source imports change the specified data directory:
   -Source .\case-a.zip, .\case-b `
   -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-batch-run') `
   -Execute -AllowImport `
-  -Model "qwen-3.6-27b" -Deadline 10m
+  -Model "<exact-model-id>" -Deadline 10m
 ```
 
 To use already imported corpora without mutating them, pass explicit ids and
@@ -214,7 +214,7 @@ omit `-AllowImport` (the script still requires `-Execute` for provider calls):
 ```powershell
 .\scripts\demo-corpus-batch.ps1 `
   -Cli .\contextdesk.exe `
-  -DataDir "$env:LOCALAPPDATA\ContextDesk\acceptance-rc2" `
+  -DataDir "$env:LOCALAPPDATA\ContextDesk\demo-batch-existing" `
   -CorpusId "<exact-corpus-id-1>", "<exact-corpus-id-2>" `
   -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-batch-run') `
   -Execute -Model "qwen-3.6-27b" -Deadline 10m
