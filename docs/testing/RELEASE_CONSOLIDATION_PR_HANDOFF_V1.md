@@ -15,9 +15,9 @@ PRs remain approval-gated.
 
 The branch tip is intentionally newer than the code pin. Build and verify the
 exact code pin for source acceptance; later commits are documentation or the
-scoped CI workflow mitigation only. The mitigation bounds Linux parallelism in
-the full workspace test and does not change product/runtime code or binary
-identity.
+scoped CI workflow mitigation only. The mitigation first bounded Linux
+parallelism, then serialized Linux test/build work after another hosted-runner
+communication loss; neither change product/runtime code or binary identity.
 
 ## Local evidence already complete
 
@@ -83,8 +83,8 @@ what starts the authoritative multi-OS checks; a local or branch-only run is
 not a substitute.
 
 1. Full GitHub CI, including Windows/source-build and secret/privacy scans. The
-   Ubuntu workspace test now uses bounded Linux parallelism after two hosted-runner
-   communication losses with no test assertion failure.
+   Ubuntu workspace test now uses serialized Linux test/build work after three
+   hosted-runner communication losses with no test assertion failure.
 2. Independent exact-SHA review of the code pin and acceptance procedure.
 3. Review of the open issue criteria (#861, #863–#872); leave deliberately
    deferred feature work open.
