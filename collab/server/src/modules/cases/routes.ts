@@ -262,6 +262,7 @@ export async function registerCaseRoutes(
       clientTime?: string;
       hypothesisStatus?: HypothesisStatus;
       hypothesisLinks?: { kind: "artifact" | "contribution"; id: string }[];
+      sourceId?: string;
     } = { kind, body: text };
     const privacy = str(body.privacyClass);
     if (privacy && (PRIVACY_CLASSES as readonly string[]).includes(privacy)) {
@@ -282,6 +283,8 @@ export async function registerCaseRoutes(
         id: string;
       }[];
     }
+    const sourceId = str(body.sourceId);
+    if (sourceId) input.sourceId = sourceId;
     try {
       return await deps.domain.addContribution(id, ctx.actor, input, request.ip);
     } catch (err) {
@@ -430,6 +433,7 @@ export async function registerCaseRoutes(
       expectedHash?: string | null;
       privacyClass?: PrivacyClass;
       clientTime?: string;
+      sourceId?: string;
     } = { kind: kind as ArtifactKind, summary };
     const filename = str(body.filename);
     if (filename) evidence.filename = filename;
@@ -449,6 +453,8 @@ export async function registerCaseRoutes(
     }
     const clientTime = str(body.clientTime);
     if (clientTime) evidence.clientTime = clientTime;
+    const evidenceSource = str(body.sourceId);
+    if (evidenceSource) evidence.sourceId = evidenceSource;
     try {
       return await deps.domain.addEvidence(id, ctx.actor, evidence, request.ip);
     } catch (err) {

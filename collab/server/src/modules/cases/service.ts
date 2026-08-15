@@ -14,6 +14,7 @@ import {
 } from "@cd-collab/contracts";
 import type { EvidenceStore } from "../../evidence/store.js";
 import type { AuditStore } from "../audit/index.js";
+import { CatalogService } from "../catalog/index.js";
 import {
   assertSupportedLinks,
   defaultPrivacy,
@@ -28,6 +29,7 @@ import {
   type ArtifactRow,
   type CaseStore,
   type RevisionRow,
+  type TimelineInsert,
   type TimelineRow,
 } from "./store.js";
 
@@ -38,7 +40,13 @@ export class CaseService {
     private readonly evidence: EvidenceStore,
     private readonly audit: AuditStore,
     private readonly store: CaseStore = new MemoryCaseStore(),
+    private readonly catalog: CatalogService = new CatalogService(),
   ) {}
+
+  async appendDomainTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
+    await this.requireCase(caseId);
+    return this.store.appendTimeline(caseId, event);
+  }
 
   async listCases(actor: Actor, isAdmin: boolean): Promise<CaseV1[]> {
     const rows = await this.store.listCases();
@@ -183,6 +191,7 @@ export class CaseService {
       clientTime?: string;
       hypothesisStatus?: HypothesisStatus;
       hypothesisLinks?: { kind: "artifact" | "contribution"; id: string }[];
+      sourceId?: string;
     },
     origin: string,
   ): Promise<ContributionV1> {
@@ -198,6 +207,7 @@ export class CaseService {
     const now = new Date().toISOString();
     const privacy = defaultPrivacy(input.privacyClass);
     const hash = hashContributionContent(input.kind, input.body);
+    const sourceId = await this.resolveSourceId(actor, input.sourceId);
     const rev: RevisionRow = {
       contributionId: id,
       caseId,
@@ -213,6 +223,7 @@ export class CaseService {
       createdAt: now,
       hypothesisStatus: input.kind === "hypothesis" ? (input.hypothesisStatus ?? "proposed") : null,
       hypothesisLinks: links,
+      sourceId,
     };
     await this.store.insertRevision(rev);
     await this.store.appendTimeline(caseId, {
@@ -220,7 +231,7 @@ export class CaseService {
       actor,
       targetId: id,
       clientTime: input.clientTime ?? null,
-      payload: { kind: input.kind, contentHash: hash, privacyClass: privacy },
+      payload: { kind: input.kind, contentHash: hash, privacyClass: privacy, sourceId },
     });
     await this.audit.append({
       identity: actor.id,
@@ -377,11 +388,13 @@ export class CaseService {
       summary: string;
       privacyClass?: PrivacyClass;
       clientTime?: string;
+      sourceId?: string;
     },
     origin: string,
   ): Promise<{ artifact: ArtifactV1; summary: ContributionV1 }> {
     await this.requireCase(caseId);
     const privacy = defaultPrivacy(input.privacyClass);
+    const sourceId = await this.resolveSourceId(actor, input.sourceId);
     const id = randomUUID();
     let contentHash: string | null = null;
     let byteLength: number | null = null;
@@ -418,10 +431,12 @@ export class CaseService {
       body: string;
       privacyClass: PrivacyClass;
       clientTime?: string;
+      sourceId: string;
     } = {
       kind: "upload",
       body: input.summary,
       privacyClass: privacy,
+      sourceId,
     };
     if (input.clientTime !== undefined) summaryInput.clientTime = input.clientTime;
     const summary = await this.addContribution(caseId, actor, summaryInput, origin);
@@ -442,6 +457,7 @@ export class CaseService {
       summaryContributionId: summary.id,
       uploaderId: actor.id,
       uploaderUsername: actor.username,
+      sourceId,
     };
     await this.store.insertArtifact(row);
     await this.store.appendTimeline(caseId, {
@@ -589,6 +605,7 @@ export class CaseService {
       createdAt: rev.createdAt,
       hypothesisStatus: rev.hypothesisStatus,
       hypothesisLinks: rev.kind === "hypothesis" ? rev.hypothesisLinks : null,
+      sourceId: rev.sourceId,
     };
   }
 
@@ -608,7 +625,17 @@ export class CaseService {
       privacyClass: row.privacyClass,
       summaryContributionId: row.summaryContributionId,
       uploaderId: row.uploaderId,
+      sourceId: row.sourceId,
     };
+  }
+
+  private async resolveSourceId(actor: Actor, sourceId?: string): Promise<string> {
+    if (sourceId) {
+      const found = await this.catalog.get(sourceId);
+      if (!found) throw new Error("source not found");
+      return found.id;
+    }
+    return (await this.catalog.ensureHumanSource(actor)).id;
   }
 }
 

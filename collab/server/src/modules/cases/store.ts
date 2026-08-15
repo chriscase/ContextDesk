@@ -51,6 +51,7 @@ export interface RevisionRow {
   createdAt: string;
   hypothesisStatus: HypothesisStatus | null;
   hypothesisLinks: { kind: "artifact" | "contribution"; id: string }[];
+  sourceId: string;
 }
 
 export interface ArtifactRow {
@@ -69,6 +70,7 @@ export interface ArtifactRow {
   summaryContributionId: string | null;
   uploaderId: string;
   uploaderUsername: string;
+  sourceId: string;
 }
 
 export interface TimelineInsert {
@@ -168,7 +170,10 @@ export class MemoryCaseStore implements CaseStore {
 
   async insertRevision(rev: RevisionRow): Promise<void> {
     const chain = this.revisions.get(rev.contributionId) ?? [];
-    chain.push({ ...rev, hypothesisLinks: [...rev.hypothesisLinks] });
+    chain.push({
+      ...rev,
+      hypothesisLinks: [...rev.hypothesisLinks],
+    });
     this.revisions.set(rev.contributionId, chain);
   }
 
@@ -289,7 +294,7 @@ export class PgCaseStore implements CaseStore {
 
   async listRevisions(contributionId: string): Promise<RevisionRow[]> {
     const result = await this.db.query(
-      `SELECT r.*, c.case_id, c.kind, c.privacy_class
+      `SELECT r.*, c.case_id, c.kind, c.privacy_class, c.source_id
        FROM contribution_revisions r
        JOIN contributions c ON c.id = r.contribution_id
        WHERE r.contribution_id = $1
@@ -303,8 +308,8 @@ export class PgCaseStore implements CaseStore {
     if (rev.revision === 1) {
       await this.db.query(
         `INSERT INTO contributions (
-           id, case_id, kind, privacy_class, created_at, created_by, created_by_username
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+           id, case_id, kind, privacy_class, created_at, created_by, created_by_username, source_id
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
           rev.contributionId,
           rev.caseId,
@@ -313,6 +318,7 @@ export class PgCaseStore implements CaseStore {
           rev.createdAt,
           rev.authorId,
           rev.authorUsername,
+          rev.sourceId,
         ],
       );
     }
@@ -351,8 +357,8 @@ export class PgCaseStore implements CaseStore {
       `INSERT INTO evidence_artifacts (
          id, case_id, kind, filename, uri, media_type, byte_length, content_hash,
          expected_hash, verification_status, ref_id, privacy_class,
-         summary_contribution_id, uploader_id, uploader_username
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+         summary_contribution_id, uploader_id, uploader_username, source_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       [
         row.id,
         row.caseId,
@@ -369,6 +375,7 @@ export class PgCaseStore implements CaseStore {
         row.summaryContributionId,
         row.uploaderId,
         row.uploaderUsername,
+        row.sourceId,
       ],
     );
   }
@@ -468,6 +475,7 @@ function asRevision(row: Record<string, unknown>): RevisionRow {
         ? null
         : (row.hypothesis_status as HypothesisStatus),
     hypothesisLinks: links,
+    sourceId: row.source_id === null || row.source_id === undefined ? "" : String(row.source_id),
   };
 }
 
@@ -500,5 +508,6 @@ function asArtifact(row: Record<string, unknown>): ArtifactRow {
         : String(row.summary_contribution_id),
     uploaderId: String(row.uploader_id),
     uploaderUsername: String(row.uploader_username),
+    sourceId: row.source_id === null || row.source_id === undefined ? "" : String(row.source_id),
   };
 }

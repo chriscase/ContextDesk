@@ -5,6 +5,7 @@ import "./styles/tokens.css";
 import "./styles/shell.css";
 import "./styles/login.css";
 import "./styles/cases.css";
+import "./styles/catalog.css";
 
 const root = document.getElementById("root");
 if (!root) {

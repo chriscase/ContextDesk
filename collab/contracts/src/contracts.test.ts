@@ -13,9 +13,11 @@ import { describe, expect, it } from "vitest";
 import {
   CASE_SCHEMA_ID,
   FILE_SERVER_REF_SCHEMA_ID,
+  SOURCE_SCHEMA_ID,
   parseCase,
   parseFileServerReference,
   parseHealthResponse,
+  parseSource,
 } from "./index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -47,6 +49,23 @@ describe("contracts unknown-field rejection", () => {
         verificationStatus: "verified",
       }),
     ).toThrow(/expectedHash/);
+  });
+
+  it("rejects unknown keys on sources", () => {
+    expect(() =>
+      parseSource({
+        schemaId: SOURCE_SCHEMA_ID,
+        id: "s1",
+        name: "n",
+        kind: "unknown",
+        description: null,
+        lifecycle: "active",
+        identityId: null,
+        createdAt: "t",
+        createdBy: "a",
+        extra: true,
+      }),
+    ).toThrow(/unknown key/);
   });
 
   it("rejects unknown keys on cases", () => {

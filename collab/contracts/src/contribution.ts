@@ -7,6 +7,7 @@ export const CONTRIBUTION_KINDS = [
   "hypothesis",
   "action",
   "upload",
+  "external_run",
 ] as const;
 export type ContributionKind = (typeof CONTRIBUTION_KINDS)[number];
 
@@ -36,6 +37,7 @@ export interface ContributionV1 {
   createdAt: string;
   hypothesisStatus: HypothesisStatus | null;
   hypothesisLinks: { kind: "artifact" | "contribution"; id: string }[] | null;
+  sourceId: string;
 }
 
 const contributionShape: ObjectShape = {
@@ -61,6 +63,7 @@ const contributionShape: ObjectShape = {
       }),
     ),
   ),
+  sourceId: f.req(f.str),
 };
 
 export function parseContribution(raw: unknown): ContributionV1 {

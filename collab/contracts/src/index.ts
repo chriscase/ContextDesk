@@ -69,6 +69,31 @@ export { ARTIFACT_KINDS, ARTIFACT_SCHEMA_ID, parseArtifact } from "./artifact.js
 export type { ArtifactKind, ArtifactV1 } from "./artifact.js";
 
 export {
+  PERMANENT_UNKNOWN_SOURCE_ID,
+  SOURCE_KINDS,
+  SOURCE_LIFECYCLES,
+  SOURCE_LIST_SCHEMA_ID,
+  SOURCE_SCHEMA_ID,
+  parseSource,
+  parseSourceList,
+} from "./source.js";
+export type { SourceKind, SourceLifecycle, SourceListV1, SourceV1 } from "./source.js";
+
+export {
+  COMPLETENESS,
+  CORROBORATION_STATES,
+  EVIDENCE_VISIBILITY,
+  EXTERNAL_RUN_SCHEMA_ID,
+  parseExternalRun,
+} from "./run.js";
+export type {
+  Completeness,
+  CorroborationState,
+  EvidenceVisibility,
+  ExternalRunV1,
+} from "./run.js";
+
+export {
   FILE_SERVER_REF_SCHEMA_ID,
   parseFileServerReference,
 } from "./evidence.js";

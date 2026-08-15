@@ -8,7 +8,7 @@ or crate internals. Published `packages/contracts` artifacts may be consumed
 read-only later; v1 does not.
 
 Parent epic: #883. Skeleton is #884. Auth/authz/audit is #885. Cases/timeline
-is #886. Import/export are later slices.
+is #886. Source catalog and manual import is #887. Export is a later slice.
 
 ## Layout
 
@@ -104,6 +104,26 @@ is an explicit, recorded operation. A reference whose target was never hashed
 - Process memory is PostgreSQL via `PgCaseStore` (HTTP tests also cover the
   in-memory store). `contribution_revisions` and `timeline_events` are
   insert-only (trigger + app-role grants).
+
+### Source catalog and external-run import (#887)
+
+- Catalog kinds: `human`, `external-tool`, `internal-system`, `contextdesk`,
+  `unknown`. `unknown` is permanent and is never auto-upgraded (kind cannot
+  change after create). Completeness uses #878's `exact` / `partial` /
+  `unknown` words only — no bench crate dependency.
+- Every contribution and artifact links to a catalog source. Human
+  contributions default to the authenticated identity's catalog entry.
+- Manual import stores byte-exact output (and optional prompt) as a frozen
+  `imported_runs` row. Corroboration is a separate insert-only history.
+  Nothing marks an import corroborated or verified automatically.
+- Without an #888 package, evidence visibility is `unknown` or
+  `importer_described`. The `snapshotBinding` field exists for a later
+  package snapshot identity and is not invented here.
+- Importer and operator identities are distinct fields. Missing
+  provider/model/version stay null. Output-only imports keep prompt
+  completeness `unknown`.
+- Catalog administration is case-lead/admin and audited. Retiring a source
+  keeps historical attributions.
 
 ## Module boundaries
 

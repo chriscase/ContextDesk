@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { ImportedRun } from "./ImportedRun.js";
 
 interface CaseRow {
   id: string;
@@ -15,6 +16,18 @@ interface TimelineEvent {
   payload: string;
 }
 
+interface RunRow {
+  id: string;
+  outputText: string;
+  corroborationState: string;
+  evidenceVisibility: string;
+  snapshotBinding: string | null;
+  importerUsername: string;
+  operatorUsername: string;
+  promptText: string | null;
+  promptCompleteness: string;
+}
+
 export function Cases(props: { roles?: string[] }) {
   const canLead =
     (props.roles ?? []).includes("case-lead") || (props.roles ?? []).includes("admin");
@@ -22,6 +35,8 @@ export function Cases(props: { roles?: string[] }) {
   const [active, setActive] = useState<string | null>(null);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [title, setTitle] = useState("");
+  const [sources, setSources] = useState<{ id: string; name: string; kind: string }[]>([]);
+  const [runs, setRuns] = useState<RunRow[]>([]);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/cases");
@@ -35,10 +50,20 @@ export function Cases(props: { roles?: string[] }) {
     if (!res.ok) return;
     const body = (await res.json()) as { events?: TimelineEvent[] };
     setEvents(body.events ?? []);
+    const imported = await fetch(`/api/cases/${id}/imports`);
+    if (imported.ok) {
+      const list = (await imported.json()) as { runs?: RunRow[] };
+      setRuns(list.runs ?? []);
+    }
   }, []);
 
   useEffect(() => {
     void refresh();
+    void fetch("/api/catalog/sources")
+      .then((res) => (res.ok ? res.json() : { sources: [] }))
+      .then((body: { sources?: { id: string; name: string; kind: string }[] }) => {
+        setSources(body.sources ?? []);
+      });
   }, [refresh]);
 
   useEffect(() => {
@@ -67,6 +92,46 @@ export function Cases(props: { roles?: string[] }) {
       body: JSON.stringify({ status }),
     });
     await refresh();
+  }
+
+  async function importRun(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!active) return;
+    const data = new FormData(event.currentTarget);
+    await fetch(`/api/cases/${active}/imports`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        outputText: String(data.get("outputText") ?? ""),
+        promptText: String(data.get("promptText") ?? "") || null,
+        sourceId: String(data.get("sourceId") ?? ""),
+        operatorId: String(data.get("operatorId") ?? ""),
+        operatorUsername: String(data.get("operatorUsername") ?? ""),
+        evidenceVisibility: String(data.get("evidenceVisibility") ?? "unknown"),
+        visibilityNote: String(data.get("visibilityNote") ?? "") || null,
+        snapshotBinding: String(data.get("snapshotBinding") ?? "") || null,
+        redacted: data.get("redacted") === "on",
+      }),
+    });
+    event.currentTarget.reset();
+    await loadTimeline(active);
+  }
+
+  async function corroborate(
+    id: string,
+    state: "corroborated" | "contradicted",
+    linkId: string,
+  ) {
+    if (!active) return;
+    await fetch(`/api/cases/${active}/imports/${id}/corroborate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        state,
+        links: [{ kind: "contribution", id: linkId }],
+      }),
+    });
+    await loadTimeline(active);
   }
 
   async function addNote(event: FormEvent<HTMLFormElement>) {
@@ -151,6 +216,42 @@ export function Cases(props: { roles?: string[] }) {
                 </li>
               ))}
             </ol>
+            {runs.map((run) => (
+              <ImportedRun key={run.id} run={run} onCorroborate={corroborate} />
+            ))}
+            <form className="composer" onSubmit={(e) => void importRun(e)}>
+              <p className="import-warn">
+                Pasted prompts may contain secrets. Mask them before save. Imported
+                output stays unverified until a human corroborates it. Without a
+                #888 package, visibility is importer-described or unknown.
+              </p>
+              <textarea className="login__input" name="outputText" required rows={3} placeholder="Output" />
+              <textarea className="login__input" name="promptText" rows={2} placeholder="Prompt (optional)" />
+              <select className="login__input" name="sourceId" required defaultValue="">
+                <option value="" disabled>
+                  Source
+                </option>
+                {sources.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.kind})
+                  </option>
+                ))}
+              </select>
+              <input className="login__input" name="operatorUsername" placeholder="Operator username" required />
+              <input className="login__input" name="operatorId" placeholder="Operator identity" required />
+              <select className="login__input" name="evidenceVisibility" defaultValue="unknown">
+                <option value="unknown">visibility unknown</option>
+                <option value="importer_described">importer-described</option>
+              </select>
+              <input className="login__input" name="visibilityNote" placeholder="Visibility note" />
+              <input className="login__input" name="snapshotBinding" placeholder="Package snapshot id (later #888)" />
+              <label className="import-warn">
+                <input type="checkbox" name="redacted" /> I redacted secrets before save
+              </label>
+              <button className="login__submit" type="submit">
+                Import external run
+              </button>
+            </form>
             <form className="composer" onSubmit={(e) => void addNote(e)}>
               <select className="login__input" name="kind" defaultValue="note">
                 <option value="message">message</option>

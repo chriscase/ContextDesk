@@ -20,6 +20,12 @@ describe("case list and view", () => {
             }),
           };
         }
+        if (url === "/api/catalog/sources") {
+          return { ok: true, json: async () => ({ sources: [] }) };
+        }
+        if (url === "/api/cases/c1/imports") {
+          return { ok: true, json: async () => ({ runs: [] }) };
+        }
         if (url === "/api/cases/c1/timeline") {
           return {
             ok: true,

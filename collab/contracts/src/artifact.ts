@@ -21,6 +21,7 @@ export interface ArtifactV1 {
   privacyClass: (typeof PRIVACY_CLASSES)[number];
   summaryContributionId: string | null;
   uploaderId: string;
+  sourceId: string;
 }
 
 const artifactShape: ObjectShape = {
@@ -38,6 +39,7 @@ const artifactShape: ObjectShape = {
   privacyClass: f.req(f.en(...PRIVACY_CLASSES)),
   summaryContributionId: f.nul(f.str),
   uploaderId: f.req(f.str),
+  sourceId: f.req(f.str),
 };
 
 export function parseArtifact(raw: unknown): ArtifactV1 {

@@ -13,7 +13,9 @@ import {
   loadLdapConfig,
 } from "./modules/auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "./modules/authz/index.js";
+import { CatalogService, PgCatalogStore } from "./modules/catalog/index.js";
 import { CaseService, PgCaseStore } from "./modules/cases/index.js";
+import { ImportService, PgRunStore } from "./modules/import/index.js";
 
 async function main(): Promise<void> {
   const config = loadRuntimeConfig();
@@ -30,12 +32,22 @@ async function main(): Promise<void> {
     parseGroupRoleMap(process.env.COLLAB_GROUP_ROLE_MAP),
   );
   const audit = new PgAuditStore(pool);
-  const domain = new CaseService(store, audit, new PgCaseStore(pool));
+  const catalog = new CatalogService(new PgCatalogStore(pool), audit);
+  const domain = new CaseService(store, audit, new PgCaseStore(pool), catalog);
+  const imports = new ImportService({
+    evidence: store,
+    audit,
+    cases: domain,
+    catalog,
+    runs: new PgRunStore(pool),
+  });
   const app = await buildApp({
     config,
     pool,
     store,
     domain,
+    catalog,
+    imports,
     security: {
       auth: {
         adapter,
