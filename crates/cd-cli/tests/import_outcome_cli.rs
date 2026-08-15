@@ -385,14 +385,12 @@ fn post_publish_timezone_failure_does_not_claim_nothing_was_published() {
     .unwrap();
 
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(
-        home.path().join("config.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "default_timezone": "Not/A_Real_Zone"
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    // Persist a full AppConfig so load does not fail on the required
+    // `providers` field. The invalid zone is accepted on load (validation
+    // is persist-time only) and then fails after ingest has published.
+    let mut cfg = cd_core::config::AppConfig::default();
+    cfg.default_timezone = Some("Not/A_Real_Zone".into());
+    cd_core::config::save_config(&home.path().join("config.json"), &cfg).unwrap();
 
     let import = cli(home.path())
         .args(["--json", "import", source.path().to_str().unwrap()])
