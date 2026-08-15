@@ -4117,6 +4117,15 @@ pub(super) fn preview_import_path_impl(
         }
 
         if is_archive {
+            // Deliberately unannotated. A nested container that fails has
+            // already been tagged with its own chained identity deeper in
+            // `preview_zip_members`, and `annotate_member` keeps that
+            // innermost locator. What reaches here unannotated is the
+            // top-level entry itself failing to open — where the "member" is
+            // just this file, which the caller already named, and where
+            // ingest returns the engine's bare wording. Annotating it would
+            // add nothing and would break the preview/ingest message parity
+            // asserted by `import_preview_adversarial`.
             preview_zip_members(
                 &mut file,
                 &identity,
@@ -4126,8 +4135,7 @@ pub(super) fn preview_import_path_impl(
                 cancel,
                 &mut items,
                 &mut truncated,
-            )
-            .map_err(|error| annotate_preview_member(error, &identity))?;
+            )?;
             continue;
         }
 

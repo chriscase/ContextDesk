@@ -15,10 +15,21 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Every invocation gets its own library via `--data-dir`.
+///
+/// `$HOME` alone is not isolation: `dirs::home_dir()` reads it on Unix but
+/// uses `FOLDERID_Profile` on Windows and ignores it entirely, so on Windows
+/// these tests would all share the real user profile — and, because the
+/// workspace suite runs with `RUST_TEST_THREADS=4` off Linux, they would race
+/// each other's corpora ("expected 1 corpus, found 5"). `--data-dir` is the
+/// documented cross-platform seam: it bypasses `dirs::home_dir()` and makes
+/// `config_dir` exactly this directory. `HOME` stays set so a Unix-only path
+/// that still consults it cannot escape to the real profile either.
 fn cli(home: &Path) -> Command {
     let mut cmd =
         Command::cargo_bin("contextdesk").expect("contextdesk binary built by this workspace");
     cmd.env("HOME", home);
+    cmd.arg("--data-dir").arg(home);
     cmd
 }
 
