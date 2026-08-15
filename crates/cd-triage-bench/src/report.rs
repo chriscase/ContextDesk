@@ -4,7 +4,7 @@ use crate::canonical::{to_canonical_json, to_pretty_json};
 use crate::error::{BenchError, BenchResult};
 use crate::privacy::gate_share_safe_text;
 use crate::types::{
-    Adjudication, DimensionVerdict, FairnessClass, Observed, PrivacyClass, RubricDimension,
+    Adjudication, Case, DimensionVerdict, FairnessClass, Observed, PrivacyClass, RubricDimension,
     RunStatus, ScoreReview, SourceKind, StrategyIdentity, TriageRun, REPORT_SCHEMA_V1, RUBRIC_V1,
 };
 
@@ -19,10 +19,38 @@ pub struct BacktestReport {
     pub privacy: PrivacyClass,
     pub rubric_version: String,
     pub generated_from: ReportIdentities,
+    pub counts: ReportCounts,
+    pub cases: Vec<CaseBrief>,
     pub groups: Vec<ComparisonGroup>,
     pub incomparable: Vec<IncomparablePair>,
     pub version_pairs: Vec<VersionPair>,
     pub notes: Vec<String>,
+}
+
+/// Small-n honesty: counts sit beside per-case groups. Not an aggregate score.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportCounts {
+    pub cases: u64,
+    pub groups: u64,
+    pub runs: u64,
+    pub scored: u64,
+    pub unscored: u64,
+    pub failed: u64,
+    pub partial: u64,
+    pub unscorable: u64,
+    pub incomparable_pairs: u64,
+    pub version_pairs: u64,
+    pub adjudications: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaseBrief {
+    pub case_id: String,
+    pub lifecycle: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +84,8 @@ pub struct RunSummary {
     pub fairness: String,
     pub comparison_eligible: bool,
     pub scored: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
     pub scores: Vec<ReportedDimension>,
 }
 
@@ -72,6 +102,8 @@ pub struct ReviewerVerdict {
     pub adjudication_id: String,
     pub reviewer: String,
     pub verdict: DimensionVerdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,8 +123,11 @@ pub struct VersionPair {
     pub newer_version: String,
     pub older_run_id: String,
     pub newer_run_id: String,
+    pub case_id: String,
     pub task_id: String,
     pub snapshot_id: String,
+    pub older_adjudication_ids: Vec<String>,
+    pub newer_adjudication_ids: Vec<String>,
     pub dimensions: Vec<VersionDelta>,
 }
 
@@ -107,6 +142,7 @@ pub fn build_report(
     runs: &[TriageRun],
     adjudications: &[Adjudication],
     scores: &[ScoreReview],
+    cases: &[Case],
     privacy: PrivacyClass,
 ) -> BenchResult<BacktestReport> {
     let mut runs: Vec<TriageRun> = runs.to_vec();
@@ -116,10 +152,13 @@ pub fn build_report(
     let mut scores: Vec<ScoreReview> = scores.to_vec();
     scores.sort_by(|a, b| a.score_id.cmp(&b.score_id));
 
+    let mut cases: Vec<Case> = cases.to_vec();
+    cases.sort_by(|a, b| a.case_id.cmp(&b.case_id));
     if privacy == PrivacyClass::ShareSafe {
         runs.retain(|r| r.privacy == PrivacyClass::ShareSafe);
         adjudications.retain(|a| a.privacy == PrivacyClass::ShareSafe);
         scores.retain(|s| s.privacy == PrivacyClass::ShareSafe);
+        cases.retain(|c| c.privacy == PrivacyClass::ShareSafe);
     }
 
     let mut groups_map: BTreeMap<(String, String, String), Vec<TriageRun>> = BTreeMap::new();
@@ -143,7 +182,7 @@ pub fn build_report(
             if !eligible {
                 // Still listed; not force-ranked.
             }
-            summaries.push(run_summary(run, &adjudications));
+            summaries.push(run_summary(run, &adjudications, privacy));
         }
         summaries.sort_by(|a, b| a.run_id.cmp(&b.run_id));
         for pair in fairness_incomparable(group_runs) {
@@ -188,20 +227,34 @@ pub fn build_report(
     incomparable.dedup();
 
     let version_pairs = version_pairs(&runs, &adjudications);
+    let case_briefs = case_briefs(&cases, privacy);
     let identities = ReportIdentities {
-        case_ids: unique(runs.iter().map(|r| r.case_id.clone())),
+        case_ids: unique(
+            runs.iter()
+                .map(|r| r.case_id.clone())
+                .chain(cases.iter().map(|c| c.case_id.clone())),
+        ),
         task_ids: unique(runs.iter().map(|r| r.task_id.clone())),
         snapshot_ids: unique(runs.iter().map(|r| r.snapshot_id.clone())),
         run_ids: unique(runs.iter().map(|r| r.run_id.clone())),
         adjudication_ids: unique(adjudications.iter().map(|a| a.adjudication_id.clone())),
         score_ids: unique(scores.iter().map(|s| s.score_id.clone())),
     };
+    let counts = report_counts(
+        &groups,
+        &case_briefs,
+        &incomparable,
+        &version_pairs,
+        adjudications.len(),
+    );
 
     let notes = vec![
         "Comparisons are valid only for the same evaluation task and evidence snapshot.".into(),
         "Unscored, failed, and partial runs are listed; they are not treated as zero.".into(),
         "This report does not assign readiness, qualification, or routing badges.".into(),
         "Disagreement is preserved per reviewer; scores are never silently averaged.".into(),
+        "This report is a projection over stored records. It does not execute strategies or create judgments.".into(),
+        "SDK batch execution is out of scope until the public-SDK adapter (#879) exists.".into(),
     ];
 
     let report = BacktestReport {
@@ -209,6 +262,8 @@ pub fn build_report(
         privacy,
         rubric_version: RUBRIC_V1.into(),
         generated_from: identities,
+        counts,
+        cases: case_briefs,
         groups,
         incomparable,
         version_pairs,
@@ -235,6 +290,34 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
     out.push_str(&format!("Schema: `{}`\n\n", report.schema_id));
     out.push_str(&format!("Privacy: `{}`\n\n", report.privacy.as_str()));
     out.push_str(&format!("Rubric: `{}`\n\n", report.rubric_version));
+    out.push_str("## Counts\n\n");
+    out.push_str(&format!(
+        "- cases: {}\n- groups: {}\n- runs: {} (scored {}, unscored {}, failed {}, partial {}, unscorable {})\n- incomparable pairs: {}\n- version pairs: {}\n- adjudications: {}\n\n",
+        report.counts.cases,
+        report.counts.groups,
+        report.counts.runs,
+        report.counts.scored,
+        report.counts.unscored,
+        report.counts.failed,
+        report.counts.partial,
+        report.counts.unscorable,
+        report.counts.incomparable_pairs,
+        report.counts.version_pairs,
+        report.counts.adjudications
+    ));
+    if !report.cases.is_empty() {
+        out.push_str("## Cases\n\n");
+        for case in &report.cases {
+            match &case.title {
+                Some(title) => out.push_str(&format!(
+                    "- `{}` ({}) — {title}\n",
+                    case.case_id, case.lifecycle
+                )),
+                None => out.push_str(&format!("- `{}` ({})\n", case.case_id, case.lifecycle)),
+            }
+        }
+        out.push('\n');
+    }
     out.push_str("## Honesty notes\n\n");
     for note in &report.notes {
         out.push_str(&format!("- {note}\n"));
@@ -279,8 +362,19 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
         out.push_str("## Strategy version pairs\n\n");
         for pair in &report.version_pairs {
             out.push_str(&format!(
-                "- {} `{}` → `{}`\n",
-                pair.strategy_name, pair.older_version, pair.newer_version
+                "- {} `{}` → `{}` (case `{}`, task `{}`)\n",
+                pair.strategy_name,
+                pair.older_version,
+                pair.newer_version,
+                pair.case_id,
+                pair.task_id
+            ));
+            out.push_str(&format!(
+                "  - drill-down: older run `{}` adjudications {}; newer run `{}` adjudications {}\n",
+                pair.older_run_id,
+                pair.older_adjudication_ids.join(", "),
+                pair.newer_run_id,
+                pair.newer_adjudication_ids.join(", ")
             ));
             for dim in &pair.dimensions {
                 out.push_str(&format!("  - {}: {}\n", dim.dimension.as_str(), dim.change));
@@ -294,12 +388,114 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
     Ok(out)
 }
 
+pub fn render_report_jsonl(report: &BacktestReport) -> BenchResult<String> {
+    let mut lines = Vec::new();
+    lines.push(to_canonical_json(&JsonlLine::Meta {
+        schema_id: &report.schema_id,
+        privacy: report.privacy,
+        rubric_version: &report.rubric_version,
+        generated_from: &report.generated_from,
+        counts: &report.counts,
+        notes: &report.notes,
+    })?);
+    for case in &report.cases {
+        lines.push(to_canonical_json(&JsonlLine::Case { case })?);
+    }
+    for group in &report.groups {
+        lines.push(to_canonical_json(&JsonlLine::Group { group })?);
+    }
+    for pair in &report.incomparable {
+        lines.push(to_canonical_json(&JsonlLine::Incomparable { pair })?);
+    }
+    for pair in &report.version_pairs {
+        lines.push(to_canonical_json(&JsonlLine::VersionPair { pair })?);
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    if report.privacy == PrivacyClass::ShareSafe {
+        gate_share_safe_text(&text)?;
+    }
+    Ok(text)
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum JsonlLine<'a> {
+    Meta {
+        schema_id: &'a str,
+        privacy: PrivacyClass,
+        rubric_version: &'a str,
+        generated_from: &'a ReportIdentities,
+        counts: &'a ReportCounts,
+        notes: &'a [String],
+    },
+    Case {
+        case: &'a CaseBrief,
+    },
+    Group {
+        group: &'a ComparisonGroup,
+    },
+    Incomparable {
+        pair: &'a IncomparablePair,
+    },
+    VersionPair {
+        pair: &'a VersionPair,
+    },
+}
+
+fn case_briefs(cases: &[Case], privacy: PrivacyClass) -> Vec<CaseBrief> {
+    cases
+        .iter()
+        .map(|case| CaseBrief {
+            case_id: case.case_id.clone(),
+            lifecycle: case.lifecycle.as_str().to_string(),
+            title: (privacy == PrivacyClass::OwnerOnly).then(|| case.title.clone()),
+        })
+        .collect()
+}
+
+fn report_counts(
+    groups: &[ComparisonGroup],
+    cases: &[CaseBrief],
+    incomparable: &[IncomparablePair],
+    version_pairs: &[VersionPair],
+    adjudications: usize,
+) -> ReportCounts {
+    let runs: Vec<&RunSummary> = groups.iter().flat_map(|g| g.runs.iter()).collect();
+    ReportCounts {
+        cases: cases.len() as u64,
+        groups: groups.len() as u64,
+        runs: runs.len() as u64,
+        scored: runs.iter().filter(|r| r.scored).count() as u64,
+        unscored: runs.iter().filter(|r| !r.scored).count() as u64,
+        failed: runs
+            .iter()
+            .filter(|r| r.status == RunStatus::Failed)
+            .count() as u64,
+        partial: runs
+            .iter()
+            .filter(|r| r.status == RunStatus::Partial)
+            .count() as u64,
+        unscorable: runs
+            .iter()
+            .filter(|r| r.status == RunStatus::Unscorable)
+            .count() as u64,
+        incomparable_pairs: incomparable.len() as u64,
+        version_pairs: version_pairs.len() as u64,
+        adjudications: adjudications as u64,
+    }
+}
+
 fn unique(iter: impl Iterator<Item = String>) -> Vec<String> {
     let set: BTreeSet<String> = iter.collect();
     set.into_iter().collect()
 }
 
-fn run_summary(run: &TriageRun, adjudications: &[Adjudication]) -> RunSummary {
+fn run_summary(
+    run: &TriageRun,
+    adjudications: &[Adjudication],
+    privacy: PrivacyClass,
+) -> RunSummary {
     let related: Vec<&Adjudication> = adjudications
         .iter()
         .filter(|a| a.run_id == run.run_id)
@@ -313,6 +509,8 @@ fn run_summary(run: &TriageRun, adjudications: &[Adjudication]) -> RunSummary {
                     adjudication_id: adj.adjudication_id.clone(),
                     reviewer: adj.reviewer.clone(),
                     verdict: outcome.verdict.clone(),
+                    rationale: (privacy == PrivacyClass::OwnerOnly)
+                        .then(|| outcome.rationale.clone()),
                 });
             }
         }
@@ -335,6 +533,7 @@ fn run_summary(run: &TriageRun, adjudications: &[Adjudication]) -> RunSummary {
                 .iter()
                 .any(|o| matches!(o.verdict, DimensionVerdict::Score { .. }))
         }),
+        operator: (privacy == PrivacyClass::OwnerOnly).then(|| run.operator.clone()),
         scores,
     }
 }
@@ -404,8 +603,11 @@ fn version_pairs(runs: &[TriageRun], adjudications: &[Adjudication]) -> Vec<Vers
                 newer_version: newer_v,
                 older_run_id: older.run_id.clone(),
                 newer_run_id: newer.run_id.clone(),
+                case_id: older.case_id.clone(),
                 task_id: task_id.clone(),
                 snapshot_id: snapshot_id.clone(),
+                older_adjudication_ids: adjudication_ids(older, adjudications),
+                newer_adjudication_ids: adjudication_ids(newer, adjudications),
                 dimensions,
             });
         }
@@ -425,6 +627,15 @@ fn version_pairs(runs: &[TriageRun], adjudications: &[Adjudication]) -> Vec<Vers
             ))
     });
     pairs
+}
+
+fn adjudication_ids(run: &TriageRun, adjudications: &[Adjudication]) -> Vec<String> {
+    unique(
+        adjudications
+            .iter()
+            .filter(|a| a.run_id == run.run_id)
+            .map(|a| a.adjudication_id.clone()),
+    )
 }
 
 fn version_of(strategy: &StrategyIdentity) -> String {

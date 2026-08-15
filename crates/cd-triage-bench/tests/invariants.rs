@@ -9,6 +9,41 @@ use cd_triage_bench::types::*;
 use cd_triage_bench::{import_run, materialize_task_packet, ImportOutcome};
 use common::*;
 use std::fs;
+use std::path::PathBuf;
+
+#[test]
+fn crate_source_has_no_qualification_or_routing_write_api() {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                files.push(path);
+            }
+        }
+    }
+    walk(&src, &mut files);
+    for path in files {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for forbidden in [
+            "write_qualification",
+            "set_readiness",
+            "routing_state",
+            "compatibility_badge",
+            "mark_ready",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{} must not write {forbidden}",
+                path.display()
+            );
+        }
+    }
+}
 
 #[test]
 fn crate_does_not_depend_on_cd_core_or_desktop() {
@@ -659,6 +694,7 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
         &store.load_runs().unwrap(),
         &store.load_adjudications().unwrap(),
         &store.load_scores().unwrap(),
+        &store.load_cases().unwrap(),
         PrivacyClass::OwnerOnly,
     )
     .unwrap();
@@ -666,6 +702,7 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
         &store.load_runs().unwrap(),
         &store.load_adjudications().unwrap(),
         &store.load_scores().unwrap(),
+        &store.load_cases().unwrap(),
         PrivacyClass::ShareSafe,
     )
     .unwrap();

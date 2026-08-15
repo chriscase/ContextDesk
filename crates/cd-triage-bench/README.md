@@ -11,11 +11,11 @@ SDK contracts, not by absorbing case management.
 
 Working name: `cd-triage-bench` (rename-friendly; crate prefix stays `cd-*`).
 
-Status: first slice (#877 store/entities plus a report-only #881 sketch)
-is on `main` via #890/#891. This branch adds **manual import / provenance**
-(#878) and **rubric v1 + expert adjudication** (#880). Not a close of epic
-#876. Not release-ready. ContextDesk SDK adapter remains #879. Comparison
-report aggregation remains #881.
+Status: first slice (#877 store/entities) is on `main` via #890/#891. This
+branch adds **manual import / provenance** (#878), **rubric v1 + expert
+adjudication** (#880), and **report-only comparison** over stored records
+(#881). Not a close of epic #876. Not release-ready. The SDK-driven batch
+runner is residual until #879. No composite leaderboards.
 
 ## Layout
 
@@ -101,6 +101,8 @@ cd-triage-bench --library ./bench-lib import-adjudication ./adj.json
 cd-triage-bench --library ./bench-lib review-packet "$RUN_ID" --phase diagnosis
 cd-triage-bench --library ./bench-lib show adjudications "$ADJ_ID"
 cd-triage-bench --library ./bench-lib report --format json --privacy share-safe
+cd-triage-bench --library ./bench-lib report --format jsonl --privacy owner-only
+cd-triage-bench --library ./bench-lib report --format markdown
 ```
 
 Human submission template: [`fixtures/templates/human-run.md`](fixtures/templates/human-run.md).
@@ -135,6 +137,22 @@ allowed only after a support adjudication exists.
 (`citation_not_in_snapshot:<id>`). It never writes scores. Two reviewers
 are two records; `show adjudications` renders both rationales. Re-scoring
 under rubric v2 creates new records and leaves v1 scores byte-identical.
+
+## Report-only comparison (#881)
+
+`report` is a deterministic projection over stored runs and adjudications.
+It never creates judgments and never executes a strategy. JSON, JSONL, and
+markdown are byte-stable for the same records. Groups are exact
+task + snapshot identity. Different snapshots or fairness classes are
+**incomparable** (reason included), never force-ranked. Version N vs N−1
+pairs list improved/regressed/unchanged dimensions with drill-down to runs
+and adjudications. Unscored, failed, and partial runs stay visible and are
+not treated as zero. `share_safe` drops owner-only records/titles/rationales
+and fails closed on a privacy scan. `owner_only` keeps that detail.
+
+**Residual:** an SDK-driven batch runner that executes ContextDesk across a
+case set, including mid-batch failure coverage. That needs #879. Imported
+runs already join this report from storage.
 
 ## Future scope (explicitly not this slice)
 

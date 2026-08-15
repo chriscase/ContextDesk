@@ -3,7 +3,9 @@
 use crate::canonical::to_pretty_json;
 use crate::error::{BenchError, BenchResult};
 use crate::import::{import_run, parse_import_json, parse_import_markdown, ImportOutcome};
-use crate::report::{build_report, render_report_json, render_report_markdown};
+use crate::report::{
+    build_report, render_report_json, render_report_jsonl, render_report_markdown,
+};
 use crate::review::{blinded_run_view_from_raw, ReviewPhase};
 use crate::store::BenchStore;
 use crate::types::{Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass};
@@ -74,7 +76,7 @@ pub enum Command {
     Report {
         #[arg(long, value_enum, default_value = "json")]
         format: ReportFormat,
-        #[arg(long, value_enum, default_value = "owner_only")]
+        #[arg(long, value_enum, default_value = "owner-only")]
         privacy: ReportPrivacy,
         #[arg(long)]
         task: Option<String>,
@@ -94,6 +96,7 @@ pub enum ListKind {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ReportFormat {
     Json,
+    Jsonl,
     Markdown,
 }
 
@@ -263,10 +266,12 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                 &runs,
                 &store.load_adjudications()?,
                 &store.load_scores()?,
+                &store.load_cases()?,
                 privacy.class(),
             )?;
             match format {
                 ReportFormat::Json => render_report_json(&report),
+                ReportFormat::Jsonl => render_report_jsonl(&report),
                 ReportFormat::Markdown => render_report_markdown(&report),
             }
         }
