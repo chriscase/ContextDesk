@@ -70,31 +70,21 @@ for pkg in $PKGS; do
   awk -F'\t' -v pkg="$pkg" '$1 == pkg { print $2 }' "$tmp/compile-pkgs" |
     while IFS= read -r compile; do
       rest=${compile#"-p $pkg "}
+      # Match ci_run_shard.sh build phase: skip doc selectors. Cargo rejects
+      # combining doctest selection with --no-run ("can't skip running doc
+      # tests with --no-run"; hosted run 31893128816). Doc units compile when
+      # shards execute them, same as before this warmer existed.
       case $rest in
         --doc | --doc\ *) continue ;;
       esac
       printf '%s\n' "$rest"
     done | LC_ALL=C sort -u >"$tmp/flags"
 
-  # Doc units are warmed separately: --doc is its own cargo invocation so it
-  # does not fight other target selectors under --no-run.
-  needs_doc=0
-  if awk -F'\t' -v pkg="$pkg" '$1 == pkg { print $2 }' "$tmp/compile-pkgs" |
-    grep -E '(^| )--doc( |$)' >/dev/null; then
-    needs_doc=1
-  fi
-
-  if [ -s "$tmp/flags" ]; then
-    flags=$(tr '\n' ' ' <"$tmp/flags")
-    echo "ci_warm_test_artifacts: cargo test -p $pkg $flags --no-run"
-    # shellcheck disable=SC2086
-    cargo test -p "$pkg" $flags --no-run
-  fi
-
-  if [ "$needs_doc" -eq 1 ]; then
-    echo "ci_warm_test_artifacts: cargo test -p $pkg --doc --no-run"
-    cargo test -p "$pkg" --doc --no-run
-  fi
+  [ -s "$tmp/flags" ] || continue
+  flags=$(tr '\n' ' ' <"$tmp/flags")
+  echo "ci_warm_test_artifacts: cargo test -p $pkg $flags --no-run"
+  # shellcheck disable=SC2086
+  cargo test -p "$pkg" $flags --no-run
 done
 
 echo "ci_warm_test_artifacts: done"

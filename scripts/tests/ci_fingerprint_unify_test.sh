@@ -105,4 +105,13 @@ grep -q 'ubuntu-workspace-tests-v2' "$wf" ||
 grep -q "save-if: \${{ github.ref == 'refs/heads/main' }}" "$wf" ||
   die "ci.yml rust-cache writers must save only on main"
 
+# Hosted run 31893128816: cargo rejects combining doctests with --no-run.
+warm=$ROOT/scripts/ci_warm_test_artifacts.sh
+[ -f "$warm" ] || die "missing $warm"
+if grep -E '^[[:space:]]*cargo test .*--doc' "$warm" >/dev/null; then
+  die "ci_warm_test_artifacts.sh must not invoke cargo test with --doc"
+fi
+grep -q -- '--doc | --doc' "$warm" ||
+  die "warmer must skip doc selectors like ci_run_shard.sh build phase"
+
 echo "ci_fingerprint_unify_test: OK"
