@@ -24,6 +24,7 @@ This lane is separate from:
 - Case resolution/domain expertise is evaluation-only and cannot appear in a
   materialized task packet.
 - Unknown cost, timing, prompts, and versions stay unknown.
+- CLI import documents reject unknown fields even when generated ids are omitted.
 - Unresolved cases remain valid without an invented root cause.
 - Failed and partial runs are stored runs.
 - Reports never emit readiness, qualification, or routing badges.

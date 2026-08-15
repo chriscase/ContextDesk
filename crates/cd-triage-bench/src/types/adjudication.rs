@@ -128,11 +128,74 @@ struct AdjudicationDigestBody<'a> {
     created_at: &'a str,
 }
 
+/// Import document for an adjudication. `adjudication_id` may be omitted;
+/// unknown fields are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdjudicationImport {
+    schema_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adjudication_id: Option<String>,
+    #[serde(default)]
+    privacy: PrivacyClass,
+    case_id: String,
+    task_id: String,
+    snapshot_id: String,
+    run_id: String,
+    reviewer: String,
+    conflict_of_interest: ConflictOfInterest,
+    rubric_version: String,
+    blinding: BlindingState,
+    outcomes: Vec<DimensionOutcome>,
+    created_at: String,
+}
+
 impl Adjudication {
     pub fn parse_json(text: &str) -> BenchResult<Self> {
         let parsed: Self = serde_json::from_str(text).map_err(BenchError::from_serde)?;
         parsed.validate()?;
         Ok(parsed)
+    }
+
+    /// Parse a stored record or an import document that omits `adjudication_id`.
+    pub fn parse_import_json(text: &str) -> BenchResult<Self> {
+        let import: AdjudicationImport =
+            serde_json::from_str(text).map_err(BenchError::from_serde)?;
+        require_schema(&import.schema_id, ADJUDICATION_SCHEMA_V1)?;
+        match import.adjudication_id {
+            Some(adjudication_id) => {
+                let adj = Self {
+                    schema_id: import.schema_id,
+                    adjudication_id,
+                    privacy: import.privacy,
+                    case_id: import.case_id,
+                    task_id: import.task_id,
+                    snapshot_id: import.snapshot_id,
+                    run_id: import.run_id,
+                    reviewer: import.reviewer,
+                    conflict_of_interest: import.conflict_of_interest,
+                    rubric_version: import.rubric_version,
+                    blinding: import.blinding,
+                    outcomes: import.outcomes,
+                    created_at: import.created_at,
+                };
+                adj.validate()?;
+                Ok(adj)
+            }
+            None => Self::from_parts(
+                import.privacy,
+                import.case_id,
+                import.task_id,
+                import.snapshot_id,
+                import.run_id,
+                import.reviewer,
+                import.conflict_of_interest,
+                import.rubric_version,
+                import.blinding,
+                import.outcomes,
+                import.created_at,
+            ),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -311,11 +374,75 @@ pub struct ScoreReview {
     pub created_at: String,
 }
 
+/// Body hashed for score identity. Matches the historical `from_adjudication`
+/// digest keys so existing score ids remain stable.
+#[derive(Serialize)]
+struct ScoreDigestBody<'a> {
+    adjudication_id: &'a str,
+    rubric_version: &'a str,
+    run_id: &'a str,
+    task_id: &'a str,
+    snapshot_id: &'a str,
+    dimensions: &'a [DimensionScore],
+}
+
+/// Import document for a score/review. `score_id` may be omitted; unknown
+/// fields are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScoreImport {
+    schema_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    score_id: Option<String>,
+    #[serde(default)]
+    privacy: PrivacyClass,
+    rubric_version: String,
+    case_id: String,
+    task_id: String,
+    snapshot_id: String,
+    run_id: String,
+    adjudication_id: String,
+    dimensions: Vec<DimensionScore>,
+    created_at: String,
+}
+
 impl ScoreReview {
     pub fn parse_json(text: &str) -> BenchResult<Self> {
         let parsed: Self = serde_json::from_str(text).map_err(BenchError::from_serde)?;
         parsed.validate()?;
         Ok(parsed)
+    }
+
+    /// Parse a stored record or an import document that omits `score_id`.
+    pub fn parse_import_json(text: &str) -> BenchResult<Self> {
+        let import: ScoreImport = serde_json::from_str(text).map_err(BenchError::from_serde)?;
+        require_schema(&import.schema_id, SCORE_SCHEMA_V1)?;
+        let score_id = match import.score_id {
+            Some(id) => id,
+            None => compute_score_id(
+                &import.adjudication_id,
+                &import.rubric_version,
+                &import.run_id,
+                &import.task_id,
+                &import.snapshot_id,
+                &import.dimensions,
+            )?,
+        };
+        let score = Self {
+            schema_id: import.schema_id,
+            score_id,
+            privacy: import.privacy,
+            rubric_version: import.rubric_version,
+            case_id: import.case_id,
+            task_id: import.task_id,
+            snapshot_id: import.snapshot_id,
+            run_id: import.run_id,
+            adjudication_id: import.adjudication_id,
+            dimensions: import.dimensions,
+            created_at: import.created_at,
+        };
+        score.validate()?;
+        Ok(score)
     }
 
     pub fn from_adjudication(adj: &Adjudication) -> BenchResult<Self> {
@@ -327,20 +454,14 @@ impl ScoreReview {
                 verdict: o.verdict.clone(),
             })
             .collect();
-        let score_id = format!(
-            "score-{}",
-            sha256_hex(
-                to_canonical_json(&serde_json::json!({
-                    "adjudication_id": adj.adjudication_id,
-                    "rubric_version": adj.rubric_version,
-                    "run_id": adj.run_id,
-                    "task_id": adj.task_id,
-                    "snapshot_id": adj.snapshot_id,
-                    "dimensions": dimensions,
-                }))?
-                .as_bytes()
-            )
-        );
+        let score_id = compute_score_id(
+            &adj.adjudication_id,
+            &adj.rubric_version,
+            &adj.run_id,
+            &adj.task_id,
+            &adj.snapshot_id,
+            &dimensions,
+        )?;
         let score = Self {
             schema_id: SCORE_SCHEMA_V1.into(),
             score_id,
@@ -373,8 +494,43 @@ impl ScoreReview {
                 "score review must include all five dimensions".into(),
             ));
         }
+        let expected = compute_score_id(
+            &self.adjudication_id,
+            &self.rubric_version,
+            &self.run_id,
+            &self.task_id,
+            &self.snapshot_id,
+            &self.dimensions,
+        )?;
+        if self.score_id != expected {
+            return Err(BenchError::Integrity(format!(
+                "score_id does not match content digest (expected {expected})"
+            )));
+        }
         Ok(())
     }
+}
+
+fn compute_score_id(
+    adjudication_id: &str,
+    rubric_version: &str,
+    run_id: &str,
+    task_id: &str,
+    snapshot_id: &str,
+    dimensions: &[DimensionScore],
+) -> BenchResult<String> {
+    let body = ScoreDigestBody {
+        adjudication_id,
+        rubric_version,
+        run_id,
+        task_id,
+        snapshot_id,
+        dimensions,
+    };
+    Ok(format!(
+        "score-{}",
+        sha256_hex(to_canonical_json(&body)?.as_bytes())
+    ))
 }
 
 /// Deterministic citation-existence assist. Never produces a score.
@@ -405,5 +561,102 @@ mod tests {
             .validate(RubricDimension::Actionability)
             .unwrap_err();
         assert!(err.to_string().contains("0..=3"));
+    }
+
+    fn sample_dimensions() -> Vec<DimensionScore> {
+        vec![
+            DimensionScore {
+                dimension: RubricDimension::DiagnosisCorrectness,
+                verdict: DimensionVerdict::Score { value: 3 },
+            },
+            DimensionScore {
+                dimension: RubricDimension::EvidenceSupport,
+                verdict: DimensionVerdict::Score { value: 2 },
+            },
+            DimensionScore {
+                dimension: RubricDimension::Actionability,
+                verdict: DimensionVerdict::Score { value: 2 },
+            },
+            DimensionScore {
+                dimension: RubricDimension::UncertaintyCalibration,
+                verdict: DimensionVerdict::Score { value: 1 },
+            },
+            DimensionScore {
+                dimension: RubricDimension::UnsafeUnsupportedClaims,
+                verdict: DimensionVerdict::Score { value: 3 },
+            },
+        ]
+    }
+
+    #[test]
+    fn score_id_mismatch_is_rejected() {
+        let dimensions = sample_dimensions();
+        let expected = compute_score_id(
+            "adj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            RUBRIC_V1,
+            "run-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "task-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "snap-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            &dimensions,
+        )
+        .unwrap();
+        let mut score = ScoreReview {
+            schema_id: SCORE_SCHEMA_V1.into(),
+            score_id: expected,
+            privacy: PrivacyClass::ShareSafe,
+            rubric_version: RUBRIC_V1.into(),
+            case_id: "case-fixture-1".into(),
+            task_id: "task-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            snapshot_id: "snap-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                .into(),
+            run_id: "run-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            adjudication_id: "adj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            dimensions,
+            created_at: "2026-01-15T10:00:00Z".into(),
+        };
+        score.validate().unwrap();
+        score.score_id =
+            "score-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+        let err = score.validate().unwrap_err();
+        assert!(err.to_string().contains("score_id does not match"));
+    }
+
+    #[test]
+    fn import_without_adjudication_or_score_id_rejects_unknown_fields() {
+        let adj_err = Adjudication::parse_import_json(
+            r#"{
+                "schema_id": "contextdesk.triage_bench.adjudication.v1",
+                "case_id": "case-1",
+                "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "snapshot_id": "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "run_id": "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "reviewer": "reviewer-a",
+                "conflict_of_interest": {"declared": false},
+                "rubric_version": "contextdesk.triage_bench.rubric.v1",
+                "blinding": {"kind": "blinded"},
+                "outcomes": [],
+                "created_at": "2026-01-15T10:00:00Z",
+                "unexpected": true
+            }"#,
+        )
+        .unwrap_err();
+        assert!(adj_err.to_string().contains("unknown field"));
+        let score_err = ScoreReview::parse_import_json(
+            r#"{
+                "schema_id": "contextdesk.triage_bench.score_review.v1",
+                "rubric_version": "contextdesk.triage_bench.rubric.v1",
+                "case_id": "case-1",
+                "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "snapshot_id": "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "run_id": "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "adjudication_id": "adj-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "dimensions": [],
+                "created_at": "2026-01-15T10:00:00Z",
+                "unexpected": true
+            }"#,
+        )
+        .unwrap_err();
+        assert!(score_err.to_string().contains("unknown field"));
     }
 }

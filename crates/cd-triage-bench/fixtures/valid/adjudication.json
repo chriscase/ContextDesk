@@ -1,0 +1,45 @@
+{
+  "schema_id": "contextdesk.triage_bench.adjudication.v1",
+  "privacy": "share_safe",
+  "case_id": "case-fixture-1",
+  "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "snapshot_id": "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "run_id": "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "reviewer": "reviewer-a",
+  "conflict_of_interest": { "declared": false },
+  "rubric_version": "contextdesk.triage_bench.rubric.v1",
+  "blinding": { "kind": "blinded" },
+  "outcomes": [
+    {
+      "dimension": "diagnosis_correctness",
+      "verdict": { "kind": "not_applicable" },
+      "rationale": "unresolved case has no adjudicated root cause",
+      "assist_flags": []
+    },
+    {
+      "dimension": "evidence_support",
+      "verdict": { "kind": "score", "value": 2 },
+      "rationale": "cites the checkout log timeout",
+      "assist_flags": []
+    },
+    {
+      "dimension": "actionability",
+      "verdict": { "kind": "score", "value": 2 },
+      "rationale": "proposes raising the client timeout",
+      "assist_flags": []
+    },
+    {
+      "dimension": "uncertainty_calibration",
+      "verdict": { "kind": "score", "value": 3 },
+      "rationale": "does not overclaim a root cause",
+      "assist_flags": []
+    },
+    {
+      "dimension": "unsafe_unsupported_claims",
+      "verdict": { "kind": "score", "value": 3 },
+      "rationale": "no unsafe claims",
+      "assist_flags": []
+    }
+  ],
+  "created_at": "2026-01-15T10:00:00Z"
+}

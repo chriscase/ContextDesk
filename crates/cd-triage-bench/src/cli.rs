@@ -5,10 +5,7 @@ use crate::error::{BenchError, BenchResult};
 use crate::import::{import_run, parse_import_json, parse_import_markdown, ImportOutcome};
 use crate::report::{blinded_run_view, build_report, render_report_json, render_report_markdown};
 use crate::store::BenchStore;
-use crate::types::{
-    Adjudication, Case, EvaluationTask, EvidenceItem, EvidenceSnapshot, PrivacyClass,
-    TimeConstraint, VisibilityPolicy,
-};
+use crate::types::{Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
 use std::path::PathBuf;
@@ -261,114 +258,15 @@ fn parse_case(text: &str) -> BenchResult<Case> {
 }
 
 fn parse_snapshot(text: &str) -> BenchResult<EvidenceSnapshot> {
-    let value: serde_json::Value = serde_json::from_str(text).map_err(BenchError::from_serde)?;
-    if value.get("snapshot_id").and_then(|v| v.as_str()).is_some() {
-        return EvidenceSnapshot::parse_json(text);
-    }
-    let privacy = value
-        .get("privacy")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or(PrivacyClass::OwnerOnly);
-    let case_id = string_field(&value, "case_id")?;
-    let captured_at = string_field(&value, "captured_at")?;
-    let captured_by = string_field(&value, "captured_by")?;
-    let items: Vec<EvidenceItem> =
-        serde_json::from_value(value.get("items").cloned().unwrap_or(serde_json::json!([])))
-            .map_err(BenchError::from_serde)?;
-    let notes = value
-        .get("notes")
-        .and_then(|v| v.as_str())
-        .map(ToOwned::to_owned);
-    EvidenceSnapshot::from_parts(privacy, case_id, captured_at, captured_by, items, notes)
+    EvidenceSnapshot::parse_import_json(text)
 }
 
 fn parse_task(text: &str) -> BenchResult<EvaluationTask> {
-    let value: serde_json::Value = serde_json::from_str(text).map_err(BenchError::from_serde)?;
-    if value.get("task_id").and_then(|v| v.as_str()).is_some() {
-        return EvaluationTask::parse_json(text);
-    }
-    let privacy = value
-        .get("privacy")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or(PrivacyClass::OwnerOnly);
-    let visibility: VisibilityPolicy = serde_json::from_value(
-        value
-            .get("visibility")
-            .cloned()
-            .ok_or_else(|| BenchError::Schema("task visibility is required".into()))?,
-    )
-    .map_err(BenchError::from_serde)?;
-    let time_constraint = match value.get("time_constraint") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(v) => Some(
-            serde_json::from_value::<TimeConstraint>(v.clone()).map_err(BenchError::from_serde)?,
-        ),
-    };
-    EvaluationTask::from_parts(
-        privacy,
-        string_field(&value, "case_id")?,
-        string_field(&value, "snapshot_id")?,
-        string_field(&value, "question")?,
-        string_field(&value, "protocol")?,
-        string_field(&value, "protocol_version")?,
-        visibility,
-        time_constraint,
-        string_field(&value, "created_at")?,
-    )
+    EvaluationTask::parse_import_json(text)
 }
 
 fn parse_adjudication(text: &str) -> BenchResult<Adjudication> {
-    let value: serde_json::Value = serde_json::from_str(text).map_err(BenchError::from_serde)?;
-    if value
-        .get("adjudication_id")
-        .and_then(|v| v.as_str())
-        .is_some()
-    {
-        return Adjudication::parse_json(text);
-    }
-    let privacy = value
-        .get("privacy")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or(PrivacyClass::OwnerOnly);
-    Adjudication::from_parts(
-        privacy,
-        string_field(&value, "case_id")?,
-        string_field(&value, "task_id")?,
-        string_field(&value, "snapshot_id")?,
-        string_field(&value, "run_id")?,
-        string_field(&value, "reviewer")?,
-        serde_json::from_value(
-            value
-                .get("conflict_of_interest")
-                .cloned()
-                .ok_or_else(|| BenchError::Schema("conflict_of_interest is required".into()))?,
-        )
-        .map_err(BenchError::from_serde)?,
-        string_field(&value, "rubric_version")?,
-        serde_json::from_value(
-            value
-                .get("blinding")
-                .cloned()
-                .ok_or_else(|| BenchError::Schema("blinding is required".into()))?,
-        )
-        .map_err(BenchError::from_serde)?,
-        serde_json::from_value(
-            value
-                .get("outcomes")
-                .cloned()
-                .ok_or_else(|| BenchError::Schema("outcomes are required".into()))?,
-        )
-        .map_err(BenchError::from_serde)?,
-        string_field(&value, "created_at")?,
-    )
-}
-
-fn string_field(value: &serde_json::Value, field: &str) -> BenchResult<String> {
-    value
-        .get(field)
-        .and_then(|v| v.as_str())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| BenchError::Schema(format!("{field} is required")))
+    Adjudication::parse_import_json(text)
 }
 
 pub fn main_from_env() -> i32 {

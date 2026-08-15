@@ -430,4 +430,27 @@ mod tests {
         .validate()
         .is_err());
     }
+
+    #[test]
+    fn run_import_rejects_unknown_fields() {
+        let err = RunImport::parse_json(
+            r#"{
+                "schema_id": "contextdesk.triage_bench.run_import.v1",
+                "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "strategy": {"name": "human-expert", "version": {"status": "unknown"}, "build": {"status": "unknown"}},
+                "source_kind": "human",
+                "prompt_workflow": {"completeness": "unknown", "prompt": {"status": "unknown"}, "workflow": {"status": "unknown"}},
+                "timing": {"status": "unknown"},
+                "cost": {"status": "unknown"},
+                "uncertainty": {"status": "unknown"},
+                "fairness": {"kind": "same_snapshot"},
+                "status": "completed",
+                "operator": "alice",
+                "created_at": "2026-01-15T08:00:00Z",
+                "unexpected": true
+            }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
 }
