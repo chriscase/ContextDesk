@@ -135,6 +135,12 @@ export class LdapAuthAdapter implements AuthAdapter {
 
   private async searchGroups(client: Client, dn: string): Promise<string[]> {
     if (!this.config.groupSearchBase) return [];
+    // User bind already proved the password. osixia (and many directories)
+    // hide ou=groups from non-admin binds as LDAP 0x20 No Such Object.
+    // Optional service-bind is the existing #885 seam for that lookup.
+    if (this.config.bindDn && this.config.bindPassword) {
+      await client.bind(this.config.bindDn, this.config.bindPassword);
+    }
     const filter = interpolate(this.config.groupSearchFilter, {
       dn: escapeFilter(dn),
     });

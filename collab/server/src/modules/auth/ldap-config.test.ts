@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ldapClientOptions, ldapTlsOptions } from "./ldap-adapter.js";
 import { loadLdapConfig } from "./ldap-config.js";
@@ -46,6 +47,27 @@ describe("LDAP config", () => {
     expect(tls?.rejectUnauthorized).toBe(false);
     expect(tls?.ecdhCurve).toBe("auto");
     expect(tls && "ca" in tls).toBe(false);
+  });
+
+  it("rebinds with the service account before group search after a user bind", () => {
+    const src = readFileSync(new URL("./ldap-adapter.ts", import.meta.url), "utf8");
+    const groupFn = src.slice(src.indexOf("private async searchGroups"));
+    expect(groupFn).toMatch(/this\.config\.bindDn && this\.config\.bindPassword/);
+    expect(groupFn).toMatch(/client\.bind\(this\.config\.bindDn, this\.config\.bindPassword\)/);
+    expect(src.indexOf("await client.bind(dn, password)")).toBeLessThan(
+      src.indexOf("await this.searchGroups(client, dn)"),
+    );
+  });
+
+  it("loads the optional service-bind used for group lookup", () => {
+    const cfg = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldap://directory.example.test:389",
+      COLLAB_LDAP_STARTTLS: "1",
+      COLLAB_LDAP_BIND_DN: "cn=admin,dc=example,dc=test",
+      COLLAB_LDAP_BIND_PASSWORD: "fixture-admin-secret",
+    });
+    expect(cfg.bindDn).toBe("cn=admin,dc=example,dc=test");
+    expect(cfg.bindPassword).toBe("fixture-admin-secret");
   });
 
   it("refuses TLS verification disable without explicit dev mode", () => {
