@@ -16,7 +16,9 @@ import { registerAuthRoutes, type AuthRouteDeps } from "./modules/auth/index.js"
 import { registerAuthzRoutes } from "./modules/authz/index.js";
 import type { MutableGroupRoleMap } from "./modules/authz/index.js";
 import type { AuditStore } from "./modules/audit/index.js";
+import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/index.js";
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
+import { registerImportRoutes, type ImportService } from "./modules/import/index.js";
 
 export interface SecurityDeps {
   auth: AuthRouteDeps;
@@ -30,6 +32,8 @@ export interface AppDeps {
   store: Pick<EvidenceStore, "ping">;
   security?: SecurityDeps;
   domain?: CaseService;
+  catalog?: CatalogService;
+  imports?: ImportService;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -86,6 +90,22 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         roles: deps.security.roles,
         audit: deps.security.audit,
         domain: deps.domain,
+      });
+    }
+    if (deps.catalog) {
+      await registerCatalogRoutes(app, {
+        auth: deps.security.auth,
+        roles: deps.security.roles,
+        audit: deps.security.audit,
+        catalog: deps.catalog,
+      });
+    }
+    if (deps.imports) {
+      await registerImportRoutes(app, {
+        auth: deps.security.auth,
+        roles: deps.security.roles,
+        audit: deps.security.audit,
+        imports: deps.imports,
       });
     }
   }

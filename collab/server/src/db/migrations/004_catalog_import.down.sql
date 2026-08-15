@@ -1,0 +1,10 @@
+DROP TRIGGER IF EXISTS imported_run_corroborations_no_update ON imported_run_corroborations;
+DROP FUNCTION IF EXISTS imported_run_corroborations_immutable();
+DROP TRIGGER IF EXISTS imported_runs_no_update ON imported_runs;
+DROP FUNCTION IF EXISTS imported_runs_immutable();
+DROP TABLE IF EXISTS imported_run_corroborations;
+DROP TABLE IF EXISTS imported_runs;
+ALTER TABLE evidence_artifacts DROP COLUMN IF EXISTS source_id;
+ALTER TABLE contributions DROP COLUMN IF EXISTS source_id;
+DROP TABLE IF EXISTS catalog_sources;
+DELETE FROM schema_migrations WHERE version = '004_catalog_import';

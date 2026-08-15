@@ -7,6 +7,7 @@ import {
   parseCaseList,
   parseContribution,
   parseProvenance,
+  parseSourceList,
   parseTimeline,
 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
@@ -17,6 +18,7 @@ import { MemoryAuditStore } from "../audit/index.js";
 import { MapAuthAdapter } from "../auth/index.js";
 import { createAuthLog, createRateLimiter, MemorySessionStore, defaultSessionPolicy } from "../auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
+import { CatalogService } from "../catalog/index.js";
 import { CaseService } from "./service.js";
 
 const ALICE = "fixture-alice-secret";
@@ -78,19 +80,22 @@ async function withApp(
     app: Awaited<ReturnType<typeof buildApp>>;
     audit: MemoryAuditStore;
     domain: CaseService;
+    catalog: CatalogService;
     store: FilesystemEvidenceStore;
   }) => Promise<void>,
 ) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-cases-"));
   const store = new FilesystemEvidenceStore({ rootDir: root });
   const audit = new MemoryAuditStore();
-  const domain = new CaseService(store, audit);
+  const catalog = new CatalogService(undefined, audit);
+  const domain = new CaseService(store, audit, undefined, catalog);
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(roleMap));
   const app = await buildApp({
     config: testConfig({ evidenceRoot: root }),
     pool: null,
     store,
     domain,
+    catalog,
     security: {
       auth: {
         adapter: new MapAuthAdapter(users()),
@@ -107,7 +112,7 @@ async function withApp(
     },
   });
   try {
-    await fn({ app, audit, domain, store });
+    await fn({ app, audit, domain, catalog, store });
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -184,6 +189,7 @@ describe("cases timeline evidence provenance", () => {
       );
       expect(message.authorUsername).toBe("alice");
       expect(message.privacyClass).toBe("owner_only");
+      expect(message.sourceId.length).toBeGreaterThan(0);
 
       const note = parseContribution(
         JSON.parse(
@@ -518,6 +524,22 @@ describe("cases timeline evidence provenance", () => {
       expect(audits.some((a) => a.action === "evidence_register")).toBe(true);
       expect(audits.some((a) => a.action === "hypothesis_status")).toBe(true);
       expect(audits.some((a) => a.action === "contribution_tombstone")).toBe(true);
+
+      const sources = parseSourceList(
+        JSON.parse(
+          (
+            await app.inject({
+              method: "GET",
+              url: "/api/catalog/sources",
+              headers: { cookie: alice },
+            })
+          ).body,
+        ),
+      );
+      const sourceIds = new Set(sources.sources.map((s) => s.id));
+      expect(sourceIds.has(message.sourceId)).toBe(true);
+      expect(sourceIds.has(note.sourceId)).toBe(true);
+      expect(sourceIds.has(logArt.sourceId)).toBe(true);
     });
   });
 });

@@ -6,6 +6,7 @@ import { migrateUp } from "../../db/migrate.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
 import { adminUrl, withDisposableDb } from "../../test/disposable-db.js";
 import { MemoryAuditStore } from "../audit/index.js";
+import { CatalogService, PgCatalogStore } from "../catalog/index.js";
 import { CaseService } from "./service.js";
 import { PgCaseStore } from "./store.js";
 
@@ -17,8 +18,9 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
       const store = new FilesystemEvidenceStore({ rootDir: root });
       const audit = new MemoryAuditStore();
       const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+      const catalog = new CatalogService(new PgCatalogStore(client), audit);
       try {
-        const first = new CaseService(store, audit, new PgCaseStore(client));
+        const first = new CaseService(store, audit, new PgCaseStore(client), catalog);
         const created = await first.createCase(actor, { title: "Durable fixture" }, "test");
         const note = await first.addContribution(
           created.id,
@@ -28,7 +30,7 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
         );
         await first.reviseContribution(created.id, note.id, actor, "revision 2", "test");
 
-        const second = new CaseService(store, audit, new PgCaseStore(client));
+        const second = new CaseService(store, audit, new PgCaseStore(client), catalog);
         const reloaded = await second.getCase(created.id, actor, false);
         expect(reloaded?.title).toBe("Durable fixture");
         const chain = await second.provenance(created.id, note.id);
