@@ -4,8 +4,10 @@ import { createMockEngineClient, type ImportRunReport } from "@contextdesk/clien
 import { ImportFlow } from "./ImportFlow";
 
 const dialogMocks = vi.hoisted(() => ({
-  openDirectoryDialog: vi.fn(async () => "/incidents/checkout-outage"),
-  openFileDialog: vi.fn(async () => null),
+  openDirectoryDialog: vi.fn(
+    async (): Promise<string | null> => "/incidents/checkout-outage",
+  ),
+  openFileDialog: vi.fn(async (): Promise<string | null> => null),
 }));
 vi.mock("../../lib/dialogs", () => dialogMocks);
 
