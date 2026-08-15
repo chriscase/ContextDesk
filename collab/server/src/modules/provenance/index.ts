@@ -1,2 +1,4 @@
-/** Reserved modular-monolith boundary. Domain implementation is a later slice. */
+/** Immutable provenance: revision chains and tombstones. */
 export const MODULE_ID = "provenance" as const;
+
+export { LegalHoldError, assertCanTombstone, visibleBody } from "./chain.js";

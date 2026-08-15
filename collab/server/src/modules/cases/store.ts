@@ -1,0 +1,504 @@
+import type { Pool } from "pg";
+import {
+  type ArtifactKind,
+  type CaseSeverity,
+  type CaseStatus,
+  type ContributionKind,
+  type HypothesisStatus,
+  type PrivacyClass,
+} from "@cd-collab/contracts";
+export interface Actor {
+  id: string;
+  username: string;
+}
+
+export interface TimelineRow {
+  seq: number;
+  kind: string;
+  actorId: string;
+  actorUsername: string;
+  targetId: string | null;
+  clientTime: string | null;
+  serverTime: string;
+  payload: string;
+}
+
+export interface CaseRow {
+  id: string;
+  title: string;
+  severity: CaseSeverity;
+  status: CaseStatus;
+  legalHold: boolean;
+  retentionClass: string;
+  createdAt: string;
+  createdBy: string;
+  createdByUsername: string;
+  participants: { identityId: string; username: string }[];
+}
+
+export interface RevisionRow {
+  contributionId: string;
+  caseId: string;
+  kind: ContributionKind;
+  revision: number;
+  predecessorRevision: number | null;
+  body: string;
+  contentHash: string;
+  privacyClass: PrivacyClass;
+  tombstone: boolean;
+  authorId: string;
+  authorUsername: string;
+  createdAt: string;
+  hypothesisStatus: HypothesisStatus | null;
+  hypothesisLinks: { kind: "artifact" | "contribution"; id: string }[];
+}
+
+export interface ArtifactRow {
+  id: string;
+  caseId: string;
+  kind: ArtifactKind;
+  filename: string | null;
+  uri: string | null;
+  mediaType: string | null;
+  byteLength: number | null;
+  contentHash: string | null;
+  expectedHash: string | null;
+  verificationStatus: string | null;
+  refId: string | null;
+  privacyClass: PrivacyClass;
+  summaryContributionId: string | null;
+  uploaderId: string;
+  uploaderUsername: string;
+}
+
+export interface TimelineInsert {
+  kind: string;
+  actor: Actor;
+  targetId: string | null;
+  clientTime: string | null;
+  payload: unknown;
+}
+
+export interface CaseStore {
+  listCases(): Promise<CaseRow[]>;
+  getCase(id: string): Promise<CaseRow | null>;
+  insertCase(row: CaseRow): Promise<void>;
+  updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void>;
+  addParticipant(
+    caseId: string,
+    participant: { identityId: string; username: string },
+    addedBy: string,
+  ): Promise<void>;
+  listTimeline(caseId: string): Promise<TimelineRow[]>;
+  appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow>;
+  listRevisions(contributionId: string): Promise<RevisionRow[]>;
+  insertRevision(rev: RevisionRow): Promise<void>;
+  getArtifact(artifactId: string): Promise<ArtifactRow | null>;
+  insertArtifact(row: ArtifactRow): Promise<void>;
+}
+
+export type Queryable = Pick<Pool, "query">;
+
+export class MemoryCaseStore implements CaseStore {
+  private readonly cases = new Map<string, CaseRow>();
+  private readonly timeline = new Map<string, TimelineRow[]>();
+  private readonly revisions = new Map<string, RevisionRow[]>();
+  private readonly artifacts = new Map<string, ArtifactRow>();
+
+  async listCases(): Promise<CaseRow[]> {
+    return [...this.cases.values()].map((row) => cloneCase(row));
+  }
+
+  async getCase(id: string): Promise<CaseRow | null> {
+    const row = this.cases.get(id);
+    return row ? cloneCase(row) : null;
+  }
+
+  async insertCase(row: CaseRow): Promise<void> {
+    this.cases.set(row.id, cloneCase(row));
+    this.timeline.set(row.id, []);
+  }
+
+  async updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void> {
+    const existing = this.cases.get(row.id);
+    if (!existing) throw new Error("case not found");
+    existing.status = row.status;
+    existing.legalHold = row.legalHold;
+  }
+
+  async addParticipant(
+    caseId: string,
+    participant: { identityId: string; username: string },
+    _addedBy: string,
+  ): Promise<void> {
+    const existing = this.cases.get(caseId);
+    if (!existing) throw new Error("case not found");
+    if (!existing.participants.some((p) => p.identityId === participant.identityId)) {
+      existing.participants.push({ ...participant });
+    }
+  }
+
+  async listTimeline(caseId: string): Promise<TimelineRow[]> {
+    return [...(this.timeline.get(caseId) ?? [])];
+  }
+
+  async appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
+    const list = this.timeline.get(caseId) ?? [];
+    const row: TimelineRow = {
+      seq: list.length + 1,
+      kind: event.kind,
+      actorId: event.actor.id,
+      actorUsername: event.actor.username,
+      targetId: event.targetId,
+      clientTime: event.clientTime,
+      serverTime: new Date().toISOString(),
+      payload: JSON.stringify(event.payload),
+    };
+    list.push(row);
+    this.timeline.set(caseId, list);
+    return row;
+  }
+
+  async listRevisions(contributionId: string): Promise<RevisionRow[]> {
+    return [...(this.revisions.get(contributionId) ?? [])].map((rev) => ({
+      ...rev,
+      hypothesisLinks: [...rev.hypothesisLinks],
+    }));
+  }
+
+  async insertRevision(rev: RevisionRow): Promise<void> {
+    const chain = this.revisions.get(rev.contributionId) ?? [];
+    chain.push({ ...rev, hypothesisLinks: [...rev.hypothesisLinks] });
+    this.revisions.set(rev.contributionId, chain);
+  }
+
+  async getArtifact(artifactId: string): Promise<ArtifactRow | null> {
+    const row = this.artifacts.get(artifactId);
+    return row ? { ...row } : null;
+  }
+
+  async insertArtifact(row: ArtifactRow): Promise<void> {
+    this.artifacts.set(row.id, { ...row });
+  }
+}
+
+export class PgCaseStore implements CaseStore {
+  constructor(private readonly db: Queryable) {}
+
+  async listCases(): Promise<CaseRow[]> {
+    const result = await this.db.query(`${CASE_SELECT} GROUP BY c.id`);
+    return result.rows.map((row) => asCase(row as Record<string, unknown>));
+  }
+
+  async getCase(id: string): Promise<CaseRow | null> {
+    const result = await this.db.query(`${CASE_SELECT} WHERE c.id = $1 GROUP BY c.id`, [id]);
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asCase(row) : null;
+  }
+
+  async insertCase(row: CaseRow): Promise<void> {
+    await this.db.query(
+      `INSERT INTO cases (
+         id, title, severity, status, legal_hold, retention_class,
+         created_at, created_by, created_by_username, last_seq
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0)`,
+      [
+        row.id,
+        row.title,
+        row.severity,
+        row.status,
+        row.legalHold,
+        row.retentionClass,
+        row.createdAt,
+        row.createdBy,
+        row.createdByUsername,
+      ],
+    );
+    for (const participant of row.participants) {
+      await this.addParticipant(row.id, participant, row.createdBy);
+    }
+  }
+
+  async updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void> {
+    const result = await this.db.query(
+      `UPDATE cases SET status = $2, legal_hold = $3 WHERE id = $1`,
+      [row.id, row.status, row.legalHold],
+    );
+    if (result.rowCount === 0) throw new Error("case not found");
+  }
+
+  async addParticipant(
+    caseId: string,
+    participant: { identityId: string; username: string },
+    addedBy: string,
+  ): Promise<void> {
+    await this.db.query(
+      `INSERT INTO case_participants (case_id, identity_id, username, added_by)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (case_id, identity_id) DO NOTHING`,
+      [caseId, participant.identityId, participant.username, addedBy],
+    );
+  }
+
+  async listTimeline(caseId: string): Promise<TimelineRow[]> {
+    const result = await this.db.query(
+      `SELECT seq, kind, actor_id, actor_username, target_id, client_time, server_time, payload
+       FROM timeline_events WHERE case_id = $1 ORDER BY seq ASC`,
+      [caseId],
+    );
+    return result.rows.map((row) => asTimeline(row as Record<string, unknown>));
+  }
+
+  async appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
+    const seqRes = await this.db.query<{ last_seq: string | number }>(
+      `UPDATE cases SET last_seq = last_seq + 1 WHERE id = $1 RETURNING last_seq`,
+      [caseId],
+    );
+    const seqRaw = seqRes.rows[0]?.last_seq;
+    if (seqRaw === undefined) throw new Error("case not found");
+    const seq = Number(seqRaw);
+    const serverTime = new Date().toISOString();
+    const payload = JSON.stringify(event.payload);
+    await this.db.query(
+      `INSERT INTO timeline_events (
+         case_id, seq, kind, actor_id, actor_username, target_id, client_time, server_time, payload
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+      [
+        caseId,
+        seq,
+        event.kind,
+        event.actor.id,
+        event.actor.username,
+        event.targetId,
+        event.clientTime,
+        serverTime,
+        payload,
+      ],
+    );
+    return {
+      seq,
+      kind: event.kind,
+      actorId: event.actor.id,
+      actorUsername: event.actor.username,
+      targetId: event.targetId,
+      clientTime: event.clientTime,
+      serverTime,
+      payload,
+    };
+  }
+
+  async listRevisions(contributionId: string): Promise<RevisionRow[]> {
+    const result = await this.db.query(
+      `SELECT r.*, c.case_id, c.kind, c.privacy_class
+       FROM contribution_revisions r
+       JOIN contributions c ON c.id = r.contribution_id
+       WHERE r.contribution_id = $1
+       ORDER BY r.revision ASC`,
+      [contributionId],
+    );
+    return result.rows.map((row) => asRevision(row as Record<string, unknown>));
+  }
+
+  async insertRevision(rev: RevisionRow): Promise<void> {
+    if (rev.revision === 1) {
+      await this.db.query(
+        `INSERT INTO contributions (
+           id, case_id, kind, privacy_class, created_at, created_by, created_by_username
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          rev.contributionId,
+          rev.caseId,
+          rev.kind,
+          rev.privacyClass,
+          rev.createdAt,
+          rev.authorId,
+          rev.authorUsername,
+        ],
+      );
+    }
+    await this.db.query(
+      `INSERT INTO contribution_revisions (
+         contribution_id, revision, predecessor_revision, author_id, author_username,
+         body, content_hash, tombstone, hypothesis_status, hypothesis_links, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)`,
+      [
+        rev.contributionId,
+        rev.revision,
+        rev.predecessorRevision,
+        rev.authorId,
+        rev.authorUsername,
+        rev.body,
+        rev.contentHash,
+        rev.tombstone,
+        rev.hypothesisStatus,
+        JSON.stringify(rev.hypothesisLinks),
+        rev.createdAt,
+      ],
+    );
+  }
+
+  async getArtifact(artifactId: string): Promise<ArtifactRow | null> {
+    const result = await this.db.query(
+      `SELECT * FROM evidence_artifacts WHERE id = $1`,
+      [artifactId],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asArtifact(row) : null;
+  }
+
+  async insertArtifact(row: ArtifactRow): Promise<void> {
+    await this.db.query(
+      `INSERT INTO evidence_artifacts (
+         id, case_id, kind, filename, uri, media_type, byte_length, content_hash,
+         expected_hash, verification_status, ref_id, privacy_class,
+         summary_contribution_id, uploader_id, uploader_username
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      [
+        row.id,
+        row.caseId,
+        row.kind,
+        row.filename,
+        row.uri,
+        row.mediaType,
+        row.byteLength,
+        row.contentHash,
+        row.expectedHash,
+        row.verificationStatus,
+        row.refId,
+        row.privacyClass,
+        row.summaryContributionId,
+        row.uploaderId,
+        row.uploaderUsername,
+      ],
+    );
+  }
+}
+
+const CASE_SELECT = `
+  SELECT c.id, c.title, c.severity, c.status, c.legal_hold, c.retention_class,
+         c.created_at, c.created_by, c.created_by_username,
+         COALESCE(
+           json_agg(
+             json_build_object('identityId', p.identity_id, 'username', p.username)
+           ) FILTER (WHERE p.identity_id IS NOT NULL),
+           '[]'
+         ) AS participants
+  FROM cases c
+  LEFT JOIN case_participants p ON p.case_id = c.id
+`;
+
+function cloneCase(row: CaseRow): CaseRow {
+  return {
+    ...row,
+    participants: row.participants.map((p) => ({ ...p })),
+  };
+}
+
+function asIso(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
+function asCase(row: Record<string, unknown>): CaseRow {
+  const participantsRaw = row.participants;
+  const participants = Array.isArray(participantsRaw)
+    ? participantsRaw.map((p) => {
+        const rec = p as Record<string, unknown>;
+        return { identityId: String(rec.identityId), username: String(rec.username) };
+      })
+    : [];
+  return {
+    id: String(row.id),
+    title: String(row.title),
+    severity: row.severity as CaseSeverity,
+    status: row.status as CaseStatus,
+    legalHold: Boolean(row.legal_hold),
+    retentionClass: String(row.retention_class),
+    createdAt: asIso(row.created_at),
+    createdBy: String(row.created_by),
+    createdByUsername: String(row.created_by_username),
+    participants,
+  };
+}
+
+function asTimeline(row: Record<string, unknown>): TimelineRow {
+  const payload = row.payload;
+  return {
+    seq: Number(row.seq),
+    kind: String(row.kind),
+    actorId: String(row.actor_id),
+    actorUsername: String(row.actor_username),
+    targetId: row.target_id === null || row.target_id === undefined ? null : String(row.target_id),
+    clientTime:
+      row.client_time === null || row.client_time === undefined ? null : asIso(row.client_time),
+    serverTime: asIso(row.server_time),
+    payload: typeof payload === "string" ? payload : JSON.stringify(payload ?? {}),
+  };
+}
+
+function asRevision(row: Record<string, unknown>): RevisionRow {
+  const linksRaw = row.hypothesis_links;
+  const links = Array.isArray(linksRaw)
+    ? linksRaw.map((item) => {
+        const rec = item as Record<string, unknown>;
+        return {
+          kind: rec.kind as "artifact" | "contribution",
+          id: String(rec.id),
+        };
+      })
+    : [];
+  return {
+    contributionId: String(row.contribution_id),
+    caseId: String(row.case_id),
+    kind: row.kind as ContributionKind,
+    revision: Number(row.revision),
+    predecessorRevision:
+      row.predecessor_revision === null || row.predecessor_revision === undefined
+        ? null
+        : Number(row.predecessor_revision),
+    body: row.body === null || row.body === undefined ? "" : String(row.body),
+    contentHash: String(row.content_hash),
+    privacyClass: row.privacy_class as PrivacyClass,
+    tombstone: Boolean(row.tombstone),
+    authorId: String(row.author_id),
+    authorUsername: String(row.author_username),
+    createdAt: asIso(row.created_at),
+    hypothesisStatus:
+      row.hypothesis_status === null || row.hypothesis_status === undefined
+        ? null
+        : (row.hypothesis_status as HypothesisStatus),
+    hypothesisLinks: links,
+  };
+}
+
+function asArtifact(row: Record<string, unknown>): ArtifactRow {
+  return {
+    id: String(row.id),
+    caseId: String(row.case_id),
+    kind: row.kind as ArtifactKind,
+    filename: row.filename === null || row.filename === undefined ? null : String(row.filename),
+    uri: row.uri === null || row.uri === undefined ? null : String(row.uri),
+    mediaType:
+      row.media_type === null || row.media_type === undefined ? null : String(row.media_type),
+    byteLength:
+      row.byte_length === null || row.byte_length === undefined ? null : Number(row.byte_length),
+    contentHash:
+      row.content_hash === null || row.content_hash === undefined ? null : String(row.content_hash),
+    expectedHash:
+      row.expected_hash === null || row.expected_hash === undefined
+        ? null
+        : String(row.expected_hash),
+    verificationStatus:
+      row.verification_status === null || row.verification_status === undefined
+        ? null
+        : String(row.verification_status),
+    refId: row.ref_id === null || row.ref_id === undefined ? null : String(row.ref_id),
+    privacyClass: row.privacy_class as PrivacyClass,
+    summaryContributionId:
+      row.summary_contribution_id === null || row.summary_contribution_id === undefined
+        ? null
+        : String(row.summary_contribution_id),
+    uploaderId: String(row.uploader_id),
+    uploaderUsername: String(row.uploader_username),
+  };
+}

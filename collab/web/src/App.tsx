@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Cases } from "./Cases.js";
 import { LoginForm } from "./LoginForm.js";
 
 interface SessionView {
@@ -42,20 +43,23 @@ export function App() {
       <p className="shell__eyebrow">working name</p>
       <h1 className="shell__title">cd-collab</h1>
       <p className="shell__copy">
-        Collaboration and case-memory shell. Cases, timelines, and imports land
-        in later slices. This surface is separately deployable and does not
-        embed the desktop or evaluation bench.
+        Collaboration and case-memory shell. Source catalog and exports land in
+        later slices. This surface is separately deployable and does not embed
+        the desktop or evaluation bench.
       </p>
       {!ready ? null : session ? (
-        <section className="session">
-          <p>
-            Signed in as <strong>{session.username}</strong>
-          </p>
-          <p className="session__roles">Roles: {session.roles.join(", ") || "none"}</p>
-          <button className="login__logout" type="button" onClick={() => void logout()}>
-            Sign out
-          </button>
-        </section>
+        <>
+          <section className="session">
+            <p>
+              Signed in as <strong>{session.username}</strong>
+            </p>
+            <p className="session__roles">Roles: {session.roles.join(", ") || "none"}</p>
+            <button className="login__logout" type="button" onClick={() => void logout()}>
+              Sign out
+            </button>
+          </section>
+          <Cases roles={session.roles} />
+        </>
       ) : (
         <LoginForm onSuccess={() => void refresh()} />
       )}

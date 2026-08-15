@@ -11,7 +11,9 @@ const addFormats =
   addFormatsImport;
 import { describe, expect, it } from "vitest";
 import {
+  CASE_SCHEMA_ID,
   FILE_SERVER_REF_SCHEMA_ID,
+  parseCase,
   parseFileServerReference,
   parseHealthResponse,
 } from "./index.js";
@@ -47,6 +49,24 @@ describe("contracts unknown-field rejection", () => {
     ).toThrow(/expectedHash/);
   });
 
+  it("rejects unknown keys on cases", () => {
+    expect(() =>
+      parseCase({
+        schemaId: CASE_SCHEMA_ID,
+        id: "c1",
+        title: "t",
+        severity: "low",
+        status: "open",
+        legalHold: false,
+        retentionClass: "standard",
+        participants: [],
+        createdAt: "t",
+        createdBy: "alice",
+        extra: true,
+      }),
+    ).toThrow(/unknown key/);
+  });
+
   it("accepts never-hashed refs as unverified", () => {
     const ref = parseFileServerReference({
       schemaId: FILE_SERVER_REF_SCHEMA_ID,
@@ -76,6 +96,25 @@ describe("JSON Schema additionalProperties: false", () => {
         status: "ok",
         service: "x",
         surprise: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it("case schema rejects unknown fields", () => {
+    const validate = ajv.compile(loadSchema("case.v1.json"));
+    expect(
+      validate({
+        schemaId: CASE_SCHEMA_ID,
+        id: "c",
+        title: "t",
+        severity: "low",
+        status: "open",
+        legalHold: false,
+        retentionClass: "standard",
+        participants: [],
+        createdAt: "t",
+        createdBy: "a",
+        leak: true,
       }),
     ).toBe(false);
   });

@@ -1,0 +1,70 @@
+import { checkObject, f, type ObjectShape } from "./parse.js";
+
+export const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
+export type PrivacyClass = (typeof PRIVACY_CLASSES)[number];
+
+export const CASE_STATUSES = ["open", "monitoring", "resolved", "archived"] as const;
+export type CaseStatus = (typeof CASE_STATUSES)[number];
+
+export const CASE_SEVERITIES = ["low", "medium", "high", "critical"] as const;
+export type CaseSeverity = (typeof CASE_SEVERITIES)[number];
+
+export const CASE_SCHEMA_ID = "cd-collab.case.v1" as const;
+
+export interface CaseParticipantV1 {
+  identityId: string;
+  username: string;
+}
+
+export interface CaseV1 {
+  schemaId: typeof CASE_SCHEMA_ID;
+  id: string;
+  title: string;
+  severity: CaseSeverity;
+  status: CaseStatus;
+  legalHold: boolean;
+  retentionClass: string;
+  participants: CaseParticipantV1[];
+  createdAt: string;
+  createdBy: string;
+}
+
+const participantShape: ObjectShape = {
+  identityId: f.req(f.str),
+  username: f.req(f.str),
+};
+
+const caseShape: ObjectShape = {
+  schemaId: f.req(f.en(CASE_SCHEMA_ID)),
+  id: f.req(f.str),
+  title: f.req(f.str),
+  severity: f.req(f.en(...CASE_SEVERITIES)),
+  status: f.req(f.en(...CASE_STATUSES)),
+  legalHold: f.req(f.bool),
+  retentionClass: f.req(f.str),
+  participants: f.req(f.arr(f.obj(participantShape))),
+  createdAt: f.req(f.str),
+  createdBy: f.req(f.str),
+};
+
+export function parseCase(raw: unknown): CaseV1 {
+  checkObject("$", caseShape, raw);
+  return raw as CaseV1;
+}
+
+export const CASE_LIST_SCHEMA_ID = "cd-collab.case_list.v1" as const;
+
+export interface CaseListV1 {
+  schemaId: typeof CASE_LIST_SCHEMA_ID;
+  cases: CaseV1[];
+}
+
+const caseListShape: ObjectShape = {
+  schemaId: f.req(f.en(CASE_LIST_SCHEMA_ID)),
+  cases: f.req(f.arr(f.obj(caseShape))),
+};
+
+export function parseCaseList(raw: unknown): CaseListV1 {
+  checkObject("$", caseListShape, raw);
+  return raw as CaseListV1;
+}

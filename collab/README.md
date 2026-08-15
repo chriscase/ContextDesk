@@ -7,8 +7,8 @@ directory is an **npm workspace independent of** the Rust workspace,
 or crate internals. Published `packages/contracts` artifacts may be consumed
 read-only later; v1 does not.
 
-Parent epic: #883. Skeleton is #884. Auth/authz/audit is #885. Cases/import/export
-are later slices.
+Parent epic: #883. Skeleton is #884. Auth/authz/audit is #885. Cases/timeline
+is #886. Import/export are later slices.
 
 ## Layout
 
@@ -85,6 +85,25 @@ is an explicit, recorded operation. A reference whose target was never hashed
   set `COLLAB_COOKIE_SECURE=1` behind HTTPS.
 - MFA and SSO/OIDC are out of v1 (adapter seam only). MFA is a directory/VPN
   responsibility.
+
+### Cases, timeline, evidence, provenance (#886)
+
+- A case has title, severity, status (`open` / `monitoring` / `resolved` /
+  `archived`), participants, retention class, and a legal-hold flag.
+- The timeline is append-only with server-assigned `seq`. Client-supplied time
+  is stored and never used for order.
+- Contributions (`message` / `note` / `hypothesis` / `action` / `upload`) are
+  attributed to the #885 identity. Edits are new revisions; deletes are
+  tombstones. `contribution_revisions` is insert-only at the DB.
+- Held artifacts store original bytes in `EvidenceStore`. Summaries are
+  separate contributions. File-server re-checks are timeline events and do
+  not mutate the registered record.
+- Privacy class defaults to `owner_only`; `share_safe` is explicit.
+- A `supported` hypothesis must link at least one artifact or contribution.
+- Legal hold refuses content deletion (tombstone).
+- Process memory is PostgreSQL via `PgCaseStore` (HTTP tests also cover the
+  in-memory store). `contribution_revisions` and `timeline_events` are
+  insert-only (trigger + app-role grants).
 
 ## Module boundaries
 
