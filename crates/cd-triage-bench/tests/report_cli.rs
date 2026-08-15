@@ -68,24 +68,27 @@ fn adjudicate(
     unsafe_claims: DimensionVerdict,
 ) {
     let run = store.get_run(run_id).unwrap();
-    let adj = Adjudication::from_parts(
+    put_support_then_diagnosis(
+        store,
         PrivacyClass::ShareSafe,
-        run.case_id,
-        run.task_id,
-        run.snapshot_id,
-        run.run_id,
-        reviewer.into(),
+        &run.case_id,
+        &run.task_id,
+        &run.snapshot_id,
+        &run.run_id,
+        reviewer,
         ConflictOfInterest {
             declared: false,
             notes: None,
         },
-        RUBRIC_V1.into(),
+        RUBRIC_V1,
         BlindingState::Blinded,
-        outcomes(diagnosis, evidence, action, uncertainty, unsafe_claims),
-        created_at.into(),
-    )
-    .unwrap();
-    store.put_adjudication(&adj).unwrap();
+        diagnosis,
+        evidence,
+        action,
+        uncertainty,
+        unsafe_claims,
+        created_at,
+    );
 }
 
 #[test]
@@ -129,9 +132,20 @@ fn issue_881_report_only_acceptance() {
         "web-assistant",
         Observed::Known("1.0".into()),
         WEB_RAW,
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        "2026-01-15T08:05:00Z",
+    );
+    let _failed = import_named(
+        &store,
+        &task.task_id,
+        SourceKind::WebOnly,
+        "web-crash",
+        Observed::Known("0.1".into()),
+        "failed mid-batch write-up\n",
         FairnessClass::UnknownVisibility,
         RunStatus::Failed,
-        "2026-01-15T08:05:00Z",
+        "2026-01-15T08:04:00Z",
     );
     adjudicate(
         &store,
@@ -179,16 +193,71 @@ fn issue_881_report_only_acceptance() {
         RunStatus::Partial,
         "2026-01-15T08:10:00Z",
     );
-    let _unscored = import_status(
+    let withheld = import_status(
         &store,
         &task.task_id,
         SourceKind::Human,
         "second-human",
         Observed::Unknown,
-        "No adjudication yet.\n",
+        "Owner-only scores live on a share-safe run.\n",
         FairnessClass::SameSnapshot,
         RunStatus::Completed,
         "2026-01-15T08:20:00Z",
+    );
+    let withheld_run = store.get_run(&withheld).unwrap();
+    put_support_then_diagnosis(
+        &store,
+        PrivacyClass::OwnerOnly,
+        &withheld_run.case_id,
+        &withheld_run.task_id,
+        &withheld_run.snapshot_id,
+        &withheld_run.run_id,
+        "reviewer-private",
+        ConflictOfInterest {
+            declared: false,
+            notes: None,
+        },
+        RUBRIC_V1,
+        BlindingState::Blinded,
+        DimensionVerdict::Score { value: 2 },
+        DimensionVerdict::Score { value: 2 },
+        DimensionVerdict::Score { value: 2 },
+        DimensionVerdict::Score { value: 2 },
+        DimensionVerdict::Score { value: 2 },
+        "2026-01-15T10:30:00Z",
+    );
+    let _unscored = import_status(
+        &store,
+        &task.task_id,
+        SourceKind::Human,
+        "never-scored",
+        Observed::Unknown,
+        "No adjudication yet.\n",
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        "2026-01-15T08:21:00Z",
+    );
+    let human_run = store.get_run(&human).unwrap();
+    put_support_then_diagnosis(
+        &store,
+        PrivacyClass::ShareSafe,
+        &human_run.case_id,
+        &human_run.task_id,
+        &human_run.snapshot_id,
+        &human_run.run_id,
+        "reviewer-a",
+        ConflictOfInterest {
+            declared: false,
+            notes: None,
+        },
+        "contextdesk.triage_bench.rubric.v2",
+        BlindingState::Blinded,
+        DimensionVerdict::Score { value: 1 },
+        DimensionVerdict::Score { value: 1 },
+        DimensionVerdict::Score { value: 1 },
+        DimensionVerdict::Score { value: 1 },
+        DimensionVerdict::Score { value: 1 },
+        "2026-01-15T11:00:00Z",
     );
 
     let mut items = four_kind_items();
@@ -363,11 +432,11 @@ fn issue_881_report_only_acceptance() {
     assert!(owner["counts"]["failed"].as_u64().unwrap() >= 1);
     assert!(owner["counts"]["partial"].as_u64().unwrap() >= 1);
     assert!(owner["groups"].as_array().unwrap().iter().any(|g| {
-        g["runs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["status"] == "failed" || r["status"] == "partial" || r["scored"] == false)
+        g["runs"].as_array().unwrap().iter().any(|r| {
+            r["status"] == "failed"
+                || r["status"] == "partial"
+                || r["score_visibility"] == "unscored"
+        })
     }));
     assert!(owner["incomparable"].as_array().unwrap().iter().any(|p| {
         p["reason"]
@@ -389,6 +458,30 @@ fn issue_881_report_only_acceptance() {
         .collect();
     assert!(changes.contains(&"improved"));
     assert!(changes.contains(&"regressed"));
+    assert_eq!(pair["rubric_version"], "contextdesk.triage_bench.rubric.v1");
+    assert_eq!(pair["older_status"], "completed");
+    assert_eq!(pair["newer_status"], "completed");
+    assert_eq!(pair["older_fairness"], "same_snapshot");
+    assert_eq!(pair["newer_fairness"], "same_snapshot");
+    assert!(!owner["incomparable"].as_array().unwrap().iter().any(|p| {
+        (p["left_run_id"] == pair["older_run_id"] && p["right_run_id"] == pair["newer_run_id"])
+            || (p["left_run_id"] == pair["newer_run_id"]
+                && p["right_run_id"] == pair["older_run_id"])
+    }));
+    assert!(owner["rubric_versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "contextdesk.triage_bench.rubric.v1"));
+    assert!(owner["rubric_versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "contextdesk.triage_bench.rubric.v2"));
+    assert!(owner["version_pairs"].as_array().unwrap().iter().all(|p| {
+        p["rubric_version"] != "contextdesk.triage_bench.rubric.v2"
+            || p["strategy_name"] != "web-assistant"
+    }));
     assert!(pair["case_id"].as_str().unwrap().starts_with("case-"));
     assert!(pair["older_run_id"].as_str().unwrap().starts_with("run-"));
     assert!(pair["newer_run_id"].as_str().unwrap().starts_with("run-"));
@@ -399,6 +492,10 @@ fn issue_881_report_only_acceptance() {
     assert!(owner["cases"].as_array().unwrap().iter().any(|c| c["title"]
         .as_str()
         .is_some_and(|t| t.contains("/Users/alex/incidents"))));
+    assert!(serde_json::to_string(&owner)
+        .unwrap()
+        .contains("reviewer-a"));
+    assert!(owner["counts"]["withheld_scored_runs"].as_u64().unwrap() == 0);
 
     let share = bench()
         .args([
@@ -429,6 +526,34 @@ fn issue_881_report_only_acceptance() {
         .iter()
         .all(|c| c.get("title").is_none() || c["title"].is_null()));
     assert!(!share_text.contains("diagnosis rationale") && !share_text.contains("\"rationale\""));
+    assert!(!share_text.contains("reviewer-a"));
+    assert!(!share_text.contains("reviewer-private"));
+    assert!(
+        share_json["counts"]["withheld_scored_runs"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(
+        share_json["counts"]["withheld_adjudications"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(share_json["groups"].as_array().unwrap().iter().any(|g| {
+        g["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["score_visibility"] == "withheld")
+    }));
+    assert!(share_json["groups"].as_array().unwrap().iter().any(|g| {
+        g["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["score_visibility"] == "unscored")
+    }));
 
     assert!(!jsonl.contains("write_qualification"));
 }

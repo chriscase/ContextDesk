@@ -43,14 +43,21 @@ reason. Composite indices and rankings are out of scope (#881).
    strategy identity, no case resolution. If masking is impossible (non-UTF-8
    raw, or the raw text contains the strategy name), `blinding` is
    `unblinded` with a reason.
-2. Expert writes an adjudication JSON (see
-   [`../fixtures/templates/adjudication.example.json`](../fixtures/templates/adjudication.example.json)).
+2. Expert writes a **support-phase** adjudication (`phase: support`).
+   `diagnosis_correctness` must be `not_applicable` or `unscorable` — the
+   resolution has not been revealed. See
+   [`../fixtures/templates/adjudication.example.json`](../fixtures/templates/adjudication.example.json).
 3. `import-adjudication` stores the adjudication and a derived `ScoreReview`.
    Citation-existence checks attach `citation_not_in_snapshot:<id>` flags on
    evidence_support and unsafe_unsupported_claims. Verdicts are unchanged.
-4. `review-packet <run_id> --phase diagnosis` — allowed only after a support
-   adjudication exists; may reveal resolution so diagnosis can be scored.
-5. A second reviewer is a second adjudication. Disagreement is preserved.
+4. `review-packet <run_id> --phase diagnosis` — allowed only after a
+   **support-phase** adjudication exists; may reveal resolution so diagnosis
+   can be scored.
+5. Expert writes a **diagnosis-phase** adjudication (`phase: diagnosis`).
+   The store rejects this unless a support-phase record already exists for
+   the run. A support-phase record that scores `diagnosis_correctness` is
+   rejected even on a resolved case.
+6. A second reviewer is a second adjudication. Disagreement is preserved.
    Nothing averages the two.
 
 `show adjudications <id>` prints reviewer identity, conflict-of-interest,

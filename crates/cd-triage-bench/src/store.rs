@@ -298,6 +298,15 @@ impl BenchStore {
                 "adjudication identities do not match the run".into(),
             ));
         }
+        if adj.phase == ReviewPhase::Diagnosis {
+            let existing = self.load_adjudications()?;
+            if !run_has_support_adjudication(&existing, &adj.run_id) {
+                return Err(BenchError::Schema(
+                    "diagnosis-phase adjudication requires a recorded support-phase review first"
+                        .into(),
+                ));
+            }
+        }
         let case = self.get_case(&adj.case_id)?;
         if !case.diagnosis_is_applicable() {
             match adj.outcome(crate::types::RubricDimension::DiagnosisCorrectness) {

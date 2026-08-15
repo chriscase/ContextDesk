@@ -9,24 +9,7 @@ use crate::types::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Phase of a two-phase review packet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewPhase {
-    /// Evidence-support review. Case resolution is excluded.
-    Support,
-    /// Diagnosis review after support is recorded. Resolution may be revealed.
-    Diagnosis,
-}
-
-impl ReviewPhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Support => "support",
-            Self::Diagnosis => "diagnosis",
-        }
-    }
-}
+pub use crate::types::ReviewPhase;
 
 /// Strategy-masked view of a run for expert review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +223,7 @@ pub fn merge_citation_assists(adj: Adjudication, flags: Vec<String>) -> BenchRes
         adj.reviewer,
         adj.conflict_of_interest,
         adj.rubric_version,
+        adj.phase,
         adj.blinding,
         outcomes,
         adj.created_at,
@@ -249,7 +233,7 @@ pub fn merge_citation_assists(adj: Adjudication, flags: Vec<String>) -> BenchRes
 pub fn run_has_support_adjudication(adjudications: &[Adjudication], run_id: &str) -> bool {
     adjudications
         .iter()
-        .any(|adj| adj.run_id == run_id && adj.outcome(RubricDimension::EvidenceSupport).is_some())
+        .any(|adj| adj.run_id == run_id && adj.phase == ReviewPhase::Support)
 }
 
 #[cfg(test)]
@@ -368,6 +352,7 @@ mod tests {
                 notes: None,
             },
             crate::types::RUBRIC_V1.into(),
+            ReviewPhase::Diagnosis,
             BlindingState::Blinded,
             outcomes,
             "2026-01-15T10:00:00Z".into(),

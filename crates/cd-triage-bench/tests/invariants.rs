@@ -452,9 +452,20 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
         "web-assistant",
         Observed::Known("1.0".into()),
         WEB_RAW,
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        "2026-01-15T08:05:00Z",
+    );
+    let _failed = import_named(
+        &store,
+        &resolved_task.task_id,
+        SourceKind::WebOnly,
+        "web-crash",
+        Observed::Known("0.1".into()),
+        "failed mid-batch write-up\n",
         FairnessClass::UnknownVisibility,
         RunStatus::Failed,
-        "2026-01-15T08:05:00Z",
+        "2026-01-15T08:04:00Z",
     );
     let web_v2 = import_named(
         &store,
@@ -473,108 +484,93 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
     );
     assert!(flags.iter().any(|f| f.contains("citation_not_in_snapshot")));
 
-    let adj_a = Adjudication::from_parts(
+    put_support_then_diagnosis(
+        &store,
         PrivacyClass::ShareSafe,
-        "case-checkout-cascade".into(),
-        resolved_task.task_id.clone(),
-        resolved_snap.snapshot_id.clone(),
-        human.clone(),
-        "reviewer-a".into(),
+        "case-checkout-cascade",
+        &resolved_task.task_id,
+        &resolved_snap.snapshot_id,
+        &human,
+        "reviewer-a",
         ConflictOfInterest {
             declared: false,
             notes: None,
         },
-        RUBRIC_V1.into(),
+        RUBRIC_V1,
         BlindingState::Blinded,
-        outcomes(
-            DimensionVerdict::Score { value: 3 },
-            DimensionVerdict::Score { value: 3 },
-            DimensionVerdict::Score { value: 2 },
-            DimensionVerdict::Score { value: 2 },
-            DimensionVerdict::Score { value: 3 },
-        ),
-        "2026-01-15T10:00:00Z".into(),
-    )
-    .unwrap();
-    let adj_b = Adjudication::from_parts(
+        DimensionVerdict::Score { value: 3 },
+        DimensionVerdict::Score { value: 3 },
+        DimensionVerdict::Score { value: 2 },
+        DimensionVerdict::Score { value: 2 },
+        DimensionVerdict::Score { value: 3 },
+        "2026-01-15T10:00:00Z",
+    );
+    put_support_then_diagnosis(
+        &store,
         PrivacyClass::ShareSafe,
-        "case-checkout-cascade".into(),
-        resolved_task.task_id.clone(),
-        resolved_snap.snapshot_id.clone(),
-        human.clone(),
-        "reviewer-b".into(),
+        "case-checkout-cascade",
+        &resolved_task.task_id,
+        &resolved_snap.snapshot_id,
+        &human,
+        "reviewer-b",
         ConflictOfInterest {
             declared: true,
             notes: Some("authored the human write-up".into()),
         },
-        RUBRIC_V1.into(),
+        RUBRIC_V1,
         BlindingState::Unblinded {
             reason: "distinctive first-person write-up".into(),
         },
-        outcomes(
-            DimensionVerdict::Score { value: 2 },
-            DimensionVerdict::Score { value: 3 },
-            DimensionVerdict::Score { value: 1 },
-            DimensionVerdict::Score { value: 2 },
-            DimensionVerdict::Score { value: 3 },
-        ),
-        "2026-01-15T10:05:00Z".into(),
-    )
-    .unwrap();
-    store.put_adjudication(&adj_a).unwrap();
-    store.put_adjudication(&adj_b).unwrap();
+        DimensionVerdict::Score { value: 2 },
+        DimensionVerdict::Score { value: 3 },
+        DimensionVerdict::Score { value: 1 },
+        DimensionVerdict::Score { value: 2 },
+        DimensionVerdict::Score { value: 3 },
+        "2026-01-15T10:05:00Z",
+    );
 
-    let mut unsafe_outcomes = outcomes(
+    put_support_then_diagnosis(
+        &store,
+        PrivacyClass::ShareSafe,
+        "case-checkout-cascade",
+        &resolved_task.task_id,
+        &resolved_snap.snapshot_id,
+        &web,
+        "reviewer-a",
+        ConflictOfInterest {
+            declared: false,
+            notes: None,
+        },
+        RUBRIC_V1,
+        BlindingState::Blinded,
         DimensionVerdict::Score { value: 0 },
         DimensionVerdict::Score { value: 0 },
         DimensionVerdict::Score { value: 3 },
         DimensionVerdict::Score { value: 0 },
         DimensionVerdict::Score { value: 0 },
+        "2026-01-15T10:10:00Z",
     );
-    unsafe_outcomes[4].assist_flags = flags.clone();
-    let adj_web = Adjudication::from_parts(
+    put_support_then_diagnosis(
+        &store,
         PrivacyClass::ShareSafe,
-        "case-checkout-cascade".into(),
-        resolved_task.task_id.clone(),
-        resolved_snap.snapshot_id.clone(),
-        web.clone(),
-        "reviewer-a".into(),
+        "case-checkout-cascade",
+        &resolved_task.task_id,
+        &resolved_snap.snapshot_id,
+        &web_v2,
+        "reviewer-a",
         ConflictOfInterest {
             declared: false,
             notes: None,
         },
-        RUBRIC_V1.into(),
+        RUBRIC_V1,
         BlindingState::Blinded,
-        unsafe_outcomes,
-        "2026-01-15T10:10:00Z".into(),
-    )
-    .unwrap();
-    store.put_adjudication(&adj_web).unwrap();
-
-    let adj_web_v2 = Adjudication::from_parts(
-        PrivacyClass::ShareSafe,
-        "case-checkout-cascade".into(),
-        resolved_task.task_id.clone(),
-        resolved_snap.snapshot_id.clone(),
-        web_v2.clone(),
-        "reviewer-a".into(),
-        ConflictOfInterest {
-            declared: false,
-            notes: None,
-        },
-        RUBRIC_V1.into(),
-        BlindingState::Blinded,
-        outcomes(
-            DimensionVerdict::Score { value: 3 },
-            DimensionVerdict::Score { value: 2 },
-            DimensionVerdict::Score { value: 1 },
-            DimensionVerdict::Score { value: 1 },
-            DimensionVerdict::Score { value: 2 },
-        ),
-        "2026-01-15T10:11:00Z".into(),
-    )
-    .unwrap();
-    store.put_adjudication(&adj_web_v2).unwrap();
+        DimensionVerdict::Score { value: 3 },
+        DimensionVerdict::Score { value: 2 },
+        DimensionVerdict::Score { value: 1 },
+        DimensionVerdict::Score { value: 1 },
+        DimensionVerdict::Score { value: 2 },
+        "2026-01-15T10:11:00Z",
+    );
 
     let unresolved_snap = EvidenceSnapshot::from_parts(
         PrivacyClass::OwnerOnly,
@@ -643,6 +639,7 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
             notes: None,
         },
         RUBRIC_V1.into(),
+        ReviewPhase::Support,
         BlindingState::Blinded,
         outcomes(
             DimensionVerdict::NotApplicable,
@@ -657,32 +654,32 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
     store.put_adjudication(&adj_unresolved).unwrap();
 
     let v1_score = store
-        .get_score(&adj_a.to_score_review().unwrap().score_id)
-        .unwrap();
-    let adj_v2 = Adjudication::from_parts(
+        .load_scores()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.run_id == human && s.rubric_version == RUBRIC_V1)
+        .expect("v1 score");
+    put_support_then_diagnosis(
+        &store,
         PrivacyClass::ShareSafe,
-        "case-checkout-cascade".into(),
-        resolved_task.task_id.clone(),
-        resolved_snap.snapshot_id.clone(),
-        human.clone(),
-        "reviewer-a".into(),
+        "case-checkout-cascade",
+        &resolved_task.task_id,
+        &resolved_snap.snapshot_id,
+        &human,
+        "reviewer-a",
         ConflictOfInterest {
             declared: false,
             notes: None,
         },
-        "contextdesk.triage_bench.rubric.v2".into(),
+        "contextdesk.triage_bench.rubric.v2",
         BlindingState::Blinded,
-        outcomes(
-            DimensionVerdict::Score { value: 1 },
-            DimensionVerdict::Score { value: 1 },
-            DimensionVerdict::Score { value: 1 },
-            DimensionVerdict::Score { value: 1 },
-            DimensionVerdict::Score { value: 1 },
-        ),
-        "2026-01-15T11:00:00Z".into(),
-    )
-    .unwrap();
-    store.put_adjudication(&adj_v2).unwrap();
+        DimensionVerdict::Score { value: 1 },
+        DimensionVerdict::Score { value: 1 },
+        DimensionVerdict::Score { value: 1 },
+        DimensionVerdict::Score { value: 1 },
+        DimensionVerdict::Score { value: 1 },
+        "2026-01-15T11:00:00Z",
+    );
     let still_v1 = store.get_score(&v1_score.score_id).unwrap();
     assert_eq!(still_v1, v1_score);
 
@@ -709,10 +706,10 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
     let once = render_report_json(&report).unwrap();
     let twice = render_report_json(&report).unwrap();
     assert_eq!(once, twice);
-    assert!(report.groups.iter().any(|g| g
-        .runs
-        .iter()
-        .any(|r| !r.scored || matches!(r.status, RunStatus::Failed | RunStatus::Partial))));
+    assert!(report.groups.iter().any(|g| g.runs.iter().any(|r| {
+        r.score_visibility != cd_triage_bench::report::ScoreVisibility::Scored
+            || matches!(r.status, RunStatus::Failed | RunStatus::Partial)
+    })));
     assert!(report
         .incomparable
         .iter()
@@ -724,8 +721,28 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
         .iter()
         .find(|p| p.strategy_name == "web-assistant")
         .expect("version pair");
+    assert_eq!(pair.older_status, RunStatus::Completed);
+    assert_eq!(pair.newer_status, RunStatus::Completed);
+    assert_eq!(pair.rubric_version, RUBRIC_V1);
     assert!(pair.dimensions.iter().any(|d| d.change == "improved"));
     assert!(pair.dimensions.iter().any(|d| d.change == "regressed"));
+    assert!(!report.incomparable.iter().any(|p| {
+        (p.left_run_id == pair.older_run_id && p.right_run_id == pair.newer_run_id)
+            || (p.left_run_id == pair.newer_run_id && p.right_run_id == pair.older_run_id)
+    }));
+    assert!(report
+        .rubric_versions
+        .iter()
+        .any(|v| v == "contextdesk.triage_bench.rubric.v2"));
+    assert!(!share_safe.groups.iter().any(|g| {
+        g.runs.iter().any(|r| {
+            r.scores.iter().any(|d| {
+                d.verdicts
+                    .iter()
+                    .any(|v| v.reviewer.as_deref() == Some("reviewer-a"))
+            })
+        })
+    }));
     assert!(!once.to_ascii_lowercase().contains("ready"));
     assert!(!once.to_ascii_lowercase().contains("leaderboard"));
     let share_text = render_report_json(&share_safe).unwrap();
