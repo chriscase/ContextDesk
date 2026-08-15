@@ -405,8 +405,10 @@ mod tests {
                 "2024-06-01 08:00:05,000 ERROR - boom",
             ],
         );
-        let mut cfg = AppConfig::default();
-        cfg.default_timezone = Some("Not/A_Real_Zone".into());
+        let cfg = AppConfig {
+            default_timezone: Some("Not/A_Real_Zone".into()),
+            ..AppConfig::default()
+        };
         let (result, outcome) = default_import_with_outcome(
             cache.path(),
             source.path(),
