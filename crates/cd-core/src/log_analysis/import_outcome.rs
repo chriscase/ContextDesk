@@ -183,16 +183,16 @@ fn encode_member_identity(identity: &str) -> String {
 }
 
 fn decode_member_identity(encoded: &str) -> Option<String> {
-    let bytes = encoded.as_bytes();
     let mut out = String::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
+    let mut rest = encoded;
+    while !rest.is_empty() {
+        if rest.as_bytes()[0] == b'%' {
+            let bytes = rest.as_bytes();
+            if bytes.len() < 3 {
                 return None;
             }
-            let hi = from_hex(bytes[i + 1])?;
-            let lo = from_hex(bytes[i + 2])?;
+            let hi = from_hex(bytes[1])?;
+            let lo = from_hex(bytes[2])?;
             let decoded = (hi << 4) | lo;
             match decoded {
                 b'%' => out.push('%'),
@@ -200,14 +200,14 @@ fn decode_member_identity(encoded: &str) -> Option<String> {
                 b']' => out.push(']'),
                 _ => return None,
             }
-            i += 3;
+            rest = rest.get(3..)?;
         } else {
-            let ch = encoded[i..].chars().next()?;
+            let ch = rest.chars().next()?;
             if matches!(ch, '[' | ']') {
                 return None;
             }
+            rest = rest.get(ch.len_utf8()..)?;
             out.push(ch);
-            i += ch.len_utf8();
         }
     }
     Some(out)
