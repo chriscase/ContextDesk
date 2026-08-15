@@ -1,0 +1,46 @@
+# Example local/dev topology. One app service + PostgreSQL.
+# Copy to docker-compose.yml and supply secret-store values via .env.
+# No company-specific hostnames. TLS terminates at the operator ingress
+# (see README.md); this compose is plaintext localhost only.
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: collab
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/01-roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d collab"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      COLLAB_HOST: 0.0.0.0
+      COLLAB_PORT: "8787"
+      COLLAB_SERVICE_NAME: cd-collab
+      COLLAB_DATABASE_URL: ${COLLAB_DATABASE_URL}
+      COLLAB_MIGRATE_DATABASE_URL: ${COLLAB_MIGRATE_DATABASE_URL}
+      COLLAB_EVIDENCE_ROOT: /var/lib/cd-collab/evidence
+      COLLAB_STATIC_DIR: /srv/web/dist
+    volumes:
+      - evidence_data:/var/lib/cd-collab/evidence
+    ports:
+      - "8787:8787"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db_data:
+  evidence_data:

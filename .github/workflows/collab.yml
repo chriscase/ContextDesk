@@ -1,0 +1,63 @@
+# Own CI lane for the collab/ npm workspace (#884).
+# Does not modify or depend on rust / desktop / packages jobs in ci.yml.
+name: collab
+
+on:
+  push:
+    paths:
+      - "collab/**"
+      - ".github/workflows/collab.yml"
+  pull_request:
+    paths:
+      - "collab/**"
+      - ".github/workflows/collab.yml"
+
+concurrency:
+  group: collab-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  collab:
+    name: collab (typecheck, lint, test, migrate dry-run)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: collab
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      COLLAB_TEST_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      COLLAB_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/collab_ci
+      COLLAB_MIGRATE_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/collab_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: collab/package-lock.json
+      - name: create disposable database
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d postgres \
+            -c "CREATE DATABASE collab_ci;"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - name: migration dry-run
+        run: npm run migrate:dry-run
+      - run: npm run build

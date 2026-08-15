@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/file-server-ref.v1.json",
+  "title": "cd-collab FileServerReference v1",
+  "description": "Controlled file-server reference. Never silently treated as verified without an expected hash.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "id", "uri", "expectedHash", "verificationStatus"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.file_server_ref.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "uri": { "type": "string", "minLength": 1 },
+    "expectedHash": {
+      "type": ["string", "null"],
+      "description": "Null when the remote target has never been hashed."
+    },
+    "verificationStatus": {
+      "type": "string",
+      "enum": ["verified", "unverified", "unreachable"]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "verificationStatus": { "const": "verified" } }
+      },
+      "then": {
+        "properties": {
+          "expectedHash": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  ]
+}
