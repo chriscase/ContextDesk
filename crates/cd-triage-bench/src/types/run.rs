@@ -245,27 +245,8 @@ impl TriageRun {
         validate_id("case_id", &self.case_id)?;
         validate_id("task_id", &self.task_id)?;
         validate_id("snapshot_id", &self.snapshot_id)?;
-        validate_bounded_string("strategy.name", &self.strategy.name, 256)?;
-        if self.strategy.name.trim().is_empty() {
-            return Err(BenchError::Schema("strategy.name is empty".into()));
-        }
-        validate_observed_string("strategy.version", &self.strategy.version, 128)?;
-        validate_observed_string("strategy.build", &self.strategy.build, 256)?;
-        match &self.prompt_workflow.completeness {
-            Completeness::Unknown => {
-                if !self.prompt_workflow.prompt.is_unknown()
-                    || !self.prompt_workflow.workflow.is_unknown()
-                {
-                    return Err(BenchError::Schema(
-                        "prompt_workflow completeness unknown requires unknown prompt and workflow"
-                            .into(),
-                    ));
-                }
-            }
-            Completeness::Exact | Completeness::Partial => {}
-        }
-        validate_observed_string("prompt", &self.prompt_workflow.prompt, MAX_STRING_BYTES)?;
-        validate_observed_string("workflow", &self.prompt_workflow.workflow, MAX_STRING_BYTES)?;
+        validate_strategy_identity(&self.strategy)?;
+        validate_prompt_workflow(&self.prompt_workflow)?;
         if self.raw_output.digest.algorithm != "sha256" {
             return Err(BenchError::Schema(
                 "raw_output digest algorithm must be sha256".into(),
@@ -273,41 +254,10 @@ impl TriageRun {
         }
         crate::types::validate_sha256_hex(&self.raw_output.digest.hex)?;
         validate_bounded_string("raw_output.encoding", &self.raw_output.encoding, 32)?;
-        if self.claims.len() > MAX_CLAIMS {
-            return Err(BenchError::Schema("too many claims".into()));
-        }
-        for (i, claim) in self.claims.iter().enumerate() {
-            validate_bounded_string(
-                &format!("claims[{i}].claim"),
-                &claim.claim,
-                MAX_STRING_BYTES,
-            )?;
-            if let Some(id) = &claim.evidence_item_id {
-                validate_id(&format!("claims[{i}].evidence_item_id"), id)?;
-            }
-            if let Some(locator) = &claim.locator {
-                validate_bounded_string(&format!("claims[{i}].locator"), locator, 1024)?;
-            }
-        }
-        if let Observed::Known(timing) = &self.timing {
-            timing.validate()?;
-        }
-        if let Observed::Known(cost) = &self.cost {
-            cost.validate()?;
-        }
-        validate_observed_string("uncertainty", &self.uncertainty, MAX_STRING_BYTES)?;
-        if let FairnessClass::ExtraEvidence { description } = &self.fairness {
-            validate_bounded_string("fairness.description", description, MAX_STRING_BYTES)?;
-            if description.trim().is_empty() {
-                return Err(BenchError::Schema(
-                    "extra_evidence fairness requires a description".into(),
-                ));
-            }
-        }
-        validate_bounded_string("operator", &self.operator, 512)?;
-        if let Some(importer) = &self.importer {
-            validate_bounded_string("importer", importer, 512)?;
-        }
+        validate_claims(&self.claims)?;
+        validate_observed_timing_cost_uncertainty(&self.timing, &self.cost, &self.uncertainty)?;
+        validate_fairness(&self.fairness)?;
+        validate_attribution(&self.operator, self.importer.as_deref())?;
         validate_rfc3339("created_at", &self.created_at)?;
         if let Some(other) = &self.near_duplicate_of {
             validate_id("near_duplicate_of", other)?;
@@ -387,7 +337,13 @@ impl RunImport {
     pub fn validate_metadata(&self) -> BenchResult<()> {
         require_schema(&self.schema_id, RUN_IMPORT_SCHEMA_V1)?;
         validate_id("task_id", &self.task_id)?;
-        validate_bounded_string("strategy.name", &self.strategy.name, 256)?;
+        validate_strategy_identity(&self.strategy)?;
+        validate_prompt_workflow(&self.prompt_workflow)?;
+        validate_claims(&self.claims)?;
+        validate_observed_timing_cost_uncertainty(&self.timing, &self.cost, &self.uncertainty)?;
+        validate_fairness(&self.fairness)?;
+        validate_attribution(&self.operator, self.importer.as_deref())?;
+        validate_rfc3339("created_at", &self.created_at)?;
         if let Some(raw) = &self.raw_output_utf8 {
             if raw.len() > MAX_RAW_INLINE_BYTES {
                 return Err(BenchError::Schema("raw_output_utf8 exceeds 8 MiB".into()));
@@ -395,6 +351,93 @@ impl RunImport {
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_strategy_identity(strategy: &StrategyIdentity) -> BenchResult<()> {
+    validate_bounded_string("strategy.name", &strategy.name, 256)?;
+    if strategy.name.trim().is_empty() {
+        return Err(BenchError::Schema("strategy.name is empty".into()));
+    }
+    validate_observed_string("strategy.version", &strategy.version, 128)?;
+    validate_observed_string("strategy.build", &strategy.build, 256)?;
+    Ok(())
+}
+
+pub(crate) fn validate_prompt_workflow(prompt_workflow: &PromptWorkflow) -> BenchResult<()> {
+    match prompt_workflow.completeness {
+        Completeness::Unknown => {
+            if !prompt_workflow.prompt.is_unknown() || !prompt_workflow.workflow.is_unknown() {
+                return Err(BenchError::Schema(
+                    "prompt_workflow completeness unknown requires unknown prompt and workflow"
+                        .into(),
+                ));
+            }
+        }
+        Completeness::Exact | Completeness::Partial => {}
+    }
+    validate_observed_string("prompt", &prompt_workflow.prompt, MAX_STRING_BYTES)?;
+    validate_observed_string("workflow", &prompt_workflow.workflow, MAX_STRING_BYTES)?;
+    Ok(())
+}
+
+pub(crate) fn validate_fairness(fairness: &FairnessClass) -> BenchResult<()> {
+    if let FairnessClass::ExtraEvidence { description } = fairness {
+        validate_bounded_string("fairness.description", description, MAX_STRING_BYTES)?;
+        if description.trim().is_empty() {
+            return Err(BenchError::Schema(
+                "extra_evidence fairness requires a description".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_claims(claims: &[ClaimedCitation]) -> BenchResult<()> {
+    if claims.len() > MAX_CLAIMS {
+        return Err(BenchError::Schema("too many claims".into()));
+    }
+    for (i, claim) in claims.iter().enumerate() {
+        validate_bounded_string(
+            &format!("claims[{i}].claim"),
+            &claim.claim,
+            MAX_STRING_BYTES,
+        )?;
+        if let Some(id) = &claim.evidence_item_id {
+            validate_id(&format!("claims[{i}].evidence_item_id"), id)?;
+        }
+        if let Some(locator) = &claim.locator {
+            validate_bounded_string(&format!("claims[{i}].locator"), locator, 1024)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_observed_timing_cost_uncertainty(
+    timing: &Observed<Timing>,
+    cost: &Observed<Cost>,
+    uncertainty: &Observed<String>,
+) -> BenchResult<()> {
+    if let Observed::Known(timing) = timing {
+        timing.validate()?;
+    }
+    if let Observed::Known(cost) = cost {
+        cost.validate()?;
+    }
+    validate_observed_string("uncertainty", uncertainty, MAX_STRING_BYTES)
+}
+
+pub(crate) fn validate_attribution(operator: &str, importer: Option<&str>) -> BenchResult<()> {
+    validate_bounded_string("operator", operator, 512)?;
+    if operator.trim().is_empty() {
+        return Err(BenchError::Schema("operator is empty".into()));
+    }
+    if let Some(importer) = importer {
+        validate_bounded_string("importer", importer, 512)?;
+        if importer.trim().is_empty() {
+            return Err(BenchError::Schema("importer is empty".into()));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -429,6 +472,74 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn omitted_fairness_is_rejected() {
+        let err = RunImport::parse_json(
+            r#"{
+                "schema_id": "contextdesk.triage_bench.run_import.v1",
+                "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "strategy": {"name": "human-expert", "version": {"status": "unknown"}, "build": {"status": "unknown"}},
+                "source_kind": "human",
+                "prompt_workflow": {"completeness": "unknown", "prompt": {"status": "unknown"}, "workflow": {"status": "unknown"}},
+                "timing": {"status": "unknown"},
+                "cost": {"status": "unknown"},
+                "uncertainty": {"status": "unknown"},
+                "status": "completed",
+                "operator": "alice",
+                "created_at": "2026-01-15T08:00:00Z"
+            }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("fairness"), "{err}");
+    }
+
+    #[test]
+    fn extra_evidence_requires_a_description() {
+        let err = RunImport::parse_json(
+            r#"{
+                "schema_id": "contextdesk.triage_bench.run_import.v1",
+                "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "strategy": {"name": "human-expert", "version": {"status": "unknown"}, "build": {"status": "unknown"}},
+                "source_kind": "human",
+                "prompt_workflow": {"completeness": "unknown", "prompt": {"status": "unknown"}, "workflow": {"status": "unknown"}},
+                "timing": {"status": "unknown"},
+                "cost": {"status": "unknown"},
+                "uncertainty": {"status": "unknown"},
+                "fairness": {"kind": "extra_evidence", "description": "   "},
+                "status": "completed",
+                "operator": "alice",
+                "created_at": "2026-01-15T08:00:00Z"
+            }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("description"), "{err}");
+    }
+
+    #[test]
+    fn missing_strategy_version_stays_a_required_unknown_object() {
+        let err = RunImport::parse_json(
+            r#"{
+                "schema_id": "contextdesk.triage_bench.run_import.v1",
+                "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "strategy": {"name": "human-expert", "build": {"status": "unknown"}},
+                "source_kind": "human",
+                "prompt_workflow": {"completeness": "unknown", "prompt": {"status": "unknown"}, "workflow": {"status": "unknown"}},
+                "timing": {"status": "unknown"},
+                "cost": {"status": "unknown"},
+                "uncertainty": {"status": "unknown"},
+                "fairness": {"kind": "same_snapshot"},
+                "status": "completed",
+                "operator": "alice",
+                "created_at": "2026-01-15T08:00:00Z"
+            }"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("missing field") && err.to_string().contains("version"),
+            "{err}"
+        );
     }
 
     #[test]

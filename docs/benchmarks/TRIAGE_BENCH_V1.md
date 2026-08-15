@@ -1,8 +1,10 @@
 # Incident-triage evaluation bench v1
 
-**Status:** **Local integration** on `cursor/triage-bench-foundation-b926`
-(issues #876/#877/#878 and report-only #880/#881). Offline crate
-`cd-triage-bench`. Not shipped on `main`. Not a readiness or release claim.
+**Status:** **Local integration.** The #877 store/entities first slice is on
+`main` (#890/#891). Manual import and provenance for external/human/web-only
+runs (#878) live in `cd-triage-bench` (`import-run`, human template + worked
+example). Report-only #880/#881 sketches remain; the ContextDesk SDK adapter
+is #879. Not a close of epic #876. Not a readiness or release claim.
 
 ## Purpose
 
