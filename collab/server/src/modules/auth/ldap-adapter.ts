@@ -1,3 +1,4 @@
+import type { ConnectionOptions } from "node:tls";
 import { Client, type ClientOptions } from "ldapts";
 import type { AuthAdapter, AuthSuccess } from "./adapter.js";
 import type { LdapConfig } from "./ldap-config.js";
@@ -18,6 +19,45 @@ function interpolate(template: string, vars: Record<string, string>): string {
   return out;
 }
 
+function errorDetail(err: unknown): string {
+  if (!(err instanceof Error)) return "error";
+  return `${err.name}: ${err.message}`.slice(0, 160);
+}
+
+/**
+ * TLS options for LDAPS connect or StartTLS upgrade.
+ * Do not pass `ca: undefined` — Node treats that as an empty trust store.
+ * osixia fixture certs need an explicit ECDH curve for Node 22.
+ */
+export function ldapTlsOptions(config: LdapConfig): ConnectionOptions {
+  const options: ConnectionOptions = {
+    rejectUnauthorized: config.verifyTls,
+  };
+  if (config.ca !== undefined) {
+    options.ca = config.ca;
+  }
+  if (!config.verifyTls) {
+    options.ecdhCurve = "auto";
+  }
+  return options;
+}
+
+/**
+ * ldapts treats any constructor `tlsOptions` as "TLS from the first byte".
+ * StartTLS must connect plaintext, then upgrade — so omit tlsOptions there.
+ */
+export function ldapClientOptions(config: LdapConfig): ClientOptions {
+  const options: ClientOptions = {
+    url: config.url,
+    timeout: config.timeoutMs,
+    connectTimeout: config.timeoutMs,
+  };
+  if (!config.starttls) {
+    options.tlsOptions = ldapTlsOptions(config);
+  }
+  return options;
+}
+
 export class LdapAuthAdapter implements AuthAdapter {
   constructor(
     private readonly config: LdapConfig,
@@ -29,17 +69,14 @@ export class LdapAuthAdapter implements AuthAdapter {
     password: string,
   ): Promise<AuthSuccess | null> {
     if (!username || !password) return null;
-    const client = new Client(this.clientOptions());
+    const client = new Client(ldapClientOptions(this.config));
     try {
       if (this.config.starttls) {
-        await client.startTLS({
-          rejectUnauthorized: this.config.verifyTls,
-          ca: this.config.ca,
-        });
+        await client.startTLS(ldapTlsOptions(this.config));
       }
       const dn = await this.resolveUserDn(client, username, password);
       if (!dn) {
-        this.log.event({ event: "ldap_bind_failed", username });
+        this.log.event({ event: "ldap_bind_failed", username, detail: "no_dn" });
         return null;
       }
       await client.bind(dn, password);
@@ -49,8 +86,8 @@ export class LdapAuthAdapter implements AuthAdapter {
         identity: { id: dn, username, displayName: username },
         groups,
       };
-    } catch {
-      this.log.event({ event: "ldap_bind_failed", username });
+    } catch (err) {
+      this.log.event({ event: "ldap_bind_failed", username, detail: errorDetail(err) });
       return null;
     } finally {
       try {
@@ -59,18 +96,6 @@ export class LdapAuthAdapter implements AuthAdapter {
         // ignore
       }
     }
-  }
-
-  private clientOptions(): ClientOptions {
-    return {
-      url: this.config.url,
-      timeout: this.config.timeoutMs,
-      connectTimeout: this.config.timeoutMs,
-      tlsOptions: {
-        rejectUnauthorized: this.config.verifyTls,
-        ca: this.config.ca,
-      },
-    };
   }
 
   private async resolveUserDn(
@@ -98,13 +123,14 @@ export class LdapAuthAdapter implements AuthAdapter {
     const { searchEntries } = await client.search(this.config.userSearchBase, {
       scope: "sub",
       filter,
-      attributes: ["dn"],
+      // `dn` is not a schema attribute; requesting it can fail the search.
+      attributes: ["uid"],
       sizeLimit: 2,
     });
     const first = searchEntries[0];
     if (!first || searchEntries.length !== 1) return null;
     const dn = first.dn;
-    return typeof dn === "string" ? dn : null;
+    return typeof dn === "string" && dn.length > 0 ? dn : null;
   }
 
   private async searchGroups(client: Client, dn: string): Promise<string[]> {
@@ -115,7 +141,7 @@ export class LdapAuthAdapter implements AuthAdapter {
     const { searchEntries } = await client.search(this.config.groupSearchBase, {
       scope: "sub",
       filter,
-      attributes: ["dn"],
+      attributes: ["cn"],
       sizeLimit: 50,
     });
     return searchEntries

@@ -13,7 +13,7 @@ describe.skipIf(!configured)("OpenLDAP fixture (encrypted)", () => {
       process.env.COLLAB_LDAP_FIXTURE_USER ?? "alice",
       process.env.COLLAB_LDAP_FIXTURE_PASSWORD ?? "fixture-alice-secret",
     );
-    expect(ok).not.toBeNull();
+    expect(ok, log.lines().join(" | ")).not.toBeNull();
     expect(ok?.identity.username).toBe(
       process.env.COLLAB_LDAP_FIXTURE_USER ?? "alice",
     );

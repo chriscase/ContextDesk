@@ -12,10 +12,14 @@ ldapadd -x -H ldaps://127.0.0.1:636 \
   -f deploy/openldap/seed.ldif
 ```
 
-App env for the fixture (verification disabled only with explicit dev mode):
+App env for the fixture (verification disabled only with explicit dev mode).
+Hosted CI uses StartTLS on 389: Node 22 cannot complete LDAPS to the
+osixia self-signed cert (handshake / curve), while `ldapadd` on 636 still
+works. StartTLS is encrypted and is the #885-allowed alternative to `ldaps://`.
 
 ```
-COLLAB_LDAP_URL=ldaps://127.0.0.1:636
+COLLAB_LDAP_URL=ldap://127.0.0.1:389
+COLLAB_LDAP_STARTTLS=1
 COLLAB_LDAP_DEV_MODE=1
 COLLAB_LDAP_TLS_INSECURE=1
 COLLAB_LDAP_USER_DN_TEMPLATE=uid={username},ou=people,dc=example,dc=test

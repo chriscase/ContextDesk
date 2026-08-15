@@ -71,7 +71,10 @@ is an explicit, recorded operation. A reference whose target was never hashed
   (enforced by `password-isolation.test.ts`).
 - Transport: `ldaps://` or `ldap://` + StartTLS. Plaintext is refused at
   `loadLdapConfig`. Disabling TLS verification requires explicit
-  `COLLAB_LDAP_DEV_MODE=1` (fixture only).
+  `COLLAB_LDAP_DEV_MODE=1` (fixture only). Hosted CI uses StartTLS against
+  the osixia fixture — Node 22 cannot complete LDAPS to that image's
+  self-signed cert. Constructor `tlsOptions` are omitted for StartTLS so
+  ldapts does not wrap port 389 as LDAPS.
 - Optional service-bind (`COLLAB_LDAP_BIND_DN` / `COLLAB_LDAP_BIND_PASSWORD`) is
   secret-store-sourced and never written to the DB, logs, or audit.
 - Sessions: opaque `HttpOnly` `SameSite=Lax` cookies; server-side store;
