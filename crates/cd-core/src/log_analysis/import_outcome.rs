@@ -116,6 +116,12 @@ pub(crate) fn member_annotation(message: &str) -> Option<String> {
     if encoded.is_empty() {
         return None;
     }
+    // A well-formed annotation is a single frame. Leftover transport after
+    // this closer means the string is not ours — do not guess an identity.
+    let after = rest.get(end + MEMBER_ANNOTATION_CLOSE.len_utf8()..)?;
+    if after.contains(MEMBER_ANNOTATION_MARKER) {
+        return None;
+    }
     decode_member_identity(encoded)
 }
 
