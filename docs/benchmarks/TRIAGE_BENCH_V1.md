@@ -1,10 +1,10 @@
 # Incident-triage evaluation bench v1
 
 **Status:** **Local integration.** The #877 store/entities first slice is on
-`main` (#890/#891). This branch adds manual import/provenance (#878) and
-rubric v1 + file/CLI expert adjudication (#880). Report aggregation remains
-#881. The ContextDesk SDK adapter is #879. Not a close of epic #876. Not a
-readiness or release claim.
+`main` (#890/#891). This branch adds manual import/provenance (#878), rubric
+v1 + file/CLI expert adjudication (#880), and report-only comparison over
+stored records (#881). The SDK-driven batch runner is residual until #879.
+Not a close of epic #876. Not a readiness or release claim.
 
 ## Purpose
 

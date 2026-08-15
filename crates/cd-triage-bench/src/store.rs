@@ -138,6 +138,14 @@ impl BenchStore {
         list_ids(&self.root.join("cases"))
     }
 
+    pub fn load_cases(&self) -> BenchResult<Vec<Case>> {
+        let mut cases = Vec::new();
+        for id in self.list_cases()? {
+            cases.push(self.get_case(&id)?);
+        }
+        Ok(cases)
+    }
+
     pub fn put_snapshot(&self, snapshot: &EvidenceSnapshot) -> BenchResult<()> {
         snapshot.validate()?;
         self.verify_snapshot_blobs(snapshot)?;

@@ -23,7 +23,7 @@ pub mod types;
 pub use error::{BenchError, BenchResult};
 pub use import::{import_run, ImportOutcome};
 pub use packet::{materialize_task_packet, TaskPacket};
-pub use report::{render_report_json, render_report_markdown, BacktestReport};
+pub use report::{render_report_json, render_report_jsonl, render_report_markdown, BacktestReport};
 pub use review::{materialize_review_packet, merge_citation_assists, ReviewPacket, ReviewPhase};
 pub use store::BenchStore;
 pub use types::*;
