@@ -15,6 +15,7 @@ import {
 import { MutableGroupRoleMap, parseGroupRoleMap } from "./modules/authz/index.js";
 import { CatalogService, PgCatalogStore } from "./modules/catalog/index.js";
 import { CaseService, PgCaseStore } from "./modules/cases/index.js";
+import { ExportService, loadExportPrivacyConfig } from "./modules/export/index.js";
 import { ImportService, PgRunStore } from "./modules/import/index.js";
 
 async function main(): Promise<void> {
@@ -41,6 +42,13 @@ async function main(): Promise<void> {
     catalog,
     runs: new PgRunStore(pool),
   });
+  const exporter = new ExportService({
+    cases: domain,
+    catalog,
+    imports,
+    audit,
+    privacy: loadExportPrivacyConfig(),
+  });
   const app = await buildApp({
     config,
     pool,
@@ -48,6 +56,7 @@ async function main(): Promise<void> {
     domain,
     catalog,
     imports,
+    exporter,
     security: {
       auth: {
         adapter,

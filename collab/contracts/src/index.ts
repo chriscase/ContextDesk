@@ -103,3 +103,50 @@ export type {
   FileServerReferenceV1,
   VerificationStatus,
 } from "./evidence.js";
+
+export {
+  BRIEF_SCHEMA_ID,
+  IMPORTED_RESPONSE_PRESENTATION,
+  parseBrief,
+} from "./brief.js";
+export type {
+  BriefActionV1,
+  BriefAttributionV1,
+  BriefEvidenceV1,
+  BriefHeaderV1,
+  BriefHypothesisV1,
+  BriefImportedRunV1,
+  BriefLinkV1,
+  BriefTimelineEventV1,
+  BriefV1,
+} from "./brief.js";
+
+export {
+  PACKAGE_DEFAULT_EXCLUSIONS,
+  PACKAGE_ITEM_KINDS,
+  PACKAGE_MANIFEST_SCHEMA_ID,
+  PACKAGE_SCHEMA_ID,
+  parsePackageManifest,
+  parsePromptPackage,
+} from "./package.js";
+export type {
+  PackageExcerptV1,
+  PackageItemKind,
+  PackageManifestItemV1,
+  PackageManifestV1,
+  PromptPackageV1,
+} from "./package.js";
+
+export {
+  EXPORT_ENVELOPE_SCHEMA_ID,
+  EXPORT_INVENTORY_SCHEMA_ID,
+  EXPORT_KINDS,
+  parseExportEnvelope,
+  parseExportInventory,
+} from "./export.js";
+export type {
+  ExportEnvelopeV1,
+  ExportInventoryItemV1,
+  ExportInventoryV1,
+  ExportKind,
+} from "./export.js";

@@ -44,10 +44,10 @@ export function App() {
       <p className="shell__eyebrow">working name</p>
       <h1 className="shell__title">cd-collab</h1>
       <p className="shell__copy">
-        Collaboration and case-memory shell. Source catalog and manual
-        external-run import live here; package export is a later slice. This
-        surface is separately deployable and does not embed the desktop or
-        evaluation bench.
+        Collaboration and case-memory shell. Source catalog, manual
+        external-run import, and share-safe export live here. This surface is
+        separately deployable and does not embed the desktop or evaluation
+        bench.
       </p>
       {!ready ? null : session ? (
         <>

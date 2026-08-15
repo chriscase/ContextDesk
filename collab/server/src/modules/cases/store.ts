@@ -94,8 +94,10 @@ export interface CaseStore {
   listTimeline(caseId: string): Promise<TimelineRow[]>;
   appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow>;
   listRevisions(contributionId: string): Promise<RevisionRow[]>;
+  listLatestRevisions(caseId: string): Promise<RevisionRow[]>;
   insertRevision(rev: RevisionRow): Promise<void>;
   getArtifact(artifactId: string): Promise<ArtifactRow | null>;
+  listArtifactsByCase(caseId: string): Promise<ArtifactRow[]>;
   insertArtifact(row: ArtifactRow): Promise<void>;
 }
 
@@ -168,6 +170,20 @@ export class MemoryCaseStore implements CaseStore {
     }));
   }
 
+  async listLatestRevisions(caseId: string): Promise<RevisionRow[]> {
+    const latest: RevisionRow[] = [];
+    for (const chain of this.revisions.values()) {
+      const row = chain[chain.length - 1];
+      if (row && row.caseId === caseId) {
+        latest.push({
+          ...row,
+          hypothesisLinks: [...row.hypothesisLinks],
+        });
+      }
+    }
+    return latest.sort((a, b) => a.contributionId.localeCompare(b.contributionId));
+  }
+
   async insertRevision(rev: RevisionRow): Promise<void> {
     const chain = this.revisions.get(rev.contributionId) ?? [];
     chain.push({
@@ -180,6 +196,13 @@ export class MemoryCaseStore implements CaseStore {
   async getArtifact(artifactId: string): Promise<ArtifactRow | null> {
     const row = this.artifacts.get(artifactId);
     return row ? { ...row } : null;
+  }
+
+  async listArtifactsByCase(caseId: string): Promise<ArtifactRow[]> {
+    return [...this.artifacts.values()]
+      .filter((row) => row.caseId === caseId)
+      .map((row) => ({ ...row }))
+      .sort((a, b) => a.id.localeCompare(b.id));
   }
 
   async insertArtifact(row: ArtifactRow): Promise<void> {
@@ -304,6 +327,25 @@ export class PgCaseStore implements CaseStore {
     return result.rows.map((row) => asRevision(row as Record<string, unknown>));
   }
 
+  async listLatestRevisions(caseId: string): Promise<RevisionRow[]> {
+    const result = await this.db.query(
+      `SELECT r.*, c.case_id, c.kind, c.privacy_class, c.source_id
+       FROM contribution_revisions r
+       JOIN contributions c ON c.id = r.contribution_id
+       JOIN (
+         SELECT contribution_id, MAX(revision) AS revision
+         FROM contribution_revisions
+         GROUP BY contribution_id
+       ) latest
+         ON latest.contribution_id = r.contribution_id
+        AND latest.revision = r.revision
+       WHERE c.case_id = $1
+       ORDER BY r.contribution_id ASC`,
+      [caseId],
+    );
+    return result.rows.map((row) => asRevision(row as Record<string, unknown>));
+  }
+
   async insertRevision(rev: RevisionRow): Promise<void> {
     if (rev.revision === 1) {
       await this.db.query(
@@ -350,6 +392,14 @@ export class PgCaseStore implements CaseStore {
     );
     const row = result.rows[0] as Record<string, unknown> | undefined;
     return row ? asArtifact(row) : null;
+  }
+
+  async listArtifactsByCase(caseId: string): Promise<ArtifactRow[]> {
+    const result = await this.db.query(
+      `SELECT * FROM evidence_artifacts WHERE case_id = $1 ORDER BY id ASC`,
+      [caseId],
+    );
+    return result.rows.map((row) => asArtifact(row as Record<string, unknown>));
   }
 
   async insertArtifact(row: ArtifactRow): Promise<void> {

@@ -26,6 +26,9 @@ describe("case list and view", () => {
         if (url === "/api/cases/c1/imports") {
           return { ok: true, json: async () => ({ runs: [] }) };
         }
+        if (url === "/api/cases/c1/export/inventory") {
+          return { ok: true, json: async () => ({ items: [] }) };
+        }
         if (url === "/api/cases/c1/timeline") {
           return {
             ok: true,

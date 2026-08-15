@@ -181,6 +181,21 @@ export class CaseService {
     return this.store.listTimeline(caseId);
   }
 
+  async listContributions(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<ContributionV1[]> {
+    if (!(await this.getCase(caseId, actor, isAdmin))) return [];
+    const rows = await this.store.listLatestRevisions(caseId);
+    return rows.map((row) => this.toContribution(row, row.tombstone));
+  }
+
+  async listArtifacts(caseId: string, actor: Actor, isAdmin: boolean): Promise<ArtifactV1[]> {
+    if (!(await this.getCase(caseId, actor, isAdmin))) return [];
+    return (await this.store.listArtifactsByCase(caseId)).map((row) => this.toArtifact(row));
+  }
+
   async addContribution(
     caseId: string,
     actor: Actor,

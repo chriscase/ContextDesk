@@ -11,17 +11,22 @@ const addFormats =
   addFormatsImport;
 import { describe, expect, it } from "vitest";
 import {
+  BRIEF_SCHEMA_ID,
   CASE_SCHEMA_ID,
   FILE_SERVER_REF_SCHEMA_ID,
+  PACKAGE_SCHEMA_ID,
   SOURCE_SCHEMA_ID,
+  parseBrief,
   parseCase,
   parseFileServerReference,
   parseHealthResponse,
+  parsePromptPackage,
   parseSource,
 } from "./index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const schemasDir = join(here, "..", "schemas");
+const fixturesDir = join(here, "..", "fixtures");
 
 function loadSchema(name: string): object {
   return JSON.parse(readFileSync(join(schemasDir, name), "utf8")) as object;
@@ -66,6 +71,30 @@ describe("contracts unknown-field rejection", () => {
         extra: true,
       }),
     ).toThrow(/unknown key/);
+  });
+
+  it("accepts the valid brief fixture and rejects unknown fields", () => {
+    const valid = JSON.parse(readFileSync(join(fixturesDir, "brief.valid.json"), "utf8"));
+    const brief = parseBrief(valid);
+    expect(brief.schemaId).toBe(BRIEF_SCHEMA_ID);
+    expect(brief.importedRuns[0]?.presentation).toBe("imported_response");
+    const invalid = JSON.parse(
+      readFileSync(join(fixturesDir, "brief.unknown-field.json"), "utf8"),
+    );
+    expect(() => parseBrief(invalid)).toThrow(/unknown key/);
+  });
+
+  it("accepts the valid package fixture and rejects unknown fields", () => {
+    const valid = JSON.parse(
+      readFileSync(join(fixturesDir, "prompt-package.valid.json"), "utf8"),
+    );
+    const pkg = parsePromptPackage(valid);
+    expect(pkg.schemaId).toBe(PACKAGE_SCHEMA_ID);
+    expect(pkg.manifest.excludedByDefault).toEqual(["corroboration", "resolution"]);
+    const invalid = JSON.parse(
+      readFileSync(join(fixturesDir, "prompt-package.unknown-field.json"), "utf8"),
+    );
+    expect(() => parsePromptPackage(invalid)).toThrow(/unknown key/);
   });
 
   it("rejects unknown keys on cases", () => {
@@ -136,6 +165,46 @@ describe("JSON Schema additionalProperties: false", () => {
         leak: true,
       }),
     ).toBe(false);
+  });
+
+  it("brief schema rejects unknown fields", () => {
+    const validate = ajv.compile(loadSchema("brief.v1.json"));
+    expect(
+      validate({
+        schemaId: BRIEF_SCHEMA_ID,
+        privacyClass: "owner_only",
+        header: {},
+        timeline: [],
+        hypotheses: [],
+        actions: [],
+        evidence: [],
+        attributions: [],
+        importedRuns: [],
+        leak: true,
+      }),
+    ).toBe(false);
+    expect(validate(JSON.parse(readFileSync(join(fixturesDir, "brief.valid.json"), "utf8")))).toBe(
+      true,
+    );
+  });
+
+  it("prompt-package schema rejects unknown fields", () => {
+    const validate = ajv.compile(loadSchema("prompt-package.v1.json"));
+    expect(
+      validate({
+        schemaId: PACKAGE_SCHEMA_ID,
+        privacyClass: "share_safe",
+        caseId: "c",
+        snapshotIdentity: "h",
+        manifest: {},
+        excerpts: [],
+        promptScaffold: null,
+        leak: true,
+      }),
+    ).toBe(false);
+    expect(
+      validate(JSON.parse(readFileSync(join(fixturesDir, "prompt-package.valid.json"), "utf8"))),
+    ).toBe(true);
   });
 
   it("file-server-ref schema rejects unknown fields", () => {

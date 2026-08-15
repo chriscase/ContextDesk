@@ -18,6 +18,7 @@ import type { MutableGroupRoleMap } from "./modules/authz/index.js";
 import type { AuditStore } from "./modules/audit/index.js";
 import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/index.js";
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
+import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
 import { registerImportRoutes, type ImportService } from "./modules/import/index.js";
 
 export interface SecurityDeps {
@@ -34,6 +35,7 @@ export interface AppDeps {
   domain?: CaseService;
   catalog?: CatalogService;
   imports?: ImportService;
+  exporter?: ExportService;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -106,6 +108,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         roles: deps.security.roles,
         audit: deps.security.audit,
         imports: deps.imports,
+      });
+    }
+    if (deps.exporter) {
+      await registerExportRoutes(app, {
+        auth: deps.security.auth,
+        roles: deps.security.roles,
+        audit: deps.security.audit,
+        exporter: deps.exporter,
       });
     }
   }

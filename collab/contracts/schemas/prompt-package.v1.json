@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/prompt-package.v1.json",
+  "title": "cd-collab Prompt Package v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "privacyClass",
+    "caseId",
+    "snapshotIdentity",
+    "manifest",
+    "excerpts",
+    "promptScaffold"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.prompt_package.v1" },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "caseId": { "type": "string" },
+    "snapshotIdentity": { "type": "string" },
+    "manifest": { "type": "object" },
+    "excerpts": { "type": "array" },
+    "promptScaffold": { "type": ["string", "null"] }
+  }
+}
