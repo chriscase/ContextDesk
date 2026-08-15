@@ -24,7 +24,7 @@ Current implementation slice (release line):
   native v4 routes require the explicit dialect and host check; wire support is
   not a quality verdict.
 
-Source conversation: `6a791c7e-4bb8-83ea-b176-35e66f103cd9`
+Source conversation: owner-local (id withheld from the public repository)
 
 The thread reader retained only the first 20,000 characters of the oversized
 research answer. Those characters contained the executive conclusions and a

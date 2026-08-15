@@ -40,7 +40,7 @@ The focused assertions are mutation-oriented: allowing a mixed attempt set,
 allowing an incomplete extended set, removing the diagnostic-fault redaction
 precedence, or making a usefulness failure exit zero each contradicts a test.
 
-The live Luna/DeepSeek captures remain owner-local and are not copied into the
+The live DeepSeek captures remain owner-local and are not copied into the
 repository.
 
 ## Streaming and cancellation audit

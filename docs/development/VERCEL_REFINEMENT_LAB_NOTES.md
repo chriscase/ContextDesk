@@ -445,7 +445,7 @@ GPT-OSS should not be the default final synthesizer for this incident shape.
 ## Matched direct-Grok app diagnosis and refinement
 
 The complete 31-record incident was imported into the normal ContextDesk data
-store as corpus `019fe731-d67a-7143-943e-ca6588a5cf45`. Before the handoff fix,
+store as corpus `[owner-local corpus id]`. Before the handoff fix,
 the app's five-call Grok multi-stage run retrieved 17 evidence identities but
 produced `root_cause_established=false`, omitted rollback/recovery, and treated
 the boundary violation as only a competing explanation. A one-call Grok control
@@ -695,7 +695,7 @@ model and must not be represented as the employer build.
 - The benchmark's real BGE-M3/Qwen reranker lanes remain honestly marked
   `FUTURE_CAPABILITY_UNAVAILABLE`. Synthetic synonym and reranker adapters are
   test fixtures, not proof of real semantic capability.
-- Imported corpus `019fe55d-f3ce-7f62-b802-bc99d1c8d071` currently has zero
+- Imported corpus `[owner-local corpus id]` currently has zero
   embedded templates and selects `structured_keyword` mode.
 
 ## Vercel retrieval capability findings

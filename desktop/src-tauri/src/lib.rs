@@ -9527,6 +9527,82 @@ impl LogIngestRunError {
     }
 }
 
+/// Project a core import failure into the string the UI shows.
+///
+/// The preview walk carries a failing archive member's identity out on the
+/// error message behind the `[member=…]` transport marker
+/// (`cd_core::log_analysis::import_outcome`), and that identity is raw —
+/// a secret-bearing member name would ride along verbatim. The CLI already
+/// strips the marker and reports the secret-scrubbed locator instead; this
+/// is the same projection for the desktop's import preview/run surfaces,
+/// which render the returned string directly. The engine's own wording
+/// stays at the front so message-matching callers are unaffected, and an
+/// unannotated message passes through unchanged.
+fn import_error_message(error: &cd_core::error::CoreError) -> String {
+    use cd_core::log_analysis::import_outcome::{strip_member_annotation, ImportOutcomeReport};
+    let raw = error.to_string();
+    let stripped = strip_member_annotation(&raw);
+    if stripped == raw {
+        return raw;
+    }
+    // Re-derive the identity through the same fail-closed report the CLI
+    // uses: `rejected_from_error` reads the annotation back and rebuilds the
+    // locator secret-scrubbed, so the member can still be named safely.
+    let rejected = ImportOutcomeReport::rejected_from_error(error);
+    match rejected.defects.first() {
+        Some(defect) => format!("{stripped} (failing member: {})", defect.source.identity),
+        None => stripped.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod import_error_projection_tests {
+    use super::import_error_message;
+    use cd_core::error::CoreError;
+
+    /// The `[member=…]` transport marker must never reach the UI, while the
+    /// engine's own wording survives at the front and the member is still
+    /// named through the scrubbed locator.
+    #[test]
+    fn member_annotation_is_stripped_and_the_scrubbed_locator_is_named() {
+        let error =
+            CoreError::Message("zip open: invalid Zip archive [member=bundles/inner.zip]".into());
+        let shown = import_error_message(&error);
+        assert!(!shown.contains("[member="), "marker leaked: {shown}");
+        assert!(
+            shown.starts_with("zip open: invalid Zip archive"),
+            "engine wording must stay at the front: {shown}"
+        );
+        assert!(
+            shown.contains("bundles/inner.zip"),
+            "the failing member must still be named: {shown}"
+        );
+    }
+
+    /// A secret-bearing member name is scrubbed by the same redaction the
+    /// outcome report uses — the raw annotated identity must not pass
+    /// through to the UI.
+    #[test]
+    fn secret_bearing_member_names_are_scrubbed() {
+        let error = CoreError::Message(
+            "zip open: invalid Zip archive [member=bundles/sk-abcdefghijklmnopqrst.bin]".into(),
+        );
+        let shown = import_error_message(&error);
+        assert!(!shown.contains("[member="), "marker leaked: {shown}");
+        assert!(
+            !shown.contains("abcdefghijklmnopqrst"),
+            "credential-shaped member name reached the UI string: {shown}"
+        );
+    }
+
+    /// Errors without an annotation pass through byte for byte.
+    #[test]
+    fn unannotated_messages_pass_through_unchanged() {
+        let error = CoreError::Message("policy denied: plan is stale".into());
+        assert_eq!(import_error_message(&error), error.to_string());
+    }
+}
+
 fn register_exclusive_cancel(
     cancels: &mut HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
     key: &str,
@@ -9702,7 +9778,7 @@ async fn run_log_ingest(
         };
         result.map_err(|error| match error {
             cd_core::error::CoreError::Cancelled => LogIngestRunError::Cancelled,
-            other => LogIngestRunError::Failed(other.to_string()),
+            other => LogIngestRunError::Failed(import_error_message(&other)),
         })
     })
     .await;
@@ -10886,7 +10962,7 @@ async fn log_preview_import(
             std::path::Path::new(&path),
             Some(&cancel),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| import_error_message(&error))
     })
     .await
     .map_err(|error| format!("import preview task join: {error}"));
@@ -10941,7 +11017,7 @@ async fn log_run_import(
             &selected,
             Some(&verify_cancel),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| import_error_message(&error))
     })
     .await
     .map_err(|error| format!("import plan verification task join: {error}"));

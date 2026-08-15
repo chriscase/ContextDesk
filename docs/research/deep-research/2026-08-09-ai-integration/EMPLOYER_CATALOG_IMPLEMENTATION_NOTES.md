@@ -17,7 +17,7 @@ Production adapter status on the current release line:
   this adds wire support, not a live quality or employer-model equivalence
   claim.
 
-Source conversation: `6a79155a-bb58-83ea-89e6-a03c0c41ff12`
+Source conversation: owner-local (id withheld from the public repository)
 
 This file retains the implementation-specific material that did not fit in the
 main synthesis. It comes from the clean prefix of the transferred research

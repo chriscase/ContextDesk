@@ -282,7 +282,7 @@ must stay visible in typed telemetry.
 ## 5. Reproduction commands
 
 ```bash
-git -C /Users/chriscase/Documents/GitHub/ContextDesk worktree list | grep transport-semantic
+git -C <repo-root> worktree list | grep transport-semantic
 cd <worktree>
 
 # Wire seam (15 green)

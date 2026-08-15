@@ -28,11 +28,11 @@ describe("redactDiagnosticText (#325)", () => {
 
   it("redacts corp-looking hosts and private IPs", () => {
     const out = redactDiagnosticText(
-      "failed https://ies-ebs-conf.ies.mentorg.com/path, server.internal, 100.64.1.30, 127.0.0.1, ::1, fd12:3456::7, and fe80::1",
+      "failed https://conf-01.ies.example.com/path, server.internal, 100.64.1.30, 127.0.0.1, ::1, fd12:3456::7, and fe80::1",
     );
     expect(out).toContain("[REDACTED-HOST]");
     expect(out).toContain("[REDACTED-IP]");
-    expect(out).not.toContain("mentorg");
+    expect(out).not.toContain("conf-01");
     expect(out).not.toContain("server.internal");
     expect(out).not.toContain("100.64.1.30");
     expect(out).not.toContain("127.0.0.1");
@@ -55,7 +55,7 @@ describe("redactDiagnosticText (#325)", () => {
 describe("buildErrorReport (#325)", () => {
   it("builds redacted report and github URL without secrets", () => {
     const r = buildErrorReport({
-      raw: "confluence: error sending request for url (https://ies-ebs-conf.ies.mentorg.com/rest/api/content/search?cql=secret)",
+      raw: "confluence: error sending request for url (https://conf-01.ies.example.com/rest/api/content/search?cql=secret)",
       appVersion: "0.1.0-test",
       channel: "dev",
       gitSha: "abc1234",
@@ -63,7 +63,7 @@ describe("buildErrorReport (#325)", () => {
     });
     expect(r.summary.length).toBeGreaterThan(0);
     expect(r.reportMarkdown).toContain("redacted");
-    expect(r.reportMarkdown).not.toContain("mentorg");
+    expect(r.reportMarkdown).not.toContain("conf-01");
     expect(r.reportMarkdown).not.toContain("cql=secret");
     expect(r.reportMarkdown).toContain("Channel: dev");
     expect(r.reportMarkdown).toContain("Git: abc1234");
@@ -71,7 +71,7 @@ describe("buildErrorReport (#325)", () => {
       "github.com/chriscase/ContextDesk/issues/new",
     );
     expect(r.githubNewIssueUrl).toContain("title=");
-    expect(decodeURIComponent(r.githubNewIssueUrl)).not.toContain("mentorg");
+    expect(decodeURIComponent(r.githubNewIssueUrl)).not.toContain("conf-01");
   });
 });
 
@@ -94,7 +94,7 @@ describe("buildFeedbackReport", () => {
   it("builds feature request URL without requiring an error", () => {
     const r = buildFeedbackReport({
       kind: "feature",
-      summary: "Richer log importer for Airbus dumps",
+      summary: "Richer log importer for appliance dumps",
       detail: "Folder ingest produced zero lines.",
       debugLog: ["scan found 3 files", "file a.gz: skipped binary-like"],
       appVersion: "0.1.0",

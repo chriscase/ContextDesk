@@ -426,7 +426,7 @@ mod tests {
             "What caused the service failures?",
             "# Observations\n\n- The service became unavailable.\n- Requests failed afterward.\n\n## Missing evidence\n\n- Service-side logs.",
             InvestigationRenderOptions {
-                model: "qwen-3.6-27b",
+                model: "example-analyst-model",
                 elapsed_ms: 85_800,
                 typed_envelope: false,
                 grounding: "grounded",
@@ -435,7 +435,7 @@ mod tests {
             },
         );
         assert!(report.contains("Question: What caused the service failures?"));
-        assert!(report.contains("Analyst: qwen-3.6-27b"));
+        assert!(report.contains("Analyst: example-analyst-model"));
         assert!(report.contains("PROVISIONAL"));
         assert!(report.contains("Grounding: grounded"));
         assert!(report.contains("Observations"));

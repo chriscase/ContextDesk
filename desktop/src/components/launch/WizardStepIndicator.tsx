@@ -1,4 +1,4 @@
-/** Thin step rail for pre-launch (NexaDeck-inspired). */
+/** Thin step rail for pre-launch. */
 
 export type LaunchStepId = "workspace" | "ai" | "ready";
 

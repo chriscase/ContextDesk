@@ -262,5 +262,5 @@ model graded its own homework."
 A provider-neutral offline ledger (`contextdesk gateway ledger`) aggregates
 share-safe diagnostic reports and documented historical rows for model
 comparison over time. It does **not** change this diagnostic's execution path
-and stays independent of Luna tool-continuation hardening. See
+and stays independent of tool-continuation hardening. See
 [`docs/benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md`](../../benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md).

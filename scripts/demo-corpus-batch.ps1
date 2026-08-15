@@ -21,17 +21,19 @@
     or provider bodies are copied into the aggregate report.
 
 .EXAMPLE
+    # <MODEL-ID> is a placeholder: pass an exact model id discovered from the
+    # configured provider (`contextdesk models discover`), byte for byte.
     .\demo-corpus-batch.ps1 -Cli .\contextdesk.exe `
       -DataDir "$env:LOCALAPPDATA\ContextDesk\demo-batch" `
       -Source .\case-a.zip, .\case-b `
       -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-output') -Execute -AllowImport `
-      -Model 'qwen-3.6-27b' -Deadline 10m
+      -Model '<MODEL-ID>' -Deadline 10m
 
 .EXAMPLE
     .\demo-corpus-batch.ps1 -Cli .\contextdesk.exe `
       -DataDir "$env:LOCALAPPDATA\ContextDesk\acceptance-rc2" `
-      -CorpusId '019fe3a6-58db-7800-874e-a4ccafffd07b' `
-      -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-output') -Execute -Model 'deepseek-v4-flash'
+      -CorpusId '<CORPUS-ID>' `
+      -OutputRoot (Join-Path $env:TEMP 'contextdesk-demo-output') -Execute -Model '<MODEL-ID>'
 ##>
 
 [CmdletBinding()]
@@ -48,7 +50,10 @@ param(
 
     [string[]] $CorpusId = @(),
 
-    [string] $Model = 'qwen-3.6-27b',
+    # No default on purpose: the harness must never bake in an environment's
+    # model. Pass the exact id `contextdesk models discover` reports for the
+    # configured provider; the trace check below compares it byte for byte.
+    [string] $Model = '',
 
     [string] $Deadline = '10m',
 
@@ -229,6 +234,9 @@ if ($Source.Count -gt 0 -and $Execute -and -not $AllowImport) {
 }
 if ($Execute -and [string]::IsNullOrWhiteSpace($Model)) {
     throw 'An exact discovered model id is required for -Execute.'
+}
+if ($Execute -and $Model -match '^<.*>$') {
+    throw 'Replace the <MODEL-ID> placeholder with an exact model id discovered from the configured provider (contextdesk models discover).'
 }
 
 # Canonicalize and deduplicate source paths before any work begins. This avoids

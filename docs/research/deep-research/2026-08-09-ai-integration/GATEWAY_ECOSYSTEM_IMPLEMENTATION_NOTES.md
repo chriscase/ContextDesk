@@ -2,7 +2,7 @@
 
 Status: recovered bounded research detail; not a protocol-conformance claim
 
-Source conversation: `6a791be6-0170-83ea-b176-35e66f103cd9`
+Source conversation: owner-local (id withheld from the public repository)
 
 The thread reader retained only the first 20,000 characters of the oversized
 research answer. This file records the high-value deltas visible in that preview

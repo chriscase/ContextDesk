@@ -141,6 +141,16 @@ $BIN --data-dir "$DATA" --json corpus list
 $BIN --data-dir "$DATA" --json explore "timeout"
 ```
 
+Every import ends in exactly one typed outcome: **complete**, **partial**
+(a corpus was published, with a located defect ledger naming which archive
+member or record is missing — down to `outer.zip!/inner.zip!/app.log` and
+line — and a bounded defect code saying why), or **rejected** (nothing
+published, the library unchanged, the stopping member named). The same
+verdict appears in operator prose and in machine output (`data.outcome`
+in `--json`; `error.details` on a rejection), so automation gates on
+typed facts, never on prose. Details and generic examples:
+[Import outcomes and the defect ledger](docs/CLI.md#import-outcomes-and-the-defect-ledger).
+
 ### Raw-log normalization example
 
 ```bash

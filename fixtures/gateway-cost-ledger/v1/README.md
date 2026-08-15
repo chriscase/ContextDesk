@@ -21,6 +21,6 @@ allowlist.
 | `historical/` | Documented benchmark rows (no invented live data) |
 | `malformed/` | Credential / raw-prompt / endpoint-leak rejection cases |
 
-Never commit owner-local Luna raw captures here. See
+Never commit owner-local raw captures here. See
 `docs/benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md` for the offline import
 path.

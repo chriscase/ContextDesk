@@ -1,4 +1,4 @@
-/** Custom ContextDesk mark — desk + citation bars (not NexaDeck waveform). */
+/** Custom ContextDesk mark — desk + citation bars. */
 
 type Props = {
   size?: number;

@@ -66,6 +66,7 @@ DEMO_SHIPPED_VERBS = {
     "logging-assessment",
     "exception-episodes",
     "episodes",
+    "models",
 }
 
 SHIPPED_COMMANDS = {

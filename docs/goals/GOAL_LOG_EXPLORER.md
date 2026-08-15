@@ -109,7 +109,7 @@ EOF
 )"
 
 # Commit design + goal on a branch
-cd /Users/chriscase/Documents/GitHub/ContextDesk && \
+cd <repo-root> && \
 git checkout -b docs/log-explorer-design 2>&1 && \
 git add docs/design/LOG_EXPLORER.md docs/goals/GOAL_LOG_EXPLORER.md && \
 git commit -m "$(cat <<'EOF'
@@ -125,6 +125,6 @@ gh pr create --repo chriscase/ContextDesk --base main --head docs/log-explorer-d
 <|tool_call_begin|>
 run_terminal_command
 command
-cd /Users/chriscase/Documents/GitHub/ContextDesk && gh issue list --search "Log Explorer OR Log Investigation" --limit 10 2>&1
+cd <repo-root> && gh issue list --search "Log Explorer OR Log Investigation" --limit 10 2>&1
 description
 List filed Log Explorer issues

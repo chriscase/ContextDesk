@@ -64,6 +64,29 @@ class DemoCorpusBatchContractTests(unittest.TestCase):
             self.assertIn(needle, self.source)
         self.assertNotIn("$args.Add('--auto-approve')", self.source)
 
+    def test_no_hard_coded_model_default(self) -> None:
+        """The reusable harness must never bake in an environment's model id.
+
+        A live run needs the exact id discovered from the operator's own
+        configured provider (``contextdesk models discover``), passed
+        explicitly. Documentation examples use an explicit placeholder, and a
+        copy-pasted placeholder fails fast instead of reaching a provider.
+        """
+        self.assertIn("[string] $Model = ''", self.source)
+        self.assertIn(
+            "An exact discovered model id is required for -Execute.", self.source
+        )
+        self.assertIn("-Model '<MODEL-ID>'", self.source)
+        self.assertIn("$Model -match '^<.*>$'", self.source)
+        self.assertIn("Replace the <MODEL-ID> placeholder", self.source)
+        # The trace gate keeps comparing the served model byte for byte.
+        self.assertIn("$trace[0].chat_model -ceq $Model", self.source)
+        # No provider-specific model id may ride along as a default or an
+        # example in this reusable procedure.
+        lowered = self.source.lower()
+        for vendor_fragment in ("qwen", "deepseek", "-27b", "-flash"):
+            self.assertNotIn(vendor_fragment, lowered)
+
     def test_harness_checks_existing_timezone_before_live_turn(self) -> None:
         self.assertIn("timezone", self.source)
         self.assertIn("unresolved_local_records", self.source)

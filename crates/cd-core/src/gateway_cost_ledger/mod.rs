@@ -8,7 +8,7 @@
 //! Missing cost or token fields stay explicitly unknown — never coerced
 //! to zero. [`VerdictStatus::Inconclusive`] stays distinct from pass and fail.
 //!
-//! Independent of the Luna tool-continuation hardening lane: owner-local Luna
+//! Independent of the tool-continuation hardening lane: owner-local
 //! reports may be imported later via the documented offline path without
 //! committing raw captures (see `docs/benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md`).
 

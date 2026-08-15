@@ -106,7 +106,7 @@ inventory` and explicit dry-run cleanup for disposable worktree targets.
 
 ## How to work issues
 
-1. **Multi-step goals:** use an integration branch `integrate/<slug>` (all agent kinds). Commit there with local gates; open **one** PR to `main` when the batch is coherent — see [`docs/AGENT_WORKFLOW.md`](docs/AGENT_WORKFLOW.md). Scripts: `~/Documents/GitHub/scripts/integrate-setup.sh`, `integrate-promote.sh`.
+1. **Multi-step goals:** use an integration branch `integrate/<slug>` (all agent kinds). Commit there with local gates; open **one** PR to `main` when the batch is coherent — see [`docs/AGENT_WORKFLOW.md`](docs/AGENT_WORKFLOW.md). Scripts: owner-local `integrate-setup.sh`, `integrate-promote.sh` (kept outside this repository).
 2. **Single tight fix:** smallest PR that closes one issue is still fine (direct to `main`).
 3. Link `Fixes #N` in the promote/PR description
 4. Update docs when behavior or architecture changes

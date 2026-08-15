@@ -1,5 +1,5 @@
 /**
- * Animated splash (vendored NexaCore pattern) — ContextDesk branding.
+ * Animated splash (vendored motion pattern) — ContextDesk branding.
  * enter → hold → exit; always completes (timeout safety).
  */
 import {

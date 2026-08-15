@@ -1,6 +1,7 @@
 # Agent workflow — integration branches + attribution
 
-Binding companion to [`AGENTS.md`](../AGENTS.md), global `~/Documents/GitHub/Claude.md`,
+Binding companion to [`AGENTS.md`](../AGENTS.md), the owner's global agent
+instructions (kept outside this repository),
 [`ISSUE_HONESTY.md`](./ISSUE_HONESTY.md), and [`CLOSE_PROOF.md`](./CLOSE_PROOF.md).
 
 Applies to **all** agent kinds that touch this repo: Grok Build, Claude Code,
@@ -38,7 +39,7 @@ Examples:
 **Do not** use one eternal shared `dev` for all goals — parallel goals collide.
 Use a **new slug per batch**.
 
-## Commands (from `~/Documents/GitHub/scripts`)
+## Commands (from the owner-local `scripts` checkout, outside this repository)
 
 ```bash
 # Start batch (optional worktree keeps main checkout free)

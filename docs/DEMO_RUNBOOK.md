@@ -140,7 +140,8 @@ $BIN --data-dir "$DATA" --json import ./fixtures/cli-release-demo
 
 **Expect:** JSON envelope `ok: true`, `command: "import"`,
 `data.events_imported: 6`, `data.sources_selected: 1`,
-`data.timezone_ambiguous_sources: []`.
+`data.timezone_ambiguous_sources: []`, and the typed verdict
+`data.outcome.class: "complete"` with `data.outcome.defects: []`.
 
 ```bash
 $BIN --data-dir "$DATA" --json corpus list
@@ -150,6 +151,17 @@ echo "CORPUS=$CORPUS"
 ```
 
 **Expect:** one corpus; id matches `data.corpus_id` from import.
+
+`data.outcome` is the acceptance verdict for every import: `complete`
+(everything offered was published), `partial` (published, but the bounded
+defect ledger names what is missing — identity chain such as
+`outer.zip!/inner.zip!/app.log`, a stable defect code, and for record
+defects the line/byte position), or `rejected` (nonzero exit, nothing
+published, the same typed document under `error.details`). Gate demo
+acceptance on `outcome.class`, not on the legacy `data.partial` bool —
+that bool reflects failed or policy-excluded sources only and stays
+`false` for a malformed-records-only partial. Codes and generic examples:
+[docs/CLI.md — Import outcomes](CLI.md#import-outcomes-and-the-defect-ledger).
 
 ### B. Explore / context (deterministic query — no LLM)
 
@@ -194,9 +206,11 @@ import, read credentials, or contact a gateway:
 ```
 
 After reviewing the preflight report, run the selected cases serially. The
-example below uses the exact catalog id returned by model discovery; substitute
-the model actually selected on the user's gateway. `-AllowImport` is required
-because source imports change the specified data directory:
+harness has no built-in model default: `-Execute` requires `-Model` with the
+exact catalog id returned by model discovery (`contextdesk models discover`)
+for the provider actually configured, and the trace gate compares it byte for
+byte. `-AllowImport` is required because source imports change the specified
+data directory:
 
 ```powershell
 .\scripts\demo-corpus-batch.ps1 `

@@ -11,7 +11,7 @@ Build a provider-neutral, share-safe ledger so operators can compare gateway
 diagnostic runs over time: request counts, token/cost summaries when reported,
 latency, deadline/cancellation, cleanup, failure categories, and typed verdicts.
 
-This lane is **independent** of the Luna tool-continuation hardening lane. It
+This lane is **independent** of the tool-continuation hardening lane. It
 does not change gateway diagnose execution, tool continuation, or credential
 handling.
 
@@ -80,9 +80,9 @@ Text output is a deterministic provenance × gateway × model cohort table
 Unknown identities never collapse unrelated runs into one cohort. JSON uses
 the comparison schema above.
 
-## Importing owner-local Luna reports later (without committing raw data)
+## Importing owner-local diagnostic reports later (without committing raw data)
 
-Owner-local Luna / private diagnostic directories may contain raw provider
+Owner-local private diagnostic directories may contain raw provider
 exchanges under a `private/` capture tree. Those must **never** be committed.
 
 Recommended offline import path:
@@ -114,10 +114,10 @@ lane.
 
 ## Non-goals
 
-- Live gateway or Luna continuation probing
+- Live gateway or tool-continuation probing
 - Readiness / verified badges derived from aggregates
 - Committing owner-local raw captures or credentials
-- Coupling to the Luna tool-continuation hardening branch
+- Coupling to the tool-continuation hardening branch
 
 ## Hermetic mutation coverage
 
