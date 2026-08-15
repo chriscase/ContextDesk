@@ -16,7 +16,22 @@ env:
   # (the only writer) and every shard (`save-if: false` so they restore but
   # do not save). Do not set Swatinem `lookup-only: true` on shards: that
   # checks the key without downloading files.
-  CD_SHARD_COUNT: "4"
+  #
+  # Raised 4 -> 8 after the shard carrying `cd-core/lib/other` was cancelled at
+  # the 60-minute job budget on two consecutive runs of PR #892 (31888581827,
+  # 31897532947), each time leaving its 29 units unrun and failing the
+  # aggregate at `coverage: 87/116`. The other three shards finished in 16-33
+  # minutes, so the partition — not the tree — was the problem.
+  #
+  # 8 rather than 6 because a shard's cost is build + tests and only the test
+  # half shrinks when units are spread: hosted shard 4 reported `build time:
+  # 710s` of a `total time: 1203s` on a warm cache. At 6 shards the
+  # `cd-core/lib/other` shard still draws 19 of 116 units, which lands near the
+  # 50-minute step timeout; at 8 it draws 15. If that shard ever overruns
+  # again, the next lever is a `lib_splits` entry for `cd-core/lib/other` in
+  # scripts/ci_shard_plan.sh — the same mechanism that already split
+  # `cd-core/lib` into `log_analysis` and `other` — not a further count bump.
+  CD_SHARD_COUNT: "8"
 
 # Keep every main-branch run, but stop spending runner time on an obsolete PR
 # revision once a newer commit for the same PR has started CI.
@@ -229,7 +244,7 @@ jobs:
       fail-fast: false
       matrix:
         # Keep in sync with CD_SHARD_COUNT (see the workflow `env` block).
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
