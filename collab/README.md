@@ -7,8 +7,8 @@ directory is an **npm workspace independent of** the Rust workspace,
 or crate internals. Published `packages/contracts` artifacts may be consumed
 read-only later; v1 does not.
 
-Parent epic: #883. This skeleton is #884. Auth, domain, import, and export are
-sibling issues — module folders exist here, implementations do not.
+Parent epic: #883. Skeleton is #884. Auth/authz/audit is #885. Cases/import/export
+are later slices.
 
 ## Layout
 
@@ -62,6 +62,29 @@ silently fetches or caches remote bytes. Verification against an expected hash
 is an explicit, recorded operation. A reference whose target was never hashed
 (`expectedHash: null`) is representable and stays `unverified` or
 `unreachable`; it is never silently treated as `verified`.
+
+### Auth: bind-through LDAP over encrypted transport only (#885)
+
+- `AuthAdapter.authenticate(username, password)` lives in `modules/auth`.
+  Passwords exist in memory only for the bind. No hashing, caching, storage, or
+  logging. No other module may import `ldapts` or read a password field
+  (enforced by `password-isolation.test.ts`).
+- Transport: `ldaps://` or `ldap://` + StartTLS. Plaintext is refused at
+  `loadLdapConfig`. Disabling TLS verification requires explicit
+  `COLLAB_LDAP_DEV_MODE=1` (fixture only).
+- Optional service-bind (`COLLAB_LDAP_BIND_DN` / `COLLAB_LDAP_BIND_PASSWORD`) is
+  secret-store-sourced and never written to the DB, logs, or audit.
+- Sessions: opaque `HttpOnly` `SameSite=Lax` cookies; server-side store;
+  TTL + idle timeout; revocation is immediate. No JWTs.
+- Group→role map is config (`COLLAB_GROUP_ROLE_MAP`); unmapped users are
+  default-deny. Roles are recomputed from the current map on every request.
+- Audit is insert-only (`audit_events` trigger + app-role grants). Failed
+  logins are rate-limited and return the same `invalid_credentials` body
+  whether the account exists.
+- CSRF: same-origin SPA + `SameSite=Lax`. TLS terminates at ingress;
+  set `COLLAB_COOKIE_SECURE=1` behind HTTPS.
+- MFA and SSO/OIDC are out of v1 (adapter seam only). MFA is a directory/VPN
+  responsibility.
 
 ## Module boundaries
 

@@ -15,6 +15,21 @@ export type {
 } from "./health.js";
 
 export {
+  APP_ROLES,
+  AUTH_ERROR_SCHEMA_ID,
+  SESSION_SCHEMA_ID,
+  parseAuthError,
+  parseSessionResponse,
+} from "./auth.js";
+export type {
+  AppRole,
+  AuthErrorCode,
+  AuthErrorV1,
+  IdentityV1,
+  SessionResponseV1,
+} from "./auth.js";
+
+export {
   FILE_SERVER_REF_SCHEMA_ID,
   parseFileServerReference,
 } from "./evidence.js";

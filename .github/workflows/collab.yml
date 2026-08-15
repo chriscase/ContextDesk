@@ -37,10 +37,29 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      ldap:
+        image: osixia/openldap:1.5.0
+        env:
+          LDAP_ORGANISATION: Example
+          LDAP_DOMAIN: example.test
+          LDAP_ADMIN_PASSWORD: fixture-admin-secret
+          LDAP_TLS: "true"
+          LDAP_TLS_VERIFY_CLIENT: never
+        ports:
+          - 389:389
+          - 636:636
     env:
       COLLAB_TEST_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
       COLLAB_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/collab_ci
       COLLAB_MIGRATE_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/collab_ci
+      COLLAB_LDAP_URL: ldaps://127.0.0.1:636
+      COLLAB_LDAP_DEV_MODE: "1"
+      COLLAB_LDAP_TLS_INSECURE: "1"
+      COLLAB_LDAP_USER_DN_TEMPLATE: uid={username},ou=people,dc=example,dc=test
+      COLLAB_LDAP_GROUP_SEARCH_BASE: ou=groups,dc=example,dc=test
+      COLLAB_LDAP_FIXTURE_USER: alice
+      COLLAB_LDAP_FIXTURE_PASSWORD: fixture-alice-secret
+      COLLAB_GROUP_ROLE_MAP: cn=viewers,ou=groups,dc=example,dc=test=viewer;cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -51,9 +70,22 @@ jobs:
       - name: create disposable database
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client
+          sudo apt-get install -y -qq postgresql-client ldap-utils
           PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d postgres \
             -c "CREATE DATABASE collab_ci;"
+      - name: seed OpenLDAP fixture
+        run: |
+          for i in $(seq 1 40); do
+            if ldapsearch -x -H ldap://127.0.0.1:389 -b dc=example,dc=test \
+              -D cn=admin,dc=example,dc=test -w fixture-admin-secret -s base \
+              >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          LDAPTLS_REQCERT=never ldapadd -x -H ldaps://127.0.0.1:636 \
+            -D cn=admin,dc=example,dc=test -w fixture-admin-secret \
+            -f deploy/openldap/seed.ldif
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
