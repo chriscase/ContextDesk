@@ -115,3 +115,6 @@ logs/
 # Python bytecode from the reference producer examples.
 __pycache__/
 *.pyc
+
+# Per-shard CI test logs/results (scripts/ci_run_shard.sh --out, #874)
+ci-shards/
