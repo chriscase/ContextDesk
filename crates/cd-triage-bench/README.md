@@ -11,8 +11,12 @@ SDK contracts, not by absorbing case management.
 
 Working name: `cd-triage-bench` (rename-friendly; crate prefix stays `cd-*`).
 
-Status on this branch: **local integration** (Refs #877, #878, and the
-report-only slice of #880/#881). Not shipped on `main`. Not release-ready.
+Status: first slice (#877 store/entities plus a report-only #880/#881 sketch)
+is on `main` via #890/#891. This crate's **manual import / provenance** path
+(#878) is completed here: human, web-only, and other-product `TriageRun`s,
+byte-exact raw capture, mandatory immutable fairness, and explicit
+duplicate / near-duplicate outcomes. Not a close of epic #876. Not
+release-ready. ContextDesk SDK adapter remains #879.
 
 ## Layout
 
@@ -97,6 +101,20 @@ cd-triage-bench --library ./bench-lib report --format json --privacy share-safe
 ```
 
 Human submission template: [`fixtures/templates/human-run.md`](fixtures/templates/human-run.md).
+Worked example: [`fixtures/templates/human-run.example.md`](fixtures/templates/human-run.example.md).
+
+The markdown body after the closing ` ``` ` fence is the raw write-up. Import
+skips only that one leading newline and otherwise stores the body byte-exact
+(trailing spaces included). `raw_output_utf8` in the JSON, when present, wins
+over the markdown body. `--raw` wins over both and is the binary-safe path.
+
+`show runs <id>` prints completeness (`exact` / `partial` / `unknown`) and
+leaves unknown cost, timing, prompt, workflow, and strategy version as
+`{"status":"unknown"}`. Re-importing an identical payload prints
+`duplicate <run_id>`. A different raw hash, or the same raw bytes with a
+different fairness/strategy identity, prints `created <run_id>` (and
+`near_duplicate_of=` when the raw digest already exists). There is no edit
+verb; changing fairness on a stored record fails closed.
 
 ## Rubric v1 dimensions
 

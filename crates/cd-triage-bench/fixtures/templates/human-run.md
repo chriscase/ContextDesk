@@ -1,7 +1,16 @@
-<!-- contextdesk.triage_bench.run_import.v1 human submission template -->
+<!--
+contextdesk.triage_bench.run_import.v1 — human submission template
 
-Fill the JSON metadata, then write the verbatim result below the fence.
-Unknown fields stay `"status": "unknown"` — do not invent versions, prompts, costs, or timing.
+Fill the JSON metadata. Unknown fields stay {"status":"unknown"} — do not
+invent versions, prompts, costs, or timing. Fairness is required at import
+and cannot be edited later.
+
+The verbatim result starts on the first line after the closing fence.
+That body is stored byte-exact: only the single newline after ``` is skipped.
+Do not edit a run after import; a correction is a new run.
+
+Worked example: human-run.example.md
+-->
 
 ```json
 {
@@ -29,5 +38,4 @@ Unknown fields stay `"status": "unknown"` — do not invent versions, prompts, c
   "created_at": "2026-01-15T08:00:00Z"
 }
 ```
-
-Write the verbatim expert result below this line. Do not edit it after import; corrections are a new run.
+PASTE_VERBATIM_RESULT_HERE

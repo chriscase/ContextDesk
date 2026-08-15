@@ -174,6 +174,19 @@ fn manual_import_preserves_raw_bytes_and_source_kinds() {
     assert_eq!(human_run.operator, "operator-a");
     assert_eq!(human_run.importer.as_deref(), Some("importer-b"));
     assert_eq!(other_run.status, RunStatus::Partial);
+    assert_eq!(
+        human_run.raw_output.digest,
+        ContentDigest::of_bytes(HUMAN_RAW.as_bytes())
+    );
+    assert_eq!(
+        sha256_hex(&store.get_blob(&human_run.raw_output.digest.hex).unwrap()),
+        human_run.raw_output.digest.hex
+    );
+    assert_eq!(
+        web_run.claims[0].evidence_item_id.as_deref(),
+        Some("ev-does-not-exist")
+    );
+    assert!(!snapshot_ids(&snapshot).contains("ev-does-not-exist"));
 }
 
 #[test]
