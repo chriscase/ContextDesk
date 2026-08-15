@@ -76,7 +76,9 @@ is an explicit, recorded operation. A reference whose target was never hashed
   self-signed cert. Constructor `tlsOptions` are omitted for StartTLS so
   ldapts does not wrap port 389 as LDAPS.
 - Optional service-bind (`COLLAB_LDAP_BIND_DN` / `COLLAB_LDAP_BIND_PASSWORD`) is
-  secret-store-sourced and never written to the DB, logs, or audit.
+  secret-store-sourced and never written to the DB, logs, or audit. After a
+  successful user bind it is reused to read group membership when the
+  directory hides group OUs from the user (osixia returns LDAP 0x20).
 - Sessions: opaque `HttpOnly` `SameSite=Lax` cookies; server-side store;
   TTL + idle timeout; revocation is immediate. No JWTs.
 - Group→role map is config (`COLLAB_GROUP_ROLE_MAP`); unmapped users are

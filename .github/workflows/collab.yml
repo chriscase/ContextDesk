@@ -61,6 +61,11 @@ jobs:
       COLLAB_LDAP_TLS_INSECURE: "1"
       COLLAB_LDAP_USER_DN_TEMPLATE: uid={username},ou=people,dc=example,dc=test
       COLLAB_LDAP_GROUP_SEARCH_BASE: ou=groups,dc=example,dc=test
+      # osixia default ACL is admin/self only; group search as alice is 0x20.
+      # Service-bind is the #885 seam. Password is the fixture admin secret
+      # already used by the seed step — not a production credential.
+      COLLAB_LDAP_BIND_DN: cn=admin,dc=example,dc=test
+      COLLAB_LDAP_BIND_PASSWORD: fixture-admin-secret
       COLLAB_LDAP_FIXTURE_USER: alice
       COLLAB_LDAP_FIXTURE_PASSWORD: fixture-alice-secret
       COLLAB_GROUP_ROLE_MAP: cn=viewers,ou=groups,dc=example,dc=test=viewer;cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin
@@ -87,9 +92,12 @@ jobs:
             fi
             sleep 2
           done
-          LDAPTLS_REQCERT=never ldapadd -x -H ldaps://127.0.0.1:636 \
+          LDAPTLS_REQCERT=never ldapadd -x -H ldap://127.0.0.1:389 -ZZ \
             -D cn=admin,dc=example,dc=test -w fixture-admin-secret \
             -f deploy/openldap/seed.ldif
+          LDAPTLS_REQCERT=never ldapsearch -x -H ldap://127.0.0.1:389 -ZZ \
+            -D cn=admin,dc=example,dc=test -w fixture-admin-secret \
+            -b uid=alice,ou=people,dc=example,dc=test -s base uid >/dev/null
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
