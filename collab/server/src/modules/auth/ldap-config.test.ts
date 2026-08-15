@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ldapClientOptions, ldapTlsOptions } from "./ldap-adapter.js";
 import { loadLdapConfig } from "./ldap-config.js";
 
 describe("LDAP config", () => {
@@ -24,6 +25,27 @@ describe("LDAP config", () => {
       COLLAB_LDAP_STARTTLS: "1",
     });
     expect(cfg.starttls).toBe(true);
+  });
+
+  it("omits constructor tlsOptions so StartTLS can upgrade a plaintext socket", () => {
+    const cfg = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldap://directory.example.test:389",
+      COLLAB_LDAP_STARTTLS: "1",
+    });
+    expect(ldapClientOptions(cfg).tlsOptions).toBeUndefined();
+    expect(ldapTlsOptions(cfg).rejectUnauthorized).toBe(true);
+  });
+
+  it("uses insecure fixture TLS options that Node can negotiate with osixia", () => {
+    const cfg = loadLdapConfig({
+      COLLAB_LDAP_URL: "ldaps://127.0.0.1:636",
+      COLLAB_LDAP_TLS_INSECURE: "1",
+      COLLAB_LDAP_DEV_MODE: "1",
+    });
+    const tls = ldapClientOptions(cfg).tlsOptions;
+    expect(tls?.rejectUnauthorized).toBe(false);
+    expect(tls?.ecdhCurve).toBe("auto");
+    expect(tls && "ca" in tls).toBe(false);
   });
 
   it("refuses TLS verification disable without explicit dev mode", () => {

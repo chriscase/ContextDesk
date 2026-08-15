@@ -52,7 +52,11 @@ jobs:
       COLLAB_TEST_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
       COLLAB_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/collab_ci
       COLLAB_MIGRATE_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/collab_ci
-      COLLAB_LDAP_URL: ldaps://127.0.0.1:636
+      # StartTLS on 389: osixia LDAPS (636) + Node 22 fails the handshake
+      # (wrong curve) while ldapadd still works. StartTLS is encrypted and
+      # is the transport #885 already allows. Seed still uses ldaps://636.
+      COLLAB_LDAP_URL: ldap://127.0.0.1:389
+      COLLAB_LDAP_STARTTLS: "1"
       COLLAB_LDAP_DEV_MODE: "1"
       COLLAB_LDAP_TLS_INSECURE: "1"
       COLLAB_LDAP_USER_DN_TEMPLATE: uid={username},ou=people,dc=example,dc=test
