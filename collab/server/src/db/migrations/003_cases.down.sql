@@ -1,0 +1,11 @@
+DROP TRIGGER IF EXISTS contribution_revisions_no_update ON contribution_revisions;
+DROP FUNCTION IF EXISTS contribution_revisions_immutable();
+DROP TRIGGER IF EXISTS timeline_events_no_update ON timeline_events;
+DROP FUNCTION IF EXISTS timeline_events_immutable();
+DROP TABLE IF EXISTS evidence_artifacts;
+DROP TABLE IF EXISTS contribution_revisions;
+DROP TABLE IF EXISTS contributions;
+DROP TABLE IF EXISTS timeline_events;
+DROP TABLE IF EXISTS case_participants;
+DROP TABLE IF EXISTS cases;
+DELETE FROM schema_migrations WHERE version = '003_cases';

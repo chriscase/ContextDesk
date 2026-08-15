@@ -16,6 +16,7 @@ import { registerAuthRoutes, type AuthRouteDeps } from "./modules/auth/index.js"
 import { registerAuthzRoutes } from "./modules/authz/index.js";
 import type { MutableGroupRoleMap } from "./modules/authz/index.js";
 import type { AuditStore } from "./modules/audit/index.js";
+import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 
 export interface SecurityDeps {
   auth: AuthRouteDeps;
@@ -28,10 +29,11 @@ export interface AppDeps {
   pool: Pick<Pool, "query"> | null;
   store: Pick<EvidenceStore, "ping">;
   security?: SecurityDeps;
+  domain?: CaseService;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024 });
 
   app.get("/health", async (): Promise<HealthResponseV1> => {
     return {
@@ -78,6 +80,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       roles: deps.security.roles,
       audit: deps.security.audit,
     });
+    if (deps.domain) {
+      await registerCaseRoutes(app, {
+        auth: deps.security.auth,
+        roles: deps.security.roles,
+        audit: deps.security.audit,
+        domain: deps.domain,
+      });
+    }
   }
 
   const staticDir =

@@ -30,6 +30,45 @@ export type {
 } from "./auth.js";
 
 export {
+  CASE_LIST_SCHEMA_ID,
+  CASE_SCHEMA_ID,
+  CASE_SEVERITIES,
+  CASE_STATUSES,
+  PRIVACY_CLASSES,
+  parseCase,
+  parseCaseList,
+} from "./case.js";
+export type {
+  CaseListV1,
+  CaseParticipantV1,
+  CaseSeverity,
+  CaseStatus,
+  CaseV1,
+  PrivacyClass,
+} from "./case.js";
+
+export { TIMELINE_SCHEMA_ID, parseTimeline } from "./timeline.js";
+export type { TimelineEventV1, TimelineV1 } from "./timeline.js";
+
+export {
+  CONTRIBUTION_KINDS,
+  CONTRIBUTION_SCHEMA_ID,
+  HYPOTHESIS_STATUSES,
+  PROVENANCE_SCHEMA_ID,
+  parseContribution,
+  parseProvenance,
+} from "./contribution.js";
+export type {
+  ContributionKind,
+  ContributionV1,
+  HypothesisStatus,
+  ProvenanceV1,
+} from "./contribution.js";
+
+export { ARTIFACT_KINDS, ARTIFACT_SCHEMA_ID, parseArtifact } from "./artifact.js";
+export type { ArtifactKind, ArtifactV1 } from "./artifact.js";
+
+export {
   FILE_SERVER_REF_SCHEMA_ID,
   parseFileServerReference,
 } from "./evidence.js";

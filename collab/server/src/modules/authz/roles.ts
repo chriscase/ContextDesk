@@ -2,7 +2,7 @@ import { APP_ROLES, type AppRole } from "@cd-collab/contracts";
 
 export { APP_ROLES, type AppRole };
 
-export type AuthzAction = "read" | "mutate" | "admin";
+export type AuthzAction = "read" | "mutate" | "lead" | "admin";
 
 const RANK: Record<AppRole, number> = {
   viewer: 1,
@@ -22,6 +22,8 @@ export function canPerform(roles: readonly AppRole[], action: AuthzAction): bool
       return max >= RANK.viewer;
     case "mutate":
       return max >= RANK.contributor;
+    case "lead":
+      return max >= RANK["case-lead"];
     case "admin":
       return max >= RANK.admin;
   }

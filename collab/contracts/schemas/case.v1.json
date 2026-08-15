@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/case.v1.json",
+  "title": "cd-collab Case v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "id", "title", "severity", "status", "legalHold", "retentionClass", "participants", "createdAt", "createdBy"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.case.v1" },
+    "id": { "type": "string" },
+    "title": { "type": "string" },
+    "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "status": { "type": "string", "enum": ["open", "monitoring", "resolved", "archived"] },
+    "legalHold": { "type": "boolean" },
+    "retentionClass": { "type": "string" },
+    "participants": { "type": "array" },
+    "createdAt": { "type": "string" },
+    "createdBy": { "type": "string" }
+  }
+}
