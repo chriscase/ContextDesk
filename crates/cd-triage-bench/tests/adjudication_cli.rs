@@ -370,6 +370,76 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
     assert!(!diag_early_ok, "{diag_early}");
     assert!(diag_early.contains("evidence-support"), "{diag_early}");
 
+    let diagnosis_without_support = json!({
+        "schema_id": "contextdesk.triage_bench.adjudication.v1",
+        "privacy": "share_safe",
+        "case_id": seed.case_id,
+        "task_id": seed.task_id,
+        "snapshot_id": seed.snapshot_id,
+        "run_id": human_id,
+        "reviewer": "reviewer-a",
+        "conflict_of_interest": { "declared": false },
+        "rubric_version": "contextdesk.triage_bench.rubric.v1",
+        "phase": "diagnosis",
+        "blinding": { "kind": "blinded" },
+        "outcomes": outcomes(
+            json!({"kind": "score", "value": 3}),
+            json!({"kind": "score", "value": 3}),
+            json!({"kind": "score", "value": 2}),
+            json!({"kind": "score", "value": 2}),
+            json!({"kind": "score", "value": 3}),
+        ),
+        "created_at": "2026-01-15T09:50:00Z"
+    });
+    let diag_file = seed.tmp.path().join("diag-without-support.json");
+    write_json(&diag_file, &diagnosis_without_support);
+    bench()
+        .env("HOME", &seed.home_file)
+        .args([
+            "--library",
+            seed.library.to_str().unwrap(),
+            "import-adjudication",
+            diag_file.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("support-phase"));
+
+    let blind_diagnosis = json!({
+        "schema_id": "contextdesk.triage_bench.adjudication.v1",
+        "privacy": "share_safe",
+        "case_id": seed.case_id,
+        "task_id": seed.task_id,
+        "snapshot_id": seed.snapshot_id,
+        "run_id": human_id,
+        "reviewer": "reviewer-a",
+        "conflict_of_interest": { "declared": false },
+        "rubric_version": "contextdesk.triage_bench.rubric.v1",
+        "phase": "support",
+        "blinding": { "kind": "blinded" },
+        "outcomes": outcomes(
+            json!({"kind": "score", "value": 3}),
+            json!({"kind": "score", "value": 3}),
+            json!({"kind": "score", "value": 2}),
+            json!({"kind": "score", "value": 2}),
+            json!({"kind": "score", "value": 3}),
+        ),
+        "created_at": "2026-01-15T09:51:00Z"
+    });
+    let blind_file = seed.tmp.path().join("blind-diagnosis.json");
+    write_json(&blind_file, &blind_diagnosis);
+    bench()
+        .env("HOME", &seed.home_file)
+        .args([
+            "--library",
+            seed.library.to_str().unwrap(),
+            "import-adjudication",
+            blind_file.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("diagnosis_correctness"));
+
     let leaky_raw = "web-assistant says the database is down. Citation: ev-does-not-exist\n";
     let web_id = seed.import_run_json(
         "web-assistant",
@@ -395,6 +465,28 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
     assert!(!unblindable.contains("\"source_kind\""));
     assert!(!unblindable.contains("\"strategy\""));
 
+    let support_a = json!({
+        "schema_id": "contextdesk.triage_bench.adjudication.v1",
+        "privacy": "share_safe",
+        "case_id": seed.case_id,
+        "task_id": seed.task_id,
+        "snapshot_id": seed.snapshot_id,
+        "run_id": human_id,
+        "reviewer": "reviewer-a",
+        "conflict_of_interest": { "declared": false },
+        "rubric_version": "contextdesk.triage_bench.rubric.v1",
+        "phase": "support",
+        "blinding": { "kind": "blinded" },
+        "outcomes": outcomes(
+            json!({"kind": "not_applicable"}),
+            json!({"kind": "score", "value": 3}),
+            json!({"kind": "score", "value": 2}),
+            json!({"kind": "score", "value": 2}),
+            json!({"kind": "score", "value": 3}),
+        ),
+        "created_at": "2026-01-15T10:00:00Z"
+    });
+    seed.import_adj(&support_a);
     let adj_a = json!({
         "schema_id": "contextdesk.triage_bench.adjudication.v1",
         "privacy": "share_safe",
@@ -405,6 +497,7 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
         "reviewer": "reviewer-a",
         "conflict_of_interest": { "declared": false },
         "rubric_version": "contextdesk.triage_bench.rubric.v1",
+        "phase": "diagnosis",
         "blinding": { "kind": "blinded" },
         "outcomes": outcomes(
             json!({"kind": "score", "value": 3}),
@@ -413,10 +506,11 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
             json!({"kind": "score", "value": 2}),
             json!({"kind": "score", "value": 3}),
         ),
-        "created_at": "2026-01-15T10:00:00Z"
+        "created_at": "2026-01-15T10:01:00Z"
     });
     let (adj_a_id, score_a_id) = seed.import_adj(&adj_a);
     let shown_a = seed.show("adjudications", &adj_a_id);
+    assert_eq!(shown_a["phase"], "diagnosis");
     assert_eq!(shown_a["reviewer"], "reviewer-a");
     assert_eq!(shown_a["conflict_of_interest"]["declared"], false);
     assert_eq!(
@@ -431,6 +525,34 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
     );
     assert_eq!(score_a["run_id"], human_id);
 
+    let support_b = json!({
+        "schema_id": "contextdesk.triage_bench.adjudication.v1",
+        "privacy": "share_safe",
+        "case_id": seed.case_id,
+        "task_id": seed.task_id,
+        "snapshot_id": seed.snapshot_id,
+        "run_id": human_id,
+        "reviewer": "reviewer-b",
+        "conflict_of_interest": {
+            "declared": true,
+            "notes": "authored the human write-up"
+        },
+        "rubric_version": "contextdesk.triage_bench.rubric.v1",
+        "phase": "support",
+        "blinding": {
+            "kind": "unblinded",
+            "reason": "distinctive first-person write-up"
+        },
+        "outcomes": outcomes(
+            json!({"kind": "not_applicable"}),
+            json!({"kind": "score", "value": 3}),
+            json!({"kind": "score", "value": 1}),
+            json!({"kind": "score", "value": 2}),
+            json!({"kind": "score", "value": 3}),
+        ),
+        "created_at": "2026-01-15T10:05:00Z"
+    });
+    seed.import_adj(&support_b);
     let adj_b = json!({
         "schema_id": "contextdesk.triage_bench.adjudication.v1",
         "privacy": "share_safe",
@@ -444,6 +566,7 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
             "notes": "authored the human write-up"
         },
         "rubric_version": "contextdesk.triage_bench.rubric.v1",
+        "phase": "diagnosis",
         "blinding": {
             "kind": "unblinded",
             "reason": "distinctive first-person write-up"
@@ -455,7 +578,7 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
             json!({"kind": "score", "value": 2}),
             json!({"kind": "score", "value": 3}),
         ),
-        "created_at": "2026-01-15T10:05:00Z"
+        "created_at": "2026-01-15T10:06:00Z"
     });
     let (adj_b_id, score_b_id) = seed.import_adj(&adj_b);
     assert_ne!(adj_a_id, adj_b_id);
@@ -496,6 +619,28 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
         json!({"kind": "score", "value": 0}),
     );
     unsafe_outcomes[4]["rationale"] = json!("invented citation and invented outage");
+    let web_support = json!({
+        "schema_id": "contextdesk.triage_bench.adjudication.v1",
+        "privacy": "share_safe",
+        "case_id": seed.case_id,
+        "task_id": seed.task_id,
+        "snapshot_id": seed.snapshot_id,
+        "run_id": web_id,
+        "reviewer": "reviewer-a",
+        "conflict_of_interest": { "declared": false },
+        "rubric_version": "contextdesk.triage_bench.rubric.v1",
+        "phase": "support",
+        "blinding": { "kind": "unblinded", "reason": "raw names the strategy" },
+        "outcomes": outcomes(
+            json!({"kind": "not_applicable"}),
+            json!({"kind": "score", "value": 0}),
+            json!({"kind": "score", "value": 1}),
+            json!({"kind": "score", "value": 0}),
+            json!({"kind": "score", "value": 0}),
+        ),
+        "created_at": "2026-01-15T10:09:00Z"
+    });
+    seed.import_adj(&web_support);
     let adj_web = json!({
         "schema_id": "contextdesk.triage_bench.adjudication.v1",
         "privacy": "share_safe",
@@ -506,6 +651,7 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
         "reviewer": "reviewer-a",
         "conflict_of_interest": { "declared": false },
         "rubric_version": "contextdesk.triage_bench.rubric.v1",
+        "phase": "diagnosis",
         "blinding": { "kind": "unblinded", "reason": "raw names the strategy" },
         "outcomes": unsafe_outcomes,
         "created_at": "2026-01-15T10:10:00Z"
@@ -543,6 +689,7 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
         "reviewer": "reviewer-a",
         "conflict_of_interest": { "declared": false },
         "rubric_version": "contextdesk.triage_bench.rubric.v2",
+        "phase": "diagnosis",
         "blinding": { "kind": "blinded" },
         "outcomes": outcomes(
             json!({"kind": "score", "value": 1}),
@@ -733,6 +880,7 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
         "reviewer": "reviewer-a",
         "conflict_of_interest": { "declared": false },
         "rubric_version": "contextdesk.triage_bench.rubric.v1",
+        "phase": "support",
         "blinding": { "kind": "blinded" },
         "outcomes": outcomes(
             json!({"kind": "not_applicable"}),
@@ -930,6 +1078,7 @@ fn issue_880_unresolved_diagnosis_score_is_rejected() {
             "reviewer": "reviewer-a",
             "conflict_of_interest": { "declared": false },
             "rubric_version": "contextdesk.triage_bench.rubric.v1",
+            "phase": "support",
             "blinding": { "kind": "blinded" },
             "outcomes": outcomes(
                 json!({"kind": "score", "value": 2}),

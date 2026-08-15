@@ -19,6 +19,25 @@ pub enum RubricDimension {
     UnsafeUnsupportedClaims,
 }
 
+/// Phase of a two-phase review. Support packets exclude case resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewPhase {
+    /// Evidence-support review. Case resolution is excluded.
+    Support,
+    /// Diagnosis review after a support-phase record exists. Resolution may be revealed.
+    Diagnosis,
+}
+
+impl ReviewPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Support => "support",
+            Self::Diagnosis => "diagnosis",
+        }
+    }
+}
+
 impl RubricDimension {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -110,6 +129,7 @@ pub struct Adjudication {
     pub reviewer: String,
     pub conflict_of_interest: ConflictOfInterest,
     pub rubric_version: String,
+    pub phase: ReviewPhase,
     pub blinding: BlindingState,
     pub outcomes: Vec<DimensionOutcome>,
     pub created_at: String,
@@ -123,6 +143,7 @@ struct AdjudicationDigestBody<'a> {
     run_id: &'a str,
     reviewer: &'a str,
     rubric_version: &'a str,
+    phase: ReviewPhase,
     blinding: &'a BlindingState,
     outcomes: &'a [DimensionOutcome],
     created_at: &'a str,
@@ -145,6 +166,7 @@ struct AdjudicationImport {
     reviewer: String,
     conflict_of_interest: ConflictOfInterest,
     rubric_version: String,
+    phase: ReviewPhase,
     blinding: BlindingState,
     outcomes: Vec<DimensionOutcome>,
     created_at: String,
@@ -175,6 +197,7 @@ impl Adjudication {
                     reviewer: import.reviewer,
                     conflict_of_interest: import.conflict_of_interest,
                     rubric_version: import.rubric_version,
+                    phase: import.phase,
                     blinding: import.blinding,
                     outcomes: import.outcomes,
                     created_at: import.created_at,
@@ -191,6 +214,7 @@ impl Adjudication {
                 import.reviewer,
                 import.conflict_of_interest,
                 import.rubric_version,
+                import.phase,
                 import.blinding,
                 import.outcomes,
                 import.created_at,
@@ -208,6 +232,7 @@ impl Adjudication {
         reviewer: String,
         conflict_of_interest: ConflictOfInterest,
         rubric_version: String,
+        phase: ReviewPhase,
         blinding: BlindingState,
         mut outcomes: Vec<DimensionOutcome>,
         created_at: String,
@@ -220,6 +245,7 @@ impl Adjudication {
             &run_id,
             &reviewer,
             &rubric_version,
+            phase,
             &blinding,
             &outcomes,
             &created_at,
@@ -235,6 +261,7 @@ impl Adjudication {
             reviewer,
             conflict_of_interest,
             rubric_version,
+            phase,
             blinding,
             outcomes,
             created_at,
@@ -268,6 +295,20 @@ impl Adjudication {
         if let BlindingState::Unblinded { reason } = &self.blinding {
             validate_bounded_string("blinding.reason", reason, 1024)?;
         }
+        if self.phase == ReviewPhase::Support {
+            match self.outcome(RubricDimension::DiagnosisCorrectness) {
+                Some(outcome)
+                    if matches!(
+                        outcome.verdict,
+                        DimensionVerdict::NotApplicable | DimensionVerdict::Unscorable { .. }
+                    ) => {}
+                _ => {
+                    return Err(BenchError::Schema(
+                        "support-phase adjudication cannot score diagnosis_correctness; resolution is not revealed".into(),
+                    ));
+                }
+            }
+        }
         if self.outcomes.len() != 5 {
             return Err(BenchError::Schema(
                 "adjudication must include all five rubric dimensions".into(),
@@ -299,6 +340,7 @@ impl Adjudication {
             &self.run_id,
             &self.reviewer,
             &self.rubric_version,
+            self.phase,
             &self.blinding,
             &self.outcomes,
             &self.created_at,
@@ -328,6 +370,7 @@ fn compute_adjudication_id(
     run_id: &str,
     reviewer: &str,
     rubric_version: &str,
+    phase: ReviewPhase,
     blinding: &BlindingState,
     outcomes: &[DimensionOutcome],
     created_at: &str,
@@ -339,6 +382,7 @@ fn compute_adjudication_id(
         run_id,
         reviewer,
         rubric_version,
+        phase,
         blinding,
         outcomes,
         created_at,
@@ -563,6 +607,83 @@ mod tests {
         assert!(err.to_string().contains("0..=3"));
     }
 
+    fn five_outcomes(diagnosis: DimensionVerdict) -> Vec<DimensionOutcome> {
+        vec![
+            DimensionOutcome {
+                dimension: RubricDimension::DiagnosisCorrectness,
+                verdict: diagnosis,
+                rationale: "r".into(),
+                assist_flags: vec![],
+            },
+            DimensionOutcome {
+                dimension: RubricDimension::EvidenceSupport,
+                verdict: DimensionVerdict::Score { value: 2 },
+                rationale: "r".into(),
+                assist_flags: vec![],
+            },
+            DimensionOutcome {
+                dimension: RubricDimension::Actionability,
+                verdict: DimensionVerdict::Score { value: 2 },
+                rationale: "r".into(),
+                assist_flags: vec![],
+            },
+            DimensionOutcome {
+                dimension: RubricDimension::UncertaintyCalibration,
+                verdict: DimensionVerdict::Score { value: 2 },
+                rationale: "r".into(),
+                assist_flags: vec![],
+            },
+            DimensionOutcome {
+                dimension: RubricDimension::UnsafeUnsupportedClaims,
+                verdict: DimensionVerdict::Score { value: 2 },
+                rationale: "r".into(),
+                assist_flags: vec![],
+            },
+        ]
+    }
+
+    #[test]
+    fn support_phase_cannot_score_diagnosis_correctness() {
+        let err = Adjudication::from_parts(
+            PrivacyClass::ShareSafe,
+            "case-1".into(),
+            "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            "reviewer-a".into(),
+            ConflictOfInterest {
+                declared: false,
+                notes: None,
+            },
+            RUBRIC_V1.into(),
+            ReviewPhase::Support,
+            BlindingState::Blinded,
+            five_outcomes(DimensionVerdict::Score { value: 3 }),
+            "2026-01-15T10:00:00Z".into(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("support-phase"));
+        assert!(err.to_string().contains("diagnosis_correctness"));
+        Adjudication::from_parts(
+            PrivacyClass::ShareSafe,
+            "case-1".into(),
+            "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            "reviewer-a".into(),
+            ConflictOfInterest {
+                declared: false,
+                notes: None,
+            },
+            RUBRIC_V1.into(),
+            ReviewPhase::Support,
+            BlindingState::Blinded,
+            five_outcomes(DimensionVerdict::NotApplicable),
+            "2026-01-15T10:00:00Z".into(),
+        )
+        .unwrap();
+    }
+
     fn sample_dimensions() -> Vec<DimensionScore> {
         vec![
             DimensionScore {
@@ -634,10 +755,11 @@ mod tests {
                 "reviewer": "reviewer-a",
                 "conflict_of_interest": {"declared": false},
                 "rubric_version": "contextdesk.triage_bench.rubric.v1",
+                "phase": "support",
                 "blinding": {"kind": "blinded"},
                 "outcomes": [],
                 "created_at": "2026-01-15T10:00:00Z",
-                "unexpected": true
+                "unexpected": true}
             }"#,
         )
         .unwrap_err();

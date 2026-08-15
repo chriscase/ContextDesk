@@ -147,8 +147,11 @@ task + snapshot identity. Different snapshots or fairness classes are
 **incomparable** (reason included), never force-ranked. Version N vs N−1
 pairs list improved/regressed/unchanged dimensions with drill-down to runs
 and adjudications. Unscored, failed, and partial runs stay visible and are
-not treated as zero. `share_safe` drops owner-only records/titles/rationales
-and fails closed on a privacy scan. `owner_only` keeps that detail.
+not treated as zero. Version pairs skip incomparable fairness/snapshot pairs
+and refuse a non-completed baseline. Scores are never pooled across rubric
+versions. `share_safe` drops owner-only records/titles/rationales/reviewers
+and fails closed on a privacy scan; withheld scores are counted separately
+from genuine absence. `owner_only` keeps that detail.
 
 **Residual:** an SDK-driven batch runner that executes ContextDesk across a
 case set, including mid-batch failure coverage. That needs #879. Imported

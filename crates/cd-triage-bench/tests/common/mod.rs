@@ -289,6 +289,65 @@ pub fn outcomes(
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn put_support_then_diagnosis(
+    store: &BenchStore,
+    privacy: PrivacyClass,
+    case_id: &str,
+    task_id: &str,
+    snapshot_id: &str,
+    run_id: &str,
+    reviewer: &str,
+    conflict_of_interest: ConflictOfInterest,
+    rubric_version: &str,
+    blinding: BlindingState,
+    diagnosis: DimensionVerdict,
+    evidence: DimensionVerdict,
+    action: DimensionVerdict,
+    uncertainty: DimensionVerdict,
+    unsafe_claims: DimensionVerdict,
+    created_at: &str,
+) {
+    let support = Adjudication::from_parts(
+        privacy,
+        case_id.into(),
+        task_id.into(),
+        snapshot_id.into(),
+        run_id.into(),
+        reviewer.into(),
+        conflict_of_interest.clone(),
+        rubric_version.into(),
+        ReviewPhase::Support,
+        blinding.clone(),
+        outcomes(
+            DimensionVerdict::NotApplicable,
+            evidence.clone(),
+            action.clone(),
+            uncertainty.clone(),
+            unsafe_claims.clone(),
+        ),
+        created_at.into(),
+    )
+    .unwrap();
+    store.put_adjudication(&support).unwrap();
+    let diagnosis_adj = Adjudication::from_parts(
+        privacy,
+        case_id.into(),
+        task_id.into(),
+        snapshot_id.into(),
+        run_id.into(),
+        reviewer.into(),
+        conflict_of_interest,
+        rubric_version.into(),
+        ReviewPhase::Diagnosis,
+        blinding,
+        outcomes(diagnosis, evidence, action, uncertainty, unsafe_claims),
+        created_at.into(),
+    )
+    .unwrap();
+    store.put_adjudication(&diagnosis_adj).unwrap();
+}
+
 pub fn snapshot_ids(snapshot: &EvidenceSnapshot) -> BTreeSet<String> {
     snapshot
         .items

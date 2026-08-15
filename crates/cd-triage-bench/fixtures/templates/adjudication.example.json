@@ -10,6 +10,7 @@
     "declared": false
   },
   "rubric_version": "contextdesk.triage_bench.rubric.v1",
+  "phase": "support",
   "blinding": { "kind": "blinded" },
   "outcomes": [
     {
