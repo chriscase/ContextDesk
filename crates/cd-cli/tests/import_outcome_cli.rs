@@ -208,8 +208,14 @@ fn partial_import_reports_located_details_in_json_and_prose() {
         stdout.contains("Import complete with defects (PARTIAL)"),
         "the headline must not say plain 'complete' for a partial corpus: {stdout}"
     );
+    // Assert the wording either side of the dash, not the dash itself: the
+    // human renderer normalizes typography to ASCII when `ascii_from_env()`
+    // is on, and that defaults to `cfg!(windows)`, so this headline's em dash
+    // (`push_ascii_typography`, U+2014) reaches a Windows operator as "-".
+    // The rendered prose is the only surface affected — the `--json` envelope
+    // and the rejection message asserted below carry the em dash verbatim.
     assert!(
-        stdout.contains("PARTIAL — a corpus was published but"),
+        stdout.contains("PARTIAL") && stdout.contains("a corpus was published but"),
         "{stdout}"
     );
     for fact in [
