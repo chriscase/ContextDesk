@@ -75,6 +75,13 @@ pub(crate) const ARCHIVE_MEMBER_SEPARATOR: &str = "!/";
 /// [`ImportOutcomeReport::rejected_from_error`] reads it back. The original
 /// message stays intact at the front, so existing callers that match on it
 /// (`contains("zip open")`) are unaffected.
+///
+/// The payload is percent-encoded for `[`, `]`, and `%` so an attacker-
+/// controlled ZIP member name cannot forge a second frame or leave a leftover
+/// `[member=` after a missed parse. Operator-facing surfaces must still run
+/// [`strip_member_annotation`]: a missed caller that prints `Display` raw is
+/// fail-open for the marker, which is why every host boundary seals.
+const MEMBER_ANNOTATION_MARKER: &str = "[member=";
 const MEMBER_ANNOTATION_OPEN: &str = " [member=";
 const MEMBER_ANNOTATION_CLOSE: char = ']';
 
@@ -82,33 +89,130 @@ const MEMBER_ANNOTATION_CLOSE: char = ']';
 ///
 /// Idempotent by design: the innermost frame that knows the identity annotates
 /// it, and outer frames re-propagating the same error leave it alone, so the
-/// deepest (most specific) locator is the one that survives.
+/// deepest (most specific) locator is the one that survives. An empty identity
+/// is not written — an empty frame is indistinguishable from a parse failure
+/// and would only leak the marker.
 pub(crate) fn annotate_member(message: &str, identity: &str) -> String {
-    if member_annotation(message).is_some() {
+    if message.contains(MEMBER_ANNOTATION_MARKER) || identity.is_empty() {
         return message.to_string();
     }
-    format!("{message}{MEMBER_ANNOTATION_OPEN}{identity}{MEMBER_ANNOTATION_CLOSE}")
+    format!(
+        "{message}{MEMBER_ANNOTATION_OPEN}{}{MEMBER_ANNOTATION_CLOSE}",
+        encode_member_identity(identity)
+    )
 }
 
 /// Read a member identity back out of an annotated message, if present.
-pub(crate) fn member_annotation(message: &str) -> Option<&str> {
-    let start = message.rfind(MEMBER_ANNOTATION_OPEN)? + MEMBER_ANNOTATION_OPEN.len();
+///
+/// Fail-closed: a missing closer, an empty payload, or a corrupt encoding
+/// yields `None`. The operator seal still strips the marker; the locator is
+/// simply omitted rather than guessed from leftover text.
+pub(crate) fn member_annotation(message: &str) -> Option<String> {
+    let open_at = message.find(MEMBER_ANNOTATION_OPEN)?;
+    let start = open_at + MEMBER_ANNOTATION_OPEN.len();
     let rest = message.get(start..)?;
-    let end = rest.rfind(MEMBER_ANNOTATION_CLOSE)?;
-    let identity = rest.get(..end)?;
-    (!identity.is_empty()).then_some(identity)
+    let end = rest.find(MEMBER_ANNOTATION_CLOSE)?;
+    let encoded = rest.get(..end)?;
+    if encoded.is_empty() {
+        return None;
+    }
+    decode_member_identity(encoded)
 }
 
 /// The message an operator should see, with any annotation removed.
 ///
-/// The locator is reported as its own field, so repeating it inside the prose
-/// would just be noise.
+/// Fail-closed: the first occurrence of `[member=` is cut through to the end
+/// of the string, whether or not the frame parses. A malformed or nested
+/// marker therefore cannot leave leftover `[member=` in operator prose.
 pub fn strip_member_annotation(message: &str) -> &str {
-    match message.rfind(MEMBER_ANNOTATION_OPEN) {
-        Some(at) if member_annotation(message).is_some() => {
-            message.get(..at).unwrap_or(message).trim_end()
+    match message.find(MEMBER_ANNOTATION_MARKER) {
+        Some(at) => {
+            let cut = if at > 0 && message.as_bytes().get(at - 1) == Some(&b' ') {
+                at - 1
+            } else {
+                at
+            };
+            message.get(..cut).unwrap_or(message).trim_end()
         }
-        _ => message,
+        None => message,
+    }
+}
+
+/// Operator-facing import error: sealed, optionally naming the scrubbed member.
+///
+/// This is the function every host should call instead of `error.to_string()`.
+/// The transport marker never survives. When the annotation parses, the
+/// member is named through the same secret-scrubbed locator the outcome
+/// report uses; when it does not, the sealed engine wording stands alone.
+pub fn operator_import_error(error: &CoreError) -> String {
+    let raw = error.to_string();
+    let sealed = strip_member_annotation(&raw);
+    debug_assert!(
+        !sealed.contains(MEMBER_ANNOTATION_MARKER),
+        "seal left a transport marker: {sealed}"
+    );
+    if member_annotation(&raw).is_none() {
+        return sealed.to_string();
+    }
+    let rejected = ImportOutcomeReport::rejected_from_error(error);
+    match rejected.defects.first() {
+        Some(defect) if !defect.source.identity.contains(MEMBER_ANNOTATION_MARKER) => {
+            format!("{sealed} (failing member: {})", defect.source.identity)
+        }
+        _ => sealed.to_string(),
+    }
+}
+
+fn encode_member_identity(identity: &str) -> String {
+    let mut out = String::with_capacity(identity.len());
+    for ch in identity.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            '[' => out.push_str("%5B"),
+            ']' => out.push_str("%5D"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn decode_member_identity(encoded: &str) -> Option<String> {
+    let bytes = encoded.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = from_hex(bytes[i + 1])?;
+            let lo = from_hex(bytes[i + 2])?;
+            let decoded = (hi << 4) | lo;
+            match decoded {
+                b'%' => out.push('%'),
+                b'[' => out.push('['),
+                b']' => out.push(']'),
+                _ => return None,
+            }
+            i += 3;
+        } else {
+            let ch = encoded[i..].chars().next()?;
+            if matches!(ch, '[' | ']') {
+                return None;
+            }
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    Some(out)
+}
+
+fn from_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
     }
 }
 
@@ -391,21 +495,32 @@ const MAX_LOCATOR_PATH_SEGMENTS: usize = 8;
 /// each scrubbed with the same rules the progress channel uses.
 fn redact_portable_path(level: &str) -> String {
     if is_absolute_path(level) {
-        return redact_basename(level);
+        return forbid_member_marker(&redact_basename(level));
     }
     let mut segments: Vec<String> = level
         .split(['/', '\\'])
         .filter(|segment| !segment.is_empty() && *segment != ".")
-        .map(redact_basename)
+        .map(|segment| forbid_member_marker(&redact_basename(segment)))
         .collect();
     if segments.is_empty() {
-        return redact_basename(level);
+        return forbid_member_marker(&redact_basename(level));
     }
     if segments.len() > MAX_LOCATOR_PATH_SEGMENTS {
         segments = segments.split_off(segments.len() - MAX_LOCATOR_PATH_SEGMENTS);
         segments.insert(0, "…".to_string());
     }
     segments.join("/")
+}
+
+/// A locator component must never carry the transport marker. An attacker-
+/// controlled ZIP name can legally contain `[member=`; publishing that
+/// substring would re-open the leak the operator seal exists to close.
+fn forbid_member_marker(component: &str) -> String {
+    if component.contains(MEMBER_ANNOTATION_MARKER) {
+        "[REDACTED_BASENAME]".to_string()
+    } else {
+        component.to_string()
+    }
 }
 
 fn is_absolute_path(value: &str) -> bool {
@@ -643,7 +758,7 @@ impl ImportOutcomeReport {
         // so its presence is itself the evidence: this is an unreadable
         // container, not the `Unclassified` fallback a bare message would get.
         let mut ledger = DefectLedger::new();
-        ledger.record_fatal(ImportDefectCode::ArchiveUnreadable, identity, None);
+        ledger.record_fatal(ImportDefectCode::ArchiveUnreadable, &identity, None);
         Self::rejected(&IngestStats::default(), &ledger)
     }
 
@@ -1316,6 +1431,76 @@ mod tests {
         );
         assert!(summary.contains("line 41"), "{summary}");
         assert!(summary.contains("member_read_failed"), "{summary}");
+    }
+
+    #[test]
+    fn seal_is_fail_closed_for_malformed_and_nested_markers() {
+        for raw in [
+            "zip open: missing end record [member=]",
+            "zip open: missing end record [member=foo [member=sk-abcdefghijklmnopqrst]]",
+            "zip open: missing end record [member=x] [member=secret]",
+            "zip open: missing end record[member=no-space]",
+        ] {
+            let sealed = strip_member_annotation(raw);
+            assert!(
+                !sealed.contains("[member="),
+                "seal left a transport marker in {raw:?} → {sealed:?}"
+            );
+            assert!(
+                sealed.starts_with("zip open: missing end record"),
+                "engine wording must survive: {sealed}"
+            );
+            assert_eq!(
+                member_annotation(raw),
+                None,
+                "malformed frame must not parse: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_identity_round_trips_even_when_the_name_contains_the_marker() {
+        let identity = "foo [member=sk-abcdefghijklmnopqrst]";
+        let annotated = annotate_member("zip open: missing end record", identity);
+        assert!(
+            annotated.contains("[member="),
+            "the transport frame is still how identity rides on CoreError"
+        );
+        assert_eq!(member_annotation(&annotated).as_deref(), Some(identity));
+        let sealed = strip_member_annotation(&annotated);
+        assert_eq!(sealed, "zip open: missing end record");
+        assert!(!sealed.contains("[member="), "{sealed}");
+
+        let error = CoreError::Message(annotated);
+        let shown = operator_import_error(&error);
+        assert!(
+            !shown.contains("[member="),
+            "operator string leaked marker: {shown}"
+        );
+        assert!(
+            !shown.contains("abcdefghijklmnopqrst"),
+            "credential-shaped member name reached the operator string: {shown}"
+        );
+        assert!(
+            shown.contains("zip open: missing end record"),
+            "engine wording must stay at the front: {shown}"
+        );
+    }
+
+    #[test]
+    fn locator_refuses_to_publish_the_transport_marker() {
+        let locator =
+            SourceLocator::from_identity("bundle.zip!/foo [member=sk-abcdefghijklmnopqrst].log");
+        assert!(
+            !locator.identity.contains("[member="),
+            "locator leaked the transport marker: {}",
+            locator.identity
+        );
+        assert!(
+            !locator.member.contains("[member="),
+            "member leaked the transport marker: {}",
+            locator.member
+        );
     }
 
     #[test]

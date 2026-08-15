@@ -101,6 +101,46 @@ export type ImportConfidence = {
   sources: ImportSourceConfidence[];
 };
 
+/** Terminal class of one import run (`contextdesk.import_outcome.v1`). */
+export type ImportOutcomeClass = "complete" | "partial" | "rejected";
+
+/** Fail-closed import result contract carried on a published run. */
+export type ImportOutcomeReport = {
+  schemaId: string;
+  schemaVersion: number;
+  class: ImportOutcomeClass;
+  published: boolean;
+  corpusId?: string | null;
+  counts: {
+    sourcesDiscovered: number;
+    sourcesImported: number;
+    sourcesFailed: number;
+    sourcesExcluded: number;
+    sourcesIgnored: number;
+    recordsImported: number;
+    recordsMalformed: number;
+  };
+  defects: Array<{
+    code: string;
+    severity: "fatal" | "degraded";
+    source: {
+      identity: string;
+      archiveChain: string[];
+      member: string;
+      archiveDepth: number;
+    };
+    location?: { line: number; byteOffset: number } | null;
+    occurrences: number;
+  }>;
+  defectCounts: Record<string, number>;
+  privacy: {
+    redactionMode: string;
+    policySummary: string;
+    defectsTruncated: boolean;
+  };
+  manifestDigest: string;
+};
+
 /** Result of a completed (published) import run. */
 export type ImportRunReport = {
   corpusId: string;
@@ -126,6 +166,8 @@ export type ImportRunReport = {
     modelId: string | null;
   } | null;
   confidence: ImportConfidence;
+  /** Classified complete/partial/rejected document. Required from current hosts. */
+  outcome?: ImportOutcomeReport;
 };
 
 /** Request for a reviewed, plan-bound import run. */

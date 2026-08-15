@@ -593,6 +593,7 @@ pub fn ingest_path_with_outcome(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     selection: Option<&IngestSelection>,
+    managed_identity: Option<&str>,
 ) -> (CoreResult<IngestReport>, ImportOutcomeReport) {
     // Argument validation happens before the walk, so there is no ledger yet.
     // These still return a classified, rejected outcome rather than leaving the
@@ -635,7 +636,7 @@ pub fn ingest_path_with_outcome(
         policy.defer_above_source_bytes,
         progress,
         cancel,
-        None,
+        managed_identity,
         selection,
         RawIngestLimits::default(),
         None,

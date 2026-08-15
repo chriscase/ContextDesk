@@ -381,3 +381,112 @@ describe("ImportFlow timezone tail", () => {
     expect(screen.getByRole("region", { name: "Import finished" })).toBeTruthy();
   });
 });
+
+describe("ImportFlow classified outcome", () => {
+  it("does not present a partial import as finished", async () => {
+    const client = createMockEngineClient();
+    const report: ImportRunReport = {
+      corpusId: "partial-corpus",
+      lines: 8,
+      templates: 2,
+      reductionRatio: 4,
+      embedded: 0,
+      files: 2,
+      discoveredFiles: 2,
+      excludedFiles: 0,
+      failedFiles: 0,
+      ignoredFiles: 0,
+      exclusionCounts: {},
+      exclusionExamples: [],
+      partial: false,
+      sourceBytes: 80,
+      corpusBytes: 40,
+      tsMin: null,
+      tsMax: null,
+      formatCounts: { jsonl: 2 },
+      confidence: {
+        corpusTimeQuality: "wall",
+        counts: {
+          wall: 2,
+          orderOnly: 0,
+          mixed: 0,
+          matched: 2,
+          ambiguous: 0,
+          unknown: 0,
+          unresolved: 0,
+        },
+        sources: [],
+      },
+      outcome: {
+        schemaId: "contextdesk.import_outcome.v1",
+        schemaVersion: 1,
+        class: "partial",
+        published: true,
+        corpusId: "partial-corpus",
+        counts: {
+          sourcesDiscovered: 2,
+          sourcesImported: 2,
+          sourcesFailed: 0,
+          sourcesExcluded: 0,
+          sourcesIgnored: 0,
+          recordsImported: 8,
+          recordsMalformed: 2,
+        },
+        defects: [
+          {
+            code: "malformed_structured_record",
+            severity: "degraded",
+            source: {
+              identity: "logs/malformed.jsonl",
+              archiveChain: [],
+              member: "malformed.jsonl",
+              archiveDepth: 0,
+            },
+            location: { line: 2, byteOffset: 40 },
+            occurrences: 2,
+          },
+        ],
+        defectCounts: { malformed_structured_record: 2 },
+        privacy: {
+          redactionMode: "identity_structural_only",
+          policySummary: "structural identity only",
+          defectsTruncated: false,
+        },
+        manifestDigest: "sha256:mock-partial",
+      },
+    };
+    vi.spyOn(client.import, "run").mockResolvedValue(report);
+
+    await toPreflight(client);
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /I understand and want to proceed/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+
+    expect(
+      await screen.findByRole("region", { name: "Import finished with defects" }),
+    ).toBeTruthy();
+    expect(screen.getByText(/Import finished with defects \(PARTIAL\)/)).toBeTruthy();
+    expect(screen.getByText(/logs\/malformed.jsonl — malformed_structured_record/)).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Import finished" })).toBeNull();
+    expect(screen.queryByText(/^Import finished — corpus/)).toBeNull();
+  });
+});
+
+describe("ImportFlow second seal", () => {
+  it("never shows a leftover [member= marker from a leaky host string", async () => {
+    const client = createMockEngineClient();
+    vi.spyOn(client.import, "preview").mockRejectedValue(
+      new Error(
+        "zip open: missing end record [member=foo [member=sk-abcdefghijklmnopqrst]]",
+      ),
+    );
+    dialogMocks.openFileDialog.mockResolvedValueOnce("/tmp/outer.zip");
+    render(<ImportFlow engine={client} variant="pane" />);
+    fireEvent.click(screen.getByRole("button", { name: "Choose file or ZIP…" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("zip open: missing end record");
+    expect(alert.textContent).not.toContain("[member=");
+    expect(alert.textContent).not.toContain("abcdefghijklmnopqrst");
+  });
+});

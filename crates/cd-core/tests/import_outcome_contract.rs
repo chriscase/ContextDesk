@@ -61,6 +61,7 @@ fn import(cache: &Path, source: &Path, name: &str) -> cd_core::log_analysis::Imp
         &NoopProcessProgress,
         None,
         None,
+        None,
     );
     assert!(
         outcome.invariants_hold(),
@@ -505,4 +506,16 @@ fn the_carried_identity_never_leaks_into_the_message() {
     );
     // An unannotated message is returned untouched.
     assert_eq!(strip_member_annotation("plain failure"), "plain failure");
+    // Fail-closed: a malformed or nested frame is cut, never returned raw.
+    for leaky in [
+        "zip open: missing end record [member=]",
+        "zip open: missing end record [member=foo [member=sk-abcdefghijklmnopqrst]]",
+        "zip open: missing end record [member=x] [member=secret]",
+    ] {
+        let sealed = strip_member_annotation(leaky);
+        assert!(
+            !sealed.contains("[member="),
+            "fail-open seal leaked marker from {leaky:?}: {sealed}"
+        );
+    }
 }

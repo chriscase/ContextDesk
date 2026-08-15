@@ -16,6 +16,8 @@ export {
   type EngineEvents,
   type EventRevisionReport,
   type ImportConfidence,
+  type ImportOutcomeClass,
+  type ImportOutcomeReport,
   type ImportRunReport,
   type ImportRunRequest,
   type ImportService,

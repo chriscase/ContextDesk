@@ -8424,6 +8424,9 @@ struct LogIngestReportDto {
     /// Separate operation phase timings (#824). Progress chrome stays one
     /// monotonic Stream for interleaved work; completion/diagnostics list these.
     phase_timings: cd_core::log_analysis::IngestPhaseTimings,
+    /// Fail-closed import result contract. Present on every published run so
+    /// the desktop cannot read Partial as Complete from a missing field.
+    outcome: cd_core::log_analysis::ImportOutcomeReport,
 }
 
 const DEMO_LOG_IDENTITY: &str = "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1";
@@ -9529,30 +9532,12 @@ impl LogIngestRunError {
 
 /// Project a core import failure into the string the UI shows.
 ///
-/// The preview walk carries a failing archive member's identity out on the
-/// error message behind the `[member=…]` transport marker
-/// (`cd_core::log_analysis::import_outcome`), and that identity is raw —
-/// a secret-bearing member name would ride along verbatim. The CLI already
-/// strips the marker and reports the secret-scrubbed locator instead; this
-/// is the same projection for the desktop's import preview/run surfaces,
-/// which render the returned string directly. The engine's own wording
-/// stays at the front so message-matching callers are unaffected, and an
-/// unannotated message passes through unchanged.
+/// Fail-closed: [`cd_core::log_analysis::operator_import_error`] strips any
+/// `[member=` transport frame — well-formed or not — before the string
+/// crosses IPC. A ZIP member name that itself contains the marker cannot
+/// leave leftover `[member=` in the webview.
 fn import_error_message(error: &cd_core::error::CoreError) -> String {
-    use cd_core::log_analysis::import_outcome::{strip_member_annotation, ImportOutcomeReport};
-    let raw = error.to_string();
-    let stripped = strip_member_annotation(&raw);
-    if stripped == raw {
-        return raw;
-    }
-    // Re-derive the identity through the same fail-closed report the CLI
-    // uses: `rejected_from_error` reads the annotation back and rebuilds the
-    // locator secret-scrubbed, so the member can still be named safely.
-    let rejected = ImportOutcomeReport::rejected_from_error(error);
-    match rejected.defects.first() {
-        Some(defect) => format!("{stripped} (failing member: {})", defect.source.identity),
-        None => stripped.to_string(),
-    }
+    cd_core::log_analysis::operator_import_error(error)
 }
 
 #[cfg(test)]
@@ -9600,6 +9585,27 @@ mod import_error_projection_tests {
     fn unannotated_messages_pass_through_unchanged() {
         let error = CoreError::Message("policy denied: plan is stale".into());
         assert_eq!(import_error_message(&error), error.to_string());
+    }
+
+    /// The seal is fail-closed: a malformed or nested frame is cut, never
+    /// returned with leftover `[member=`.
+    #[test]
+    fn malformed_member_frames_never_reach_the_ui() {
+        for raw in [
+            "zip open: missing end record [member=]",
+            "zip open: missing end record [member=foo [member=sk-abcdefghijklmnopqrst]]",
+            "zip open: missing end record [member=x] [member=secret]",
+        ] {
+            let shown = import_error_message(&CoreError::Message(raw.into()));
+            assert!(
+                !shown.contains("[member="),
+                "fail-open seal leaked marker from {raw:?}: {shown}"
+            );
+            assert!(
+                shown.starts_with("zip open: missing end record"),
+                "engine wording must survive: {shown}"
+            );
+        }
     }
 }
 
@@ -9728,61 +9734,25 @@ async fn run_log_ingest(
     let name_owned = name.unwrap_or_else(|| "corpus".into());
     let cancel_for_job = cancel.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        let result = match (managed_identity, selection) {
-            (Some(identity), Some(selection)) => {
-                cd_core::log_analysis::ingest_path_with_policy_selection_and_observer_managed(
-                    &cache,
-                    &selected_path,
-                    &name_owned,
-                    &policy,
-                    embed_backend,
-                    &progress,
-                    Some(&cancel_for_job),
-                    &identity,
-                    &selection,
-                )
-            }
-            (Some(identity), None) => {
-                cd_core::log_analysis::ingest_path_with_policy_and_observer_managed(
-                    &cache,
-                    &selected_path,
-                    &name_owned,
-                    &policy,
-                    embed_backend,
-                    &progress,
-                    Some(&cancel_for_job),
-                    &identity,
-                )
-            }
-            (None, Some(selection)) => {
-                cd_core::log_analysis::ingest_path_with_policy_selection_and_observer(
-                    &cache,
-                    &selected_path,
-                    &name_owned,
-                    &policy,
-                    embed_backend,
-                    &progress,
-                    Some(&cancel_for_job),
-                    &selection,
-                )
-            }
-            (None, None) => cd_core::log_analysis::ingest_path_with_policy_and_observer(
-                &cache,
-                &selected_path,
-                &name_owned,
-                &policy,
-                embed_backend,
-                &progress,
-                Some(&cancel_for_job),
-            ),
-        };
-        result.map_err(|error| match error {
-            cd_core::error::CoreError::Cancelled => LogIngestRunError::Cancelled,
-            other => LogIngestRunError::Failed(import_error_message(&other)),
-        })
+        let (result, classified) = cd_core::log_analysis::ingest_path_with_outcome(
+            &cache,
+            &selected_path,
+            &name_owned,
+            &policy,
+            embed_backend,
+            &progress,
+            Some(&cancel_for_job),
+            selection.as_ref(),
+            managed_identity.as_deref(),
+        );
+        match result {
+            Ok(report) => Ok((report, classified)),
+            Err(cd_core::error::CoreError::Cancelled) => Err(LogIngestRunError::Cancelled),
+            Err(other) => Err(LogIngestRunError::Failed(import_error_message(&other))),
+        }
     })
     .await;
-    let report = match outcome {
+    let (report, classified) = match outcome {
         Ok(Ok(report)) => {
             state
                 .failed_log_ingest_diagnostic
@@ -9855,6 +9825,7 @@ async fn run_log_ingest(
             .collect(),
         embedding: report.embedding,
         phase_timings: report.phase_timings,
+        outcome: classified,
     })
 }
 
@@ -15340,8 +15311,8 @@ mod log_noise_candidate_host_tests {
             "run_log_ingest must use spawn_blocking for trusted-core ingest"
         );
         assert!(
-            body.contains("ingest_path_with_policy_and_observer"),
-            "run_log_ingest must call the shipped core ingest path"
+            body.contains("ingest_path_with_outcome"),
+            "run_log_ingest must call the classified-outcome ingest path"
         );
         assert!(
             !body.contains("LogCorpus::open("),

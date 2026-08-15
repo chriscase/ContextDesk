@@ -11,6 +11,7 @@ import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { EngineClient } from "@contextdesk/client";
 import { EngineError } from "@contextdesk/client";
 import type { ImportRunInput } from "../../lib/activity/types";
+import { sealImportOperatorMessage } from "../../lib/importOutcome";
 import { openDirectoryDialog, openFileDialog } from "../../lib/dialogs";
 import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
 import type { ProcessProgressDto } from "../wizards/types";
@@ -20,6 +21,7 @@ import {
   INITIAL_IMPORT_FLOW_STATE,
   importDisabledReason,
   importFlowReducer,
+  classifiedImportClass,
   selectedForRun,
   selectedImportableCount,
   type ImportFlowState,
@@ -180,7 +182,9 @@ export function ImportFlow({
       if (!mountedRef.current || previewExitRequestedRef.current) return;
       dispatch({
         type: "PREVIEW_FAILED",
-        message: error instanceof Error ? error.message : String(error),
+        message: sealImportOperatorMessage(
+          error instanceof Error ? error.message : String(error),
+        ),
       });
     } finally {
       previewActiveRef.current = false;
@@ -235,7 +239,9 @@ export function ImportFlow({
       } else {
         dispatch({
           type: "RUN_FAILED",
-          message: error instanceof Error ? error.message : String(error),
+          message: sealImportOperatorMessage(
+            error instanceof Error ? error.message : String(error),
+          ),
         });
         onRunSettled?.({
           startedAtMs,
@@ -260,6 +266,8 @@ export function ImportFlow({
   const unresolvedTime = state.runReport
     ? state.runReport.confidence.counts.unresolved
     : 0;
+  const runClass = classifiedImportClass(state.runReport);
+  const runDefects = state.runReport?.outcome?.defects ?? [];
 
   return (
     <div className={`import-flow import-flow--${variant}`}>
@@ -371,8 +379,9 @@ export function ImportFlow({
             </p>
           ) : null}
           <p className="import-flow__hint">
-            Importing publishes one corpus atomically. Cancel or failure before publication
-            leaves nothing in the library.
+            Every import ends as complete, partial, or rejected. Complete and partial
+            publish one corpus atomically; rejected or cancelled leaves the library
+            unchanged. Partial is not done — the defect ledger names what is missing.
           </p>
         </section>
       ) : null}
@@ -446,15 +455,38 @@ export function ImportFlow({
       ) : null}
 
       {state.stage === "summary" && state.runReport ? (
-        <section className="import-flow__summary" aria-label="Import finished">
-          <p className="import-flow__done" role="status">
-            Import finished — corpus {state.runReport.corpusId}.{" "}
+        <section
+          className="import-flow__summary"
+          aria-label={
+            runClass === "partial" ? "Import finished with defects" : "Import finished"
+          }
+        >
+          <p
+            className={
+              runClass === "partial"
+                ? "import-flow__done import-flow__done--partial"
+                : "import-flow__done"
+            }
+            role="status"
+          >
+            {runClass === "partial"
+              ? `Import finished with defects (PARTIAL) — corpus ${state.runReport.corpusId}.`
+              : `Import finished — corpus ${state.runReport.corpusId}.`}{" "}
             {state.runReport.lines.toLocaleString()} events from {state.runReport.files}{" "}
             source{state.runReport.files === 1 ? "" : "s"}.
             {state.runReport.ignoredFiles > 0
               ? ` ${state.runReport.ignoredFiles} kept out — counted, never silent.`
               : ""}
           </p>
+          {runClass === "partial" && runDefects.length > 0 ? (
+            <ul className="import-flow__defects">
+              {runDefects.map((defect) => (
+                <li key={`${defect.code}:${defect.source.identity}`}>
+                  {defect.source.identity} — {defect.code}
+                </li>
+              ))}
+            </ul>
+          ) : null}
           {unresolvedTime > 0 ? (
             <TimeReviewCard
               engine={engine}

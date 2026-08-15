@@ -153,15 +153,17 @@ way in operator prose and in machine output (the
 | `partial` | yes | A corpus was published, but it does not contain everything the source offered. The defect ledger names what is missing, and why. |
 | `rejected` | no | Nothing was published. Staging was removed and the corpus library is unchanged. The ledger names the source or archive member that stopped the run. |
 
-Classification is fail-closed and decided in one place in the engine: a
-failing run always pairs with `rejected`, never with a published class,
-and a `rejected` outcome never carries a corpus id. Intentional filtering
-(directories, hidden files, unselected entries) is counted as *ignored*
-and never makes a corpus partial. Text output leads with the verdict —
-`Import complete`, `Import complete with defects (PARTIAL)`, or an
-`error:` line ending `nothing was published — the library is unchanged` —
-followed by an `Import outcome:` block whenever there is a defect to
-explain.
+Classification is fail-closed and decided in one place in the engine. A
+`rejected` outcome never carries a corpus id. An ingest `Err` pairs with
+`rejected`, but a failure *after* publication (for example an invalid
+configured default timezone) can return `Err` with a `complete` or
+`partial` outcome — the typed `published` bit is then what the operator
+copy must follow. Intentional filtering (directories, hidden files,
+unselected entries) is counted as *ignored* and never makes a corpus
+partial. Text output leads with the verdict — `Import complete`,
+`Import complete with defects (PARTIAL)`, or an `error:` line whose
+publication sentence is driven by `published` — followed by an
+`Import outcome:` block whenever there is a defect to explain.
 
 Defects are **located and coded**, never free-form operating-system, ZIP,
 or parser text (unstable across platforms, and the most likely place for

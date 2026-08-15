@@ -291,6 +291,7 @@ fn default_import_inner(
         observer,
         cancel,
         Some(&selection),
+        None,
     );
     let report = match ingest_result {
         Ok(report) => report,
@@ -389,6 +390,47 @@ mod tests {
         assert!(
             outcome.reviewed_formats_applied.is_empty(),
             "reviewed-format store is not composed in this selective integration"
+        );
+    }
+
+    #[test]
+    fn post_publish_timezone_failure_carries_the_published_outcome() {
+        let cache = tempdir().unwrap();
+        let source = tempdir().unwrap();
+        write_log(
+            source.path(),
+            "app.log",
+            &[
+                "2024-06-01 08:00:00,000 INFO - started",
+                "2024-06-01 08:00:05,000 ERROR - boom",
+            ],
+        );
+        let mut cfg = AppConfig::default();
+        cfg.default_timezone = Some("Not/A_Real_Zone".into());
+        let (result, outcome) = default_import_with_outcome(
+            cache.path(),
+            source.path(),
+            &cfg,
+            None,
+            &NoopProcessProgress,
+        );
+        assert!(
+            result.is_err(),
+            "invalid default zone must fail after ingest"
+        );
+        assert!(
+            outcome.published,
+            "the accompanying outcome must admit the corpus exists: {outcome:?}"
+        );
+        assert_ne!(
+            outcome.class,
+            cd_core::log_analysis::ImportOutcomeClass::Rejected
+        );
+        assert!(outcome.corpus_id.is_some(), "{outcome:?}");
+        let id = outcome.corpus_id.as_deref().expect("published corpus id");
+        assert!(
+            LogCorpus::open(cache.path(), id).is_ok(),
+            "the corpus named by the outcome must be on disk"
         );
     }
 }

@@ -118,13 +118,13 @@ pub use import_diagnose::{
     IMPORT_DIAGNOSTIC_SCHEMA_VERSION,
 };
 pub use import_outcome::{
-    outcome_from_ingest, DefectLedger, ImportDefect, ImportDefectCode, ImportDefectSeverity,
-    ImportOutcomeClass, ImportOutcomeCounts, ImportOutcomePrivacy, ImportOutcomeReport,
-    RecordLocation, SourceLocator, IMPORT_OUTCOME_SCHEMA_ID, IMPORT_OUTCOME_SCHEMA_VERSION,
-    MAX_IMPORT_DEFECTS,
+    operator_import_error, outcome_from_ingest, strip_member_annotation, DefectLedger,
+    ImportDefect, ImportDefectCode, ImportDefectSeverity, ImportOutcomeClass, ImportOutcomeCounts,
+    ImportOutcomePrivacy, ImportOutcomeReport, RecordLocation, SourceLocator,
+    IMPORT_OUTCOME_SCHEMA_ID, IMPORT_OUTCOME_SCHEMA_VERSION, MAX_IMPORT_DEFECTS,
 };
 pub use ingest::{
-    ingest_path, ingest_path_with_observer, ingest_path_with_policy,
+    ingest_path, ingest_path_with_observer, ingest_path_with_outcome, ingest_path_with_policy,
     ingest_path_with_policy_and_observer, ingest_path_with_policy_and_observer_managed,
     ingest_path_with_policy_selection_and_observer,
     ingest_path_with_policy_selection_and_observer_managed, IngestPhaseTimings, IngestReport,

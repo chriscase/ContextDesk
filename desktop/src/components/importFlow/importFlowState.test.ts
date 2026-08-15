@@ -7,6 +7,7 @@ import {
   importDisabledReason,
   importFlowReducer,
   preselectedIdentities,
+  classifiedImportClass,
   selectedForRun,
   selectedImportableCount,
   selectorRows,
@@ -342,5 +343,73 @@ describe("timezone groups", () => {
     expect(groups[0]!.label).toBe("classic-syslog-record · zone abbreviation not resolved");
     expect(groups[1]!.sources).toEqual(["b.log", "a.log"]);
     expect(groups[1]!.records).toBe(30);
+  });
+});
+
+describe("classifiedImportClass", () => {
+  it("reads the typed class and never treats a missing document as partial", () => {
+    const report: ImportRunReport = {
+      corpusId: "c",
+      lines: 1,
+      templates: 1,
+      reductionRatio: 1,
+      embedded: 0,
+      files: 1,
+      discoveredFiles: 1,
+      excludedFiles: 0,
+      failedFiles: 0,
+      ignoredFiles: 0,
+      exclusionCounts: {},
+      exclusionExamples: [],
+      partial: false,
+      sourceBytes: 1,
+      corpusBytes: 1,
+      tsMin: null,
+      tsMax: null,
+      formatCounts: {},
+      confidence: {
+        corpusTimeQuality: "wall",
+        counts: {
+          wall: 1,
+          orderOnly: 0,
+          mixed: 0,
+          matched: 1,
+          ambiguous: 0,
+          unknown: 0,
+          unresolved: 0,
+        },
+        sources: [],
+      },
+    };
+    expect(classifiedImportClass(report)).toBe("complete");
+    expect(
+      classifiedImportClass({
+        ...report,
+        outcome: {
+          schemaId: "contextdesk.import_outcome.v1",
+          schemaVersion: 1,
+          class: "partial",
+          published: true,
+          corpusId: "c",
+          counts: {
+            sourcesDiscovered: 1,
+            sourcesImported: 1,
+            sourcesFailed: 0,
+            sourcesExcluded: 0,
+            sourcesIgnored: 0,
+            recordsImported: 1,
+            recordsMalformed: 2,
+          },
+          defects: [],
+          defectCounts: {},
+          privacy: {
+            redactionMode: "identity_structural_only",
+            policySummary: "structural",
+            defectsTruncated: false,
+          },
+          manifestDigest: "sha256:x",
+        },
+      }),
+    ).toBe("partial");
   });
 });

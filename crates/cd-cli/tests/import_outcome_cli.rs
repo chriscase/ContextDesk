@@ -372,3 +372,66 @@ fn rejected_import_names_the_member_and_publishes_nothing() {
         "the text-mode rejection must publish nothing either"
     );
 }
+
+/// After ingest publishes, a failing timezone default-apply must not claim
+/// "nothing was published". The typed `published` bit drives that sentence.
+#[test]
+fn post_publish_timezone_failure_does_not_claim_nothing_was_published() {
+    let source = tempfile::tempdir().unwrap();
+    std::fs::write(
+        source.path().join("app.log"),
+        "2024-06-01 08:00:00,000 INFO - started\n2024-06-01 08:00:05,000 ERROR - boom\n",
+    )
+    .unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "default_timezone": "Not/A_Real_Zone"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let import = cli(home.path())
+        .args(["--json", "import", source.path().to_str().unwrap()])
+        .output()
+        .expect("run contextdesk import");
+    assert_ne!(
+        import.status.code(),
+        Some(0),
+        "an invalid configured default zone must fail after publish: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    let envelope = parse_envelope(&import.stdout);
+    assert_eq!(envelope["ok"], false);
+    let error = &envelope["error"];
+    let message = error["message"].as_str().expect("error message");
+    assert!(
+        !message.contains("nothing was published"),
+        "published corpus must not be described as unpublished: {message}"
+    );
+    assert!(
+        message.contains("a corpus was published before this failure")
+            || error["details"]["published"] == true,
+        "operator copy or details must admit publication: message={message} details={}",
+        error["details"]
+    );
+    assert_eq!(error["details"]["published"], true);
+    assert_ne!(error["details"]["class"], "rejected");
+    assert!(
+        error["details"]
+            .get("corpusId")
+            .is_some_and(|id| !id.is_null()),
+        "a published failure must still name the corpus: {}",
+        error["details"]
+    );
+    let ids = corpus_ids(home.path());
+    assert_eq!(
+        ids.len(),
+        1,
+        "the corpus must actually exist after the post-publish failure"
+    );
+    assert_eq!(Some(ids[0].as_str()), error["details"]["corpusId"].as_str());
+}

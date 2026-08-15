@@ -9,7 +9,7 @@
  * are the courtesy layer that explains itself inline.
  */
 import type { WireImportPreviewItem, WireImportPreviewPlan, WireImportPreviewReport } from "@contextdesk/contracts";
-import type { ImportRunReport } from "@contextdesk/client";
+import type { ImportOutcomeClass, ImportRunReport } from "@contextdesk/client";
 import type { WireProcessProgress } from "@contextdesk/contracts";
 
 /** Flow stages. Post-publication review is part of `summary`, never a gate. */
@@ -495,6 +495,15 @@ export function timezoneGroups(report: ImportRunReport): TimezoneGroup[] {
     group.records += source.lines;
   }
   return [...groups.values()].sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/** Classified import class from the host document. Missing outcome is complete. */
+export function classifiedImportClass(
+  report: ImportRunReport | null | undefined,
+): ImportOutcomeClass {
+  if (!report) return "rejected";
+  if (report.outcome?.class) return report.outcome.class;
+  return "complete";
 }
 
 /** IANA zone gate matching the shipped review dialog's rule. */

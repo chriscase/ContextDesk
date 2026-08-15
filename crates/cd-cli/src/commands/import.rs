@@ -279,7 +279,7 @@ pub async fn run(
 
     let outcome = match joined {
         Ok((Ok(outcome), _)) => outcome,
-        Ok((Err(core_error), rejected)) => {
+        Ok((Err(core_error), outcome)) => {
             if matches!(&core_error, cd_core::error::CoreError::Cancelled) {
                 return Err(CliError::cancelled(
                     "import cancelled — no partial corpus was published, safe to retry",
@@ -291,26 +291,17 @@ pub async fn run(
             // typed document for `--format json`.
             // The locator is its own field below, so strip the marker the
             // engine used to carry it out rather than printing it twice.
-            let raw = core_error.to_string();
-            let message =
-                cd_core::log_analysis::import_outcome::strip_member_annotation(&raw).to_string();
-            let located = rejected
-                .defects
-                .first()
-                .map(|defect| {
-                    format!(
-                        "{message}\n\nfailing source: {} ({})\nnothing was published — the library is unchanged",
-                        defect.source.identity,
-                        defect.code.as_str()
-                    )
-                })
-                .unwrap_or_else(|| message.clone());
-            let error = if message.contains("nothing importable") {
+            // Publication copy is driven by the typed `published` bit: after
+            // ingest succeeds, timezone default-apply can still return Err
+            // with a Complete/Partial outcome, and claiming "nothing was
+            // published" about that corpus would be false.
+            let located = import_failure_prose(&core_error, &outcome);
+            let error = if located.contains("nothing importable") {
                 CliError::user(located)
             } else {
                 CliError::internal(located)
             };
-            return Err(error.with_details(rejected.to_json()));
+            return Err(error.with_details(outcome.to_json()));
         }
         Err(join_error) => {
             return Err(CliError::internal(format!(
@@ -342,4 +333,100 @@ pub async fn run(
     }
     output.selection = plan_items;
     Ok(output)
+}
+
+/// Operator prose for an import that returned `Err`.
+///
+/// The publication sentence is driven by [`ImportOutcomeReport::published`],
+/// not by whether a defect exists. A Partial/Complete outcome can ride with
+/// `Err` when timezone default-apply fails after ingest has already published.
+fn import_failure_prose(
+    core_error: &cd_core::error::CoreError,
+    outcome: &ImportOutcomeReport,
+) -> String {
+    let message =
+        cd_core::log_analysis::import_outcome::strip_member_annotation(&core_error.to_string())
+            .to_string();
+    debug_assert!(
+        !message.contains("[member="),
+        "import failure prose left a transport marker: {message}"
+    );
+    let publication = if outcome.published {
+        match outcome.corpus_id.as_deref() {
+            Some(id) => format!(
+                "a corpus was published before this failure — the library is not unchanged (corpus {id})"
+            ),
+            None => {
+                "a corpus was published before this failure — the library is not unchanged"
+                    .to_string()
+            }
+        }
+    } else {
+        "nothing was published — the library is unchanged".to_string()
+    };
+    match outcome.defects.first() {
+        Some(defect) => format!(
+            "{message}\n\nfailing source: {} ({})\n{publication}",
+            defect.source.identity,
+            defect.code.as_str()
+        ),
+        None => format!("{message}\n\n{publication}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::import_failure_prose;
+    use cd_core::error::CoreError;
+    use cd_core::log_analysis::import_outcome::{DefectLedger, ImportOutcomeReport};
+    use cd_core::log_analysis::ingest::IngestStats;
+
+    #[test]
+    fn published_bit_drives_the_publication_sentence() {
+        let mut ledger = DefectLedger::new();
+        ledger.record_malformed_structured_record(
+            "logs/malformed.jsonl",
+            cd_core::log_analysis::import_outcome::RecordLocation::new(2, 40),
+        );
+        let stats = IngestStats {
+            discovered_files: 2,
+            files: 2,
+            lines: 8,
+            partial: true,
+            ..IngestStats::default()
+        };
+        let published = ImportOutcomeReport::published("corpus-published", &stats, &ledger);
+        assert!(published.published);
+        let shown = import_failure_prose(
+            &CoreError::Message("default timezone is not a valid IANA zone".into()),
+            &published,
+        );
+        assert!(
+            !shown.contains("nothing was published"),
+            "published outcome must not claim the library is unchanged: {shown}"
+        );
+        assert!(
+            shown.contains("a corpus was published before this failure"),
+            "{shown}"
+        );
+        assert!(shown.contains("corpus-published"), "{shown}");
+        assert!(
+            shown.contains("failing source: logs/malformed.jsonl"),
+            "{shown}"
+        );
+
+        let rejected = ImportOutcomeReport::rejected_without_locator(&CoreError::Message(
+            "zip open: missing end record".into(),
+        ));
+        assert!(!rejected.published);
+        let shown = import_failure_prose(
+            &CoreError::Message("zip open: missing end record [member=bundles/inner.zip]".into()),
+            &rejected,
+        );
+        assert!(
+            shown.contains("nothing was published — the library is unchanged"),
+            "{shown}"
+        );
+        assert!(!shown.contains("[member="), "marker leaked: {shown}");
+    }
 }
