@@ -1,0 +1,385 @@
+//! Offline CLI for the triage evaluation bench.
+
+use crate::canonical::to_pretty_json;
+use crate::error::{BenchError, BenchResult};
+use crate::import::{import_run, parse_import_json, parse_import_markdown, ImportOutcome};
+use crate::report::{blinded_run_view, build_report, render_report_json, render_report_markdown};
+use crate::store::BenchStore;
+use crate::types::{
+    Adjudication, Case, EvaluationTask, EvidenceItem, EvidenceSnapshot, PrivacyClass,
+    TimeConstraint, VisibilityPolicy,
+};
+use clap::{Parser, Subcommand, ValueEnum};
+use std::fs;
+use std::path::PathBuf;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "cd-triage-bench",
+    about = "Headless incident-triage evaluation bench (offline, no GUI, no engine adapter)",
+    long_about = "Create, import, and compare source-neutral triage evaluation records.\n\
+This tool never contacts a network, reads a keychain, or writes ContextDesk\n\
+qualification/readiness/routing state. ContextDesk SDK execution is out of scope."
+)]
+pub struct Cli {
+    /// Library directory (file-backed store).
+    #[arg(long, env = "CD_TRIAGE_BENCH_LIBRARY", global = true)]
+    pub library: Option<PathBuf>,
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Create a new empty library directory.
+    Init,
+    /// Import a case JSON record.
+    ImportCase { file: PathBuf },
+    /// Import an evidence snapshot JSON; hash and store --blob files first.
+    ImportSnapshot {
+        file: PathBuf,
+        #[arg(long = "blob", value_name = "FILE")]
+        blobs: Vec<PathBuf>,
+    },
+    /// Import an evaluation task JSON record.
+    ImportTask { file: PathBuf },
+    /// Import a human/web/other-product run (JSON or markdown template).
+    ImportRun {
+        file: PathBuf,
+        #[arg(long)]
+        raw: Option<PathBuf>,
+    },
+    /// Import an expert adjudication JSON record and derive score/review.
+    ImportAdjudication { file: PathBuf },
+    /// List stored record ids.
+    List {
+        #[arg(value_enum)]
+        kind: ListKind,
+    },
+    /// Show one stored record as JSON.
+    Show {
+        #[arg(value_enum)]
+        kind: ListKind,
+        id: String,
+    },
+    /// Materialize a strategy-visible task packet (excludes case resolution).
+    Packet { task_id: String },
+    /// Show a blinded review view of a run (strategy identity masked when possible).
+    BlindedRun { run_id: String },
+    /// Reproducible comparison report over stored runs and adjudications.
+    Report {
+        #[arg(long, value_enum, default_value = "json")]
+        format: ReportFormat,
+        #[arg(long, value_enum, default_value = "owner_only")]
+        privacy: ReportPrivacy,
+        #[arg(long)]
+        task: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ListKind {
+    Cases,
+    Snapshots,
+    Tasks,
+    Runs,
+    Adjudications,
+    Scores,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ReportFormat {
+    Json,
+    Markdown,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ReportPrivacy {
+    OwnerOnly,
+    ShareSafe,
+}
+
+impl ReportPrivacy {
+    fn class(self) -> PrivacyClass {
+        match self {
+            Self::OwnerOnly => PrivacyClass::OwnerOnly,
+            Self::ShareSafe => PrivacyClass::ShareSafe,
+        }
+    }
+}
+
+pub fn run_cli<I, T>(args: I) -> BenchResult<String>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let cli = Cli::try_parse_from(args).map_err(|e| BenchError::Message(e.to_string()))?;
+    dispatch(cli)
+}
+
+fn dispatch(cli: Cli) -> BenchResult<String> {
+    match cli.command {
+        Command::Init => {
+            let root = require_library(cli.library)?;
+            let created_at = "1970-01-01T00:00:00Z";
+            // Wall-clock is not part of durable record identity. Init uses a
+            // fixed timestamp so repeated init of an empty path stays stable
+            // when the metadata file is identical; a populated path fails closed.
+            BenchStore::init(&root, created_at)?;
+            Ok(format!("initialized library at {}\n", root.display()))
+        }
+        Command::ImportCase { file } => {
+            let store = open_store(cli.library)?;
+            let case =
+                parse_case(&fs::read_to_string(&file).map_err(|e| BenchError::io(&file, e))?)?;
+            store.put_case(&case)?;
+            Ok(format!("{}\n", case.case_id))
+        }
+        Command::ImportSnapshot { file, blobs } => {
+            let store = open_store(cli.library)?;
+            for blob in &blobs {
+                let bytes = fs::read(blob).map_err(|e| BenchError::io(blob, e))?;
+                store.put_blob(&bytes)?;
+            }
+            let snapshot =
+                parse_snapshot(&fs::read_to_string(&file).map_err(|e| BenchError::io(&file, e))?)?;
+            store.put_snapshot(&snapshot)?;
+            Ok(format!("{}\n", snapshot.snapshot_id))
+        }
+        Command::ImportTask { file } => {
+            let store = open_store(cli.library)?;
+            let task =
+                parse_task(&fs::read_to_string(&file).map_err(|e| BenchError::io(&file, e))?)?;
+            store.put_task(&task)?;
+            Ok(format!("{}\n", task.task_id))
+        }
+        Command::ImportRun { file, raw } => {
+            let store = open_store(cli.library)?;
+            let text = fs::read_to_string(&file).map_err(|e| BenchError::io(&file, e))?;
+            let import = if file.extension().and_then(|e| e.to_str()) == Some("md")
+                || text.contains("```json")
+            {
+                parse_import_markdown(&text)?.0
+            } else {
+                parse_import_json(&text)?
+            };
+            let raw_bytes = if let Some(path) = raw {
+                fs::read(&path).map_err(|e| BenchError::io(&path, e))?
+            } else if let Some(inline) = &import.raw_output_utf8 {
+                inline.as_bytes().to_vec()
+            } else {
+                return Err(BenchError::Schema(
+                    "import-run requires --raw or raw_output_utf8 / markdown body".into(),
+                ));
+            };
+            match import_run(&store, &import, &raw_bytes)? {
+                ImportOutcome::Created {
+                    run_id,
+                    near_duplicate_of,
+                } => {
+                    let extra = near_duplicate_of
+                        .map(|id| format!(" near_duplicate_of={id}"))
+                        .unwrap_or_default();
+                    Ok(format!("created {run_id}{extra}\n"))
+                }
+                ImportOutcome::Duplicate { run_id } => Ok(format!("duplicate {run_id}\n")),
+            }
+        }
+        Command::ImportAdjudication { file } => {
+            let store = open_store(cli.library)?;
+            let adj = parse_adjudication(
+                &fs::read_to_string(&file).map_err(|e| BenchError::io(&file, e))?,
+            )?;
+            let score = store.put_adjudication(&adj)?;
+            Ok(format!("{} {}\n", adj.adjudication_id, score.score_id))
+        }
+        Command::List { kind } => {
+            let store = open_store(cli.library)?;
+            let ids = match kind {
+                ListKind::Cases => store.list_cases()?,
+                ListKind::Snapshots => store.list_snapshots()?,
+                ListKind::Tasks => store.list_tasks()?,
+                ListKind::Runs => store.list_runs()?,
+                ListKind::Adjudications => store.list_adjudications()?,
+                ListKind::Scores => store.list_scores()?,
+            };
+            Ok(ids.join("\n") + if ids.is_empty() { "" } else { "\n" })
+        }
+        Command::Show { kind, id } => {
+            let store = open_store(cli.library)?;
+            match kind {
+                ListKind::Cases => to_pretty_json(&store.get_case(&id)?),
+                ListKind::Snapshots => to_pretty_json(&store.get_snapshot(&id)?),
+                ListKind::Tasks => to_pretty_json(&store.get_task(&id)?),
+                ListKind::Runs => to_pretty_json(&store.get_run(&id)?),
+                ListKind::Adjudications => to_pretty_json(&store.get_adjudication(&id)?),
+                ListKind::Scores => to_pretty_json(&store.get_score(&id)?),
+            }
+        }
+        Command::Packet { task_id } => {
+            let store = open_store(cli.library)?;
+            to_pretty_json(&store.materialize_packet(&task_id)?)
+        }
+        Command::BlindedRun { run_id } => {
+            let store = open_store(cli.library)?;
+            to_pretty_json(&blinded_run_view(&store.get_run(&run_id)?))
+        }
+        Command::Report {
+            format,
+            privacy,
+            task,
+        } => {
+            let store = open_store(cli.library)?;
+            let mut runs = store.load_runs()?;
+            if let Some(task_id) = task {
+                runs.retain(|r| r.task_id == task_id);
+            }
+            let report = build_report(
+                &runs,
+                &store.load_adjudications()?,
+                &store.load_scores()?,
+                privacy.class(),
+            )?;
+            match format {
+                ReportFormat::Json => render_report_json(&report),
+                ReportFormat::Markdown => render_report_markdown(&report),
+            }
+        }
+    }
+}
+
+fn require_library(library: Option<PathBuf>) -> BenchResult<PathBuf> {
+    library.ok_or_else(|| BenchError::Message("--library is required".into()))
+}
+
+fn open_store(library: Option<PathBuf>) -> BenchResult<BenchStore> {
+    BenchStore::open(require_library(library)?)
+}
+
+fn parse_case(text: &str) -> BenchResult<Case> {
+    Case::parse_json(text)
+}
+
+fn parse_snapshot(text: &str) -> BenchResult<EvidenceSnapshot> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(BenchError::from_serde)?;
+    if value.get("snapshot_id").and_then(|v| v.as_str()).is_some() {
+        return EvidenceSnapshot::parse_json(text);
+    }
+    let privacy = value
+        .get("privacy")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or(PrivacyClass::OwnerOnly);
+    let case_id = string_field(&value, "case_id")?;
+    let captured_at = string_field(&value, "captured_at")?;
+    let captured_by = string_field(&value, "captured_by")?;
+    let items: Vec<EvidenceItem> =
+        serde_json::from_value(value.get("items").cloned().unwrap_or(serde_json::json!([])))
+            .map_err(BenchError::from_serde)?;
+    let notes = value
+        .get("notes")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned);
+    EvidenceSnapshot::from_parts(privacy, case_id, captured_at, captured_by, items, notes)
+}
+
+fn parse_task(text: &str) -> BenchResult<EvaluationTask> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(BenchError::from_serde)?;
+    if value.get("task_id").and_then(|v| v.as_str()).is_some() {
+        return EvaluationTask::parse_json(text);
+    }
+    let privacy = value
+        .get("privacy")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or(PrivacyClass::OwnerOnly);
+    let visibility: VisibilityPolicy = serde_json::from_value(
+        value
+            .get("visibility")
+            .cloned()
+            .ok_or_else(|| BenchError::Schema("task visibility is required".into()))?,
+    )
+    .map_err(BenchError::from_serde)?;
+    let time_constraint = match value.get("time_constraint") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => Some(
+            serde_json::from_value::<TimeConstraint>(v.clone()).map_err(BenchError::from_serde)?,
+        ),
+    };
+    EvaluationTask::from_parts(
+        privacy,
+        string_field(&value, "case_id")?,
+        string_field(&value, "snapshot_id")?,
+        string_field(&value, "question")?,
+        string_field(&value, "protocol")?,
+        string_field(&value, "protocol_version")?,
+        visibility,
+        time_constraint,
+        string_field(&value, "created_at")?,
+    )
+}
+
+fn parse_adjudication(text: &str) -> BenchResult<Adjudication> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(BenchError::from_serde)?;
+    if value
+        .get("adjudication_id")
+        .and_then(|v| v.as_str())
+        .is_some()
+    {
+        return Adjudication::parse_json(text);
+    }
+    let privacy = value
+        .get("privacy")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or(PrivacyClass::OwnerOnly);
+    Adjudication::from_parts(
+        privacy,
+        string_field(&value, "case_id")?,
+        string_field(&value, "task_id")?,
+        string_field(&value, "snapshot_id")?,
+        string_field(&value, "run_id")?,
+        string_field(&value, "reviewer")?,
+        serde_json::from_value(
+            value
+                .get("conflict_of_interest")
+                .cloned()
+                .ok_or_else(|| BenchError::Schema("conflict_of_interest is required".into()))?,
+        )
+        .map_err(BenchError::from_serde)?,
+        string_field(&value, "rubric_version")?,
+        serde_json::from_value(
+            value
+                .get("blinding")
+                .cloned()
+                .ok_or_else(|| BenchError::Schema("blinding is required".into()))?,
+        )
+        .map_err(BenchError::from_serde)?,
+        serde_json::from_value(
+            value
+                .get("outcomes")
+                .cloned()
+                .ok_or_else(|| BenchError::Schema("outcomes are required".into()))?,
+        )
+        .map_err(BenchError::from_serde)?,
+        string_field(&value, "created_at")?,
+    )
+}
+
+fn string_field(value: &serde_json::Value, field: &str) -> BenchResult<String> {
+    value
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| BenchError::Schema(format!("{field} is required")))
+}
+
+pub fn main_from_env() -> i32 {
+    match run_cli(std::env::args_os()) {
+        Ok(out) => {
+            print!("{out}");
+            0
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            err.exit_code()
+        }
+    }
+}

@@ -87,3 +87,13 @@ Transfers are sequential (bounded concurrency of one) and streaming. Cancellatio
 waits for the active storage future to stop before returning. Local workspace
 roots remain authoritative. Restore, remote deletion, bidirectional sync, and S3
 indexing are not part of Phase A.
+
+## Offline incident-triage evaluation bench
+
+`cd-triage-bench` is a **separate** workspace crate (CLI + library) for
+source-neutral evaluation of historical incidents: cases, immutable evidence
+snapshots, imported runs, expert adjudication, and comparison reports. It is
+not a host, not `cd-core`, and not the future web collaboration layer. Default
+paths are offline (no network, keychain, or provider). See
+[`docs/benchmarks/TRIAGE_BENCH_V1.md`](benchmarks/TRIAGE_BENCH_V1.md) and
+[`crates/cd-triage-bench/README.md`](../crates/cd-triage-bench/README.md).
