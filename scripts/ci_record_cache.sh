@@ -15,7 +15,7 @@ OUT=""
 HIT=""
 ROLE=""
 SHARD=""
-SHARED_KEY="ubuntu-workspace-tests"
+SHARED_KEY="ubuntu-workspace-tests-v2"
 SAVE=""
 RESTORE_DIR=""
 

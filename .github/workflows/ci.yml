@@ -12,10 +12,15 @@ env:
   # Number of shards the Ubuntu workspace test suite is split into (#874).
   # `strategy.matrix` cannot read the env context, so the shard list below is
   # spelled out literally; the aggregate job fails closed if the two ever
-  # disagree. Cache key `ubuntu-workspace-tests` is shared by rust-ubuntu
-  # (the only writer) and every shard (`save-if: false` so they restore but
-  # do not save). Do not set Swatinem `lookup-only: true` on shards: that
-  # checks the key without downloading files.
+  # disagree. Cache key `ubuntu-workspace-tests-v2` is shared by rust-ubuntu
+  # (the only writer on main) and every shard (`save-if: false` so they
+  # restore but do not save). v2 discards caches warmed with
+  # `cargo test --workspace --no-run`, whose feature unification does not
+  # match per-shard `cargo test -p` fingerprints (run 31851734335). Do not
+  # set Swatinem `lookup-only: true` on shards: that checks the key without
+  # downloading files. Large rust-cache writers use
+  # `save-if: ${{ github.ref == 'refs/heads/main' }}` so PRs restore main
+  # caches without writing duplicate multi-GB PR copies.
   #
   # Raised 4 -> 8 after the shard carrying `cd-core/lib/other` was cancelled at
   # the 60-minute job budget on two consecutive runs of PR #892 (31888581827,
@@ -126,6 +131,8 @@ jobs:
         with:
           cache-workspace-crates: true
           cache-on-failure: true
+          # PRs restore main's cache; only main writes (avoids duplicate GB copies).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy (workspace, all targets)
@@ -163,9 +170,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
-          shared-key: ubuntu-workspace-tests
+          shared-key: ubuntu-workspace-tests-v2
           cache-workspace-crates: true
           cache-on-failure: true
+          # Main is the only writer; PRs restore without saving a second copy.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: record cache restore
         run: |
           mkdir -p ci-shards
@@ -173,8 +182,8 @@ jobs:
             --out ci-shards/cache-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
             --role warmup \
-            --shared-key ubuntu-workspace-tests \
-            --save true
+            --shared-key ubuntu-workspace-tests-v2 \
+            --save "$( [ '${{ github.ref }}' = 'refs/heads/main' ] && echo true || echo false )"
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy (workspace, all targets)
@@ -195,10 +204,10 @@ jobs:
           wait "$hb" 2>/dev/null || true
           exit "$rc"
       - name: compile workspace tests (cache warmup)
-        # One compile of DuckDB/workspace test binaries. Shards restore this
-        # cache with save-if: false (they must actually download the files).
-        # and should restore this entry. CARGO_BUILD_JOBS=2 matches the 2-core
-        # hosted runner; test execution stays single-threaded on the shards.
+        # Shard-shaped -p compiles (not --workspace --no-run). Shards restore
+        # this cache with save-if: false (they must actually download files).
+        # CARGO_BUILD_JOBS=2 matches the 2-core hosted runner; test execution
+        # stays single-threaded on the shards.
         env:
           CARGO_BUILD_JOBS: "2"
         run: |
@@ -206,12 +215,12 @@ jobs:
             waited=0
             while sleep 60; do
               waited=$((waited + 60))
-              echo "[warmup] cargo test --workspace --no-run still running after ${waited}s ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+              echo "[warmup] shard-shaped cargo test --no-run still running after ${waited}s ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
             done
           ) &
           hb=$!
           set +e
-          cargo test --workspace --no-run
+          sh scripts/ci_warm_test_artifacts.sh
           rc=$?
           set -e
           kill "$hb" 2>/dev/null || true
@@ -257,7 +266,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
-          shared-key: ubuntu-workspace-tests
+          shared-key: ubuntu-workspace-tests-v2
           cache-workspace-crates: true
           # save-if: false restores files and skips the save post-step.
           # lookup-only: true would set cache-hit without downloading (run
@@ -275,7 +284,7 @@ jobs:
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
             --role shard \
             --shard '${{ matrix.shard }}' \
-            --shared-key ubuntu-workspace-tests \
+            --shared-key ubuntu-workspace-tests-v2 \
             --save false \
             --restore-dir target
           echo "CD_CACHE_STATE=$(jq -r .cache_state ci-shards/cache-status.json)" >> "$GITHUB_ENV"
@@ -329,7 +338,9 @@ jobs:
           pattern: rust-ubuntu-shard-*
           path: shard-results
       - name: shard tooling self-test
-        run: sh scripts/tests/ci_shard_test.sh
+        run: |
+          sh scripts/tests/ci_shard_test.sh
+          sh scripts/tests/ci_fingerprint_unify_test.sh
       - name: per-shard diagnostics
         run: sh scripts/ci_run_shard.sh --summary shard-results || true
       - name: aggregate shard results (fail closed)
@@ -368,6 +379,8 @@ jobs:
         with:
           workspaces: desktop/src-tauri
           cache-on-failure: true
+          # PRs restore main's tauri cache; only main writes.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: fmt
         run: cargo fmt -- --check
       - name: clippy

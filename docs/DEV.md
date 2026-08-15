@@ -81,8 +81,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
 # One CI Ubuntu test shard, exactly as CI partitions it (#874) — see below
-sh scripts/ci_shard_plan.sh verify --shards 4
-sh scripts/ci_run_shard.sh --shard 2 --shards 4
+sh scripts/ci_shard_plan.sh verify --shards 8
+sh scripts/ci_run_shard.sh --shard 2 --shards 8
 sh scripts/ci_run_shard.sh --summary ci-shards
 sh scripts/tests/ci_shard_test.sh
 
@@ -130,13 +130,18 @@ failed closed.
 
 CI therefore:
 
-1. Compiles Ubuntu workspace tests **once** in `rust (ubuntu-latest)`
-   (`cargo test --workspace --no-run`) and **saves** the shared
-   `ubuntu-workspace-tests` rust-cache entry there.
-2. Runs the same suite as `CD_SHARD_COUNT` (currently **8**) lookup-only shards
-   that restore that cache. `cd-core/lib` is executed as two complementary
-   filters (`log_analysis::` and `--skip log_analysis::`) so the heavy library
-   binary is not pinned to shard 1.
+1. Compiles Ubuntu workspace tests **once** in `rust (ubuntu-latest)` using
+   shard-shaped `cargo test -p … --no-run` (`scripts/ci_warm_test_artifacts.sh`)
+   and **saves** the shared `ubuntu-workspace-tests-v2` rust-cache entry there
+   (main branch only). Warming with `cargo test --workspace --no-run` is
+   wrong: workspace feature unification does not match per-shard `-p`
+   fingerprints, so warm shards still recompiled DuckDB for ~11 minutes
+   (hosted run `31851734335`).
+2. Runs the same suite as `CD_SHARD_COUNT` (currently **8**) shards that
+   restore that cache (`save-if: false`, never Swatinem `lookup-only`).
+   `cd-core/lib` is executed as two complementary filters (`log_analysis::`
+   and `--skip log_analysis::`) so the heavy library binary is not pinned to
+   shard 1.
 
    The count went 4 → 8 because the shard drawing `cd-core/lib/other` was
    cancelled at the 60-minute job budget on two consecutive runs while the
@@ -153,6 +158,7 @@ CI therefore:
 | Script | Role |
 | --- | --- |
 | `scripts/ci_shard_plan.sh` | Enumerates every testable target from `cargo metadata` and partitions it. `verify` fails closed if the partition is not an exact, duplicate-free cover. |
+| `scripts/ci_warm_test_artifacts.sh` | Warmup compile: per-package `-p` `--no-run` matching shard build selectors (fingerprint alignment). |
 | `scripts/ci_run_shard.sh` | Runs one shard: per-unit start/finish lines, a heartbeat while a unit runs, a bounded `manifest.json`, `progress.jsonl`, and `status.json`. SIGTERM writes `incomplete`. |
 | `scripts/ci_record_cache.sh` | Records `cache_state=warm` only on an exact rust-cache hit. |
 | `scripts/ci_aggregate_shards.sh` | The gate. Fails if a shard is missing, failed, incomplete, stopped early, or if any test unit was claimed by no shard. |
@@ -167,7 +173,7 @@ Properties worth knowing:
   integration target are all units.
 - **The partition is deterministic** — round-robin over a canonically sorted
   unit list — so a shard reproduces identically on a laptop:
-  `sh scripts/ci_run_shard.sh --shard 2 --shards 4`.
+  `sh scripts/ci_run_shard.sh --shard 2 --shards 8`.
 - **Cancellation diagnostics:** a step timeout or job cancel SIGTERM's
   `ci_run_shard.sh` while the VM is still up; the trap writes `status.json`
   and `if: always()` uploads `rust-ubuntu-shard-N` (14-day retention). A VM
@@ -178,7 +184,9 @@ Properties worth knowing:
   Shards use `save-if: false` (restore files, do not save). Do **not** set
   `lookup-only: true`: that reports a hit without downloading, which hosted
   run `31845262696` recorded as warm while each shard still compiled for
-  11–12 minutes. The warmup job is the only writer.
+  11–12 minutes. The warmup job on **main** is the only writer
+  (`save-if: ${{ github.ref == 'refs/heads/main' }}`); PR runs restore the
+  main cache and do not save a second multi-GB copy.
 - **Nothing about the suite is relaxed.** Shards keep `RUST_TEST_THREADS=1`.
   macOS and Windows still run `cargo test --workspace`.
 

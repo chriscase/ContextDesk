@@ -379,7 +379,7 @@ expect_ok "exact hit is warm" sh "$CACHE" --out "$TMP/cache-warm.json" --hit tru
 [ "$(jq -r '.cache_state' "$TMP/cache-warm.json")" = warm ] || fail "true hit must be warm"
 [ "$(jq -r '.cache_hit' "$TMP/cache-warm.json")" = true ] || fail "true hit must set cache_hit"
 [ "$(jq -r '.save' "$TMP/cache-warm.json")" = true ] || fail "warmup defaults to save=true"
-[ "$(jq -r '.shared_key' "$TMP/cache-warm.json")" = ubuntu-workspace-tests ] || fail "shared key"
+[ "$(jq -r '.shared_key' "$TMP/cache-warm.json")" = ubuntu-workspace-tests-v2 ] || fail "shared key"
 
 expect_ok "miss is cold" sh "$CACHE" --out "$TMP/cache-cold.json" --hit false --role shard --shard 1 --save false
 [ "$(jq -r '.cache_state' "$TMP/cache-cold.json")" = cold ] || fail "false hit must be cold"
@@ -468,20 +468,31 @@ def cache_step(job):
     raise SystemExit("missing rust-cache step")
 
 wu = cache_step(jobs["rust-ubuntu"])["with"]
-if wu.get("shared-key") != "ubuntu-workspace-tests":
+if wu.get("shared-key") != "ubuntu-workspace-tests-v2":
     raise SystemExit(f"warmup shared-key {wu.get('shared-key')}")
 if wu.get("lookup-only") in (True, "true"):
     raise SystemExit("warmup must save, not lookup-only")
-if wu.get("save-if") in (False, "false"):
-    raise SystemExit("warmup must be allowed to save")
+save_if = wu.get("save-if")
+if save_if in (False, "false"):
+    raise SystemExit("warmup must be allowed to save on main")
+if save_if not in (True, "true", None) and "refs/heads/main" not in str(save_if):
+    raise SystemExit(f"warmup save-if should be main-only, got {save_if!r}")
 
 sh = cache_step(jobs["rust-ubuntu-shard"])["with"]
-if sh.get("shared-key") != "ubuntu-workspace-tests":
+if sh.get("shared-key") != "ubuntu-workspace-tests-v2":
     raise SystemExit("shard shared-key mismatch")
 if sh.get("lookup-only") in (True, "true"):
     raise SystemExit("shards must not use lookup-only (that skips the download)")
 if sh.get("save-if") not in (False, "false"):
     raise SystemExit("shards must not save the shared cache")
+
+# macOS/Windows + tauri writers also save only on main (PR cache duplication).
+rust_save = cache_step(jobs["rust"])["with"].get("save-if")
+if rust_save is None or "refs/heads/main" not in str(rust_save):
+    raise SystemExit(f"mac/win rust-cache save-if should be main-only, got {rust_save!r}")
+tauri_save = cache_step(jobs["tauri-host"])["with"].get("save-if")
+if tauri_save is None or "refs/heads/main" not in str(tauri_save):
+    raise SystemExit(f"tauri rust-cache save-if should be main-only, got {tauri_save!r}")
 
 uploads = [s for s in steps(jobs["rust-ubuntu-shard"]) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
 if len(uploads) != 1:
@@ -507,10 +518,12 @@ if cu["with"].get("name") != "rust-ubuntu-cache-status":
 if int(cu["with"]["retention-days"]) != 14:
     raise SystemExit("cache-status retention")
 
-# Ubuntu rust job warms with --no-run and must not run the suite itself.
+# Ubuntu rust job warms with shard-shaped -p --no-run (not --workspace).
 ubuntu_runs = "\n".join(s.get("run") or "" for s in steps(jobs["rust-ubuntu"]))
-if "cargo test --workspace --no-run" not in ubuntu_runs:
-    raise SystemExit("ubuntu rust job must compile tests with --no-run")
+if "ci_warm_test_artifacts.sh" not in ubuntu_runs:
+    raise SystemExit("ubuntu rust job must warm via scripts/ci_warm_test_artifacts.sh")
+if "cargo test --workspace --no-run" in ubuntu_runs:
+    raise SystemExit("ubuntu rust job must not warm with cargo test --workspace --no-run")
 # A bare `cargo test --workspace` (no --no-run) would reintroduce the monolith.
 for block in ubuntu_runs.splitlines():
     stripped = block.strip()
