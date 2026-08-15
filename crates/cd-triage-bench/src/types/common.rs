@@ -9,12 +9,14 @@ pub const CASE_SCHEMA_V1: &str = "contextdesk.triage_bench.case.v1";
 pub const SNAPSHOT_SCHEMA_V1: &str = "contextdesk.triage_bench.evidence_snapshot.v1";
 pub const TASK_SCHEMA_V1: &str = "contextdesk.triage_bench.evaluation_task.v1";
 pub const PACKET_SCHEMA_V1: &str = "contextdesk.triage_bench.task_packet.v1";
+pub const REVIEW_PACKET_SCHEMA_V1: &str = "contextdesk.triage_bench.review_packet.v1";
 pub const RUN_SCHEMA_V1: &str = "contextdesk.triage_bench.triage_run.v1";
 pub const RUN_IMPORT_SCHEMA_V1: &str = "contextdesk.triage_bench.run_import.v1";
 pub const ADJUDICATION_SCHEMA_V1: &str = "contextdesk.triage_bench.adjudication.v1";
 pub const SCORE_SCHEMA_V1: &str = "contextdesk.triage_bench.score_review.v1";
 pub const REPORT_SCHEMA_V1: &str = "contextdesk.triage_bench.backtest_report.v1";
 pub const RUBRIC_V1: &str = "contextdesk.triage_bench.rubric.v1";
+pub const RUBRIC_V2: &str = "contextdesk.triage_bench.rubric.v2";
 
 pub const MAX_ID_CHARS: usize = 192;
 pub const MAX_STRING_BYTES: usize = 64 * 1024;
