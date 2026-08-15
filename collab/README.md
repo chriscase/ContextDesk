@@ -8,7 +8,7 @@ or crate internals. Published `packages/contracts` artifacts may be consumed
 read-only later; v1 does not.
 
 Parent epic: #883. Skeleton is #884. Auth/authz/audit is #885. Cases/timeline
-is #886. Source catalog and manual import is #887. Export is a later slice.
+is #886. Source catalog and manual import is #887. Export is #888.
 
 ## Layout
 
@@ -118,12 +118,35 @@ is an explicit, recorded operation. A reference whose target was never hashed
   Nothing marks an import corroborated or verified automatically.
 - Without an #888 package, evidence visibility is `unknown` or
   `importer_described`. The `snapshotBinding` field exists for a later
-  package snapshot identity and is not invented here.
+  package snapshot identity. #888 export fills that field with the package
+  manifest hash.
 - Importer and operator identities are distinct fields. Missing
   provider/model/version stay null. Output-only imports keep prompt
   completeness `unknown`.
 - Catalog administration is case-lead/admin and audited. Retiring a source
   keeps historical attributions.
+
+### Portable export (#888)
+
+- Export is a read-only projection. It never creates, edits, or reinterprets
+  case content. Consumers are the public case, catalog, and import APIs.
+- Two artifacts: a **triage brief** (case projection) and a **selected-evidence
+  prompt package** (explicit selection + optional scaffold). The package
+  manifest hash is the snapshot identity imported runs bind to.
+- Canonical versioned JSON plus markdown generated from the same payload.
+  Re-export of an unchanged case or selection is byte-identical. `exportedAt`
+  lives only on the envelope, outside the deterministic payload.
+- Variants match #876 invariant 7: `owner_only` (contributor+) and
+  `share_safe` (case-lead+ when leaving the tool). `share_safe` is
+  default-deny for raw `owner_only` artifacts, redacts directory identities
+  from `COLLAB_EXPORT_REDACTION_MAP`, and fails closed on a rule-based
+  privacy scan (`COLLAB_EXPORT_INTERNAL_HOST_SUFFIXES`). The redaction map is
+  never embedded in `share_safe` output.
+- Packages exclude corroboration and resolution content by default. Imported
+  external runs appear in the brief as `imported_response` with their
+  corroboration state — never as a finding.
+- Every export is audited with actor, case, variant, and — for packages —
+  the manifest hash.
 
 ## Module boundaries
 

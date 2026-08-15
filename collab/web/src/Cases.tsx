@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { ExportPanel } from "./ExportPanel.js";
 import { ImportedRun } from "./ImportedRun.js";
 
 interface CaseRow {
@@ -29,8 +30,10 @@ interface RunRow {
 }
 
 export function Cases(props: { roles?: string[] }) {
-  const canLead =
-    (props.roles ?? []).includes("case-lead") || (props.roles ?? []).includes("admin");
+  const roles = props.roles ?? [];
+  const canLead = roles.includes("case-lead") || roles.includes("admin");
+  const canWrite =
+    canLead || roles.includes("contributor");
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
@@ -244,7 +247,11 @@ export function Cases(props: { roles?: string[] }) {
                 <option value="importer_described">importer-described</option>
               </select>
               <input className="login__input" name="visibilityNote" placeholder="Visibility note" />
-              <input className="login__input" name="snapshotBinding" placeholder="Package snapshot id (later #888)" />
+              <input
+                className="login__input"
+                name="snapshotBinding"
+                placeholder="Package snapshot identity"
+              />
               <label className="import-warn">
                 <input type="checkbox" name="redacted" /> I redacted secrets before save
               </label>
@@ -252,6 +259,7 @@ export function Cases(props: { roles?: string[] }) {
                 Import external run
               </button>
             </form>
+            <ExportPanel caseId={current.id} canWrite={canWrite} canLead={canLead} />
             <form className="composer" onSubmit={(e) => void addNote(e)}>
               <select className="login__input" name="kind" defaultValue="note">
                 <option value="message">message</option>

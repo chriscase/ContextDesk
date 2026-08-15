@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/export-envelope.v1.json",
+  "title": "cd-collab Export Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "kind", "privacyClass", "exportedAt", "payload", "markdown"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.export_envelope.v1" },
+    "kind": { "type": "string", "enum": ["brief", "package"] },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "exportedAt": { "type": "string" },
+    "payload": { "type": "object" },
+    "markdown": { "type": "string" }
+  }
+}
