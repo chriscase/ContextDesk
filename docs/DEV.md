@@ -80,6 +80,12 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
+# One CI Ubuntu test shard, exactly as CI partitions it (#874) — see below
+sh scripts/ci_shard_plan.sh verify --shards 4
+sh scripts/ci_run_shard.sh --shard 2 --shards 4
+sh scripts/ci_run_shard.sh --summary ci-shards
+sh scripts/tests/ci_shard_test.sh
+
 # Desktop
 cd desktop
 npm install
@@ -110,6 +116,65 @@ Index caps (all in `index.rs`; surfaced via `AppConfig`):
 - **`MAX_FILE_BYTES`** — per-file read cap, **512 KiB** (larger files / binaries skipped
   before any `read_to_string`, so huge dumps never allocate in full).
 - **`MAX_DEPTH`** — directory-walk depth cap, **12** (runaway nesting is skipped).
+
+## CI Ubuntu workspace test shards (#874)
+
+`cargo test --workspace` is still the local gate and still the gate on macOS and
+Windows. On Ubuntu it ran 70–80 minutes as one step, and when the hosted runner
+lost its connection GitHub marked the job failed with the step still
+`in_progress` and **no log blob at all**. Hosted runs on the first sharding
+attempt (`31828397526`, `31835229724`) then showed the same failure mode on
+**shard 1 only**: 86–96 minutes, step stuck `in_progress`, no log, no artifact,
+cache post-step never ran. Shards 2–4 passed (80/107 units); the aggregate
+failed closed.
+
+CI therefore:
+
+1. Compiles Ubuntu workspace tests **once** in `rust (ubuntu-latest)`
+   (`cargo test --workspace --no-run`) and **saves** the shared
+   `ubuntu-workspace-tests` rust-cache entry there.
+2. Runs the same suite as `CD_SHARD_COUNT` (currently **4**) lookup-only shards
+   that restore that cache. `cd-core/lib` is executed as two complementary
+   filters (`log_analysis::` and `--skip log_analysis::`) so the heavy library
+   binary is not pinned to shard 1.
+3. Aggregates with `scripts/ci_aggregate_shards.sh`, which fails closed on a
+   missing, failed, incomplete, or truncated shard, and on any unit no shard
+   claimed.
+
+| Script | Role |
+| --- | --- |
+| `scripts/ci_shard_plan.sh` | Enumerates every testable target from `cargo metadata` and partitions it. `verify` fails closed if the partition is not an exact, duplicate-free cover. |
+| `scripts/ci_run_shard.sh` | Runs one shard: per-unit start/finish lines, a heartbeat while a unit runs, a bounded `manifest.json`, `progress.jsonl`, and `status.json`. SIGTERM writes `incomplete`. |
+| `scripts/ci_record_cache.sh` | Records `cache_state=warm` only on an exact rust-cache hit. |
+| `scripts/ci_aggregate_shards.sh` | The gate. Fails if a shard is missing, failed, incomplete, stopped early, or if any test unit was claimed by no shard. |
+
+Properties worth knowing:
+
+- **Coverage is checked, not assumed.** The shard plan comes from Cargo's own
+  view of the workspace, so a new `crates/*/tests/*.rs` joins a shard on its
+  next run; the aggregate recomputes the plan and rejects any unit that no
+  shard reported. Unit tests (`--lib`, including complementary `cd-core/lib`
+  filters), binary unit tests (`--bins`), doc tests (`--doc`), and every
+  integration target are all units.
+- **The partition is deterministic** — round-robin over a canonically sorted
+  unit list — so a shard reproduces identically on a laptop:
+  `sh scripts/ci_run_shard.sh --shard 2 --shards 4`.
+- **Cancellation diagnostics:** a step timeout or job cancel SIGTERM's
+  `ci_run_shard.sh` while the VM is still up; the trap writes `status.json`
+  and `if: always()` uploads `rust-ubuntu-shard-N` (14-day retention). A VM
+  that is already gone cannot upload; the warmup job exists so shards should
+  not sit in the 86–96 minute hosted-runner-loss window.
+- **Cache is honest.** `cache_state` is `warm` only when Swatinem reports an
+  exact `cache-hit` **and** the restored `target/` directory is non-empty.
+  Shards use `save-if: false` (restore files, do not save). Do **not** set
+  `lookup-only: true`: that reports a hit without downloading, which hosted
+  run `31845262696` recorded as warm while each shard still compiled for
+  11–12 minutes. The warmup job is the only writer.
+- **Nothing about the suite is relaxed.** Shards keep `RUST_TEST_THREADS=1`.
+  macOS and Windows still run `cargo test --workspace`.
+
+Required-check / ruleset wiring is **not** workflow behavior; see
+[`docs/CI_REQUIRED_CHECKS.md`](CI_REQUIRED_CHECKS.md).
 
 ## Renderer visual acceptance (desktop)
 
