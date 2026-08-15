@@ -11,12 +11,11 @@ SDK contracts, not by absorbing case management.
 
 Working name: `cd-triage-bench` (rename-friendly; crate prefix stays `cd-*`).
 
-Status: first slice (#877 store/entities plus a report-only #880/#881 sketch)
-is on `main` via #890/#891. This crate's **manual import / provenance** path
-(#878) is completed here: human, web-only, and other-product `TriageRun`s,
-byte-exact raw capture, mandatory immutable fairness, and explicit
-duplicate / near-duplicate outcomes. Not a close of epic #876. Not
-release-ready. ContextDesk SDK adapter remains #879.
+Status: first slice (#877 store/entities plus a report-only #881 sketch)
+is on `main` via #890/#891. This branch adds **manual import / provenance**
+(#878) and **rubric v1 + expert adjudication** (#880). Not a close of epic
+#876. Not release-ready. ContextDesk SDK adapter remains #879. Comparison
+report aggregation remains #881.
 
 ## Layout
 
@@ -30,6 +29,7 @@ release-ready. ContextDesk SDK adapter remains #879.
   adjudications/<adjudication_id>.json
   scores/<score_id>.json
   packets/<packet_id>.json
+  review-packets/<packet_id>.json
   blobs/sha256/<hh>/<hex>
 ```
 
@@ -96,7 +96,10 @@ cd-triage-bench --library ./bench-lib import-run ./other.json --raw ./other.txt
 cd-triage-bench --library ./bench-lib list runs
 cd-triage-bench --library ./bench-lib show runs "$RUN_ID"
 cd-triage-bench --library ./bench-lib packet "$TASK_ID"
+cd-triage-bench --library ./bench-lib review-packet "$RUN_ID" --phase support
 cd-triage-bench --library ./bench-lib import-adjudication ./adj.json
+cd-triage-bench --library ./bench-lib review-packet "$RUN_ID" --phase diagnosis
+cd-triage-bench --library ./bench-lib show adjudications "$ADJ_ID"
 cd-triage-bench --library ./bench-lib report --format json --privacy share-safe
 ```
 
@@ -116,17 +119,22 @@ different fairness/strategy identity, prints `created <run_id>` (and
 `near_duplicate_of=` when the raw digest already exists). There is no edit
 verb; changing fairness on a stored record fails closed.
 
-## Rubric v1 dimensions
+## Rubric v1 and adjudication
 
-1. Diagnosis correctness (n/a on unresolved cases)
-2. Evidence support
-3. Actionability
-4. Uncertainty/calibration
-5. Unsafe unsupported claims
+Documented rubric and score schema:
+[`docs/RUBRIC_V1.md`](docs/RUBRIC_V1.md).
+Worked adjudication example:
+[`fixtures/templates/adjudication.example.json`](fixtures/templates/adjudication.example.json).
 
-Deterministic citation-existence checks may set **assist flags**. They never
-produce scores. Human experts remain the scoring authority. Disagreement is
-preserved as separate adjudications.
+`review-packet --phase support` is a blinded review packet: no structured
+strategy identity and no case resolution. If masking is impossible, the
+packet records why (`blinding.kind = unblinded`). Diagnosis phase is
+allowed only after a support adjudication exists.
+
+`import-adjudication` attaches deterministic citation-existence **flags**
+(`citation_not_in_snapshot:<id>`). It never writes scores. Two reviewers
+are two records; `show adjudications` renders both rationales. Re-scoring
+under rubric v2 creates new records and leaves v1 scores byte-identical.
 
 ## Future scope (explicitly not this slice)
 

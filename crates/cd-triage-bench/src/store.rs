@@ -3,6 +3,11 @@
 use crate::canonical::to_pretty_json;
 use crate::error::{BenchError, BenchResult};
 use crate::packet::{materialize_task_packet, TaskPacket};
+use crate::review::{
+    materialize_review_packet, merge_citation_assists, run_has_support_adjudication, ReviewPacket,
+    ReviewPhase,
+};
+use crate::types::citation_assist_flags;
 use crate::types::{
     sha256_hex, Adjudication, Case, ContentDigest, EvaluationTask, EvidenceSnapshot, ScoreReview,
     TriageRun, LIBRARY_SCHEMA_V1,
@@ -37,6 +42,7 @@ impl BenchStore {
             "adjudications",
             "scores",
             "packets",
+            "review-packets",
             "blobs/sha256",
         ] {
             let path = root.join(dir);
@@ -231,6 +237,46 @@ impl BenchStore {
             runs.push(self.get_run(&id)?);
         }
         Ok(runs)
+    }
+
+    pub fn materialize_review_packet(
+        &self,
+        run_id: &str,
+        phase: ReviewPhase,
+    ) -> BenchResult<ReviewPacket> {
+        let run = self.get_run(run_id)?;
+        let task = self.get_task(&run.task_id)?;
+        let case = self.get_case(&run.case_id)?;
+        let snapshot = self.get_snapshot(&run.snapshot_id)?;
+        let raw = self.get_blob(&run.raw_output.digest.hex)?;
+        let support_recorded = run_has_support_adjudication(&self.load_adjudications()?, run_id);
+        let packet = materialize_review_packet(
+            &case,
+            &snapshot,
+            &task,
+            &run,
+            &raw,
+            phase,
+            support_recorded,
+        )?;
+        atomic_write_json(
+            &self.entity_path("review-packets", &packet.packet_id),
+            &packet,
+        )?;
+        Ok(packet)
+    }
+
+    pub fn import_adjudication(&self, adj: Adjudication) -> BenchResult<ScoreReview> {
+        let run = self.get_run(&adj.run_id)?;
+        let snapshot = self.get_snapshot(&run.snapshot_id)?;
+        let item_ids = snapshot
+            .items
+            .iter()
+            .map(|item| item.item_id().to_string())
+            .collect();
+        let flags = citation_assist_flags(&item_ids, &run.claims);
+        let adj = merge_citation_assists(adj, flags)?;
+        self.put_adjudication(&adj)
     }
 
     pub fn put_adjudication(&self, adj: &Adjudication) -> BenchResult<ScoreReview> {

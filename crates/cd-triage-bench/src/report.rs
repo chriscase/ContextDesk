@@ -7,6 +7,8 @@ use crate::types::{
     Adjudication, DimensionVerdict, FairnessClass, Observed, PrivacyClass, RubricDimension,
     RunStatus, ScoreReview, SourceKind, StrategyIdentity, TriageRun, REPORT_SCHEMA_V1, RUBRIC_V1,
 };
+
+pub use crate::review::{blinded_run_view, BlindedRunView};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -99,39 +101,6 @@ pub struct VersionPair {
 pub struct VersionDelta {
     pub dimension: RubricDimension,
     pub change: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BlindedRunView {
-    pub run_id: String,
-    pub status: RunStatus,
-    pub raw_output_digest: String,
-    pub uncertainty: Observed<String>,
-    pub claim_count: usize,
-    pub strategy_masked: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unblindable_reason: Option<String>,
-}
-
-pub fn blinded_run_view(run: &TriageRun) -> BlindedRunView {
-    let unblindable_reason = distinctive_format_reason(run);
-    BlindedRunView {
-        run_id: run.run_id.clone(),
-        status: run.status,
-        raw_output_digest: run.raw_output.digest.wire(),
-        uncertainty: run.uncertainty.clone(),
-        claim_count: run.claims.len(),
-        strategy_masked: unblindable_reason.is_none(),
-        unblindable_reason,
-    }
-}
-
-fn distinctive_format_reason(run: &TriageRun) -> Option<String> {
-    if run.raw_output.encoding != "utf-8" {
-        return Some("non-utf8 raw artifact retains a distinctive encoding".into());
-    }
-    None
 }
 
 pub fn build_report(

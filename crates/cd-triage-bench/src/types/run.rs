@@ -39,6 +39,7 @@ pub enum RunStatus {
     Partial,
     Cancelled,
     TimedOut,
+    Unscorable,
 }
 
 impl RunStatus {
@@ -49,6 +50,7 @@ impl RunStatus {
             Self::Partial => "partial",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
+            Self::Unscorable => "unscorable",
         }
     }
 }
