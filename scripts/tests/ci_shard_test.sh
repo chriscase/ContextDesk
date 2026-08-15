@@ -159,7 +159,9 @@ expect_fail "runner must reject a shard outside the matrix" \
   sh "$RUN" --shard 9 --shards 4 --out "$TMP/never"
 
 # ------------------------------------------------------------- aggregate gate
-SHARDS=4
+# Must equal the workflow's CD_SHARD_COUNT: the workflow-contract check below
+# compares them and fails closed when they drift.
+SHARDS=8
 
 make_results() {
   dir=$1

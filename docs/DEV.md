@@ -133,10 +133,19 @@ CI therefore:
 1. Compiles Ubuntu workspace tests **once** in `rust (ubuntu-latest)`
    (`cargo test --workspace --no-run`) and **saves** the shared
    `ubuntu-workspace-tests` rust-cache entry there.
-2. Runs the same suite as `CD_SHARD_COUNT` (currently **4**) lookup-only shards
+2. Runs the same suite as `CD_SHARD_COUNT` (currently **8**) lookup-only shards
    that restore that cache. `cd-core/lib` is executed as two complementary
    filters (`log_analysis::` and `--skip log_analysis::`) so the heavy library
    binary is not pinned to shard 1.
+
+   The count went 4 → 8 because the shard drawing `cd-core/lib/other` was
+   cancelled at the 60-minute job budget on two consecutive runs while the
+   other three finished in 16–33 minutes. A shard pays build **and** test
+   cost — a warm hosted shard reported `build time: 710s` of `total time:
+   1203s` — so only the test half shrinks as units spread, which is why the
+   count was doubled rather than nudged to 6. If the `cd-core/lib/other`
+   shard overruns again, split it with a `lib_splits` entry in
+   `scripts/ci_shard_plan.sh` rather than raising the count further.
 3. Aggregates with `scripts/ci_aggregate_shards.sh`, which fails closed on a
    missing, failed, incomplete, or truncated shard, and on any unit no shard
    claimed.
