@@ -1,0 +1,31 @@
+{
+  "schema_id": "contextdesk.triage_bench.evidence_snapshot.v1",
+  "privacy": "share_safe",
+  "case_id": "case-fixture-1",
+  "captured_at": "2026-01-15T06:00:00Z",
+  "captured_by": "fixture-operator",
+  "items": [
+    {
+      "kind": "log",
+      "item_id": "ev-log-1",
+      "privacy": "share_safe",
+      "capture_time": "2026-01-15T04:12:00Z",
+      "source": {
+        "reference": "checkout.log",
+        "captured_from": "synthetic collector"
+      },
+      "media_type": "text/plain",
+      "format": "raw",
+      "content": {
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "57e9d2061f7c70b1736bacdbb05b92cb52182117950f7e97009e0c745cf33dbc"
+        },
+        "byte_length": 62
+      },
+      "summaries": [],
+      "visible_to_strategies": true
+    }
+  ],
+  "unexpected": true
+}

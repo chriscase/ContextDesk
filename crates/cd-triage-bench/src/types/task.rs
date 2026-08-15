@@ -76,11 +76,68 @@ struct TaskDigestBody<'a> {
     time_constraint: &'a Option<TimeConstraint>,
 }
 
+/// Import document for an evaluation task. `task_id` may be omitted; unknown
+/// fields are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskImport {
+    schema_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
+    #[serde(default)]
+    privacy: PrivacyClass,
+    case_id: String,
+    snapshot_id: String,
+    question: String,
+    protocol: String,
+    protocol_version: String,
+    visibility: VisibilityPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    time_constraint: Option<TimeConstraint>,
+    created_at: String,
+}
+
 impl EvaluationTask {
     pub fn parse_json(text: &str) -> BenchResult<Self> {
         let parsed: Self = serde_json::from_str(text).map_err(BenchError::from_serde)?;
         parsed.validate()?;
         Ok(parsed)
+    }
+
+    /// Parse a stored record or an import document that omits `task_id`.
+    pub fn parse_import_json(text: &str) -> BenchResult<Self> {
+        let import: TaskImport = serde_json::from_str(text).map_err(BenchError::from_serde)?;
+        require_schema(&import.schema_id, TASK_SCHEMA_V1)?;
+        match import.task_id {
+            Some(task_id) => {
+                let task = Self {
+                    schema_id: import.schema_id,
+                    task_id,
+                    privacy: import.privacy,
+                    case_id: import.case_id,
+                    snapshot_id: import.snapshot_id,
+                    question: import.question,
+                    protocol: import.protocol,
+                    protocol_version: import.protocol_version,
+                    visibility: import.visibility,
+                    time_constraint: import.time_constraint,
+                    created_at: import.created_at,
+                };
+                task.validate()?;
+                Ok(task)
+            }
+            None => Self::from_parts(
+                import.privacy,
+                import.case_id,
+                import.snapshot_id,
+                import.question,
+                import.protocol,
+                import.protocol_version,
+                import.visibility,
+                import.time_constraint,
+                import.created_at,
+            ),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -243,5 +300,50 @@ mod tests {
         .unwrap();
         assert_ne!(a.task_id, b.task_id);
         assert_ne!(a.snapshot_id, b.snapshot_id);
+    }
+
+    #[test]
+    fn import_without_task_id_rejects_unknown_fields() {
+        let err = EvaluationTask::parse_import_json(
+            r#"{
+                "schema_id": "contextdesk.triage_bench.evaluation_task.v1",
+                "case_id": "case-1",
+                "snapshot_id": "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "question": "What failed?",
+                "protocol": "visible evidence only",
+                "protocol_version": "v1",
+                "visibility": {"visible_item_ids": ["ev-log-1"]},
+                "created_at": "2026-01-15T07:00:00Z",
+                "unexpected": true
+            }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn task_id_mismatch_is_rejected() {
+        let task = EvaluationTask::from_parts(
+            PrivacyClass::OwnerOnly,
+            "case-1".into(),
+            "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "What failed?".into(),
+            "visible evidence only".into(),
+            "v1".into(),
+            VisibilityPolicy {
+                visible_item_ids: vec!["ev-log-1".into()],
+                include_summaries: true,
+                include_raw_bytes: true,
+            },
+            None,
+            "2026-01-15T07:00:00Z".into(),
+        )
+        .unwrap();
+        let mut json = serde_json::to_value(&task).unwrap();
+        json["task_id"] = serde_json::json!(
+            "task-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        );
+        let err = EvaluationTask::parse_import_json(&json.to_string()).unwrap_err();
+        assert!(err.to_string().contains("task_id does not match"));
     }
 }

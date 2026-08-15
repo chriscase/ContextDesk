@@ -331,11 +331,59 @@ struct SnapshotDigestBody<'a> {
     notes: &'a Option<String>,
 }
 
+/// Import document for an evidence snapshot. `snapshot_id` may be omitted;
+/// unknown fields are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotImport {
+    schema_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot_id: Option<String>,
+    #[serde(default)]
+    privacy: PrivacyClass,
+    case_id: String,
+    captured_at: String,
+    captured_by: String,
+    items: Vec<EvidenceItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
+}
+
 impl EvidenceSnapshot {
     pub fn parse_json(text: &str) -> BenchResult<Self> {
         let parsed: Self = serde_json::from_str(text).map_err(BenchError::from_serde)?;
         parsed.validate()?;
         Ok(parsed)
+    }
+
+    /// Parse a stored record or an import document that omits `snapshot_id`.
+    pub fn parse_import_json(text: &str) -> BenchResult<Self> {
+        let import: SnapshotImport = serde_json::from_str(text).map_err(BenchError::from_serde)?;
+        require_schema(&import.schema_id, SNAPSHOT_SCHEMA_V1)?;
+        match import.snapshot_id {
+            Some(snapshot_id) => {
+                let snapshot = Self {
+                    schema_id: import.schema_id,
+                    snapshot_id,
+                    privacy: import.privacy,
+                    case_id: import.case_id,
+                    captured_at: import.captured_at,
+                    captured_by: import.captured_by,
+                    items: import.items,
+                    notes: import.notes,
+                };
+                snapshot.validate()?;
+                Ok(snapshot)
+            }
+            None => Self::from_parts(
+                import.privacy,
+                import.case_id,
+                import.captured_at,
+                import.captured_by,
+                import.items,
+                import.notes,
+            ),
+        }
     }
 
     pub fn validate(&self) -> BenchResult<()> {
@@ -538,5 +586,40 @@ mod tests {
         )
         .unwrap();
         assert!(snapshot.items[0].held_content().is_none());
+    }
+
+    #[test]
+    fn import_without_snapshot_id_rejects_unknown_fields() {
+        let err = EvidenceSnapshot::parse_import_json(
+            r#"{
+                "schema_id": "contextdesk.triage_bench.evidence_snapshot.v1",
+                "case_id": "case-1",
+                "captured_at": "2026-01-15T06:00:00Z",
+                "captured_by": "operator",
+                "items": [],
+                "unexpected": true
+            }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn snapshot_id_mismatch_is_rejected() {
+        let snapshot = EvidenceSnapshot::from_parts(
+            PrivacyClass::OwnerOnly,
+            "case-1".into(),
+            "2026-01-15T06:00:00Z".into(),
+            "operator".into(),
+            vec![log_item(b"error checkout\n")],
+            None,
+        )
+        .unwrap();
+        let mut json = serde_json::to_value(&snapshot).unwrap();
+        json["snapshot_id"] = serde_json::json!(
+            "snap-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        );
+        let err = EvidenceSnapshot::parse_import_json(&json.to_string()).unwrap_err();
+        assert!(err.to_string().contains("snapshot_id does not match"));
     }
 }

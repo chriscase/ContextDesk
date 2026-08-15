@@ -1,0 +1,24 @@
+{
+  "schema_id": "contextdesk.triage_bench.run_import.v1",
+  "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "strategy": {
+    "name": "human-expert",
+    "version": { "status": "unknown" },
+    "build": { "status": "unknown" }
+  },
+  "source_kind": "human",
+  "prompt_workflow": {
+    "completeness": "unknown",
+    "prompt": { "status": "unknown" },
+    "workflow": { "status": "unknown" }
+  },
+  "raw_output_utf8": "Diagnosis: inventory client timeout. Next step: raise timeout and watch error rate.\n",
+  "timing": { "status": "unknown" },
+  "cost": { "status": "unknown" },
+  "uncertainty": { "status": "unknown" },
+  "fairness": { "kind": "same_snapshot" },
+  "status": "completed",
+  "operator": "operator-a",
+  "privacy": "share_safe",
+  "created_at": "2026-01-15T08:00:00Z"
+}

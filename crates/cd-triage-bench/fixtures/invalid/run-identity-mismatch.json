@@ -1,0 +1,35 @@
+{
+  "schema_id": "contextdesk.triage_bench.triage_run.v1",
+  "run_id": "run-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "privacy": "share_safe",
+  "case_id": "case-fixture-1",
+  "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "snapshot_id": "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "strategy": {
+    "name": "human-expert",
+    "version": { "status": "unknown" },
+    "build": { "status": "unknown" }
+  },
+  "source_kind": "human",
+  "prompt_workflow": {
+    "completeness": "unknown",
+    "prompt": { "status": "unknown" },
+    "workflow": { "status": "unknown" }
+  },
+  "raw_output": {
+    "digest": {
+      "algorithm": "sha256",
+      "hex": "07c92868e91970628566d2d08a4b8062c09a4af1efb004c0c4ed024e2ab5e271"
+    },
+    "byte_length": 84,
+    "encoding": "utf-8"
+  },
+  "claims": [],
+  "timing": { "status": "unknown" },
+  "cost": { "status": "unknown" },
+  "uncertainty": { "status": "unknown" },
+  "fairness": { "kind": "same_snapshot" },
+  "status": "completed",
+  "operator": "operator-a",
+  "created_at": "2026-01-15T08:00:00Z"
+}

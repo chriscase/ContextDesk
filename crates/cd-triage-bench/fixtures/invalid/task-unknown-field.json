@@ -1,0 +1,16 @@
+{
+  "schema_id": "contextdesk.triage_bench.evaluation_task.v1",
+  "privacy": "share_safe",
+  "case_id": "case-fixture-1",
+  "snapshot_id": "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "question": "What caused the checkout failures?",
+  "protocol": "Answer only from visible snapshot evidence.",
+  "protocol_version": "v1",
+  "visibility": {
+    "visible_item_ids": ["ev-log-1"],
+    "include_summaries": true,
+    "include_raw_bytes": true
+  },
+  "created_at": "2026-01-15T07:00:00Z",
+  "unexpected": true
+}

@@ -11,8 +11,8 @@ SDK contracts, not by absorbing case management.
 
 Working name: `cd-triage-bench` (rename-friendly; crate prefix stays `cd-*`).
 
-Status on this branch: **local integration** for issues #877, #878, and the
-report-only slice of #880/#881. Not shipped on `main`. Not release-ready.
+Status on this branch: **local integration** (Refs #877, #878, and the
+report-only slice of #880/#881). Not shipped on `main`. Not release-ready.
 
 ## Layout
 
@@ -63,8 +63,15 @@ report-only slice of #880/#881. Not shipped on `main`. Not release-ready.
 ## Schema versioning and migration
 
 Schema ids are exact strings (`contextdesk.triage_bench.*.v1`). Unknown fields
-are rejected. Additive change requires a new schema id (`v2`); v1 records stay
-readable and are never rewritten in place. There is no implicit upgrade.
+are rejected on stored records **and** on CLI import documents, including the
+happy path that omits generated `snapshot_id` / `task_id` / `adjudication_id` /
+`score_id` / `run_id`. Additive change requires a new schema id (`v2`); v1
+records stay readable and are never rewritten in place. There is no implicit
+upgrade.
+
+Valid and invalid fixtures live in [`fixtures/valid`](fixtures/valid) and
+[`fixtures/invalid`](fixtures/invalid). Content-addressed identity mismatches
+fail closed. This slice does not close #877 on its own; treat it as **Refs #877**.
 
 ## CLI examples
 

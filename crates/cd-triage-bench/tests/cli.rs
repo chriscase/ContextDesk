@@ -328,23 +328,80 @@ fn init_and_import_work_with_poisoned_home() {
 }
 
 #[test]
-fn unknown_field_case_is_rejected() {
+fn unknown_field_imports_are_rejected_without_generated_ids() {
     let tmp = tempfile::tempdir().unwrap();
     let library = tmp.path().join("lib");
     bench()
         .args(["--library", library.to_str().unwrap(), "init"])
         .assert()
         .success();
-    let invalid =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/invalid/case-unknown-field.json");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/invalid");
+    for (command, file) in [
+        ("import-case", "case-unknown-field.json"),
+        ("import-snapshot", "snapshot-unknown-field.json"),
+        ("import-task", "task-unknown-field.json"),
+        ("import-run", "run-unknown-field.json"),
+        ("import-adjudication", "adjudication-unknown-field.json"),
+    ] {
+        bench()
+            .args([
+                "--library",
+                library.to_str().unwrap(),
+                command,
+                fixtures.join(file).to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("unknown field"));
+    }
+}
+
+#[test]
+fn identity_mismatch_imports_are_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("lib");
+    bench()
+        .args(["--library", library.to_str().unwrap(), "init"])
+        .assert()
+        .success();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/invalid");
     bench()
         .args([
             "--library",
             library.to_str().unwrap(),
-            "import-case",
-            invalid.to_str().unwrap(),
+            "import-snapshot",
+            fixtures
+                .join("snapshot-identity-mismatch.json")
+                .to_str()
+                .unwrap(),
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unknown field"));
+        .stderr(predicate::str::contains("snapshot_id does not match"));
+    bench()
+        .args([
+            "--library",
+            library.to_str().unwrap(),
+            "import-task",
+            fixtures
+                .join("task-identity-mismatch.json")
+                .to_str()
+                .unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("task_id does not match"));
+    bench()
+        .args([
+            "--library",
+            library.to_str().unwrap(),
+            "import-adjudication",
+            fixtures
+                .join("adjudication-identity-mismatch.json")
+                .to_str()
+                .unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("adjudication_id does not match"));
 }
