@@ -12,11 +12,22 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import type { Config } from "./config.js";
 import type { EvidenceStore } from "./evidence/store.js";
+import { registerAuthRoutes, type AuthRouteDeps } from "./modules/auth/index.js";
+import { registerAuthzRoutes } from "./modules/authz/index.js";
+import type { MutableGroupRoleMap } from "./modules/authz/index.js";
+import type { AuditStore } from "./modules/audit/index.js";
+
+export interface SecurityDeps {
+  auth: AuthRouteDeps;
+  roles: MutableGroupRoleMap;
+  audit: AuditStore;
+}
 
 export interface AppDeps {
   config: Config;
   pool: Pick<Pool, "query"> | null;
   store: Pick<EvidenceStore, "ping">;
+  security?: SecurityDeps;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -59,6 +70,15 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     }
     return body;
   });
+
+  if (deps.security) {
+    await registerAuthRoutes(app, deps.security.auth);
+    await registerAuthzRoutes(app, {
+      auth: deps.security.auth,
+      roles: deps.security.roles,
+      audit: deps.security.audit,
+    });
+  }
 
   const staticDir =
     deps.config.staticDir ??

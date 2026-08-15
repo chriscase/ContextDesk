@@ -1,0 +1,10 @@
+DROP TRIGGER IF EXISTS audit_events_no_update ON audit_events;
+DROP FUNCTION IF EXISTS audit_events_immutable();
+DROP INDEX IF EXISTS audit_events_action_idx;
+DROP INDEX IF EXISTS audit_events_at_idx;
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS authz_group_role_map;
+DROP INDEX IF EXISTS sessions_username_idx;
+DROP INDEX IF EXISTS sessions_token_hash_idx;
+DROP TABLE IF EXISTS sessions;
+DELETE FROM schema_migrations WHERE version = '002_auth_audit';

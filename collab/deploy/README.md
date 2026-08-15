@@ -26,7 +26,11 @@ Passwords and database URLs are **secret-store-sourced**. Copy
 This compose file is plaintext on localhost for development. Company hosting
 must terminate TLS at the ingress (load balancer or reverse proxy) and forward
 HTTP to the app container. The process itself does not terminate TLS in v1
-and does not embed internal hostnames.
+and does not embed internal hostnames. Set `COLLAB_COOKIE_SECURE=1` behind
+HTTPS. The directory connection is separate: LDAPS or verified StartTLS only;
+plaintext LDAP refuses to boot. CA material is operator-supplied
+(`COLLAB_LDAP_CA`). A fixture OpenLDAP seed lives in `openldap/` (example.test
+only).
 
 ## Local steps
 

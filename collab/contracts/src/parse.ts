@@ -20,6 +20,7 @@ export type FieldType =
   | { kind: "bool" }
   | { kind: "u64" }
   | { kind: "enum"; values: readonly string[] }
+  | { kind: "array"; of: FieldType }
   | { kind: "object"; shape: ObjectShape };
 
 export type ObjectShape = Readonly<
@@ -60,6 +61,12 @@ export function checkValue(path: string, type: FieldType, v: unknown): void {
           `expected one of [${type.values.join(", ")}], got ${describe(v)}`,
         );
       return;
+    case "array": {
+      if (!Array.isArray(v))
+        throw new ContractViolation(path, `expected array, got ${describe(v)}`);
+      v.forEach((item, i) => checkValue(`${path}[${i}]`, type.of, item));
+      return;
+    }
     case "object":
       checkObject(path, type.shape, v);
       return;
@@ -106,5 +113,6 @@ export const f = {
   bool: { kind: "bool" } as FieldType,
   u64: { kind: "u64" } as FieldType,
   en: (...values: string[]): FieldType => ({ kind: "enum", values }),
+  arr: (of: FieldType): FieldType => ({ kind: "array", of }),
   obj: (shape: ObjectShape): FieldType => ({ kind: "object", shape }),
 };
