@@ -638,7 +638,10 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
         "conflict_of_interest": { "declared": false },
         "rubric_version": "contextdesk.triage_bench.rubric.v1",
         "phase": "support",
-        "blinding": { "kind": "unblinded", "reason": "raw names the strategy" },
+        "blinding": {
+            "kind": "unblinded",
+            "reason": "raw output contains the strategy name `web-assistant`"
+        },
         "outcomes": outcomes(
             json!({"kind": "not_applicable"}),
             json!({"kind": "score", "value": 0}),
@@ -660,7 +663,10 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
         "conflict_of_interest": { "declared": false },
         "rubric_version": "contextdesk.triage_bench.rubric.v1",
         "phase": "diagnosis",
-        "blinding": { "kind": "unblinded", "reason": "raw names the strategy" },
+        "blinding": {
+            "kind": "unblinded",
+            "reason": "raw output contains the strategy name `web-assistant`"
+        },
         "outcomes": unsafe_outcomes,
         "created_at": "2026-01-15T10:10:00Z"
     });
