@@ -69,23 +69,34 @@ is an explicit, recorded operation. A reference whose target was never hashed
   Passwords exist in memory only for the bind. No hashing, caching, storage, or
   logging. No other module may import `ldapts` or read a password field
   (enforced by `password-isolation.test.ts`).
+- `userDnTemplate` interpolates usernames with RFC 4514 DN escaping. Search
+  filters keep RFC 4515 escaping. The two are not interchangeable.
 - Transport: `ldaps://` or `ldap://` + StartTLS. Plaintext is refused at
   `loadLdapConfig`. Disabling TLS verification requires explicit
   `COLLAB_LDAP_DEV_MODE=1` (fixture only). Hosted CI uses StartTLS against
   the osixia fixture — Node 22 cannot complete LDAPS to that image's
   self-signed cert. Constructor `tlsOptions` are omitted for StartTLS so
-  ldapts does not wrap port 389 as LDAPS.
+  ldapts does not wrap port 389 as LDAPS. The encrypted-transport test still
+  uses the insecure fixture; a separate test proves verification fail-closed
+  against that same cert. `COLLAB_REQUIRE_LDAP=1` makes a missing live URL a
+  failure, not a skip.
 - Optional service-bind (`COLLAB_LDAP_BIND_DN` / `COLLAB_LDAP_BIND_PASSWORD`) is
   secret-store-sourced and never written to the DB, logs, or audit. After a
   successful user bind it is reused to read group membership when the
   directory hides group OUs from the user (osixia returns LDAP 0x20).
+  `lookupGroups` repeats that service-bind search on each request so directory
+  group removal does not wait for the 8h/30m session TTL.
 - Sessions: opaque `HttpOnly` `SameSite=Lax` cookies; server-side store;
   TTL + idle timeout; revocation is immediate. No JWTs.
-- Group→role map is config (`COLLAB_GROUP_ROLE_MAP`); unmapped users are
-  default-deny. Roles are recomputed from the current map on every request.
-- Audit is insert-only (`audit_events` trigger + app-role grants). Failed
-  logins are rate-limited and return the same `invalid_credentials` body
-  whether the account exists.
+- Group→role map is persisted (`authz_group_role_map`) and reloaded on every
+  `/api/` request. Unmapped users are default-deny. A revoke on one instance
+  is visible to the next request on another instance without a restart.
+- Audit is insert-only (`audit_events` trigger + app-role grants). Persist
+  success is never recorded or returned as failure/forbidden; persist failure
+  is never recorded or returned as success. Failed logins are rate-limited and
+  return the same `invalid_credentials` body whether the account exists.
+- Hosted CI creates `collab_app` before migrations so least-privilege GRANTs
+  are applied and exercised as that role, not only as `postgres`.
 - CSRF: same-origin SPA + `SameSite=Lax`. TLS terminates at ingress;
   set `COLLAB_COOKIE_SECURE=1` behind HTTPS.
 - MFA and SSO/OIDC are out of v1 (adapter seam only). MFA is a directory/VPN
@@ -118,6 +129,9 @@ is an explicit, recorded operation. A reference whose target was never hashed
   `unknown` words only — no bench crate dependency.
 - Every contribution and artifact links to a catalog source. Human
   contributions default to the authenticated identity's catalog entry.
+  `GET /api/catalog/sources` returns raw directory identities only to admins.
+  Other callers keep the source UUID, kind, and non-identity labels; DNs are
+  omitted or replaced with a stable `attr:` hash so attribution still matches.
 - Manual import stores byte-exact output (and optional prompt) as a frozen
   `imported_runs` row. Corroboration is a separate insert-only history.
   Nothing marks an import corroborated or verified automatically.

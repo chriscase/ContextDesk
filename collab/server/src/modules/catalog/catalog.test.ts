@@ -47,6 +47,18 @@ function users() {
         groups: ["cn=admins,ou=groups,dc=example,dc=test"],
       },
     ],
+    [
+      "carol",
+      {
+        password: "fixture-carol-secret",
+        identity: {
+          id: "uid=carol,ou=people,dc=example,dc=test",
+          username: "carol",
+          displayName: "carol",
+        },
+        groups: ["cn=viewers,ou=groups,dc=example,dc=test"],
+      },
+    ],
   ]);
 }
 
@@ -196,6 +208,89 @@ describe("source catalog", () => {
       );
       expect(sourcesAfter.sources.find((s) => s.id === note.sourceId)?.lifecycle).toBe("retired");
       expect(note.sourceId).toBe(createdIds[0]);
+    });
+  });
+
+  it("hides raw directory identities from unauthorized catalog readers", async () => {
+    await withApp(async ({ app }) => {
+      const dave = cookie(
+        await app.inject({
+          method: "POST",
+          url: "/api/auth/login",
+          payload: { username: "dave", password: "fixture-dave-secret" },
+        }),
+      );
+      const alice = cookie(
+        await app.inject({
+          method: "POST",
+          url: "/api/auth/login",
+          payload: { username: "alice", password: "fixture-alice-secret" },
+        }),
+      );
+      const carol = cookie(
+        await app.inject({
+          method: "POST",
+          url: "/api/auth/login",
+          payload: { username: "carol", password: "fixture-carol-secret" },
+        }),
+      );
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Catalog identity fixture" },
+      });
+      expect(created.statusCode).toBe(200);
+      const caseId = (JSON.parse(created.body) as { id: string }).id;
+      const note = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/contributions`,
+        headers: { cookie: alice },
+        payload: { kind: "note", body: "binds alice as a human source" },
+      });
+      expect(note.statusCode).toBe(200);
+
+      const adminList = parseSourceList(
+        JSON.parse(
+          (await app.inject({ method: "GET", url: "/api/catalog/sources", headers: { cookie: dave } }))
+            .body,
+        ),
+      );
+      const human = adminList.sources.find((s) => s.kind === "human" && s.identityId);
+      expect(human).toBeDefined();
+      expect(human?.identityId).toBe("uid=alice,ou=people,dc=example,dc=test");
+      expect(human?.createdBy).toBe("uid=alice,ou=people,dc=example,dc=test");
+      expect(human?.name).toBe("alice");
+      const assistant = parseSource(
+        JSON.parse(
+          (
+            await app.inject({
+              method: "POST",
+              url: "/api/catalog/sources",
+              headers: { cookie: dave },
+              payload: { name: "Web assistant", kind: "external-tool" },
+            })
+          ).body,
+        ),
+      );
+
+      const viewerBody = (
+        await app.inject({ method: "GET", url: "/api/catalog/sources", headers: { cookie: carol } })
+      ).body;
+      expect(viewerBody).not.toContain("uid=alice,ou=people,dc=example,dc=test");
+      expect(viewerBody).not.toContain("uid=dave,ou=people,dc=example,dc=test");
+      const viewerList = parseSourceList(JSON.parse(viewerBody));
+      const projected = viewerList.sources.find((s) => s.id === human?.id);
+      expect(projected?.id).toBe(human?.id);
+      expect(projected?.kind).toBe("human");
+      expect(projected?.identityId).toBeNull();
+      expect(projected?.name).toBe(human?.id);
+      expect(projected?.createdBy).toMatch(/^attr:[0-9a-f]{64}$/);
+      expect(projected?.createdBy).not.toContain("uid=");
+      const viewerAssistant = viewerList.sources.find((s) => s.id === assistant.id);
+      expect(viewerAssistant?.name).toBe("Web assistant");
+      expect(viewerAssistant?.kind).toBe("external-tool");
+      expect(viewerAssistant?.createdBy).toMatch(/^attr:[0-9a-f]{64}$/);
     });
   });
 });

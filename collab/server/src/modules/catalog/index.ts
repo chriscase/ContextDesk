@@ -8,3 +8,4 @@ export type { CatalogStore } from "./store.js";
 export { registerCatalogRoutes } from "./routes.js";
 export type { CatalogRouteDeps } from "./routes.js";
 export { isSourceKind } from "./model.js";
+export { directoryAttribution, projectSourceForCaller } from "./project.js";

@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import {
   emptyMapping,
   isAppRole,
+  MutableGroupRoleMap,
   type AppRole,
   type GroupRoleMapping,
 } from "./roles.js";
@@ -30,22 +31,27 @@ function mappingFromRows(rows: readonly Record<string, unknown>[]): GroupRoleMap
 }
 
 export class MemoryGroupRoleStore implements GroupRoleStore {
-  private mapping: GroupRoleMapping;
+  private readonly live: MutableGroupRoleMap;
 
-  constructor(initial: GroupRoleMapping = emptyMapping()) {
-    this.mapping = { entries: new Map(initial.entries) };
+  constructor(initial: GroupRoleMapping | MutableGroupRoleMap = emptyMapping()) {
+    this.live =
+      initial instanceof MutableGroupRoleMap
+        ? initial
+        : new MutableGroupRoleMap(initial);
   }
 
   async load(): Promise<GroupRoleMapping> {
-    return { entries: new Map(this.mapping.entries) };
+    return this.live.snapshot();
   }
 
   async set(groupDn: string, role: AppRole, _updatedBy: string): Promise<void> {
-    this.mapping.entries.set(normalizeGroup(groupDn), role);
+    this.live.set(groupDn, role);
   }
 
   async delete(groupDn: string): Promise<boolean> {
-    return this.mapping.entries.delete(normalizeGroup(groupDn));
+    const had = this.live.snapshot().entries.has(normalizeGroup(groupDn));
+    this.live.delete(groupDn);
+    return had;
   }
 }
 

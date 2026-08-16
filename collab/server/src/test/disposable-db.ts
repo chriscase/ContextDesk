@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 
+export const COLLAB_APP_ROLE = "collab_app";
+export const COLLAB_APP_ROLE_PASSWORD = "fixture-app-role";
+
 export function adminUrl(): string | undefined {
   return process.env.COLLAB_TEST_ADMIN_URL;
 }
@@ -15,6 +18,29 @@ function withDatabaseName(connectionString: string, name: string): string {
   }
 }
 
+export function appRoleUrl(databaseUrl: string): string {
+  const url = new URL(databaseUrl);
+  url.username = COLLAB_APP_ROLE;
+  const withUser = url.toString();
+  return withUser.replace(
+    `://${COLLAB_APP_ROLE}@`,
+    `://${COLLAB_APP_ROLE}:${encodeURIComponent(COLLAB_APP_ROLE_PASSWORD)}@`,
+  );
+}
+
+async function ensureAppRole(admin: Client): Promise<void> {
+  await admin.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'collab_app') THEN
+        CREATE ROLE collab_app LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
+      ELSE
+        ALTER ROLE collab_app WITH LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
+      END IF;
+    END $$;
+  `);
+}
+
 export async function withDisposableDb(
   fn: (client: Client, url: string) => Promise<void>,
 ): Promise<void> {
@@ -26,7 +52,9 @@ export async function withDisposableDb(
   const root = new Client({ connectionString: admin });
   await root.connect();
   try {
+    await ensureAppRole(root);
     await root.query(`CREATE DATABASE ${name}`);
+    await root.query(`GRANT CONNECT ON DATABASE ${name} TO collab_app`);
   } finally {
     await root.end();
   }

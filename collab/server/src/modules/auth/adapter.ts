@@ -14,6 +14,12 @@ export interface AuthSuccess {
  */
 export interface AuthAdapter {
   authenticate(username: string, password: string): Promise<AuthSuccess | null>;
+  /**
+   * Live directory groups for an already-authenticated identity.
+   * Must not require the user password. Failures should throw so callers
+   * can fail closed instead of keeping login-time groups.
+   */
+  lookupGroups(identity: AuthIdentity): Promise<string[]>;
 }
 
 export class MapAuthAdapter implements AuthAdapter {
@@ -31,5 +37,12 @@ export class MapAuthAdapter implements AuthAdapter {
     const row = this.users.get(username);
     if (!row || row.password !== password) return null;
     return { identity: row.identity, groups: [...row.groups] };
+  }
+
+  async lookupGroups(identity: AuthIdentity): Promise<string[]> {
+    for (const row of this.users.values()) {
+      if (row.identity.id === identity.id) return [...row.groups];
+    }
+    return [];
   }
 }

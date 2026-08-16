@@ -85,44 +85,48 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   if (deps.security) {
-    const roleStore =
-      deps.security.roleStore ?? new MemoryGroupRoleStore(deps.security.roles.snapshot());
-    await registerAuthRoutes(app, deps.security.auth);
+    const security = deps.security;
+    const roleStore = security.roleStore ?? new MemoryGroupRoleStore(security.roles);
+    app.addHook("onRequest", async (request) => {
+      if (!request.url.startsWith("/api/")) return;
+      security.roles.replace(await roleStore.load());
+    });
+    await registerAuthRoutes(app, security.auth);
     await registerAuthzRoutes(app, {
-      auth: deps.security.auth,
-      roles: deps.security.roles,
+      auth: security.auth,
+      roles: security.roles,
       roleStore,
-      audit: deps.security.audit,
+      audit: security.audit,
     });
     if (deps.domain) {
       await registerCaseRoutes(app, {
-        auth: deps.security.auth,
-        roles: deps.security.roles,
-        audit: deps.security.audit,
+        auth: security.auth,
+        roles: security.roles,
+        audit: security.audit,
         domain: deps.domain,
       });
     }
     if (deps.catalog) {
       await registerCatalogRoutes(app, {
-        auth: deps.security.auth,
-        roles: deps.security.roles,
-        audit: deps.security.audit,
+        auth: security.auth,
+        roles: security.roles,
+        audit: security.audit,
         catalog: deps.catalog,
       });
     }
     if (deps.imports) {
       await registerImportRoutes(app, {
-        auth: deps.security.auth,
-        roles: deps.security.roles,
-        audit: deps.security.audit,
+        auth: security.auth,
+        roles: security.roles,
+        audit: security.audit,
         imports: deps.imports,
       });
     }
     if (deps.exporter) {
       await registerExportRoutes(app, {
-        auth: deps.security.auth,
-        roles: deps.security.roles,
-        audit: deps.security.audit,
+        auth: security.auth,
+        roles: security.roles,
+        audit: security.audit,
         exporter: deps.exporter,
       });
     }

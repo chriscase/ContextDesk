@@ -19,7 +19,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
 import {
   resolveActiveSession,
-  type AuthRouteDeps,
+  type ActiveSessionDeps,
 } from "../auth/index.js";
 import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
 import { LegalHoldError, type Actor, type CaseService } from "./service.js";
@@ -79,7 +79,7 @@ async function requireCaseAccess(
 }
 
 export interface CaseRouteDeps {
-  auth: Pick<AuthRouteDeps, "sessions" | "policy">;
+  auth: ActiveSessionDeps;
   roles: MutableGroupRoleMap;
   audit: AuditStore;
   domain: CaseService;

@@ -5,8 +5,9 @@ import {
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
-import { resolveActiveSession, type AuthRouteDeps } from "../auth/index.js";
+import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
 import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+import { projectSourceForCaller } from "./project.js";
 import type { CatalogService } from "./service.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
@@ -24,7 +25,7 @@ function str(v: unknown): string | undefined {
 }
 
 export interface CatalogRouteDeps {
-  auth: Pick<AuthRouteDeps, "sessions" | "policy">;
+  auth: ActiveSessionDeps;
   roles: MutableGroupRoleMap;
   audit: AuditStore;
   catalog: CatalogService;
@@ -42,6 +43,7 @@ export async function registerCatalogRoutes(
       actor: { id: session.identity.id, username: session.identity.username },
       canRead: canPerform(roles, "read"),
       canLead: canPerform(roles, "lead"),
+      canSeeDirectoryIdentities: canPerform(roles, "admin"),
     };
   }
 
@@ -55,9 +57,12 @@ export async function registerCatalogRoutes(
       void reply.code(403);
       return authError("forbidden");
     }
+    const sources = (await deps.catalog.list()).map((source) =>
+      projectSourceForCaller(source, ctx.canSeeDirectoryIdentities),
+    );
     return {
       schemaId: SOURCE_LIST_SCHEMA_ID,
-      sources: await deps.catalog.list(),
+      sources,
     };
   });
 
