@@ -886,24 +886,28 @@ mod tests {
             "local bare clone failed: {}",
             String::from_utf8_lossy(&cloned.stderr)
         );
-        let canonical_url = "https://github.com/chriscase/ContextDesk.git";
         let bare_url = if cfg!(windows) {
             format!("file:///{}", bare.to_string_lossy().replace('\\', "/"))
         } else {
             format!("file://{}", bare.display())
         };
-        let configured = Command::new("git")
-            .args(["config", "--local"])
-            .arg(format!("url.{bare_url}.insteadOf"))
-            .arg(canonical_url)
-            .current_dir(d.path())
-            .output()
-            .unwrap();
-        assert!(
-            configured.status.success(),
-            "local URL rewrite failed: {}",
-            String::from_utf8_lossy(&configured.stderr)
-        );
+        for canonical_url in [
+            "https://github.com/chriscase/ContextDesk.git",
+            "git@github.com:chriscase/ContextDesk.git",
+        ] {
+            let configured = Command::new("git")
+                .args(["config", "--local"])
+                .arg(format!("url.{bare_url}.insteadOf"))
+                .arg(canonical_url)
+                .current_dir(d.path())
+                .output()
+                .unwrap();
+            assert!(
+                configured.status.success(),
+                "local URL rewrite failed for {canonical_url}: {}",
+                String::from_utf8_lossy(&configured.stderr)
+            );
+        }
         let r = fetch_product_source(d.path(), "");
         assert!(
             r.is_ok(),
