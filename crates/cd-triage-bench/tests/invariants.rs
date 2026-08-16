@@ -307,7 +307,12 @@ fn identical_import_is_explicit_dedupe_and_near_duplicate_is_new() {
     let near_duplicate_of = store.get_run(&near).unwrap().near_duplicate_of.unwrap();
     assert_ne!(near_duplicate_of, near);
     assert_eq!(
-        store.get_run(&near_duplicate_of).unwrap().raw_output.digest.hex,
+        store
+            .get_run(&near_duplicate_of)
+            .unwrap()
+            .raw_output
+            .digest
+            .hex,
         ContentDigest::of_bytes(HUMAN_RAW.as_bytes()).hex
     );
 }

@@ -3,8 +3,8 @@
 use crate::error::{BenchError, BenchResult};
 use crate::store::{BenchStore, PutRunOutcome};
 use crate::types::{
-    Completeness, Observed, PromptWorkflow, RawOutput, RunImport,
-    StrategyIdentity, TriageRun, RUN_SCHEMA_V2,
+    Completeness, Observed, PromptWorkflow, RawOutput, RunImport, StrategyIdentity, TriageRun,
+    RUN_SCHEMA_V2,
 };
 
 /// Result of attempting to import a run.

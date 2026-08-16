@@ -13,6 +13,8 @@ pub use crate::review::{blinded_run_view, BlindedRunView};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+type VersionPairKey = (String, SourceKind, Observed<String>, String, String);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BacktestReport {
@@ -677,10 +679,7 @@ fn version_pairs(
         .iter()
         .map(|p| ordered_run_ids(&p.left_run_id, &p.right_run_id))
         .collect();
-    let mut by_key: BTreeMap<
-        (String, SourceKind, Observed<String>, String, String),
-        Vec<&TriageRun>,
-    > = BTreeMap::new();
+    let mut by_key: BTreeMap<VersionPairKey, Vec<&TriageRun>> = BTreeMap::new();
     for run in runs {
         if let Observed::Known(_) = &run.strategy.version {
             by_key

@@ -276,8 +276,7 @@ impl BenchStore {
 
     pub fn get_review_packet(&self, packet_id: &str) -> BenchResult<ReviewPacket> {
         let text = self.read_entity("review-packets", packet_id)?;
-        let packet: ReviewPacket =
-            serde_json::from_str(&text).map_err(BenchError::from_serde)?;
+        let packet: ReviewPacket = serde_json::from_str(&text).map_err(BenchError::from_serde)?;
         packet.validate()?;
         Ok(packet)
     }
