@@ -246,7 +246,7 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
             let store = open_store(cli.library)?;
             let run = store.get_run(&run_id)?;
             let raw = store.get_blob(&run.raw_output.digest.hex)?;
-            to_pretty_json(&blinded_run_view_from_raw(&run, raw.as_ref()))
+            to_pretty_json(&blinded_run_view_from_raw(&run, Some(raw.as_slice())))
         }
         Command::ReviewPacket { run_id, phase } => {
             let store = open_store(cli.library)?;
