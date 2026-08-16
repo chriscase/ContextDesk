@@ -22,7 +22,7 @@ import {
   type AuthRouteDeps,
 } from "../auth/index.js";
 import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
-import { LegalHoldError, type CaseService } from "./service.js";
+import { LegalHoldError, type Actor, type CaseService } from "./service.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
@@ -55,6 +55,29 @@ function domainError(
   return { error: message };
 }
 
+interface CaseSessionContext {
+  actor: Actor;
+  isAdmin: boolean;
+  canRead: boolean;
+}
+
+async function requireCaseAccess(
+  domain: CaseService,
+  ctx: CaseSessionContext,
+  caseId: string,
+  reply: { code: (status: number) => unknown },
+): Promise<boolean> {
+  if (!ctx.canRead) {
+    void reply.code(403);
+    return false;
+  }
+  if (!(await domain.getCase(caseId, ctx.actor, ctx.isAdmin))) {
+    void reply.code(404);
+    return false;
+  }
+  return true;
+}
+
 export interface CaseRouteDeps {
   auth: Pick<AuthRouteDeps, "sessions" | "policy">;
   roles: MutableGroupRoleMap;
@@ -85,6 +108,10 @@ export async function registerCaseRoutes(
     if (!ctx) {
       void reply.code(401);
       return authError("unauthenticated");
+    }
+    if (!ctx.canRead) {
+      void reply.code(403);
+      return authError("forbidden");
     }
     return {
       schemaId: CASE_LIST_SCHEMA_ID,
@@ -132,11 +159,11 @@ export async function registerCaseRoutes(
       return authError("unauthenticated");
     }
     const id = (request.params as { id: string }).id;
-    const found = await deps.domain.getCase(id, ctx.actor, ctx.isAdmin);
-    if (!found) {
-      void reply.code(404);
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
       return { error: "not_found" };
     }
+    const found = await deps.domain.getCase(id, ctx.actor, ctx.isAdmin);
+    if (!found) return { error: "not_found" };
     return found;
   });
 
@@ -151,6 +178,9 @@ export async function registerCaseRoutes(
       return authError("forbidden");
     }
     const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return authError("forbidden");
+    }
     const status = str(asRecord(request.body).status);
     if (!status || !(CASE_STATUSES as readonly string[]).includes(status)) {
       void reply.code(400);
@@ -174,6 +204,9 @@ export async function registerCaseRoutes(
       return authError("forbidden");
     }
     const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return authError("forbidden");
+    }
     const body = asRecord(request.body);
     const identityId = str(body.identityId);
     const username = str(body.username);
@@ -204,6 +237,9 @@ export async function registerCaseRoutes(
       return authError("forbidden");
     }
     const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return authError("forbidden");
+    }
     const legalHold = asRecord(request.body).legalHold === true;
     try {
       return await deps.domain.setLegalHold(id, ctx.actor, legalHold, request.ip);
@@ -219,8 +255,7 @@ export async function registerCaseRoutes(
       return authError("unauthenticated");
     }
     const id = (request.params as { id: string }).id;
-    if (!(await deps.domain.getCase(id, ctx.actor, ctx.isAdmin))) {
-      void reply.code(404);
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
       return { error: "not_found" };
     }
     return {
@@ -248,6 +283,9 @@ export async function registerCaseRoutes(
       return authError("forbidden");
     }
     const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return authError("forbidden");
+    }
     const body = asRecord(request.body);
     const kind = str(body.kind);
     const text = str(body.body);
@@ -303,6 +341,9 @@ export async function registerCaseRoutes(
       return authError("forbidden");
     }
     const params = request.params as { id: string; cid: string };
+    if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
+      return authError("forbidden");
+    }
     const text = str(asRecord(request.body).body);
     if (text === undefined) {
       void reply.code(400);
@@ -332,6 +373,9 @@ export async function registerCaseRoutes(
       return authError("forbidden");
     }
     const params = request.params as { id: string; cid: string };
+    if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
+      return authError("forbidden");
+    }
     try {
       return await deps.domain.tombstoneContribution(
         params.id,
@@ -351,8 +395,7 @@ export async function registerCaseRoutes(
       return authError("unauthenticated");
     }
     const params = request.params as { id: string; cid: string };
-    if (!(await deps.domain.getCase(params.id, ctx.actor, ctx.isAdmin))) {
-      void reply.code(404);
+    if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
       return { error: "not_found" };
     }
     try {
@@ -377,6 +420,9 @@ export async function registerCaseRoutes(
       return authError("forbidden");
     }
     const params = request.params as { id: string; cid: string };
+    if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
+      return authError("forbidden");
+    }
     const body = asRecord(request.body);
     const status = str(body.status);
     if (!status || !(HYPOTHESIS_STATUSES as readonly string[]).includes(status)) {
@@ -411,6 +457,9 @@ export async function registerCaseRoutes(
       return authError("forbidden");
     }
     const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return authError("forbidden");
+    }
     const body = asRecord(request.body);
     const kind = str(body.kind);
     const summary = str(body.summary);
@@ -469,8 +518,7 @@ export async function registerCaseRoutes(
       return authError("unauthenticated");
     }
     const params = request.params as { id: string; eid: string };
-    if (!(await deps.domain.getCase(params.id, ctx.actor, ctx.isAdmin))) {
-      void reply.code(404);
+    if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
       return { error: "not_found" };
     }
     const found = await deps.domain.getArtifact(params.id, params.eid);
@@ -488,8 +536,7 @@ export async function registerCaseRoutes(
       return authError("unauthenticated");
     }
     const params = request.params as { id: string; eid: string };
-    if (!(await deps.domain.getCase(params.id, ctx.actor, ctx.isAdmin))) {
-      void reply.code(404);
+    if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
       return { error: "not_found" };
     }
     const bytes = await deps.domain.getArtifactBytes(
@@ -516,6 +563,9 @@ export async function registerCaseRoutes(
       return authError("forbidden");
     }
     const params = request.params as { id: string; eid: string };
+    if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
+      return authError("forbidden");
+    }
     try {
       return await deps.domain.recheckReference(
         params.id,

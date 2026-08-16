@@ -51,6 +51,10 @@ export async function registerCatalogRoutes(
       void reply.code(401);
       return authError("unauthenticated");
     }
+    if (!ctx.canRead) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
     return {
       schemaId: SOURCE_LIST_SCHEMA_ID,
       sources: await deps.catalog.list(),

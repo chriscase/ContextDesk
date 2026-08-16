@@ -27,7 +27,7 @@ export function sourceLabelOf(
   variant: PrivacyClass,
 ): string {
   const name = sources.get(sourceId)?.name ?? "unknown";
-  return shareSafeLabel(name, privacy, variant);
+  return shareSafeLabel(name, privacy, variant, "source");
 }
 
 export function artifactIdentityHash(artifact: ArtifactV1): string {
@@ -60,7 +60,8 @@ export function projectBrief(input: {
   privacy: ExportPrivacyConfig;
 }): BriefV1 {
   const { variant } = input;
-  const label = (raw: string) => shareSafeLabel(raw, input.privacy, variant);
+  const label = (raw: string) => shareSafeLabel(raw, input.privacy, variant, "identity");
+  const targetLabel = (raw: string) => shareSafeLabel(raw, input.privacy, variant, "target");
 
   const timeline = [...input.timeline]
     .sort((a, b) => a.seq - b.seq)
@@ -68,7 +69,7 @@ export function projectBrief(input: {
       seq: ev.seq,
       kind: ev.kind,
       actorLabel: label(ev.actorUsername),
-      targetId: ev.targetId === null ? null : label(ev.targetId),
+      targetId: ev.targetId === null ? null : targetLabel(ev.targetId),
       payloadDigest: payloadDigest(ev.payload),
     }));
 

@@ -40,6 +40,7 @@ export async function registerImportRoutes(
     return {
       actor: { id: session.identity.id, username: session.identity.username },
       isAdmin: canPerform(roles, "admin"),
+      canRead: canPerform(roles, "read"),
       canWrite: canPerform(roles, "mutate"),
     };
   }
@@ -49,6 +50,10 @@ export async function registerImportRoutes(
     if (!ctx) {
       void reply.code(401);
       return authError("unauthenticated");
+    }
+    if (!ctx.canRead) {
+      void reply.code(403);
+      return authError("forbidden");
     }
     const id = (request.params as { id: string }).id;
     return {
@@ -136,6 +141,10 @@ export async function registerImportRoutes(
     if (!ctx) {
       void reply.code(401);
       return authError("unauthenticated");
+    }
+    if (!ctx.canRead) {
+      void reply.code(403);
+      return authError("forbidden");
     }
     const params = request.params as { id: string; rid: string };
     const found = await deps.imports.getRun(params.id, params.rid, ctx.actor, ctx.isAdmin);
