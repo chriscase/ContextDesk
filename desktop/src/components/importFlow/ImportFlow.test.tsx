@@ -353,6 +353,32 @@ describe("ImportFlow timezone tail", () => {
           },
         ],
       },
+      // Hosts always send a class. Unresolved timezones are a follow-up, not
+      // an import defect — this fixture is a complete publication.
+      outcome: {
+        schemaId: "contextdesk.import_outcome.v1",
+        schemaVersion: 1,
+        class: "complete",
+        published: true,
+        corpusId: "mixed-time-corpus",
+        counts: {
+          sourcesDiscovered: 2,
+          sourcesImported: 2,
+          sourcesFailed: 0,
+          sourcesExcluded: 0,
+          sourcesIgnored: 0,
+          recordsImported: 12,
+          recordsMalformed: 0,
+        },
+        defects: [],
+        defectCounts: {},
+        privacy: {
+          redactionMode: "identity_structural_only",
+          policySummary: "structural identity only",
+          defectsTruncated: false,
+        },
+        manifestDigest: "sha256:mixed-time",
+      },
     };
     vi.spyOn(client.import, "run").mockResolvedValue(report);
 

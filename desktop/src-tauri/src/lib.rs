@@ -9662,7 +9662,10 @@ mod import_error_projection_tests {
             "command error leaked marker: {}",
             dto.message
         );
-        let outcome = dto.outcome.expect("rejected ingest must carry the outcome");
+        let outcome = dto
+            .outcome
+            .as_ref()
+            .expect("rejected ingest must carry the outcome");
         assert_eq!(
             outcome.class,
             cd_core::log_analysis::ImportOutcomeClass::Rejected
