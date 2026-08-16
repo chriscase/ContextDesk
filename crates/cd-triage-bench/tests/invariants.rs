@@ -278,9 +278,15 @@ fn identical_import_is_explicit_dedupe_and_near_duplicate_is_new() {
         }
         other => panic!("expected metadata-conflicting near duplicate, got {other:?}"),
     }
-    let metadata_conflict = store.load_runs().unwrap().into_iter().find(|run| {
-        run.run_id != first && run.raw_output.digest.hex == ContentDigest::of_bytes(HUMAN_RAW.as_bytes()).hex
-    }).expect("metadata near duplicate");
+    let metadata_conflict = store
+        .load_runs()
+        .unwrap()
+        .into_iter()
+        .find(|run| {
+            run.run_id != first
+                && run.raw_output.digest.hex == ContentDigest::of_bytes(HUMAN_RAW.as_bytes()).hex
+        })
+        .expect("metadata near duplicate");
     assert_eq!(metadata_conflict.status, RunStatus::Failed);
     assert_eq!(metadata_conflict.operator, "operator-b");
     assert_eq!(metadata_conflict.privacy, PrivacyClass::OwnerOnly);
@@ -298,9 +304,11 @@ fn identical_import_is_explicit_dedupe_and_near_duplicate_is_new() {
         "2026-01-15T09:30:00Z",
     );
     assert_ne!(near, first);
+    let near_duplicate_of = store.get_run(&near).unwrap().near_duplicate_of.unwrap();
+    assert_ne!(near_duplicate_of, near);
     assert_eq!(
-        store.get_run(&near).unwrap().near_duplicate_of.as_deref(),
-        Some(first.as_str())
+        store.get_run(&near_duplicate_of).unwrap().raw_output.digest.hex,
+        ContentDigest::of_bytes(HUMAN_RAW.as_bytes()).hex
     );
 }
 
