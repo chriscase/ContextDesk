@@ -30,6 +30,8 @@ export interface AuthRouteDeps {
   cookieSecure: boolean;
 }
 
+export type ActiveSessionDeps = Pick<AuthRouteDeps, "sessions" | "policy" | "adapter">;
+
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
 }
@@ -50,14 +52,20 @@ function readCookie(request: FastifyRequest): string | undefined {
 
 export async function resolveActiveSession(
   request: FastifyRequest,
-  deps: Pick<AuthRouteDeps, "sessions" | "policy">,
+  deps: ActiveSessionDeps,
 ): Promise<SessionRecord | null> {
   const token = readCookie(request);
   if (!token) return null;
   const record = await deps.sessions.getByToken(token);
   if (!record || !isSessionActive(record, deps.policy)) return null;
   await deps.sessions.touch(record.id);
-  return record;
+  let groups: string[];
+  try {
+    groups = await deps.adapter.lookupGroups(record.identity);
+  } catch {
+    groups = [];
+  }
+  return { ...record, groups };
 }
 
 export async function registerAuthRoutes(

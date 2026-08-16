@@ -1,23 +1,11 @@
 import type { ConnectionOptions } from "node:tls";
 import { Client, type ClientOptions } from "ldapts";
-import type { AuthAdapter, AuthSuccess } from "./adapter.js";
+import type { AuthAdapter, AuthIdentity, AuthSuccess } from "./adapter.js";
 import type { LdapConfig } from "./ldap-config.js";
+import { escapeDn, escapeFilter, interpolate } from "./ldap-escape.js";
 import type { AuthLog } from "./log.js";
 
-function escapeFilter(value: string): string {
-  return value.replace(/[\\*()\0]/g, (ch) => {
-    const hex = ch.charCodeAt(0).toString(16).padStart(2, "0");
-    return `\\${hex}`;
-  });
-}
-
-function interpolate(template: string, vars: Record<string, string>): string {
-  let out = template;
-  for (const [key, value] of Object.entries(vars)) {
-    out = out.replaceAll(`{${key}}`, value);
-  }
-  return out;
-}
+export { escapeDn, escapeFilter } from "./ldap-escape.js";
 
 function errorDetail(err: unknown): string {
   if (!(err instanceof Error)) return "error";
@@ -98,6 +86,22 @@ export class LdapAuthAdapter implements AuthAdapter {
     }
   }
 
+  async lookupGroups(identity: AuthIdentity): Promise<string[]> {
+    const client = new Client(ldapClientOptions(this.config));
+    try {
+      if (this.config.starttls) {
+        await client.startTLS(ldapTlsOptions(this.config));
+      }
+      return await this.searchGroups(client, identity.id);
+    } finally {
+      try {
+        await client.unbind();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   private async resolveUserDn(
     client: Client,
     username: string,
@@ -105,7 +109,7 @@ export class LdapAuthAdapter implements AuthAdapter {
   ): Promise<string | null> {
     if (this.config.userDnTemplate) {
       return interpolate(this.config.userDnTemplate, {
-        username: escapeFilter(username),
+        username: escapeDn(username),
       });
     }
     if (!this.config.userSearchBase) {

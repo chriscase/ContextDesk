@@ -7,7 +7,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
 import {
   resolveActiveSession,
-  type AuthRouteDeps,
+  type ActiveSessionDeps,
 } from "../auth/index.js";
 import { canPerform, isAppRole, type MutableGroupRoleMap } from "./roles.js";
 import type { GroupRoleStore } from "./store.js";
@@ -17,7 +17,7 @@ function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
 }
 
 export interface AuthzRouteDeps {
-  auth: Pick<AuthRouteDeps, "sessions" | "policy">;
+  auth: ActiveSessionDeps;
   roles: MutableGroupRoleMap;
   roleStore: GroupRoleStore;
   audit: AuditStore;
@@ -66,16 +66,8 @@ export async function registerAuthzRoutes(
     const role = (body as { role: AppRole }).role;
     try {
       await deps.roleStore.set(group, role, session.identity.id);
-      deps.roles.set(group, role);
-      await deps.audit.append({
-        identity: session.identity.id,
-        action: "role_mapping_update",
-        target: `${group}=${role}`,
-        origin: request.ip,
-        outcome: "success",
-      });
     } catch {
-      await deps.audit.append({
+      const audit = await recordAudit(deps.audit, {
         identity: session.identity.id,
         action: "role_mapping_update",
         target: `${group}=${role}`,
@@ -83,9 +75,17 @@ export async function registerAuthzRoutes(
         outcome: "failure",
       });
       void reply.code(503);
-      return authError("forbidden");
+      return { error: "unavailable", audit };
     }
-    return { ok: true, group, role };
+    deps.roles.set(group, role);
+    const audit = await recordAudit(deps.audit, {
+      identity: session.identity.id,
+      action: "role_mapping_update",
+      target: `${group}=${role}`,
+      origin: request.ip,
+      outcome: "success",
+    });
+    return { ok: true, group, role, audit };
   });
 
   app.delete("/api/authz/group-role-map", async (request, reply) => {
@@ -117,30 +117,11 @@ export async function registerAuthzRoutes(
       return authError("forbidden");
     }
     const group = (body as { group: string }).group;
+    let deleted: boolean;
     try {
-      const deleted = await deps.roleStore.delete(group);
-      if (!deleted) {
-        await deps.audit.append({
-          identity: session.identity.id,
-          action: "role_mapping_revoke",
-          target: group,
-          origin: request.ip,
-          outcome: "failure",
-        });
-        void reply.code(404);
-        return { error: "not_found" };
-      }
-      deps.roles.delete(group);
-      await deps.audit.append({
-        identity: session.identity.id,
-        action: "role_mapping_revoke",
-        target: group,
-        origin: request.ip,
-        outcome: "success",
-      });
-      return { ok: true, group, revoked: true };
+      deleted = await deps.roleStore.delete(group);
     } catch {
-      await deps.audit.append({
+      const audit = await recordAudit(deps.audit, {
         identity: session.identity.id,
         action: "role_mapping_revoke",
         target: group,
@@ -148,9 +129,41 @@ export async function registerAuthzRoutes(
         outcome: "failure",
       });
       void reply.code(503);
-      return authError("forbidden");
+      return { error: "unavailable", audit };
     }
+    if (!deleted) {
+      const audit = await recordAudit(deps.audit, {
+        identity: session.identity.id,
+        action: "role_mapping_revoke",
+        target: group,
+        origin: request.ip,
+        outcome: "failure",
+      });
+      void reply.code(404);
+      return { error: "not_found", audit };
+    }
+    deps.roles.delete(group);
+    const audit = await recordAudit(deps.audit, {
+      identity: session.identity.id,
+      action: "role_mapping_revoke",
+      target: group,
+      origin: request.ip,
+      outcome: "success",
+    });
+    return { ok: true, group, revoked: true, audit };
   });
+}
+
+async function recordAudit(
+  audit: AuditStore,
+  record: Parameters<AuditStore["append"]>[0],
+): Promise<"recorded" | "failed"> {
+  try {
+    await audit.append(record);
+    return "recorded";
+  } catch {
+    return "failed";
+  }
 }
 
 async function authorizeMutation(

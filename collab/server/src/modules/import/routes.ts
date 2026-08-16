@@ -4,7 +4,7 @@ import {
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
-import { resolveActiveSession, type AuthRouteDeps } from "../auth/index.js";
+import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
 import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
 import type { ImportService } from "./service.js";
 
@@ -23,7 +23,7 @@ function str(v: unknown): string | undefined {
 }
 
 export interface ImportRouteDeps {
-  auth: Pick<AuthRouteDeps, "sessions" | "policy">;
+  auth: ActiveSessionDeps;
   roles: MutableGroupRoleMap;
   audit: AuditStore;
   imports: ImportService;

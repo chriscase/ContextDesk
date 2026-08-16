@@ -37,6 +37,7 @@ CREATE INDEX IF NOT EXISTS evidence_file_references_uri_idx
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'collab_app') THEN
+    GRANT USAGE ON SCHEMA public TO collab_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app_meta TO collab_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE evidence_file_references TO collab_app;
     GRANT SELECT ON TABLE schema_migrations TO collab_app;

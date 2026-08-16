@@ -25,4 +25,6 @@ export {
   registerAuthRoutes,
   resolveActiveSession,
 } from "./routes.js";
-export type { AuthRouteDeps } from "./routes.js";
+export type { ActiveSessionDeps, AuthRouteDeps } from "./routes.js";
+export { escapeDn, escapeFilter } from "./ldap-escape.js";
+export { liveLdapConfigured } from "./ldap-coverage.js";
