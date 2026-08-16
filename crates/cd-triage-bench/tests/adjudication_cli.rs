@@ -250,6 +250,16 @@ impl Seeded {
     }
 
     fn import_adj(&self, value: &Value) -> (String, String) {
+        let mut value = value.clone();
+        if value.get("review_packet_id").is_none() {
+            let run_id = value["run_id"].as_str().unwrap();
+            let phase = value["phase"].as_str().unwrap();
+            let (ok, packet) = self.review_packet(run_id, phase);
+            if ok {
+                let packet: Value = serde_json::from_str(&packet).unwrap();
+                value["review_packet_id"] = packet["packet_id"].clone();
+            }
+        }
         let path = self.tmp.path().join(format!(
             "adj-{}.json",
             value["reviewer"].as_str().unwrap_or("r")

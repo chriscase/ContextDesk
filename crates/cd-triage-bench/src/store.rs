@@ -308,12 +308,12 @@ impl BenchStore {
         }
         let phase = adj.phase.ok_or_else(|| {
             BenchError::Schema(
-                "new adjudications must declare phase and bind a generated review packet".into(),
+                "new adjudications must declare phase and bind a generated review packet; diagnosis also requires a prior support-phase review".into(),
             )
         })?;
         let packet_id = adj.review_packet_id.as_deref().ok_or_else(|| {
             BenchError::Schema(
-                "new adjudications must declare phase and bind a generated review packet".into(),
+                "new adjudications must declare phase and bind a generated review packet; diagnosis also requires a prior support-phase review".into(),
             )
         })?;
         if adj.schema_id != crate::types::ADJUDICATION_SCHEMA_V2 {

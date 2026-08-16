@@ -627,6 +627,9 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
         RunStatus::Partial,
         "2026-01-16T08:00:00Z",
     );
+    let unresolved_packet = store
+        .materialize_review_packet(&unresolved_run, ReviewPhase::Support)
+        .unwrap();
     let adj_unresolved = Adjudication::from_parts(
         PrivacyClass::OwnerOnly,
         "case-open-question".into(),
@@ -650,6 +653,8 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
         ),
         "2026-01-16T10:00:00Z".into(),
     )
+    .unwrap()
+    .bind_review_packet(unresolved_packet.packet_id)
     .unwrap();
     store.put_adjudication(&adj_unresolved).unwrap();
 

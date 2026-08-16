@@ -308,6 +308,9 @@ pub fn put_support_then_diagnosis(
     unsafe_claims: DimensionVerdict,
     created_at: &str,
 ) {
+    let support_packet = store
+        .materialize_review_packet(run_id, ReviewPhase::Support)
+        .unwrap();
     let support = Adjudication::from_parts(
         privacy,
         case_id.into(),
@@ -328,8 +331,13 @@ pub fn put_support_then_diagnosis(
         ),
         created_at.into(),
     )
+    .unwrap()
+    .bind_review_packet(support_packet.packet_id)
     .unwrap();
     store.put_adjudication(&support).unwrap();
+    let diagnosis_packet = store
+        .materialize_review_packet(run_id, ReviewPhase::Diagnosis)
+        .unwrap();
     let diagnosis_adj = Adjudication::from_parts(
         privacy,
         case_id.into(),
@@ -344,6 +352,8 @@ pub fn put_support_then_diagnosis(
         outcomes(diagnosis, evidence, action, uncertainty, unsafe_claims),
         created_at.into(),
     )
+    .unwrap()
+    .bind_review_packet(diagnosis_packet.packet_id)
     .unwrap();
     store.put_adjudication(&diagnosis_adj).unwrap();
 }
