@@ -68,6 +68,7 @@ import {
   type LogDiagnosticStatus,
 } from "../../lib/logDiagnosticReport";
 import { HELP_TEMPLATE_GROUPING } from "../../lib/helpContent";
+import { operatorImportCommandFailure } from "../../lib/importOutcome";
 import {
   DismissibleLayerContext,
   useDismissibleLayer,
@@ -952,7 +953,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       await refresh();
       await selectCorpus(r.corpusId);
     } catch (e) {
-      setError(String(e));
+      setError(operatorImportCommandFailure(e).message);
       let diagnostic: FailedLogIngestDiagnosticDto | null = null;
       try {
         diagnostic = await hostGetFailedLogIngestDiagnostic();

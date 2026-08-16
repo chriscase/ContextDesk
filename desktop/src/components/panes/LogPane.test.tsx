@@ -1295,6 +1295,30 @@ describe("LogPane", () => {
     );
   });
 
+  it("shows a readable classified rejection instead of [object Object]", async () => {
+    localStorage.setItem("cd-activity-inspector-mode", "compact");
+    hostMocks.confirm.mockResolvedValue(true);
+    hostMocks.openFile.mockResolvedValue("/tmp/outer-reject.zip");
+    hostMocks.ingest.mockRejectedValue({
+      message: "zip open: missing end record [member=bundles/inner.zip]",
+      outcome: { class: "rejected", published: false },
+    });
+    hostMocks.getFailedIngestDiagnostic.mockResolvedValue(null);
+
+    render(<LogPane />);
+    await chooseImportMode("Import a raw log file or ZIP…");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(
+      "Import rejected: zip open: missing end record",
+    );
+    expect(alert.textContent).not.toContain("[object Object]");
+    expect(alert.textContent).not.toContain("[member=");
+    expect(
+      screen.getByTestId("activity-import-summary").getAttribute("data-outcome"),
+    ).toBe("failed");
+  });
+
   it("records a quick cancelled ZIP attempt as cancelled without publishing", async () => {
     localStorage.setItem("cd-activity-inspector-mode", "compact");
     hostMocks.confirm.mockResolvedValue(true);
