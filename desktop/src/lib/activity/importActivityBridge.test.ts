@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ActivityEventInput, ImportRunInput } from "./types";
+import type { ProcessProgressPhase } from "../../components/wizards/types";
+import type {
+  ActivityEventInput,
+  ImportActivityOutcome,
+  ImportRunInput,
+} from "./types";
 import {
   IMPORT_ACTIVITY_CHANGED_EVENT,
   forgetCorpusImportActivity,
@@ -64,7 +69,36 @@ function completedRun(corpusId = "corpus-a"): ImportRunInput {
   };
 }
 
-function liveEvents(run: ImportRunInput) {
+/**
+ * The canonical PARTIAL case: the legacy `partial` bool stays false (no source
+ * failed or was policy-excluded) while the typed class is partial because
+ * records inside a source were malformed. Gating on the bool is exactly what
+ * `docs/CLI.md` warns against, so the fixture keeps it false on purpose.
+ */
+function partialRun(corpusId = "corpus-partial"): ImportRunInput {
+  return { ...completedRun(corpusId), outcome: "partial" };
+}
+
+/**
+ * Host progress phases are process lifecycle, not outcome classes:
+ * `ProcessProgressPhase` has no `"partial"`. A partial import is one the host
+ * *finished* — the corpus was published, with defects — so it ends on
+ * `"completed"`, and `settleImportActivityAttempt` rewrites that last event
+ * into the classified terminal. Ending a partial run on any other phase would
+ * take the append branch instead and stop exercising the production path.
+ */
+function terminalProgressPhase(
+  outcome: ImportActivityOutcome,
+): ProcessProgressPhase {
+  if (outcome === "failed") return "failed";
+  if (outcome === "cancelled") return "cancelled";
+  return "completed";
+}
+
+function liveEvents(
+  run: ImportRunInput,
+  message = "/sensitive/tenant-a/runtime.log",
+) {
   let attempt = beginImportActivityAttempt("import:bridge-test", run.sourceKind);
   for (const [phase, elapsedMs] of [
     ["starting", 0],
@@ -72,14 +106,14 @@ function liveEvents(run: ImportRunInput) {
     ["stream", 20],
     ["validate", 30],
     ["publish", 40],
-    [run.outcome === "completed" ? "completed" : run.outcome, 50],
+    [terminalProgressPhase(run.outcome), 50],
   ] as const) {
     attempt = recordImportProgress(attempt, {
       operation_id: "host-bridge-test",
       correlation_id: "import:bridge-test",
       kind: "log_ingest",
       phase,
-      message: "/sensitive/tenant-a/runtime.log",
+      message,
       fraction: null,
       lines_processed: phase === "stream" ? 120 : null,
       files_processed: phase === "scan" ? 2 : null,
@@ -132,6 +166,50 @@ describe("corpus import activity bridge", () => {
     expect(custom).toHaveBeenCalledOnce();
     const payload = (custom.mock.calls[0]?.[0] as CustomEvent).detail;
     expect(emit).toHaveBeenCalledWith(IMPORT_ACTIVITY_CHANGED_EVENT, payload);
+  });
+
+  it("persists and broadcasts a published PARTIAL terminal without leaking the member marker", async () => {
+    const custom = vi.fn();
+    const emit = vi.fn(async () => undefined);
+    window.addEventListener(IMPORT_ACTIVITY_CHANGED_EVENT, custom);
+    const run = partialRun();
+    // A marker-bearing host string on every progress update: the projector must
+    // keep it out of storage and broadcast just as it does a private path.
+    await publishImportRunActivity(
+      run,
+      liveEvents(run, "outer.zip!/bundles/inner.zip [member=bundles/inner.zip]"),
+      0,
+      emit,
+    );
+    window.removeEventListener(IMPORT_ACTIVITY_CHANGED_EVENT, custom);
+
+    // Persisted: the terminal survives the allowlist, so the causal chain does
+    // too. Before the PARTIAL tuple existed this was an empty ledger — a
+    // published corpus with no import trace anywhere in Activity.
+    const loaded = loadCorpusImportActivity("corpus-partial");
+    expect(loaded.events.length).toBeGreaterThan(3);
+    expect(
+      loaded.events.some(
+        (event) => event.label === "Corpus published with defects (PARTIAL)",
+      ),
+    ).toBe(true);
+    expect(
+      loaded.events.every((event) => event.corpusId === "corpus-partial"),
+    ).toBe(true);
+
+    // Broadcast: same payload to this window and across webviews.
+    expect(custom).toHaveBeenCalledOnce();
+    const payload = (custom.mock.calls[0]?.[0] as CustomEvent).detail;
+    expect(emit).toHaveBeenCalledWith(IMPORT_ACTIVITY_CHANGED_EVENT, payload);
+
+    // Sealed: neither the marker nor the member identity reaches storage.
+    const stored = localStorage.getItem(
+      "contextdesk.importActivity.v1:corpus-partial",
+    );
+    expect(stored).not.toBeNull();
+    expect(stored).not.toContain("[member=");
+    expect(stored).not.toContain("bundles/inner.zip");
+    expect(JSON.stringify(loaded.events)).not.toContain("[member=");
   });
 
   it("does not persist or announce failed/cancelled attempts without a corpus", async () => {

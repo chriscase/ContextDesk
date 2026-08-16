@@ -139,6 +139,15 @@ const IMPORT_LABEL_TUPLES: ReadonlyMap<
     "Corpus published",
     { origin: "governed_write", phases: TERMINAL_PHASE, statuses: new Set<ActivityStatus>(["ok"]) },
   ],
+  // A partial import publishes a corpus, so it carries the same governed-write
+  // origin and `ok` status as a clean publish — the class, not the status, is
+  // what makes it partial. Without this tuple `safeProjectedEvent` rejects the
+  // terminal, `safeEventsForRun` then drops the whole causal chain, and the
+  // bridge silently stores and broadcasts nothing for a published corpus.
+  [
+    "Corpus published with defects (PARTIAL)",
+    { origin: "governed_write", phases: TERMINAL_PHASE, statuses: new Set<ActivityStatus>(["ok"]) },
+  ],
   [
     "Import cancelled — nothing published",
     {
