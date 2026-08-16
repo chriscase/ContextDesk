@@ -73,14 +73,15 @@ LIB_KINDS='["lib","rlib","dylib","cdylib","staticlib","proc-macro"]'
 # shard 2 alone and produced no result after 56m1s (run 31926634503;
 # aggregate: never run: cd-core/lib/other).
 #
-# Ten complementary units together are exactly `cargo test -p cd-core --lib`.
+# Eleven complementary units together are exactly `cargo test -p cd-core --lib`.
 # Match filters are OR; the skip child must list every match filter (verify
 # fails closed if it does not) and must not itself be heavy. A leftover-
 # heavy slice must not sit alone and must not share a shard with any other
 # cd-core unit (run 31936313731: policy + 7 cd-core --test binaries, 58m1s,
-# no artifact). Hosted run 31941510316 then left shard 2 in progress until
-# the 60-minute budget with the policy slice and one companion. Split that
-# slice again; short prefixes that are substrings of another module path
+# no artifact). Hosted runs 31941510316 and 31949682882 then left shard 2
+# in progress until the 60-minute budget with the policy slice and one
+# companion. Split that slice again; short prefixes that are substrings of
+# another module path
 # (`events::`, `index::`, `object_store::`, `probe::`, `text::`) stay in the
 # same match group as the longer name so rustc substring filters do not
 # double-run.
@@ -94,7 +95,8 @@ lib_splits() {
     'cd-core/lib	services	match	chat:: confluence_ro:: embed:: events:: harvest:: incident_evidence:: incident_evidence_archive:: investigation_answer:: model_curation:: normalized_log_events:: quality_eval:: research:: sessions:: sql_ro:: turn_trace:: web_research::' \
     'cd-core/lib	platform	match	ai_probe:: audit:: config:: error:: gateway_cost_ledger:: injection:: keychain_store:: linked_triage_contract:: mcp_client:: memory_fs:: module_registry:: modules:: probe:: providers:: reasoning_effort:: rerank:: skills:: triage_quality:: workspace_backup:: x_search::' \
     'cd-core/lib	control	match	cheap_model_fast_triage_benchmark:: context_plan:: deadline_controls:: extension_contract:: paths:: preflight:: redact:: tools::' \
-    'cd-core/lib	policy	match	branding:: git_source:: home_source:: news_sources::' \
+    'cd-core/lib	policy_git	match	branding:: git_source::' \
+    'cd-core/lib	policy_sources	match	home_source:: news_sources::' \
     'cd-core/lib	policy_stream	match	sse:: triage_sdk::' \
     'cd-core/lib	wire	match	http_preset:: model_role_hints:: provider_telemetry:: router:: triage_policy_store:: triage_role_qualification::' \
     'cd-core/lib	surface	match	activity:: build_identity:: connectors:: context_budgeting:: discovery:: embedding_space:: grok_auth:: help:: index:: index_watch:: model_context:: model_ref:: multi_stage_budget:: object_store:: openai_chat_contract:: permissions:: process_progress:: s3_object_store:: session_context:: ssrf:: text:: vector_index:: workspace::' \
@@ -104,13 +106,13 @@ lib_splits() {
 # Hosted test-wall seconds from run 31906598802 (cold Ubuntu shards 1-7)
 # plus later leftover isolates: other 56m (31926634503), control 57m
 # (31931230358), policy+cd-core tests 58m (31936313731), and policy still
-# in progress at the 60m budget on 31941510316. platform isolated finished
-# in 13m40s so it is not leftover-heavy. The skip leftover must stay below
-# HEAVY_WEIGHT. Default 8s covers the many sub-10s units.
+# in progress at the 60m budget on 31941510316 and 31949682882. platform
+# isolated finished in 13m40s so it is not leftover-heavy. The skip leftover
+# must stay below HEAVY_WEIGHT. Default 8s covers the many sub-10s units.
 #
 # A unit at or above HEAVY_WEIGHT is a "heavy": when there are at least
 # that many shards, verify refuses two heavies on one shard.
-# Leftover-heavy slices (control/policy/wire) must not sit alone and must
+# Leftover-heavy slices (control/policy_git/wire) must not sit alone and must
 # not share a shard with any other cd-core unit — cold --lib plus extra
 # cd-core --test binaries is the 58m shard-4 failure mode. The small
 # policy_stream child is not leftover-heavy, like the hosted-fast
@@ -124,7 +126,8 @@ weight_for() {
     cd-core/lib/control) printf '%s\n' 380 ;;
     cd-core/lib/log_analysis) printf '%s\n' 367 ;;
     cd-core/lib/services) printf '%s\n' 340 ;;
-    cd-core/lib/policy) printf '%s\n' 200 ;;
+    cd-core/lib/policy_git) printf '%s\n' 200 ;;
+    cd-core/lib/policy_sources) printf '%s\n' 80 ;;
     cd-core/lib/wire) printf '%s\n' 200 ;;
     cd-core/test/duplicate_rendering_acceptance_lab) printf '%s\n' 189 ;;
     cd-core/lib/platform) printf '%s\n' 120 ;;
@@ -138,7 +141,7 @@ weight_for() {
 # Slow leftover --lib slices. Not platform/surface/other (hosted-fast or tiny).
 is_leftover_heavy() {
   case $1 in
-    cd-core/lib/control | cd-core/lib/policy | cd-core/lib/wire) return 0 ;;
+    cd-core/lib/control | cd-core/lib/policy_git | cd-core/lib/wire) return 0 ;;
     *) return 1 ;;
   esac
 }
