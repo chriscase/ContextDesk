@@ -139,9 +139,9 @@ CI therefore:
    (hosted run `31851734335`).
 2. Runs the same suite as `CD_SHARD_COUNT` (currently **8**) shards that
    restore that cache (`save-if: false`, never Swatinem `lookup-only`).
-   `cd-core/lib` is executed as four complementary filters (`log_analysis::`,
-   a `runtime` match group, a `services` match group, and a skip leftover)
-   so the heavy library binary is not pinned to one shard.
+   `cd-core/lib` is executed as seven complementary filters (`log_analysis::`,
+   `runtime`, `services`, `platform`, `control`, `surface`, and a light skip
+   leftover) so the heavy library binary is not pinned to one shard.
 
    The count went 4 → 8 because the shard drawing `cd-core/lib/other` was
    cancelled at the 60-minute job budget on two consecutive runs while the
@@ -152,7 +152,10 @@ CI therefore:
    shards still put that leftover (`--skip log_analysis::`, 1485 `#[test]`s)
    on shard 8 with 13 companions; hosted run `31906598802` cancelled that
    leftover-heavy bucket at 65 minutes while shards 1–7 finished in 22–37
-   minutes. The plan now splits the leftover and assigns by hosted
+   minutes. The next tip isolated that leftover on shard 2; hosted run
+   `31926634503` cancelled it at 56m1s with no artifact (`never run:
+   cd-core/lib/other`) while shard 8 passed in 27 minutes. The leftover is
+   now three match groups plus a light skip leftover, assigned by hosted
    test-weight (heaviest first, onto the lightest shard) rather than raising
    the count or the job timeout.
 3. Aggregates with `scripts/ci_aggregate_shards.sh`, which fails closed on a

@@ -33,10 +33,14 @@ env:
   # 710s` of a `total time: 1203s` on a warm cache. Alphabetical round-robin
   # at 8 shards still put the leftover `cd-core/lib/other` (1485 #[test]s)
   # on shard 8 with 13 companions; run 31906598802 cancelled that leftover-
-  # heavy bucket at 65m while shards 1-7 finished in 22-37m. The plan now
-  # splits that leftover (`runtime` + `services` + smaller `other`) and
-  # assigns by hosted test-weight so heavies do not share a shard. Do not
-  # raise the count or the job timeout to paper over a pile.
+  # heavy bucket at 65m while shards 1-7 finished in 22-37m. Splitting into
+  # runtime/services/other moved the skip leftover onto shard 2 alone;
+  # run 31926634503 cancelled that shard at 56m1s with no artifact
+  # (aggregate: never run: cd-core/lib/other) while shard 8 passed in 27m.
+  # The leftover is now three match groups (platform/control/surface) plus
+  # a light skip leftover. Heavies do not share a shard; a skip leftover
+  # that is still heavy fails verify. Do not raise the count or the job
+  # timeout to paper over a pile.
   CD_SHARD_COUNT: "8"
 
 # Keep every main-branch run, but stop spending runner time on an obsolete PR

@@ -68,14 +68,18 @@ LIB_KINDS='["lib","rlib","dylib","cdylib","staticlib","proc-macro"]'
 # Complementary filters for oversized `--lib` binaries.  Hosted evidence:
 # shard 1 uniquely ran unsplitted `cd-core/lib` and lost its runner; later
 # `cd-core/lib/other` (`--skip log_analysis::`, 1485 #[test]s) landed on
-# shard 8 via alphabetical round-robin and that leftover-heavy bucket timed
-# out at 65m on run 31906598802 while shards 1-7 finished in 22-37m.
+# shard 8 via alphabetical round-robin and timed out at 65m (run 31906598802).
+# After runtime/services split, the remaining skip leftover still occupied
+# shard 2 alone and produced no result after 56m1s (run 31926634503;
+# aggregate: never run: cd-core/lib/other).
 #
-# Four complementary units together are exactly `cargo test -p cd-core --lib`.
-# `log_analysis` is the measured 367s / 725-test slice. The former `other`
-# leftover is split into `runtime` + `services` + a smaller `other` so no
-# single lib unit keeps ~1500 tests. Match filters are OR; the skip child
-# must list every match filter (verify fails closed if it does not).
+# Seven complementary units together are exactly `cargo test -p cd-core --lib`.
+# Match filters are OR; the skip child must list every match filter (verify
+# fails closed if it does not) and must not itself be heavy (a leftover that
+# is still heavy must be split again, not given a longer job timeout).
+# Short prefixes that are substrings of another module path (`events::`,
+# `index::`, `object_store::`, `probe::`, `text::`) stay in the same match
+# group as the longer name so rustc substring filters do not double-run.
 #
 # Columns: parent_unit, child_suffix, mode (match|skip), filter
 # Filter may be space-separated prefixes (match = OR, skip = repeated --skip).
@@ -83,15 +87,19 @@ lib_splits() {
   printf '%s\n' \
     'cd-core/lib	log_analysis	match	log_analysis::' \
     'cd-core/lib	runtime	match	agent:: capability_qualification:: fast_triage:: investigations:: memory:: multi_model:: tool_host::' \
-    'cd-core/lib	services	match	chat:: confluence_ro:: embed:: harvest:: incident_evidence:: incident_evidence_archive:: investigation_answer:: model_curation:: normalized_log_events:: quality_eval:: research:: sessions:: sql_ro:: turn_trace:: web_research::' \
-    'cd-core/lib	other	skip	agent:: capability_qualification:: chat:: confluence_ro:: embed:: fast_triage:: harvest:: incident_evidence:: incident_evidence_archive:: investigation_answer:: investigations:: log_analysis:: memory:: model_curation:: multi_model:: normalized_log_events:: quality_eval:: research:: sessions:: sql_ro:: tool_host:: turn_trace:: web_research::'
+    'cd-core/lib	services	match	chat:: confluence_ro:: embed:: events:: harvest:: incident_evidence:: incident_evidence_archive:: investigation_answer:: model_curation:: normalized_log_events:: quality_eval:: research:: sessions:: sql_ro:: turn_trace:: web_research::' \
+    'cd-core/lib	platform	match	ai_probe:: audit:: config:: error:: gateway_cost_ledger:: injection:: keychain_store:: linked_triage_contract:: mcp_client:: memory_fs:: module_registry:: modules:: probe:: providers:: reasoning_effort:: rerank:: skills:: triage_quality:: workspace_backup:: x_search::' \
+    'cd-core/lib	control	match	branding:: cheap_model_fast_triage_benchmark:: context_plan:: deadline_controls:: extension_contract:: git_source:: home_source:: http_preset:: model_role_hints:: news_sources:: paths:: preflight:: provider_telemetry:: redact:: router:: sse:: tools:: triage_policy_store:: triage_role_qualification:: triage_sdk::' \
+    'cd-core/lib	surface	match	activity:: build_identity:: connectors:: context_budgeting:: discovery:: embedding_space:: grok_auth:: help:: index:: index_watch:: model_context:: model_ref:: multi_stage_budget:: object_store:: openai_chat_contract:: permissions:: process_progress:: s3_object_store:: session_context:: ssrf:: text:: vector_index:: workspace::' \
+    'cd-core/lib	other	skip	activity:: agent:: ai_probe:: audit:: branding:: build_identity:: capability_qualification:: chat:: cheap_model_fast_triage_benchmark:: config:: confluence_ro:: connectors:: context_budgeting:: context_plan:: deadline_controls:: discovery:: embed:: embedding_space:: error:: events:: extension_contract:: fast_triage:: gateway_cost_ledger:: git_source:: grok_auth:: harvest:: help:: home_source:: http_preset:: incident_evidence:: incident_evidence_archive:: index:: index_watch:: injection:: investigation_answer:: investigations:: keychain_store:: linked_triage_contract:: log_analysis:: mcp_client:: memory:: memory_fs:: model_context:: model_curation:: model_ref:: model_role_hints:: module_registry:: modules:: multi_model:: multi_stage_budget:: news_sources:: normalized_log_events:: object_store:: openai_chat_contract:: paths:: permissions:: preflight:: probe:: process_progress:: provider_telemetry:: providers:: quality_eval:: reasoning_effort:: redact:: rerank:: research:: router:: s3_object_store:: session_context:: sessions:: skills:: sql_ro:: sse:: ssrf:: text:: tool_host:: tools:: triage_policy_store:: triage_quality:: triage_role_qualification:: triage_sdk:: turn_trace:: vector_index:: web_research:: workspace:: workspace_backup:: x_search::'
 }
 
-# Hosted test-wall seconds from run 31906598802 (cold Ubuntu shards 1-7).
-# Unmeasured leftover lib splits use conservative estimates from #[test]
-# counts relative to measured log_analysis (725 tests / 367s), padded
-# because leftover modules were the slow side of that run. Default 8s
-# covers the many sub-10s units so leftovers fill light shards.
+# Hosted test-wall seconds from run 31906598802 (cold Ubuntu shards 1-7)
+# plus run 31926634503 (shard 2 = cd-core/lib/other alone, 56m1s, no
+# artifact). That leftover (~500 tests) is now three match groups; each
+# third is weighted as a heavy so it cannot share a shard with another
+# heavy. The skip leftover must stay below HEAVY_WEIGHT (verify fails
+# closed if it does not). Default 8s covers the many sub-10s units.
 #
 # A unit at or above HEAVY_WEIGHT is a "heavy": when there are at least
 # that many shards, verify refuses two heavies on one shard.
@@ -99,13 +107,16 @@ HEAVY_WEIGHT=180
 
 weight_for() {
   case $1 in
+    cd-core/lib/control) printf '%s\n' 750 ;;
+    cd-core/lib/platform) printf '%s\n' 750 ;;
+    cd-core/lib/surface) printf '%s\n' 750 ;;
     cd-core/test/real_format_exception_episode_acceptance_lab) printf '%s\n' 660 ;;
-    cd-core/lib/other) printf '%s\n' 520 ;;
     cd-core/lib/runtime) printf '%s\n' 400 ;;
     cd-core/lib/log_analysis) printf '%s\n' 367 ;;
     cd-core/lib/services) printf '%s\n' 340 ;;
     cd-core/test/duplicate_rendering_acceptance_lab) printf '%s\n' 189 ;;
     cd-core/test/log_lab) printf '%s\n' 55 ;;
+    cd-core/lib/other) printf '%s\n' 40 ;;
     *) printf '%s\n' 8 ;;
   esac
 }
@@ -443,6 +454,23 @@ EOF
   ' "$tmp/splits"; then
     failures=$((failures + 1))
   fi
+
+  # 8. A skip leftover that is still heavy is the 56m shard-2 failure mode
+  #    (run 31926634503: never run: cd-core/lib/other). Split it further;
+  #    do not raise the job timeout.
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    mode=$(printf '%s\n' "$row" | cut -f3)
+    [ "$mode" = skip ] || continue
+    parent=$(printf '%s\n' "$row" | cut -f1)
+    suffix=$(printf '%s\n' "$row" | cut -f2)
+    child="$parent/$suffix"
+    uw=$(weight_for "$child")
+    if [ "$uw" -ge "$HEAVY_WEIGHT" ]; then
+      echo "error: skip leftover $child is still heavy (weight $uw >= $HEAVY_WEIGHT); split it further" >&2
+      failures=$((failures + 1))
+    fi
+  done <"$tmp/splits"
 
   if [ "$failures" -ne 0 ]; then
     echo "shard plan verification FAILED ($failures problem(s))" >&2
