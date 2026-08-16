@@ -10,6 +10,7 @@ import {
   type AuthRouteDeps,
 } from "../auth/index.js";
 import { canPerform, isAppRole, type MutableGroupRoleMap } from "./roles.js";
+import type { GroupRoleStore } from "./store.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
@@ -18,6 +19,7 @@ function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
 export interface AuthzRouteDeps {
   auth: Pick<AuthRouteDeps, "sessions" | "policy">;
   roles: MutableGroupRoleMap;
+  roleStore: GroupRoleStore;
   audit: AuditStore;
 }
 
@@ -62,15 +64,92 @@ export async function registerAuthzRoutes(
     }
     const group = (body as { group: string }).group;
     const role = (body as { role: AppRole }).role;
-    deps.roles.set(group, role);
-    await deps.audit.append({
-      identity: session.identity.id,
-      action: "role_mapping_update",
-      target: `${group}=${role}`,
-      origin: request.ip,
-      outcome: "success",
-    });
+    try {
+      await deps.roleStore.set(group, role, session.identity.id);
+      deps.roles.set(group, role);
+      await deps.audit.append({
+        identity: session.identity.id,
+        action: "role_mapping_update",
+        target: `${group}=${role}`,
+        origin: request.ip,
+        outcome: "success",
+      });
+    } catch {
+      await deps.audit.append({
+        identity: session.identity.id,
+        action: "role_mapping_update",
+        target: `${group}=${role}`,
+        origin: request.ip,
+        outcome: "failure",
+      });
+      void reply.code(503);
+      return authError("forbidden");
+    }
     return { ok: true, group, role };
+  });
+
+  app.delete("/api/authz/group-role-map", async (request, reply) => {
+    const session = await resolveActiveSession(request, deps.auth);
+    if (!session) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    const roles = deps.roles.resolve(session.groups);
+    if (!canPerform(roles, "admin")) {
+      await deps.audit.append({
+        identity: session.identity.id,
+        action: "role_mapping_revoke",
+        target: "forbidden",
+        origin: request.ip,
+        outcome: "denied",
+      });
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const body = request.body;
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      !("group" in body) ||
+      typeof (body as { group: unknown }).group !== "string"
+    ) {
+      void reply.code(400);
+      return authError("forbidden");
+    }
+    const group = (body as { group: string }).group;
+    try {
+      const deleted = await deps.roleStore.delete(group);
+      if (!deleted) {
+        await deps.audit.append({
+          identity: session.identity.id,
+          action: "role_mapping_revoke",
+          target: group,
+          origin: request.ip,
+          outcome: "failure",
+        });
+        void reply.code(404);
+        return { error: "not_found" };
+      }
+      deps.roles.delete(group);
+      await deps.audit.append({
+        identity: session.identity.id,
+        action: "role_mapping_revoke",
+        target: group,
+        origin: request.ip,
+        outcome: "success",
+      });
+      return { ok: true, group, revoked: true };
+    } catch {
+      await deps.audit.append({
+        identity: session.identity.id,
+        action: "role_mapping_revoke",
+        target: group,
+        origin: request.ip,
+        outcome: "failure",
+      });
+      void reply.code(503);
+      return authError("forbidden");
+    }
   });
 }
 

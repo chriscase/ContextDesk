@@ -23,8 +23,8 @@ export function sha256Text(text: string): string {
 
 export function payloadDigest(payload: string): string {
   try {
-    return canonicalJson(JSON.parse(payload) as unknown);
+    return sha256Text(canonicalJson(JSON.parse(payload) as unknown));
   } catch {
-    return payload;
+    return sha256Text(payload);
   }
 }
