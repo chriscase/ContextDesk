@@ -9518,7 +9518,7 @@ enum LogIngestRunError {
     /// Ingest classified a rejection; the typed outcome must cross IPC.
     Rejected {
         message: String,
-        outcome: cd_core::log_analysis::ImportOutcomeReport,
+        outcome: Box<cd_core::log_analysis::ImportOutcomeReport>,
     },
 }
 
@@ -9542,7 +9542,7 @@ impl LogIngestRunError {
             },
             Self::Rejected { message, outcome } => ImportCommandErrorDto {
                 message,
-                outcome: Some(outcome),
+                outcome: Some(*outcome),
             },
         }
     }
@@ -9648,13 +9648,12 @@ mod import_error_projection_tests {
     /// and still seals the transport marker.
     #[test]
     fn rejected_ingest_error_carries_the_classified_outcome() {
-        let error = CoreError::Message(
-            "zip open: missing end record [member=bundles/inner.zip]".into(),
-        );
+        let error =
+            CoreError::Message("zip open: missing end record [member=bundles/inner.zip]".into());
         let classified = cd_core::log_analysis::ImportOutcomeReport::rejected_from_error(&error);
         let dto = super::LogIngestRunError::Rejected {
             message: import_error_message(&error),
-            outcome: classified,
+            outcome: Box::new(classified),
         }
         .into_command_error();
         assert!(
@@ -9831,7 +9830,7 @@ async fn run_log_ingest(
             Err(cd_core::error::CoreError::Cancelled) => Err(LogIngestRunError::Cancelled),
             Err(other) => Err(LogIngestRunError::Rejected {
                 message: import_error_message(&other),
-                outcome: classified,
+                outcome: Box::new(classified),
             }),
         }
     })
@@ -10191,7 +10190,9 @@ async fn install_demo_log_corpus_transaction<B: DemoLogInstallBackend>(
             backend.select_corpus(prior_active_corpus);
             return DemoLogInstallDto::cancelled();
         }
-        Err(LogIngestRunError::Failed(error) | LogIngestRunError::Rejected { message: error, .. }) => {
+        Err(
+            LogIngestRunError::Failed(error) | LogIngestRunError::Rejected { message: error, .. },
+        ) => {
             backend.select_corpus(prior_active_corpus);
             return DemoLogInstallDto::failed(error, true);
         }
