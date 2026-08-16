@@ -37,10 +37,12 @@ env:
   # runtime/services/other moved the skip leftover onto shard 2 alone;
   # run 31926634503 cancelled that shard at 56m1s with no artifact
   # (aggregate: never run: cd-core/lib/other) while shard 8 passed in 27m.
-  # The leftover is now three match groups (platform/control/surface) plus
-  # a light skip leftover. Heavies do not share a shard; a skip leftover
-  # that is still heavy fails verify. Do not raise the count or the job
-  # timeout to paper over a pile.
+  # The leftover is now platform / control / policy / surface plus a light
+  # skip leftover. Run 31931230358: isolated control on shard 1 produced
+  # no result after 57m2s (never run: cd-core/lib/control) while platform
+  # on shard 2 finished in 13m40s. Control is split in two; a leftover-
+  # heavy slice that sits alone fails verify. Do not raise the count or
+  # the job timeout to paper over a pile.
   CD_SHARD_COUNT: "8"
 
 # Keep every main-branch run, but stop spending runner time on an obsolete PR
@@ -249,10 +251,10 @@ jobs:
     needs: [rust-ubuntu]
     runs-on: ubuntu-latest
     # Tests only, after the warmup job has compiled. 50 minutes is enough for
-    # one isolated heavy (660s lab or one lib leftover split) plus cold
-    # build, and is below the ~86-96 minute hosted-runner-loss window from
-    # runs 31828397526 / 31835229724. A step timeout (below) leaves the
-    # runner alive so always() diagnostics can upload. Do not raise this
+    # one isolated measured heavy (660s lab) or a leftover *half* plus cold
+    # build — not an unsplitted leftover third (run 31931230358: isolated
+    # control, 57m2s, no artifact). Below the ~86-96 minute hosted-runner-
+    # loss window from runs 31828397526 / 31835229724. Do not raise this
     # to hide a leftover-heavy pile — rebalance scripts/ci_shard_plan.sh.
     timeout-minutes: 60
     strategy:

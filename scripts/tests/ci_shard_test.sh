@@ -92,10 +92,10 @@ grep -qx "cd-core/doc" "$TMP/units" || fail "doc tests are missing from the plan
 
 # Lib split: the unsplitted parent must not be a run unit, children must exist,
 # and compile-args must strip the filter so `--no-run` stays valid.
-# Seven complementary children replace one parent (log_analysis + runtime +
-# services + platform + control + surface + leftover other). Hosted run
-# 31926634503: the previous skip leftover alone on shard 2 produced no
-# result after 56m1s (never run: cd-core/lib/other).
+# Eight complementary children replace one parent. Hosted run 31931230358:
+# isolated cd-core/lib/control on shard 1 produced no result after 57m2s
+# (never run: cd-core/lib/control) while platform on shard 2 finished in
+# 13m40s. Control is split into control + policy.
 grep -qx "cd-core/lib" "$TMP/base" || fail "cd-core/lib must remain a cargo test target"
 grep -qx "cd-core/lib" "$TMP/units" && fail "cd-core/lib must not run unsplitted (would pile onto one shard)"
 grep -qx "cd-core/lib/log_analysis" "$TMP/units" || fail "cd-core/lib/log_analysis missing"
@@ -103,10 +103,11 @@ grep -qx "cd-core/lib/runtime" "$TMP/units" || fail "cd-core/lib/runtime missing
 grep -qx "cd-core/lib/services" "$TMP/units" || fail "cd-core/lib/services missing"
 grep -qx "cd-core/lib/platform" "$TMP/units" || fail "cd-core/lib/platform missing"
 grep -qx "cd-core/lib/control" "$TMP/units" || fail "cd-core/lib/control missing"
+grep -qx "cd-core/lib/policy" "$TMP/units" || fail "cd-core/lib/policy missing"
 grep -qx "cd-core/lib/surface" "$TMP/units" || fail "cd-core/lib/surface missing"
 grep -qx "cd-core/lib/other" "$TMP/units" || fail "cd-core/lib/other missing"
-[ $((BASE_COUNT + 6)) -eq "$UNIT_COUNT" ] ||
-  fail "lib split should add six extra shard units ($BASE_COUNT base -> $UNIT_COUNT units)"
+[ $((BASE_COUNT + 7)) -eq "$UNIT_COUNT" ] ||
+  fail "lib split should add seven extra shard units ($BASE_COUNT base -> $UNIT_COUNT units)"
 
 [ "$(sh "$PLAN" args cd-core/lib/log_analysis)" = "-p cd-core --lib -- log_analysis::" ] ||
   fail "log_analysis lib-split selector"
@@ -122,6 +123,10 @@ printf '%s\n' "$PLATFORM_ARGS" | grep -q -- 'triage_quality::' || fail "platform
 printf '%s\n' "$PLATFORM_ARGS" | grep -q -- 'probe::' || fail "platform selector must match probe:: (covers ai_probe)"
 CONTROL_ARGS=$(sh "$PLAN" args cd-core/lib/control)
 printf '%s\n' "$CONTROL_ARGS" | grep -q -- 'redact::' || fail "control selector must match redact::"
+printf '%s\n' "$CONTROL_ARGS" | grep -q -- 'sse::' && fail "control must not still own sse:: (moved to policy)"
+POLICY_ARGS=$(sh "$PLAN" args cd-core/lib/policy)
+printf '%s\n' "$POLICY_ARGS" | grep -q -- 'sse::' || fail "policy selector must match sse::"
+printf '%s\n' "$POLICY_ARGS" | grep -q -- 'git_source::' || fail "policy selector must match git_source::"
 SURFACE_ARGS=$(sh "$PLAN" args cd-core/lib/surface)
 printf '%s\n' "$SURFACE_ARGS" | grep -q -- 'index::' || fail "surface selector must match index:: (covers vector_index)"
 printf '%s\n' "$SURFACE_ARGS" | grep -q -- 'text::' || fail "surface selector must match text:: (covers session_context)"
@@ -131,6 +136,7 @@ printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip agent::' || fail "other leftove
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip chat::' || fail "other leftover must skip chat::"
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip triage_quality::' || fail "other leftover must skip platform filters"
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip redact::' || fail "other leftover must skip control filters"
+printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip sse::' || fail "other leftover must skip policy filters"
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip index::' || fail "other leftover must skip surface filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/log_analysis)" = "-p cd-core --lib" ] ||
   fail "compile-args must strip the log_analysis filter"
@@ -142,6 +148,8 @@ printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip index::' || fail "other leftove
   fail "compile-args must strip the platform match filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/control)" = "-p cd-core --lib" ] ||
   fail "compile-args must strip the control match filters"
+[ "$(sh "$PLAN" compile-args cd-core/lib/policy)" = "-p cd-core --lib" ] ||
+  fail "compile-args must strip the policy match filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/surface)" = "-p cd-core --lib" ] ||
   fail "compile-args must strip the surface match filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/other)" = "-p cd-core --lib" ] ||
@@ -149,27 +157,17 @@ printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip index::' || fail "other leftove
 [ "$(sh "$PLAN" compile-args cd-core/test/golden_retrieval)" = "-p cd-core --test golden_retrieval" ] ||
   fail "compile-args for an integration target"
 
-# Weight-aware assignment: at the CI width, known heavies must not share a
-# shard. The skip leftover must not be heavy (run 31926634503: other alone
-# on shard 2, 56m1s, no artifact).
+# Weight-aware assignment: leftover-heavy slices must not sit alone
+# (run 31931230358: control alone on shard 1, 57m2s, no artifact).
 CI_SHARDS=8
 sh "$PLAN" plan --shards "$CI_SHARDS" >"$TMP/plan8"
-heavies='cd-core/lib/control
-cd-core/lib/platform
-cd-core/lib/surface
-cd-core/test/real_format_exception_episode_acceptance_lab
-cd-core/lib/runtime
-cd-core/lib/log_analysis
-cd-core/lib/services
-cd-core/test/duplicate_rendering_acceptance_lab'
-heavy_shards=$(
-  printf '%s\n' "$heavies" | while IFS= read -r u; do
-    awk -F'\t' -v u="$u" '$2 == u { print $1 }' "$TMP/plan8"
-  done | LC_ALL=C sort
-)
-[ "$(printf '%s\n' "$heavy_shards" | grep -c .)" -eq 8 ] || fail "expected eight heavy units in the 8-shard plan"
-[ "$(printf '%s\n' "$heavy_shards" | uniq -d | grep -c . || true)" -eq 0 ] ||
-  fail "two heavy units share a shard under the 8-shard plan"
+for leftover in cd-core/lib/control cd-core/lib/policy cd-core/lib/platform cd-core/lib/surface cd-core/lib/other; do
+  grep -q "^[0-9]	$leftover\$" "$TMP/plan8" || fail "$leftover missing from the 8-shard plan"
+done
+# Unsplitted control (redact + sse + git_source together) was the 57m bucket.
+CONTROL_FILTERS=$(sh "$PLAN" args cd-core/lib/control)
+printf '%s\n' "$CONTROL_FILTERS" | grep -q -- 'redact::' || fail "control keeps redact::"
+printf '%s\n' "$CONTROL_FILTERS" | grep -q -- 'git_source::' && fail "unsplitted control must not keep git_source::"
 other_shard=$(awk -F'\t' '$2 == "cd-core/lib/other" { print $1 }' "$TMP/plan8")
 other_companions=$(awk -F'\t' -v s="$other_shard" '$1 == s { c++ } END { print c + 0 }' "$TMP/plan8")
 [ "$other_companions" -gt 1 ] || fail "skip leftover cd-core/lib/other must not occupy a shard alone"
