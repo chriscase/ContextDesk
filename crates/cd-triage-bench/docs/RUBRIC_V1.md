@@ -43,7 +43,8 @@ reason. Composite indices and rankings are out of scope (#881).
    strategy identity, no case resolution. If masking is impossible (non-UTF-8
    raw, or the raw text contains the strategy name), `blinding` is
    `unblinded` with a reason.
-2. Expert writes a **support-phase** adjudication (`phase: support`).
+2. Expert writes a **support-phase** adjudication (`phase: support`) and
+   copies the generated `packet_id` into `review_packet_id`.
    `diagnosis_correctness` must be `not_applicable` or `unscorable` — the
    resolution has not been revealed. See
    [`../fixtures/templates/adjudication.example.json`](../fixtures/templates/adjudication.example.json).
@@ -53,10 +54,11 @@ reason. Composite indices and rankings are out of scope (#881).
 4. `review-packet <run_id> --phase diagnosis` — allowed only after a
    **support-phase** adjudication exists; may reveal resolution so diagnosis
    can be scored.
-5. Expert writes a **diagnosis-phase** adjudication (`phase: diagnosis`).
-   The store rejects this unless a support-phase record already exists for
-   the run. A support-phase record that scores `diagnosis_correctness` is
-   rejected even on a resolved case.
+5. Expert writes a **diagnosis-phase** adjudication (`phase: diagnosis`) bound
+   to its generated packet. The store rejects this unless a support-phase
+   record already exists for the same reviewer and its timestamp is not later
+   than the diagnosis record. A support-phase record that scores
+   `diagnosis_correctness` is rejected even on a resolved case.
 6. A second reviewer is a second adjudication. Disagreement is preserved.
    Nothing averages the two.
 

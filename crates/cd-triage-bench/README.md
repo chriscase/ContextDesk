@@ -36,7 +36,7 @@ runner is residual until #879. No composite leaderboards.
 - Snapshot, task, run, adjudication, and score identities are content-addressed
   (SHA-256 of canonical JSON of the digest body).
 - Records are **immutable**. A second write with different bytes fails closed.
-  Identical bytes are idempotent. Corrections are new records.
+  Identical full payloads are idempotent. Corrections are new records.
 - Default privacy class is `owner_only`. `share_safe` is explicit.
 - Original evidence bytes live in the blob store. Attributed summaries sit
   beside items and never replace originals.
@@ -50,8 +50,8 @@ runner is residual until #879. No composite leaderboards.
 | `Case` | caller-assigned `case_id` |
 | `EvidenceSnapshot` | `snap-<sha256>` of canonical manifest **without** `snapshot_id` |
 | `EvaluationTask` | `task-<sha256>` of question, protocol, visibility, snapshot |
-| `TriageRun` | `run-<sha256>` of task, snapshot, source, strategy, raw digest, fairness |
-| `Adjudication` | `adj-<sha256>` of reviewer, rubric, outcomes, run binding |
+| `TriageRun` | `run-<sha256>` of task, snapshot, source, strategy, raw digest, metadata, and fairness |
+| `Adjudication` | `adj-<sha256>` of reviewer, rubric, outcomes, phase, and review-packet binding |
 | `ScoreReview` | `score-<sha256>` derived from an adjudication; never rewritten |
 
 ## Privacy, unknown, and fairness
@@ -69,9 +69,10 @@ runner is residual until #879. No composite leaderboards.
 Schema ids are exact strings (`contextdesk.triage_bench.*.v1`). Unknown fields
 are rejected on stored records **and** on CLI import documents, including the
 happy path that omits generated `snapshot_id` / `task_id` / `adjudication_id` /
-`score_id` / `run_id`. Additive change requires a new schema id (`v2`); v1
-records stay readable and are never rewritten in place. There is no implicit
-upgrade.
+`score_id` / `run_id`. Additive changes use a new schema id (`v2`); legacy v1
+adjudications without phase or packet fields remain readable with their
+historical digest and are never rewritten in place. There is no implicit
+upgrade. Current report output is `backtest_report.v2`.
 
 Valid and invalid fixtures live in [`fixtures/valid`](fixtures/valid) and
 [`fixtures/invalid`](fixtures/invalid). Content-addressed identity mismatches
@@ -116,10 +117,11 @@ over the markdown body. `--raw` wins over both and is the binary-safe path.
 `show runs <id>` prints completeness (`exact` / `partial` / `unknown`) and
 leaves unknown cost, timing, prompt, workflow, and strategy version as
 `{"status":"unknown"}`. Re-importing an identical payload prints
-`duplicate <run_id>`. A different raw hash, or the same raw bytes with a
-different fairness/strategy identity, prints `created <run_id>` (and
-`near_duplicate_of=` when the raw digest already exists). There is no edit
-verb; changing fairness on a stored record fails closed.
+`duplicate <run_id>`. A different raw hash, or the same raw bytes with
+different material metadata, fairness, or strategy identity, prints
+`created <run_id>` (and `near_duplicate_of=` when the raw digest already
+exists). There is no edit verb; changing fairness or other metadata on a
+stored record fails closed.
 
 ## Rubric v1 and adjudication
 
@@ -130,8 +132,10 @@ Worked adjudication example:
 
 `review-packet --phase support` is a blinded review packet: no structured
 strategy identity and no case resolution. If masking is impossible, the
-packet records why (`blinding.kind = unblinded`). Diagnosis phase is
-allowed only after a support adjudication exists.
+packet records why (`blinding.kind = unblinded`). Each adjudication carries
+the generated `review_packet_id`; the store verifies packet identity and
+blinding, and diagnosis phase also requires a prior support record by the same
+reviewer. Missing raw artifacts fail closed rather than claiming blinding.
 
 `import-adjudication` attaches deterministic citation-existence **flags**
 (`citation_not_in_snapshot:<id>`). It never writes scores. Two reviewers
@@ -147,11 +151,13 @@ task + snapshot identity. Different snapshots or fairness classes are
 **incomparable** (reason included), never force-ranked. Version N vs N−1
 pairs list improved/regressed/unchanged dimensions with drill-down to runs
 and adjudications. Unscored, failed, and partial runs stay visible and are
-not treated as zero. Version pairs skip incomparable fairness/snapshot pairs
-and refuse a non-completed baseline. Scores are never pooled across rubric
-versions. `share_safe` drops owner-only records/titles/rationales/reviewers
-and fails closed on a privacy scan; withheld scores are counted separately
-from genuine absence. `owner_only` keeps that detail.
+not treated as zero. Partial dimension coverage is reported separately from
+fully scored runs. Version pairs skip incomparable fairness/snapshot pairs,
+non-completed baselines, and source/build identity mismatches. Scores are
+never pooled across rubric versions. `share_safe` drops owner-only
+records/titles/rationales/reviewers and fails closed on a privacy scan;
+withheld scores are counted separately from genuine absence. `owner_only`
+keeps that detail.
 
 **Residual:** an SDK-driven batch runner that executes ContextDesk across a
 case set, including mid-batch failure coverage. That needs #879. Imported

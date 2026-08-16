@@ -29,6 +29,14 @@ This lane is separate from:
 - CLI import documents reject unknown fields even when generated ids are omitted.
 - Unresolved cases remain valid without an invented root cause.
 - Failed and partial runs are stored runs.
+- Run identity includes material outcome and attribution metadata; conflicting
+  re-imports become explicit near-duplicates instead of silently keeping the
+  first writer's provenance.
+- Legacy v1 adjudications without phase remain readable; new adjudications
+  bind to generated review packets, verify computed blinding, and enforce
+  support-before-diagnosis chronology.
+- Reports use `backtest_report.v2`, expose partial score coverage, and keep
+  version comparisons partitioned by source kind and strategy build.
 - Reports never emit readiness, qualification, or routing badges.
 - Manual import preserves raw bytes byte-exact.
 

@@ -1,10 +1,11 @@
 {
-  "schema_id": "contextdesk.triage_bench.adjudication.v1",
+  "schema_id": "contextdesk.triage_bench.adjudication.v2",
   "privacy": "share_safe",
   "case_id": "REPLACE_WITH_CASE_ID",
   "task_id": "REPLACE_WITH_TASK_ID",
   "snapshot_id": "REPLACE_WITH_SNAPSHOT_ID",
   "run_id": "REPLACE_WITH_RUN_ID",
+  "review_packet_id": "REPLACE_WITH_GENERATED_REVIEW_PACKET_ID",
   "reviewer": "reviewer-a",
   "conflict_of_interest": {
     "declared": false
