@@ -20,10 +20,9 @@ export function shareSafeLabel(
   if (variant === "owner_only") return raw;
   const mapped = config.identityRedactions[raw];
   if (mapped) return mapped;
-  if (field === "source") return raw;
+  if (field === "source") return isDirectoryDn(raw) ? "participant" : raw;
   if (field === "target" && isUuid(raw)) return raw;
-  if (isDirectoryDn(raw) || field !== "source") return "participant";
-  return raw;
+  return "participant";
 }
 
 export function containsRedactionMap(text: string, config: ExportPrivacyConfig): boolean {
