@@ -5,7 +5,9 @@
 //! ContextDesk qualification, readiness, or routing state.
 //!
 //! ContextDesk remains a triage engine. Cases, evidence libraries, imported
-//! runs, adjudication, and comparison reports live here.
+//! runs, adjudication, and comparison reports live here. The public-SDK
+//! adapter (#879) drives ContextDesk only through published contract schema
+//! ids and a hermetic mock engine.
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +18,7 @@ pub mod import;
 pub mod packet;
 pub mod privacy;
 pub mod report;
+pub mod sdk;
 pub mod store;
 pub mod types;
 

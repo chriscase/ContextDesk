@@ -1,0 +1,11 @@
+{
+  "schema_id": "contextdesk.triage_bench.sdk_script_fixture.v1",
+  "script": "completed",
+  "terminal": "completed",
+  "run_status": "completed",
+  "result_kind": "grounded_final",
+  "validation_state": "passed",
+  "reason_code": "mock_completed",
+  "share_safe_schema_id": "contextdesk.triage.result_share_safe.v2",
+  "replay_schema_id": "contextdesk.triage.replay.v1"
+}

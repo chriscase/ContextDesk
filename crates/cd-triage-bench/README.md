@@ -11,8 +11,10 @@ SDK contracts, not by absorbing case management.
 
 Working name: `cd-triage-bench` (rename-friendly; crate prefix stays `cd-*`).
 
-Status on this branch: **local integration** (Refs #877, #878, and the
-report-only slice of #880/#881). Not shipped on `main`. Not release-ready.
+Status on this branch: **local integration** (Refs #877–#879). First-slice
+store/import is on `integrate/rc`. This branch adds the **public-SDK mock
+adapter** (#879). Not shipped on `main`. Not release-ready. Live providers
+are out of default CI.
 
 ## Layout
 
@@ -92,9 +94,17 @@ cd-triage-bench --library ./bench-lib import-run ./other.json --raw ./other.txt
 cd-triage-bench --library ./bench-lib list runs
 cd-triage-bench --library ./bench-lib show runs "$RUN_ID"
 cd-triage-bench --library ./bench-lib packet "$TASK_ID"
+cd-triage-bench --library ./bench-lib run-sdk "$TASK_ID" --engine mock --script completed
 cd-triage-bench --library ./bench-lib import-adjudication ./adj.json
 cd-triage-bench --library ./bench-lib report --format json --privacy share-safe
 ```
+
+`run-sdk` materializes the task packet under the task visibility policy,
+drives the published compile/preflight/execute/cancel/replay/evaluate seams
+through a deterministic mock engine, and records a `contextdesk_sdk`
+`TriageRun`. Failed, partial, timed-out, cancelled, and preflight-rejected
+attempts are stored runs. Usage and cost stay `unknown`. There is no live
+provider path in this crate.
 
 Human submission template: [`fixtures/templates/human-run.md`](fixtures/templates/human-run.md).
 
@@ -117,7 +127,7 @@ preserved as separate adjudications.
 - Direct web-tool / browser automation (manual import is the path here)
 - Multi-strategy synthesis
 - Similar-case retrieval
-- ContextDesk public-SDK adapter (#879)
+- Live ContextDesk provider execution (the mock adapter is the #879 CI path)
 - LLM-as-judge (forbidden as scoring authority; any later judge follows #867)
 
 ## Non-goals

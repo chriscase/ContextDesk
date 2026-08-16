@@ -1,0 +1,11 @@
+{
+  "schema_id": "contextdesk.triage_bench.sdk_script_fixture.v1",
+  "script": "timed_out",
+  "terminal": "timed_out",
+  "run_status": "timed_out",
+  "result_kind": "honest_partial",
+  "validation_state": "failed",
+  "reason_code": "mock_timed_out",
+  "share_safe_schema_id": "contextdesk.triage.result_share_safe.v2",
+  "replay_schema_id": "contextdesk.triage.replay.v1"
+}

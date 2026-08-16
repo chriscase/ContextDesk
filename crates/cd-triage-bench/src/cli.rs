@@ -4,6 +4,7 @@ use crate::canonical::to_pretty_json;
 use crate::error::{BenchError, BenchResult};
 use crate::import::{import_run, parse_import_json, parse_import_markdown, ImportOutcome};
 use crate::report::{blinded_run_view, build_report, render_report_json, render_report_markdown};
+use crate::sdk::{run_mock_task, SdkRunRequest, SdkScriptedTerminal};
 use crate::store::BenchStore;
 use crate::types::{Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -13,10 +14,11 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(
     name = "cd-triage-bench",
-    about = "Headless incident-triage evaluation bench (offline, no GUI, no engine adapter)",
-    long_about = "Create, import, and compare source-neutral triage evaluation records.\n\
+    about = "Headless incident-triage evaluation bench (offline, no GUI)",
+    long_about = "Create, import, compare, and mock-execute source-neutral triage records.\n\
 This tool never contacts a network, reads a keychain, or writes ContextDesk\n\
-qualification/readiness/routing state. ContextDesk SDK execution is out of scope."
+qualification/readiness/routing state. Live ContextDesk providers are out of\n\
+scope; `run-sdk` uses the hermetic public-contract mock engine only."
 )]
 pub struct Cli {
     /// Library directory (file-backed store).
@@ -72,6 +74,14 @@ pub enum Command {
         #[arg(long)]
         task: Option<String>,
     },
+    /// Execute one stored task through the public-SDK mock engine and record the run.
+    RunSdk {
+        task_id: String,
+        #[arg(long, value_enum, default_value = "mock")]
+        engine: SdkEngineArg,
+        #[arg(long, value_enum, default_value = "completed")]
+        script: SdkScriptArg,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -101,6 +111,34 @@ impl ReportPrivacy {
         match self {
             Self::OwnerOnly => PrivacyClass::OwnerOnly,
             Self::ShareSafe => PrivacyClass::ShareSafe,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SdkEngineArg {
+    Mock,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum SdkScriptArg {
+    Completed,
+    Failed,
+    Partial,
+    TimedOut,
+    Cancelled,
+    PreflightRejected,
+}
+
+impl From<SdkScriptArg> for SdkScriptedTerminal {
+    fn from(value: SdkScriptArg) -> Self {
+        match value {
+            SdkScriptArg::Completed => Self::Completed,
+            SdkScriptArg::Failed => Self::Failed,
+            SdkScriptArg::Partial => Self::Partial,
+            SdkScriptArg::TimedOut => Self::TimedOut,
+            SdkScriptArg::Cancelled => Self::Cancelled,
+            SdkScriptArg::PreflightRejected => Self::PreflightRejected,
         }
     }
 }
@@ -241,6 +279,19 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                 ReportFormat::Json => render_report_json(&report),
                 ReportFormat::Markdown => render_report_markdown(&report),
             }
+        }
+        Command::RunSdk {
+            task_id,
+            engine: SdkEngineArg::Mock,
+            script,
+        } => {
+            let store = open_store(cli.library)?;
+            let stored = run_mock_task(&store, SdkRunRequest::mock(&task_id, script.into()))?;
+            let status = stored.outcome.terminal.as_str();
+            Ok(format!(
+                "created {} status={status} sdk_run_id={}\n",
+                stored.run_id, stored.outcome.sdk_run_id
+            ))
         }
     }
 }

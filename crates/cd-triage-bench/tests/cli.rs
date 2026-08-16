@@ -405,3 +405,29 @@ fn identity_mismatch_imports_are_rejected() {
         .failure()
         .stderr(predicate::str::contains("adjudication_id does not match"));
 }
+
+#[test]
+fn run_sdk_mock_records_a_contextdesk_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("lib");
+    let store = init_store(&library);
+    store.put_case(&resolved_case()).unwrap();
+    let snapshot = snapshot_for(&store, "case-checkout-cascade");
+    let task = task_for(&store, &snapshot);
+
+    bench()
+        .args([
+            "--library",
+            library.to_str().unwrap(),
+            "run-sdk",
+            &task.task_id,
+            "--engine",
+            "mock",
+            "--script",
+            "completed",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("created run-"))
+        .stdout(predicate::str::contains("status=completed"));
+}

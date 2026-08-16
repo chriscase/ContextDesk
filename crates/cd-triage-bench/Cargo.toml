@@ -1,6 +1,6 @@
 [package]
 name = "cd-triage-bench"
-description = "Headless source-neutral incident-triage evaluation bench: cases, immutable evidence snapshots, imported runs, adjudication, and honest comparison reports. No GUI, network, keychain, or ContextDesk engine dependency."
+description = "Headless source-neutral incident-triage evaluation bench: cases, immutable evidence snapshots, imported runs, public-SDK mock execution, adjudication, and honest comparison reports. No GUI, network, keychain, or engine-crate dependency."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

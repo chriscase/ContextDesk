@@ -1,4 +1,4 @@
-//! Library/store invariants for the headless triage bench (#877–#881 slice).
+//! Library/store invariants for the headless triage bench (#877–#879 slice).
 
 mod common;
 
