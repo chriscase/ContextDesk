@@ -557,9 +557,11 @@ describe("SuppressTemplateDialog", () => {
         },
       ),
     );
-    expect(screen.getByText("250")).toBeTruthy();
-    expect(screen.getByText(/25.0% of raw corpus/)).toBeTruthy();
-    expect(screen.getByText("heartbeat token=[REDACTED]")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByText("250")).toBeTruthy();
+      expect(screen.getByText(/25.0% of raw corpus/)).toBeTruthy();
+      expect(screen.getByText("heartbeat token=[REDACTED]")).toBeTruthy();
+    });
     expect(host.hostLogActivateTemplateSuppression).not.toHaveBeenCalled();
 
     fireEvent.click(

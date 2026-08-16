@@ -92,10 +92,12 @@ grep -qx "cd-core/doc" "$TMP/units" || fail "doc tests are missing from the plan
 
 # Lib split: the unsplitted parent must not be a run unit, children must exist,
 # and compile-args must strip the filter so `--no-run` stays valid.
-# Nine complementary children replace one parent. Hosted run 31936313731:
+# Ten complementary children replace one parent. Hosted run 31936313731:
 # cd-core/lib/policy plus seven cd-core --test binaries on shard 4 produced
-# no result after 58m1s. Policy is split into policy + wire, and leftover-
-# heavy slices must not share a shard with other cd-core units.
+# no result after 58m1s. Hosted run 31941510316 then left the policy slice
+# in progress until the 60-minute budget. Policy is split into policy +
+# policy_stream + wire, and leftover-heavy slices must not share a shard
+# with other cd-core units.
 grep -qx "cd-core/lib" "$TMP/base" || fail "cd-core/lib must remain a cargo test target"
 grep -qx "cd-core/lib" "$TMP/units" && fail "cd-core/lib must not run unsplitted (would pile onto one shard)"
 grep -qx "cd-core/lib/log_analysis" "$TMP/units" || fail "cd-core/lib/log_analysis missing"
@@ -104,11 +106,12 @@ grep -qx "cd-core/lib/services" "$TMP/units" || fail "cd-core/lib/services missi
 grep -qx "cd-core/lib/platform" "$TMP/units" || fail "cd-core/lib/platform missing"
 grep -qx "cd-core/lib/control" "$TMP/units" || fail "cd-core/lib/control missing"
 grep -qx "cd-core/lib/policy" "$TMP/units" || fail "cd-core/lib/policy missing"
+grep -qx "cd-core/lib/policy_stream" "$TMP/units" || fail "cd-core/lib/policy_stream missing"
 grep -qx "cd-core/lib/wire" "$TMP/units" || fail "cd-core/lib/wire missing"
 grep -qx "cd-core/lib/surface" "$TMP/units" || fail "cd-core/lib/surface missing"
 grep -qx "cd-core/lib/other" "$TMP/units" || fail "cd-core/lib/other missing"
-[ $((BASE_COUNT + 8)) -eq "$UNIT_COUNT" ] ||
-  fail "lib split should add eight extra shard units ($BASE_COUNT base -> $UNIT_COUNT units)"
+[ $((BASE_COUNT + 9)) -eq "$UNIT_COUNT" ] ||
+  fail "lib split should add nine extra shard units ($BASE_COUNT base -> $UNIT_COUNT units)"
 
 [ "$(sh "$PLAN" args cd-core/lib/log_analysis)" = "-p cd-core --lib -- log_analysis::" ] ||
   fail "log_analysis lib-split selector"
@@ -124,11 +127,13 @@ printf '%s\n' "$PLATFORM_ARGS" | grep -q -- 'triage_quality::' || fail "platform
 printf '%s\n' "$PLATFORM_ARGS" | grep -q -- 'probe::' || fail "platform selector must match probe:: (covers ai_probe)"
 CONTROL_ARGS=$(sh "$PLAN" args cd-core/lib/control)
 printf '%s\n' "$CONTROL_ARGS" | grep -q -- 'redact::' || fail "control selector must match redact::"
-printf '%s\n' "$CONTROL_ARGS" | grep -q -- 'sse::' && fail "control must not still own sse:: (moved to policy)"
+printf '%s\n' "$CONTROL_ARGS" | grep -q -- 'sse::' && fail "control must not still own sse:: (moved to policy_stream)"
 POLICY_ARGS=$(sh "$PLAN" args cd-core/lib/policy)
-printf '%s\n' "$POLICY_ARGS" | grep -q -- 'sse::' || fail "policy selector must match sse::"
 printf '%s\n' "$POLICY_ARGS" | grep -q -- 'git_source::' || fail "policy selector must match git_source::"
 printf '%s\n' "$POLICY_ARGS" | grep -q -- 'http_preset::' && fail "policy must not still own http_preset:: (moved to wire)"
+POLICY_STREAM_ARGS=$(sh "$PLAN" args cd-core/lib/policy_stream)
+printf '%s\n' "$POLICY_STREAM_ARGS" | grep -q -- 'sse::' || fail "policy_stream selector must match sse::"
+printf '%s\n' "$POLICY_STREAM_ARGS" | grep -q -- 'triage_sdk::' || fail "policy_stream selector must match triage_sdk::"
 WIRE_ARGS=$(sh "$PLAN" args cd-core/lib/wire)
 printf '%s\n' "$WIRE_ARGS" | grep -q -- 'http_preset::' || fail "wire selector must match http_preset::"
 printf '%s\n' "$WIRE_ARGS" | grep -q -- 'provider_telemetry::' || fail "wire selector must match provider_telemetry::"
@@ -141,7 +146,7 @@ printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip agent::' || fail "other leftove
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip chat::' || fail "other leftover must skip chat::"
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip triage_quality::' || fail "other leftover must skip platform filters"
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip redact::' || fail "other leftover must skip control filters"
-printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip sse::' || fail "other leftover must skip policy filters"
+printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip sse::' || fail "other leftover must skip policy_stream filters"
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip http_preset::' || fail "other leftover must skip wire filters"
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip index::' || fail "other leftover must skip surface filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/log_analysis)" = "-p cd-core --lib" ] ||
@@ -156,6 +161,8 @@ printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip index::' || fail "other leftove
   fail "compile-args must strip the control match filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/policy)" = "-p cd-core --lib" ] ||
   fail "compile-args must strip the policy match filters"
+[ "$(sh "$PLAN" compile-args cd-core/lib/policy_stream)" = "-p cd-core --lib" ] ||
+  fail "compile-args must strip the policy_stream match filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/wire)" = "-p cd-core --lib" ] ||
   fail "compile-args must strip the wire match filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/surface)" = "-p cd-core --lib" ] ||
@@ -169,10 +176,10 @@ printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip index::' || fail "other leftove
 # other cd-core units (run 31936313731: policy + 7 cd-core tests, 58m1s).
 CI_SHARDS=8
 sh "$PLAN" plan --shards "$CI_SHARDS" >"$TMP/plan8"
-for leftover in cd-core/lib/control cd-core/lib/policy cd-core/lib/wire cd-core/lib/platform cd-core/lib/surface cd-core/lib/other; do
+for leftover in cd-core/lib/control cd-core/lib/policy cd-core/lib/policy_stream cd-core/lib/wire cd-core/lib/platform cd-core/lib/surface cd-core/lib/other; do
   grep -q "^[0-9]	$leftover\$" "$TMP/plan8" || fail "$leftover missing from the 8-shard plan"
 done
-for lh in cd-core/lib/control cd-core/lib/policy cd-core/lib/wire; do
+for lh in cd-core/lib/control cd-core/lib/policy cd-core/lib/policy_stream cd-core/lib/wire; do
   lh_shard=$(awk -F'\t' -v u="$lh" '$2 == u { print $1 }' "$TMP/plan8")
   [ -n "$lh_shard" ] || fail "$lh missing from plan"
   lh_n=$(awk -F'\t' -v s="$lh_shard" '$1 == s { c++ } END { print c + 0 }' "$TMP/plan8")

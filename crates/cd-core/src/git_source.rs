@@ -868,17 +868,47 @@ mod tests {
         // Requesting the fork name must be refused.
         let err = fetch_product_source(d.path(), "origin").unwrap_err();
         assert!(err.contains("not the validated canonical"), "{err}");
-        // Empty / default uses canonical name only (network may fail — identity is what we prove).
+        // Redirect the canonical URL to a local bare clone so this unit test
+        // proves the selected remote without requiring network access.
+        let bare_tmp = tempdir().unwrap();
+        let bare = bare_tmp.path().join("canonical-remote.git");
+        let cloned = Command::new("git")
+            .args([
+                "clone",
+                "--bare",
+                d.path().to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            cloned.status.success(),
+            "local bare clone failed: {}",
+            String::from_utf8_lossy(&cloned.stderr)
+        );
+        let canonical_url = "https://github.com/chriscase/ContextDesk.git";
+        let bare_url = if cfg!(windows) {
+            format!("file:///{}", bare.to_string_lossy().replace('\\', "/"))
+        } else {
+            format!("file://{}", bare.display())
+        };
+        let configured = Command::new("git")
+            .args(["config", "--local"])
+            .arg(format!("url.{bare_url}.insteadOf"))
+            .arg(canonical_url)
+            .current_dir(d.path())
+            .output()
+            .unwrap();
+        assert!(
+            configured.status.success(),
+            "local URL rewrite failed: {}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
         let r = fetch_product_source(d.path(), "");
-        // Either network error from real fetch attempt against github, or success offline mock —
-        // must not have used origin. We assert error does not claim unproven when remote is good.
-        if let Err(e) = r {
-            assert!(
-                !e.contains("not a proven ContextDesk source checkout — no canonical"),
-                "{e}"
-            );
-            assert!(!e.contains("not the validated canonical"));
-        }
+        assert!(
+            r.is_ok(),
+            "canonical fetch should use the local test remote: {r:?}"
+        );
     }
 
     #[test]

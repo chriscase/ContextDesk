@@ -37,12 +37,14 @@ env:
   # runtime/services/other moved the skip leftover onto shard 2 alone;
   # run 31926634503 cancelled that shard at 56m1s with no artifact
   # (aggregate: never run: cd-core/lib/other) while shard 8 passed in 27m.
-  # Leftover --lib is platform / control / policy / wire / surface plus a
-  # light skip leftover. Run 31936313731: policy plus seven cd-core --test
-  # binaries on shard 4 produced no result after 58m1s. Policy is split
-  # again; leftover-heavy slices (control/policy/wire) must not sit alone
-  # and must not share a shard with other cd-core units. Do not raise the
-  # count or the job timeout to paper over a pile.
+  # Leftover --lib is platform / control / policy / policy_stream / wire /
+  # surface plus a light skip leftover. Run 31936313731: policy plus seven
+  # cd-core --test binaries on shard 4 produced no result after 58m1s.
+  # Run 31941510316 left shard 2 in progress until the 60m budget with the
+  # policy slice and one companion. Policy is split again; leftover-heavy
+  # slices (control/policy/policy_stream/wire) must not sit alone and must
+  # not share a shard with other cd-core units. Do not raise the count or
+  # the job timeout to paper over a pile.
   CD_SHARD_COUNT: "8"
 
 # Keep every main-branch run, but stop spending runner time on an obsolete PR
