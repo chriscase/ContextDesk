@@ -35,11 +35,18 @@ export type EngineErrorCode =
 /** Typed engine failure preserving the engine's own message verbatim. */
 export class EngineError extends Error {
   readonly code: EngineErrorCode;
+  /** Classified import outcome when the host attached one to a failed run. */
+  readonly outcome?: ImportOutcomeReport;
 
-  constructor(code: EngineErrorCode, message: string) {
+  constructor(
+    code: EngineErrorCode,
+    message: string,
+    outcome?: ImportOutcomeReport,
+  ) {
     super(message);
     this.name = "EngineError";
     this.code = code;
+    this.outcome = outcome;
   }
 }
 
@@ -166,9 +173,54 @@ export type ImportRunReport = {
     modelId: string | null;
   } | null;
   confidence: ImportConfidence;
-  /** Classified complete/partial/rejected document. Required from current hosts. */
+  /**
+   * Classified complete/partial/rejected document. Current hosts always send
+   * it; a missing field is fail-closed at the UI (never treated as complete).
+   */
   outcome?: ImportOutcomeReport;
 };
+
+const IMPORT_OUTCOME_CLASSES = new Set<ImportOutcomeClass>([
+  "complete",
+  "partial",
+  "rejected",
+]);
+
+function isImportOutcomeReport(value: unknown): value is ImportOutcomeReport {
+  if (!value || typeof value !== "object") return false;
+  const cls = (value as { class?: unknown }).class;
+  return typeof cls === "string" && IMPORT_OUTCOME_CLASSES.has(cls as ImportOutcomeClass);
+}
+
+/** Read a host import-command rejection: sealed message plus optional outcome. */
+export function hostImportFailure(error: unknown): {
+  message: string;
+  outcome?: ImportOutcomeReport;
+} {
+  if (error && typeof error === "object" && "message" in error) {
+    const message = (error as { message: unknown }).message;
+    if (typeof message === "string") {
+      const outcome = (error as { outcome?: unknown }).outcome;
+      return {
+        message,
+        outcome: isImportOutcomeReport(outcome) ? outcome : undefined,
+      };
+    }
+  }
+  if (typeof error === "string") {
+    try {
+      const parsed: unknown = JSON.parse(error);
+      if (parsed && typeof parsed === "object" && "message" in parsed) {
+        return hostImportFailure(parsed);
+      }
+    } catch {
+      // Plain host string — not a serialized failure document.
+    }
+    return { message: error };
+  }
+  if (error instanceof Error) return { message: error.message };
+  return { message: String(error) };
+}
 
 /** Request for a reviewed, plan-bound import run. */
 export type ImportRunRequest = {

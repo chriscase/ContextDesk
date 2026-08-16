@@ -9515,18 +9515,54 @@ const LOG_REANALYZE_CANCEL_KEY: &str = "log_reanalyze";
 enum LogIngestRunError {
     Cancelled,
     Failed(String),
+    /// Ingest classified a rejection; the typed outcome must cross IPC.
+    Rejected {
+        message: String,
+        outcome: cd_core::log_analysis::ImportOutcomeReport,
+    },
 }
 
 impl LogIngestRunError {
     fn message(&self) -> &str {
         match self {
             Self::Cancelled => "ingest cancelled",
-            Self::Failed(message) => message,
+            Self::Failed(message) | Self::Rejected { message, .. } => message,
         }
     }
 
-    fn into_message(self) -> String {
-        self.message().to_string()
+    fn into_command_error(self) -> ImportCommandErrorDto {
+        match self {
+            Self::Cancelled => ImportCommandErrorDto {
+                message: "ingest cancelled".into(),
+                outcome: None,
+            },
+            Self::Failed(message) => ImportCommandErrorDto {
+                message,
+                outcome: None,
+            },
+            Self::Rejected { message, outcome } => ImportCommandErrorDto {
+                message,
+                outcome: Some(outcome),
+            },
+        }
+    }
+}
+
+/// Structured import-command rejection so a classified outcome is not dropped.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportCommandErrorDto {
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<cd_core::log_analysis::ImportOutcomeReport>,
+}
+
+impl From<String> for ImportCommandErrorDto {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            outcome: None,
+        }
     }
 }
 
@@ -9606,6 +9642,48 @@ mod import_error_projection_tests {
                 "engine wording must survive: {shown}"
             );
         }
+    }
+
+    /// A rejected ingest keeps the classified outcome on the command error
+    /// and still seals the transport marker.
+    #[test]
+    fn rejected_ingest_error_carries_the_classified_outcome() {
+        let error = CoreError::Message(
+            "zip open: missing end record [member=bundles/inner.zip]".into(),
+        );
+        let classified = cd_core::log_analysis::ImportOutcomeReport::rejected_from_error(&error);
+        let dto = super::LogIngestRunError::Rejected {
+            message: import_error_message(&error),
+            outcome: classified,
+        }
+        .into_command_error();
+        assert!(
+            !dto.message.contains("[member="),
+            "command error leaked marker: {}",
+            dto.message
+        );
+        let outcome = dto.outcome.expect("rejected ingest must carry the outcome");
+        assert_eq!(
+            outcome.class,
+            cd_core::log_analysis::ImportOutcomeClass::Rejected
+        );
+        assert!(!outcome.published);
+        assert!(
+            outcome
+                .defects
+                .iter()
+                .any(|defect| defect.source.identity.contains("bundles/inner.zip")),
+            "locator missing: {outcome:?}"
+        );
+        let wire = serde_json::to_value(&dto).expect("command error must serialize");
+        assert_eq!(wire["outcome"]["class"], "rejected");
+        assert_eq!(wire["outcome"]["published"], false);
+        assert!(
+            wire["message"]
+                .as_str()
+                .is_some_and(|message| !message.contains("[member=")),
+            "serialized message leaked marker: {wire}"
+        );
     }
 }
 
@@ -9748,7 +9826,10 @@ async fn run_log_ingest(
         match result {
             Ok(report) => Ok((report, classified)),
             Err(cd_core::error::CoreError::Cancelled) => Err(LogIngestRunError::Cancelled),
-            Err(other) => Err(LogIngestRunError::Failed(import_error_message(&other))),
+            Err(other) => Err(LogIngestRunError::Rejected {
+                message: import_error_message(&other),
+                outcome: classified,
+            }),
         }
     })
     .await;
@@ -9838,7 +9919,7 @@ async fn ingest_log_path(
     path: String,
     name: Option<String>,
     correlation_id: Option<String>,
-) -> Result<LogIngestReportDto, String> {
+) -> Result<LogIngestReportDto, ImportCommandErrorDto> {
     let invocation = ProcessProgressInvocation::new(correlation_id);
     let cancel_key = format!("{LOG_INGEST_CANCEL_KEY}:{}", invocation.correlation_id);
     let cancel = cd_core::process_progress::CancelFlag::new();
@@ -9868,7 +9949,7 @@ async fn ingest_log_path(
         &cancel_key,
         &cancel_registration,
     );
-    result.map_err(LogIngestRunError::into_message)
+    result.map_err(LogIngestRunError::into_command_error)
 }
 
 struct DemoLogIngestReceipt {
@@ -10107,7 +10188,7 @@ async fn install_demo_log_corpus_transaction<B: DemoLogInstallBackend>(
             backend.select_corpus(prior_active_corpus);
             return DemoLogInstallDto::cancelled();
         }
-        Err(LogIngestRunError::Failed(error)) => {
+        Err(LogIngestRunError::Failed(error) | LogIngestRunError::Rejected { message: error, .. }) => {
             backend.select_corpus(prior_active_corpus);
             return DemoLogInstallDto::failed(error, true);
         }
@@ -10964,7 +11045,7 @@ async fn log_run_import(
     plan_version: u32,
     selected: Vec<String>,
     correlation_id: Option<String>,
-) -> Result<LogIngestReportDto, String> {
+) -> Result<LogIngestReportDto, ImportCommandErrorDto> {
     let invocation = ProcessProgressInvocation::new(correlation_id);
     let cancel_key = format!("{LOG_INGEST_CANCEL_KEY}:{}", invocation.correlation_id);
     let cancel = cd_core::process_progress::CancelFlag::new();
@@ -11000,7 +11081,7 @@ async fn log_run_import(
                 &cancel_key,
                 &cancel_registration,
             );
-            return Err(message);
+            return Err(message.into());
         }
     };
     let result = run_log_ingest(
@@ -11019,7 +11100,7 @@ async fn log_run_import(
         &cancel_key,
         &cancel_registration,
     );
-    result.map_err(LogIngestRunError::into_message)
+    result.map_err(LogIngestRunError::into_command_error)
 }
 
 /// Apply reviewed timezone declarations to one or more sources atomically

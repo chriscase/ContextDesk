@@ -225,6 +225,63 @@ describe("tauri engine adapter mapping", () => {
     });
   });
 
+  it("attaches a classified outcome from a structured host rejection", async () => {
+    const outcome = {
+      schemaId: "contextdesk.import_outcome.v1",
+      schemaVersion: 1,
+      class: "rejected",
+      published: false,
+      counts: {
+        sourcesDiscovered: 1,
+        sourcesImported: 0,
+        sourcesFailed: 1,
+        sourcesExcluded: 0,
+        sourcesIgnored: 0,
+        recordsImported: 0,
+        recordsMalformed: 0,
+      },
+      defects: [
+        {
+          code: "archive_unreadable",
+          severity: "fatal",
+          source: {
+            identity: "bundles/inner.zip",
+            archiveChain: ["bundles"],
+            member: "inner.zip",
+            archiveDepth: 1,
+          },
+          occurrences: 1,
+        },
+      ],
+      defectCounts: { archive_unreadable: 1 },
+      privacy: {
+        redactionMode: "identity_structural_only",
+        policySummary: "structural identity only",
+        defectsTruncated: false,
+      },
+      manifestDigest: "sha256:rejected",
+    };
+    const transport: TauriTransport = {
+      invoke: async () => {
+        throw { message: "zip open: missing end record", outcome };
+      },
+      listen: async () => () => {},
+    };
+    const client = createTauriEngineClient(transport);
+    await expect(
+      client.import.run({
+        path: "/tmp/outer.zip",
+        planToken: "t",
+        planVersion: 1,
+        selected: ["a.log"],
+      }),
+    ).rejects.toMatchObject({
+      name: "EngineError",
+      message: "zip open: missing end record",
+      outcome: { class: "rejected", published: false },
+    });
+  });
+
   it("passes command arguments through with host casing", async () => {
     const invocations: [string, Record<string, unknown> | undefined][] = [];
     const transport: TauriTransport = {

@@ -11,6 +11,7 @@ export const CLIENT_PACKAGE = "@contextdesk/client" as const;
 export {
   EngineError,
   classifyEngineMessage,
+  hostImportFailure,
   type EngineClient,
   type EngineErrorCode,
   type EngineEvents,

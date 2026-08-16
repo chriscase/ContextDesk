@@ -208,9 +208,45 @@ describe("run lifecycle", () => {
     expect(state.stage).toBe("running");
     state = importFlowReducer(state, { type: "RUN_FAILED", message: "disk full" });
     expect(state.stage).toBe("run_failed");
+    expect(state.errorOutcome).toBeUndefined();
     state = importFlowReducer(state, { type: "RETRY" });
     expect(state.stage).toBe("preflight");
     expect(state.selected).toBe(selectedBefore);
+  });
+
+  it("keeps a classified rejected outcome on RUN_FAILED", () => {
+    let state = previewedState();
+    state = importFlowReducer(state, { type: "RUN_STARTED" });
+    const outcome: NonNullable<ImportRunReport["outcome"]> = {
+      schemaId: "contextdesk.import_outcome.v1",
+      schemaVersion: 1,
+      class: "rejected",
+      published: false,
+      counts: {
+        sourcesDiscovered: 1,
+        sourcesImported: 0,
+        sourcesFailed: 1,
+        sourcesExcluded: 0,
+        sourcesIgnored: 0,
+        recordsImported: 0,
+        recordsMalformed: 0,
+      },
+      defects: [],
+      defectCounts: {},
+      privacy: {
+        redactionMode: "identity_structural_only",
+        policySummary: "structural",
+        defectsTruncated: false,
+      },
+      manifestDigest: "sha256:rejected",
+    };
+    state = importFlowReducer(state, {
+      type: "RUN_FAILED",
+      message: "zip open: missing end record",
+      outcome,
+    });
+    expect(state.stage).toBe("run_failed");
+    expect(state.errorOutcome).toEqual(outcome);
   });
 });
 
@@ -347,7 +383,7 @@ describe("timezone groups", () => {
 });
 
 describe("classifiedImportClass", () => {
-  it("reads the typed class and never treats a missing document as partial", () => {
+  it("reads the typed class and never treats a missing outcome as complete", () => {
     const report: ImportRunReport = {
       corpusId: "c",
       lines: 1,
@@ -381,7 +417,8 @@ describe("classifiedImportClass", () => {
         sources: [],
       },
     };
-    expect(classifiedImportClass(report)).toBe("complete");
+    expect(classifiedImportClass(report)).toBe("partial");
+    expect(classifiedImportClass({ ...report, partial: true })).toBe("partial");
     expect(
       classifiedImportClass({
         ...report,

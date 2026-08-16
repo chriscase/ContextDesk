@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createMockEngineClient, type ImportRunReport } from "@contextdesk/client";
+import {
+  createMockEngineClient,
+  EngineError,
+  type ImportOutcomeReport,
+  type ImportRunReport,
+} from "@contextdesk/client";
 import { ImportFlow } from "./ImportFlow";
 
 const dialogMocks = vi.hoisted(() => ({
@@ -470,6 +475,114 @@ describe("ImportFlow classified outcome", () => {
     ).toBeTruthy();
     expect(screen.getByText(/Import finished with defects \(PARTIAL\)/)).toBeTruthy();
     expect(screen.getByText(/logs\/malformed.jsonl — malformed_structured_record/)).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Import finished" })).toBeNull();
+    expect(screen.queryByText(/^Import finished — corpus/)).toBeNull();
+  });
+
+  it("does not present a published report with no outcome as finished", async () => {
+    const client = createMockEngineClient();
+    const report: ImportRunReport = {
+      corpusId: "omitted-outcome",
+      lines: 8,
+      templates: 2,
+      reductionRatio: 4,
+      embedded: 0,
+      files: 2,
+      discoveredFiles: 2,
+      excludedFiles: 0,
+      failedFiles: 0,
+      ignoredFiles: 0,
+      exclusionCounts: {},
+      exclusionExamples: [],
+      partial: true,
+      sourceBytes: 80,
+      corpusBytes: 40,
+      tsMin: null,
+      tsMax: null,
+      formatCounts: { jsonl: 2 },
+      confidence: {
+        corpusTimeQuality: "wall",
+        counts: {
+          wall: 2,
+          orderOnly: 0,
+          mixed: 0,
+          matched: 2,
+          ambiguous: 0,
+          unknown: 0,
+          unresolved: 0,
+        },
+        sources: [],
+      },
+    };
+    vi.spyOn(client.import, "run").mockResolvedValue(report);
+
+    await toPreflight(client);
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /I understand and want to proceed/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+
+    expect(
+      await screen.findByRole("region", { name: "Import finished with defects" }),
+    ).toBeTruthy();
+    expect(screen.getByText(/Import finished with defects \(PARTIAL\)/)).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Import finished" })).toBeNull();
+    expect(screen.queryByText(/^Import finished — corpus/)).toBeNull();
+  });
+
+  it("surfaces a rejected ingest outcome instead of a finished import", async () => {
+    const client = createMockEngineClient();
+    const outcome: ImportOutcomeReport = {
+      schemaId: "contextdesk.import_outcome.v1",
+      schemaVersion: 1,
+      class: "rejected",
+      published: false,
+      counts: {
+        sourcesDiscovered: 1,
+        sourcesImported: 0,
+        sourcesFailed: 1,
+        sourcesExcluded: 0,
+        sourcesIgnored: 0,
+        recordsImported: 0,
+        recordsMalformed: 0,
+      },
+      defects: [
+        {
+          code: "archive_unreadable",
+          severity: "fatal",
+          source: {
+            identity: "bundles/inner.zip",
+            archiveChain: ["bundles"],
+            member: "inner.zip",
+            archiveDepth: 1,
+          },
+          occurrences: 1,
+        },
+      ],
+      defectCounts: { archive_unreadable: 1 },
+      privacy: {
+        redactionMode: "identity_structural_only",
+        policySummary: "structural identity only",
+        defectsTruncated: false,
+      },
+      manifestDigest: "sha256:rejected",
+    };
+    vi.spyOn(client.import, "run").mockRejectedValue(
+      new EngineError("failed", "zip open: missing end record", outcome),
+    );
+
+    await toPreflight(client);
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /I understand and want to proceed/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Import rejected:");
+    expect(alert.textContent).toContain("zip open: missing end record");
+    expect(alert.textContent).toContain("bundles/inner.zip — archive_unreadable");
+    expect(alert.textContent).toContain("Nothing was published — the library is unchanged.");
+    expect(alert.textContent).not.toContain("[member=");
     expect(screen.queryByRole("region", { name: "Import finished" })).toBeNull();
     expect(screen.queryByText(/^Import finished — corpus/)).toBeNull();
   });

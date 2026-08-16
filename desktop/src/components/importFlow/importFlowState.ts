@@ -42,6 +42,8 @@ export type ImportFlowState = {
    */
   exitRequested: boolean;
   error: string | null;
+  /** Classified outcome attached to a failed run; absent on plain host strings. */
+  errorOutcome: ImportRunReport["outcome"];
   progress: WireProcessProgress | null;
   runReport: ImportRunReport | null;
 };
@@ -56,6 +58,7 @@ export const INITIAL_IMPORT_FLOW_STATE: ImportFlowState = {
   rangeAnchor: null,
   exitRequested: false,
   error: null,
+  errorOutcome: undefined,
   progress: null,
   runReport: null,
 };
@@ -75,7 +78,7 @@ export type ImportFlowEvent =
   | { type: "RUN_STARTED" }
   | { type: "PROGRESS"; progress: WireProcessProgress }
   | { type: "PUBLISHED"; report: ImportRunReport }
-  | { type: "RUN_FAILED"; message: string }
+  | { type: "RUN_FAILED"; message: string; outcome?: ImportRunReport["outcome"] }
   | { type: "RUN_CANCELLED" }
   | { type: "RETRY" }
   | { type: "EXIT_REQUESTED" }
@@ -377,7 +380,14 @@ export function importFlowReducer(
     case "RUN_STARTED":
       if (state.stage !== "preflight" && state.stage !== "selector") return state;
       if (importDisabledReason(state) !== null) return state;
-      return { ...state, stage: "running", progress: null, error: null, exitRequested: false };
+      return {
+        ...state,
+        stage: "running",
+        progress: null,
+        error: null,
+        errorOutcome: undefined,
+        exitRequested: false,
+      };
     case "PROGRESS":
       if (state.stage !== "running") return state;
       return { ...state, progress: event.progress };
@@ -386,13 +396,25 @@ export function importFlowReducer(
       return { ...state, stage: "summary", runReport: event.report };
     case "RUN_FAILED":
       if (state.stage !== "running") return state;
-      return { ...state, stage: "run_failed", error: event.message };
+      return {
+        ...state,
+        stage: "run_failed",
+        error: event.message,
+        errorOutcome: event.outcome,
+      };
     case "RUN_CANCELLED":
       if (state.stage !== "running") return state;
       return { ...state, stage: "run_cancelled", error: null };
     case "RETRY":
       if (state.stage !== "run_failed" && state.stage !== "run_cancelled") return state;
-      return { ...state, stage: "preflight", error: null, progress: null, exitRequested: false };
+      return {
+        ...state,
+        stage: "preflight",
+        error: null,
+        errorOutcome: undefined,
+        progress: null,
+        exitRequested: false,
+      };
     case "EXIT_REQUESTED":
       if (state.stage !== "running") return state;
       return { ...state, exitRequested: true };
@@ -497,13 +519,20 @@ export function timezoneGroups(report: ImportRunReport): TimezoneGroup[] {
   return [...groups.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
 
-/** Classified import class from the host document. Missing outcome is complete. */
+/**
+ * Classified import class from the host document.
+ *
+ * Fail-closed: only an explicit `complete` class may render as complete.
+ * A missing or unknown outcome is never complete — a published report
+ * without a class cannot be certified, so it is treated as partial.
+ */
 export function classifiedImportClass(
   report: ImportRunReport | null | undefined,
 ): ImportOutcomeClass {
   if (!report) return "rejected";
-  if (report.outcome?.class) return report.outcome.class;
-  return "complete";
+  const cls = report.outcome?.class;
+  if (cls === "complete" || cls === "partial" || cls === "rejected") return cls;
+  return "partial";
 }
 
 /** IANA zone gate matching the shipped review dialog's rule. */

@@ -242,6 +242,7 @@ export function ImportFlow({
           message: sealImportOperatorMessage(
             error instanceof Error ? error.message : String(error),
           ),
+          outcome: error instanceof EngineError ? error.outcome : undefined,
         });
         onRunSettled?.({
           startedAtMs,
@@ -267,7 +268,11 @@ export function ImportFlow({
     ? state.runReport.confidence.counts.unresolved
     : 0;
   const runClass = classifiedImportClass(state.runReport);
+  const runIsComplete = runClass === "complete";
   const runDefects = state.runReport?.outcome?.defects ?? [];
+  const failedOutcome = state.errorOutcome;
+  const failedDefects = failedOutcome?.defects ?? [];
+  const failedPublished = failedOutcome?.published === true;
 
   return (
     <div className={`import-flow import-flow--${variant}`}>
@@ -431,9 +436,24 @@ export function ImportFlow({
 
       {state.stage === "run_failed" ? (
         <section className="import-flow__error-panel" role="alert">
-          <p>Import failed: {state.error}</p>
+          <p>
+            {failedOutcome?.class === "rejected"
+              ? `Import rejected: ${state.error}`
+              : `Import failed: ${state.error}`}
+          </p>
+          {failedDefects.length > 0 ? (
+            <ul className="import-flow__defects">
+              {failedDefects.map((defect) => (
+                <li key={`${defect.code}:${defect.source.identity}`}>
+                  {defect.source.identity} — {defect.code}
+                </li>
+              ))}
+            </ul>
+          ) : null}
           <p className="import-flow__hint">
-            Nothing was published — the library is unchanged.
+            {failedPublished
+              ? "A corpus was published before this failure — the library is not unchanged."
+              : "Nothing was published — the library is unchanged."}
           </p>
           <div className="import-flow__row">
             <button type="button" onClick={() => dispatch({ type: "RETRY" })}>
@@ -458,27 +478,27 @@ export function ImportFlow({
         <section
           className="import-flow__summary"
           aria-label={
-            runClass === "partial" ? "Import finished with defects" : "Import finished"
+            runIsComplete ? "Import finished" : "Import finished with defects"
           }
         >
           <p
             className={
-              runClass === "partial"
-                ? "import-flow__done import-flow__done--partial"
-                : "import-flow__done"
+              runIsComplete
+                ? "import-flow__done"
+                : "import-flow__done import-flow__done--partial"
             }
             role="status"
           >
-            {runClass === "partial"
-              ? `Import finished with defects (PARTIAL) — corpus ${state.runReport.corpusId}.`
-              : `Import finished — corpus ${state.runReport.corpusId}.`}{" "}
+            {runIsComplete
+              ? `Import finished — corpus ${state.runReport.corpusId}.`
+              : `Import finished with defects (PARTIAL) — corpus ${state.runReport.corpusId}.`}{" "}
             {state.runReport.lines.toLocaleString()} events from {state.runReport.files}{" "}
             source{state.runReport.files === 1 ? "" : "s"}.
             {state.runReport.ignoredFiles > 0
               ? ` ${state.runReport.ignoredFiles} kept out — counted, never silent.`
               : ""}
           </p>
-          {runClass === "partial" && runDefects.length > 0 ? (
+          {!runIsComplete && runDefects.length > 0 ? (
             <ul className="import-flow__defects">
               {runDefects.map((defect) => (
                 <li key={`${defect.code}:${defect.source.identity}`}>
