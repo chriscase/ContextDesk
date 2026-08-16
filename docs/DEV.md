@@ -139,10 +139,11 @@ CI therefore:
    (hosted run `31851734335`).
 2. Runs the same suite as `CD_SHARD_COUNT` (currently **8**) shards that
    restore that cache (`save-if: false`, never Swatinem `lookup-only`).
-   `cd-core/lib` is executed as eight complementary filters (`log_analysis::`,
-   `runtime`, `services`, `platform`, `control`, `policy`, `surface`, and a
-   light skip leftover) so the heavy library binary is not pinned to one
-   shard.
+   `cd-core/lib` is executed as nine complementary filters (`log_analysis::`,
+   `runtime`, `services`, `platform`, `control`, `policy`, `wire`, `surface`,
+   and a light skip leftover) so the heavy library binary is not pinned to
+   one shard. Leftover-heavy slices do not share a shard with other
+   `cd-core` units.
 
    The count went 4 → 8 because the shard drawing `cd-core/lib/other` was
    cancelled at the 60-minute job budget on two consecutive runs while the
@@ -156,11 +157,11 @@ CI therefore:
    minutes. The next tip isolated that leftover on shard 2; hosted run
    `31926634503` cancelled it at 56m1s with no artifact (`never run:
    cd-core/lib/other`) while shard 8 passed in 27 minutes. The leftover is
-   now platform / control / policy / surface plus a light skip leftover,
-   assigned by hosted test-weight (heaviest first, onto the lightest shard)
-   rather than raising the count or the job timeout. Isolated `control`
-   still timed out at 57m on run `31931230358`; that third is split in two
-   and a leftover-heavy slice may not sit alone.
+   now platform / control / policy / wire / surface plus a light skip
+   leftover. Isolated `control` timed out at 57m on run `31931230358`;
+   `policy` plus other cd-core tests timed out at 58m on run `31936313731`.
+   Leftover-heavy slices are split further and may not sit alone or share a
+   shard with other `cd-core` units.
 3. Aggregates with `scripts/ci_aggregate_shards.sh`, which fails closed on a
    missing, failed, incomplete, or truncated shard, and on any unit no shard
    claimed.

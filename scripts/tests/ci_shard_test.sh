@@ -92,10 +92,10 @@ grep -qx "cd-core/doc" "$TMP/units" || fail "doc tests are missing from the plan
 
 # Lib split: the unsplitted parent must not be a run unit, children must exist,
 # and compile-args must strip the filter so `--no-run` stays valid.
-# Eight complementary children replace one parent. Hosted run 31931230358:
-# isolated cd-core/lib/control on shard 1 produced no result after 57m2s
-# (never run: cd-core/lib/control) while platform on shard 2 finished in
-# 13m40s. Control is split into control + policy.
+# Nine complementary children replace one parent. Hosted run 31936313731:
+# cd-core/lib/policy plus seven cd-core --test binaries on shard 4 produced
+# no result after 58m1s. Policy is split into policy + wire, and leftover-
+# heavy slices must not share a shard with other cd-core units.
 grep -qx "cd-core/lib" "$TMP/base" || fail "cd-core/lib must remain a cargo test target"
 grep -qx "cd-core/lib" "$TMP/units" && fail "cd-core/lib must not run unsplitted (would pile onto one shard)"
 grep -qx "cd-core/lib/log_analysis" "$TMP/units" || fail "cd-core/lib/log_analysis missing"
@@ -104,10 +104,11 @@ grep -qx "cd-core/lib/services" "$TMP/units" || fail "cd-core/lib/services missi
 grep -qx "cd-core/lib/platform" "$TMP/units" || fail "cd-core/lib/platform missing"
 grep -qx "cd-core/lib/control" "$TMP/units" || fail "cd-core/lib/control missing"
 grep -qx "cd-core/lib/policy" "$TMP/units" || fail "cd-core/lib/policy missing"
+grep -qx "cd-core/lib/wire" "$TMP/units" || fail "cd-core/lib/wire missing"
 grep -qx "cd-core/lib/surface" "$TMP/units" || fail "cd-core/lib/surface missing"
 grep -qx "cd-core/lib/other" "$TMP/units" || fail "cd-core/lib/other missing"
-[ $((BASE_COUNT + 7)) -eq "$UNIT_COUNT" ] ||
-  fail "lib split should add seven extra shard units ($BASE_COUNT base -> $UNIT_COUNT units)"
+[ $((BASE_COUNT + 8)) -eq "$UNIT_COUNT" ] ||
+  fail "lib split should add eight extra shard units ($BASE_COUNT base -> $UNIT_COUNT units)"
 
 [ "$(sh "$PLAN" args cd-core/lib/log_analysis)" = "-p cd-core --lib -- log_analysis::" ] ||
   fail "log_analysis lib-split selector"
@@ -127,6 +128,10 @@ printf '%s\n' "$CONTROL_ARGS" | grep -q -- 'sse::' && fail "control must not sti
 POLICY_ARGS=$(sh "$PLAN" args cd-core/lib/policy)
 printf '%s\n' "$POLICY_ARGS" | grep -q -- 'sse::' || fail "policy selector must match sse::"
 printf '%s\n' "$POLICY_ARGS" | grep -q -- 'git_source::' || fail "policy selector must match git_source::"
+printf '%s\n' "$POLICY_ARGS" | grep -q -- 'http_preset::' && fail "policy must not still own http_preset:: (moved to wire)"
+WIRE_ARGS=$(sh "$PLAN" args cd-core/lib/wire)
+printf '%s\n' "$WIRE_ARGS" | grep -q -- 'http_preset::' || fail "wire selector must match http_preset::"
+printf '%s\n' "$WIRE_ARGS" | grep -q -- 'provider_telemetry::' || fail "wire selector must match provider_telemetry::"
 SURFACE_ARGS=$(sh "$PLAN" args cd-core/lib/surface)
 printf '%s\n' "$SURFACE_ARGS" | grep -q -- 'index::' || fail "surface selector must match index:: (covers vector_index)"
 printf '%s\n' "$SURFACE_ARGS" | grep -q -- 'text::' || fail "surface selector must match text:: (covers session_context)"
@@ -137,6 +142,7 @@ printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip chat::' || fail "other leftover
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip triage_quality::' || fail "other leftover must skip platform filters"
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip redact::' || fail "other leftover must skip control filters"
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip sse::' || fail "other leftover must skip policy filters"
+printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip http_preset::' || fail "other leftover must skip wire filters"
 printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip index::' || fail "other leftover must skip surface filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/log_analysis)" = "-p cd-core --lib" ] ||
   fail "compile-args must strip the log_analysis filter"
@@ -150,6 +156,8 @@ printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip index::' || fail "other leftove
   fail "compile-args must strip the control match filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/policy)" = "-p cd-core --lib" ] ||
   fail "compile-args must strip the policy match filters"
+[ "$(sh "$PLAN" compile-args cd-core/lib/wire)" = "-p cd-core --lib" ] ||
+  fail "compile-args must strip the wire match filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/surface)" = "-p cd-core --lib" ] ||
   fail "compile-args must strip the surface match filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/other)" = "-p cd-core --lib" ] ||
@@ -157,20 +165,24 @@ printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip index::' || fail "other leftove
 [ "$(sh "$PLAN" compile-args cd-core/test/golden_retrieval)" = "-p cd-core --test golden_retrieval" ] ||
   fail "compile-args for an integration target"
 
-# Weight-aware assignment: leftover-heavy slices must not sit alone
-# (run 31931230358: control alone on shard 1, 57m2s, no artifact).
+# Leftover-heavy slices must not sit alone and must not share a shard with
+# other cd-core units (run 31936313731: policy + 7 cd-core tests, 58m1s).
 CI_SHARDS=8
 sh "$PLAN" plan --shards "$CI_SHARDS" >"$TMP/plan8"
-for leftover in cd-core/lib/control cd-core/lib/policy cd-core/lib/platform cd-core/lib/surface cd-core/lib/other; do
+for leftover in cd-core/lib/control cd-core/lib/policy cd-core/lib/wire cd-core/lib/platform cd-core/lib/surface cd-core/lib/other; do
   grep -q "^[0-9]	$leftover\$" "$TMP/plan8" || fail "$leftover missing from the 8-shard plan"
 done
-# Unsplitted control (redact + sse + git_source together) was the 57m bucket.
+for lh in cd-core/lib/control cd-core/lib/policy cd-core/lib/wire; do
+  lh_shard=$(awk -F'\t' -v u="$lh" '$2 == u { print $1 }' "$TMP/plan8")
+  [ -n "$lh_shard" ] || fail "$lh missing from plan"
+  lh_n=$(awk -F'\t' -v s="$lh_shard" '$1 == s { c++ } END { print c + 0 }' "$TMP/plan8")
+  [ "$lh_n" -eq 2 ] || fail "leftover-heavy $lh must have exactly one companion on shard $lh_shard (got $lh_n)"
+  stacked=$(awk -F'\t' -v s="$lh_shard" -v self="$lh" '$1 == s && $2 != self && $2 ~ /^cd-core\// { print $2 }' "$TMP/plan8")
+  [ -z "$stacked" ] || fail "leftover-heavy $lh stacked with cd-core units: $stacked"
+done
 CONTROL_FILTERS=$(sh "$PLAN" args cd-core/lib/control)
 printf '%s\n' "$CONTROL_FILTERS" | grep -q -- 'redact::' || fail "control keeps redact::"
 printf '%s\n' "$CONTROL_FILTERS" | grep -q -- 'git_source::' && fail "unsplitted control must not keep git_source::"
-other_shard=$(awk -F'\t' '$2 == "cd-core/lib/other" { print $1 }' "$TMP/plan8")
-other_companions=$(awk -F'\t' -v s="$other_shard" '$1 == s { c++ } END { print c + 0 }' "$TMP/plan8")
-[ "$other_companions" -gt 1 ] || fail "skip leftover cd-core/lib/other must not occupy a shard alone"
 sh "$PLAN" plan --shards "$CI_SHARDS" >"$TMP/plan8.again"
 cmp -s "$TMP/plan8" "$TMP/plan8.again" || fail "weighted shard plan is not deterministic"
 
@@ -343,23 +355,34 @@ EOF
 chmod +x "$STUB/cargo"
 
 WIDE=$UNIT_COUNT
-FIRST_UNIT=$(sh "$PLAN" shard 1 --shards "$WIDE")
+# Leftover-heavy slices keep one non-cd-core companion even at this width, so
+# shard 1 is a pair. The runner stub assertions assume a singleton shard.
+sh "$PLAN" plan --shards "$WIDE" >"$TMP/plan-wide"
+SINGLETON_SHARD=$(awk -F'\t' '
+  { c[$1]++; u[$1]=$2 }
+  END {
+    for (s = 1; s <= '"$WIDE"'; s++) if (c[s] == 1) { print s; exit }
+  }
+' "$TMP/plan-wide")
+[ -n "$SINGLETON_SHARD" ] || fail "wide plan must still have a singleton shard for runner stubs"
+FIRST_UNIT=$(awk -F'\t' -v s="$SINGLETON_SHARD" '$1 == s { print $2 }' "$TMP/plan-wide")
+[ -n "$FIRST_UNIT" ] || fail "singleton shard $SINGLETON_SHARD has no unit"
 
 expect_ok "a passing shard must exit 0" \
   env PATH="$STUB:$PATH" CD_CACHE_STATE=warm \
-  sh "$RUN" --shard 1 --shards "$WIDE" --out "$TMP/stub-pass" --heartbeat 0
-PASS_STATUS="$TMP/stub-pass/shard-1/status.json"
+  sh "$RUN" --shard "$SINGLETON_SHARD" --shards "$WIDE" --out "$TMP/stub-pass" --heartbeat 0
+PASS_STATUS="$TMP/stub-pass/shard-$SINGLETON_SHARD/status.json"
 [ "$(jq -r '.status' "$PASS_STATUS")" = pass ] || fail "passing shard must record status=pass"
 [ "$(jq -r '.cache_state' "$PASS_STATUS")" = warm ] || fail "passing shard must record cache_state"
 [ "$(jq -r '.tests_passed' "$PASS_STATUS")" = 3 ] || fail "test counts must be parsed from cargo output"
 [ "$(jq -r '.tests_ignored' "$PASS_STATUS")" = 1 ] || fail "ignored counts must be parsed"
 [ "$(jq -r '.units[0]' "$PASS_STATUS")" = "$FIRST_UNIT" ] || fail "status.json must record the units it ran"
-[ -s "$TMP/stub-pass/shard-1/logs/$(printf '%s' "$FIRST_UNIT" | tr '/' '_').log" ] ||
+[ -s "$TMP/stub-pass/shard-$SINGLETON_SHARD/logs/$(printf '%s' "$FIRST_UNIT" | tr '/' '_').log" ] ||
   fail "a per-unit log must be written"
-[ -s "$TMP/stub-pass/shard-1/manifest.json" ] || fail "manifest.json must be written"
-MANIFEST_BYTES=$(wc -c <"$TMP/stub-pass/shard-1/manifest.json" | tr -d ' ')
+[ -s "$TMP/stub-pass/shard-$SINGLETON_SHARD/manifest.json" ] || fail "manifest.json must be written"
+MANIFEST_BYTES=$(wc -c <"$TMP/stub-pass/shard-$SINGLETON_SHARD/manifest.json" | tr -d ' ')
 [ "$MANIFEST_BYTES" -lt 2048 ] || fail "manifest.json must stay bounded (got ${MANIFEST_BYTES} bytes)"
-[ "$(jq -r '.schema' "$TMP/stub-pass/shard-1/manifest.json")" = "cd.ci.shard_manifest.v1" ] ||
+[ "$(jq -r '.schema' "$TMP/stub-pass/shard-$SINGLETON_SHARD/manifest.json")" = "cd.ci.shard_manifest.v1" ] ||
   fail "manifest schema"
 
 expect_ok "summary mode must render a completed shard" sh "$RUN" --summary "$TMP/stub-pass"
@@ -369,8 +392,8 @@ grep -q "no unit was left in flight" "$TMP/out" ||
 
 expect_fail "a failing test binary must fail the shard" \
   env PATH="$STUB:$PATH" STUB_CARGO_FAIL=1 CD_CACHE_STATE=cold \
-  sh "$RUN" --shard 1 --shards "$WIDE" --out "$TMP/stub-fail" --heartbeat 0
-FAIL_STATUS="$TMP/stub-fail/shard-1/status.json"
+  sh "$RUN" --shard "$SINGLETON_SHARD" --shards "$WIDE" --out "$TMP/stub-fail" --heartbeat 0
+FAIL_STATUS="$TMP/stub-fail/shard-$SINGLETON_SHARD/status.json"
 [ "$(jq -r '.status' "$FAIL_STATUS")" = fail ] || fail "failing shard must record status=fail"
 [ "$(jq -r '.cache_state' "$FAIL_STATUS")" = cold ] || fail "failing shard must keep honest cache_state"
 [ "$(jq -r '.tests_failed' "$FAIL_STATUS")" = 1 ] || fail "failing shard must record the failed count"
@@ -379,17 +402,17 @@ FAIL_STATUS="$TMP/stub-fail/shard-1/status.json"
 
 expect_fail "a build failure must fail the shard" \
   env PATH="$STUB:$PATH" STUB_CARGO_BUILD_FAIL=1 \
-  sh "$RUN" --shard 1 --shards "$WIDE" --out "$TMP/stub-build-fail" --heartbeat 0
-[ "$(jq -r '.status' "$TMP/stub-build-fail/shard-1/status.json")" = fail ] ||
+  sh "$RUN" --shard "$SINGLETON_SHARD" --shards "$WIDE" --out "$TMP/stub-build-fail" --heartbeat 0
+[ "$(jq -r '.status' "$TMP/stub-build-fail/shard-$SINGLETON_SHARD/status.json")" = fail ] ||
   fail "a build failure must record status=fail"
-[ -s "$TMP/stub-build-fail/shard-1/build.log" ] || fail "a build failure must leave build.log"
+[ -s "$TMP/stub-build-fail/shard-$SINGLETON_SHARD/build.log" ] || fail "a build failure must leave build.log"
 
 # Snapshot hook is invoked with the shard directory as $1.
 HOOK_OUT="$TMP/hook-manifest.json"
 expect_ok "snapshot hook must run" \
   env PATH="$STUB:$PATH" HOOK_OUT="$HOOK_OUT" \
   CD_SHARD_SNAPSHOT_HOOK='cp "$1/manifest.json" "$HOOK_OUT"' \
-  sh "$RUN" --shard 1 --shards "$WIDE" --out "$TMP/stub-hook" --heartbeat 0
+  sh "$RUN" --shard "$SINGLETON_SHARD" --shards "$WIDE" --out "$TMP/stub-hook" --heartbeat 0
 [ -s "$HOOK_OUT" ] || fail "snapshot hook must copy the manifest"
 jq -e '.schema == "cd.ci.shard_manifest.v1"' "$HOOK_OUT" >/dev/null ||
   fail "hooked manifest must be valid"
@@ -397,30 +420,31 @@ jq -e '.schema == "cd.ci.shard_manifest.v1"' "$HOOK_OUT" >/dev/null ||
 # SIGTERM (step timeout / cancellation) must write incomplete status.json
 # quickly — not after the in-flight cargo process finishes.
 env PATH="$STUB:$PATH" STUB_CARGO_SLEEP=30 CD_CACHE_STATE=warm \
-  sh "$RUN" --shard 1 --shards "$WIDE" --out "$TMP/stub-term" --heartbeat 0 --unit-timeout 0 \
+  sh "$RUN" --shard "$SINGLETON_SHARD" --shards "$WIDE" --out "$TMP/stub-term" --heartbeat 0 --unit-timeout 0 \
   >"$TMP/stub-term.out" 2>&1 &
 TERM_PID=$!
 i=0
 while [ "$i" -lt 80 ]; do
-  if grep -q '"phase":"test"' "$TMP/stub-term/shard-1/progress.jsonl" 2>/dev/null; then
+  if grep -q '"phase":"test"' "$TMP/stub-term/shard-$SINGLETON_SHARD/progress.jsonl" 2>/dev/null; then
     break
   fi
   sleep 0.1
   i=$((i + 1))
 done
-grep -q '"phase":"test"' "$TMP/stub-term/shard-1/progress.jsonl" 2>/dev/null ||
+grep -q '"phase":"test"' "$TMP/stub-term/shard-$SINGLETON_SHARD/progress.jsonl" 2>/dev/null ||
   fail "SIGTERM fixture never started its test unit"
 TERM_START=$(date +%s)
 kill -TERM "$TERM_PID" 2>/dev/null || true
 wait "$TERM_PID" || true
 TERM_ELAPSED=$(($(date +%s) - TERM_START))
 [ "$TERM_ELAPSED" -lt 8 ] || fail "SIGTERM took ${TERM_ELAPSED}s; cargo was not interrupted"
-[ -f "$TMP/stub-term/shard-1/status.json" ] || fail "SIGTERM must still leave status.json"
-TERM_STATUS=$(jq -r '.status' "$TMP/stub-term/shard-1/status.json")
+[ -f "$TMP/stub-term/shard-$SINGLETON_SHARD/status.json" ] || fail "SIGTERM must still leave status.json"
+TERM_STATUS=$(jq -r '.status' "$TMP/stub-term/shard-$SINGLETON_SHARD/status.json")
 [ "$TERM_STATUS" = incomplete ] ||
   fail "SIGTERM shard status must be incomplete, got $TERM_STATUS"
 expect_fail "aggregate must refuse a SIGTERM shard" \
-  sh "$AGG" --dir "$TMP/stub-term" --shards 1
+  sh "$AGG" --dir "$TMP/stub-term" --shards "$SINGLETON_SHARD"
+grep -q "incomplete" "$TMP/out" || fail "aggregate must mention incomplete status"
 
 # ------------------------------------------------------- lost-runner forensics
 LOST="$TMP/lost/rust-ubuntu-shard-2/shard-2"
