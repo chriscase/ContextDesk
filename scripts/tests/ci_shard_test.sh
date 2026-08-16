@@ -179,7 +179,7 @@ sh "$PLAN" plan --shards "$CI_SHARDS" >"$TMP/plan8"
 for leftover in cd-core/lib/control cd-core/lib/policy cd-core/lib/policy_stream cd-core/lib/wire cd-core/lib/platform cd-core/lib/surface cd-core/lib/other; do
   grep -q "^[0-9]	$leftover\$" "$TMP/plan8" || fail "$leftover missing from the 8-shard plan"
 done
-for lh in cd-core/lib/control cd-core/lib/policy cd-core/lib/policy_stream cd-core/lib/wire; do
+for lh in cd-core/lib/control cd-core/lib/policy cd-core/lib/wire; do
   lh_shard=$(awk -F'\t' -v u="$lh" '$2 == u { print $1 }' "$TMP/plan8")
   [ -n "$lh_shard" ] || fail "$lh missing from plan"
   lh_n=$(awk -F'\t' -v s="$lh_shard" '$1 == s { c++ } END { print c + 0 }' "$TMP/plan8")

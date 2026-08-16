@@ -110,9 +110,11 @@ lib_splits() {
 #
 # A unit at or above HEAVY_WEIGHT is a "heavy": when there are at least
 # that many shards, verify refuses two heavies on one shard.
-# Leftover-heavy slices (control/policy/policy_stream/wire) must not sit alone and must
+# Leftover-heavy slices (control/policy/wire) must not sit alone and must
 # not share a shard with any other cd-core unit — cold --lib plus extra
-# cd-core --test binaries is the 58m shard-4 failure mode.
+# cd-core --test binaries is the 58m shard-4 failure mode. The small
+# policy_stream child is not leftover-heavy, like the hosted-fast
+# platform/surface slices, so it remains eligible for the regular shards.
 HEAVY_WEIGHT=180
 
 weight_for() {
@@ -122,7 +124,7 @@ weight_for() {
     cd-core/lib/control) printf '%s\n' 380 ;;
     cd-core/lib/log_analysis) printf '%s\n' 367 ;;
     cd-core/lib/services) printf '%s\n' 340 ;;
-    cd-core/lib/policy | cd-core/lib/policy_stream) printf '%s\n' 200 ;;
+    cd-core/lib/policy) printf '%s\n' 200 ;;
     cd-core/lib/wire) printf '%s\n' 200 ;;
     cd-core/test/duplicate_rendering_acceptance_lab) printf '%s\n' 189 ;;
     cd-core/lib/platform) printf '%s\n' 120 ;;
@@ -136,7 +138,7 @@ weight_for() {
 # Slow leftover --lib slices. Not platform/surface/other (hosted-fast or tiny).
 is_leftover_heavy() {
   case $1 in
-    cd-core/lib/control | cd-core/lib/policy | cd-core/lib/policy_stream | cd-core/lib/wire) return 0 ;;
+    cd-core/lib/control | cd-core/lib/policy | cd-core/lib/wire) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -242,7 +244,7 @@ shard_count() {
 }
 
 # Constrained assignment. Leftover-heavy --lib slices
-# (control/policy/policy_stream/wire) each get their own shard plus
+# (control/policy/wire) each get their own shard plus
 # non-cd-core companions only. Other units
 # use heaviest-first onto the lightest legal shard. When there are not
 # enough shards to isolate leftover-heavy from cd-core (shards <= leftover-
