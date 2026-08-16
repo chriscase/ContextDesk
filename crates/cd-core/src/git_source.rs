@@ -382,12 +382,14 @@ pub const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 // Test-only override of the git binary (thread-local so parallel tests stay isolated).
 #[cfg(test)]
+type GitCommandOverride = dyn Fn(&Path, &[&str]) -> Result<String, String>;
+
+#[cfg(test)]
 thread_local! {
     static GIT_BIN_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
         const { std::cell::RefCell::new(None) };
-    static GIT_COMMAND_OVERRIDE: std::cell::RefCell<Option<Box<
-        dyn Fn(&Path, &[&str]) -> Result<String, String>,
-    >>> = const { std::cell::RefCell::new(None) };
+    static GIT_COMMAND_OVERRIDE: std::cell::RefCell<Option<Box<GitCommandOverride>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Run `f` with a fixed git executable (hermetic timeout/fixture tests).
