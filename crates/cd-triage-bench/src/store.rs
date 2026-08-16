@@ -329,9 +329,21 @@ impl BenchStore {
             || packet.run_id != adj.run_id
             || packet.blinding != adj.blinding
         {
-            return Err(BenchError::Integrity(
-                "adjudication does not match its generated review packet".into(),
-            ));
+            return Err(BenchError::Integrity(format!(
+                "adjudication does not match its generated review packet (packet phase={:?}, case={}, task={}, snapshot={}, run={}, blinding={:?}; adjudication phase={:?}, case={}, task={}, snapshot={}, run={}, blinding={:?})",
+                packet.phase,
+                packet.case_id,
+                packet.task_id,
+                packet.snapshot_id,
+                packet.run_id,
+                packet.blinding,
+                phase,
+                adj.case_id,
+                adj.task_id,
+                adj.snapshot_id,
+                adj.run_id,
+                adj.blinding
+            )));
         }
         if phase == ReviewPhase::Diagnosis {
             let existing = self.load_adjudications()?;
