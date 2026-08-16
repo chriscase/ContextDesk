@@ -365,7 +365,19 @@ impl BenchStore {
             });
             if !diagnosis_has_prior_support {
                 return Err(BenchError::Schema(
-                    "diagnosis-phase adjudication requires a prior support-phase review by the same reviewer and rubric".into(),
+                    format!(
+                        "diagnosis-phase adjudication requires a prior support-phase review by the same reviewer and rubric (existing: {:?})",
+                        existing
+                            .iter()
+                            .map(|support| (
+                                support.run_id.as_str(),
+                                support.reviewer.as_str(),
+                                support.rubric_version.as_str(),
+                                support.phase,
+                                support.created_at.as_str()
+                            ))
+                            .collect::<Vec<_>>()
+                    ),
                 ));
             }
         }
