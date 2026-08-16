@@ -12,5 +12,5 @@ export function shareSafeLabel(
 
 export function containsRedactionMap(text: string, config: ExportPrivacyConfig): boolean {
   if (text.includes("identityRedactions") || text.includes("redactionMap")) return true;
-  return Object.keys(config.identityRedactions).some((key) => key.includes("=") && text.includes(key));
+  return Object.keys(config.identityRedactions).some((key) => text.includes(key));
 }

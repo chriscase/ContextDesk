@@ -10,7 +10,11 @@ import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
 import { MemoryAuditStore } from "../audit/index.js";
-import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
+import {
+  MemoryGroupRoleStore,
+  MutableGroupRoleMap,
+  parseGroupRoleMap,
+} from "../authz/index.js";
 import { MapAuthAdapter } from "./adapter.js";
 import { createAuthLog } from "./log.js";
 import { createRateLimiter } from "./rate-limit.js";
@@ -80,6 +84,7 @@ async function withApp(
     audit: MemoryAuditStore;
     log: ReturnType<typeof createAuthLog>;
     roles: MutableGroupRoleMap;
+    roleStore: MemoryGroupRoleStore;
   }) => Promise<void>,
   opts?: { maxFails?: number },
 ) {
@@ -88,6 +93,7 @@ async function withApp(
   const audit = new MemoryAuditStore();
   const log = createAuthLog();
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(defaultMap));
+  const roleStore = new MemoryGroupRoleStore(roles.snapshot());
   const app = await buildApp({
     config: testConfig({ evidenceRoot: root }),
     pool: null,
@@ -107,11 +113,12 @@ async function withApp(
         cookieSecure: false,
       },
       roles,
+      roleStore,
       audit,
     },
   });
   try {
-    await fn({ app, audit, log, roles });
+    await fn({ app, audit, log, roles, roleStore });
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -219,6 +226,55 @@ describe("auth flow", () => {
       });
       expect(me.statusCode).toBe(200);
       expect(parseSessionResponse(JSON.parse(me.body)).roles).toEqual(["viewer"]);
+    });
+  });
+
+  it("persists and revokes a group-role mapping through the admin API", async () => {
+    await withApp(async ({ app, audit, roleStore }) => {
+      const login = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        payload: { username: "dave", password: "fixture-dave-secret" },
+      });
+      expect(login.statusCode).toBe(200);
+      const cookie = cookieFrom(login);
+      const group = "cn=temporary,ou=groups,dc=example,dc=test";
+
+      const updated = await app.inject({
+        method: "PUT",
+        url: "/api/authz/group-role-map",
+        headers: { cookie },
+        payload: { group, role: "contributor" },
+      });
+      expect(updated.statusCode).toBe(200);
+      expect((await roleStore.load()).entries.get(group)).toBe("contributor");
+
+      const revoked = await app.inject({
+        method: "DELETE",
+        url: "/api/authz/group-role-map",
+        headers: { cookie },
+        payload: { group },
+      });
+      expect(revoked.statusCode).toBe(200);
+      expect((await roleStore.load()).entries.has(group)).toBe(false);
+
+      const events = await audit.list();
+      expect(
+        events.some(
+          (event) =>
+            event.action === "role_mapping_update" &&
+            event.target === `${group}=contributor` &&
+            event.outcome === "success",
+        ),
+      ).toBe(true);
+      expect(
+        events.some(
+          (event) =>
+            event.action === "role_mapping_revoke" &&
+            event.target === group &&
+            event.outcome === "success",
+        ),
+      ).toBe(true);
     });
   });
 

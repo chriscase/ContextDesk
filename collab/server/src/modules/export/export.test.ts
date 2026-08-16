@@ -59,6 +59,18 @@ function users() {
       },
     ],
     [
+      "bob",
+      {
+        password: "fixture-bob-secret",
+        identity: {
+          id: "uid=bob,ou=people,dc=example,dc=test",
+          username: "bob",
+          displayName: "bob",
+        },
+        groups: ["cn=unmapped,ou=groups,dc=example,dc=test"],
+      },
+    ],
+    [
       "carol",
       {
         password: "fixture-carol-secret",
@@ -308,6 +320,16 @@ describe("triage brief and prompt-package export", () => {
       const fx = await seedFixture(app);
 
       const carol = await login(app, "carol", "fixture-carol-secret");
+      const addedBob = await app.inject({
+        method: "POST",
+        url: `/api/cases/${fx.caseId}/participants`,
+        headers: { cookie: fx.dave },
+        payload: {
+          identityId: "uid=bob,ou=people,dc=example,dc=test",
+          username: "bob",
+        },
+      });
+      expect(addedBob.statusCode).toBe(200);
       const viewerDenied = await app.inject({
         method: "POST",
         url: `/api/cases/${fx.caseId}/export/brief`,
@@ -401,9 +423,15 @@ describe("triage brief and prompt-package export", () => {
       );
       expect(sharePayload.attributions.some((a) => a.actorLabel === "contributor")).toBe(true);
       expect(canonicalJson(sharePayload)).not.toContain("uid=alice,ou=people,dc=example,dc=test");
+      expect(canonicalJson(sharePayload)).not.toContain("alice");
+      expect(canonicalJson(sharePayload)).not.toContain("uid=bob,ou=people,dc=example,dc=test");
+      expect(canonicalJson(sharePayload)).not.toContain("bob");
       expect(canonicalJson(sharePayload)).not.toContain("identityRedactions");
       expect(canonicalJson(sharePayload)).not.toContain("redactionMap");
       expect(shareBrief.markdown).not.toContain("uid=alice,ou=people,dc=example,dc=test");
+      expect(shareBrief.markdown).not.toContain("alice");
+      expect(shareBrief.markdown).not.toContain("uid=bob,ou=people,dc=example,dc=test");
+      expect(shareBrief.markdown).not.toContain("bob");
 
       const inventory = parseExportInventory(
         JSON.parse(

@@ -12,7 +12,11 @@ import {
   defaultSessionPolicy,
   loadLdapConfig,
 } from "./modules/auth/index.js";
-import { MutableGroupRoleMap, parseGroupRoleMap } from "./modules/authz/index.js";
+import {
+  MutableGroupRoleMap,
+  parseGroupRoleMap,
+  PgGroupRoleStore,
+} from "./modules/authz/index.js";
 import { CatalogService, PgCatalogStore } from "./modules/catalog/index.js";
 import { CaseService, PgCaseStore } from "./modules/cases/index.js";
 import { ExportService, loadExportPrivacyConfig } from "./modules/export/index.js";
@@ -29,9 +33,11 @@ async function main(): Promise<void> {
   const sessions = process.env.COLLAB_SESSION_STORE === "memory"
     ? new MemorySessionStore()
     : new PgSessionStore(pool);
-  const roles = new MutableGroupRoleMap(
+  const roleStore = new PgGroupRoleStore(
+    pool,
     parseGroupRoleMap(process.env.COLLAB_GROUP_ROLE_MAP),
   );
+  const roles = new MutableGroupRoleMap(await roleStore.load());
   const audit = new PgAuditStore(pool);
   const catalog = new CatalogService(new PgCatalogStore(pool), audit);
   const domain = new CaseService(store, audit, new PgCaseStore(pool), catalog);
@@ -69,6 +75,7 @@ async function main(): Promise<void> {
         cookieSecure: process.env.COLLAB_COOKIE_SECURE !== "0",
       },
       roles,
+      roleStore,
       audit,
     },
   });

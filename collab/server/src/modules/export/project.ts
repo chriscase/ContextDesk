@@ -68,7 +68,7 @@ export function projectBrief(input: {
       seq: ev.seq,
       kind: ev.kind,
       actorLabel: label(ev.actorUsername),
-      targetId: ev.targetId,
+      targetId: ev.targetId === null ? null : label(ev.targetId),
       payloadDigest: payloadDigest(ev.payload),
     }));
 

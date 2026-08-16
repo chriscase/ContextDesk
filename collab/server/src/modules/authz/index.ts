@@ -13,3 +13,5 @@ export {
 export type { AppRole, AuthzAction, GroupRoleMapping } from "./roles.js";
 export { registerAuthzRoutes } from "./routes.js";
 export type { AuthzRouteDeps } from "./routes.js";
+export { MemoryGroupRoleStore, PgGroupRoleStore } from "./store.js";
+export type { GroupRoleStore } from "./store.js";

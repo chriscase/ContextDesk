@@ -14,7 +14,11 @@ import type { Config } from "./config.js";
 import type { EvidenceStore } from "./evidence/store.js";
 import { registerAuthRoutes, type AuthRouteDeps } from "./modules/auth/index.js";
 import { registerAuthzRoutes } from "./modules/authz/index.js";
-import type { MutableGroupRoleMap } from "./modules/authz/index.js";
+import {
+  MemoryGroupRoleStore,
+  type GroupRoleStore,
+  type MutableGroupRoleMap,
+} from "./modules/authz/index.js";
 import type { AuditStore } from "./modules/audit/index.js";
 import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/index.js";
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
@@ -24,6 +28,7 @@ import { registerImportRoutes, type ImportService } from "./modules/import/index
 export interface SecurityDeps {
   auth: AuthRouteDeps;
   roles: MutableGroupRoleMap;
+  roleStore?: GroupRoleStore;
   audit: AuditStore;
 }
 
@@ -80,10 +85,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   if (deps.security) {
+    const roleStore =
+      deps.security.roleStore ?? new MemoryGroupRoleStore(deps.security.roles.snapshot());
     await registerAuthRoutes(app, deps.security.auth);
     await registerAuthzRoutes(app, {
       auth: deps.security.auth,
       roles: deps.security.roles,
+      roleStore,
       audit: deps.security.audit,
     });
     if (deps.domain) {

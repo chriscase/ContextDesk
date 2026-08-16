@@ -15,7 +15,7 @@
       "kind": "case_created",
       "actorLabel": "alice",
       "targetId": "11111111-1111-1111-1111-111111111111",
-      "payloadDigest": "{\"title\":\"Fixture incident\"}"
+      "payloadDigest": "2d95bbe9bfed19e3019942530f73f4a73d324fc404d491406b681057c405908c"
     }
   ],
   "hypotheses": [
