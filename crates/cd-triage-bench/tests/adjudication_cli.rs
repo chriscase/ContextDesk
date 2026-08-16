@@ -550,8 +550,7 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
         "rubric_version": "contextdesk.triage_bench.rubric.v1",
         "phase": "support",
         "blinding": {
-            "kind": "unblinded",
-            "reason": "distinctive first-person write-up"
+            "kind": "blinded"
         },
         "outcomes": outcomes(
             json!({"kind": "not_applicable"}),
@@ -578,8 +577,7 @@ fn issue_880_cli_rubric_and_adjudication_acceptance() {
         "rubric_version": "contextdesk.triage_bench.rubric.v1",
         "phase": "diagnosis",
         "blinding": {
-            "kind": "unblinded",
-            "reason": "distinctive first-person write-up"
+            "kind": "blinded"
         },
         "outcomes": outcomes(
             json!({"kind": "score", "value": 2}),
