@@ -350,7 +350,6 @@ impl BenchStore {
             let diagnosis_has_prior_support = existing.iter().any(|support| {
                 support.run_id == adj.run_id
                     && support.reviewer == adj.reviewer
-                    && support.rubric_version == adj.rubric_version
                     && support.phase == Some(ReviewPhase::Support)
                     && support
                         .created_at
@@ -366,7 +365,7 @@ impl BenchStore {
             if !diagnosis_has_prior_support {
                 return Err(BenchError::Schema(
                     format!(
-                        "diagnosis-phase adjudication requires a prior support-phase review by the same reviewer and rubric (existing: {:?})",
+                        "diagnosis-phase adjudication requires a prior support-phase review by the same reviewer (existing: {:?})",
                         existing
                             .iter()
                             .map(|support| (
