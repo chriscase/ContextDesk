@@ -262,16 +262,28 @@ fn identical_import_is_explicit_dedupe_and_near_duplicate_is_new() {
         cost: Observed::Unknown,
         uncertainty: Observed::Unknown,
         fairness: FairnessClass::SameSnapshot,
-        status: RunStatus::Completed,
-        operator: "operator-a".into(),
+        status: RunStatus::Failed,
+        operator: "operator-b".into(),
         importer: Some("importer-b".into()),
-        privacy: PrivacyClass::ShareSafe,
+        privacy: PrivacyClass::OwnerOnly,
         created_at: "2026-01-15T09:00:00Z".into(),
     };
     match import_run(&store, &document, HUMAN_RAW.as_bytes()).unwrap() {
-        ImportOutcome::Duplicate { run_id } => assert_eq!(run_id, first),
-        other => panic!("expected duplicate, got {other:?}"),
+        ImportOutcome::Created {
+            run_id,
+            near_duplicate_of,
+        } => {
+            assert_ne!(run_id, first);
+            assert_eq!(near_duplicate_of.as_deref(), Some(first.as_str()));
+        }
+        other => panic!("expected metadata-conflicting near duplicate, got {other:?}"),
     }
+    let metadata_conflict = store.load_runs().unwrap().into_iter().find(|run| {
+        run.run_id != first && run.raw_output.digest.hex == ContentDigest::of_bytes(HUMAN_RAW.as_bytes()).hex
+    }).expect("metadata near duplicate");
+    assert_eq!(metadata_conflict.status, RunStatus::Failed);
+    assert_eq!(metadata_conflict.operator, "operator-b");
+    assert_eq!(metadata_conflict.privacy, PrivacyClass::OwnerOnly);
     let near = import_named(
         &store,
         &task.task_id,
@@ -518,9 +530,7 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
             notes: Some("authored the human write-up".into()),
         },
         RUBRIC_V1,
-        BlindingState::Unblinded {
-            reason: "distinctive first-person write-up".into(),
-        },
+        BlindingState::Blinded,
         DimensionVerdict::Score { value: 2 },
         DimensionVerdict::Score { value: 3 },
         DimensionVerdict::Score { value: 1 },
@@ -689,8 +699,11 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
     assert_eq!(still_v1, v1_score);
 
     let blinded = blinded_run_view(&store.get_run(&human).unwrap());
-    assert!(blinded.strategy_masked);
-    assert!(blinded.unblindable_reason.is_none());
+    assert!(!blinded.strategy_masked);
+    assert_eq!(
+        blinded.unblindable_reason.as_deref(),
+        Some("raw artifact was not loaded; blinding could not be established")
+    );
 
     let report = build_report(
         &store.load_runs().unwrap(),
@@ -753,4 +766,285 @@ fn adjudication_disagreement_and_unresolved_diagnosis_na() {
     let share_text = render_report_json(&share_safe).unwrap();
     assert!(!share_text.contains("/Users/"));
     assert!(!share_text.contains("SKU service"));
+}
+
+#[test]
+fn support_only_adjudication_is_partial_not_fully_scored() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = init_store(dir.path());
+    store.put_case(&resolved_case()).unwrap();
+    let snapshot = snapshot_for(&store, "case-checkout-cascade");
+    let task = task_for(&store, &snapshot);
+    let run_id = import_named(
+        &store,
+        &task.task_id,
+        SourceKind::Human,
+        "human-expert",
+        Observed::Unknown,
+        HUMAN_RAW,
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        "2026-01-15T08:00:00Z",
+    );
+    let packet = store
+        .materialize_review_packet(&run_id, ReviewPhase::Support)
+        .unwrap();
+    let support = Adjudication::from_parts(
+        PrivacyClass::ShareSafe,
+        "case-checkout-cascade".into(),
+        task.task_id.clone(),
+        snapshot.snapshot_id.clone(),
+        run_id.clone(),
+        "reviewer-a".into(),
+        ConflictOfInterest {
+            declared: false,
+            notes: None,
+        },
+        RUBRIC_V1.into(),
+        ReviewPhase::Support,
+        BlindingState::Blinded,
+        outcomes(
+            DimensionVerdict::NotApplicable,
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+        ),
+        "2026-01-15T10:00:00Z".into(),
+    )
+    .unwrap()
+    .bind_review_packet(packet.packet_id)
+    .unwrap();
+    store.put_adjudication(&support).unwrap();
+
+    let report = build_report(
+        &store.load_runs().unwrap(),
+        &store.load_adjudications().unwrap(),
+        &store.load_scores().unwrap(),
+        &store.load_cases().unwrap(),
+        PrivacyClass::ShareSafe,
+    )
+    .unwrap();
+    let summary = report.groups[0]
+        .runs
+        .iter()
+        .find(|run| run.run_id == run_id)
+        .unwrap();
+    assert_eq!(
+        summary.score_visibility,
+        cd_triage_bench::report::ScoreVisibility::Partial
+    );
+    assert_eq!(report.counts.scored, 0);
+    assert_eq!(report.counts.partial_scored_runs, 1);
+}
+
+#[test]
+fn version_pairs_are_partitioned_by_source_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = init_store(dir.path());
+    store.put_case(&resolved_case()).unwrap();
+    let snapshot = snapshot_for(&store, "case-checkout-cascade");
+    let task = task_for(&store, &snapshot);
+    let human_v1 = import_named(
+        &store,
+        &task.task_id,
+        SourceKind::Human,
+        "shared-strategy",
+        Observed::Known("1.0".into()),
+        "human v1",
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        "2026-01-15T08:00:00Z",
+    );
+    let human_v2 = import_named(
+        &store,
+        &task.task_id,
+        SourceKind::Human,
+        "shared-strategy",
+        Observed::Known("2.0".into()),
+        "human v2",
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        "2026-01-15T08:01:00Z",
+    );
+    let web_v1 = import_named(
+        &store,
+        &task.task_id,
+        SourceKind::WebOnly,
+        "shared-strategy",
+        Observed::Known("1.0".into()),
+        "web v1",
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        "2026-01-15T08:02:00Z",
+    );
+    let web_v2 = import_named(
+        &store,
+        &task.task_id,
+        SourceKind::WebOnly,
+        "shared-strategy",
+        Observed::Known("2.0".into()),
+        "web v2",
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        "2026-01-15T08:03:00Z",
+    );
+    for run_id in [&human_v1, &human_v2, &web_v1, &web_v2] {
+        let run = store.get_run(run_id).unwrap();
+        put_support_then_diagnosis(
+            &store,
+            PrivacyClass::ShareSafe,
+            &run.case_id,
+            &run.task_id,
+            &run.snapshot_id,
+            &run.run_id,
+            "reviewer-a",
+            ConflictOfInterest {
+                declared: false,
+                notes: None,
+            },
+            RUBRIC_V1,
+            BlindingState::Blinded,
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+            "2026-01-15T10:00:00Z",
+        );
+    }
+    let report = build_report(
+        &store.load_runs().unwrap(),
+        &store.load_adjudications().unwrap(),
+        &store.load_scores().unwrap(),
+        &store.load_cases().unwrap(),
+        PrivacyClass::ShareSafe,
+    )
+    .unwrap();
+    assert_eq!(report.version_pairs.len(), 2);
+    assert!(report
+        .version_pairs
+        .iter()
+        .any(|pair| pair.source_kind == SourceKind::Human));
+    assert!(report
+        .version_pairs
+        .iter()
+        .any(|pair| pair.source_kind == SourceKind::WebOnly));
+}
+
+#[test]
+fn diagnosis_chronology_is_checked_after_support_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = init_store(dir.path());
+    store.put_case(&resolved_case()).unwrap();
+    let snapshot = snapshot_for(&store, "case-checkout-cascade");
+    let task = task_for(&store, &snapshot);
+    let run_id = import_named(
+        &store,
+        &task.task_id,
+        SourceKind::Human,
+        "human-expert",
+        Observed::Unknown,
+        HUMAN_RAW,
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        "2026-01-15T08:00:00Z",
+    );
+    let support_packet = store
+        .materialize_review_packet(&run_id, ReviewPhase::Support)
+        .unwrap();
+    let support = Adjudication::from_parts(
+        PrivacyClass::ShareSafe,
+        "case-checkout-cascade".into(),
+        task.task_id.clone(),
+        snapshot.snapshot_id.clone(),
+        run_id.clone(),
+        "reviewer-a".into(),
+        ConflictOfInterest {
+            declared: false,
+            notes: None,
+        },
+        RUBRIC_V1.into(),
+        ReviewPhase::Support,
+        BlindingState::Blinded,
+        outcomes(
+            DimensionVerdict::NotApplicable,
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+        ),
+        "2026-01-15T10:00:00Z".into(),
+    )
+    .unwrap()
+    .bind_review_packet(support_packet.packet_id)
+    .unwrap();
+    store.put_adjudication(&support).unwrap();
+    let diagnosis_packet = store
+        .materialize_review_packet(&run_id, ReviewPhase::Diagnosis)
+        .unwrap();
+    let diagnosis = Adjudication::from_parts(
+        PrivacyClass::ShareSafe,
+        "case-checkout-cascade".into(),
+        task.task_id,
+        snapshot.snapshot_id,
+        run_id,
+        "reviewer-a".into(),
+        ConflictOfInterest {
+            declared: false,
+            notes: None,
+        },
+        RUBRIC_V1.into(),
+        ReviewPhase::Diagnosis,
+        BlindingState::Blinded,
+        outcomes(
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+            DimensionVerdict::Score { value: 2 },
+        ),
+        "2026-01-15T09:00:00Z".into(),
+    )
+    .unwrap()
+    .bind_review_packet(diagnosis_packet.packet_id)
+    .unwrap();
+    let err = store.put_adjudication(&diagnosis).unwrap_err();
+    assert!(err.to_string().contains("prior support-phase"));
+}
+
+#[test]
+fn blinded_run_command_fails_when_raw_blob_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = init_store(dir.path());
+    store.put_case(&resolved_case()).unwrap();
+    let snapshot = snapshot_for(&store, "case-checkout-cascade");
+    let task = task_for(&store, &snapshot);
+    let run_id = import_named(
+        &store,
+        &task.task_id,
+        SourceKind::Human,
+        "human-expert",
+        Observed::Unknown,
+        HUMAN_RAW,
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        "2026-01-15T08:00:00Z",
+    );
+    let run = store.get_run(&run_id).unwrap();
+    let blob_path = store
+        .root()
+        .join("blobs/sha256")
+        .join(&run.raw_output.digest.hex[..2])
+        .join(&run.raw_output.digest.hex);
+    fs::remove_file(blob_path).unwrap();
+    let err = cd_triage_bench::cli::run_cli([
+        "cd-triage-bench",
+        "--library",
+        store.root().to_str().unwrap(),
+        "blinded-run",
+        &run_id,
+    ])
+    .unwrap_err();
+    assert!(err.to_string().contains("No such file") || err.to_string().contains("not found"));
 }
