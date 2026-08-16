@@ -219,8 +219,7 @@ impl Adjudication {
     pub fn parse_import_json(text: &str) -> BenchResult<Self> {
         let import: AdjudicationImport =
             serde_json::from_str(text).map_err(BenchError::from_serde)?;
-        if import.schema_id != ADJUDICATION_SCHEMA_V1
-            && import.schema_id != ADJUDICATION_SCHEMA_V2
+        if import.schema_id != ADJUDICATION_SCHEMA_V1 && import.schema_id != ADJUDICATION_SCHEMA_V2
         {
             return Err(BenchError::Schema(format!(
                 "adjudication schema must be {ADJUDICATION_SCHEMA_V1} or {ADJUDICATION_SCHEMA_V2}, got {}",
@@ -257,9 +256,7 @@ impl Adjudication {
                 let phase = import.phase.ok_or_else(|| {
                     BenchError::Schema("new adjudication imports must declare phase".into())
                 })?;
-                if import.schema_id == ADJUDICATION_SCHEMA_V2
-                    && import.review_packet_id.is_none()
-                {
+                if import.schema_id == ADJUDICATION_SCHEMA_V2 && import.review_packet_id.is_none() {
                     return Err(BenchError::Schema(
                         "adjudication.v2 requires review_packet_id".into(),
                     ));
@@ -513,10 +510,7 @@ impl Adjudication {
         )
     }
 
-    pub fn with_outcomes(
-        &self,
-        mut outcomes: Vec<DimensionOutcome>,
-    ) -> BenchResult<Self> {
+    pub fn with_outcomes(&self, mut outcomes: Vec<DimensionOutcome>) -> BenchResult<Self> {
         outcomes.sort_by_key(|o| o.dimension);
         let mut updated = self.clone();
         updated.outcomes = outcomes;
@@ -527,35 +521,31 @@ impl Adjudication {
 
     fn compute_id(&self) -> BenchResult<String> {
         match (self.schema_id.as_str(), self.phase, &self.review_packet_id) {
-            (ADJUDICATION_SCHEMA_V2, Some(phase), Some(packet_id)) => {
-                compute_adjudication_id(
-                    &self.case_id,
-                    &self.task_id,
-                    &self.snapshot_id,
-                    &self.run_id,
-                    &self.reviewer,
-                    &self.rubric_version,
-                    phase,
-                    packet_id,
-                    &self.blinding,
-                    &self.outcomes,
-                    &self.created_at,
-                )
-            }
-            (ADJUDICATION_SCHEMA_V1, Some(phase), None) => {
-                compute_current_v1_adjudication_id(
-                    &self.case_id,
-                    &self.task_id,
-                    &self.snapshot_id,
-                    &self.run_id,
-                    &self.reviewer,
-                    &self.rubric_version,
-                    phase,
-                    &self.blinding,
-                    &self.outcomes,
-                    &self.created_at,
-                )
-            }
+            (ADJUDICATION_SCHEMA_V2, Some(phase), Some(packet_id)) => compute_adjudication_id(
+                &self.case_id,
+                &self.task_id,
+                &self.snapshot_id,
+                &self.run_id,
+                &self.reviewer,
+                &self.rubric_version,
+                phase,
+                packet_id,
+                &self.blinding,
+                &self.outcomes,
+                &self.created_at,
+            ),
+            (ADJUDICATION_SCHEMA_V1, Some(phase), None) => compute_current_v1_adjudication_id(
+                &self.case_id,
+                &self.task_id,
+                &self.snapshot_id,
+                &self.run_id,
+                &self.reviewer,
+                &self.rubric_version,
+                phase,
+                &self.blinding,
+                &self.outcomes,
+                &self.created_at,
+            ),
             (ADJUDICATION_SCHEMA_V1, None, None) => compute_legacy_adjudication_id(
                 &self.case_id,
                 &self.task_id,
@@ -607,6 +597,7 @@ fn compute_adjudication_id(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_current_v1_adjudication_id(
     case_id: &str,
     task_id: &str,
@@ -637,6 +628,7 @@ fn compute_current_v1_adjudication_id(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_legacy_adjudication_id(
     case_id: &str,
     task_id: &str,
@@ -964,12 +956,10 @@ mod tests {
             adjudication_id: String::new(),
             privacy: PrivacyClass::ShareSafe,
             case_id: "case-1".into(),
-            task_id: "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            task_id: "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            snapshot_id: "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .into(),
-            snapshot_id:
-                "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            run_id: "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                .into(),
+            run_id: "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
             reviewer: "reviewer-a".into(),
             conflict_of_interest: ConflictOfInterest {
                 declared: false,

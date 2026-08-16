@@ -102,9 +102,7 @@ pub fn distinctive_format_reason(run: &TriageRun, raw: Option<&[u8]>) -> Option<
     let raw = match raw {
         Some(raw) => raw,
         None => {
-            return Some(
-                "raw artifact was not loaded; blinding could not be established".into(),
-            )
+            return Some("raw artifact was not loaded; blinding could not be established".into())
         }
     };
     let text = std::str::from_utf8(raw).ok()?;
