@@ -19,13 +19,9 @@ function withDatabaseName(connectionString: string, name: string): string {
 }
 
 export function appRoleUrl(databaseUrl: string): string {
-  const url = new URL(databaseUrl);
-  url.username = COLLAB_APP_ROLE;
-  const withUser = url.toString();
-  return withUser.replace(
-    `://${COLLAB_APP_ROLE}@`,
-    `://${COLLAB_APP_ROLE}:${encodeURIComponent(COLLAB_APP_ROLE_PASSWORD)}@`,
-  );
+  const parsed = new URL(databaseUrl);
+  const path = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  return `postgres://${COLLAB_APP_ROLE}:${encodeURIComponent(COLLAB_APP_ROLE_PASSWORD)}@${parsed.host}${path}`;
 }
 
 async function ensureAppRole(admin: Client): Promise<void> {

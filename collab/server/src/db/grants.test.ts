@@ -19,6 +19,12 @@ describe("hosted least-privilege pin", () => {
     expect(yml).toMatch(/COLLAB_MIGRATE_DATABASE_URL: postgres:\/\/postgres:/);
     expect(yml).toMatch(/COLLAB_TEST_ADMIN_URL: postgres:\/\/postgres:/);
   });
+
+  it("builds the app-role URL without inheriting the admin password", () => {
+    const url = appRoleUrl("postgres://postgres:postgres@127.0.0.1:5432/collab_ci");
+    expect(url).toContain("://collab_app:fixture-app-role@127.0.0.1:5432/collab_ci");
+    expect(url).not.toContain("postgres:postgres");
+  });
 });
 
 describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
