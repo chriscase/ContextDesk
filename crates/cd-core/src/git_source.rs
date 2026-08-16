@@ -385,6 +385,9 @@ pub const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 thread_local! {
     static GIT_BIN_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
         const { std::cell::RefCell::new(None) };
+    static GIT_COMMAND_OVERRIDE: std::cell::RefCell<Option<Box<
+        dyn Fn(&Path, &[&str]) -> Result<String, String>,
+    >>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Run `f` with a fixed git executable (hermetic timeout/fixture tests).
@@ -397,6 +400,27 @@ pub fn with_git_bin_override<R>(path: &Path, f: impl FnOnce() -> R) -> R {
     impl Drop for Reset {
         fn drop(&mut self) {
             GIT_BIN_OVERRIDE.with(|c| {
+                *c.borrow_mut() = None;
+            });
+        }
+    }
+    let _guard = Reset;
+    f()
+}
+
+/// Run `f` with a hermetic git command response (test-only).
+#[cfg(test)]
+pub fn with_git_command_override<R>(
+    runner: impl Fn(&Path, &[&str]) -> Result<String, String> + 'static,
+    f: impl FnOnce() -> R,
+) -> R {
+    GIT_COMMAND_OVERRIDE.with(|c| {
+        *c.borrow_mut() = Some(Box::new(runner));
+    });
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            GIT_COMMAND_OVERRIDE.with(|c| {
                 *c.borrow_mut() = None;
             });
         }
@@ -419,6 +443,12 @@ fn git_program() -> String {
 
 /// Synchronous git with fixed argv (no shell); redacts stderr; kills on timeout.
 pub fn run_git_simple(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(result) =
+        GIT_COMMAND_OVERRIDE.with(|c| c.borrow().as_ref().map(|runner| runner(cwd, args)))
+    {
+        return result;
+    }
     run_git_timeout(cwd, args, GIT_TIMEOUT)
 }
 
@@ -868,50 +898,25 @@ mod tests {
         // Requesting the fork name must be refused.
         let err = fetch_product_source(d.path(), "origin").unwrap_err();
         assert!(err.contains("not the validated canonical"), "{err}");
-        // Redirect the canonical URL to a local bare clone so this unit test
-        // proves the selected remote without requiring network access.
-        let bare_tmp = tempdir().unwrap();
-        let bare = bare_tmp.path().join("canonical-remote.git");
-        let cloned = Command::new("git")
-            .args([
-                "clone",
-                "--bare",
-                d.path().to_str().unwrap(),
-                bare.to_str().unwrap(),
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            cloned.status.success(),
-            "local bare clone failed: {}",
-            String::from_utf8_lossy(&cloned.stderr)
+        // Keep the remote discovery real, but intercept only the final fetch
+        // so this unit test proves the selected remote without network access.
+        let r = with_git_command_override(
+            |_, args| match args {
+                ["remote"] => Ok("origin\nupstream\n".into()),
+                ["remote", "get-url", "origin"] => {
+                    Ok("https://github.com/myfork/ContextDesk.git".into())
+                }
+                ["remote", "get-url", "upstream"] => {
+                    Ok("git@github.com:chriscase/ContextDesk.git".into())
+                }
+                ["fetch", "upstream"] => Ok(String::new()),
+                _ => Err(format!("unexpected git command: {args:?}")),
+            },
+            || fetch_product_source(d.path(), ""),
         );
-        let bare_url = if cfg!(windows) {
-            format!("file:///{}", bare.to_string_lossy().replace('\\', "/"))
-        } else {
-            format!("file://{}", bare.display())
-        };
-        for canonical_url in [
-            "https://github.com/chriscase/ContextDesk.git",
-            "git@github.com:chriscase/ContextDesk.git",
-        ] {
-            let configured = Command::new("git")
-                .args(["config", "--local"])
-                .arg(format!("url.{bare_url}.insteadOf"))
-                .arg(canonical_url)
-                .current_dir(d.path())
-                .output()
-                .unwrap();
-            assert!(
-                configured.status.success(),
-                "local URL rewrite failed for {canonical_url}: {}",
-                String::from_utf8_lossy(&configured.stderr)
-            );
-        }
-        let r = fetch_product_source(d.path(), "");
         assert!(
             r.is_ok(),
-            "canonical fetch should use the local test remote: {r:?}"
+            "canonical fetch should use the intercepted upstream remote: {r:?}"
         );
     }
 
