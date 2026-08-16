@@ -417,6 +417,11 @@ describe("triage brief and prompt-package export", () => {
       const shareEmail = sharePayload.evidence.find((e) => e.id === fx.emailId);
       expect(shareEmail?.content).toBe(EML);
       expect(shareEmail?.bytesIncluded).toBe(true);
+      expect(sharePayload.timeline.find((event) => event.kind === "case_created")?.targetId).toBe(
+        fx.caseId,
+      );
+      expect(sharePayload.importedRuns[0]?.sourceLabel).toBe("Web assistant");
+      expect(shareBrief.markdown).toContain(`case_created · ${fx.caseId}`);
       expect(sharePayload.attributions.length).toBeGreaterThan(0);
       expect(sharePayload.attributions.every((a) => a.actorLabel && a.action && a.targetKind)).toBe(
         true,

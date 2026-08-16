@@ -46,6 +46,18 @@ function users() {
       },
     ],
     [
+      "eve",
+      {
+        password: "fixture-eve-secret",
+        identity: {
+          id: "uid=eve,ou=people,dc=example,dc=test",
+          username: "eve",
+          displayName: "eve",
+        },
+        groups: ["cn=contributors,ou=groups,dc=example,dc=test"],
+      },
+    ],
+    [
       "carol",
       {
         password: "fixture-carol-secret",
@@ -82,6 +94,7 @@ async function withApp(
     domain: CaseService;
     catalog: CatalogService;
     store: FilesystemEvidenceStore;
+    roles: MutableGroupRoleMap;
   }) => Promise<void>,
 ) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-cases-"));
@@ -112,7 +125,7 @@ async function withApp(
     },
   });
   try {
-    await fn({ app, audit, domain, catalog, store });
+    await fn({ app, audit, domain, catalog, store, roles });
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -540,6 +553,80 @@ describe("cases timeline evidence provenance", () => {
       expect(sourceIds.has(message.sourceId)).toBe(true);
       expect(sourceIds.has(note.sourceId)).toBe(true);
       expect(sourceIds.has(logArt.sourceId)).toBe(true);
+    });
+  });
+
+  it("rejects contributor writes from non-members", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Membership gate fixture" },
+      });
+      expect(created.statusCode).toBe(200);
+      const caseId = parseCase(JSON.parse(created.body)).id;
+      const eve = await login(app, "eve", "fixture-eve-secret");
+
+      const read = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}`,
+        headers: { cookie: eve },
+      });
+      expect(read.statusCode).toBe(404);
+
+      const write = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/contributions`,
+        headers: { cookie: eve },
+        payload: { kind: "note", body: "This must not land." },
+      });
+      expect(write.statusCode).toBe(404);
+
+      const ownerRead = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/timeline`,
+        headers: { cookie: alice },
+      });
+      expect(parseTimeline(JSON.parse(ownerRead.body)).events).toHaveLength(1);
+    });
+  });
+
+  it("cuts member case reads and writes after group-role revoke", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Revoke read fixture" },
+      });
+      const caseId = parseCase(JSON.parse(created.body)).id;
+      const dave = await login(app, "dave", "fixture-dave-secret");
+
+      const revoked = await app.inject({
+        method: "DELETE",
+        url: "/api/authz/group-role-map",
+        headers: { cookie: dave },
+        payload: { group: "cn=contributors,ou=groups,dc=example,dc=test" },
+      });
+      expect(revoked.statusCode).toBe(200);
+
+      const read = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}`,
+        headers: { cookie: alice },
+      });
+      expect(read.statusCode).toBe(403);
+
+      const write = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/contributions`,
+        headers: { cookie: alice },
+        payload: { kind: "note", body: "This must not land after revoke." },
+      });
+      expect(write.statusCode).toBe(403);
     });
   });
 });

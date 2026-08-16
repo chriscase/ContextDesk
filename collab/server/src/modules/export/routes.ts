@@ -40,12 +40,17 @@ export async function registerExportRoutes(
     return {
       actor: { id: session.identity.id, username: session.identity.username },
       isAdmin: canPerform(roles, "admin"),
+      canRead: canPerform(roles, "read"),
       canWrite: canPerform(roles, "mutate"),
       canLead: canPerform(roles, "lead"),
     };
   }
 
-  function canExport(variant: string, ctx: { canWrite: boolean; canLead: boolean }): boolean {
+  function canExport(
+    variant: string,
+    ctx: { canRead: boolean; canWrite: boolean; canLead: boolean },
+  ): boolean {
+    if (!ctx.canRead) return false;
     if (variant === "share_safe") return ctx.canLead;
     return ctx.canWrite;
   }
@@ -55,6 +60,10 @@ export async function registerExportRoutes(
     if (!ctx) {
       void reply.code(401);
       return authError("unauthenticated");
+    }
+    if (!ctx.canRead) {
+      void reply.code(403);
+      return authError("forbidden");
     }
     const id = (request.params as { id: string }).id;
     const found = await deps.exporter.inventory(id, ctx.actor, ctx.isAdmin);
