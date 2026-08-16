@@ -452,7 +452,7 @@ export async function publishImportRunActivity(
   const corpusId = run.report?.corpusId;
   if (
     typeof window === "undefined" ||
-    run.outcome !== "completed" ||
+    (run.outcome !== "completed" && run.outcome !== "partial") ||
     !validCorpusId(corpusId)
   ) {
     return;

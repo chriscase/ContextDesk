@@ -10,7 +10,10 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { EngineClient } from "@contextdesk/client";
 import { EngineError } from "@contextdesk/client";
-import type { ImportRunInput } from "../../lib/activity/types";
+import {
+  activityOutcomeFromImportClass,
+  type ImportRunInput,
+} from "../../lib/activity/types";
 import { sealImportOperatorMessage } from "../../lib/importOutcome";
 import { openDirectoryDialog, openFileDialog } from "../../lib/dialogs";
 import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
@@ -222,7 +225,9 @@ export function ImportFlow({
       onRunSettled?.({
         startedAtMs,
         endedAtMs: Date.now(),
-        outcome: "completed",
+        outcome: activityOutcomeFromImportClass(
+          classifiedImportClass(report),
+        ),
         sourceKind,
         report,
       });

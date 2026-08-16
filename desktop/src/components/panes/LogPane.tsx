@@ -85,7 +85,10 @@ import { ImportActivitySummary } from "../activity/ImportActivitySummary";
 import { ActivityEventList } from "../activity/ActivityEventList";
 import { ActivityToggle } from "../activity/ActivityToggle";
 import { useActivityInspector } from "../../hooks/useActivityInspector";
-import type { ImportRunInput } from "../../lib/activity/types";
+import {
+  activityOutcomeFromImportClass,
+  type ImportRunInput,
+} from "../../lib/activity/types";
 import {
   forgetCorpusImportActivity,
   publishImportRunActivity,
@@ -946,7 +949,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       recordImportRun({
         startedAtMs,
         endedAtMs: Date.now(),
-        outcome: "completed",
+        outcome: activityOutcomeFromImportClass(r.outcome?.class),
         sourceKind: quickImportSourceKind(mode, path),
         report: r,
       });

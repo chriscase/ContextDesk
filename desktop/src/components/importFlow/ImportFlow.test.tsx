@@ -490,7 +490,7 @@ describe("ImportFlow classified outcome", () => {
     };
     vi.spyOn(client.import, "run").mockResolvedValue(report);
 
-    await toPreflight(client);
+    const { onRunSettled } = await toPreflight(client);
     fireEvent.click(
       screen.getByRole("checkbox", { name: /I understand and want to proceed/ }),
     );
@@ -503,6 +503,13 @@ describe("ImportFlow classified outcome", () => {
     expect(screen.getByText(/logs\/malformed.jsonl — malformed_structured_record/)).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Import finished" })).toBeNull();
     expect(screen.queryByText(/^Import finished — corpus/)).toBeNull();
+    expect(onRunSettled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "partial",
+        sourceKind: "directory",
+        report: expect.objectContaining({ corpusId: "partial-corpus" }),
+      }),
+    );
   });
 
   it("does not present a published report with no outcome as finished", async () => {
@@ -542,7 +549,7 @@ describe("ImportFlow classified outcome", () => {
     };
     vi.spyOn(client.import, "run").mockResolvedValue(report);
 
-    await toPreflight(client);
+    const { onRunSettled } = await toPreflight(client);
     fireEvent.click(
       screen.getByRole("checkbox", { name: /I understand and want to proceed/ }),
     );
@@ -554,6 +561,9 @@ describe("ImportFlow classified outcome", () => {
     expect(screen.getByText(/Import finished with defects \(PARTIAL\)/)).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Import finished" })).toBeNull();
     expect(screen.queryByText(/^Import finished — corpus/)).toBeNull();
+    expect(onRunSettled).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "partial" }),
+    );
   });
 
   it("surfaces a rejected ingest outcome instead of a finished import", async () => {

@@ -349,7 +349,14 @@ export function recordImportProgress(
   };
 }
 
+function importPublished(outcome: ImportRunInput["outcome"]): boolean {
+  return outcome === "completed" || outcome === "partial";
+}
+
 function terminalLabel(run: ImportRunInput): string {
+  if (run.outcome === "partial") {
+    return "Corpus published with defects (PARTIAL)";
+  }
   if (run.outcome === "completed") {
     return "Corpus published — Explorer can refresh";
   }
@@ -360,7 +367,7 @@ function terminalLabel(run: ImportRunInput): string {
 }
 
 function terminalDetail(run: ImportRunInput): string {
-  if (run.outcome === "completed" && run.report) {
+  if (importPublished(run.outcome) && run.report) {
     return [
       countLabel(run.report.lines, "event"),
       countLabel(run.report.templates, "template"),
@@ -388,13 +395,13 @@ export function settleImportActivityAttempt(
       }
     : workspaceScope();
   const status =
-    run.outcome === "completed"
+    run.outcome === "completed" || run.outcome === "partial"
       ? ("ok" as const)
       : run.outcome === "cancelled"
         ? ("cancelled" as const)
         : ("failed" as const);
   const origin =
-    run.outcome === "completed"
+    run.outcome === "completed" || run.outcome === "partial"
       ? ("governed_write" as const)
       : ("deterministic_host" as const);
   const events: ActivityEventInput[] = attempt.events.map(

@@ -542,6 +542,8 @@ export type ImportReportInput = {
   formatCounts: Record<string, number>;
   embedding?: ImportEmbeddingInput | null;
   confidence?: ImportConfidenceInput | null;
+  /** Host classified class when the run published a corpus. */
+  outcome?: { class: "complete" | "partial" | "rejected" } | null;
 };
 
 export type ImportDiagnosticInput = {
@@ -561,11 +563,32 @@ export type ImportDiagnosticInput = {
   };
 };
 
-/** One completed/failed/cancelled import attempt, as the ledger sees it. */
+/** One completed/failed/cancelled/partial import attempt, as the ledger sees it. */
+export type ImportActivityOutcome =
+  | "completed"
+  | "partial"
+  | "failed"
+  | "cancelled";
+
+/**
+ * Map the host import-outcome class onto the Activity lane.
+ *
+ * Fail-closed: only an explicit `complete` is recorded as completed.
+ * Missing or unknown class is partial, never a silent success.
+ */
+export function activityOutcomeFromImportClass(
+  cls: "complete" | "partial" | "rejected" | undefined | null,
+): ImportActivityOutcome {
+  if (cls === "complete") return "completed";
+  if (cls === "rejected") return "failed";
+  return "partial";
+}
+
+/** One completed/failed/cancelled/partial import attempt, as the ledger sees it. */
 export type ImportRunInput = {
   startedAtMs: number;
   endedAtMs: number;
-  outcome: "completed" | "failed" | "cancelled";
+  outcome: ImportActivityOutcome;
   sourceKind: "directory" | "file" | "zip" | "package" | "demo" | "unknown";
   report?: ImportReportInput | null;
   diagnostic?: ImportDiagnosticInput | null;

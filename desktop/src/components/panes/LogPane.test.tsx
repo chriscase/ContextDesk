@@ -193,6 +193,13 @@ function successfulImport(corpusId: string): LogIngestReportDto {
     tsMax: 1,
     formatCounts: { plain: 1 },
     topTemplates: [],
+    outcome: {
+      schemaId: "contextdesk.import_outcome.v1",
+      schemaVersion: 1,
+      class: "complete",
+      published: true,
+      corpusId,
+    },
   };
 }
 
@@ -1292,6 +1299,33 @@ describe("LogPane", () => {
     expect(hostMocks.clearFailedIngestDiagnostic).toHaveBeenCalledTimes(1);
     expect(document.activeElement).toBe(
       screen.getAllByRole("button", { name: "Import logs…" })[0],
+    );
+  });
+
+  it("records a malformed-records import as partial, not completed", async () => {
+    localStorage.setItem("cd-activity-inspector-mode", "compact");
+    hostMocks.confirm.mockResolvedValue(true);
+    hostMocks.openFile.mockResolvedValue("/tmp/malformed.jsonl");
+    hostMocks.ingest.mockResolvedValue({
+      ...successfulImport("partial-corpus"),
+      partial: false,
+      outcome: {
+        schemaId: "contextdesk.import_outcome.v1",
+        schemaVersion: 1,
+        class: "partial",
+        published: true,
+        corpusId: "partial-corpus",
+      },
+    });
+
+    render(<LogPane />);
+    await chooseImportMode("Import a raw log file or ZIP…");
+    const summary = await screen.findByTestId("activity-import-summary");
+    expect(summary.getAttribute("data-outcome")).toBe("partial");
+    expect(summary.getAttribute("data-outcome")).not.toBe("completed");
+    fireEvent.click(screen.getByTestId("activity-import-details-toggle"));
+    expect(screen.getByTestId("activity-import-ledger").textContent).toMatch(
+      /Coverage/,
     );
   });
 
