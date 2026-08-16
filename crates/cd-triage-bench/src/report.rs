@@ -6,7 +6,7 @@ use crate::privacy::gate_share_safe_text;
 use crate::types::{
     Adjudication, Case, DimensionVerdict, FairnessClass, Observed, PrivacyClass, ReviewPhase,
     RubricDimension, RunStatus, ScoreReview, SourceKind, StrategyIdentity, TriageRun,
-    REPORT_SCHEMA_V1,
+    REPORT_SCHEMA_V2,
 };
 
 pub use crate::review::{blinded_run_view, BlindedRunView};
@@ -37,6 +37,7 @@ pub struct ReportCounts {
     pub runs: u64,
     pub scored: u64,
     pub unscored: u64,
+    pub partial_scored_runs: u64,
     pub withheld_scored_runs: u64,
     pub withheld_adjudications: u64,
     pub failed: u64,
@@ -97,6 +98,7 @@ pub struct RunSummary {
 #[serde(rename_all = "snake_case")]
 pub enum ScoreVisibility {
     Scored,
+    Partial,
     Unscored,
     Withheld,
 }
@@ -133,6 +135,8 @@ pub struct IncomparablePair {
 #[serde(deny_unknown_fields)]
 pub struct VersionPair {
     pub strategy_name: String,
+    pub source_kind: SourceKind,
+    pub strategy_build: Observed<String>,
     pub older_version: String,
     pub newer_version: String,
     pub older_run_id: String,
@@ -295,7 +299,7 @@ pub fn build_report(
     ];
 
     let report = BacktestReport {
-        schema_id: REPORT_SCHEMA_V1.into(),
+        schema_id: REPORT_SCHEMA_V2.into(),
         privacy,
         rubric_versions: unique(adjudications.iter().map(|a| a.rubric_version.clone())),
         generated_from: identities,
@@ -341,11 +345,12 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
     ));
     out.push_str("## Counts\n\n");
     out.push_str(&format!(
-        "- cases: {}\n- groups: {}\n- runs: {} (scored {}, unscored {}, withheld {}, failed {}, partial {}, unscorable {})\n- withheld adjudications: {}\n- incomparable pairs: {}\n- version pairs: {}\n- adjudications: {}\n\n",
+        "- cases: {}\n- groups: {}\n- runs: {} (scored {}, partial-scored {}, unscored {}, withheld {}, failed {}, partial {}, unscorable {})\n- withheld adjudications: {}\n- incomparable pairs: {}\n- version pairs: {}\n- adjudications: {}\n\n",
         report.counts.cases,
         report.counts.groups,
         report.counts.runs,
         report.counts.scored,
+        report.counts.partial_scored_runs,
         report.counts.unscored,
         report.counts.withheld_scored_runs,
         report.counts.failed,
@@ -413,8 +418,10 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
         out.push_str("## Strategy version pairs\n\n");
         for pair in &report.version_pairs {
             out.push_str(&format!(
-                "- {} `{}` → `{}` (case `{}`, task `{}`)\n",
+                "- {} source `{}` build `{:?}` `{}` → `{}` (case `{}`, task `{}`)\n",
                 pair.strategy_name,
+                pair.source_kind.as_str(),
+                pair.strategy_build,
                 pair.older_version,
                 pair.newer_version,
                 pair.case_id,
@@ -509,6 +516,7 @@ impl ScoreVisibility {
     fn as_str(self) -> &'static str {
         match self {
             Self::Scored => "scored",
+            Self::Partial => "partial",
             Self::Unscored => "unscored",
             Self::Withheld => "withheld",
         }
@@ -531,6 +539,10 @@ fn report_counts(
         scored: runs
             .iter()
             .filter(|r| r.score_visibility == ScoreVisibility::Scored)
+            .count() as u64,
+        partial_scored_runs: runs
+            .iter()
+            .filter(|r| r.score_visibility == ScoreVisibility::Partial)
             .count() as u64,
         unscored: runs
             .iter()
@@ -606,10 +618,15 @@ fn run_summary(
     }
 }
 
-fn has_numeric_score(adj: &Adjudication) -> bool {
-    adj.outcomes
+fn numeric_dimensions(adjudications: &[&Adjudication], run_id: &str) -> BTreeSet<RubricDimension> {
+    adjudications
         .iter()
-        .any(|o| matches!(o.verdict, DimensionVerdict::Score { .. }))
+        .filter(|adj| adj.run_id == run_id)
+        .flat_map(|adj| adj.outcomes.iter())
+        .filter_map(|outcome| {
+            matches!(outcome.verdict, DimensionVerdict::Score { .. }).then_some(outcome.dimension)
+        })
+        .collect()
 }
 
 fn score_visibility(
@@ -617,16 +634,16 @@ fn score_visibility(
     visible: &[Adjudication],
     all: &[Adjudication],
 ) -> ScoreVisibility {
-    let world = all
-        .iter()
-        .any(|a| a.run_id == run.run_id && has_numeric_score(a));
-    let shown = visible
-        .iter()
-        .any(|a| a.run_id == run.run_id && has_numeric_score(a));
-    match (world, shown) {
-        (_, true) => ScoreVisibility::Scored,
-        (true, false) => ScoreVisibility::Withheld,
-        (false, false) => ScoreVisibility::Unscored,
+    let world = numeric_dimensions(&all.iter().collect::<Vec<_>>(), &run.run_id);
+    let shown = numeric_dimensions(&visible.iter().collect::<Vec<_>>(), &run.run_id);
+    if shown.len() == RubricDimension::all().len() {
+        ScoreVisibility::Scored
+    } else if !shown.is_empty() {
+        ScoreVisibility::Partial
+    } else if !world.is_empty() {
+        ScoreVisibility::Withheld
+    } else {
+        ScoreVisibility::Unscored
     }
 }
 
@@ -660,12 +677,17 @@ fn version_pairs(
         .iter()
         .map(|p| ordered_run_ids(&p.left_run_id, &p.right_run_id))
         .collect();
-    let mut by_key: BTreeMap<(String, String, String), Vec<&TriageRun>> = BTreeMap::new();
+    let mut by_key: BTreeMap<
+        (String, SourceKind, Observed<String>, String, String),
+        Vec<&TriageRun>,
+    > = BTreeMap::new();
     for run in runs {
         if let Observed::Known(_) = &run.strategy.version {
             by_key
                 .entry((
                     run.strategy.name.clone(),
+                    run.source_kind,
+                    run.strategy.build.clone(),
                     run.task_id.clone(),
                     run.snapshot_id.clone(),
                 ))
@@ -674,7 +696,7 @@ fn version_pairs(
         }
     }
     let mut pairs = Vec::new();
-    for ((name, task_id, snapshot_id), group) in by_key {
+    for ((name, source_kind, strategy_build, task_id, snapshot_id), group) in by_key {
         let mut group = group;
         group.sort_by_key(|a| version_of(&a.strategy));
         for window in group.windows(2) {
@@ -705,6 +727,8 @@ fn version_pairs(
                 }
                 pairs.push(VersionPair {
                     strategy_name: name.clone(),
+                    source_kind,
+                    strategy_build: strategy_build.clone(),
                     older_version: older_v.clone(),
                     newer_version: newer_v.clone(),
                     older_run_id: older.run_id.clone(),
@@ -727,6 +751,8 @@ fn version_pairs(
     pairs.sort_by(|a, b| {
         (
             &a.strategy_name,
+            &a.source_kind,
+            &a.strategy_build,
             &a.task_id,
             &a.rubric_version,
             &a.older_version,
@@ -734,6 +760,8 @@ fn version_pairs(
         )
             .cmp(&(
                 &b.strategy_name,
+                &b.source_kind,
+                &b.strategy_build,
                 &b.task_id,
                 &b.rubric_version,
                 &b.older_version,
@@ -807,7 +835,9 @@ fn numeric_score(
     };
     let mut values = Vec::new();
     for adj in adjudications.iter().filter(|a| {
-        a.run_id == run.run_id && a.rubric_version == rubric_version && a.phase == preferred_phase
+        a.run_id == run.run_id
+            && a.rubric_version == rubric_version
+            && a.phase == Some(preferred_phase)
     }) {
         if let Some(outcome) = adj.outcome(dimension) {
             if let DimensionVerdict::Score { value } = outcome.verdict {

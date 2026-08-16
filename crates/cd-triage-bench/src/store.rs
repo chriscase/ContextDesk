@@ -274,6 +274,14 @@ impl BenchStore {
         Ok(packet)
     }
 
+    pub fn get_review_packet(&self, packet_id: &str) -> BenchResult<ReviewPacket> {
+        let text = self.read_entity("review-packets", packet_id)?;
+        let packet: ReviewPacket =
+            serde_json::from_str(&text).map_err(BenchError::from_serde)?;
+        packet.validate()?;
+        Ok(packet)
+    }
+
     pub fn import_adjudication(&self, adj: Adjudication) -> BenchResult<ScoreReview> {
         let run = self.get_run(&adj.run_id)?;
         let snapshot = self.get_snapshot(&run.snapshot_id)?;
@@ -298,12 +306,54 @@ impl BenchStore {
                 "adjudication identities do not match the run".into(),
             ));
         }
-        if adj.phase == ReviewPhase::Diagnosis {
+        let phase = adj.phase.ok_or_else(|| {
+            BenchError::Schema(
+                "new adjudications must declare phase and bind a generated review packet".into(),
+            )
+        })?;
+        let packet_id = adj.review_packet_id.as_deref().ok_or_else(|| {
+            BenchError::Schema(
+                "new adjudications must declare phase and bind a generated review packet".into(),
+            )
+        })?;
+        if adj.schema_id != crate::types::ADJUDICATION_SCHEMA_V2 {
+            return Err(BenchError::Schema(
+                "new adjudications must use adjudication.v2 when packet-bound".into(),
+            ));
+        }
+        let packet = self.get_review_packet(packet_id)?;
+        if packet.phase != phase
+            || packet.case_id != adj.case_id
+            || packet.task_id != adj.task_id
+            || packet.snapshot_id != adj.snapshot_id
+            || packet.run_id != adj.run_id
+            || packet.blinding != adj.blinding
+        {
+            return Err(BenchError::Integrity(
+                "adjudication does not match its generated review packet".into(),
+            ));
+        }
+        if phase == ReviewPhase::Diagnosis {
             let existing = self.load_adjudications()?;
-            if !run_has_support_adjudication(&existing, &adj.run_id) {
+            let diagnosis_has_prior_support = existing.iter().any(|support| {
+                support.run_id == adj.run_id
+                    && support.reviewer == adj.reviewer
+                    && support.rubric_version == adj.rubric_version
+                    && support.phase == Some(ReviewPhase::Support)
+                    && support
+                        .created_at
+                        .parse::<chrono::DateTime<chrono::FixedOffset>>()
+                        .ok()
+                        .zip(
+                            adj.created_at
+                                .parse::<chrono::DateTime<chrono::FixedOffset>>()
+                                .ok(),
+                        )
+                        .is_some_and(|(support_at, diagnosis_at)| support_at <= diagnosis_at)
+            });
+            if !diagnosis_has_prior_support {
                 return Err(BenchError::Schema(
-                    "diagnosis-phase adjudication requires a recorded support-phase review first"
-                        .into(),
+                    "diagnosis-phase adjudication requires a prior support-phase review by the same reviewer and rubric".into(),
                 ));
             }
         }

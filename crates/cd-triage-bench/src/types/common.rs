@@ -11,10 +11,13 @@ pub const TASK_SCHEMA_V1: &str = "contextdesk.triage_bench.evaluation_task.v1";
 pub const PACKET_SCHEMA_V1: &str = "contextdesk.triage_bench.task_packet.v1";
 pub const REVIEW_PACKET_SCHEMA_V1: &str = "contextdesk.triage_bench.review_packet.v1";
 pub const RUN_SCHEMA_V1: &str = "contextdesk.triage_bench.triage_run.v1";
+pub const RUN_SCHEMA_V2: &str = "contextdesk.triage_bench.triage_run.v2";
 pub const RUN_IMPORT_SCHEMA_V1: &str = "contextdesk.triage_bench.run_import.v1";
 pub const ADJUDICATION_SCHEMA_V1: &str = "contextdesk.triage_bench.adjudication.v1";
+pub const ADJUDICATION_SCHEMA_V2: &str = "contextdesk.triage_bench.adjudication.v2";
 pub const SCORE_SCHEMA_V1: &str = "contextdesk.triage_bench.score_review.v1";
 pub const REPORT_SCHEMA_V1: &str = "contextdesk.triage_bench.backtest_report.v1";
+pub const REPORT_SCHEMA_V2: &str = "contextdesk.triage_bench.backtest_report.v2";
 pub const RUBRIC_V1: &str = "contextdesk.triage_bench.rubric.v1";
 pub const RUBRIC_V2: &str = "contextdesk.triage_bench.rubric.v2";
 
@@ -65,7 +68,7 @@ impl Completeness {
 }
 
 /// Observed value that can be genuinely unknown. Distinct from zero or empty.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(tag = "status", content = "value", rename_all = "snake_case")]
 pub enum Observed<T> {
     #[default]
