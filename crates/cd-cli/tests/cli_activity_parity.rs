@@ -10,12 +10,30 @@ use std::sync::Arc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+/// Isolated binary invocation.
+///
+/// `$HOME` alone is not isolation: `dirs::home_dir()` reads it on Unix but
+/// uses `FOLDERID_Profile` on Windows and ignores it entirely. Without
+/// `--data-dir`, every Windows test in this file (and every earlier
+/// `cd-cli` integration binary in the same job) shares the runner profile
+/// — `cli-state.json` plus pretty-printed session files — and a bare
+/// `chat` without `--new` resumes that leftover session. A racy or
+/// concatenated session parse surfaces as `error.kind: internal` /
+/// `serde: trailing characters at line N`. `--data-dir` is the documented
+/// cross-platform seam: it bypasses `dirs::home_dir()`. `HOME` stays set
+/// so a Unix-only path that still consults it cannot escape either.
 fn cli(home: &Path) -> Command {
     let mut cmd =
         Command::cargo_bin("contextdesk").expect("contextdesk binary built by this workspace");
     cmd.env("HOME", home);
     cmd.env("NO_COLOR", "1");
+    cmd.arg("--data-dir").arg(utf8_path(home));
     cmd
+}
+
+fn utf8_path(path: &Path) -> &str {
+    path.to_str()
+        .expect("isolated temp path must be UTF-8 (ASCII on CI runners)")
 }
 
 fn write_profile(home: &Path, server_uri: &str, tools: bool) -> PathBuf {
@@ -42,6 +60,9 @@ fn write_profile(home: &Path, server_uri: &str, tools: bool) -> PathBuf {
 fn parse_jsonl(stdout: &[u8]) -> Vec<Value> {
     let text = String::from_utf8_lossy(stdout);
     let mut lines = Vec::new();
+    // `str::lines` splits on `\n` and `\r\n` alike — a Windows JSONL
+    // writer must still emit one JSON object per line, not a pretty
+    // envelope plus leftovers.
     for (i, raw) in text.lines().enumerate() {
         if raw.trim().is_empty() {
             continue;
@@ -111,11 +132,12 @@ async fn activity_summary_json_contains_shared_record() {
     let output = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "chat",
             "--activity",
             "summary",
+            "--new",
             "hi there",
         ])
         .output()
@@ -217,11 +239,12 @@ async fn activity_causal_phases_on_tool_round_are_monotonic() {
     let output = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "chat",
             "--activity",
             "summary",
+            "--new",
             "--auto-approve",
             "search knowledge",
         ])
@@ -306,11 +329,12 @@ async fn jsonl_activity_lines_carry_stable_meta_and_type() {
         cli(home.path())
             .args([
                 "--app-config",
-                app_config_path.to_str().unwrap(),
+                utf8_path(&app_config_path),
                 "--jsonl",
                 "chat",
                 "--activity",
                 "summary",
+                "--new",
                 "parity probe",
             ])
             .output()
@@ -359,7 +383,7 @@ async fn dry_run_activity_and_trace_share_capture() {
     let output = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "chat",
             "--dry-run",
@@ -367,6 +391,7 @@ async fn dry_run_activity_and_trace_share_capture() {
             "summary",
             "--trace",
             "summary",
+            "--new",
             "what is in context?",
         ])
         .output()
@@ -409,9 +434,9 @@ async fn linked_tools_unavailable_projects_truthful_failed_activity() {
     let import = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "import",
-            logs.to_str().unwrap(),
+            utf8_path(&logs),
         ])
         .output()
         .expect("import");
@@ -419,7 +444,7 @@ async fn linked_tools_unavailable_projects_truthful_failed_activity() {
     let list = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "corpus",
             "list",
@@ -447,7 +472,7 @@ async fn linked_tools_unavailable_projects_truthful_failed_activity() {
     let output = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "chat",
             "--activity",
@@ -608,10 +633,10 @@ async fn linked_log_turn_returns_exact_grounded_evidence_and_activity_lifecycle(
     let imported = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "import",
-            logs.to_str().unwrap(),
+            utf8_path(&logs),
         ])
         .output()
         .expect("import fixture");
@@ -629,7 +654,7 @@ async fn linked_log_turn_returns_exact_grounded_evidence_and_activity_lifecycle(
     let output = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "chat",
             "--activity",
@@ -716,10 +741,10 @@ async fn contribution_mode_projects_truthful_entry_degradation_in_activity() {
     let imported = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "import",
-            logs.to_str().unwrap(),
+            utf8_path(&logs),
         ])
         .output()
         .expect("import fixture");
@@ -737,7 +762,7 @@ async fn contribution_mode_projects_truthful_entry_degradation_in_activity() {
     let output = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "chat",
             "--activity",
@@ -800,7 +825,7 @@ async fn hard_provider_failure_returns_bounded_failed_activity_in_json_and_jsonl
         let output = cli(home.path())
             .args([
                 "--app-config",
-                app_config_path.to_str().unwrap(),
+                utf8_path(&app_config_path),
                 mode,
                 "chat",
                 "--activity",
@@ -873,16 +898,12 @@ async fn session_resume_persists_and_continues() {
         .await;
 
     let home = tempfile::tempdir().unwrap();
-    let data = home.path().join("data");
-    std::fs::create_dir_all(&data).unwrap();
     let app_config_path = write_profile(home.path(), &server.uri(), false);
 
     let first = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
-            "--data-dir",
-            data.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "chat",
             "--activity",
@@ -904,9 +925,7 @@ async fn session_resume_persists_and_continues() {
     let second = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
-            "--data-dir",
-            data.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "chat",
             "--activity",
@@ -969,7 +988,7 @@ async fn cli_context_selection_reaches_provider_only_when_explicit() {
         let mut command = cli(home.path());
         command.args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--json",
             "chat",
             "--new",
@@ -1010,7 +1029,7 @@ fn activity_full_without_ack_refuses() {
     let output = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--jsonl",
             "chat",
             "--activity",
@@ -1119,7 +1138,7 @@ async fn non_interactive_permission_denies_without_auto_approve() {
     let output = cli(home.path())
         .args([
             "--app-config",
-            app_config_path.to_str().unwrap(),
+            utf8_path(&app_config_path),
             "--jsonl",
             "chat",
             "--activity",
