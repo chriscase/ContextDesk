@@ -92,23 +92,62 @@ grep -qx "cd-core/doc" "$TMP/units" || fail "doc tests are missing from the plan
 
 # Lib split: the unsplitted parent must not be a run unit, children must exist,
 # and compile-args must strip the filter so `--no-run` stays valid.
+# Four complementary children replace one parent (log_analysis + runtime +
+# services + leftover other) so the former 1485-test leftover cannot sit
+# alone on one shard.
 grep -qx "cd-core/lib" "$TMP/base" || fail "cd-core/lib must remain a cargo test target"
 grep -qx "cd-core/lib" "$TMP/units" && fail "cd-core/lib must not run unsplitted (would pile onto one shard)"
 grep -qx "cd-core/lib/log_analysis" "$TMP/units" || fail "cd-core/lib/log_analysis missing"
+grep -qx "cd-core/lib/runtime" "$TMP/units" || fail "cd-core/lib/runtime missing"
+grep -qx "cd-core/lib/services" "$TMP/units" || fail "cd-core/lib/services missing"
 grep -qx "cd-core/lib/other" "$TMP/units" || fail "cd-core/lib/other missing"
-[ $((BASE_COUNT + 1)) -eq "$UNIT_COUNT" ] ||
-  fail "lib split should add exactly one extra shard unit ($BASE_COUNT base -> $UNIT_COUNT units)"
+[ $((BASE_COUNT + 3)) -eq "$UNIT_COUNT" ] ||
+  fail "lib split should add three extra shard units ($BASE_COUNT base -> $UNIT_COUNT units)"
 
 [ "$(sh "$PLAN" args cd-core/lib/log_analysis)" = "-p cd-core --lib -- log_analysis::" ] ||
   fail "log_analysis lib-split selector"
-[ "$(sh "$PLAN" args cd-core/lib/other)" = "-p cd-core --lib -- --skip log_analysis::" ] ||
-  fail "other lib-split selector"
+RUNTIME_ARGS=$(sh "$PLAN" args cd-core/lib/runtime)
+printf '%s\n' "$RUNTIME_ARGS" | grep -q -- '-- agent::' || fail "runtime selector must match agent::"
+printf '%s\n' "$RUNTIME_ARGS" | grep -q -- 'tool_host::' || fail "runtime selector must match tool_host::"
+printf '%s\n' "$RUNTIME_ARGS" | grep -q -- '--skip' && fail "runtime selector must be match, not skip"
+SERVICES_ARGS=$(sh "$PLAN" args cd-core/lib/services)
+printf '%s\n' "$SERVICES_ARGS" | grep -q -- 'incident_evidence::' || fail "services selector must match incident_evidence::"
+OTHER_ARGS=$(sh "$PLAN" args cd-core/lib/other)
+printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip log_analysis::' || fail "other leftover must skip log_analysis::"
+printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip agent::' || fail "other leftover must skip agent::"
+printf '%s\n' "$OTHER_ARGS" | grep -q -- '--skip chat::' || fail "other leftover must skip chat::"
 [ "$(sh "$PLAN" compile-args cd-core/lib/log_analysis)" = "-p cd-core --lib" ] ||
   fail "compile-args must strip the log_analysis filter"
+[ "$(sh "$PLAN" compile-args cd-core/lib/runtime)" = "-p cd-core --lib" ] ||
+  fail "compile-args must strip the runtime match filters"
+[ "$(sh "$PLAN" compile-args cd-core/lib/services)" = "-p cd-core --lib" ] ||
+  fail "compile-args must strip the services match filters"
 [ "$(sh "$PLAN" compile-args cd-core/lib/other)" = "-p cd-core --lib" ] ||
-  fail "compile-args must strip the --skip filter"
+  fail "compile-args must strip the --skip filters"
 [ "$(sh "$PLAN" compile-args cd-core/test/golden_retrieval)" = "-p cd-core --test golden_retrieval" ] ||
   fail "compile-args for an integration target"
+
+# Weight-aware assignment: at the CI width, known heavies must not share a
+# shard. Alphabetical round-robin put cd-core/lib/other on shard 8 with 13
+# companions (hosted run 31906598802 timed out at 65m).
+CI_SHARDS=8
+sh "$PLAN" plan --shards "$CI_SHARDS" >"$TMP/plan8"
+heavies='cd-core/test/real_format_exception_episode_acceptance_lab
+cd-core/lib/other
+cd-core/lib/runtime
+cd-core/lib/log_analysis
+cd-core/lib/services
+cd-core/test/duplicate_rendering_acceptance_lab'
+heavy_shards=$(
+  printf '%s\n' "$heavies" | while IFS= read -r u; do
+    awk -F'\t' -v u="$u" '$2 == u { print $1 }' "$TMP/plan8"
+  done | LC_ALL=C sort
+)
+[ "$(printf '%s\n' "$heavy_shards" | grep -c .)" -eq 6 ] || fail "expected six heavy units in the 8-shard plan"
+[ "$(printf '%s\n' "$heavy_shards" | uniq -d | grep -c . || true)" -eq 0 ] ||
+  fail "two heavy units share a shard under the 8-shard plan"
+sh "$PLAN" plan --shards "$CI_SHARDS" >"$TMP/plan8.again"
+cmp -s "$TMP/plan8" "$TMP/plan8.again" || fail "weighted shard plan is not deterministic"
 
 # Complementary filters over a fixture list of rustc test names: no overlap,
 # no dropped name. This is the coverage proof that the two lib units equal

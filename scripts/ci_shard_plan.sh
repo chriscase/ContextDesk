@@ -43,9 +43,11 @@ Usage:
 Options:
   --shards N   number of shards (default: $CD_SHARD_COUNT, else 4)
 
-The partition is round-robin over the canonically sorted unit list, so it is a
-pure function of the commit: the same tree always produces the same plan on
-every runner and on a developer laptop.
+The partition is a pure function of the commit: heaviest units first, each
+placed on the currently lightest shard (lowest index on a tie). Leftover
+light units fill the light shards instead of stacking onto one leftover-heavy
+bucket. The same tree always produces the same plan on every runner and on a
+developer laptop.
 EOF
 }
 
@@ -63,16 +65,49 @@ metadata() {
 # unmapped-target guard below cannot drift apart.
 LIB_KINDS='["lib","rlib","dylib","cdylib","staticlib","proc-macro"]'
 
-# Complementary filters for oversized `--lib` binaries.  Hosted evidence: shard
-# 1 uniquely ran `cd-core/lib` and was the only shard that lost its runner;
-# surviving shards' tests were seconds except one 525s integration target.
-# These two units together are exactly `cargo test -p cd-core --lib`.
+# Complementary filters for oversized `--lib` binaries.  Hosted evidence:
+# shard 1 uniquely ran unsplitted `cd-core/lib` and lost its runner; later
+# `cd-core/lib/other` (`--skip log_analysis::`, 1485 #[test]s) landed on
+# shard 8 via alphabetical round-robin and that leftover-heavy bucket timed
+# out at 65m on run 31906598802 while shards 1-7 finished in 22-37m.
+#
+# Four complementary units together are exactly `cargo test -p cd-core --lib`.
+# `log_analysis` is the measured 367s / 725-test slice. The former `other`
+# leftover is split into `runtime` + `services` + a smaller `other` so no
+# single lib unit keeps ~1500 tests. Match filters are OR; the skip child
+# must list every match filter (verify fails closed if it does not).
 #
 # Columns: parent_unit, child_suffix, mode (match|skip), filter
+# Filter may be space-separated prefixes (match = OR, skip = repeated --skip).
 lib_splits() {
   printf '%s\n' \
     'cd-core/lib	log_analysis	match	log_analysis::' \
-    'cd-core/lib	other	skip	log_analysis::'
+    'cd-core/lib	runtime	match	agent:: capability_qualification:: fast_triage:: investigations:: memory:: multi_model:: tool_host::' \
+    'cd-core/lib	services	match	chat:: confluence_ro:: embed:: harvest:: incident_evidence:: incident_evidence_archive:: investigation_answer:: model_curation:: normalized_log_events:: quality_eval:: research:: sessions:: sql_ro:: turn_trace:: web_research::' \
+    'cd-core/lib	other	skip	agent:: capability_qualification:: chat:: confluence_ro:: embed:: fast_triage:: harvest:: incident_evidence:: incident_evidence_archive:: investigation_answer:: investigations:: log_analysis:: memory:: model_curation:: multi_model:: normalized_log_events:: quality_eval:: research:: sessions:: sql_ro:: tool_host:: turn_trace:: web_research::'
+}
+
+# Hosted test-wall seconds from run 31906598802 (cold Ubuntu shards 1-7).
+# Unmeasured leftover lib splits use conservative estimates from #[test]
+# counts relative to measured log_analysis (725 tests / 367s), padded
+# because leftover modules were the slow side of that run. Default 8s
+# covers the many sub-10s units so leftovers fill light shards.
+#
+# A unit at or above HEAVY_WEIGHT is a "heavy": when there are at least
+# that many shards, verify refuses two heavies on one shard.
+HEAVY_WEIGHT=180
+
+weight_for() {
+  case $1 in
+    cd-core/test/real_format_exception_episode_acceptance_lab) printf '%s\n' 660 ;;
+    cd-core/lib/other) printf '%s\n' 520 ;;
+    cd-core/lib/runtime) printf '%s\n' 400 ;;
+    cd-core/lib/log_analysis) printf '%s\n' 367 ;;
+    cd-core/lib/services) printf '%s\n' 340 ;;
+    cd-core/test/duplicate_rendering_acceptance_lab) printf '%s\n' 189 ;;
+    cd-core/test/log_lab) printf '%s\n' 55 ;;
+    *) printf '%s\n' 8 ;;
+  esac
 }
 
 # Every testable target in the root workspace, in a canonical, locale-stable
@@ -164,10 +199,31 @@ shard_count() {
   printf '%s\n' "$count"
 }
 
-# Round-robin over the canonical order: index N goes to shard (N mod shards)+1.
+# Greedy multiprocessor scheduling: heaviest unit first, always onto the
+# currently lightest shard (lowest index on a tie). Leftover light units
+# therefore fill the light shards instead of piling onto the shard that
+# already drew cd-core/lib/other — that round-robin leftover-heavy bucket
+# is what timed out at 65m on hosted run 31906598802 (shard 8).
 plan() {
   shards=$1
-  units | awk -v shards="$shards" '{ printf "%d\t%s\n", (NR - 1) % shards + 1, $0 }'
+  units | while IFS= read -r unit; do
+    [ -n "$unit" ] || continue
+    printf '%s\t%s\n' "$(weight_for "$unit")" "$unit"
+  done |
+    LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2 |
+    awk -F'\t' -v shards="$shards" '
+      BEGIN { for (s = 1; s <= shards; s++) load[s] = 0 }
+      NF >= 2 {
+        w = $1 + 0
+        u = $2
+        best = 1
+        for (s = 2; s <= shards; s++) {
+          if (load[s] < load[best]) best = s
+        }
+        load[best] += w
+        printf "%d\t%s\n", best, u
+      }
+    '
 }
 
 shard() {
@@ -198,8 +254,21 @@ args_for() {
       filter=$(printf '%s\n' "$row" | cut -f4)
       [ -n "$filter" ] || die "empty filter for lib split '$unit'"
       case $mode in
-        match) printf -- '-p %s --lib -- %s\n' "$pkg" "$filter" ;;
-        skip) printf -- '-p %s --lib -- --skip %s\n' "$pkg" "$filter" ;;
+        match)
+          printf -- '-p %s --lib --' "$pkg"
+          # Word-split is intentional: filters are space-separated prefixes.
+          for f in $filter; do
+            printf ' %s' "$f"
+          done
+          printf '\n'
+          ;;
+        skip)
+          printf -- '-p %s --lib --' "$pkg"
+          for f in $filter; do
+            printf ' --skip %s' "$f"
+          done
+          printf '\n'
+          ;;
         *) die "unknown lib-split mode '$mode' in '$unit'" ;;
       esac
       ;;
@@ -253,17 +322,49 @@ verify() {
     failures=$((failures + 1))
   fi
 
-  # 3. Every shard index in 1..N must own at least one unit.
+  # 3. Every shard index in 1..N must own at least one unit. Print the
+  #    hosted test-weight so a leftover-heavy pile is visible in the log.
   i=1
+  heavy_count=0
   while [ "$i" -le "$shards" ]; do
-    n=$(awk -F'\t' -v want="$i" '$1 == want { c++ } END { print c + 0 }' "$tmp/plan")
+    n=0
+    w=0
+    heavies_here=0
+    while IFS= read -r unit; do
+      [ -n "$unit" ] || continue
+      n=$((n + 1))
+      uw=$(weight_for "$unit")
+      w=$((w + uw))
+      if [ "$uw" -ge "$HEAVY_WEIGHT" ]; then
+        heavies_here=$((heavies_here + 1))
+        heavy_count=$((heavy_count + 1))
+      fi
+    done <<EOF
+$(awk -F'\t' -v want="$i" '$1 == want { print $2 }' "$tmp/plan")
+EOF
     if [ "$n" -eq 0 ]; then
       echo "error: shard $i is empty; reduce the shard count" >&2
       failures=$((failures + 1))
     fi
-    echo "  shard $i/$shards: $n units"
+    echo "  shard $i/$shards: $n units  test-weight=$w"
+    printf '%s\n' "$heavies_here" >"$tmp/heavies-$i"
     i=$((i + 1))
   done
+
+  # 3b. When there are enough shards for every heavy, two heavies must not
+  #     share a shard. Alphabetical round-robin put cd-core/lib/other on
+  #     shard 8 with 13 companions; that leftover-heavy bucket hit 65m.
+  if [ "$heavy_count" -gt 0 ] && [ "$shards" -ge "$heavy_count" ]; then
+    i=1
+    while [ "$i" -le "$shards" ]; do
+      h=$(cat "$tmp/heavies-$i")
+      if [ "$h" -gt 1 ]; then
+        echo "error: shard $i carries $h heavy units (weight >= $HEAVY_WEIGHT); leftover-heavy pile" >&2
+        failures=$((failures + 1))
+      fi
+      i=$((i + 1))
+    done
+  fi
 
   # 4. No target that `cargo test` would run may be left unmapped.
   unmapped=$(unmapped_targets)
@@ -315,11 +416,39 @@ verify() {
     fi
   done <"$tmp/splits"
 
+  # 7. The skip leftover for a parent must list every match filter so the
+  #    complementary children remain an exact cover of `--lib`.
+  if ! awk -F'\t' '
+    $3 == "match" { matchf[$1] = matchf[$1] " " $4 }
+    $3 == "skip" { skipf[$1] = $4; skipn[$1]++ }
+    END {
+      err = 0
+      for (p in matchf) {
+        if (skipn[p] != 1) {
+          printf "error: lib split parent %s needs exactly one skip leftover\n", p
+          err = 1
+          continue
+        }
+        n = split(matchf[p], a, /[[:space:]]+/)
+        for (i = 1; i <= n; i++) {
+          if (a[i] == "") continue
+          if ((" " skipf[p] " ") !~ (" " a[i] " ")) {
+            printf "error: leftover skip for %s is missing match filter %s\n", p, a[i]
+            err = 1
+          }
+        }
+      }
+      exit err
+    }
+  ' "$tmp/splits"; then
+    failures=$((failures + 1))
+  fi
+
   if [ "$failures" -ne 0 ]; then
     echo "shard plan verification FAILED ($failures problem(s))" >&2
     exit 1
   fi
-  echo "shard plan verified: exhaustive, disjoint, no empty shard"
+  echo "shard plan verified: exhaustive, disjoint, no empty shard, no leftover-heavy pile"
 }
 
 [ $# -ge 1 ] || {

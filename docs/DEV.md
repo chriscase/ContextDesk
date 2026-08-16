@@ -139,18 +139,22 @@ CI therefore:
    (hosted run `31851734335`).
 2. Runs the same suite as `CD_SHARD_COUNT` (currently **8**) shards that
    restore that cache (`save-if: false`, never Swatinem `lookup-only`).
-   `cd-core/lib` is executed as two complementary filters (`log_analysis::`
-   and `--skip log_analysis::`) so the heavy library binary is not pinned to
-   shard 1.
+   `cd-core/lib` is executed as four complementary filters (`log_analysis::`,
+   a `runtime` match group, a `services` match group, and a skip leftover)
+   so the heavy library binary is not pinned to one shard.
 
    The count went 4 → 8 because the shard drawing `cd-core/lib/other` was
    cancelled at the 60-minute job budget on two consecutive runs while the
    other three finished in 16–33 minutes. A shard pays build **and** test
    cost — a warm hosted shard reported `build time: 710s` of `total time:
    1203s` — so only the test half shrinks as units spread, which is why the
-   count was doubled rather than nudged to 6. If the `cd-core/lib/other`
-   shard overruns again, split it with a `lib_splits` entry in
-   `scripts/ci_shard_plan.sh` rather than raising the count further.
+   count was doubled rather than nudged to 6. Alphabetical round-robin at 8
+   shards still put that leftover (`--skip log_analysis::`, 1485 `#[test]`s)
+   on shard 8 with 13 companions; hosted run `31906598802` cancelled that
+   leftover-heavy bucket at 65 minutes while shards 1–7 finished in 22–37
+   minutes. The plan now splits the leftover and assigns by hosted
+   test-weight (heaviest first, onto the lightest shard) rather than raising
+   the count or the job timeout.
 3. Aggregates with `scripts/ci_aggregate_shards.sh`, which fails closed on a
    missing, failed, incomplete, or truncated shard, and on any unit no shard
    claimed.
@@ -171,9 +175,9 @@ Properties worth knowing:
   shard reported. Unit tests (`--lib`, including complementary `cd-core/lib`
   filters), binary unit tests (`--bins`), doc tests (`--doc`), and every
   integration target are all units.
-- **The partition is deterministic** — round-robin over a canonically sorted
-  unit list — so a shard reproduces identically on a laptop:
-  `sh scripts/ci_run_shard.sh --shard 2 --shards 8`.
+- **The partition is deterministic** — heaviest units first, each placed on
+  the currently lightest shard — so a shard reproduces identically on a
+  laptop: `sh scripts/ci_run_shard.sh --shard 2 --shards 8`.
 - **Cancellation diagnostics:** a step timeout or job cancel SIGTERM's
   `ci_run_shard.sh` while the VM is still up; the trap writes `status.json`
   and `if: always()` uploads `rust-ubuntu-shard-N` (14-day retention). A VM

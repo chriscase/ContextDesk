@@ -30,12 +30,13 @@ env:
   #
   # 8 rather than 6 because a shard's cost is build + tests and only the test
   # half shrinks when units are spread: hosted shard 4 reported `build time:
-  # 710s` of a `total time: 1203s` on a warm cache. At 6 shards the
-  # `cd-core/lib/other` shard still draws 19 of 116 units, which lands near the
-  # 50-minute step timeout; at 8 it draws 15. If that shard ever overruns
-  # again, the next lever is a `lib_splits` entry for `cd-core/lib/other` in
-  # scripts/ci_shard_plan.sh — the same mechanism that already split
-  # `cd-core/lib` into `log_analysis` and `other` — not a further count bump.
+  # 710s` of a `total time: 1203s` on a warm cache. Alphabetical round-robin
+  # at 8 shards still put the leftover `cd-core/lib/other` (1485 #[test]s)
+  # on shard 8 with 13 companions; run 31906598802 cancelled that leftover-
+  # heavy bucket at 65m while shards 1-7 finished in 22-37m. The plan now
+  # splits that leftover (`runtime` + `services` + smaller `other`) and
+  # assigns by hosted test-weight so heavies do not share a shard. Do not
+  # raise the count or the job timeout to paper over a pile.
   CD_SHARD_COUNT: "8"
 
 # Keep every main-branch run, but stop spending runner time on an obsolete PR
@@ -244,10 +245,11 @@ jobs:
     needs: [rust-ubuntu]
     runs-on: ubuntu-latest
     # Tests only, after the warmup job has compiled. 50 minutes is enough for
-    # the known 525s integration target plus `cd-core/lib` splits, and is
-    # below the ~86-96 minute hosted-runner-loss window from runs
-    # 31828397526 / 31835229724. A step timeout (below) leaves the runner
-    # alive so always() diagnostics can upload.
+    # one isolated heavy (660s lab or one lib leftover split) plus cold
+    # build, and is below the ~86-96 minute hosted-runner-loss window from
+    # runs 31828397526 / 31835229724. A step timeout (below) leaves the
+    # runner alive so always() diagnostics can upload. Do not raise this
+    # to hide a leftover-heavy pile — rebalance scripts/ci_shard_plan.sh.
     timeout-minutes: 60
     strategy:
       fail-fast: false
