@@ -264,7 +264,7 @@ impl Seeded {
             "adj-{}.json",
             value["reviewer"].as_str().unwrap_or("r")
         ));
-        write_json(&path, value);
+        write_json(&path, &value);
         let out = bench()
             .env("HOME", &self.home_file)
             .args([
