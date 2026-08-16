@@ -3,8 +3,8 @@
 use crate::error::{BenchError, BenchResult};
 use crate::store::{BenchStore, PutRunOutcome};
 use crate::types::{
-    run_fingerprint, Completeness, Observed, PromptWorkflow, RawOutput, RunImport,
-    StrategyIdentity, TriageRun, RUN_SCHEMA_V1,
+    Completeness, Observed, PromptWorkflow, RawOutput, RunImport,
+    StrategyIdentity, TriageRun, RUN_SCHEMA_V2,
 };
 
 /// Result of attempting to import a run.
@@ -30,16 +30,7 @@ pub fn import_run(
     }
     let task = store.get_task(&document.task_id)?;
     let digest = store.put_blob(raw_bytes)?;
-    let fingerprint = run_fingerprint(
-        &task.task_id,
-        &task.snapshot_id,
-        document.source_kind,
-        &document.strategy.name,
-        &document.strategy.version,
-        &digest.hex,
-        &document.fairness,
-    )?;
-    let run_id = format!("run-{fingerprint}");
+    let run_id = String::new();
     let near_duplicate_of = find_near_duplicate(store, &digest.hex, &run_id)?;
     let encoding = if std::str::from_utf8(raw_bytes).is_ok() {
         "utf-8"
@@ -47,8 +38,8 @@ pub fn import_run(
         "binary"
     };
 
-    let run = TriageRun {
-        schema_id: RUN_SCHEMA_V1.into(),
+    let mut run = TriageRun {
+        schema_id: RUN_SCHEMA_V2.into(),
         run_id,
         privacy: document.privacy,
         case_id: task.case_id.clone(),
@@ -73,6 +64,7 @@ pub fn import_run(
         created_at: document.created_at.clone(),
         near_duplicate_of: near_duplicate_of.clone(),
     };
+    run.run_id = format!("run-{}", run.fingerprint()?);
 
     match store.put_run(&run)? {
         PutRunOutcome::Duplicate { run_id } => Ok(ImportOutcome::Duplicate { run_id }),

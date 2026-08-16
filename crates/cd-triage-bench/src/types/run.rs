@@ -3,7 +3,7 @@
 use super::common::{
     require_schema, sha256_hex, validate_bounded_string, validate_id, validate_rfc3339,
     Completeness, ContentDigest, Observed, PrivacyClass, MAX_CLAIMS, MAX_RAW_INLINE_BYTES,
-    MAX_STRING_BYTES, RUN_IMPORT_SCHEMA_V1, RUN_SCHEMA_V1,
+    MAX_STRING_BYTES, RUN_IMPORT_SCHEMA_V1, RUN_SCHEMA_V1, RUN_SCHEMA_V2,
 };
 use crate::canonical::to_canonical_json;
 use crate::error::{BenchError, BenchResult};
@@ -212,7 +212,7 @@ pub struct TriageRun {
 }
 
 #[derive(Serialize)]
-struct RunFingerprintBody<'a> {
+struct LegacyRunFingerprintBody<'a> {
     task_id: &'a str,
     snapshot_id: &'a str,
     source_kind: SourceKind,
@@ -220,6 +220,28 @@ struct RunFingerprintBody<'a> {
     strategy_version: &'a Observed<String>,
     raw_digest: &'a str,
     fairness: &'a FairnessClass,
+}
+
+#[derive(Serialize)]
+struct RunIdentityFingerprintBody<'a> {
+    task_id: &'a str,
+    snapshot_id: &'a str,
+    source_kind: SourceKind,
+    strategy_name: &'a str,
+    strategy_version: &'a Observed<String>,
+    strategy_build: &'a Observed<String>,
+    raw_digest: &'a str,
+    prompt_workflow: &'a PromptWorkflow,
+    claims: &'a [ClaimedCitation],
+    timing: &'a Observed<Timing>,
+    cost: &'a Observed<Cost>,
+    uncertainty: &'a Observed<String>,
+    fairness: &'a FairnessClass,
+    status: RunStatus,
+    privacy: PrivacyClass,
+    operator: &'a str,
+    importer: &'a Option<String>,
+    created_at: &'a str,
 }
 
 impl TriageRun {
@@ -230,19 +252,30 @@ impl TriageRun {
     }
 
     pub fn fingerprint(&self) -> BenchResult<String> {
-        run_fingerprint(
-            &self.task_id,
-            &self.snapshot_id,
-            self.source_kind,
-            &self.strategy.name,
-            &self.strategy.version,
-            &self.raw_output.digest.hex,
-            &self.fairness,
-        )
+        match self.schema_id.as_str() {
+            RUN_SCHEMA_V1 => legacy_run_fingerprint(
+                &self.task_id,
+                &self.snapshot_id,
+                self.source_kind,
+                &self.strategy.name,
+                &self.strategy.version,
+                &self.raw_output.digest.hex,
+                &self.fairness,
+            ),
+            RUN_SCHEMA_V2 => run_identity_fingerprint(self),
+            schema => Err(BenchError::Schema(format!(
+                "unsupported triage run schema {schema}"
+            ))),
+        }
     }
 
     pub fn validate(&self) -> BenchResult<()> {
-        require_schema(&self.schema_id, RUN_SCHEMA_V1)?;
+        if self.schema_id != RUN_SCHEMA_V1 && self.schema_id != RUN_SCHEMA_V2 {
+            return Err(BenchError::Schema(format!(
+                "triage run schema must be {RUN_SCHEMA_V1} or {RUN_SCHEMA_V2}, got {}",
+                self.schema_id
+            )));
+        }
         validate_id("run_id", &self.run_id)?;
         validate_id("case_id", &self.case_id)?;
         validate_id("task_id", &self.task_id)?;
@@ -290,7 +323,27 @@ pub fn run_fingerprint(
     raw_digest_hex: &str,
     fairness: &FairnessClass,
 ) -> BenchResult<String> {
-    let body = RunFingerprintBody {
+    legacy_run_fingerprint(
+        task_id,
+        snapshot_id,
+        source_kind,
+        strategy_name,
+        strategy_version,
+        raw_digest_hex,
+        fairness,
+    )
+}
+
+fn legacy_run_fingerprint(
+    task_id: &str,
+    snapshot_id: &str,
+    source_kind: SourceKind,
+    strategy_name: &str,
+    strategy_version: &Observed<String>,
+    raw_digest_hex: &str,
+    fairness: &FairnessClass,
+) -> BenchResult<String> {
+    let body = LegacyRunFingerprintBody {
         task_id,
         snapshot_id,
         source_kind,
@@ -301,6 +354,30 @@ pub fn run_fingerprint(
     };
     let canonical = to_canonical_json(&body)?;
     Ok(sha256_hex(canonical.as_bytes()))
+}
+
+fn run_identity_fingerprint(run: &TriageRun) -> BenchResult<String> {
+    let body = RunIdentityFingerprintBody {
+        task_id: &run.task_id,
+        snapshot_id: &run.snapshot_id,
+        source_kind: run.source_kind,
+        strategy_name: &run.strategy.name,
+        strategy_version: &run.strategy.version,
+        strategy_build: &run.strategy.build,
+        raw_digest: &run.raw_output.digest.hex,
+        prompt_workflow: &run.prompt_workflow,
+        claims: &run.claims,
+        timing: &run.timing,
+        cost: &run.cost,
+        uncertainty: &run.uncertainty,
+        fairness: &run.fairness,
+        status: run.status,
+        privacy: run.privacy,
+        operator: &run.operator,
+        importer: &run.importer,
+        created_at: &run.created_at,
+    };
+    Ok(sha256_hex(to_canonical_json(&body)?.as_bytes()))
 }
 
 /// Manual import document. Raw bytes may be inline or supplied separately.

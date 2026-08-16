@@ -51,6 +51,31 @@ impl ReviewPacket {
     pub fn to_json(&self) -> BenchResult<String> {
         to_pretty_json(self)
     }
+
+    pub fn validate(&self) -> BenchResult<()> {
+        if self.schema_id != REVIEW_PACKET_SCHEMA_V1 {
+            return Err(BenchError::Schema(format!(
+                "review packet schema must be {REVIEW_PACKET_SCHEMA_V1}, got {}",
+                self.schema_id
+            )));
+        }
+        crate::types::validate_id("packet_id", &self.packet_id)?;
+        crate::types::validate_id("case_id", &self.case_id)?;
+        crate::types::validate_id("task_id", &self.task_id)?;
+        crate::types::validate_id("snapshot_id", &self.snapshot_id)?;
+        crate::types::validate_id("run_id", &self.run_id)?;
+        assert_review_packet_invariants(self)?;
+        let expected = format!(
+            "rpkt-{}",
+            sha256_hex(to_canonical_json(&review_digest_body(self))?.as_bytes())
+        );
+        if self.packet_id != expected {
+            return Err(BenchError::Integrity(format!(
+                "review packet id does not match content digest (expected {expected})"
+            )));
+        }
+        Ok(())
+    }
 }
 
 pub fn blinded_run_view(run: &TriageRun) -> BlindedRunView {
@@ -74,7 +99,14 @@ pub fn distinctive_format_reason(run: &TriageRun, raw: Option<&[u8]>) -> Option<
     if run.raw_output.encoding != "utf-8" {
         return Some("non-utf8 raw artifact retains a distinctive encoding".into());
     }
-    let raw = raw?;
+    let raw = match raw {
+        Some(raw) => raw,
+        None => {
+            return Some(
+                "raw artifact was not loaded; blinding could not be established".into(),
+            )
+        }
+    };
     let text = std::str::from_utf8(raw).ok()?;
     let name = run.strategy.name.trim();
     if !name.is_empty()
@@ -214,26 +246,13 @@ pub fn merge_citation_assists(adj: Adjudication, flags: Vec<String>) -> BenchRes
             outcome.assist_flags.sort();
         }
     }
-    Adjudication::from_parts(
-        adj.privacy,
-        adj.case_id,
-        adj.task_id,
-        adj.snapshot_id,
-        adj.run_id,
-        adj.reviewer,
-        adj.conflict_of_interest,
-        adj.rubric_version,
-        adj.phase,
-        adj.blinding,
-        outcomes,
-        adj.created_at,
-    )
+    adj.with_outcomes(outcomes)
 }
 
 pub fn run_has_support_adjudication(adjudications: &[Adjudication], run_id: &str) -> bool {
     adjudications
         .iter()
-        .any(|adj| adj.run_id == run_id && adj.phase == ReviewPhase::Support)
+        .any(|adj| adj.run_id == run_id && adj.phase == Some(ReviewPhase::Support))
 }
 
 #[cfg(test)]
