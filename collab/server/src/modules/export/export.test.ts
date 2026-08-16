@@ -421,7 +421,7 @@ describe("triage brief and prompt-package export", () => {
         fx.caseId,
       );
       expect(sharePayload.importedRuns[0]?.sourceLabel).toBe("Web assistant");
-      expect(shareBrief.markdown).toContain(`case_created · ${fx.caseId}`);
+      expect(shareBrief.markdown).toContain(`case_created · contributor · ${fx.caseId}`);
       expect(sharePayload.attributions.length).toBeGreaterThan(0);
       expect(sharePayload.attributions.every((a) => a.actorLabel && a.action && a.targetKind)).toBe(
         true,
