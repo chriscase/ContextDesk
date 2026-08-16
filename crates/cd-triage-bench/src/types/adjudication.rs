@@ -956,6 +956,40 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn legacy_v1_adjudication_without_phase_remains_readable() {
+        let outcomes = five_outcomes(DimensionVerdict::Score { value: 2 });
+        let mut legacy = Adjudication {
+            schema_id: ADJUDICATION_SCHEMA_V1.into(),
+            adjudication_id: String::new(),
+            privacy: PrivacyClass::ShareSafe,
+            case_id: "case-1".into(),
+            task_id: "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .into(),
+            snapshot_id:
+                "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            run_id: "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                .into(),
+            reviewer: "reviewer-a".into(),
+            conflict_of_interest: ConflictOfInterest {
+                declared: false,
+                notes: None,
+            },
+            rubric_version: RUBRIC_V1.into(),
+            phase: None,
+            review_packet_id: None,
+            blinding: BlindingState::Blinded,
+            outcomes,
+            created_at: "2026-01-15T10:00:00Z".into(),
+        };
+        legacy.adjudication_id = legacy.compute_id().unwrap();
+        let text = serde_json::to_string(&legacy).unwrap();
+        let parsed = Adjudication::parse_json(&text).unwrap();
+        assert_eq!(parsed, legacy);
+        assert!(!text.contains("\"phase\""));
+        assert!(!text.contains("review_packet_id"));
+    }
+
     fn sample_dimensions() -> Vec<DimensionScore> {
         vec![
             DimensionScore {

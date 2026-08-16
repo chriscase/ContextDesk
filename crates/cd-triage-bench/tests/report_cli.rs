@@ -428,6 +428,10 @@ fn issue_881_report_only_acceptance() {
     assert!(!md.contains("leaderboard"));
 
     let owner: serde_json::Value = serde_json::from_slice(&json1.stdout).unwrap();
+    assert_eq!(
+        owner["schema_id"],
+        "contextdesk.triage_bench.backtest_report.v2"
+    );
     assert!(owner["counts"]["unscored"].as_u64().unwrap() >= 1);
     assert!(owner["counts"]["failed"].as_u64().unwrap() >= 1);
     assert!(owner["counts"]["partial"].as_u64().unwrap() >= 1);
