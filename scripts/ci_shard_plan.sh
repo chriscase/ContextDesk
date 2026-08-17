@@ -93,7 +93,10 @@ enumerate_base_units() {
       | @tsv
     ' |
     LC_ALL=C sort -u |
-    cut -f4
+    cut -f4 |
+    # Git Bash can preserve CRLF from native Windows tools.  Keep the
+    # canonical unit stream byte-for-byte identical on every runner.
+    tr -d '\015'
 }
 
 # Replace configured parent lib units with complementary child units.
@@ -108,7 +111,7 @@ expand_units() {
     else
       printf '%s\n' "$unit"
     fi
-  done | LC_ALL=C sort -u
+  done | LC_ALL=C sort -u | tr -d '\015'
 }
 
 # Any target `cargo test` would pick up but this script does not know how to
