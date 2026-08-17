@@ -156,7 +156,8 @@ CI therefore:
 | `scripts/ci_shard_plan.sh` | Enumerates every testable target from `cargo metadata` and partitions it. `verify` fails closed if the partition is not an exact, duplicate-free cover. |
 | `scripts/ci_run_shard.sh` | Runs one shard: per-unit start/finish lines, a heartbeat while a unit runs, a bounded `manifest.json`, `progress.jsonl`, and `status.json`. SIGTERM writes `incomplete`. |
 | `scripts/ci_run_platform_shard.sh` | Validates `macos` / `windows` and delegates to the portable shard runner; no GNU `tail --pid`, `stdbuf`, or platform-specific test selection. |
-| `scripts/ci_record_cache.sh` | Records `cache_state=warm` only on an exact rust-cache hit. |
+| `scripts/ci_record_cache.sh` | Records `cache_state=warm` only on an exact rust-cache hit whose `target/` contains compiled deps and bundled DuckDB. |
+| `scripts/ci_cache_fingerprint.sh` | Records the per-OS shared key, Cargo.lock digest, rustc identity, and `RUSTFLAGS`. |
 | `scripts/ci_aggregate_shards.sh` | The gate. Fails if a shard is missing, failed, incomplete, stopped early, or if any test unit was claimed by no shard. |
 
 Properties worth knowing:
@@ -176,11 +177,17 @@ Properties worth knowing:
   that is already gone cannot upload; the warmup job exists so shards should
   not sit in the 86–96 minute hosted-runner-loss window.
 - **Cache is honest.** `cache_state` is `warm` only when Swatinem reports an
-  exact `cache-hit` **and** the restored `target/` directory is non-empty.
-  Shards use `save-if: false` (restore files, do not save). Do **not** set
-  `lookup-only: true`: that reports a hit without downloading, which hosted
-  run `31845262696` recorded as warm while each shard still compiled for
-  11–12 minutes. The warmup job is the only writer.
+  exact `cache-hit` **and** the restored `target/` contains compiled
+  `debug/deps` artifacts including bundled DuckDB. A `CACHEDIR.TAG` or
+  registry-only restore stays cold. Shards use `save-if: false` (restore
+  files, do not save). Do **not** set `lookup-only: true`: that reports a hit
+  without downloading, which hosted run `31845262696` recorded as warm while
+  each shard still compiled for 11–12 minutes. The warmup job is the only
+  writer. rust-cache hashes `Cargo.lock` and rustc; `env-vars: RUSTFLAGS`
+  is added so `-D warnings` is part of the stored key. Shared keys stay
+  per-OS (`ubuntu-workspace-tests`, `macos-latest-workspace-tests-v2`,
+  `windows-latest-workspace-tests-v2`) so a Linux DuckDB build cannot be
+  restored on macOS or Windows.
 - **Nothing about the suite is relaxed.** Shards keep `RUST_TEST_THREADS=1`.
   macOS and Windows use the same planner and aggregate the complete unit set.
   Their `rust (macos-latest)` / `rust (windows-latest)` jobs are restore-only
@@ -190,15 +197,14 @@ Properties worth knowing:
 ### macOS / Windows four-way lanes
 
 The warm hosted study found the Windows monolith was the wall-clock bottleneck
-(`cargo test --workspace` ≈ 35 minutes), with macOS at ≈ 24 minutes. The draft
-follow-up first proved complete two-way coverage but regressed critical-path
-time because the warmup was serialized. The current draft probes the exact
-cache key, conditionally runs one `--no-run` writer on a miss, and uses four
-restore-only shards per OS. It deliberately does not copy Ubuntu's eight-way
-leftover-heavy split. The aggregates are named
-`rust tests (macos-latest aggregate)` and
-`rust tests (windows-latest aggregate)`; they are not yet added to the active
-ruleset. The measured baseline, regression, and portability rationale live in
+(`cargo test --workspace` ≈ 35 minutes), with macOS at ≈ 24 minutes. A first
+two-way split proved complete coverage but regressed critical-path time because
+the warmup was serialized. Current `main` probes the exact per-OS cache key,
+conditionally runs one `--no-run` writer on a miss, and uses four restore-only
+shards per OS. It deliberately does not copy Ubuntu's eight-way leftover-heavy
+split. The aggregates are named `rust tests (macos-latest aggregate)` and
+`rust tests (windows-latest aggregate)`; they are not in the active ruleset.
+The measured baseline, regression, and cache-key rationale live in
 [`docs/testing/MACOS_WINDOWS_CI_LANES.md`](testing/MACOS_WINDOWS_CI_LANES.md).
 Reproduce the planner evidence with `sh scripts/ci_macos_windows_lane_study.sh`.
 

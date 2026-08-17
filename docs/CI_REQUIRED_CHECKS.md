@@ -15,8 +15,8 @@ active requirement.
 ## What to require
 
 The active ruleset currently enforces the Ubuntu aggregate named above. The
-remaining rows are the project’s candidate checks and lane signals; this draft
-does not modify the ruleset or add the new desktop aggregates to it.
+remaining rows are the project’s candidate checks and lane signals. This
+document does not modify the ruleset or add the desktop aggregates to it.
 
 These are the stable **check names** (the `name:` fields in
 `.github/workflows/ci.yml`), not job ids. The active ruleset currently requires
@@ -32,8 +32,8 @@ only the Ubuntu aggregate named above.
 | `rust (macos-latest)` | macOS restore-only preflight: fmt, clippy, examples, smoke; not the suite gate. A separate conditional cache-writer runs `--no-run` only on a miss |
 | `rust (windows-latest)` | Windows restore-only preflight: fmt, clippy, examples, smoke; not the suite gate. A separate conditional cache-writer runs `--no-run` only on a miss |
 | `rust tests (ubuntu aggregate)` | Fail-closed Ubuntu workspace test gate |
-| `rust tests (macos-latest aggregate)` | Fail-closed macOS workspace test gate; draft follow-up check |
-| `rust tests (windows-latest aggregate)` | Fail-closed Windows workspace test gate; draft follow-up check |
+| `rust tests (macos-latest aggregate)` | Fail-closed macOS workspace test gate (coverage signal, not in the ruleset) |
+| `rust tests (windows-latest aggregate)` | Fail-closed Windows workspace test gate (coverage signal, not in the ruleset) |
 | `tauri host (ubuntu-latest)` | Desktop host compile |
 | `tauri host (macos-latest)` | Desktop host compile |
 | `desktop ui (typecheck, lint, test, build)` | Desktop UI gate |
@@ -57,6 +57,25 @@ only the Ubuntu aggregate named above.
 - The macOS/Windows shard indexes are likewise signals. The per-OS aggregate
   is the stable coverage check; the active ruleset still requires only
   `rust tests (ubuntu aggregate)`.
+
+## Shard matrix and cache boundaries
+
+Workspace tests are sharded, then fail-closed:
+
+| OS | Warmup check | Test shards | Aggregate check | Required on `main`? |
+| --- | --- | --- | --- | --- |
+| Ubuntu | `rust (ubuntu-latest)` (`--no-run` only) | 8 | `rust tests (ubuntu aggregate)` | **yes** — this is the only ruleset gate |
+| macOS | `rust (macos-latest)` restore-only preflight | 4 | `rust tests (macos-latest aggregate)` | no |
+| Windows | `rust (windows-latest)` restore-only preflight | 4 | `rust tests (windows-latest aggregate)` | no |
+
+The planner (`scripts/ci_shard_plan.sh`) enumerates every `cargo test --workspace`
+unit from `cargo metadata`. The aggregate recomputes that list and fails if any
+unit is missing, duplicated, or left on a cancelled/timed-out shard.
+
+Cache stores are per OS. rust-cache hashes `Cargo.lock` and rustc; the workflow
+also passes `env-vars: RUSTFLAGS`. A restore is warm only when `target/` has
+compiled deps **and** bundled DuckDB artifacts. See
+[`docs/testing/MACOS_WINDOWS_CI_LANES.md`](testing/MACOS_WINDOWS_CI_LANES.md).
 
 ## Path-aware routing
 

@@ -438,13 +438,40 @@ expect_ok "hit without restored files is cold" \
 [ "$(jq -r '.restore' "$TMP/cache-hit-nofiles.json")" = "key-hit-without-files" ] ||
   fail "must name the lookup-only miss"
 
-mkdir -p "$TMP/full-target/debug"
-echo stub >"$TMP/full-target/debug/foo"
-expect_ok "hit with restored files is warm" \
+mkdir -p "$TMP/tag-only-target"
+echo 'Signature: 8a477f597d28d172789f06886806bc55' >"$TMP/tag-only-target/CACHEDIR.TAG"
+expect_ok "CACHEDIR.TAG alone is not a warm workspace" \
+  sh "$CACHE" --out "$TMP/cache-hit-tag.json" --hit true --role shard --save false \
+  --restore-dir "$TMP/tag-only-target"
+[ "$(jq -r '.cache_state' "$TMP/cache-hit-tag.json")" = cold ] ||
+  fail "CACHEDIR.TAG-only target must stay cold"
+[ "$(jq -r '.restore' "$TMP/cache-hit-tag.json")" = "key-hit-without-artifacts" ] ||
+  fail "must name a hit without compiled artifacts"
+
+mkdir -p "$TMP/deps-only-target/debug/deps"
+echo stub >"$TMP/deps-only-target/debug/deps/cd_core-deadbeef.rlib"
+expect_ok "compiled deps without DuckDB are cold" \
+  sh "$CACHE" --out "$TMP/cache-hit-noduck.json" --hit true --role shard --save false \
+  --restore-dir "$TMP/deps-only-target"
+[ "$(jq -r '.cache_state' "$TMP/cache-hit-noduck.json")" = cold ] ||
+  fail "missing DuckDB must not claim warm"
+[ "$(jq -r '.restore' "$TMP/cache-hit-noduck.json")" = "key-hit-without-duckdb" ] ||
+  fail "must name a hit without DuckDB"
+
+mkdir -p "$TMP/full-target/debug/deps" "$TMP/full-target/debug/build/libduckdb-sys-abc123"
+echo stub >"$TMP/full-target/debug/deps/cd_core-deadbeef.rlib"
+echo stub >"$TMP/full-target/debug/deps/libduckdb-cafebabe.rlib"
+expect_ok "hit with compiled workspace + DuckDB is warm" \
   sh "$CACHE" --out "$TMP/cache-hit-files.json" --hit true --role shard --save false \
-  --restore-dir "$TMP/full-target"
-[ "$(jq -r '.cache_state' "$TMP/cache-hit-files.json")" = warm ] || fail "hit+files must be warm"
+  --restore-dir "$TMP/full-target" --fingerprint cafe1234
+[ "$(jq -r '.cache_state' "$TMP/cache-hit-files.json")" = warm ] || fail "hit+artifacts must be warm"
 [ "$(jq -r '.restore' "$TMP/cache-hit-files.json")" = files ] || fail "restore=files"
+[ "$(jq -r '.fingerprint' "$TMP/cache-hit-files.json")" = cafe1234 ] || fail "fingerprint recorded"
+
+expect_fail "assert-dir rejects a CACHEDIR.TAG-only tree" \
+  sh "$CACHE" --assert-dir "$TMP/tag-only-target"
+expect_ok "assert-dir accepts a compiled workspace + DuckDB tree" \
+  sh "$CACHE" --assert-dir "$TMP/full-target"
 
 expect_ok "preflight role is restore-only by default" \
   sh "$CACHE" --out "$TMP/cache-preflight.json" --hit true --role preflight
@@ -520,6 +547,8 @@ if wu.get("lookup-only") in (True, "true"):
     raise SystemExit("warmup must save, not lookup-only")
 if wu.get("save-if") in (False, "false"):
     raise SystemExit("warmup must be allowed to save")
+if wu.get("env-vars") != "RUSTFLAGS":
+    raise SystemExit("ubuntu warmup must hash RUSTFLAGS in the cache key")
 
 sh = cache_step(jobs["rust-ubuntu-shard"])["with"]
 if sh.get("shared-key") != "ubuntu-workspace-tests":
@@ -528,6 +557,8 @@ if sh.get("lookup-only") in (True, "true"):
     raise SystemExit("shards must not use lookup-only (that skips the download)")
 if sh.get("save-if") not in (False, "false"):
     raise SystemExit("shards must not save the shared cache")
+if sh.get("env-vars") != "RUSTFLAGS":
+    raise SystemExit("ubuntu shards must use the same RUSTFLAGS cache input")
 
 uploads = [s for s in steps(jobs["rust-ubuntu-shard"]) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
 if len(uploads) != 1:
@@ -557,6 +588,8 @@ if int(cu["with"]["retention-days"]) != 14:
 ubuntu_runs = "\n".join(s.get("run") or "" for s in steps(jobs["rust-ubuntu"]))
 if "cargo test --workspace --no-run" not in ubuntu_runs:
     raise SystemExit("ubuntu rust job must compile tests with --no-run")
+if "--assert-dir target" not in ubuntu_runs:
+    raise SystemExit("ubuntu rust job must assert compiled DuckDB artifacts after --no-run")
 # A bare `cargo test --workspace` (no --no-run) would reintroduce the monolith.
 for block in ubuntu_runs.splitlines():
     stripped = block.strip()
@@ -581,6 +614,8 @@ for name, os_name in (("rust-macos-cache-probe", "macos-latest"),
         raise SystemExit(f"{name} must be lookup-only")
     if cache.get("save-if") not in (False, "false"):
         raise SystemExit(f"{name} must not save a partial cache")
+    if cache.get("env-vars") != "RUSTFLAGS":
+        raise SystemExit(f"{name} must hash RUSTFLAGS with the probe key")
 
 for name, os_name in (("rust-macos-cache-warmup", "macos-latest"),
                       ("rust-windows-cache-warmup", "windows-latest")):
@@ -592,6 +627,11 @@ for name, os_name in (("rust-macos-cache-warmup", "macos-latest"),
         raise SystemExit(f"{name} cache key mismatch")
     if cache.get("lookup-only") in (True, "true") or cache.get("save-if") in (False, "false"):
         raise SystemExit(f"{name} must be a cache writer")
+    if cache.get("env-vars") != "RUSTFLAGS":
+        raise SystemExit(f"{name} must hash RUSTFLAGS with the writer key")
+    warmup_runs = "\n".join(s.get("run") or "" for s in steps(warmup))
+    if "--assert-dir target" not in warmup_runs:
+        raise SystemExit(f"{name} must assert compiled DuckDB artifacts before save")
 
 platform_shard = jobs["rust-platform-shard"]
 platform_matrix = platform_shard["strategy"]["matrix"]
@@ -606,6 +646,8 @@ if platform_cache.get("lookup-only") in (True, "true"):
     raise SystemExit("platform shards must download cache files")
 if platform_cache.get("save-if") not in (False, "false"):
     raise SystemExit("platform shards must not save the shared cache")
+if platform_cache.get("env-vars") != "RUSTFLAGS":
+    raise SystemExit("platform shards must hash RUSTFLAGS with the OS key")
 platform_runs = "\n".join(s.get("run") or "" for s in steps(platform_shard))
 if "ci_run_platform_shard.sh" not in platform_runs:
     raise SystemExit("platform shard must use the portable runner")

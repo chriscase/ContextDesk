@@ -1,12 +1,15 @@
 # macOS / Windows rust CI lanes
 
-**Status:** staged draft implementation with hosted proof. This lane preserves
-macOS/Windows workspace coverage and reduced the desktop critical path in run
+**Status:** on `main` via #910 (four-way shards) and #912 (probe must not
+save). This lane preserves macOS/Windows workspace coverage and reduced the
+desktop critical path in run
 [`32008278389`](https://github.com/chriscase/ContextDesk/actions/runs/32008278389).
-It does not change the Ubuntu ruleset, merge anything, or make a release claim.
+It does not change the Ubuntu ruleset or make a release claim.
 
-The active branch is [`codex/ci-macos-windows-2way`](https://github.com/chriscase/ContextDesk/pull/910),
-which remains draft-only.
+Post-merge run [`32059232242`](https://github.com/chriscase/ContextDesk/actions/runs/32059232242)
+(`#912` on `main`) was a cold write then a warm restore: desktop probes
+missed, one warmup per OS compiled DuckDB, and every desktop shard recorded
+`cache_state=warm` / `restore=files`. Ubuntu reused `ubuntu-workspace-tests`.
 
 ## What the hosted evidence says
 
@@ -123,6 +126,21 @@ save partial state. On a cold miss, shards wait for the one writer and then
 restore the completed cache; if the writer fails, the shard/aggregate path
 fails closed rather than silently running an untracked cold build.
 
+A restore is `warm` only when `target/debug/deps` has compiled rust artifacts
+**and** a DuckDB marker (`libduckdb-sys-*` build dir or a `*duckdb*` rlib).
+A `CACHEDIR.TAG` or registry-only 113MB hit is recorded as cold
+(`key-hit-without-artifacts` / `key-hit-without-duckdb`). Warmup jobs also
+`--assert-dir target` after `cargo test --workspace --no-run`.
+
+Cache-key boundaries:
+
+| Input | Who hashes it | Cross-OS? |
+| --- | --- | --- |
+| `shared-key` (`ubuntu-workspace-tests`, `*-workspace-tests-v2`) | workflow | no — keys are per OS |
+| `Cargo.lock`, rustc, rust-toolchain, `.cargo/config.toml` | Swatinem/rust-cache environment hash | no — rustc/target triple differ |
+| `RUSTFLAGS` (`-D warnings`) | rust-cache `env-vars` | same flag, different OS keys |
+| lock digest + rustc + `RUSTFLAGS` + shared-key | `scripts/ci_cache_fingerprint.sh` (status JSON only) | recorded, not a second store key |
+
 ## Gates and boundaries
 
 - The required main-branch check remains exactly `rust tests (ubuntu aggregate)`.
@@ -134,7 +152,8 @@ fails closed rather than silently running an untracked cold build.
   this draft.
 - No timeout is raised to hide a slow shard, and no test unit is skipped.
 - The four-way desktop speed improvement is proven by hosted run `32008278389`;
-  no release or required-check promotion is implied.
+  the first `main` cold-then-warm path is run `32059232242`. No release or
+  required-check promotion is implied.
 
 Pinned baseline, two-way regression, and four-way evidence lives in
 [`ci_macos_windows_lane_evidence.json`](../../scripts/fixtures/ci_macos_windows_lane_evidence.json).
