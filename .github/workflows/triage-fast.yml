@@ -43,7 +43,12 @@ jobs:
         with:
           workspaces: .
           shared-key: triage-sdk-fast-v1
-          cache-workspace-crates: true
+          # The repository is one large workspace. Keeping workspace crates
+          # here would retain cd-core/DuckDB artifacts despite this lane
+          # building only cd-triage-sdk; cache dependencies, not workspace
+          # members, and let the main Ubuntu cache own those artifacts.
+          cache-all-crates: false
+          cache-workspace-crates: false
           cache-on-failure: true
           # Only main writes cache entries. PR branches restore from main but
           # never save: two extra full-registry entries per PR would push the
@@ -113,7 +118,10 @@ jobs:
         with:
           workspaces: .
           shared-key: triage-bench-fast-v1
-          cache-workspace-crates: true
+          # See the SDK lane: do not duplicate the full workspace/DuckDB
+          # target in this dependency-light cache namespace.
+          cache-all-crates: false
+          cache-workspace-crates: false
           cache-on-failure: true
           # See the SDK lane: main is the only writer.
           save-if: ${{ github.ref == 'refs/heads/main' }}
