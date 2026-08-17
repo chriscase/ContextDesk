@@ -5,8 +5,9 @@ name: gui-accept
 on:
   workflow_dispatch:
   schedule:
-    # Weekly; operators can disable if flaky
-    - cron: "0 6 * * 1"
+    # Nightly; operators can disable if flaky. This remains optional and is
+    # never a pull-request required check.
+    - cron: "0 6 * * *"
 
 concurrency:
   group: gui-accept-${{ github.ref }}
