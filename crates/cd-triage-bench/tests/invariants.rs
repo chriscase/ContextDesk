@@ -1059,5 +1059,9 @@ fn blinded_run_command_fails_when_raw_blob_is_missing() {
         &run_id,
     ])
     .unwrap_err();
-    assert!(err.to_string().contains("No such file") || err.to_string().contains("not found"));
+    assert!(matches!(
+        err,
+        cd_triage_bench::BenchError::Io { source, .. }
+            if source.kind() == std::io::ErrorKind::NotFound
+    ));
 }
