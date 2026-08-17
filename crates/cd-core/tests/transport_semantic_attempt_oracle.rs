@@ -235,11 +235,20 @@ fn json_ok(body: &'static str) -> WireStep {
 struct SequenceResponder {
     calls: Arc<AtomicUsize>,
     steps: Vec<WireStep>,
+    /// When the nth response is served (1-based), set this flag before the
+    /// HTTP body is returned. That happens-before the client enters the
+    /// 429 wait, so cancellation is visible without a second task.
+    cancel_after: Option<(usize, Arc<AtomicBool>)>,
 }
 
 impl Respond for SequenceResponder {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         let index = self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some((n, cancel)) = &self.cancel_after {
+            if index + 1 >= *n {
+                cancel.store(true, Ordering::SeqCst);
+            }
+        }
         let step = self
             .steps
             .get(index)
@@ -256,12 +265,21 @@ impl Respond for SequenceResponder {
 }
 
 async fn mount_steps(server: &MockServer, steps: Vec<WireStep>) -> Arc<AtomicUsize> {
+    mount_steps_with_cancel(server, steps, None).await
+}
+
+async fn mount_steps_with_cancel(
+    server: &MockServer,
+    steps: Vec<WireStep>,
+    cancel_after: Option<(usize, Arc<AtomicBool>)>,
+) -> Arc<AtomicUsize> {
     let calls = Arc::new(AtomicUsize::new(0));
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(SequenceResponder {
             calls: calls.clone(),
             steps,
+            cancel_after,
         })
         .mount(server)
         .await;
@@ -315,19 +333,42 @@ async fn complete_streaming_once(
         .await
 }
 
-/// Flip `cancel` as soon as the wire has served `n` responses — the only
-/// deterministic way to cancel *inside* transport backoff.
-fn cancel_after_calls(calls: Arc<AtomicUsize>, n: usize, cancel: Arc<AtomicBool>) {
-    tokio::spawn(async move {
-        for _ in 0..5_000 {
-            if calls.load(Ordering::SeqCst) >= n {
-                cancel.store(true, Ordering::SeqCst);
-                return;
+/// A loopback address that is TCP connection-refused *now*, and is not an
+/// ephemeral bind-then-drop port.
+///
+/// Windows recycles a just-released `:0` port into a sibling `MockServer`
+/// while this suite runs in parallel. Hitting that fixture yields HTTP 429
+/// (then a 30s uncancellable fallback wait) or an empty 200 that parses as
+/// `serde: expected value at line 1 column 1` — not a transport refuse.
+fn refused_loopback_url() -> String {
+    use std::io::ErrorKind;
+    use std::net::{SocketAddr, TcpStream};
+
+    let timeout = std::time::Duration::from_millis(200);
+    const CANDIDATES: &[u16] = &[1, 9, 13, 17, 19, 23, 37, 79, 111];
+    for port in CANDIDATES {
+        let addr = SocketAddr::from(([127, 0, 0, 1], *port));
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
+                return format!("http://{addr}");
             }
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            _ => continue,
         }
-        cancel.store(true, Ordering::SeqCst);
-    });
+    }
+    for _ in 0..32 {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").port()
+        };
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
+                return format!("http://{addr}");
+            }
+            _ => continue,
+        }
+    }
+    panic!("could not locate a loopback port that is TCP connection-refused");
 }
 
 // ---------------------------------------------------------------------------
@@ -572,11 +613,10 @@ async fn traced_delay_for_retry_after(
         Some(value) => rate_limited(value),
         None => RATE_LIMITED_NO_HEADER,
     };
-    let wire_calls = mount_steps(&server, vec![step]).await;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let wire_calls = mount_steps_with_cancel(&server, vec![step], Some((1, cancel.clone()))).await;
 
     let (backend, _recorder) = traced_backend(&server.uri()).await;
-    let cancel = Arc::new(AtomicBool::new(false));
-    cancel_after_calls(wire_calls.clone(), 1, cancel.clone());
     let error = complete_streaming_once(backend.as_ref(), Some(cancel.as_ref()))
         .await
         .expect_err("cancellation interrupts the traced backoff");
@@ -649,11 +689,11 @@ async fn absent_retry_after_falls_back_to_the_bounded_default() {
 async fn cancellation_during_backoff_exits_promptly_without_further_requests() {
     let (capture, _guard) = ChatTraceCapture::install();
     let server = MockServer::start().await;
-    let wire_calls = mount_steps(&server, vec![rate_limited("60")]).await;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let wire_calls =
+        mount_steps_with_cancel(&server, vec![rate_limited("60")], Some((1, cancel.clone()))).await;
 
     let (backend, recorder) = traced_backend(&server.uri()).await;
-    let cancel = Arc::new(AtomicBool::new(false));
-    cancel_after_calls(wire_calls.clone(), 1, cancel.clone());
 
     let started = std::time::Instant::now();
     let error = complete_streaming_once(backend.as_ref(), Some(cancel.as_ref()))
@@ -714,13 +754,8 @@ async fn connection_reset_before_headers_is_terminal_without_protocol_replay() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn connection_refused_classifies_as_transport_failure_not_provider_status() {
-    // Bind then immediately drop a listener: the port is real but closed.
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.local_addr().expect("addr").port()
-    };
     let client = cd_core::chat::OpenAiCompatibleClient::new(
-        format!("http://127.0.0.1:{port}"),
+        refused_loopback_url(),
         None,
         "oracle-test-model",
         &SsrfPolicy::default(),

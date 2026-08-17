@@ -206,6 +206,10 @@ pub fn resolve_and_validate(
 /// Build a reqwest client that cannot follow redirects and is DNS-pinned to
 /// IPs vetted by [`resolve_and_validate`] (#141 anti-rebind).
 ///
+/// Loopback and `localhost` destinations also disable HTTP proxies so a
+/// corp/WPAD proxy cannot rewrite local transport (or bypass the pin).
+/// Public hosts still honor `HTTP_PROXY`.
+///
 /// Callers that need redirects must implement a manual hop loop and re-call
 /// this (or re-validate each hop) — never use `Policy::limited`/`default`.
 pub fn build_pinned_client(
@@ -232,9 +236,39 @@ pub fn build_pinned_client(
     if host.parse::<IpAddr>().is_err() && !(host.eq_ignore_ascii_case("localhost")) {
         builder = builder.resolve_to_addrs(host, &sockets);
     }
+    // Loopback must talk to the pinned local socket, never to an env/system
+    // HTTP proxy. A proxy turns "connection refused" into an empty HTTP 200
+    // (then a serde error) and can also bypass the DNS pin. Public hosts
+    // still honor HTTP_PROXY so corp-gateway users keep working. S3's
+    // pinned client already uses `.no_proxy()` for the same reason.
+    if destination_is_loopback(host, &sockets) {
+        builder = builder.no_proxy();
+    }
     builder
         .build()
         .map_err(|e| CoreError::Message(format!("http client: {e}")))
+}
+
+fn destination_is_loopback(host: &str, sockets: &[SocketAddr]) -> bool {
+    host_is_loopback(host)
+        || (!sockets.is_empty() && sockets.iter().all(|socket| ip_is_loopback(socket.ip())))
+}
+
+fn host_is_loopback(host: &str) -> bool {
+    let host_l = host.to_ascii_lowercase();
+    if host_l == "localhost" || host_l.ends_with(".localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>().is_ok_and(ip_is_loopback)
+}
+
+fn ip_is_loopback(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+    }
 }
 
 /// Convenience: parse `raw`, resolve+vet with the given resolver, pin client.
@@ -490,6 +524,19 @@ mod tests {
             std::time::Duration::from_secs(5),
         );
         assert!(r.is_err(), "expected refuse, got ok");
+    }
+
+    #[test]
+    fn loopback_hosts_and_mapped_ipv4_are_detected() {
+        assert!(host_is_loopback("127.0.0.1"));
+        assert!(host_is_loopback("LOCALHOST"));
+        assert!(host_is_loopback("ollama.localhost"));
+        assert!(host_is_loopback("::1"));
+        assert!(host_is_loopback("::ffff:127.0.0.1"));
+        assert!(!host_is_loopback("api.example.com"));
+        assert!(!host_is_loopback("10.0.0.5"));
+        assert!(ip_is_loopback(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(ip_is_loopback(IpAddr::V6(Ipv6Addr::LOCALHOST)));
     }
 
     #[test]
