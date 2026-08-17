@@ -6,6 +6,7 @@ members = [
     "crates/cd-workflow",
     "crates/cd-cli",
     "crates/cd-test-gateway",
+    "crates/cd-triage-sdk",
     "crates/cd-triage-bench",
     # "desktop/src-tauri",  # nested after scaffold
 ]

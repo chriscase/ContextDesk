@@ -39,6 +39,31 @@ When a ruleset is added, require these **check names** (the `name:` fields in
   executes the suite; requiring only `rust (ubuntu-latest)` would treat a
   skipped/failed shard matrix as irrelevant as long as fmt/clippy passed.
 
+## Triage fast lane (advisory, not a gate)
+
+The optional `.github/workflows/triage-fast.yml` workflow publishes
+`triage fast (SDK)`, `triage fast (bench)`, and `triage fast (aggregate)`.
+These are advisory acceleration for the dependency-light `cd-triage-sdk` /
+`cd-triage-bench` path. They do not replace or rename
+`rust tests (ubuntu aggregate)`, and they must not be used as the full
+workspace Ubuntu gate — the fast lane compiles two crates and never exercises
+`cd-core`, `cd-workflow`, DuckDB, SQLite, keyring, or any network-capable
+engine code.
+
+Two limits matter before you require them anywhere:
+
+- **The draft head has an explicit push trigger for hosted validation.** This
+  revision runs on pushes to `main`, `integrate/rc`, and
+  `codex/triage-fast-lane`; pull-request events still target only `main` and
+  `integrate/rc`. The self-head push entry exists so this draft can validate
+  before its stack is integrated. A pull request targeting another stacked
+  branch still gets no PR-triggered fast-lane checks, so these advisory checks
+  must never be required for such branches.
+- **They assume the sharded Ubuntu CI.** The `rust tests (ubuntu aggregate)`
+  gate and the `rust (ubuntu-latest)` warmup described above arrive with the
+  #874 shard work. Until that lands, `rust (ubuntu-latest)` still runs
+  `cargo test --workspace` itself and there is no aggregate check to defer to.
+
 ## How to verify a ruleset
 
 After saving the ruleset, open a draft PR and confirm the “Required” list on
