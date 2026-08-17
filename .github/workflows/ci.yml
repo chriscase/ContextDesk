@@ -125,7 +125,9 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: |
           set -eu
-          if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "push" ]; then
+          # Path-aware skipping is PR feedback only. Every push to main gets
+          # the complete Ubuntu workspace gate, including bench-only commits.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
             if [ -n "$BASE_SHA" ] && [ "$BASE_SHA" != "0000000000000000000000000000000000000000" ]; then
               git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$BASE_SHA"
               git diff --name-only "$BASE_SHA" "$HEAD_SHA" > changed-files.txt

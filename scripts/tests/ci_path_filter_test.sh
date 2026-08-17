@@ -44,6 +44,7 @@ except ImportError as exc:
 
 root = Path(sys.argv[1])
 ci = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+ci_text = (root / ".github/workflows/ci.yml").read_text()
 jobs = ci["jobs"]
 path = jobs.get("ci-path-filter")
 if not path:
@@ -65,6 +66,10 @@ if aggregate.get("if") != "always()":
 aggregate_runs = "\n".join(s.get("run") or "" for s in aggregate["steps"])
 if "cargo test -p cd-triage-bench --all-targets" not in aggregate_runs:
     raise SystemExit("bench-only route must run complete bench validation")
+if 'if [ "$EVENT_NAME" = "pull_request" ]; then' not in ci_text:
+    raise SystemExit("path-aware filtering must be limited to pull requests")
+if "the complete Ubuntu workspace gate" not in ci_text:
+    raise SystemExit("workflow must document full main-push coverage")
 
 gui = (root / ".github/workflows/gui-accept.yml").read_text()
 if 'cron: "0 6 * * *"' not in gui:
