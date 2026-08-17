@@ -40,6 +40,14 @@ jobs:
           cache-on-failure: true
       - name: report cache result
         run: echo "triage SDK cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: verify dependency boundary
+        shell: bash
+        run: |
+          cargo tree --locked --offline -p cd-triage-sdk --edges normal | tee /tmp/triage-sdk-tree.txt
+          if grep -Eiq 'cd-core|cd-workflow|duckdb|libduckdb-sys|rusqlite|keyring|reqwest|tokio' /tmp/triage-sdk-tree.txt; then
+            echo "::error title=triage SDK dependency boundary::heavy or runtime dependency found"
+            exit 1
+          fi
       - name: fmt
         run: cargo fmt -p cd-triage-sdk -- --check
       - name: clippy
@@ -65,6 +73,14 @@ jobs:
           cache-on-failure: true
       - name: report cache result
         run: echo "triage bench cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: verify dependency boundary
+        shell: bash
+        run: |
+          cargo tree --locked --offline -p cd-triage-bench --edges normal | tee /tmp/triage-bench-tree.txt
+          if grep -Eiq 'cd-core|cd-workflow|duckdb|libduckdb-sys|rusqlite|keyring|reqwest|tokio' /tmp/triage-bench-tree.txt; then
+            echo "::error title=triage bench dependency boundary::heavy or runtime dependency found"
+            exit 1
+          fi
       - name: fmt
         run: cargo fmt -p cd-triage-bench -- --check
       - name: clippy
