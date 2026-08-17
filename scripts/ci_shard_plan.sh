@@ -283,7 +283,8 @@ verify() {
     jq -r '.packages[] | "\(.manifest_path)\t\(.name)"' |
     awk -F'\t' '
       function crate_rel(path) {
-        gsub(/\\\\/, "/", path)
+        # Cargo emits one native backslash per separator on Windows.
+        gsub(/\\/, "/", path)
         sub(/^.*\/crates\//, "", path)
         sub(/\/Cargo\.toml$/, "", path)
         return path
