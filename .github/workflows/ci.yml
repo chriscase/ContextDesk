@@ -15,7 +15,8 @@ env:
   # disagree. Cache key `ubuntu-workspace-tests` is shared by rust-ubuntu
   # (the only writer) and every shard (`save-if: false` so they restore but
   # do not save). Do not set Swatinem `lookup-only: true` on shards: that
-  # checks the key without downloading files.
+  # checks the key without downloading files. Probes also set `save-if: false`;
+  # a lookup-only probe must never create a partial cache before warmup runs.
   #
   # Raised 4 -> 8 after the shard carrying `cd-core/lib/other` was cancelled at
   # the 60-minute job budget on two consecutive runs of PR #892 (31888581827,
@@ -172,9 +173,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
-          shared-key: macos-latest-workspace-tests
+          shared-key: macos-latest-workspace-tests-v2
           cache-workspace-crates: true
           lookup-only: true
+          save-if: false
 
   rust-windows-cache-probe:
     name: rust cache probe (windows-latest)
@@ -188,9 +190,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
-          shared-key: windows-latest-workspace-tests
+          shared-key: windows-latest-workspace-tests-v2
           cache-workspace-crates: true
           lookup-only: true
+          save-if: false
 
   rust-macos-cache-warmup:
     name: rust cache warmup (macos-latest)
@@ -204,7 +207,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
-          shared-key: macos-latest-workspace-tests
+          shared-key: macos-latest-workspace-tests-v2
           cache-workspace-crates: true
           cache-on-failure: true
           lookup-only: false
@@ -217,7 +220,7 @@ jobs:
             --out ci-platform-shards/cache-warmup-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
             --role warmup \
-            --shared-key macos-latest-workspace-tests \
+            --shared-key macos-latest-workspace-tests-v2 \
             --save true
       - name: compile workspace tests (cache warmup)
         env:
@@ -261,7 +264,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
-          shared-key: windows-latest-workspace-tests
+          shared-key: windows-latest-workspace-tests-v2
           cache-workspace-crates: true
           cache-on-failure: true
           lookup-only: false
@@ -274,7 +277,7 @@ jobs:
             --out ci-platform-shards/cache-warmup-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
             --role warmup \
-            --shared-key windows-latest-workspace-tests \
+            --shared-key windows-latest-workspace-tests-v2 \
             --save true
       - name: compile workspace tests (cache warmup)
         env:
@@ -333,7 +336,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
-          shared-key: ${{ matrix.os }}-workspace-tests
+          shared-key: ${{ matrix.os }}-workspace-tests-v2
           cache-workspace-crates: true
           lookup-only: false
           save-if: false
@@ -345,7 +348,7 @@ jobs:
             --out ci-platform-shards/cache-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
             --role preflight \
-            --shared-key '${{ matrix.os }}-workspace-tests' \
+            --shared-key '${{ matrix.os }}-workspace-tests-v2' \
             --save false \
             --restore-dir target
           echo "CD_CACHE_STATE=$(jq -r .cache_state ci-platform-shards/cache-status.json)" >> "$GITHUB_ENV"
@@ -637,7 +640,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
-          shared-key: ${{ matrix.os }}-workspace-tests
+          shared-key: ${{ matrix.os }}-workspace-tests-v2
           cache-workspace-crates: true
           lookup-only: false
           save-if: false
@@ -650,7 +653,7 @@ jobs:
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
             --role shard \
             --shard '${{ matrix.shard }}' \
-            --shared-key '${{ matrix.os }}-workspace-tests' \
+            --shared-key '${{ matrix.os }}-workspace-tests-v2' \
             --save false \
             --restore-dir target
           echo "CD_CACHE_STATE=$(jq -r .cache_state ci-platform-shards/cache-status.json)" >> "$GITHUB_ENV"

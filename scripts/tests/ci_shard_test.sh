@@ -575,10 +575,12 @@ for name, os_name in (("rust-macos-cache-probe", "macos-latest"),
     if probe.get("outputs", {}).get("cache-hit") != "${{ steps.rust-cache.outputs.cache-hit }}":
         raise SystemExit(f"{name} must expose cache-hit")
     cache = cache_step(probe)["with"]
-    if cache.get("shared-key") != f"{os_name}-workspace-tests":
+    if cache.get("shared-key") != f"{os_name}-workspace-tests-v2":
         raise SystemExit(f"{name} cache key mismatch")
     if cache.get("lookup-only") not in (True, "true"):
         raise SystemExit(f"{name} must be lookup-only")
+    if cache.get("save-if") not in (False, "false"):
+        raise SystemExit(f"{name} must not save a partial cache")
 
 for name, os_name in (("rust-macos-cache-warmup", "macos-latest"),
                       ("rust-windows-cache-warmup", "windows-latest")):
@@ -586,7 +588,7 @@ for name, os_name in (("rust-macos-cache-warmup", "macos-latest"),
     if "cargo test --workspace --no-run" not in "\n".join(s.get("run") or "" for s in steps(warmup)):
         raise SystemExit(f"{name} must compile workspace tests on a cache miss")
     cache = cache_step(warmup)["with"]
-    if cache.get("shared-key") != f"{os_name}-workspace-tests":
+    if cache.get("shared-key") != f"{os_name}-workspace-tests-v2":
         raise SystemExit(f"{name} cache key mismatch")
     if cache.get("lookup-only") in (True, "true") or cache.get("save-if") in (False, "false"):
         raise SystemExit(f"{name} must be a cache writer")
@@ -598,7 +600,7 @@ if platform_matrix["os"] != ["macos-latest", "windows-latest"]:
 if platform_matrix["shard"] != [1, 2, 3, 4]:
     raise SystemExit(f"platform shard matrix changed: {platform_matrix['shard']}")
 platform_cache = cache_step(platform_shard)["with"]
-if platform_cache.get("shared-key") != "${{ matrix.os }}-workspace-tests":
+if platform_cache.get("shared-key") != "${{ matrix.os }}-workspace-tests-v2":
     raise SystemExit("platform shard cache key mismatch")
 if platform_cache.get("lookup-only") in (True, "true"):
     raise SystemExit("platform shards must download cache files")
