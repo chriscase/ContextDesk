@@ -37,7 +37,8 @@ pub fn assert_golden(name: &str, actual: &str) {
         fs::write(&path, actual).expect("write golden");
     }
     let expected = fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("missing golden {}: {error}", path.display()));
+        .unwrap_or_else(|error| panic!("missing golden {}: {error}", path.display()))
+        .replace("\r\n", "\n");
     assert_eq!(
         expected, actual,
         "golden {name} is stale; re-run with UPDATE_ADAPTER_FIXTURES=1 if the change is intended"

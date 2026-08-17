@@ -222,7 +222,8 @@ fn issue_878_cli_imports_three_source_kinds_with_provenance() {
     let example = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/templates/human-run.example.md"),
     )
-    .unwrap();
+    .unwrap()
+    .replace("\r\n", "\n");
     let human_md = example.replace("REPLACE_WITH_TASK_ID", &seed.task_id);
     let human_path = seed.tmp.path().join("human.md");
     fs::write(&human_path, &human_md).unwrap();
