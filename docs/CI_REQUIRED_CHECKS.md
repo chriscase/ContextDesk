@@ -46,6 +46,13 @@ the PR checks panel matches the table above. A deliberately missing shard
 artifact must keep `rust tests (ubuntu aggregate)` red, and that red check
 must block merge.
 
+The stacked adapter workflow publishes `triage fast (adapter)` as an
+additional advisory check once `cd-triage-bench-adapter` is present. It uses
+its own cache namespace and the same locked-fetch plus full dependency-boundary
+guard as the SDK/bench fast lanes. It does not replace or rename
+`rust tests (ubuntu aggregate)` and must not be added as the Ubuntu workspace
+gate.
+
 ## Related
 
 - Workflow: `.github/workflows/ci.yml`

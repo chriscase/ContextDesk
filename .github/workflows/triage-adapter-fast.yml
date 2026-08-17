@@ -1,0 +1,74 @@
+name: Triage adapter fast
+
+on:
+  push:
+    branches: [main, integrate/rc]
+  pull_request:
+    branches: [main, integrate/rc]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CD_TRIAGE_BANNED_DEPS: 'cd-core|cd-workflow|duckdb|libduckdb-sys|rusqlite|libsqlite3-sys|sqlx.*|keyring|reqwest|tokio.*|hyper.*|ureq|curl|isahc|async-std|smol|native-tls|openssl.*|tonic'
+
+concurrency:
+  group: triage-adapter-fast-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Advisory dependency-light validation for the sibling adapter crate.
+jobs:
+  adapter:
+    name: triage fast (adapter)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          workspaces: .
+          shared-key: triage-adapter-fast-v1
+          # Cache dependency artifacts only. The adapter itself is small, and
+          # retaining every workspace crate here would duplicate the expensive
+          # Ubuntu workspace cache that owns DuckDB.
+          cache-all-crates: false
+          cache-workspace-crates: false
+          cache-on-failure: true
+          # Main is the only writer; PRs restore the shared cache without
+          # producing extra full-registry entries that can evict DuckDB cache.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: report cache result
+        run: |
+          echo "triage adapter cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: fetch dependencies (locked)
+        run: cargo fetch --locked
+      - name: verify dependency boundary
+        shell: bash
+        run: |
+          cargo tree --locked --offline -p cd-triage-bench-adapter \
+            --edges normal,build,dev --target all | tee /tmp/triage-adapter-tree.txt
+          cargo tree --locked --offline -p cd-triage-bench-adapter \
+            --edges normal,build,dev --target all --prefix none --format '{p}' \
+            | awk '{print $1}' | sort -u > /tmp/triage-adapter-deps.txt
+          echo "resolved packages: $(wc -l < /tmp/triage-adapter-deps.txt)"
+          if [ ! -s /tmp/triage-adapter-deps.txt ]; then
+            echo "::error title=triage adapter dependency boundary::empty dependency tree"
+            exit 1
+          fi
+          if grep -Exi "$CD_TRIAGE_BANNED_DEPS" /tmp/triage-adapter-deps.txt; then
+            echo "::error title=triage adapter dependency boundary::heavy or runtime dependency found"
+            exit 1
+          fi
+      - name: fmt
+        run: cargo fmt -p cd-triage-bench-adapter -- --check
+      - name: clippy
+        run: cargo clippy --locked --offline -p cd-triage-bench-adapter --all-targets -- -D warnings
+      - name: test
+        run: cargo test --locked --offline -p cd-triage-bench-adapter
