@@ -21,7 +21,6 @@ When a ruleset is added, require these **check names** (the `name:` fields in
 | `claim↔code guard` | Shipped-claim honesty |
 | `close-proof discipline (#254)` | Close-comment SHA + proof |
 | `GUI integration contracts (no WebDriver)` | GUI contract suite |
-| `rust (ubuntu-latest)` | Ubuntu fmt, clippy, examples, smoke, **cache warmup** (not the suite; do not use it as the Ubuntu suite gate) |
 | `rust (macos-latest)` | macOS fmt, clippy, `cargo test --workspace`, examples, smoke |
 | `rust (windows-latest)` | Windows fmt, clippy, `cargo test --workspace`, examples, smoke |
 | `rust tests (ubuntu aggregate)` | Fail-closed Ubuntu workspace test gate |
@@ -39,6 +38,9 @@ When a ruleset is added, require these **check names** (the `name:` fields in
   `cargo test --workspace` inside `rust (ubuntu-latest)`”. That job no longer
   executes the suite; requiring only `rust (ubuntu-latest)` would treat a
   skipped/failed shard matrix as irrelevant as long as fmt/clippy passed.
+- `rust (ubuntu-latest)` is warmup and diagnostics only. It is intentionally
+  absent from the Ubuntu suite-gate list above; require exactly
+  `rust tests (ubuntu aggregate)` for that gate.
 
 ## Path-aware routing
 
