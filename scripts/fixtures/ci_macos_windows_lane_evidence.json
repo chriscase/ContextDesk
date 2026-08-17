@@ -1,0 +1,107 @@
+{
+  "schema_id": "contextdesk.ci.macos_windows_lane_evidence.v3",
+  "main_sha": "ffe57ff754fefc017f44c925cbc2dd0054e29374",
+  "warm_run_id": "31904068651",
+  "warm_run_url": "https://github.com/chriscase/ContextDesk/actions/runs/31904068651",
+  "replicate_run_id": "31887796502",
+  "replicate_run_url": "https://github.com/chriscase/ContextDesk/actions/runs/31887796502",
+  "recommended_desktop_shards": 4,
+  "two_way_split_run_id": "32002319037",
+  "two_way_split_head": "1fabe2baf5203e1f181ce1039cf9be5c09eeec9c",
+  "cold_ubuntu_duckdb_compile_minutes_min": 36,
+  "cold_ubuntu_duckdb_compile_minutes_max": 55,
+  "warm": {
+    "macos": {
+      "job_seconds": 1691,
+      "test_workspace_seconds": 1415,
+      "clippy_seconds": 99,
+      "cache_restore_seconds": 46
+    },
+    "windows": {
+      "job_seconds": 2560,
+      "test_workspace_seconds": 2085,
+      "clippy_seconds": 130,
+      "cache_restore_seconds": 74
+    },
+    "ubuntu": {
+      "warmup_job_seconds": 614,
+      "warmup_compile_tests_seconds": 284,
+      "worst_shard_job_seconds": 1464,
+      "example_shard_build_seconds": 710,
+      "example_shard_total_seconds": 1203
+    }
+  },
+  "replicate": {
+    "windows": {
+      "test_workspace_seconds": 2082
+    }
+  },
+  "two_way_split_observed": {
+    "macos": {
+      "preflight_seconds": 712,
+      "slowest_shard_seconds": 1419,
+      "critical_path_seconds": 2131,
+      "baseline_monolithic_job_seconds": 1691,
+      "all_shards_warm_and_complete": true
+    },
+    "windows": {
+      "preflight_seconds": 1045,
+      "slowest_shard_seconds": 2878,
+      "critical_path_seconds": 3923,
+      "baseline_monolithic_job_seconds": 2560,
+      "all_shards_warm_and_complete": true
+    }
+  },
+  "four_way_run_id": "32008278389",
+  "four_way_run_url": "https://github.com/chriscase/ContextDesk/actions/runs/32008278389",
+  "four_way_head": "2f1d4fd982c945c3265a339365b1efa5d4998641",
+  "four_way_observed": {
+    "overall_run_seconds": 2237,
+    "macos": {
+      "probe_hit": true,
+      "cache_warmup": "skipped",
+      "preflight_seconds": 232,
+      "slowest_shard_status_seconds": 1293,
+      "slowest_shard_job_seconds": 1349,
+      "critical_path_from_workflow_start_seconds": 1488,
+      "units": "114/114",
+      "passed": 3670,
+      "failed": 0,
+      "ignored": 21,
+      "all_shards_warm_and_complete": true
+    },
+    "windows": {
+      "probe_hit": true,
+      "cache_warmup": "skipped",
+      "preflight_seconds": 402,
+      "slowest_shard_status_seconds": 2016,
+      "slowest_shard_job_seconds": 2133,
+      "critical_path_from_workflow_start_seconds": 2163,
+      "units": "114/114",
+      "passed": 3636,
+      "failed": 0,
+      "ignored": 21,
+      "all_shards_warm_and_complete": true
+    },
+    "ubuntu": {
+      "warmup_job_seconds": 589,
+      "slowest_shard_status_seconds": 1434,
+      "slowest_shard_job_seconds": 1598,
+      "units": "114/114",
+      "passed": 3670,
+      "failed": 0,
+      "ignored": 21,
+      "all_shards_warm_and_complete": true
+    },
+    "all_gates_green": true
+  },
+  "notes": [
+    "Cache restore 37-74s plus clippy 1-2 minutes means both measured main runs were warm. The 35-minute Windows cargo test --workspace step is therefore linking plus execution, not a cold DuckDB compile.",
+    "Cold DuckDB minutes come from Ubuntu shard runs 31828397526 and 31835229724, cited in ci.yml and the #874 merge.",
+    "A preflight job that still requires the full workspace afterwards does not reduce wall clock. Treating preflight as the required gate would skip tests. Do not treat a rust-cache miss as success.",
+    "The first hosted 2-way desktop split (32002319037) was coverage-safe and warm, but its serialized warmup plus slowest shard critical path regressed from 1691s to 2131s on macOS and from 2560s to 3923s on Windows.",
+    "The four-way follow-up (32008278389) proved the exact-key probe hit, both cache writers skipped, all desktop preflights restored files, and every desktop and Ubuntu shard finished warm with complete coverage and no in-flight unit.",
+    "Against the monolithic baselines, the four-way critical path was 1488s on macOS versus 1691s and 2163s on Windows versus 2560s. The overall run completed in 2237s with all existing gates green; this is hosted evidence, not a ruleset or release promotion.",
+    "An 8-way Windows/macOS split without warmup repeats the cold DuckDB tax per shard and imports leftover-heavy isolate timeouts (#898)."
+  ]
+}

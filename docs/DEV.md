@@ -85,6 +85,7 @@ sh scripts/ci_shard_plan.sh verify --shards 8
 sh scripts/ci_run_shard.sh --shard 2 --shards 8
 sh scripts/ci_run_shard.sh --summary ci-shards
 sh scripts/tests/ci_shard_test.sh
+sh scripts/tests/ci_platform_shard_test.sh
 
 # Desktop
 cd desktop
@@ -117,10 +118,10 @@ Index caps (all in `index.rs`; surfaced via `AppConfig`):
   before any `read_to_string`, so huge dumps never allocate in full).
 - **`MAX_DEPTH`** — directory-walk depth cap, **12** (runaway nesting is skipped).
 
-## CI Ubuntu workspace test shards (#874)
+## CI workspace test shards (#874)
 
-`cargo test --workspace` is still the local gate and still the gate on macOS and
-Windows. On Ubuntu it ran 70–80 minutes as one step, and when the hosted runner
+`cargo test --workspace` is still the local gate. On Ubuntu it ran 70–80 minutes
+as one step, and when the hosted runner
 lost its connection GitHub marked the job failed with the step still
 `in_progress` and **no log blob at all**. Hosted runs on the first sharding
 attempt (`31828397526`, `31835229724`) then showed the same failure mode on
@@ -133,7 +134,7 @@ CI therefore:
 1. Compiles Ubuntu workspace tests **once** in `rust (ubuntu-latest)`
    (`cargo test --workspace --no-run`) and **saves** the shared
    `ubuntu-workspace-tests` rust-cache entry there.
-2. Runs the same suite as `CD_SHARD_COUNT` (currently **8**) lookup-only shards
+2. Runs the same suite as `CD_SHARD_COUNT` (currently **8**) restore-only shards
    that restore that cache. `cd-core/lib` is executed as two complementary
    filters (`log_analysis::` and `--skip log_analysis::`) so the heavy library
    binary is not pinned to shard 1.
@@ -154,6 +155,7 @@ CI therefore:
 | --- | --- |
 | `scripts/ci_shard_plan.sh` | Enumerates every testable target from `cargo metadata` and partitions it. `verify` fails closed if the partition is not an exact, duplicate-free cover. |
 | `scripts/ci_run_shard.sh` | Runs one shard: per-unit start/finish lines, a heartbeat while a unit runs, a bounded `manifest.json`, `progress.jsonl`, and `status.json`. SIGTERM writes `incomplete`. |
+| `scripts/ci_run_platform_shard.sh` | Validates `macos` / `windows` and delegates to the portable shard runner; no GNU `tail --pid`, `stdbuf`, or platform-specific test selection. |
 | `scripts/ci_record_cache.sh` | Records `cache_state=warm` only on an exact rust-cache hit. |
 | `scripts/ci_aggregate_shards.sh` | The gate. Fails if a shard is missing, failed, incomplete, stopped early, or if any test unit was claimed by no shard. |
 
@@ -180,7 +182,25 @@ Properties worth knowing:
   run `31845262696` recorded as warm while each shard still compiled for
   11–12 minutes. The warmup job is the only writer.
 - **Nothing about the suite is relaxed.** Shards keep `RUST_TEST_THREADS=1`.
-  macOS and Windows still run `cargo test --workspace`.
+  macOS and Windows use the same planner and aggregate the complete unit set.
+  Their `rust (macos-latest)` / `rust (windows-latest)` jobs are restore-only
+  preflight signals; a separate conditional cache writer compiles the workspace
+  only when the exact OS cache key is absent.
+
+### macOS / Windows four-way lanes
+
+The warm hosted study found the Windows monolith was the wall-clock bottleneck
+(`cargo test --workspace` ≈ 35 minutes), with macOS at ≈ 24 minutes. The draft
+follow-up first proved complete two-way coverage but regressed critical-path
+time because the warmup was serialized. The current draft probes the exact
+cache key, conditionally runs one `--no-run` writer on a miss, and uses four
+restore-only shards per OS. It deliberately does not copy Ubuntu's eight-way
+leftover-heavy split. The aggregates are named
+`rust tests (macos-latest aggregate)` and
+`rust tests (windows-latest aggregate)`; they are not yet added to the active
+ruleset. The measured baseline, regression, and portability rationale live in
+[`docs/testing/MACOS_WINDOWS_CI_LANES.md`](testing/MACOS_WINDOWS_CI_LANES.md).
+Reproduce the planner evidence with `sh scripts/ci_macos_windows_lane_study.sh`.
 
 Required-check / ruleset wiring is **not** workflow behavior; see
 [`docs/CI_REQUIRED_CHECKS.md`](CI_REQUIRED_CHECKS.md).

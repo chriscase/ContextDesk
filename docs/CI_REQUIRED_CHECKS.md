@@ -2,18 +2,25 @@
 
 This document is **configuration guidance for GitHub branch protection / rulesets**.
 It does not change workflow behavior. The workflow in `.github/workflows/ci.yml`
-already fail-closes on a missing Ubuntu test shard; a ruleset is what makes that
-job a merge blocker.
+already fail-closes on a missing test shard; a ruleset is what makes a check a
+merge blocker.
 
 The active `main` ruleset is `20890073` (`main: require Ubuntu aggregate`). Its
 Ubuntu suite gate is exactly `rust tests (ubuntu aggregate)`. The
 `rust (ubuntu-latest)` job is warmup (fmt, clippy, examples, smoke, and cache
 population), not the Ubuntu test suite and not the Ubuntu suite gate.
+The macOS/Windows aggregates are coverage signals and do not change that
+active requirement.
 
 ## What to require
 
-When a ruleset is added, require these **check names** (the `name:` fields in
-`.github/workflows/ci.yml`), not job ids:
+The active ruleset currently enforces the Ubuntu aggregate named above. The
+remaining rows are the project’s candidate checks and lane signals; this draft
+does not modify the ruleset or add the new desktop aggregates to it.
+
+These are the stable **check names** (the `name:` fields in
+`.github/workflows/ci.yml`), not job ids. The active ruleset currently requires
+only the Ubuntu aggregate named above.
 
 | Check name | Why |
 | --- | --- |
@@ -21,9 +28,12 @@ When a ruleset is added, require these **check names** (the `name:` fields in
 | `claim↔code guard` | Shipped-claim honesty |
 | `close-proof discipline (#254)` | Close-comment SHA + proof |
 | `GUI integration contracts (no WebDriver)` | GUI contract suite |
-| `rust (macos-latest)` | macOS fmt, clippy, `cargo test --workspace`, examples, smoke |
-| `rust (windows-latest)` | Windows fmt, clippy, `cargo test --workspace`, examples, smoke |
+| `rust (ubuntu-latest)` | Ubuntu fmt, clippy, examples, smoke, **cache warmup** (not the suite) |
+| `rust (macos-latest)` | macOS restore-only preflight: fmt, clippy, examples, smoke; not the suite gate. A separate conditional cache-writer runs `--no-run` only on a miss |
+| `rust (windows-latest)` | Windows restore-only preflight: fmt, clippy, examples, smoke; not the suite gate. A separate conditional cache-writer runs `--no-run` only on a miss |
 | `rust tests (ubuntu aggregate)` | Fail-closed Ubuntu workspace test gate |
+| `rust tests (macos-latest aggregate)` | Fail-closed macOS workspace test gate; draft follow-up check |
+| `rust tests (windows-latest aggregate)` | Fail-closed Windows workspace test gate; draft follow-up check |
 | `tauri host (ubuntu-latest)` | Desktop host compile |
 | `tauri host (macos-latest)` | Desktop host compile |
 | `desktop ui (typecheck, lint, test, build)` | Desktop UI gate |
@@ -41,6 +51,12 @@ When a ruleset is added, require these **check names** (the `name:` fields in
 - `rust (ubuntu-latest)` is warmup and diagnostics only. It is intentionally
   absent from the Ubuntu suite-gate list above; require exactly
   `rust tests (ubuntu aggregate)` for that gate.
+- **`rust (macos-latest)`** and **`rust (windows-latest)`** are restore-only
+  preflights, not complete workspace-suite gates. Requiring one of them alone
+  would not protect the corresponding shard aggregate.
+- The macOS/Windows shard indexes are likewise signals. The per-OS aggregate
+  is the stable coverage check; the active ruleset still requires only
+  `rust tests (ubuntu aggregate)`.
 
 ## Path-aware routing
 
@@ -54,13 +70,14 @@ appears before its dedicated validator exists, the aggregate fails closed.
 
 ## How to verify a ruleset
 
-After saving the ruleset, open a draft PR and confirm the “Required” list on
-the PR checks panel matches the table above. A deliberately missing shard
-artifact must keep `rust tests (ubuntu aggregate)` red, and that red check
-must block merge.
+After changing a ruleset, open a draft PR and confirm the “Required” list on the
+PR checks panel contains the intended aggregate names. A deliberately missing
+Ubuntu shard artifact must keep `rust tests (ubuntu aggregate)` red, and that
+red check must block merge.
 
 ## Related
 
 - Workflow: `.github/workflows/ci.yml`
 - Operator notes: `docs/DEV.md` (CI Ubuntu workspace test shards)
+- macOS/Windows wall-clock study and staged lane implementation: [`docs/testing/MACOS_WINDOWS_CI_LANES.md`](testing/MACOS_WINDOWS_CI_LANES.md)
 - Platform matrix: `docs/PLATFORMS.md`

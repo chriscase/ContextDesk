@@ -93,7 +93,10 @@ enumerate_base_units() {
       | @tsv
     ' |
     LC_ALL=C sort -u |
-    cut -f4
+    cut -f4 |
+    # Git Bash can preserve CRLF from native Windows tools.  Keep the
+    # canonical unit stream byte-for-byte identical on every runner.
+    tr -d '\015'
 }
 
 # Replace configured parent lib units with complementary child units.
@@ -108,7 +111,7 @@ expand_units() {
     else
       printf '%s\n' "$unit"
     fi
-  done | LC_ALL=C sort -u
+  done | LC_ALL=C sort -u | tr -d '\015'
 }
 
 # Any target `cargo test` would pick up but this script does not know how to
@@ -275,11 +278,27 @@ verify() {
   fi
 
   # 5. Independent cross-check against the filesystem for integration tests.
-  metadata | jq -r '.packages[] | "\(.manifest_path)\t\(.name)"' >"$tmp/manifests"
+  # Cargo emits native manifest paths. On Windows the Git Bash glob below is
+  # POSIX-shaped (`/c/...`) while metadata uses `C:\\...`; compare the stable
+  # crate-relative suffix instead of two representations of the same absolute
+  # path.
+  metadata |
+    jq -r '.packages[] | "\(.manifest_path)\t\(.name)"' |
+    awk -F'\t' '
+      function crate_rel(path) {
+        # Cargo emits one native backslash per separator on Windows.
+        gsub(/\\/, "/", path)
+        sub(/^.*\/crates\//, "", path)
+        sub(/\/Cargo\.toml$/, "", path)
+        return path
+      }
+      { print crate_rel($1) "\t" $2 }
+    ' >"$tmp/manifests"
   for file in "$ROOT"/crates/*/tests/*.rs; do
     [ -e "$file" ] || continue
-    manifest=$(dirname "$(dirname "$file")")/Cargo.toml
-    pkg=$(awk -F'\t' -v m="$manifest" '$1 == m { print $2 }' "$tmp/manifests")
+    relative=${file#"$ROOT"/crates/}
+    crate_dir=${relative%%/tests/*}
+    pkg=$(awk -F'\t' -v d="$crate_dir" '$1 == d { print $2 }' "$tmp/manifests")
     if [ -z "$pkg" ]; then
       echo "error: $file has no workspace package (is its crate a workspace member?)" >&2
       failures=$((failures + 1))

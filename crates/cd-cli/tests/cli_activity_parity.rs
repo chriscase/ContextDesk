@@ -13,6 +13,10 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 fn cli(home: &Path) -> Command {
     let mut cmd =
         Command::cargo_bin("contextdesk").expect("contextdesk binary built by this workspace");
+    // `dirs::home_dir()` ignores HOME on Windows.  Use ContextDesk's explicit
+    // data-dir seam so sessions, activity, and caches cannot leak between
+    // tests through the hosted runner's real user profile.
+    cmd.arg("--data-dir").arg(home);
     cmd.env("HOME", home);
     cmd.env("NO_COLOR", "1");
     cmd
@@ -873,16 +877,12 @@ async fn session_resume_persists_and_continues() {
         .await;
 
     let home = tempfile::tempdir().unwrap();
-    let data = home.path().join("data");
-    std::fs::create_dir_all(&data).unwrap();
     let app_config_path = write_profile(home.path(), &server.uri(), false);
 
     let first = cli(home.path())
         .args([
             "--app-config",
             app_config_path.to_str().unwrap(),
-            "--data-dir",
-            data.to_str().unwrap(),
             "--json",
             "chat",
             "--activity",
@@ -905,8 +905,6 @@ async fn session_resume_persists_and_continues() {
         .args([
             "--app-config",
             app_config_path.to_str().unwrap(),
-            "--data-dir",
-            data.to_str().unwrap(),
             "--json",
             "chat",
             "--activity",
