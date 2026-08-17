@@ -81,7 +81,7 @@ Artifacts contain local absolute paths. Review them before external sharing.
 ## CI
 
 - Default PR CI runs the dependency-locked, WebDriver-free harness contracts.
-- `.github/workflows/gui-accept.yml` is optional/manual/weekly and runs the
+- `.github/workflows/gui-accept.yml` is optional/manual/nightly and runs the
   exact-head Linux release-host scenarios on Ubuntu 24.04.
 - The heavy workflow is not a required status check and does not weaken any
   existing gate.

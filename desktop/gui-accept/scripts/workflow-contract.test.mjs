@@ -18,6 +18,11 @@ describe("gui-accept workflow contract", () => {
     assert.ok(existsSync(wf), "gui-accept.yml should exist");
     const y = readFileSync(wf, "utf8");
     assert.match(y, /workflow_dispatch/);
+    assert.match(
+      y,
+      /cron:\s*["']0 6 \* \* \*["']/,
+      "gui-accept must remain a nightly scheduled validation",
+    );
     // Must not attach to pull_request or push as a required path
     assert.ok(
       !/^\s*pull_request\s*:/m.test(y),

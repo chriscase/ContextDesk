@@ -104,6 +104,55 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  ci-path-filter:
+    name: CI path routing
+    runs-on: ubuntu-latest
+    outputs:
+      surface: ${{ steps.classify.outputs.surface }}
+      run_ubuntu: ${{ steps.classify.outputs.run_ubuntu }}
+      changed_count: ${{ steps.classify.outputs.changed_count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: path routing self-test
+        run: sh scripts/tests/ci_path_filter_test.sh
+      - name: classify changed paths
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "push" ]; then
+            if [ -n "$BASE_SHA" ] && [ "$BASE_SHA" != "0000000000000000000000000000000000000000" ]; then
+              git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$BASE_SHA"
+              git diff --name-only "$BASE_SHA" "$HEAD_SHA" > changed-files.txt
+            else
+              git ls-files > changed-files.txt
+            fi
+          else
+            git ls-files > changed-files.txt
+          fi
+          echo "Changed paths:"
+          sed 's/^/- /' changed-files.txt
+          result=$(sh scripts/ci_classify_paths.sh < changed-files.txt)
+          printf '%s\n' "$result" >> "$GITHUB_OUTPUT"
+          surface=$(printf '%s\n' "$result" | awk -F= '$1 == "surface" { print $2 }')
+          run_ubuntu=$(printf '%s\n' "$result" | awk -F= '$1 == "run_ubuntu" { print $2 }')
+          changed_count=$(printf '%s\n' "$result" | awk -F= '$1 == "changed_count" { print $2 }')
+          {
+            echo "### CI path routing"
+            echo "- Surface: `$surface`"
+            echo "- Changed paths: $changed_count"
+            if [ "$run_ubuntu" = true ]; then
+              echo "- Ubuntu workspace shards: required"
+            else
+              echo "- Ubuntu workspace shards: not required for this isolated surface"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # macOS / Windows keep the monolithic `cargo test --workspace` step. Ubuntu
   # tests moved to rust-ubuntu-shard (#874): the combined Linux step ran 70-80
   # minutes and then lost the runner with the step still `in_progress` and no
@@ -147,6 +196,8 @@ jobs:
   # each shard compiled DuckDB for 36-55 minutes.
   rust-ubuntu:
     name: rust (ubuntu-latest)
+    needs: [ci-path-filter]
+    if: needs.ci-path-filter.outputs.run_ubuntu == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
@@ -232,7 +283,8 @@ jobs:
 
   rust-ubuntu-shard:
     name: rust tests (ubuntu shard ${{ matrix.shard }})
-    needs: [rust-ubuntu]
+    needs: [ci-path-filter, rust-ubuntu]
+    if: needs.ci-path-filter.outputs.run_ubuntu == 'true'
     runs-on: ubuntu-latest
     # Tests only, after the warmup job has compiled. 50 minutes is enough for
     # the known 525s integration target plus `cd-core/lib` splits, and is
@@ -315,26 +367,43 @@ jobs:
 
   rust-ubuntu-tests:
     name: rust tests (ubuntu aggregate)
-    needs: [rust-ubuntu-shard]
+    needs: [ci-path-filter, rust-ubuntu-shard]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: run isolated bench validation
+        if: needs.ci-path-filter.outputs.surface == 'bench-only'
+        run: cargo test -p cd-triage-bench --all-targets
+      - name: record isolated collab routing
+        if: needs.ci-path-filter.outputs.surface == 'collab-only'
+        run: |
+          if [ -d collab ] || [ -d crates/cd-collab ]; then
+            echo "::error::collaboration source is present but has no dedicated validator; refusing a green filtered gate"
+            exit 1
+          fi
+          echo "No collaboration workspace crate is present on this revision; path-only collaboration documentation needs no Rust shard run."
+          git diff --check
       - name: download shard results
+        if: needs.ci-path-filter.outputs.run_ubuntu == 'true'
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           pattern: rust-ubuntu-shard-*
           path: shard-results
       - name: shard tooling self-test
+        if: needs.ci-path-filter.outputs.run_ubuntu == 'true'
         run: sh scripts/tests/ci_shard_test.sh
       - name: per-shard diagnostics
+        if: needs.ci-path-filter.outputs.run_ubuntu == 'true'
         run: sh scripts/ci_run_shard.sh --summary shard-results || true
       - name: aggregate shard results (fail closed)
+        if: needs.ci-path-filter.outputs.run_ubuntu == 'true'
         run: sh scripts/ci_aggregate_shards.sh --dir shard-results --shards "$CD_SHARD_COUNT"
       - name: every shard job must have succeeded
+        if: needs.ci-path-filter.outputs.run_ubuntu == 'true'
         run: |
           result='${{ needs.rust-ubuntu-shard.result }}'
           echo "shard matrix result: $result"

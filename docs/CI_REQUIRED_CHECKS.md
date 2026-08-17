@@ -5,9 +5,10 @@ It does not change workflow behavior. The workflow in `.github/workflows/ci.yml`
 already fail-closes on a missing Ubuntu test shard; a ruleset is what makes that
 job a merge blocker.
 
-As of the #874 sharding work, **no branch protection ruleset is configured** on
-`chriscase/ContextDesk`. Until one is, a red `rust tests (ubuntu aggregate)`
-does not by itself prevent a merge.
+The active `main` ruleset is `20890073` (`main: require Ubuntu aggregate`). Its
+Ubuntu suite gate is exactly `rust tests (ubuntu aggregate)`. The
+`rust (ubuntu-latest)` job is warmup (fmt, clippy, examples, smoke, and cache
+population), not the Ubuntu test suite and not the Ubuntu suite gate.
 
 ## What to require
 
@@ -20,7 +21,7 @@ When a ruleset is added, require these **check names** (the `name:` fields in
 | `claim↔code guard` | Shipped-claim honesty |
 | `close-proof discipline (#254)` | Close-comment SHA + proof |
 | `GUI integration contracts (no WebDriver)` | GUI contract suite |
-| `rust (ubuntu-latest)` | Ubuntu fmt, clippy, examples, smoke, **cache warmup** (not the suite) |
+| `rust (ubuntu-latest)` | Ubuntu fmt, clippy, examples, smoke, **cache warmup** (not the suite; do not use it as the Ubuntu suite gate) |
 | `rust (macos-latest)` | macOS fmt, clippy, `cargo test --workspace`, examples, smoke |
 | `rust (windows-latest)` | Windows fmt, clippy, `cargo test --workspace`, examples, smoke |
 | `rust tests (ubuntu aggregate)` | Fail-closed Ubuntu workspace test gate |
@@ -38,6 +39,16 @@ When a ruleset is added, require these **check names** (the `name:` fields in
   `cargo test --workspace` inside `rust (ubuntu-latest)`”. That job no longer
   executes the suite; requiring only `rust (ubuntu-latest)` would treat a
   skipped/failed shard matrix as irrelevant as long as fmt/clippy passed.
+
+## Path-aware routing
+
+For a Rust-touching PR, `rust tests (ubuntu aggregate)` runs the complete
+fail-closed eight-shard workspace gate. A PR that changes only
+`crates/cd-triage-bench/**` (or benchmark documentation) skips the eight
+shards but keeps the same required check name and runs the complete
+`cd-triage-bench` test suite in the aggregate job. A collaboration-only path
+is routed only when no collaboration implementation is present; if source
+appears before its dedicated validator exists, the aggregate fails closed.
 
 ## How to verify a ruleset
 
