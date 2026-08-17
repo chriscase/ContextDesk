@@ -32,6 +32,7 @@ OUT="$ROOT/ci-shards"
 HEARTBEAT=${CD_SHARD_HEARTBEAT_SECONDS:-60}
 UNIT_TIMEOUT=${CD_SHARD_UNIT_TIMEOUT_SECONDS:-1800}
 CACHE_STATE=${CD_CACHE_STATE:-unknown}
+PLATFORM_OS=${CD_PLATFORM_OS:-}
 SNAPSHOT_HOOK=${CD_SHARD_SNAPSHOT_HOOK:-}
 SUMMARY_DIR=""
 
@@ -47,6 +48,7 @@ Usage:
   --out DIR          artifact root (default: ./ci-shards)
   --heartbeat SECS   progress line interval while a unit runs (default 60, 0 disables)
   --unit-timeout S   per-unit wall-clock limit in seconds (default 1800, 0 disables)
+  --os NAME          optional platform label recorded in status artifacts
   --summary DIR      diagnostic mode: report the last completed unit and test
                      counts from an artifact directory, including a shard whose
                      runner disappeared mid-run
@@ -88,6 +90,11 @@ while [ $# -gt 0 ]; do
     --unit-timeout)
       [ $# -ge 2 ] || die "--unit-timeout needs a value"
       UNIT_TIMEOUT=$2
+      shift 2
+      ;;
+    --os)
+      [ $# -ge 2 ] || die "--os needs a value"
+      PLATFORM_OS=$2
       shift 2
       ;;
     --summary)
@@ -213,6 +220,7 @@ run_snapshot_hook() {
 write_manifest() {
   jq -n \
     --arg schema "cd.ci.shard_manifest.v1" \
+    --arg os "$PLATFORM_OS" \
     --argjson shard "$SHARD" --argjson shards "$SHARDS" \
     --arg status "$STATUS" --arg cache "$CACHE_STATE" \
     --arg started "$STARTED_AT" --arg heartbeat "$(stamp)" \
@@ -220,7 +228,8 @@ write_manifest() {
     --argjson units_total "$TOTAL" --argjson units_finished "$FINISHED" \
     --argjson tests_passed "$PASSED" --argjson tests_failed "$FAILED" \
     --argjson tests_ignored "$IGNORED" \
-    '{schema: $schema, shard: $shard, shards: $shards, status: $status,
+    '{schema: $schema, os: (if $os == "" then null else $os end),
+      shard: $shard, shards: $shards, status: $status,
       cache_state: $cache, started_at: $started, heartbeat_at: $heartbeat,
       units_total: $units_total, units_finished: $units_finished,
       tests_passed: $tests_passed, tests_failed: $tests_failed,
@@ -234,6 +243,7 @@ write_status() {
   STATUS=$1
   SECONDS_TOTAL=$(($(now_s) - SHARD_START))
   jq -n \
+    --arg os "$PLATFORM_OS" \
     --argjson shard "$SHARD" --argjson shards "$SHARDS" \
     --arg status "$STATUS" --arg finished_at "$(stamp)" \
     --arg cache "$CACHE_STATE" \
@@ -244,7 +254,8 @@ write_status() {
     --arg units "$(tr '\n' ' ' <"$SHARD_DIR/plan.txt")" \
     --arg failed_units "$FAILED_UNITS" \
     --arg in_flight "$IN_FLIGHT" \
-    '{shard: $shard, shards: $shards, status: $status, finished_at: $finished_at,
+    '{os: (if $os == "" then null else $os end),
+      shard: $shard, shards: $shards, status: $status, finished_at: $finished_at,
       cache_state: $cache,
       units_total: $units_total, units_finished: $units_finished,
       tests_passed: $tests_passed, tests_failed: $tests_failed,
@@ -260,10 +271,12 @@ record() {
   jq -nc \
     --arg event "$1" --arg phase "$2" --arg unit "$3" --arg status "$4" \
     --arg at "$(stamp)" \
+    --arg os "$PLATFORM_OS" \
     --argjson shard "$SHARD" --argjson shards "$SHARDS" \
     --argjson passed "${5:-0}" --argjson failed "${6:-0}" \
     --argjson ignored "${7:-0}" --argjson seconds "${8:-0}" \
-    '{event: $event, phase: $phase, shard: $shard, shards: $shards, unit: $unit,
+    '{event: $event, phase: $phase, os: (if $os == "" then null else $os end),
+      shard: $shard, shards: $shards, unit: $unit,
       status: $status, at: $at, tests_passed: $passed, tests_failed: $failed,
       tests_ignored: $ignored, seconds: $seconds}' >>"$PROGRESS"
 }
@@ -337,10 +350,12 @@ run_logged() {
     : >"$logfile"
   fi
   [ -f "$logfile" ] || : >"$logfile"
-  start_bytes=$(wc -c <"$logfile" | tr -d ' ')
   "$@" </dev/null >>"$logfile" 2>&1 &
   CMD_PID=$!
-  tail -c +$((start_bytes + 1)) -f --pid="$CMD_PID" "$logfile" 2>/dev/null &
+  # `tail -f` is available in the POSIX shells shipped by the macOS and
+  # Windows hosted runners.  Do not use GNU-only `--pid` or `stdbuf`: the
+  # parent waits for cargo and then stops this best-effort log follower.
+  tail -f "$logfile" 2>/dev/null &
   TAIL_PID=$!
   if wait "$CMD_PID"; then
     RC=0

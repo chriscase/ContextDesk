@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Fail-closed aggregate for the sharded Ubuntu workspace test gate (#874).
+# Fail-closed aggregate for a sharded workspace test gate (#874).
 #
 # Sharding is only safe if the sum of the shards is still the whole suite, so
 # this gate refuses to pass unless every one of them reported and, together,
@@ -22,15 +22,17 @@ PLAN="$ROOT/scripts/ci_shard_plan.sh"
 
 DIR=""
 SHARDS=${CD_SHARD_COUNT:-4}
+LABEL="ubuntu workspace test shards"
 
 usage() {
   cat <<'EOF'
 Usage:
-  sh scripts/ci_aggregate_shards.sh --dir DIR [--shards N]
+  sh scripts/ci_aggregate_shards.sh --dir DIR [--shards N] [--label TEXT]
 
   --dir DIR    directory holding the downloaded shard artifacts; status.json
                files are discovered at any depth below it
   --shards N   number of shards that must be present (default: $CD_SHARD_COUNT, else 4)
+  --label TEXT label used in diagnostics and the step summary (default: ubuntu workspace test shards)
 EOF
 }
 
@@ -49,6 +51,11 @@ while [ $# -gt 0 ]; do
     --shards)
       [ $# -ge 2 ] || die "--shards needs a value"
       SHARDS=$2
+      shift 2
+      ;;
+    --label)
+      [ $# -ge 2 ] || die "--label needs a value"
+      LABEL=$2
       shift 2
       ;;
     -h | --help)
@@ -71,7 +78,7 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 failures=0
 
 fail() {
-  echo "::error title=ubuntu test shards::$*"
+  echo "::error title=$LABEL::$*"
   echo "error: $*" >&2
   failures=$((failures + 1))
 }
@@ -196,7 +203,7 @@ fi
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
-    echo "### Ubuntu workspace test shards"
+    echo "### $LABEL"
     echo
     echo "| shard | result | units | passed | failed | ignored | cache | seconds |"
     echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
@@ -217,8 +224,8 @@ fi
 
 if [ "$failures" -ne 0 ]; then
   echo
-  echo "ubuntu workspace test gate FAILED ($failures problem(s))" >&2
+  echo "$LABEL gate FAILED ($failures problem(s))" >&2
   exit 1
 fi
 
-echo "ubuntu workspace test gate passed: all $SHARDS shards reported, full plan covered"
+echo "$LABEL gate passed: all $SHARDS shards reported, full plan covered"

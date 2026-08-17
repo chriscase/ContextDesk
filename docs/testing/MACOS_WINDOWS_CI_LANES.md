@@ -1,18 +1,18 @@
 # macOS / Windows rust CI lanes
 
-**Status:** study + inventory only. `.github/workflows/ci.yml` is unchanged
-on this branch so it does not overlap draft [#907](https://github.com/chriscase/ContextDesk/pull/907)
-(Ubuntu timeout artifacts), [#893](https://github.com/chriscase/ContextDesk/pull/893)
-(Ubuntu leftover splits), or issue [#899](https://github.com/chriscase/ContextDesk/issues/899)
-(path-filtered Ubuntu shards / nightly gui-accept).
+**Status:** study plus staged implementation draft. The follow-up keeps the
+existing Ubuntu gate and ruleset untouched, and adds two restore-only shards per
+desktop OS after an OS-specific cache warmup. It remains draft-only pending
+hosted proof of warm cache, exact coverage, and useful wall-clock improvement.
 
 Tip measured: `ffe57ff754fefc017f44c925cbc2dd0054e29374`
 (`ci: raise the Ubuntu test shard count 4 → 8`).
 
 ## What is slow
 
-Ubuntu already shards `cargo test --workspace`. macOS and Windows still run
-it as one step inside `rust (${{ matrix.os }})`.
+Ubuntu already shards `cargo test --workspace`. The draft now gives macOS and
+Windows the same complete planner/runner/aggregate shape instead of keeping
+the suite as one step inside `rust (${{ matrix.os }})`.
 
 Hosted run [`31904068651`](https://github.com/chriscase/ContextDesk/actions/runs/31904068651)
 (push to `main`, all 19 checks green):
@@ -73,29 +73,29 @@ Making the preflight the required check would **skip tests**. Forbidden.
 Preflight is allowed later only as a *non-required* early-fail, never as a
 substitute for the aggregate.
 
-### B. Safe 2-way partition with complete coverage — recommended
+### B. Safe 2-way partition with complete coverage — staged draft
 
-Reuse the existing planner, `ci_run_shard.sh`, `ci_record_cache.sh`, and
-`ci_aggregate_shards.sh`. Do **not** copy Ubuntu's 8-way leftover-heavy
+Reuse the existing planner, portable `ci_run_platform_shard.sh`,
+`ci_record_cache.sh`, and `ci_aggregate_shards.sh`. Do **not** copy Ubuntu's 8-way leftover-heavy
 split onto Windows: issue #898 is exactly leftover `cd-core/lib/*` slices
 timing out as isolates.
 
 **Next workflow patch** (separate PR; do not land in this one):
 
-1. `rust (macos-latest)` and `rust (windows-latest)` become **warmup only**:
+1. `rust (macos-latest)` and `rust (windows-latest)` are **warmup only**:
    fmt, clippy, `cargo test --workspace --no-run`, examples, smoke. Each
    **saves** a shared rust-cache (`macos-workspace-tests` /
    `windows-workspace-tests`). `cache_state=warm` only on an exact
    Swatinem hit **and** a non-empty `target/` (same honesty as Ubuntu).
-2. New `rust-macos-shard` / `rust-windows-shard` matrices `[1, 2]` restore
-   that cache with `save-if: false`. Never `lookup-only: true` (hosted run
-   `31845262696` recorded warm while compiling 11–12 minutes).
-   Command: `sh scripts/ci_run_shard.sh --shard K --shards 2`.
-3. New `rust-macos-tests` / `rust-windows-tests` aggregates
-   `sh scripts/ci_aggregate_shards.sh --dir … --shards 2`. Those names
-   become the coverage gates. Update `docs/CI_REQUIRED_CHECKS.md` in the
-   same follow-up: require the aggregates, keep warmup as fmt/clippy/cache,
-   do **not** require shard index names.
+2. `rust-platform-shard` uses `[1, 2]` per OS and restores that cache with
+   `save-if: false`. Never `lookup-only: true` (hosted run `31845262696`
+   recorded warm while compiling 11–12 minutes). The portable entry point is
+   `sh scripts/ci_run_platform_shard.sh --os macos|windows --shard K`.
+3. `rust-platform-tests` publishes fail-closed aggregates named
+   `rust tests (macos-latest aggregate)` and
+   `rust tests (windows-latest aggregate)`. They are complete-coverage
+   signals in this draft; the active ruleset still requires only
+   `rust tests (ubuntu aggregate)`.
 4. Timeouts stay at or below today's implicit GitHub job budget. Do not
    raise them. Do not skip units. Do not treat a cache miss as success.
 
@@ -125,7 +125,7 @@ wall clock, worse than a fantasy “half of 35.” Cold without warmup is
 
 ## What this branch is not
 
-- Not a workflow change.
+- Not a merge, ready-for-review declaration, or ruleset change.
 - Not a timeout raise.
 - Not a skipped test.
 - Not a claim that a cache miss is green.

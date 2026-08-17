@@ -18,12 +18,20 @@ fail() {
 [ -f "$STUDY" ] || fail "missing study script"
 [ -f "$EVIDENCE" ] || fail "missing evidence fixture"
 
-# The study must not have edited the workflow; this test guards the file
-# still contains the current monolithic macOS/Windows step.
-grep -q 'test workspace (macOS/Windows)' "$WF" ||
-  fail "ci.yml no longer has the monolithic macOS/Windows test step — update the study, do not silently change the gate here"
+# The implementation follow-up is deliberately based on this study. Guard the
+# two-way warmup/shard/aggregate shape so later workflow edits do not silently
+# turn the platform coverage gates back into a monolith.
+grep -q 'compile workspace tests (cache warmup)' "$WF" ||
+  fail "ci.yml is missing the macOS/Windows cache warmup"
+if grep -q 'test workspace (macOS/Windows)' "$WF"; then
+  fail "ci.yml still contains the monolithic macOS/Windows test step"
+fi
+grep -q 'ci_run_platform_shard.sh' "$WF" ||
+  fail "ci.yml is missing the portable platform shard runner"
+grep -q 'rust tests (\${{ matrix.os }} aggregate)' "$WF" ||
+  fail "ci.yml is missing platform aggregate check names"
 grep -q 'os: \[macos-latest, windows-latest\]' "$WF" ||
-  fail "ci.yml macOS/Windows matrix changed; this study branch must not rewrite the workflow"
+  fail "ci.yml macOS/Windows matrix changed"
 
 sh "$PLAN" verify --shards 2 >/dev/null
 sh "$PLAN" verify --shards 3 >/dev/null
@@ -40,8 +48,8 @@ grep -q 'Do not skip units' "$TMP/text" ||
   fail "study text dropped the no-skip rule"
 grep -q 'Do not treat cache miss as success' "$TMP/text" ||
   fail "study text dropped the honest-cache rule"
-grep -q 'keep .github/workflows/ci.yml' "$TMP/text" ||
-  fail "study text no longer says the workflow is out of this change"
+grep -q 'Staged workflow shape' "$TMP/text" ||
+  fail "study text no longer describes the staged implementation"
 
 units=$(jq -r .unit_count "$TMP/json")
 base=$(jq -r .cargo_test_targets "$TMP/json")

@@ -431,6 +431,8 @@ required = [
     "rust-ubuntu",
     "rust-ubuntu-shard",
     "rust-ubuntu-tests",
+    "rust-platform-shard",
+    "rust-platform-tests",
     "tauri-host",
     "desktop",
 ]
@@ -518,8 +520,42 @@ for block in ubuntu_runs.splitlines():
         raise SystemExit("ubuntu rust job must not run cargo test --workspace")
 
 macwin_runs = "\n".join(s.get("run") or "" for s in steps(jobs["rust"]))
-if "cargo test --workspace" not in macwin_runs:
-    raise SystemExit("macOS/Windows must still run cargo test --workspace")
+if "cargo test --workspace --no-run" not in macwin_runs:
+    raise SystemExit("macOS/Windows warmup must compile workspace tests with --no-run")
+for block in macwin_runs.splitlines():
+    if block.strip() == "cargo test --workspace":
+        raise SystemExit("macOS/Windows warmup must not run the monolithic workspace suite")
+
+platform_shard = jobs["rust-platform-shard"]
+platform_matrix = platform_shard["strategy"]["matrix"]
+if platform_matrix["os"] != ["macos-latest", "windows-latest"]:
+    raise SystemExit(f"platform shard OS matrix changed: {platform_matrix['os']}")
+if platform_matrix["shard"] != [1, 2]:
+    raise SystemExit(f"platform shard matrix changed: {platform_matrix['shard']}")
+platform_cache = cache_step(platform_shard)["with"]
+if platform_cache.get("shared-key") != "${{ matrix.os }}-workspace-tests":
+    raise SystemExit("platform shard cache key mismatch")
+if platform_cache.get("lookup-only") in (True, "true"):
+    raise SystemExit("platform shards must download cache files")
+if platform_cache.get("save-if") not in (False, "false"):
+    raise SystemExit("platform shards must not save the shared cache")
+platform_runs = "\n".join(s.get("run") or "" for s in steps(platform_shard))
+if "ci_run_platform_shard.sh" not in platform_runs:
+    raise SystemExit("platform shard must use the portable runner")
+platform_uploads = [s for s in steps(platform_shard) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
+if not platform_uploads or platform_uploads[0].get("if") != "always()":
+    raise SystemExit("platform shard results must upload on failure")
+
+platform_aggregate = jobs["rust-platform-tests"]
+if platform_aggregate["name"] != "rust tests (${{ matrix.os }} aggregate)":
+    raise SystemExit("platform aggregate check name changed")
+if platform_aggregate.get("if") != "always()":
+    raise SystemExit("platform aggregate must run if: always()")
+if platform_aggregate["strategy"]["matrix"]["os"] != ["macos-latest", "windows-latest"]:
+    raise SystemExit("platform aggregate OS matrix changed")
+aggregate_runs = "\n".join(s.get("run") or "" for s in steps(platform_aggregate))
+if "ci_aggregate_shards.sh" not in aggregate_runs or "--shards 2" not in aggregate_runs:
+    raise SystemExit("platform aggregate must use the fail-closed two-way aggregate")
 
 tauri_os = jobs["tauri-host"]["strategy"]["matrix"]["os"]
 if tauri_os != ["ubuntu-latest", "macos-latest"]:

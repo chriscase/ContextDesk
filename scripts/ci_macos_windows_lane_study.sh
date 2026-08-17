@@ -1,15 +1,15 @@
 #!/usr/bin/env sh
-# Fail-closed inventory for a future macOS/Windows rust-lane split.
+# Fail-closed inventory and contract for the macOS/Windows rust-lane split.
 #
-# This script does **not** change CI. It enumerates the same workspace test
-# units Ubuntu already shards (`scripts/ci_shard_plan.sh`), verifies that
-# 2/3/4-way partitions remain an exact cover, and prints the hosted timings
-# that justify the next workflow patch. No cargo build, no network, no
-# secrets. Requires: cargo, jq (via the shard planner).
+# It enumerates the same workspace test units Ubuntu already shards
+# (`scripts/ci_shard_plan.sh`), verifies that 2/3/4-way partitions remain an
+# exact cover, and prints the hosted timings behind the staged implementation.
+# No cargo build, no network, no secrets. Requires: cargo, jq (via the shard
+# planner).
 #
-# Why this exists: macOS and Windows still run monolithic
-# `cargo test --workspace`. Ubuntu already paid for the planner, runner, and
-# aggregate. Copying the 8-way leftover-heavy Ubuntu split onto Windows would
+# Why this exists: macOS and Windows were previously monolithic
+# `cargo test --workspace` lanes. Ubuntu already paid for the planner, runner,
+# and aggregate. Copying the 8-way leftover-heavy Ubuntu split onto Windows would
 # import #898's timeout class. This tool keeps the proposal honest: complete
 # coverage, warmup-or-it-is-worse, do not treat cache miss as success.
 set -eu
@@ -21,7 +21,7 @@ EVIDENCE="$ROOT/scripts/fixtures/ci_macos_windows_lane_evidence.json"
 usage() {
   cat <<'EOF'
 Usage:
-  sh scripts/ci_macos_windows_lane_study.sh            # verify + print proposal
+  sh scripts/ci_macos_windows_lane_study.sh            # verify + print contract
   sh scripts/ci_macos_windows_lane_study.sh --json     # machine-readable summary
   sh scripts/ci_macos_windows_lane_study.sh --help
 
@@ -116,7 +116,7 @@ if [ "$JSON" -eq 1 ]; then
 fi
 
 cat <<EOF
-macOS/Windows rust-lane study (no workflow edit)
+macOS/Windows rust-lane study + implementation contract
 
 Tree:          $MAIN_SHA (planner input is this checkout)
 Units:         $UNIT_COUNT shard units / $BASE_COUNT cargo test targets
@@ -149,19 +149,17 @@ Why not 8 Windows/macOS shards:
   shard when that was missed. Leftover-heavy cd-core/lib slices timeout
   when isolated (#898 / #893).
 
-Next workflow patch (do not apply here; keep .github/workflows/ci.yml
-out of this change to avoid #907 overlap):
+Staged workflow shape (draft follow-up; no merge or ruleset change here):
   1. rust (macos-latest) / rust (windows-latest) become warmup only:
      fmt, clippy, cargo test --workspace --no-run, examples, smoke.
      Each writes a shared-key rust-cache (macos-workspace-tests /
      windows-workspace-tests). cache_state=warm only on exact hit +
      non-empty target/.
-  2. rust-macos-shard / rust-windows-shard matrix [1, 2] restore that
-     cache with save-if: false, never lookup-only.
-     sh scripts/ci_run_shard.sh --shard K --shards 2
-  3. rust-macos-tests / rust-windows-tests aggregates via
-     scripts/ci_aggregate_shards.sh --shards 2
-     Those aggregates become the coverage gates.
+  2. rust-platform-shard matrix [1, 2] restores that cache with save-if: false,
+     never lookup-only, and uses scripts/ci_run_platform_shard.sh.
+  3. rust-platform-tests publishes fail-closed aggregates named
+     rust tests (macos-latest aggregate) and rust tests (windows-latest aggregate).
+     They are coverage signals until the active ruleset is deliberately updated.
   4. Do not skip units. Do not raise timeouts. Do not treat cache miss as success.
 
 See docs/testing/MACOS_WINDOWS_CI_LANES.md

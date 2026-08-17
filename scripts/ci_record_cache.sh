@@ -109,7 +109,16 @@ fi
 
 RESTORE="none"
 if [ "$STATE" = warm ] && [ -n "$RESTORE_DIR" ]; then
-  if [ -d "$RESTORE_DIR" ] && [ -n "$(find "$RESTORE_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]; then
+  restore_has_files=false
+  if [ -d "$RESTORE_DIR" ]; then
+    for probe in "$RESTORE_DIR"/*; do
+      if [ -e "$probe" ]; then
+        restore_has_files=true
+        break
+      fi
+    done
+  fi
+  if [ "$restore_has_files" = true ]; then
     RESTORE=files
   else
     STATE=cold
