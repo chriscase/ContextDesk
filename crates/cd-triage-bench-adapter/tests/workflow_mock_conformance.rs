@@ -22,12 +22,13 @@ use std::collections::BTreeMap;
 
 use cd_core::multi_model::triage_policy::{
     ContributorSlotV2, FinalizerSlotV2, ReviewerConditionV2, ReviewerSlotV2, RolePreflightV2,
-    RoleQualificationV2, RoleRequirement, TriagePolicyMode, TriagePolicyPreflightV2,
-    TriagePolicyV2,
+    RoleQualificationV2, RoleRequirement, SlotDispositionV2, TriagePolicyMode,
+    TriagePolicyPreflightV2, TriagePolicyV2,
 };
 use cd_core::multi_model::{TRIAGE_QUALIFICATION_SCHEMA_V2, TRIAGE_QUALIFICATION_WORKFLOW_V2};
 use cd_workflow::triage::{
-    MockPacket, MockRoleOutcome, MockRoleScript, MockRunControl, MockRunInput, MockTriageRunner,
+    compile_preflight, MockPacket, MockRoleOutcome, MockRoleScript, MockRunControl, MockRunInput,
+    MockTriageRunner,
 };
 
 use cd_triage_bench_adapter::{
@@ -153,7 +154,11 @@ fn preflight(policy: &TriagePolicyV2) -> TriagePolicyPreflightV2 {
         remote: false,
         qualification_schema_id: Some(TRIAGE_QUALIFICATION_SCHEMA_V2.into()),
         workflow_id: Some(TRIAGE_QUALIFICATION_WORKFLOW_V2.into()),
-        protocol_fingerprint: Some("conformance-fixture-protocol".into()),
+        // `valid_protocol_fingerprint` requires the `sha256:` prefix. Without
+        // it every slot compiles to RequiredRejected, the whole policy fails
+        // to compile, and the comparison below would silently be against a
+        // rejected policy rather than an admitted one.
+        protocol_fingerprint: Some("sha256:conformance-fixture-protocol".into()),
     };
     let mut roles: Vec<RolePreflightV2> = policy
         .contributors
@@ -202,6 +207,28 @@ fn workflow_replay(policy: &TriagePolicyV2, script: MockRoleScript) -> TriageRep
     MockTriageRunner::new(script)
         .replay(policy, &preflight(policy), &workflow_input())
         .expect("workflow mock")
+}
+
+#[test]
+fn both_fixture_policies_actually_compile() {
+    // Without this, a rejected policy turns every slot into NotAdmitted and
+    // the comparisons below still "pass" while proving much less. Assert the
+    // premise instead of assuming it.
+    for policy in [standard_policy(), enhanced_policy()] {
+        let compiled = compile_preflight(&policy, &preflight(&policy));
+        let plan = compiled.unwrap_or_else(|failure| {
+            panic!(
+                "fixture policy must compile; rejections: {:?}",
+                failure.rejections
+            )
+        });
+        assert!(
+            plan.slots
+                .iter()
+                .any(|slot| slot.disposition == SlotDispositionV2::Admitted),
+            "at least one slot must be admitted for the comparison to mean anything"
+        );
+    }
 }
 
 #[test]
