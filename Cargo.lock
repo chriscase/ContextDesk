@@ -659,6 +659,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cd-triage-bench-adapter-cli"
+version = "0.1.0"
+dependencies = [
+ "cd-triage-bench",
+ "cd-triage-bench-adapter",
+ "cd-triage-sdk",
+ "clap",
+]
+
+[[package]]
 name = "cd-triage-sdk"
 version = "0.1.0"
 dependencies = [
