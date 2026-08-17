@@ -1,0 +1,68 @@
+{
+  "schema_id": "contextdesk.triage_bench.triage_run.v1",
+  "run_id": "run-abaf2a869716773d79e87dfe621bc0aeabd68a9e6041159e906cad6a9a2491b6",
+  "privacy": "owner_only",
+  "case_id": "case-checkout-500s",
+  "task_id": "task-a02e7497a4787cbd965c3b0abb1b03688a0c0ea10eadcb87207a763ed10aae6a",
+  "snapshot_id": "snap-5c34bc690d012cc5c147d1ca3f7e08ea872a6c7ffff449a92fb98aedc3be26d3",
+  "strategy": {
+    "name": "contextdesk",
+    "version": {
+      "status": "known",
+      "value": "0.1.0"
+    },
+    "build": {
+      "status": "unknown"
+    }
+  },
+  "source_kind": "contextdesk_sdk",
+  "prompt_workflow": {
+    "completeness": "partial",
+    "prompt": {
+      "status": "unknown"
+    },
+    "workflow": {
+      "status": "known",
+      "value": "cd-triage-bench-adapter deterministic mock; policy pol-d0b61431e4df22bdff27a48ad81c441a26bda2206e104f173cf0cbb11dc0be6e; packet pkf-6db24b93cfa24ac3b0a4975356757e9550829a920734ec4f82f3380536f7c2c6; corpus cof-2bd75138119918b098f345f90def99b610f75c28e22208ddda5a5a99c8f069b9; slots [slf-598b97cae49f91cec8671b45caffea7bab9ef735eac2a7ab6ba6ea22f5754aec slf-18d33d72373e0bce60d8a085dfefd1f386ecab709770742a982a8f6fc30dff98 slf-2745e9e406a004c18d6763589bf970020ba5bf5cbc12d9c6a14d4948a62206b5 slf-65b2cffd8b8cbb986af0c5800745dbe1308f216227212b56fd90b6edb5c7b253]"
+    }
+  },
+  "raw_output": {
+    "digest": {
+      "algorithm": "sha256",
+      "hex": "5221b0760e73d256d076e174749ae1035dfececcb98203b1d88b4671e6b45a20"
+    },
+    "byte_length": 12435,
+    "encoding": "utf-8"
+  },
+  "claims": [
+    {
+      "claim": "deterministic mock: log evidence ev-log-1 is in scope for cand-mock-1",
+      "evidence_item_id": "ev-log-1"
+    },
+    {
+      "claim": "deterministic mock: email evidence ev-mail-1 is in scope for cand-mock-1",
+      "evidence_item_id": "ev-mail-1"
+    },
+    {
+      "claim": "deterministic mock: external_file_server_reference evidence ev-ref-1 is in scope for cand-mock-1",
+      "evidence_item_id": "ev-ref-1"
+    }
+  ],
+  "timing": {
+    "status": "unknown"
+  },
+  "cost": {
+    "status": "unknown"
+  },
+  "uncertainty": {
+    "status": "known",
+    "value": "deterministic_mock"
+  },
+  "fairness": {
+    "kind": "same_snapshot"
+  },
+  "status": "completed",
+  "operator": "duty-operator",
+  "importer": "cd-triage-bench-adapter",
+  "created_at": "2026-01-15T07:00:00Z"
+}

@@ -1,0 +1,54 @@
+.catalog {
+  border: 1px solid var(--border);
+  padding: 0.85rem;
+  margin-top: 1.25rem;
+}
+
+.catalog__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.imported-run {
+  border: 1px solid var(--border);
+  padding: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.imported-run--contradicted {
+  border-color: #c45c6a;
+}
+
+.imported-run__banner {
+  margin: 0 0 0.5rem;
+  color: #e0af68;
+  font-size: 0.85rem;
+}
+
+.imported-run__banner--contradicted {
+  color: #f7768e;
+}
+
+.imported-run__banner--ok {
+  color: #9ece6a;
+}
+
+.imported-run__text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: 0.85rem;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  padding: 0;
+  margin: 0.35rem 0;
+}
+
+.import-warn {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0;
+}

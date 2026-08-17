@@ -1,8 +1,10 @@
 # Incident-triage evaluation bench v1
 
-**Status:** **Local integration** on `cursor/triage-bench-foundation-b926`
-(issues #876/#877/#878 and report-only #880/#881). Offline crate
-`cd-triage-bench`. Not shipped on `main`. Not a readiness or release claim.
+**Status:** **Local integration.** The #877 store/entities first slice is on
+`main` (#890/#891). This branch adds manual import/provenance (#878), rubric
+v1 + file/CLI expert adjudication (#880), and report-only comparison over
+stored records (#881). The SDK-driven batch runner is residual until #879.
+Not a close of epic #876. Not a readiness or release claim.
 
 ## Purpose
 
@@ -27,8 +29,41 @@ This lane is separate from:
 - CLI import documents reject unknown fields even when generated ids are omitted.
 - Unresolved cases remain valid without an invented root cause.
 - Failed and partial runs are stored runs.
+- Run identity includes material outcome and attribution metadata; conflicting
+  re-imports become explicit near-duplicates instead of silently keeping the
+  first writer's provenance.
+- Legacy v1 adjudications without phase remain readable; new adjudications
+  bind to generated review packets, verify computed blinding, and enforce
+  support-before-diagnosis chronology.
+- Reports use `backtest_report.v2`, expose partial score coverage, and keep
+  version comparisons partitioned by source kind and strategy build.
 - Reports never emit readiness, qualification, or routing badges.
 - Manual import preserves raw bytes byte-exact.
+
+## ContextDesk SDK adapter (#879, draft)
+
+`cd-triage-bench-adapter` runs ContextDesk as one strategy among many over the
+public SDK boundary. It is a sibling crate, not part of `cd-triage-bench`, so
+the bench keeps no engine dependency:
+
+```text
+snapshot -> bounded packet -> TriageRequestV2 -> deterministic mock replay
+         -> owner-only TriageRun -> explicit share-safe projection
+```
+
+What the adapter does **not** claim:
+
+- No live run. `triage()` / `triage_with_policy()` do not exist in this
+  workspace; the adapter drives the versioned contracts only, and its `live`
+  feature is a dependency-free placeholder.
+- No token usage or cost. The public envelope reports neither.
+- No case, adjudication, score, qualification, readiness, routing, or
+  private-store write inside ContextDesk crates.
+
+Its default dependency tree is `cd-triage-sdk` + `cd-triage-bench` only;
+`cd-core` / `cd-workflow` are reachable exclusively through the non-default
+`workflow-mock` conformance feature. See
+[`crates/cd-triage-bench-adapter/README.md`](../../crates/cd-triage-bench-adapter/README.md).
 
 ## CLI
 
@@ -42,11 +77,12 @@ cargo run -p cd-triage-bench -- --library /tmp/bench-lib init
 ## Production anchors (this branch only)
 
 - `crates/cd-triage-bench/`
+- `crates/cd-triage-bench-adapter/` (#879 draft; mock only, no live path)
 - Handbook row: Incident-triage evaluation bench in
   `docs/design/PROVEN_METHODS.md`
 
 ## Future scope (not this slice)
 
 Web collaboration, object-storage ingestion, direct web-tool automation,
-multi-strategy synthesis, similar-case retrieval, and the ContextDesk SDK
-adapter (#879).
+multi-strategy synthesis, similar-case retrieval, a batch runner over the
+adapter, and any live ContextDesk provider execution (#879 residual).

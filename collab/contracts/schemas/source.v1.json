@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/source.v1.json",
+  "title": "cd-collab Source v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "id", "name", "kind", "description", "lifecycle", "identityId", "createdAt", "createdBy"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.source.v1" },
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "kind": {
+      "type": "string",
+      "enum": ["human", "external-tool", "internal-system", "contextdesk", "unknown"]
+    },
+    "description": { "type": ["string", "null"] },
+    "lifecycle": { "type": "string", "enum": ["active", "retired"] },
+    "identityId": { "type": ["string", "null"] },
+    "createdAt": { "type": "string" },
+    "createdBy": { "type": "string" }
+  }
+}

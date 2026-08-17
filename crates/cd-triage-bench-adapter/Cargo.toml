@@ -1,0 +1,35 @@
+[package]
+name = "cd-triage-bench-adapter"
+description = "Offline ContextDesk-as-a-strategy adapter: bench evidence snapshot to public-SDK triage request, deterministic mock replay, and an owner-only recorded bench run. Default features depend only on cd-triage-sdk and cd-triage-bench."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Default is pure and offline: contract DTOs plus the bench domain types.
+# No engine, provider transport, credential store, database, or async runtime.
+default = []
+# Non-default conformance only. Pulls `cd-core` (DuckDB, keyring) and
+# `cd-workflow` in order to compare this crate's deterministic mock against
+# `cd_workflow::triage::MockTriageRunner`. Never enabled in the default lane.
+workflow-mock = ["dep:cd-core", "dep:cd-workflow"]
+# Non-default placeholder for a future live engine path. No live
+# `triage()` / `triage_with_policy()` entry point exists in this workspace, so
+# this feature deliberately carries no engine dependency and no live claim.
+live = []
+
+[dependencies]
+cd-triage-sdk = { path = "../cd-triage-sdk" }
+cd-triage-bench = { path = "../cd-triage-bench" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# Non-default (`workflow-mock`) conformance only. These are optional so the
+# default dependency tree never reaches cd-core / cd-workflow.
+cd-core = { path = "../cd-core", optional = true }
+cd-workflow = { path = "../cd-workflow", optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

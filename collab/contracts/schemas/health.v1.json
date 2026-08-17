@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/health.v1.json",
+  "title": "cd-collab HealthResponse v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "status", "service"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.health.v1" },
+    "status": { "type": "string", "const": "ok" },
+    "service": { "type": "string", "minLength": 1 }
+  }
+}

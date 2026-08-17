@@ -1,0 +1,15 @@
+[package]
+name = "cd-triage-sdk"
+description = "Public, host-neutral triage wire contracts and validators. No engine, credentials, filesystem, or network."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

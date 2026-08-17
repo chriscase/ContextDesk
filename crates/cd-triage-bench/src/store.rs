@@ -3,6 +3,11 @@
 use crate::canonical::to_pretty_json;
 use crate::error::{BenchError, BenchResult};
 use crate::packet::{materialize_task_packet, TaskPacket};
+use crate::review::{
+    materialize_review_packet, merge_citation_assists, run_has_support_adjudication, ReviewPacket,
+    ReviewPhase,
+};
+use crate::types::citation_assist_flags;
 use crate::types::{
     sha256_hex, Adjudication, Case, ContentDigest, EvaluationTask, EvidenceSnapshot, ScoreReview,
     TriageRun, LIBRARY_SCHEMA_V1,
@@ -37,6 +42,7 @@ impl BenchStore {
             "adjudications",
             "scores",
             "packets",
+            "review-packets",
             "blobs/sha256",
         ] {
             let path = root.join(dir);
@@ -130,6 +136,14 @@ impl BenchStore {
 
     pub fn list_cases(&self) -> BenchResult<Vec<String>> {
         list_ids(&self.root.join("cases"))
+    }
+
+    pub fn load_cases(&self) -> BenchResult<Vec<Case>> {
+        let mut cases = Vec::new();
+        for id in self.list_cases()? {
+            cases.push(self.get_case(&id)?);
+        }
+        Ok(cases)
     }
 
     pub fn put_snapshot(&self, snapshot: &EvidenceSnapshot) -> BenchResult<()> {
@@ -233,6 +247,53 @@ impl BenchStore {
         Ok(runs)
     }
 
+    pub fn materialize_review_packet(
+        &self,
+        run_id: &str,
+        phase: ReviewPhase,
+    ) -> BenchResult<ReviewPacket> {
+        let run = self.get_run(run_id)?;
+        let task = self.get_task(&run.task_id)?;
+        let case = self.get_case(&run.case_id)?;
+        let snapshot = self.get_snapshot(&run.snapshot_id)?;
+        let raw = self.get_blob(&run.raw_output.digest.hex)?;
+        let support_recorded = run_has_support_adjudication(&self.load_adjudications()?, run_id);
+        let packet = materialize_review_packet(
+            &case,
+            &snapshot,
+            &task,
+            &run,
+            &raw,
+            phase,
+            support_recorded,
+        )?;
+        atomic_write_json(
+            &self.entity_path("review-packets", &packet.packet_id),
+            &packet,
+        )?;
+        Ok(packet)
+    }
+
+    pub fn get_review_packet(&self, packet_id: &str) -> BenchResult<ReviewPacket> {
+        let text = self.read_entity("review-packets", packet_id)?;
+        let packet: ReviewPacket = serde_json::from_str(&text).map_err(BenchError::from_serde)?;
+        packet.validate()?;
+        Ok(packet)
+    }
+
+    pub fn import_adjudication(&self, adj: Adjudication) -> BenchResult<ScoreReview> {
+        let run = self.get_run(&adj.run_id)?;
+        let snapshot = self.get_snapshot(&run.snapshot_id)?;
+        let item_ids = snapshot
+            .items
+            .iter()
+            .map(|item| item.item_id().to_string())
+            .collect();
+        let flags = citation_assist_flags(&item_ids, &run.claims);
+        let adj = merge_citation_assists(adj, flags)?;
+        self.put_adjudication(&adj)
+    }
+
     pub fn put_adjudication(&self, adj: &Adjudication) -> BenchResult<ScoreReview> {
         adj.validate()?;
         let run = self.get_run(&adj.run_id)?;
@@ -243,6 +304,80 @@ impl BenchStore {
             return Err(BenchError::CrossSnapshot(
                 "adjudication identities do not match the run".into(),
             ));
+        }
+        let phase = adj.phase.ok_or_else(|| {
+            BenchError::Schema(
+                "new adjudications must declare phase and bind a generated review packet; diagnosis also requires a prior support-phase review".into(),
+            )
+        })?;
+        let packet_id = adj.review_packet_id.as_deref().ok_or_else(|| {
+            BenchError::Schema(
+                "new adjudications must declare phase and bind a generated review packet; diagnosis also requires a prior support-phase review".into(),
+            )
+        })?;
+        if adj.schema_id != crate::types::ADJUDICATION_SCHEMA_V2 {
+            return Err(BenchError::Schema(
+                "new adjudications must use adjudication.v2 when packet-bound".into(),
+            ));
+        }
+        let packet = self.get_review_packet(packet_id)?;
+        if packet.phase != phase
+            || packet.case_id != adj.case_id
+            || packet.task_id != adj.task_id
+            || packet.snapshot_id != adj.snapshot_id
+            || packet.run_id != adj.run_id
+            || packet.blinding != adj.blinding
+        {
+            return Err(BenchError::Integrity(format!(
+                "adjudication does not match its generated review packet (packet phase={:?}, case={}, task={}, snapshot={}, run={}, blinding={:?}; adjudication phase={:?}, case={}, task={}, snapshot={}, run={}, blinding={:?})",
+                packet.phase,
+                packet.case_id,
+                packet.task_id,
+                packet.snapshot_id,
+                packet.run_id,
+                packet.blinding,
+                phase,
+                adj.case_id,
+                adj.task_id,
+                adj.snapshot_id,
+                adj.run_id,
+                adj.blinding
+            )));
+        }
+        if phase == ReviewPhase::Diagnosis {
+            let existing = self.load_adjudications()?;
+            let diagnosis_has_prior_support = existing.iter().any(|support| {
+                support.run_id == adj.run_id
+                    && support.reviewer == adj.reviewer
+                    && support.phase == Some(ReviewPhase::Support)
+                    && support
+                        .created_at
+                        .parse::<chrono::DateTime<chrono::FixedOffset>>()
+                        .ok()
+                        .zip(
+                            adj.created_at
+                                .parse::<chrono::DateTime<chrono::FixedOffset>>()
+                                .ok(),
+                        )
+                        .is_some_and(|(support_at, diagnosis_at)| support_at <= diagnosis_at)
+            });
+            if !diagnosis_has_prior_support {
+                return Err(BenchError::Schema(
+                    format!(
+                        "diagnosis-phase adjudication requires a prior support-phase review by the same reviewer (existing: {:?})",
+                        existing
+                            .iter()
+                            .map(|support| (
+                                support.run_id.as_str(),
+                                support.reviewer.as_str(),
+                                support.rubric_version.as_str(),
+                                support.phase,
+                                support.created_at.as_str()
+                            ))
+                            .collect::<Vec<_>>()
+                    ),
+                ));
+            }
         }
         let case = self.get_case(&adj.case_id)?;
         if !case.diagnosis_is_applicable() {

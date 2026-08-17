@@ -1,0 +1,17 @@
+{
+  "schemaId": "cd-collab.prompt_package.v1",
+  "privacyClass": "share_safe",
+  "caseId": "c",
+  "snapshotIdentity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "manifest": {
+    "schemaId": "cd-collab.package_manifest.v1",
+    "caseId": "c",
+    "variant": "share_safe",
+    "items": [],
+    "promptScaffoldHash": null,
+    "excludedByDefault": ["corroboration", "resolution"]
+  },
+  "excerpts": [],
+  "promptScaffold": null,
+  "surprise": 1
+}

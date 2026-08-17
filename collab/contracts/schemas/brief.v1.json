@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/brief.v1.json",
+  "title": "cd-collab Triage Brief v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "privacyClass",
+    "header",
+    "timeline",
+    "hypotheses",
+    "actions",
+    "evidence",
+    "attributions",
+    "importedRuns"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.brief.v1" },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "header": { "type": "object" },
+    "timeline": { "type": "array" },
+    "hypotheses": { "type": "array" },
+    "actions": { "type": "array" },
+    "evidence": { "type": "array" },
+    "attributions": { "type": "array" },
+    "importedRuns": { "type": "array" }
+  }
+}

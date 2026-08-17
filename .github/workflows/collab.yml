@@ -1,0 +1,115 @@
+# Own CI lane for the collab/ npm workspace (#884).
+# Does not modify or depend on rust / desktop / packages jobs in ci.yml.
+name: collab
+
+on:
+  push:
+    paths:
+      - "collab/**"
+      - ".github/workflows/collab.yml"
+  pull_request:
+    paths:
+      - "collab/**"
+      - ".github/workflows/collab.yml"
+
+concurrency:
+  group: collab-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  collab:
+    name: collab (typecheck, lint, test, migrate dry-run)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: collab
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      ldap:
+        image: osixia/openldap:1.5.0
+        env:
+          LDAP_ORGANISATION: Example
+          LDAP_DOMAIN: example.test
+          LDAP_ADMIN_PASSWORD: fixture-admin-secret
+          LDAP_TLS: "true"
+          LDAP_TLS_VERIFY_CLIENT: never
+        ports:
+          - 389:389
+          - 636:636
+    env:
+      COLLAB_TEST_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      COLLAB_DATABASE_URL: postgres://collab_app:collab_ci_app@127.0.0.1:5432/collab_ci
+      COLLAB_MIGRATE_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/collab_ci
+      # Fail closed if the live OpenLDAP fixture env is dropped: tests throw
+      # instead of skipIf when this is set and COLLAB_LDAP_URL is missing.
+      COLLAB_REQUIRE_LDAP: "1"
+      # StartTLS on 389: osixia LDAPS (636) + Node 22 fails the handshake
+      # (wrong curve) while ldapadd still works. StartTLS is encrypted and
+      # is the transport #885 already allows. Seed still uses ldaps://636.
+      # COLLAB_LDAP_TLS_INSECURE covers encrypted transport only. A separate
+      # test asserts certificate verification fail-closed against this fixture.
+      COLLAB_LDAP_URL: ldap://127.0.0.1:389
+      COLLAB_LDAP_STARTTLS: "1"
+      COLLAB_LDAP_DEV_MODE: "1"
+      COLLAB_LDAP_TLS_INSECURE: "1"
+      COLLAB_LDAP_USER_DN_TEMPLATE: uid={username},ou=people,dc=example,dc=test
+      COLLAB_LDAP_GROUP_SEARCH_BASE: ou=groups,dc=example,dc=test
+      # osixia default ACL is admin/self only; group search as alice is 0x20.
+      # Service-bind is the #885 seam. Password is the fixture admin secret
+      # already used by the seed step — not a production credential.
+      COLLAB_LDAP_BIND_DN: cn=admin,dc=example,dc=test
+      COLLAB_LDAP_BIND_PASSWORD: fixture-admin-secret
+      COLLAB_LDAP_FIXTURE_USER: alice
+      COLLAB_LDAP_FIXTURE_PASSWORD: fixture-alice-secret
+      COLLAB_GROUP_ROLE_MAP: cn=viewers,ou=groups,dc=example,dc=test=viewer;cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: collab/package-lock.json
+      - name: create disposable database
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client ldap-utils
+          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d postgres <<'SQL'
+          CREATE ROLE collab_app LOGIN PASSWORD 'collab_ci_app';
+          CREATE DATABASE collab_ci;
+          GRANT CONNECT ON DATABASE collab_ci TO collab_app;
+          SQL
+      - name: seed OpenLDAP fixture
+        run: |
+          for i in $(seq 1 40); do
+            if ldapsearch -x -H ldap://127.0.0.1:389 -b dc=example,dc=test \
+              -D cn=admin,dc=example,dc=test -w fixture-admin-secret -s base \
+              >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          LDAPTLS_REQCERT=never ldapadd -x -H ldap://127.0.0.1:389 -ZZ \
+            -D cn=admin,dc=example,dc=test -w fixture-admin-secret \
+            -f deploy/openldap/seed.ldif
+          LDAPTLS_REQCERT=never ldapsearch -x -H ldap://127.0.0.1:389 -ZZ \
+            -D cn=admin,dc=example,dc=test -w fixture-admin-secret \
+            -b uid=alice,ou=people,dc=example,dc=test -s base uid >/dev/null
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - name: migration dry-run
+        run: npm run migrate:dry-run
+      - run: npm run build
