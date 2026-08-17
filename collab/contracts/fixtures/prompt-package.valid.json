@@ -1,0 +1,33 @@
+{
+  "schemaId": "cd-collab.prompt_package.v1",
+  "privacyClass": "share_safe",
+  "caseId": "11111111-1111-1111-1111-111111111111",
+  "snapshotIdentity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "manifest": {
+    "schemaId": "cd-collab.package_manifest.v1",
+    "caseId": "11111111-1111-1111-1111-111111111111",
+    "variant": "share_safe",
+    "items": [
+      {
+        "kind": "artifact",
+        "id": "33333333-3333-3333-3333-333333333333",
+        "contentHash": "hash-log",
+        "privacyClass": "share_safe"
+      }
+    ],
+    "promptScaffoldHash": null,
+    "excludedByDefault": ["corroboration", "resolution"]
+  },
+  "excerpts": [
+    {
+      "kind": "artifact",
+      "id": "33333333-3333-3333-3333-333333333333",
+      "contentHash": "hash-log",
+      "sourceLabel": "alice",
+      "privacyClass": "share_safe",
+      "content": "shareable log line",
+      "bodyIncluded": true
+    }
+  ],
+  "promptScaffold": null
+}

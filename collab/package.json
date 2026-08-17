@@ -1,0 +1,25 @@
+{
+  "name": "cd-collab",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Separately deployable collaboration and case-memory layer (working name; rename-friendly).",
+  "workspaces": [
+    "contracts",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "build": "npm run build -w @cd-collab/contracts && npm run build -w @cd-collab/web && npm run build -w @cd-collab/server",
+    "typecheck": "npm run build -w @cd-collab/contracts && npm run typecheck -w @cd-collab/contracts && npm run typecheck -w @cd-collab/server && npm run typecheck -w @cd-collab/web",
+    "lint": "npm run lint -w @cd-collab/contracts && npm run lint -w @cd-collab/server && npm run lint -w @cd-collab/web",
+    "test": "npm run build -w @cd-collab/contracts && npm run test -w @cd-collab/contracts && npm run test -w @cd-collab/server && npm run test -w @cd-collab/web",
+    "migrate": "npm run migrate -w @cd-collab/server",
+    "migrate:down": "npm run migrate:down -w @cd-collab/server",
+    "migrate:dry-run": "npm run migrate:dry-run -w @cd-collab/server",
+    "dev": "npm run dev -w @cd-collab/server",
+    "start": "npm run start -w @cd-collab/server"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

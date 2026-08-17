@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/session.v1.json",
+  "title": "cd-collab SessionResponse v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "identity", "roles"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.session.v1" },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "username", "displayName"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "username": { "type": "string", "minLength": 1 },
+        "displayName": { "type": "string", "minLength": 1 }
+      }
+    },
+    "roles": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["viewer", "contributor", "case-lead", "admin"]
+      }
+    }
+  }
+}
