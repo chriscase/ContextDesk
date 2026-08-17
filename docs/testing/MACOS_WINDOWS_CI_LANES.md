@@ -1,7 +1,8 @@
 # macOS / Windows rust CI lanes
 
-**Status:** staged draft implementation. This lane preserves complete
-macOS/Windows workspace coverage while trying to reduce critical-path time.
+**Status:** staged draft implementation with hosted proof. This lane preserves
+macOS/Windows workspace coverage and reduced the desktop critical path in run
+[`32008278389`](https://github.com/chriscase/ContextDesk/actions/runs/32008278389).
 It does not change the Ubuntu ruleset, merge anything, or make a release claim.
 
 The active branch is [`codex/ci-macos-windows-2way`](https://github.com/chriscase/ContextDesk/pull/910),
@@ -29,8 +30,25 @@ OS), but the serialized warmup made the critical path worse:
 | Windows | 1045s | 2878s | 3923s | 2560s | regression |
 
 That run proves the split is coverage-safe and cache-honest. It does not prove
-that 2-way sharding is faster. The current follow-up addresses the two causes:
-the serialized cache writer on warm hits and insufficient parallel width.
+that 2-way sharding is faster. The current follow-up removes the serialized
+cache writer on warm hits and increases the parallel width.
+
+The four-way follow-up is hosted in run
+[`32008278389`](https://github.com/chriscase/ContextDesk/actions/runs/32008278389)
+and completed with all gates green. Both exact-key probes hit, both conditional
+writers were skipped, both preflights restored real files, and every desktop
+shard reported `cache: warm`, `in_flight: <none>`, and complete coverage:
+
+| OS | Probe / writer | Preflight | Slowest shard | Critical path from workflow start | Coverage / result |
+| --- | --- | ---: | ---: | ---: | --- |
+| macOS | hit / skipped | 232s | 1293s status (1349s job) | 1488s | 114/114, 3670 passed, 0 failed, 21 ignored |
+| Windows | hit / skipped | 402s | 2016s status (2133s job) | 2163s | 114/114, 3636 passed, 0 failed, 21 ignored |
+
+Against the monolithic baselines, the desktop critical paths improved from
+1691s to 1488s on macOS and from 2560s to 2163s on Windows. The unchanged
+Ubuntu gate also passed 114/114 units (3670 passed, 0 failed, 21 ignored), and
+the complete workflow finished in 2237s. This is hosted lane evidence; it is
+not a ruleset promotion or a release certification.
 
 ## Current inventory
 
@@ -82,12 +100,11 @@ without restored files is recorded as cold, never as a successful test basis.
 ## Why four shards
 
 The hosted 2-way run showed that parallelizing only the execution half was not
-enough. Local weighted timing from the hosted per-unit evidence reduces the
-largest test-only bucket substantially at width four (approximately 1008s on
-Windows and 561s on macOS before each shard's fixed build/link overhead).
-That is a sizing signal, not a speed claim. The next hosted run must measure:
+enough. Local weighted timing predicted that width four would reduce the
+largest test-only bucket, and run `32008278389` confirmed a desktop critical-
+path improvement while preserving coverage. The hosted evidence records:
 
-- probe, writer, preflight, and shard critical-path timestamps;
+- exact-key probe hits and conditional writer skips on the warm path;
 - cache state and restored-file evidence for every shard;
 - exact 114/114 unit coverage, pass/fail/ignored counts, and no in-flight
   unit at completion;
@@ -116,7 +133,8 @@ fails closed rather than silently running an untracked cold build.
   `rust tests (windows-latest aggregate)`; they are not added to the ruleset in
   this draft.
 - No timeout is raised to hide a slow shard, and no test unit is skipped.
-- A speed improvement will not be claimed until a hosted run proves it.
+- The four-way desktop speed improvement is proven by hosted run `32008278389`;
+  no release or required-check promotion is implied.
 
-Pinned baseline and first-split evidence lives in
+Pinned baseline, two-way regression, and four-way evidence lives in
 [`ci_macos_windows_lane_evidence.json`](../../scripts/fixtures/ci_macos_windows_lane_evidence.json).
