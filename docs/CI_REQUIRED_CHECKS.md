@@ -8,6 +8,9 @@ merge blocker.
 The active `main` ruleset is `20890073` (`main: require Ubuntu aggregate`). Its
 Ubuntu test requirement is exactly `rust tests (ubuntu aggregate)`.
 
+Draft #910 is the hosted-validation follow-up for the new macOS/Windows
+aggregates; it does not change that active requirement.
+
 ## What to require
 
 The active ruleset currently enforces the Ubuntu aggregate named above. The
