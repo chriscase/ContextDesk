@@ -662,10 +662,12 @@ dependencies = [
 name = "cd-triage-bench-adapter-cli"
 version = "0.1.0"
 dependencies = [
+ "assert_cmd",
  "cd-triage-bench",
  "cd-triage-bench-adapter",
  "cd-triage-sdk",
  "clap",
+ "tempfile",
 ]
 
 [[package]]

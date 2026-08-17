@@ -15,3 +15,7 @@ cd-triage-bench = { path = "../cd-triage-bench" }
 cd-triage-bench-adapter = { path = "../cd-triage-bench-adapter" }
 cd-triage-sdk = { path = "../cd-triage-sdk" }
 clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
