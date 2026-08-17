@@ -2164,6 +2164,25 @@ mod tests {
         .is_err());
     }
 
+    #[tokio::test]
+    async fn wait_for_openai_429_retry_observes_cancel_during_backoff() {
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        let started = std::time::Instant::now();
+        let error = wait_for_openai_429_retry(Duration::from_secs(30), Some(cancel.as_ref()))
+            .await
+            .expect_err("cancel must interrupt the parked backoff");
+        assert!(error.to_string().contains("cancelled"), "got {error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "20ms cancel poller must not wait out the product delay"
+        );
+    }
+
     #[test]
     fn openai_429_delay_honors_bounded_retry_after_and_conservative_fallback() {
         let empty = reqwest::header::HeaderMap::new();
