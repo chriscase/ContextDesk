@@ -2,7 +2,9 @@ name: Triage fast lane
 
 on:
   push:
-    branches: [main, integrate/rc]
+    # Include this draft head so a push can validate the workflow before the
+    # stack reaches main or integrate/rc. These checks remain advisory.
+    branches: [main, integrate/rc, codex/triage-fast-lane]
   pull_request:
     branches: [main, integrate/rc]
   workflow_dispatch:

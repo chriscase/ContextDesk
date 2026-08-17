@@ -52,12 +52,13 @@ engine code.
 
 Two limits matter before you require them anywhere:
 
-- **They only run on `main` and `integrate/rc`.** The workflow triggers on
-  pushes and pull requests whose *base* is `main` or `integrate/rc`, plus
-  `workflow_dispatch`. A pull request targeting any other branch — including
-  a stacked triage feature branch — publishes **no** fast-lane checks at all.
-  Requiring them in a ruleset that also covers such branches would leave the
-  checks permanently pending.
+- **The draft head has an explicit push trigger for hosted validation.** This
+  revision runs on pushes to `main`, `integrate/rc`, and
+  `codex/triage-fast-lane`; pull-request events still target only `main` and
+  `integrate/rc`. The self-head push entry exists so this draft can validate
+  before its stack is integrated. A pull request targeting another stacked
+  branch still gets no PR-triggered fast-lane checks, so these advisory checks
+  must never be required for such branches.
 - **They assume the sharded Ubuntu CI.** The `rust tests (ubuntu aggregate)`
   gate and the `rust (ubuntu-latest)` warmup described above arrive with the
   #874 shard work. Until that lands, `rust (ubuntu-latest)` still runs
