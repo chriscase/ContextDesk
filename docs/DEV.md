@@ -81,8 +81,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
 # One CI Ubuntu test shard, exactly as CI partitions it (#874) — see below
-sh scripts/ci_shard_plan.sh verify --shards 4
-sh scripts/ci_run_shard.sh --shard 2 --shards 4
+sh scripts/ci_shard_plan.sh verify --shards 8
+sh scripts/ci_run_shard.sh --shard 2 --shards 8
 sh scripts/ci_run_shard.sh --summary ci-shards
 sh scripts/tests/ci_shard_test.sh
 
@@ -167,7 +167,7 @@ Properties worth knowing:
   integration target are all units.
 - **The partition is deterministic** — round-robin over a canonically sorted
   unit list — so a shard reproduces identically on a laptop:
-  `sh scripts/ci_run_shard.sh --shard 2 --shards 4`.
+  `sh scripts/ci_run_shard.sh --shard 2 --shards 8`.
 - **Cancellation diagnostics:** a step timeout or job cancel SIGTERM's
   `ci_run_shard.sh` while the VM is still up; the trap writes `status.json`
   and `if: always()` uploads `rust-ubuntu-shard-N` (14-day retention). A VM
