@@ -2,7 +2,8 @@
 
 use super::common::{
     require_schema, sha256_hex, validate_bounded_string, validate_id, validate_rfc3339,
-    PrivacyClass, ADJUDICATION_SCHEMA_V1, MAX_RATIONALE_BYTES, RUBRIC_V1, SCORE_SCHEMA_V1,
+    PrivacyClass, ADJUDICATION_SCHEMA_V1, ADJUDICATION_SCHEMA_V2, MAX_RATIONALE_BYTES, RUBRIC_V1,
+    SCORE_SCHEMA_V1,
 };
 use crate::canonical::to_canonical_json;
 use crate::error::{BenchError, BenchResult};
@@ -17,6 +18,25 @@ pub enum RubricDimension {
     Actionability,
     UncertaintyCalibration,
     UnsafeUnsupportedClaims,
+}
+
+/// Phase of a two-phase review. Support packets exclude case resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewPhase {
+    /// Evidence-support review. Case resolution is excluded.
+    Support,
+    /// Diagnosis review after a support-phase record exists. Resolution may be revealed.
+    Diagnosis,
+}
+
+impl ReviewPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Support => "support",
+            Self::Diagnosis => "diagnosis",
+        }
+    }
 }
 
 impl RubricDimension {
@@ -110,6 +130,11 @@ pub struct Adjudication {
     pub reviewer: String,
     pub conflict_of_interest: ConflictOfInterest,
     pub rubric_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<ReviewPhase>,
+    /// The generated packet from which this adjudication was made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_packet_id: Option<String>,
     pub blinding: BlindingState,
     pub outcomes: Vec<DimensionOutcome>,
     pub created_at: String,
@@ -117,6 +142,35 @@ pub struct Adjudication {
 
 #[derive(Serialize)]
 struct AdjudicationDigestBody<'a> {
+    case_id: &'a str,
+    task_id: &'a str,
+    snapshot_id: &'a str,
+    run_id: &'a str,
+    reviewer: &'a str,
+    rubric_version: &'a str,
+    phase: ReviewPhase,
+    review_packet_id: &'a str,
+    blinding: &'a BlindingState,
+    outcomes: &'a [DimensionOutcome],
+    created_at: &'a str,
+}
+
+#[derive(Serialize)]
+struct CurrentV1AdjudicationDigestBody<'a> {
+    case_id: &'a str,
+    task_id: &'a str,
+    snapshot_id: &'a str,
+    run_id: &'a str,
+    reviewer: &'a str,
+    rubric_version: &'a str,
+    phase: ReviewPhase,
+    blinding: &'a BlindingState,
+    outcomes: &'a [DimensionOutcome],
+    created_at: &'a str,
+}
+
+#[derive(Serialize)]
+struct LegacyAdjudicationDigestBody<'a> {
     case_id: &'a str,
     task_id: &'a str,
     snapshot_id: &'a str,
@@ -145,6 +199,10 @@ struct AdjudicationImport {
     reviewer: String,
     conflict_of_interest: ConflictOfInterest,
     rubric_version: String,
+    #[serde(default)]
+    phase: Option<ReviewPhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_packet_id: Option<String>,
     blinding: BlindingState,
     outcomes: Vec<DimensionOutcome>,
     created_at: String,
@@ -161,11 +219,21 @@ impl Adjudication {
     pub fn parse_import_json(text: &str) -> BenchResult<Self> {
         let import: AdjudicationImport =
             serde_json::from_str(text).map_err(BenchError::from_serde)?;
-        require_schema(&import.schema_id, ADJUDICATION_SCHEMA_V1)?;
+        if import.schema_id != ADJUDICATION_SCHEMA_V1 && import.schema_id != ADJUDICATION_SCHEMA_V2
+        {
+            return Err(BenchError::Schema(format!(
+                "adjudication schema must be {ADJUDICATION_SCHEMA_V1} or {ADJUDICATION_SCHEMA_V2}, got {}",
+                import.schema_id
+            )));
+        }
         match import.adjudication_id {
             Some(adjudication_id) => {
                 let adj = Self {
-                    schema_id: import.schema_id,
+                    schema_id: if import.review_packet_id.is_some() {
+                        ADJUDICATION_SCHEMA_V2.into()
+                    } else {
+                        import.schema_id
+                    },
                     adjudication_id,
                     privacy: import.privacy,
                     case_id: import.case_id,
@@ -175,6 +243,8 @@ impl Adjudication {
                     reviewer: import.reviewer,
                     conflict_of_interest: import.conflict_of_interest,
                     rubric_version: import.rubric_version,
+                    phase: import.phase,
+                    review_packet_id: import.review_packet_id,
                     blinding: import.blinding,
                     outcomes: import.outcomes,
                     created_at: import.created_at,
@@ -182,19 +252,36 @@ impl Adjudication {
                 adj.validate()?;
                 Ok(adj)
             }
-            None => Self::from_parts(
-                import.privacy,
-                import.case_id,
-                import.task_id,
-                import.snapshot_id,
-                import.run_id,
-                import.reviewer,
-                import.conflict_of_interest,
-                import.rubric_version,
-                import.blinding,
-                import.outcomes,
-                import.created_at,
-            ),
+            None => {
+                let phase = import.phase.ok_or_else(|| {
+                    BenchError::Schema("new adjudication imports must declare phase".into())
+                })?;
+                if import.schema_id == ADJUDICATION_SCHEMA_V2 && import.review_packet_id.is_none() {
+                    return Err(BenchError::Schema(
+                        "adjudication.v2 requires review_packet_id".into(),
+                    ));
+                }
+                Self::build(
+                    if import.review_packet_id.is_some() {
+                        ADJUDICATION_SCHEMA_V2
+                    } else {
+                        ADJUDICATION_SCHEMA_V1
+                    },
+                    import.privacy,
+                    import.case_id,
+                    import.task_id,
+                    import.snapshot_id,
+                    import.run_id,
+                    import.reviewer,
+                    import.conflict_of_interest,
+                    import.rubric_version,
+                    phase,
+                    import.review_packet_id,
+                    import.blinding,
+                    import.outcomes,
+                    import.created_at,
+                )
+            }
         }
     }
 
@@ -208,25 +295,13 @@ impl Adjudication {
         reviewer: String,
         conflict_of_interest: ConflictOfInterest,
         rubric_version: String,
+        phase: ReviewPhase,
         blinding: BlindingState,
-        mut outcomes: Vec<DimensionOutcome>,
+        outcomes: Vec<DimensionOutcome>,
         created_at: String,
     ) -> BenchResult<Self> {
-        outcomes.sort_by_key(|o| o.dimension);
-        let adjudication_id = compute_adjudication_id(
-            &case_id,
-            &task_id,
-            &snapshot_id,
-            &run_id,
-            &reviewer,
-            &rubric_version,
-            &blinding,
-            &outcomes,
-            &created_at,
-        )?;
-        let adj = Self {
-            schema_id: ADJUDICATION_SCHEMA_V1.into(),
-            adjudication_id,
+        Self::build(
+            ADJUDICATION_SCHEMA_V1,
             privacy,
             case_id,
             task_id,
@@ -235,16 +310,97 @@ impl Adjudication {
             reviewer,
             conflict_of_interest,
             rubric_version,
+            phase,
+            None,
+            blinding,
+            outcomes,
+            created_at,
+        )
+    }
+
+    /// Construct a new adjudication bound to a generated review packet.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts_with_packet(
+        privacy: PrivacyClass,
+        case_id: String,
+        task_id: String,
+        snapshot_id: String,
+        run_id: String,
+        reviewer: String,
+        conflict_of_interest: ConflictOfInterest,
+        rubric_version: String,
+        phase: ReviewPhase,
+        review_packet_id: String,
+        blinding: BlindingState,
+        outcomes: Vec<DimensionOutcome>,
+        created_at: String,
+    ) -> BenchResult<Self> {
+        Self::build(
+            ADJUDICATION_SCHEMA_V2,
+            privacy,
+            case_id,
+            task_id,
+            snapshot_id,
+            run_id,
+            reviewer,
+            conflict_of_interest,
+            rubric_version,
+            phase,
+            Some(review_packet_id),
+            blinding,
+            outcomes,
+            created_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        schema_id: &str,
+        privacy: PrivacyClass,
+        case_id: String,
+        task_id: String,
+        snapshot_id: String,
+        run_id: String,
+        reviewer: String,
+        conflict_of_interest: ConflictOfInterest,
+        rubric_version: String,
+        phase: ReviewPhase,
+        review_packet_id: Option<String>,
+        blinding: BlindingState,
+        mut outcomes: Vec<DimensionOutcome>,
+        created_at: String,
+    ) -> BenchResult<Self> {
+        outcomes.sort_by_key(|o| o.dimension);
+        let adj = Self {
+            schema_id: schema_id.into(),
+            adjudication_id: String::new(),
+            privacy,
+            case_id,
+            task_id,
+            snapshot_id,
+            run_id,
+            reviewer,
+            conflict_of_interest,
+            rubric_version,
+            phase: Some(phase),
+            review_packet_id,
             blinding,
             outcomes,
             created_at,
         };
+        let mut adj = adj;
+        adj.adjudication_id = adj.compute_id()?;
         adj.validate()?;
         Ok(adj)
     }
 
     pub fn validate(&self) -> BenchResult<()> {
-        require_schema(&self.schema_id, ADJUDICATION_SCHEMA_V1)?;
+        if self.schema_id != ADJUDICATION_SCHEMA_V1 && self.schema_id != ADJUDICATION_SCHEMA_V2 {
+            return Err(BenchError::Schema(format!(
+                "adjudication schema must be {ADJUDICATION_SCHEMA_V1} or {ADJUDICATION_SCHEMA_V2}, got {}",
+                self.schema_id
+            )));
+        }
         validate_id("adjudication_id", &self.adjudication_id)?;
         validate_id("case_id", &self.case_id)?;
         validate_id("task_id", &self.task_id)?;
@@ -267,6 +423,27 @@ impl Adjudication {
         }
         if let BlindingState::Unblinded { reason } = &self.blinding {
             validate_bounded_string("blinding.reason", reason, 1024)?;
+        }
+        if self.schema_id == ADJUDICATION_SCHEMA_V2
+            && (self.phase.is_none() || self.review_packet_id.is_none())
+        {
+            return Err(BenchError::Schema(
+                "adjudication.v2 requires phase and review_packet_id".into(),
+            ));
+        }
+        if self.phase == Some(ReviewPhase::Support) {
+            match self.outcome(RubricDimension::DiagnosisCorrectness) {
+                Some(outcome)
+                    if matches!(
+                        outcome.verdict,
+                        DimensionVerdict::NotApplicable | DimensionVerdict::Unscorable { .. }
+                    ) => {}
+                _ => {
+                    return Err(BenchError::Schema(
+                        "support-phase adjudication cannot score diagnosis_correctness; resolution is not revealed".into(),
+                    ));
+                }
+            }
         }
         if self.outcomes.len() != 5 {
             return Err(BenchError::Schema(
@@ -292,17 +469,10 @@ impl Adjudication {
                 )));
             }
         }
-        let expected = compute_adjudication_id(
-            &self.case_id,
-            &self.task_id,
-            &self.snapshot_id,
-            &self.run_id,
-            &self.reviewer,
-            &self.rubric_version,
-            &self.blinding,
-            &self.outcomes,
-            &self.created_at,
-        )?;
+        if let Some(packet_id) = &self.review_packet_id {
+            validate_id("review_packet_id", packet_id)?;
+        }
+        let expected = self.compute_id()?;
         if self.adjudication_id != expected {
             return Err(BenchError::Integrity(format!(
                 "adjudication_id does not match content digest (expected {expected})"
@@ -318,6 +488,80 @@ impl Adjudication {
     pub fn to_score_review(&self) -> BenchResult<ScoreReview> {
         ScoreReview::from_adjudication(self)
     }
+
+    pub fn bind_review_packet(&self, review_packet_id: String) -> BenchResult<Self> {
+        let phase = self.phase.ok_or_else(|| {
+            BenchError::Schema("legacy adjudication cannot be bound to a review packet".into())
+        })?;
+        Self::from_parts_with_packet(
+            self.privacy,
+            self.case_id.clone(),
+            self.task_id.clone(),
+            self.snapshot_id.clone(),
+            self.run_id.clone(),
+            self.reviewer.clone(),
+            self.conflict_of_interest.clone(),
+            self.rubric_version.clone(),
+            phase,
+            review_packet_id,
+            self.blinding.clone(),
+            self.outcomes.clone(),
+            self.created_at.clone(),
+        )
+    }
+
+    pub fn with_outcomes(&self, mut outcomes: Vec<DimensionOutcome>) -> BenchResult<Self> {
+        outcomes.sort_by_key(|o| o.dimension);
+        let mut updated = self.clone();
+        updated.outcomes = outcomes;
+        updated.adjudication_id = updated.compute_id()?;
+        updated.validate()?;
+        Ok(updated)
+    }
+
+    fn compute_id(&self) -> BenchResult<String> {
+        match (self.schema_id.as_str(), self.phase, &self.review_packet_id) {
+            (ADJUDICATION_SCHEMA_V2, Some(phase), Some(packet_id)) => compute_adjudication_id(
+                &self.case_id,
+                &self.task_id,
+                &self.snapshot_id,
+                &self.run_id,
+                &self.reviewer,
+                &self.rubric_version,
+                phase,
+                packet_id,
+                &self.blinding,
+                &self.outcomes,
+                &self.created_at,
+            ),
+            (ADJUDICATION_SCHEMA_V1, Some(phase), None) => compute_current_v1_adjudication_id(
+                &self.case_id,
+                &self.task_id,
+                &self.snapshot_id,
+                &self.run_id,
+                &self.reviewer,
+                &self.rubric_version,
+                phase,
+                &self.blinding,
+                &self.outcomes,
+                &self.created_at,
+            ),
+            (ADJUDICATION_SCHEMA_V1, None, None) => compute_legacy_adjudication_id(
+                &self.case_id,
+                &self.task_id,
+                &self.snapshot_id,
+                &self.run_id,
+                &self.reviewer,
+                &self.rubric_version,
+                &self.blinding,
+                &self.outcomes,
+                &self.created_at,
+            ),
+            _ => Err(BenchError::Schema(
+                "adjudication schema and phase/packet fields are incompatible".into(),
+            )),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -328,11 +572,75 @@ fn compute_adjudication_id(
     run_id: &str,
     reviewer: &str,
     rubric_version: &str,
+    phase: ReviewPhase,
+    review_packet_id: &str,
     blinding: &BlindingState,
     outcomes: &[DimensionOutcome],
     created_at: &str,
 ) -> BenchResult<String> {
     let body = AdjudicationDigestBody {
+        case_id,
+        task_id,
+        snapshot_id,
+        run_id,
+        reviewer,
+        rubric_version,
+        phase,
+        review_packet_id,
+        blinding,
+        outcomes,
+        created_at,
+    };
+    Ok(format!(
+        "adj-{}",
+        sha256_hex(to_canonical_json(&body)?.as_bytes())
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_current_v1_adjudication_id(
+    case_id: &str,
+    task_id: &str,
+    snapshot_id: &str,
+    run_id: &str,
+    reviewer: &str,
+    rubric_version: &str,
+    phase: ReviewPhase,
+    blinding: &BlindingState,
+    outcomes: &[DimensionOutcome],
+    created_at: &str,
+) -> BenchResult<String> {
+    let body = CurrentV1AdjudicationDigestBody {
+        case_id,
+        task_id,
+        snapshot_id,
+        run_id,
+        reviewer,
+        rubric_version,
+        phase,
+        blinding,
+        outcomes,
+        created_at,
+    };
+    Ok(format!(
+        "adj-{}",
+        sha256_hex(to_canonical_json(&body)?.as_bytes())
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_legacy_adjudication_id(
+    case_id: &str,
+    task_id: &str,
+    snapshot_id: &str,
+    run_id: &str,
+    reviewer: &str,
+    rubric_version: &str,
+    blinding: &BlindingState,
+    outcomes: &[DimensionOutcome],
+    created_at: &str,
+) -> BenchResult<String> {
+    let body = LegacyAdjudicationDigestBody {
         case_id,
         task_id,
         snapshot_id,
@@ -563,6 +871,115 @@ mod tests {
         assert!(err.to_string().contains("0..=3"));
     }
 
+    fn five_outcomes(diagnosis: DimensionVerdict) -> Vec<DimensionOutcome> {
+        vec![
+            DimensionOutcome {
+                dimension: RubricDimension::DiagnosisCorrectness,
+                verdict: diagnosis,
+                rationale: "r".into(),
+                assist_flags: vec![],
+            },
+            DimensionOutcome {
+                dimension: RubricDimension::EvidenceSupport,
+                verdict: DimensionVerdict::Score { value: 2 },
+                rationale: "r".into(),
+                assist_flags: vec![],
+            },
+            DimensionOutcome {
+                dimension: RubricDimension::Actionability,
+                verdict: DimensionVerdict::Score { value: 2 },
+                rationale: "r".into(),
+                assist_flags: vec![],
+            },
+            DimensionOutcome {
+                dimension: RubricDimension::UncertaintyCalibration,
+                verdict: DimensionVerdict::Score { value: 2 },
+                rationale: "r".into(),
+                assist_flags: vec![],
+            },
+            DimensionOutcome {
+                dimension: RubricDimension::UnsafeUnsupportedClaims,
+                verdict: DimensionVerdict::Score { value: 2 },
+                rationale: "r".into(),
+                assist_flags: vec![],
+            },
+        ]
+    }
+
+    #[test]
+    fn support_phase_cannot_score_diagnosis_correctness() {
+        let err = Adjudication::from_parts(
+            PrivacyClass::ShareSafe,
+            "case-1".into(),
+            "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            "reviewer-a".into(),
+            ConflictOfInterest {
+                declared: false,
+                notes: None,
+            },
+            RUBRIC_V1.into(),
+            ReviewPhase::Support,
+            BlindingState::Blinded,
+            five_outcomes(DimensionVerdict::Score { value: 3 }),
+            "2026-01-15T10:00:00Z".into(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("support-phase"));
+        assert!(err.to_string().contains("diagnosis_correctness"));
+        Adjudication::from_parts(
+            PrivacyClass::ShareSafe,
+            "case-1".into(),
+            "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            "reviewer-a".into(),
+            ConflictOfInterest {
+                declared: false,
+                notes: None,
+            },
+            RUBRIC_V1.into(),
+            ReviewPhase::Support,
+            BlindingState::Blinded,
+            five_outcomes(DimensionVerdict::NotApplicable),
+            "2026-01-15T10:00:00Z".into(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn legacy_v1_adjudication_without_phase_remains_readable() {
+        let outcomes = five_outcomes(DimensionVerdict::Score { value: 2 });
+        let mut legacy = Adjudication {
+            schema_id: ADJUDICATION_SCHEMA_V1.into(),
+            adjudication_id: String::new(),
+            privacy: PrivacyClass::ShareSafe,
+            case_id: "case-1".into(),
+            task_id: "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            snapshot_id: "snap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            run_id: "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            reviewer: "reviewer-a".into(),
+            conflict_of_interest: ConflictOfInterest {
+                declared: false,
+                notes: None,
+            },
+            rubric_version: RUBRIC_V1.into(),
+            phase: None,
+            review_packet_id: None,
+            blinding: BlindingState::Blinded,
+            outcomes,
+            created_at: "2026-01-15T10:00:00Z".into(),
+        };
+        legacy.adjudication_id = legacy.compute_id().unwrap();
+        let text = serde_json::to_string(&legacy).unwrap();
+        let parsed = Adjudication::parse_json(&text).unwrap();
+        assert_eq!(parsed, legacy);
+        assert!(!text.contains("\"phase\""));
+        assert!(!text.contains("review_packet_id"));
+    }
+
     fn sample_dimensions() -> Vec<DimensionScore> {
         vec![
             DimensionScore {
@@ -634,10 +1051,11 @@ mod tests {
                 "reviewer": "reviewer-a",
                 "conflict_of_interest": {"declared": false},
                 "rubric_version": "contextdesk.triage_bench.rubric.v1",
+                "phase": "support",
                 "blinding": {"kind": "blinded"},
                 "outcomes": [],
                 "created_at": "2026-01-15T10:00:00Z",
-                "unexpected": true
+                "unexpected": true}
             }"#,
         )
         .unwrap_err();

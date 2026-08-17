@@ -3,7 +3,7 @@
 use super::common::{
     require_schema, sha256_hex, validate_bounded_string, validate_id, validate_rfc3339,
     Completeness, ContentDigest, Observed, PrivacyClass, MAX_CLAIMS, MAX_RAW_INLINE_BYTES,
-    MAX_STRING_BYTES, RUN_IMPORT_SCHEMA_V1, RUN_SCHEMA_V1,
+    MAX_STRING_BYTES, RUN_IMPORT_SCHEMA_V1, RUN_SCHEMA_V1, RUN_SCHEMA_V2,
 };
 use crate::canonical::to_canonical_json;
 use crate::error::{BenchError, BenchResult};
@@ -39,6 +39,7 @@ pub enum RunStatus {
     Partial,
     Cancelled,
     TimedOut,
+    Unscorable,
 }
 
 impl RunStatus {
@@ -49,6 +50,7 @@ impl RunStatus {
             Self::Partial => "partial",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
+            Self::Unscorable => "unscorable",
         }
     }
 }
@@ -210,7 +212,7 @@ pub struct TriageRun {
 }
 
 #[derive(Serialize)]
-struct RunFingerprintBody<'a> {
+struct LegacyRunFingerprintBody<'a> {
     task_id: &'a str,
     snapshot_id: &'a str,
     source_kind: SourceKind,
@@ -218,6 +220,28 @@ struct RunFingerprintBody<'a> {
     strategy_version: &'a Observed<String>,
     raw_digest: &'a str,
     fairness: &'a FairnessClass,
+}
+
+#[derive(Serialize)]
+struct RunIdentityFingerprintBody<'a> {
+    task_id: &'a str,
+    snapshot_id: &'a str,
+    source_kind: SourceKind,
+    strategy_name: &'a str,
+    strategy_version: &'a Observed<String>,
+    strategy_build: &'a Observed<String>,
+    raw_digest: &'a str,
+    prompt_workflow: &'a PromptWorkflow,
+    claims: &'a [ClaimedCitation],
+    timing: &'a Observed<Timing>,
+    cost: &'a Observed<Cost>,
+    uncertainty: &'a Observed<String>,
+    fairness: &'a FairnessClass,
+    status: RunStatus,
+    privacy: PrivacyClass,
+    operator: &'a str,
+    importer: &'a Option<String>,
+    created_at: &'a str,
 }
 
 impl TriageRun {
@@ -228,44 +252,36 @@ impl TriageRun {
     }
 
     pub fn fingerprint(&self) -> BenchResult<String> {
-        run_fingerprint(
-            &self.task_id,
-            &self.snapshot_id,
-            self.source_kind,
-            &self.strategy.name,
-            &self.strategy.version,
-            &self.raw_output.digest.hex,
-            &self.fairness,
-        )
+        match self.schema_id.as_str() {
+            RUN_SCHEMA_V1 => legacy_run_fingerprint(
+                &self.task_id,
+                &self.snapshot_id,
+                self.source_kind,
+                &self.strategy.name,
+                &self.strategy.version,
+                &self.raw_output.digest.hex,
+                &self.fairness,
+            ),
+            RUN_SCHEMA_V2 => run_identity_fingerprint(self),
+            schema => Err(BenchError::Schema(format!(
+                "unsupported triage run schema {schema}"
+            ))),
+        }
     }
 
     pub fn validate(&self) -> BenchResult<()> {
-        require_schema(&self.schema_id, RUN_SCHEMA_V1)?;
+        if self.schema_id != RUN_SCHEMA_V1 && self.schema_id != RUN_SCHEMA_V2 {
+            return Err(BenchError::Schema(format!(
+                "triage run schema must be {RUN_SCHEMA_V1} or {RUN_SCHEMA_V2}, got {}",
+                self.schema_id
+            )));
+        }
         validate_id("run_id", &self.run_id)?;
         validate_id("case_id", &self.case_id)?;
         validate_id("task_id", &self.task_id)?;
         validate_id("snapshot_id", &self.snapshot_id)?;
-        validate_bounded_string("strategy.name", &self.strategy.name, 256)?;
-        if self.strategy.name.trim().is_empty() {
-            return Err(BenchError::Schema("strategy.name is empty".into()));
-        }
-        validate_observed_string("strategy.version", &self.strategy.version, 128)?;
-        validate_observed_string("strategy.build", &self.strategy.build, 256)?;
-        match &self.prompt_workflow.completeness {
-            Completeness::Unknown => {
-                if !self.prompt_workflow.prompt.is_unknown()
-                    || !self.prompt_workflow.workflow.is_unknown()
-                {
-                    return Err(BenchError::Schema(
-                        "prompt_workflow completeness unknown requires unknown prompt and workflow"
-                            .into(),
-                    ));
-                }
-            }
-            Completeness::Exact | Completeness::Partial => {}
-        }
-        validate_observed_string("prompt", &self.prompt_workflow.prompt, MAX_STRING_BYTES)?;
-        validate_observed_string("workflow", &self.prompt_workflow.workflow, MAX_STRING_BYTES)?;
+        validate_strategy_identity(&self.strategy)?;
+        validate_prompt_workflow(&self.prompt_workflow)?;
         if self.raw_output.digest.algorithm != "sha256" {
             return Err(BenchError::Schema(
                 "raw_output digest algorithm must be sha256".into(),
@@ -273,41 +289,10 @@ impl TriageRun {
         }
         crate::types::validate_sha256_hex(&self.raw_output.digest.hex)?;
         validate_bounded_string("raw_output.encoding", &self.raw_output.encoding, 32)?;
-        if self.claims.len() > MAX_CLAIMS {
-            return Err(BenchError::Schema("too many claims".into()));
-        }
-        for (i, claim) in self.claims.iter().enumerate() {
-            validate_bounded_string(
-                &format!("claims[{i}].claim"),
-                &claim.claim,
-                MAX_STRING_BYTES,
-            )?;
-            if let Some(id) = &claim.evidence_item_id {
-                validate_id(&format!("claims[{i}].evidence_item_id"), id)?;
-            }
-            if let Some(locator) = &claim.locator {
-                validate_bounded_string(&format!("claims[{i}].locator"), locator, 1024)?;
-            }
-        }
-        if let Observed::Known(timing) = &self.timing {
-            timing.validate()?;
-        }
-        if let Observed::Known(cost) = &self.cost {
-            cost.validate()?;
-        }
-        validate_observed_string("uncertainty", &self.uncertainty, MAX_STRING_BYTES)?;
-        if let FairnessClass::ExtraEvidence { description } = &self.fairness {
-            validate_bounded_string("fairness.description", description, MAX_STRING_BYTES)?;
-            if description.trim().is_empty() {
-                return Err(BenchError::Schema(
-                    "extra_evidence fairness requires a description".into(),
-                ));
-            }
-        }
-        validate_bounded_string("operator", &self.operator, 512)?;
-        if let Some(importer) = &self.importer {
-            validate_bounded_string("importer", importer, 512)?;
-        }
+        validate_claims(&self.claims)?;
+        validate_observed_timing_cost_uncertainty(&self.timing, &self.cost, &self.uncertainty)?;
+        validate_fairness(&self.fairness)?;
+        validate_attribution(&self.operator, self.importer.as_deref())?;
         validate_rfc3339("created_at", &self.created_at)?;
         if let Some(other) = &self.near_duplicate_of {
             validate_id("near_duplicate_of", other)?;
@@ -338,7 +323,27 @@ pub fn run_fingerprint(
     raw_digest_hex: &str,
     fairness: &FairnessClass,
 ) -> BenchResult<String> {
-    let body = RunFingerprintBody {
+    legacy_run_fingerprint(
+        task_id,
+        snapshot_id,
+        source_kind,
+        strategy_name,
+        strategy_version,
+        raw_digest_hex,
+        fairness,
+    )
+}
+
+fn legacy_run_fingerprint(
+    task_id: &str,
+    snapshot_id: &str,
+    source_kind: SourceKind,
+    strategy_name: &str,
+    strategy_version: &Observed<String>,
+    raw_digest_hex: &str,
+    fairness: &FairnessClass,
+) -> BenchResult<String> {
+    let body = LegacyRunFingerprintBody {
         task_id,
         snapshot_id,
         source_kind,
@@ -349,6 +354,30 @@ pub fn run_fingerprint(
     };
     let canonical = to_canonical_json(&body)?;
     Ok(sha256_hex(canonical.as_bytes()))
+}
+
+fn run_identity_fingerprint(run: &TriageRun) -> BenchResult<String> {
+    let body = RunIdentityFingerprintBody {
+        task_id: &run.task_id,
+        snapshot_id: &run.snapshot_id,
+        source_kind: run.source_kind,
+        strategy_name: &run.strategy.name,
+        strategy_version: &run.strategy.version,
+        strategy_build: &run.strategy.build,
+        raw_digest: &run.raw_output.digest.hex,
+        prompt_workflow: &run.prompt_workflow,
+        claims: &run.claims,
+        timing: &run.timing,
+        cost: &run.cost,
+        uncertainty: &run.uncertainty,
+        fairness: &run.fairness,
+        status: run.status,
+        privacy: run.privacy,
+        operator: &run.operator,
+        importer: &run.importer,
+        created_at: &run.created_at,
+    };
+    Ok(sha256_hex(to_canonical_json(&body)?.as_bytes()))
 }
 
 /// Manual import document. Raw bytes may be inline or supplied separately.
@@ -387,7 +416,13 @@ impl RunImport {
     pub fn validate_metadata(&self) -> BenchResult<()> {
         require_schema(&self.schema_id, RUN_IMPORT_SCHEMA_V1)?;
         validate_id("task_id", &self.task_id)?;
-        validate_bounded_string("strategy.name", &self.strategy.name, 256)?;
+        validate_strategy_identity(&self.strategy)?;
+        validate_prompt_workflow(&self.prompt_workflow)?;
+        validate_claims(&self.claims)?;
+        validate_observed_timing_cost_uncertainty(&self.timing, &self.cost, &self.uncertainty)?;
+        validate_fairness(&self.fairness)?;
+        validate_attribution(&self.operator, self.importer.as_deref())?;
+        validate_rfc3339("created_at", &self.created_at)?;
         if let Some(raw) = &self.raw_output_utf8 {
             if raw.len() > MAX_RAW_INLINE_BYTES {
                 return Err(BenchError::Schema("raw_output_utf8 exceeds 8 MiB".into()));
@@ -395,6 +430,93 @@ impl RunImport {
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_strategy_identity(strategy: &StrategyIdentity) -> BenchResult<()> {
+    validate_bounded_string("strategy.name", &strategy.name, 256)?;
+    if strategy.name.trim().is_empty() {
+        return Err(BenchError::Schema("strategy.name is empty".into()));
+    }
+    validate_observed_string("strategy.version", &strategy.version, 128)?;
+    validate_observed_string("strategy.build", &strategy.build, 256)?;
+    Ok(())
+}
+
+pub(crate) fn validate_prompt_workflow(prompt_workflow: &PromptWorkflow) -> BenchResult<()> {
+    match prompt_workflow.completeness {
+        Completeness::Unknown => {
+            if !prompt_workflow.prompt.is_unknown() || !prompt_workflow.workflow.is_unknown() {
+                return Err(BenchError::Schema(
+                    "prompt_workflow completeness unknown requires unknown prompt and workflow"
+                        .into(),
+                ));
+            }
+        }
+        Completeness::Exact | Completeness::Partial => {}
+    }
+    validate_observed_string("prompt", &prompt_workflow.prompt, MAX_STRING_BYTES)?;
+    validate_observed_string("workflow", &prompt_workflow.workflow, MAX_STRING_BYTES)?;
+    Ok(())
+}
+
+pub(crate) fn validate_fairness(fairness: &FairnessClass) -> BenchResult<()> {
+    if let FairnessClass::ExtraEvidence { description } = fairness {
+        validate_bounded_string("fairness.description", description, MAX_STRING_BYTES)?;
+        if description.trim().is_empty() {
+            return Err(BenchError::Schema(
+                "extra_evidence fairness requires a description".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_claims(claims: &[ClaimedCitation]) -> BenchResult<()> {
+    if claims.len() > MAX_CLAIMS {
+        return Err(BenchError::Schema("too many claims".into()));
+    }
+    for (i, claim) in claims.iter().enumerate() {
+        validate_bounded_string(
+            &format!("claims[{i}].claim"),
+            &claim.claim,
+            MAX_STRING_BYTES,
+        )?;
+        if let Some(id) = &claim.evidence_item_id {
+            validate_id(&format!("claims[{i}].evidence_item_id"), id)?;
+        }
+        if let Some(locator) = &claim.locator {
+            validate_bounded_string(&format!("claims[{i}].locator"), locator, 1024)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_observed_timing_cost_uncertainty(
+    timing: &Observed<Timing>,
+    cost: &Observed<Cost>,
+    uncertainty: &Observed<String>,
+) -> BenchResult<()> {
+    if let Observed::Known(timing) = timing {
+        timing.validate()?;
+    }
+    if let Observed::Known(cost) = cost {
+        cost.validate()?;
+    }
+    validate_observed_string("uncertainty", uncertainty, MAX_STRING_BYTES)
+}
+
+pub(crate) fn validate_attribution(operator: &str, importer: Option<&str>) -> BenchResult<()> {
+    validate_bounded_string("operator", operator, 512)?;
+    if operator.trim().is_empty() {
+        return Err(BenchError::Schema("operator is empty".into()));
+    }
+    if let Some(importer) = importer {
+        validate_bounded_string("importer", importer, 512)?;
+        if importer.trim().is_empty() {
+            return Err(BenchError::Schema("importer is empty".into()));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -429,6 +551,74 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn omitted_fairness_is_rejected() {
+        let err = RunImport::parse_json(
+            r#"{
+                "schema_id": "contextdesk.triage_bench.run_import.v1",
+                "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "strategy": {"name": "human-expert", "version": {"status": "unknown"}, "build": {"status": "unknown"}},
+                "source_kind": "human",
+                "prompt_workflow": {"completeness": "unknown", "prompt": {"status": "unknown"}, "workflow": {"status": "unknown"}},
+                "timing": {"status": "unknown"},
+                "cost": {"status": "unknown"},
+                "uncertainty": {"status": "unknown"},
+                "status": "completed",
+                "operator": "alice",
+                "created_at": "2026-01-15T08:00:00Z"
+            }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("fairness"), "{err}");
+    }
+
+    #[test]
+    fn extra_evidence_requires_a_description() {
+        let err = RunImport::parse_json(
+            r#"{
+                "schema_id": "contextdesk.triage_bench.run_import.v1",
+                "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "strategy": {"name": "human-expert", "version": {"status": "unknown"}, "build": {"status": "unknown"}},
+                "source_kind": "human",
+                "prompt_workflow": {"completeness": "unknown", "prompt": {"status": "unknown"}, "workflow": {"status": "unknown"}},
+                "timing": {"status": "unknown"},
+                "cost": {"status": "unknown"},
+                "uncertainty": {"status": "unknown"},
+                "fairness": {"kind": "extra_evidence", "description": "   "},
+                "status": "completed",
+                "operator": "alice",
+                "created_at": "2026-01-15T08:00:00Z"
+            }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("description"), "{err}");
+    }
+
+    #[test]
+    fn missing_strategy_version_stays_a_required_unknown_object() {
+        let err = RunImport::parse_json(
+            r#"{
+                "schema_id": "contextdesk.triage_bench.run_import.v1",
+                "task_id": "task-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "strategy": {"name": "human-expert", "build": {"status": "unknown"}},
+                "source_kind": "human",
+                "prompt_workflow": {"completeness": "unknown", "prompt": {"status": "unknown"}, "workflow": {"status": "unknown"}},
+                "timing": {"status": "unknown"},
+                "cost": {"status": "unknown"},
+                "uncertainty": {"status": "unknown"},
+                "fairness": {"kind": "same_snapshot"},
+                "status": "completed",
+                "operator": "alice",
+                "created_at": "2026-01-15T08:00:00Z"
+            }"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("missing field") && err.to_string().contains("version"),
+            "{err}"
+        );
     }
 
     #[test]

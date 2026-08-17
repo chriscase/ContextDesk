@@ -555,6 +555,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cd-test-gateway",
+ "cd-triage-sdk",
  "chrono",
  "chrono-tz",
  "dirs 5.0.1",
@@ -641,6 +642,40 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cd-triage-bench-adapter"
+version = "0.1.0"
+dependencies = [
+ "cd-core",
+ "cd-triage-bench",
+ "cd-triage-sdk",
+ "cd-workflow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cd-triage-bench-adapter-cli"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "cd-triage-bench",
+ "cd-triage-bench-adapter",
+ "cd-triage-sdk",
+ "clap",
+ "tempfile",
+]
+
+[[package]]
+name = "cd-triage-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

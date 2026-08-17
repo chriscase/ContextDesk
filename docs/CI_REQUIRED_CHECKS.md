@@ -5,12 +5,12 @@ It does not change workflow behavior. The workflow in `.github/workflows/ci.yml`
 already fail-closes on a missing test shard; a ruleset is what makes a check a
 merge blocker.
 
-The active `main` ruleset is `20890073` (`main: require Ubuntu aggregate`). Its
-Ubuntu suite gate is exactly `rust tests (ubuntu aggregate)`. The
-`rust (ubuntu-latest)` job is warmup (fmt, clippy, examples, smoke, and cache
-population), not the Ubuntu test suite and not the Ubuntu suite gate.
-The macOS/Windows aggregates are coverage signals and do not change that
-active requirement.
+The active `main: require Ubuntu aggregate` ruleset (id `20890073`) on
+`chriscase/ContextDesk` requires exactly `rust tests (ubuntu aggregate)`.
+That aggregate is the merge-blocking Ubuntu test gate; the warmup job
+`rust (ubuntu-latest)` performs fmt, clippy, examples, smoke, and cache
+population, but is not the Ubuntu suite or suite gate. The macOS/Windows
+aggregates remain coverage signals and do not change that active requirement.
 
 ## What to require
 
@@ -68,12 +68,44 @@ shards but keeps the same required check name and runs the complete
 is routed only when no collaboration implementation is present; if source
 appears before its dedicated validator exists, the aggregate fails closed.
 
+## Triage fast lane (advisory, not a gate)
+
+The optional `.github/workflows/triage-fast.yml` workflow publishes
+`triage fast (SDK)`, `triage fast (bench)`, and `triage fast (aggregate)`.
+These are advisory acceleration for the dependency-light `cd-triage-sdk` /
+`cd-triage-bench` path. They do not replace or rename
+`rust tests (ubuntu aggregate)`, and they must not be used as the full
+workspace Ubuntu gate — the fast lane compiles two crates and never exercises
+`cd-core`, `cd-workflow`, DuckDB, SQLite, keyring, or any network-capable
+engine code.
+
+Two limits matter before you require them anywhere:
+
+- **The draft head has an explicit push trigger for hosted validation.** This
+  revision runs on pushes to `main`, `integrate/rc`, and
+  `codex/triage-fast-lane`; pull-request events still target only `main` and
+  `integrate/rc`. The self-head push entry exists so this draft can validate
+  before its stack is integrated. A pull request targeting another stacked
+  branch still gets no PR-triggered fast-lane checks, so these advisory checks
+  must never be required for such branches.
+- **They assume the sharded Ubuntu CI.** The `rust tests (ubuntu aggregate)`
+  gate and the `rust (ubuntu-latest)` warmup described above arrive with the
+  #874 shard work. Until that lands, `rust (ubuntu-latest)` still runs
+  `cargo test --workspace` itself and there is no aggregate check to defer to.
+
 ## How to verify a ruleset
 
 After changing a ruleset, open a draft PR and confirm the “Required” list on the
 PR checks panel contains the intended aggregate names. A deliberately missing
 Ubuntu shard artifact must keep `rust tests (ubuntu aggregate)` red, and that
 red check must block merge.
+
+The stacked adapter workflow publishes `triage fast (adapter)` as an
+additional advisory check once `cd-triage-bench-adapter` is present. It uses
+its own cache namespace and the same locked-fetch plus full dependency-boundary
+guard as the SDK/bench fast lanes. It does not replace or rename
+`rust tests (ubuntu aggregate)` and must not be added as the Ubuntu workspace
+gate.
 
 ## Related
 

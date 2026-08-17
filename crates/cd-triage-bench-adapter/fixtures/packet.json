@@ -1,0 +1,62 @@
+{
+  "schema_id": "contextdesk.triage_bench.task_packet.v1",
+  "packet_id": "pkt-26553b254b1013c6c2a9453d37251961dc4c13420307e41664be73510c186776",
+  "task_id": "task-a02e7497a4787cbd965c3b0abb1b03688a0c0ea10eadcb87207a763ed10aae6a",
+  "snapshot_id": "snap-5c34bc690d012cc5c147d1ca3f7e08ea872a6c7ffff449a92fb98aedc3be26d3",
+  "case_id": "case-checkout-500s",
+  "question": "What initiated the checkout failures, and what evidence supports it?",
+  "protocol": "Answer only from the visible evidence in this packet. Say so when evidence is missing.",
+  "protocol_version": "v1",
+  "evidence": [
+    {
+      "item_id": "ev-log-1",
+      "kind": "log",
+      "capture_time": "2026-01-15T04:12:00Z",
+      "source_reference": "app/checkout.log",
+      "source_captured_from": "synthetic fixture",
+      "media_type": "text/plain",
+      "format": "raw",
+      "content": {
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "533239a07d0f3691e3931542aa7feef9a768026beacd612ef5a51f31e0a34014"
+        },
+        "byte_length": 63
+      },
+      "summaries": [
+        {
+          "author": "duty-operator",
+          "kind": "human",
+          "text": "Upstream inventory timeouts start at 04:12Z.",
+          "created_at": "2026-01-15T05:00:00Z"
+        }
+      ]
+    },
+    {
+      "item_id": "ev-mail-1",
+      "kind": "email",
+      "capture_time": "2026-01-15T04:25:00Z",
+      "source_reference": "alerts mailbox",
+      "source_captured_from": "synthetic fixture",
+      "media_type": "message/rfc822",
+      "content": {
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "9c602ba7c3208162c03b18ae095f6766d9736226d4fbb64f50ca061ee895b5b1"
+        },
+        "byte_length": 71
+      },
+      "summaries": []
+    },
+    {
+      "item_id": "ev-ref-1",
+      "kind": "external_file_server_reference",
+      "capture_time": "2026-01-15T04:30:00Z",
+      "source_reference": "fileserver archives, incident bundle",
+      "source_captured_from": "synthetic fixture",
+      "uri": "fileserver-archives/incident-bundle.bin",
+      "verification": "unverified",
+      "summaries": []
+    }
+  ]
+}

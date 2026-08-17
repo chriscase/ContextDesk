@@ -564,6 +564,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "cd-triage-sdk",
  "chrono",
  "chrono-tz",
  "dirs 5.0.1",
@@ -596,6 +597,15 @@ dependencies = [
  "webpki-roots",
  "windows-sys 0.61.2",
  "zip 2.4.2",
+]
+
+[[package]]
+name = "cd-triage-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

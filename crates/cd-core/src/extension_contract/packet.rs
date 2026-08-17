@@ -30,15 +30,7 @@ impl TimeQualityLabel {
     }
 }
 
-/// Explicit privacy boundary for a packet (share-safe vs owner-only).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PacketPrivacyBoundary {
-    /// Safe to share without secrets, endpoints, private paths, or raw bodies.
-    ShareSafe,
-    /// Owner-only; may retain more detail but must never be the default export.
-    OwnerOnly,
-}
+pub use cd_triage_sdk::PacketPrivacyBoundary;
 
 /// One permitted opaque evidence row (host-minted id only).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

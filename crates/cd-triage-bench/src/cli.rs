@@ -3,7 +3,10 @@
 use crate::canonical::to_pretty_json;
 use crate::error::{BenchError, BenchResult};
 use crate::import::{import_run, parse_import_json, parse_import_markdown, ImportOutcome};
-use crate::report::{blinded_run_view, build_report, render_report_json, render_report_markdown};
+use crate::report::{
+    build_report, render_report_json, render_report_jsonl, render_report_markdown,
+};
+use crate::review::{blinded_run_view_from_raw, ReviewPhase};
 use crate::store::BenchStore;
 use crate::types::{Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -63,11 +66,17 @@ pub enum Command {
     Packet { task_id: String },
     /// Show a blinded review view of a run (strategy identity masked when possible).
     BlindedRun { run_id: String },
+    /// Materialize a blinded expert-review packet (support phase excludes resolution).
+    ReviewPacket {
+        run_id: String,
+        #[arg(long, value_enum, default_value = "support")]
+        phase: ReviewPhaseArg,
+    },
     /// Reproducible comparison report over stored runs and adjudications.
     Report {
         #[arg(long, value_enum, default_value = "json")]
         format: ReportFormat,
-        #[arg(long, value_enum, default_value = "owner_only")]
+        #[arg(long, value_enum, default_value = "owner-only")]
         privacy: ReportPrivacy,
         #[arg(long)]
         task: Option<String>,
@@ -87,6 +96,7 @@ pub enum ListKind {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ReportFormat {
     Json,
+    Jsonl,
     Markdown,
 }
 
@@ -101,6 +111,21 @@ impl ReportPrivacy {
         match self {
             Self::OwnerOnly => PrivacyClass::OwnerOnly,
             Self::ShareSafe => PrivacyClass::ShareSafe,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ReviewPhaseArg {
+    Support,
+    Diagnosis,
+}
+
+impl From<ReviewPhaseArg> for ReviewPhase {
+    fn from(value: ReviewPhaseArg) -> Self {
+        match value {
+            ReviewPhaseArg::Support => ReviewPhase::Support,
+            ReviewPhaseArg::Diagnosis => ReviewPhase::Diagnosis,
         }
     }
 }
@@ -187,8 +212,8 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
             let adj = parse_adjudication(
                 &fs::read_to_string(&file).map_err(|e| BenchError::io(&file, e))?,
             )?;
-            let score = store.put_adjudication(&adj)?;
-            Ok(format!("{} {}\n", adj.adjudication_id, score.score_id))
+            let score = store.import_adjudication(adj)?;
+            Ok(format!("{} {}\n", score.adjudication_id, score.score_id))
         }
         Command::List { kind } => {
             let store = open_store(cli.library)?;
@@ -219,7 +244,13 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
         }
         Command::BlindedRun { run_id } => {
             let store = open_store(cli.library)?;
-            to_pretty_json(&blinded_run_view(&store.get_run(&run_id)?))
+            let run = store.get_run(&run_id)?;
+            let raw = store.get_blob(&run.raw_output.digest.hex)?;
+            to_pretty_json(&blinded_run_view_from_raw(&run, Some(raw.as_slice())))
+        }
+        Command::ReviewPacket { run_id, phase } => {
+            let store = open_store(cli.library)?;
+            to_pretty_json(&store.materialize_review_packet(&run_id, phase.into())?)
         }
         Command::Report {
             format,
@@ -235,10 +266,12 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                 &runs,
                 &store.load_adjudications()?,
                 &store.load_scores()?,
+                &store.load_cases()?,
                 privacy.class(),
             )?;
             match format {
                 ReportFormat::Json => render_report_json(&report),
+                ReportFormat::Jsonl => render_report_jsonl(&report),
                 ReportFormat::Markdown => render_report_markdown(&report),
             }
         }
