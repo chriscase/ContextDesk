@@ -1,0 +1,90 @@
+name: Triage fast lane
+
+on:
+  push:
+    branches: [main, integrate/rc]
+  pull_request:
+    branches: [main, integrate/rc]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+concurrency:
+  group: triage-fast-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# This workflow deliberately tests only the dependency-light triage packages.
+# It is parallel to the full workspace CI and must not pull cd-core, DuckDB,
+# keyring, or network-capable engine code into the fast path.
+jobs:
+  sdk:
+    name: rust tests (triage SDK fast)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          workspaces: .
+          shared-key: triage-sdk-fast-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - name: report cache result
+        run: echo "triage SDK cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: fmt
+        run: cargo fmt -p cd-triage-sdk -- --check
+      - name: clippy
+        run: cargo clippy --locked --offline -p cd-triage-sdk --all-targets -- -D warnings
+      - name: test
+        run: cargo test --locked --offline -p cd-triage-sdk
+
+  bench:
+    name: rust tests (triage bench fast)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          workspaces: .
+          shared-key: triage-bench-fast-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
+      - name: report cache result
+        run: echo "triage bench cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: fmt
+        run: cargo fmt -p cd-triage-bench -- --check
+      - name: clippy
+        run: cargo clippy --locked --offline -p cd-triage-bench --all-targets -- -D warnings
+      - name: test
+        run: cargo test --locked --offline -p cd-triage-bench
+
+  aggregate:
+    name: rust tests (triage fast aggregate)
+    if: always()
+    needs: [sdk, bench]
+    runs-on: ubuntu-latest
+    steps:
+      - name: require both fast lanes
+        run: |
+          sdk='${{ needs.sdk.result }}'
+          bench='${{ needs.bench.result }}'
+          echo "triage SDK fast: $sdk"
+          echo "triage bench fast: $bench"
+          if [ "$sdk" != success ] || [ "$bench" != success ]; then
+            echo "::error title=triage fast lane::one or more fast lanes did not succeed"
+            exit 1
+          fi

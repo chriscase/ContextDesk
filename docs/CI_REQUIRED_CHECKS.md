@@ -39,6 +39,13 @@ When a ruleset is added, require these **check names** (the `name:` fields in
   executes the suite; requiring only `rust (ubuntu-latest)` would treat a
   skipped/failed shard matrix as irrelevant as long as fmt/clippy passed.
 
+The optional `Triage fast lane` workflow also publishes
+`rust tests (triage SDK fast)`, `rust tests (triage bench fast)`, and
+`rust tests (triage fast aggregate)`. These checks are advisory acceleration
+for the dependency-light SDK/bench path; they do not replace or rename
+`rust tests (ubuntu aggregate)`, and they must not be used as the full
+workspace Ubuntu gate.
+
 ## How to verify a ruleset
 
 After saving the ruleset, open a draft PR and confirm the “Required” list on
