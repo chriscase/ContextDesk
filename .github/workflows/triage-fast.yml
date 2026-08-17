@@ -13,9 +13,16 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Exact crate names (ERE, matched whole-line against the resolved package
+  # list) that must never reach the fast lane: the ContextDesk engine, the
+  # embedded databases, the OS keychain, and every HTTP client / async runtime
+  # in the workspace lock. Kept in one place so the two lanes cannot drift.
+  CD_TRIAGE_BANNED_DEPS: 'cd-core|cd-workflow|duckdb|libduckdb-sys|rusqlite|libsqlite3-sys|sqlx.*|keyring|reqwest|tokio.*|hyper.*|ureq|curl|isahc|async-std|smol|native-tls|openssl.*|tonic'
 
+# Match ci.yml: keep every main-branch run (they are the only cache writers),
+# and cancel only superseded PR revisions.
 concurrency:
-  group: triage-fast-${{ github.event.pull_request.number || github.ref }}
+  group: triage-fast-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # This workflow deliberately tests only the dependency-light triage packages.
@@ -23,7 +30,7 @@ concurrency:
 # keyring, or network-capable engine code into the fast path.
 jobs:
   sdk:
-    name: rust tests (triage SDK fast)
+    name: triage fast (SDK)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -38,13 +45,50 @@ jobs:
           shared-key: triage-sdk-fast-v1
           cache-workspace-crates: true
           cache-on-failure: true
+          # Only main writes cache entries. PR branches restore from main but
+          # never save: two extra full-registry entries per PR would push the
+          # repo past the 10 GB Actions cache quota and evict
+          # `ubuntu-workspace-tests`, whose loss costs the ci.yml shards 36-55
+          # minutes of DuckDB compilation each.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: report cache result
-        run: echo "triage SDK cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+        # Block scalar, not a plain one: `run: echo "... hit: ${{ ... }}"` is
+        # invalid YAML (a plain scalar may not contain ": "), which made the
+        # whole workflow unloadable.
+        run: |
+          echo "triage SDK cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: fetch dependencies (locked)
+        # Every cargo step below is --offline, so nothing else would ever
+        # populate the registry. Without this the lane cannot bootstrap: the
+        # first run on main, any Cargo.lock change (the cache key rotates and
+        # restore falls back to a stale entry), a new `stable` rustc, or a
+        # 7-day cache eviction turns a cold cache into a hard failure instead
+        # of a slower build. `cargo tree -p cd-triage-sdk` needs the *whole*
+        # workspace resolve, so this fetches the full lock, not just the two
+        # light crates.
+        run: cargo fetch --locked
       - name: verify dependency boundary
         shell: bash
         run: |
-          cargo tree --locked --offline -p cd-triage-sdk --edges normal | tee /tmp/triage-sdk-tree.txt
-          if grep -Eiq 'cd-core|cd-workflow|duckdb|libduckdb-sys|rusqlite|keyring|reqwest|tokio' /tmp/triage-sdk-tree.txt; then
+          # `cargo test` and `cargo clippy --all-targets` compile dev- and
+          # build-dependencies, and `cargo tree` defaults to the host target.
+          # `--edges normal` alone therefore inspected only a third of the
+          # graph that actually gets built. Cover every edge kind and target.
+          cargo tree --locked --offline -p cd-triage-sdk \
+            --edges normal,build,dev --target all | tee /tmp/triage-sdk-tree.txt
+          # Match whole package names, not substrings anywhere in the rendered
+          # tree, so the ban list cannot false-positive on a version string.
+          cargo tree --locked --offline -p cd-triage-sdk \
+            --edges normal,build,dev --target all --prefix none --format '{p}' \
+            | awk '{print $1}' | sort -u > /tmp/triage-sdk-deps.txt
+          echo "resolved packages: $(wc -l < /tmp/triage-sdk-deps.txt)"
+          # Fail closed: an empty package list means the query matched nothing
+          # and the ban check below would vacuously pass.
+          if [ ! -s /tmp/triage-sdk-deps.txt ]; then
+            echo "::error title=triage SDK dependency boundary::empty dependency tree"
+            exit 1
+          fi
+          if grep -Exi "$CD_TRIAGE_BANNED_DEPS" /tmp/triage-sdk-deps.txt; then
             echo "::error title=triage SDK dependency boundary::heavy or runtime dependency found"
             exit 1
           fi
@@ -56,7 +100,7 @@ jobs:
         run: cargo test --locked --offline -p cd-triage-sdk
 
   bench:
-    name: rust tests (triage bench fast)
+    name: triage fast (bench)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -71,13 +115,29 @@ jobs:
           shared-key: triage-bench-fast-v1
           cache-workspace-crates: true
           cache-on-failure: true
+          # See the SDK lane: main is the only writer.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: report cache result
-        run: echo "triage bench cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+        # See the SDK lane: block scalar required, ": " breaks a plain scalar.
+        run: |
+          echo "triage bench cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: fetch dependencies (locked)
+        # See the SDK lane: --offline below is only survivable because of this.
+        run: cargo fetch --locked
       - name: verify dependency boundary
         shell: bash
         run: |
-          cargo tree --locked --offline -p cd-triage-bench --edges normal | tee /tmp/triage-bench-tree.txt
-          if grep -Eiq 'cd-core|cd-workflow|duckdb|libduckdb-sys|rusqlite|keyring|reqwest|tokio' /tmp/triage-bench-tree.txt; then
+          cargo tree --locked --offline -p cd-triage-bench \
+            --edges normal,build,dev --target all | tee /tmp/triage-bench-tree.txt
+          cargo tree --locked --offline -p cd-triage-bench \
+            --edges normal,build,dev --target all --prefix none --format '{p}' \
+            | awk '{print $1}' | sort -u > /tmp/triage-bench-deps.txt
+          echo "resolved packages: $(wc -l < /tmp/triage-bench-deps.txt)"
+          if [ ! -s /tmp/triage-bench-deps.txt ]; then
+            echo "::error title=triage bench dependency boundary::empty dependency tree"
+            exit 1
+          fi
+          if grep -Exi "$CD_TRIAGE_BANNED_DEPS" /tmp/triage-bench-deps.txt; then
             echo "::error title=triage bench dependency boundary::heavy or runtime dependency found"
             exit 1
           fi
@@ -89,10 +149,11 @@ jobs:
         run: cargo test --locked --offline -p cd-triage-bench
 
   aggregate:
-    name: rust tests (triage fast aggregate)
+    name: triage fast (aggregate)
     if: always()
     needs: [sdk, bench]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: require both fast lanes
         run: |

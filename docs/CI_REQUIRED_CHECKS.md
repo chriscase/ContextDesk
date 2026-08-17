@@ -39,12 +39,29 @@ When a ruleset is added, require these **check names** (the `name:` fields in
   executes the suite; requiring only `rust (ubuntu-latest)` would treat a
   skipped/failed shard matrix as irrelevant as long as fmt/clippy passed.
 
-The optional `Triage fast lane` workflow also publishes
-`rust tests (triage SDK fast)`, `rust tests (triage bench fast)`, and
-`rust tests (triage fast aggregate)`. These checks are advisory acceleration
-for the dependency-light SDK/bench path; they do not replace or rename
+## Triage fast lane (advisory, not a gate)
+
+The optional `.github/workflows/triage-fast.yml` workflow publishes
+`triage fast (SDK)`, `triage fast (bench)`, and `triage fast (aggregate)`.
+These are advisory acceleration for the dependency-light `cd-triage-sdk` /
+`cd-triage-bench` path. They do not replace or rename
 `rust tests (ubuntu aggregate)`, and they must not be used as the full
-workspace Ubuntu gate.
+workspace Ubuntu gate — the fast lane compiles two crates and never exercises
+`cd-core`, `cd-workflow`, DuckDB, SQLite, keyring, or any network-capable
+engine code.
+
+Two limits matter before you require them anywhere:
+
+- **They only run on `main` and `integrate/rc`.** The workflow triggers on
+  pushes and pull requests whose *base* is `main` or `integrate/rc`, plus
+  `workflow_dispatch`. A pull request targeting any other branch — including
+  a stacked triage feature branch — publishes **no** fast-lane checks at all.
+  Requiring them in a ruleset that also covers such branches would leave the
+  checks permanently pending.
+- **They assume the sharded Ubuntu CI.** The `rust tests (ubuntu aggregate)`
+  gate and the `rust (ubuntu-latest)` warmup described above arrive with the
+  #874 shard work. Until that lands, `rust (ubuntu-latest)` still runs
+  `cargo test --workspace` itself and there is no aggregate check to defer to.
 
 ## How to verify a ruleset
 
