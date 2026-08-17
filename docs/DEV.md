@@ -182,18 +182,23 @@ Properties worth knowing:
   run `31845262696` recorded as warm while each shard still compiled for
   11–12 minutes. The warmup job is the only writer.
 - **Nothing about the suite is relaxed.** Shards keep `RUST_TEST_THREADS=1`.
-  macOS and Windows use the same planner and aggregate the complete unit set;
-  their `rust (macos-latest)` / `rust (windows-latest)` jobs are warmup-only.
+  macOS and Windows use the same planner and aggregate the complete unit set.
+  Their `rust (macos-latest)` / `rust (windows-latest)` jobs are restore-only
+  preflight signals; a separate conditional cache writer compiles the workspace
+  only when the exact OS cache key is absent.
 
-### macOS / Windows two-way lanes
+### macOS / Windows four-way lanes
 
 The warm hosted study found the Windows monolith was the wall-clock bottleneck
 (`cargo test --workspace` ≈ 35 minutes), with macOS at ≈ 24 minutes. The draft
-follow-up uses two restore-only shards per OS after a per-OS `--no-run` warmup.
-It deliberately does not copy Ubuntu's eight-way leftover-heavy split. The
-aggregates are named `rust tests (macos-latest aggregate)` and
+follow-up first proved complete two-way coverage but regressed critical-path
+time because the warmup was serialized. The current draft probes the exact
+cache key, conditionally runs one `--no-run` writer on a miss, and uses four
+restore-only shards per OS. It deliberately does not copy Ubuntu's eight-way
+leftover-heavy split. The aggregates are named
+`rust tests (macos-latest aggregate)` and
 `rust tests (windows-latest aggregate)`; they are not yet added to the active
-ruleset. The study and portability rationale live in
+ruleset. The measured baseline, regression, and portability rationale live in
 [`docs/testing/MACOS_WINDOWS_CI_LANES.md`](testing/MACOS_WINDOWS_CI_LANES.md).
 Reproduce the planner evidence with `sh scripts/ci_macos_windows_lane_study.sh`.
 

@@ -10,8 +10,10 @@
 # Why this exists: macOS and Windows were previously monolithic
 # `cargo test --workspace` lanes. Ubuntu already paid for the planner, runner,
 # and aggregate. Copying the 8-way leftover-heavy Ubuntu split onto Windows would
-# import #898's timeout class. This tool keeps the proposal honest: complete
-# coverage, warmup-or-it-is-worse, do not treat cache miss as success.
+# import #898's timeout class. The first hosted 2-way implementation preserved
+# coverage but regressed critical-path time, so this tool now records the
+# measured 4-way + cache-probe follow-up without claiming a speedup before it
+# has hosted proof.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -91,7 +93,7 @@ WARM_SHARD_BUILD_S=$(jq -r .warm.ubuntu.example_shard_build_seconds "$EVIDENCE")
 WARM_SHARD_TOTAL_S=$(jq -r .warm.ubuntu.example_shard_total_seconds "$EVIDENCE")
 
 RECOMMENDED_SHARDS=$(jq -r .recommended_desktop_shards "$EVIDENCE")
-[ "$RECOMMENDED_SHARDS" = "2" ] || die "fixture recommended_desktop_shards must stay 2 until hosted proof says otherwise"
+[ "$RECOMMENDED_SHARDS" = "4" ] || die "fixture recommended_desktop_shards must stay 4 for the current follow-up"
 
 if [ "$JSON" -eq 1 ]; then
   jq -n \
@@ -102,13 +104,18 @@ if [ "$JSON" -eq 1 ]; then
     --argjson s3_1 "$(count_for 3 1)" \
     --argjson s3_2 "$(count_for 3 2)" \
     --argjson s3_3 "$(count_for 3 3)" \
+    --argjson s4_1 "$(count_for 4 1)" \
+    --argjson s4_2 "$(count_for 4 2)" \
+    --argjson s4_3 "$(count_for 4 3)" \
+    --argjson s4_4 "$(count_for 4 4)" \
     --slurpfile ev "$EVIDENCE" \
     '{
       unit_count: $units,
       cargo_test_targets: $base,
       partitions: {
         "2": [$s2_1, $s2_2],
-        "3": [$s3_1, $s3_2, $s3_3]
+        "3": [$s3_1, $s3_2, $s3_3],
+        "4": [$s4_1, $s4_2, $s4_3, $s4_4]
       },
       evidence: $ev[0]
     }'
@@ -136,7 +143,10 @@ Hosted evidence (run $WARM_RUN on $MAIN_SHA; rust-cache restore 37–74s ⇒ war
   Cold DuckDB compile (Ubuntu shards, historical)
                                ${COLD_DUCKDB_MIN}–${COLD_DUCKDB_MAX} minutes per job
 
-Recommendation: 2-way partition WITH per-OS warmup. Not a preflight-only gate.
+Recommendation: 4-way partition WITH an exact-key cache probe and conditional per-OS warmup.
+The hosted 2-way implementation preserved coverage but was slower end-to-end;
+this 4-way design is a candidate until its own hosted run proves a speedup.
+Not a preflight-only gate: the complete shard aggregate remains required.
 Not an 8-way copy of the Ubuntu leftover-heavy split (#898).
 
 Why not preflight-as-required-gate:
@@ -150,17 +160,17 @@ Why not 8 Windows/macOS shards:
   when isolated (#898 / #893).
 
 Staged workflow shape (draft follow-up; no merge or ruleset change here):
-  1. rust (macos-latest) / rust (windows-latest) become warmup only:
-     fmt, clippy, cargo test --workspace --no-run, examples, smoke.
-     Each writes a shared-key rust-cache (macos-workspace-tests /
-     windows-workspace-tests). cache_state=warm only on exact hit +
-     non-empty target/.
-  2. rust-platform-shard matrix [1, 2] restores that cache with save-if: false,
+  1. An exact-key lookup-only probe runs per OS. A cache miss conditionally
+     starts one writer with cargo test --workspace --no-run; a hit skips it.
+  2. rust (macos-latest) / rust (windows-latest) restore the real cache and run
+     fmt, clippy, examples, and smoke as fast preflight signals. They do not
+     replace the complete suite.
+  3. rust-platform-shard matrix [1, 2, 3, 4] restores with save-if: false,
      never lookup-only, and uses scripts/ci_run_platform_shard.sh.
-  3. rust-platform-tests publishes fail-closed aggregates named
+  4. rust-platform-tests publishes fail-closed aggregates named
      rust tests (macos-latest aggregate) and rust tests (windows-latest aggregate).
      They are coverage signals until the active ruleset is deliberately updated.
-  4. Do not skip units. Do not raise timeouts. Do not treat cache miss as success.
+  5. Do not skip units. Do not raise timeouts. Do not treat cache miss as success.
 
 See docs/testing/MACOS_WINDOWS_CI_LANES.md
 EOF

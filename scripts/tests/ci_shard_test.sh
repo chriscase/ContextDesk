@@ -411,6 +411,11 @@ expect_ok "hit with restored files is warm" \
 [ "$(jq -r '.cache_state' "$TMP/cache-hit-files.json")" = warm ] || fail "hit+files must be warm"
 [ "$(jq -r '.restore' "$TMP/cache-hit-files.json")" = files ] || fail "restore=files"
 
+expect_ok "preflight role is restore-only by default" \
+  sh "$CACHE" --out "$TMP/cache-preflight.json" --hit true --role preflight
+[ "$(jq -r '.role' "$TMP/cache-preflight.json")" = preflight ] || fail "preflight role"
+[ "$(jq -r '.save' "$TMP/cache-preflight.json")" = false ] || fail "preflight must not save"
+
 # ------------------------------------------------------- workflow contracts
 python3 - "$WF" "$SHARDS" <<'PY' || fail "workflow contract python failed"
 import sys, yaml
@@ -428,6 +433,10 @@ required = [
     "close-proof",
     "gui-accept-contracts",
     "rust",
+    "rust-macos-cache-probe",
+    "rust-windows-cache-probe",
+    "rust-macos-cache-warmup",
+    "rust-windows-cache-warmup",
     "rust-ubuntu",
     "rust-ubuntu-shard",
     "rust-ubuntu-tests",
@@ -520,17 +529,38 @@ for block in ubuntu_runs.splitlines():
         raise SystemExit("ubuntu rust job must not run cargo test --workspace")
 
 macwin_runs = "\n".join(s.get("run") or "" for s in steps(jobs["rust"]))
-if "cargo test --workspace --no-run" not in macwin_runs:
-    raise SystemExit("macOS/Windows warmup must compile workspace tests with --no-run")
-for block in macwin_runs.splitlines():
-    if block.strip() == "cargo test --workspace":
-        raise SystemExit("macOS/Windows warmup must not run the monolithic workspace suite")
+if "cargo test --workspace --no-run" in macwin_runs:
+    raise SystemExit("macOS/Windows preflight must not rebuild the workspace suite")
+if "ci_record_cache.sh" not in macwin_runs or "--role preflight" not in macwin_runs:
+    raise SystemExit("macOS/Windows preflight must record its restore-only cache role")
+
+for name, os_name in (("rust-macos-cache-probe", "macos-latest"),
+                      ("rust-windows-cache-probe", "windows-latest")):
+    probe = jobs[name]
+    if probe.get("outputs", {}).get("cache-hit") != "${{ steps.rust-cache.outputs.cache-hit }}":
+        raise SystemExit(f"{name} must expose cache-hit")
+    cache = cache_step(probe)["with"]
+    if cache.get("shared-key") != f"{os_name}-workspace-tests":
+        raise SystemExit(f"{name} cache key mismatch")
+    if cache.get("lookup-only") not in (True, "true"):
+        raise SystemExit(f"{name} must be lookup-only")
+
+for name, os_name in (("rust-macos-cache-warmup", "macos-latest"),
+                      ("rust-windows-cache-warmup", "windows-latest")):
+    warmup = jobs[name]
+    if "cargo test --workspace --no-run" not in "\n".join(s.get("run") or "" for s in steps(warmup)):
+        raise SystemExit(f"{name} must compile workspace tests on a cache miss")
+    cache = cache_step(warmup)["with"]
+    if cache.get("shared-key") != f"{os_name}-workspace-tests":
+        raise SystemExit(f"{name} cache key mismatch")
+    if cache.get("lookup-only") in (True, "true") or cache.get("save-if") in (False, "false"):
+        raise SystemExit(f"{name} must be a cache writer")
 
 platform_shard = jobs["rust-platform-shard"]
 platform_matrix = platform_shard["strategy"]["matrix"]
 if platform_matrix["os"] != ["macos-latest", "windows-latest"]:
     raise SystemExit(f"platform shard OS matrix changed: {platform_matrix['os']}")
-if platform_matrix["shard"] != [1, 2]:
+if platform_matrix["shard"] != [1, 2, 3, 4]:
     raise SystemExit(f"platform shard matrix changed: {platform_matrix['shard']}")
 platform_cache = cache_step(platform_shard)["with"]
 if platform_cache.get("shared-key") != "${{ matrix.os }}-workspace-tests":
@@ -554,8 +584,8 @@ if platform_aggregate.get("if") != "always()":
 if platform_aggregate["strategy"]["matrix"]["os"] != ["macos-latest", "windows-latest"]:
     raise SystemExit("platform aggregate OS matrix changed")
 aggregate_runs = "\n".join(s.get("run") or "" for s in steps(platform_aggregate))
-if "ci_aggregate_shards.sh" not in aggregate_runs or "--shards 2" not in aggregate_runs:
-    raise SystemExit("platform aggregate must use the fail-closed two-way aggregate")
+if "ci_aggregate_shards.sh" not in aggregate_runs or "--shards 4" not in aggregate_runs:
+    raise SystemExit("platform aggregate must use the fail-closed four-way aggregate")
 
 tauri_os = jobs["tauri-host"]["strategy"]["matrix"]["os"]
 if tauri_os != ["ubuntu-latest", "macos-latest"]:

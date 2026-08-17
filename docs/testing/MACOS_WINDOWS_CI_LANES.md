@@ -1,59 +1,53 @@
 # macOS / Windows rust CI lanes
 
-**Status:** study plus staged implementation draft. The follow-up keeps the
-existing Ubuntu gate and ruleset untouched, and adds two restore-only shards per
-desktop OS after an OS-specific cache warmup. It remains draft-only pending
-hosted proof of warm cache, exact coverage, and useful wall-clock improvement.
+**Status:** staged draft implementation. This lane preserves complete
+macOS/Windows workspace coverage while trying to reduce critical-path time.
+It does not change the Ubuntu ruleset, merge anything, or make a release claim.
 
-Tip measured: `ffe57ff754fefc017f44c925cbc2dd0054e29374`
-(`ci: raise the Ubuntu test shard count 4 → 8`).
+The active branch is [`codex/ci-macos-windows-2way`](https://github.com/chriscase/ContextDesk/pull/910),
+which remains draft-only.
 
-## What is slow
+## What the hosted evidence says
 
-Ubuntu already shards `cargo test --workspace`. The draft now gives macOS and
-Windows the same complete planner/runner/aggregate shape instead of keeping
-the suite as one step inside `rust (${{ matrix.os }})`.
+The baseline hosted run [`31904068651`](https://github.com/chriscase/ContextDesk/actions/runs/31904068651)
+was warm: cache restores took 46s on macOS and 74s on Windows. Its monolithic
+workspace test steps were:
 
-Hosted run [`31904068651`](https://github.com/chriscase/ContextDesk/actions/runs/31904068651)
-(push to `main`, all 19 checks green):
+| OS | Monolithic job | Workspace test step |
+| --- | ---: | ---: |
+| macOS | 1691s | 1415s |
+| Windows | 2560s | 2085s |
 
-| Job | Wall | Dominant step | Cache restore | Clippy |
-| --- | --- | --- | --- | --- |
-| `rust (windows-latest)` | **42.7 min** | `cargo test --workspace` **34.8 min** (2085s) | 74s | 130s |
-| `rust (macos-latest)` | 28.2 min | `cargo test --workspace` 23.6 min (1415s) | 46s | 99s |
-| `rust (ubuntu-latest)` warmup | 10.2 min | `cargo test --workspace --no-run` 4.7 min | 49s | 73s |
-| Ubuntu worst shard | 24.4 min | `run shard` 22.0 min | ~50s | — |
+The first complete-coverage 2-way implementation was hosted in run
+[`32002319037`](https://github.com/chriscase/ContextDesk/actions/runs/32002319037).
+All four desktop shards were warm, complete, and green (57/57 plan units per
+OS), but the serialized warmup made the critical path worse:
 
-Replicate run [`31887796502`](https://github.com/chriscase/ContextDesk/actions/runs/31887796502)
-(previous `main` tip): Windows `cargo test --workspace` **2082s**. Same shape.
+| OS | Restore-only preflight | Slowest shard | Critical path | Baseline | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| macOS | 712s | 1419s | 2131s | 1691s | regression |
+| Windows | 1045s | 2878s | 3923s | 2560s | regression |
 
-Those cache restores (37–74s) plus clippy in 1–2 minutes mean **both measured
-main runs were warm**. The 35-minute Windows step is therefore **link +
-execute the whole workspace on one VM**, not a cold bundled-DuckDB compile.
+That run proves the split is coverage-safe and cache-honest. It does not prove
+that 2-way sharding is faster. The current follow-up addresses the two causes:
+the serialized cache writer on warm hits and insufficient parallel width.
 
-Cold DuckDB is still the other cost class. Ubuntu shards on
-`31828397526` / `31835229724` each compiled DuckDB **36–55 minutes** when
-the shared cache was missing. A warm Ubuntu shard still reported
-`build time: 710s` of `total time: 1203s` — more than half the shard is
-linking, which is why adding shards shrinks only the test half.
+## Current inventory
 
-The **CI wall clock on `main` is the Windows job**. Ubuntu warmup + worst
-shard ≈ 10 + 24 = 34 minutes, still under Windows.
+The same deterministic planner used by Ubuntu enumerates 114 test units from
+113 Cargo test targets. The `cd-core/lib` target remains two complementary
+units (`log_analysis::` and `--skip log_analysis::`) so no tests are dropped.
 
-## Inventory
-
-Same planner Ubuntu uses (`scripts/ci_shard_plan.sh`), 114 shard units /
-113 cargo test targets, exact cover at every width:
+Round-robin partition sizes are:
 
 | Width | Units per shard |
 | --- | --- |
 | 2 | 57 + 57 |
 | 3 | 38 + 38 + 38 |
 | 4 | 29 + 29 + 28 + 28 |
-| 8 (Ubuntu today) | 15 + 15 + 14×6 |
+| 8 | 15 + 15 + 14 × 6 |
 
-`cd-core/lib` is already two complementary filters (`log_analysis::` and
-`--skip log_analysis::`). Reproduce:
+The local study and exact-cover checks are:
 
 ```bash
 sh scripts/ci_macos_windows_lane_study.sh
@@ -61,75 +55,68 @@ sh scripts/ci_macos_windows_lane_study.sh --json
 sh scripts/tests/ci_macos_windows_lane_study_test.sh
 ```
 
-## Two options, one recommendation
+## Fast-hit and safe-miss design
 
-### A. Fast preflight + later complete coverage — reject as the *required* gate
+Each desktop OS follows this sequence:
 
-A parallel job of fmt / clippy / `cargo test -p cd-triage-bench` gives
-earlier signal. It does **not** cut wall clock if `cargo test --workspace`
-remains required on the same runner or a sibling that still takes 35 minutes.
-Making the preflight the required check would **skip tests**. Forbidden.
+1. An exact-key `lookup-only` cache probe runs first. It does not pretend to
+   restore files; it only decides whether the shared cache key exists.
+2. On a miss, exactly one OS-specific cache-writer job runs
+   `cargo test --workspace --no-run` and saves the complete target tree. On a
+   hit, that writer is skipped, so the test shards do not wait for a redundant
+   build.
+3. The existing `rust (macos-latest)` and `rust (windows-latest)` checks become
+   restore-only preflight signals. They require an actual non-empty `target/`
+   restore, then run fmt, clippy, examples, and server smoke tests. They do not
+   replace the complete workspace suite.
+4. Four restore-only platform shards run the full deterministic plan with
+   `save-if: false`. Every shard fails closed unless its downloaded target is
+   actually warm, and every shard uploads status and in-flight evidence.
+5. Per-OS aggregates require all four shard results and the exact 114-unit
+   cover. They remain non-required platform signals until separately promoted.
 
-Preflight is allowed later only as a *non-required* early-fail, never as a
-substitute for the aggregate.
+The cache status helper recognizes `warmup`, `preflight`, and `shard` roles.
+Only a warmup may save; preflight and shards restore and verify. A cache key hit
+without restored files is recorded as cold, never as a successful test basis.
 
-### B. Safe 2-way partition with complete coverage — staged draft
+## Why four shards
 
-Reuse the existing planner, portable `ci_run_platform_shard.sh`,
-`ci_record_cache.sh`, and `ci_aggregate_shards.sh`. Do **not** copy Ubuntu's 8-way leftover-heavy
-split onto Windows: issue #898 is exactly leftover `cd-core/lib/*` slices
-timing out as isolates.
+The hosted 2-way run showed that parallelizing only the execution half was not
+enough. Local weighted timing from the hosted per-unit evidence reduces the
+largest test-only bucket substantially at width four (approximately 1008s on
+Windows and 561s on macOS before each shard's fixed build/link overhead).
+That is a sizing signal, not a speed claim. The next hosted run must measure:
 
-**Next workflow patch** (separate PR; do not land in this one):
+- probe, writer, preflight, and shard critical-path timestamps;
+- cache state and restored-file evidence for every shard;
+- exact 114/114 unit coverage, pass/fail/ignored counts, and no in-flight
+  unit at completion;
+- comparison with the 1691s macOS and 2560s Windows baselines.
 
-1. `rust (macos-latest)` and `rust (windows-latest)` are **warmup only**:
-   fmt, clippy, `cargo test --workspace --no-run`, examples, smoke. Each
-   **saves** a shared rust-cache (`macos-workspace-tests` /
-   `windows-workspace-tests`). `cache_state=warm` only on an exact
-   Swatinem hit **and** a non-empty `target/` (same honesty as Ubuntu).
-2. `rust-platform-shard` uses `[1, 2]` per OS and restores that cache with
-   `save-if: false`. Never `lookup-only: true` (hosted run `31845262696`
-   recorded warm while compiling 11–12 minutes). The portable entry point is
-   `sh scripts/ci_run_platform_shard.sh --os macos|windows --shard K`.
-3. `rust-platform-tests` publishes fail-closed aggregates named
-   `rust tests (macos-latest aggregate)` and
-   `rust tests (windows-latest aggregate)`. They are complete-coverage
-   signals in this draft; the active ruleset still requires only
-   `rust tests (ubuntu aggregate)`.
-4. Timeouts stay at or below today's implicit GitHub job budget. Do not
-   raise them. Do not skip units. Do not treat a cache miss as success.
+Eight desktop shards are deliberately not used yet. They increase fixed build
+and link overhead and risk isolating leftover-heavy `cd-core/lib` slices, the
+same timeout class that required Ubuntu's separate tuning.
 
-Expected shape if warmup is warm (linear interpolation is **not** a
-promise; hosted proof is): Windows 35-minute test step split across two
-shards that still each pay a large link. Ubuntu's warm shard was 59%
-build. A 2-way Windows split should land in the **low-to-mid 20 minute**
-range per shard if the cache is actually warm — better than 43 minutes
-wall clock, worse than a fantasy “half of 35.” Cold without warmup is
-**2 × 36–55 minutes of DuckDB** and is a regression.
+## DuckDB and cache ownership
 
-## Risks
+Bundled DuckDB is the largest cold-build offender. A desktop cache miss must
+therefore have one writer, not four independent cold builds. On a warm hit,
+all four shards download the shared target tree in parallel and never race to
+save partial state. On a cold miss, shards wait for the one writer and then
+restore the completed cache; if the writer fails, the shard/aggregate path
+fails closed rather than silently running an untracked cold build.
 
-- **Cold cache without warmup** is the failure that made Ubuntu 4-way
-  unusable. Any desktop-lane PR that shards but forgets the writer job
-  must be rejected.
-- **Leftover-heavy `cd-core/lib` isolates** (#898, #893, #907) are an
-  Ubuntu problem this 2-way plan must not import. Do not raise
-  `--shards` past 2 on Windows/macOS without hosted leftover-slice proof.
-- **Runner minutes** roughly double if 2 shards + warmup all compile on
-  a miss. Warmth is the whole bet. Measure `cache_state` on the first
-  hosted tip.
-- **Required-check names** change. Document them before anyone wires a
-  ruleset (`docs/CI_REQUIRED_CHECKS.md`).
-- **#899 path filters** are a different lever (skip Ubuntu shards for
-  collab/bench-only PRs). They do not speed a rust-touching Windows job.
+## Gates and boundaries
 
-## What this branch is not
+- The required main-branch check remains exactly `rust tests (ubuntu aggregate)`.
+- `rust (ubuntu-latest)` remains Ubuntu warmup, not the Ubuntu suite gate.
+- Existing security, GUI, desktop, Tauri, and Ubuntu shard/aggregate jobs remain
+  present.
+- Platform aggregate names are `rust tests (macos-latest aggregate)` and
+  `rust tests (windows-latest aggregate)`; they are not added to the ruleset in
+  this draft.
+- No timeout is raised to hide a slow shard, and no test unit is skipped.
+- A speed improvement will not be claimed until a hosted run proves it.
 
-- Not a merge, ready-for-review declaration, or ruleset change.
-- Not a timeout raise.
-- Not a skipped test.
-- Not a claim that a cache miss is green.
-- Not a readiness or release claim.
-
-Pinned numbers live in
-`scripts/fixtures/ci_macos_windows_lane_evidence.json`.
+Pinned baseline and first-split evidence lives in
+[`ci_macos_windows_lane_evidence.json`](../../scripts/fixtures/ci_macos_windows_lane_evidence.json).

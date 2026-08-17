@@ -28,8 +28,8 @@ only the Ubuntu aggregate named above.
 | `close-proof discipline (#254)` | Close-comment SHA + proof |
 | `GUI integration contracts (no WebDriver)` | GUI contract suite |
 | `rust (ubuntu-latest)` | Ubuntu fmt, clippy, examples, smoke, **cache warmup** (not the suite) |
-| `rust (macos-latest)` | macOS fmt, clippy, **cache warmup** (`cargo test --workspace --no-run`), examples, smoke; not the suite gate |
-| `rust (windows-latest)` | Windows fmt, clippy, **cache warmup** (`cargo test --workspace --no-run`), examples, smoke; not the suite gate |
+| `rust (macos-latest)` | macOS restore-only preflight: fmt, clippy, examples, smoke; not the suite gate. A separate conditional cache-writer runs `--no-run` only on a miss |
+| `rust (windows-latest)` | Windows restore-only preflight: fmt, clippy, examples, smoke; not the suite gate. A separate conditional cache-writer runs `--no-run` only on a miss |
 | `rust tests (ubuntu aggregate)` | Fail-closed Ubuntu workspace test gate |
 | `rust tests (macos-latest aggregate)` | Fail-closed macOS workspace test gate; draft follow-up check |
 | `rust tests (windows-latest aggregate)` | Fail-closed Windows workspace test gate; draft follow-up check |

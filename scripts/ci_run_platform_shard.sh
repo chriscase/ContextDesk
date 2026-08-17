@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Portable macOS/Windows entry point for a two-way workspace test shard.
+# Portable macOS/Windows entry point for a complete workspace test shard.
 #
 # The common runner deliberately uses only POSIX shell facilities for process
 # supervision.  Keep this wrapper separate from the Ubuntu workflow so the
@@ -10,7 +10,7 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 
 OS=""
 SHARD=""
-SHARDS=2
+SHARDS=4
 OUT="$ROOT/ci-platform-shards"
 HEARTBEAT=${CD_SHARD_HEARTBEAT_SECONDS:-60}
 UNIT_TIMEOUT=${CD_SHARD_UNIT_TIMEOUT_SECONDS:-1800}

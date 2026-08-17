@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Record an honest rust-cache restore result for Ubuntu CI shards (#874).
+# Record an honest rust-cache restore result for CI cache ownership (#874).
 #
 # Swatinem/rust-cache exposes `cache-hit` only for an exact key match. A miss
 # is always recorded as cold. An exact hit is still cold when --restore-dir
@@ -22,7 +22,7 @@ RESTORE_DIR=""
 usage() {
   cat <<'EOF'
 Usage:
-  sh scripts/ci_record_cache.sh --out FILE --hit true|false|'' --role warmup|shard
+  sh scripts/ci_record_cache.sh --out FILE --hit true|false|'' --role warmup|preflight|shard
                                 [--shard N] [--shared-key NAME] [--save true|false]
                                 [--restore-dir DIR]
 
@@ -86,8 +86,8 @@ done
 [ -n "$OUT" ] || die "--out is required"
 [ -n "$ROLE" ] || die "--role is required"
 case $ROLE in
-  warmup | shard) ;;
-  *) die "--role must be warmup or shard, got '$ROLE'" ;;
+  warmup | preflight | shard) ;;
+  *) die "--role must be warmup, preflight, or shard, got '$ROLE'" ;;
 esac
 
 # GitHub expressions can yield true, false, empty, or the literal '<nil>'.

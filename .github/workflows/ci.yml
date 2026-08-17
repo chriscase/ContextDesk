@@ -104,19 +104,175 @@ jobs:
       - run: npm ci
       - run: npm test
 
-  # macOS / Windows are warmup-only here. Their complete workspace suites run
-  # in the restore-only two-way matrices below; the platform aggregates are
-  # the coverage gates. Ubuntu follows the same warmup -> shard -> aggregate
-  # shape, with its existing exact required check name preserved.
+  # macOS / Windows take a quick exact-key probe first. A miss starts one
+  # cache-writer warmup; a hit skips that writer and lets the restore-only
+  # preflight and complete four-way suite start immediately. The platform
+  # aggregates are coverage signals; Ubuntu keeps its existing exact required
+  # check name and warmup -> shard -> aggregate gate.
+  rust-macos-cache-probe:
+    name: rust cache probe (macos-latest)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    outputs:
+      cache-hit: ${{ steps.rust-cache.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          shared-key: macos-latest-workspace-tests
+          cache-workspace-crates: true
+          lookup-only: true
+
+  rust-windows-cache-probe:
+    name: rust cache probe (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    outputs:
+      cache-hit: ${{ steps.rust-cache.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          shared-key: windows-latest-workspace-tests
+          cache-workspace-crates: true
+          lookup-only: true
+
+  rust-macos-cache-warmup:
+    name: rust cache warmup (macos-latest)
+    needs: [rust-macos-cache-probe]
+    if: needs.rust-macos-cache-probe.outputs.cache-hit != 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          shared-key: macos-latest-workspace-tests
+          cache-workspace-crates: true
+          cache-on-failure: true
+          lookup-only: false
+          save-if: true
+      - name: record cache writer
+        shell: bash
+        run: |
+          mkdir -p ci-platform-shards
+          sh scripts/ci_record_cache.sh \
+            --out ci-platform-shards/cache-warmup-status.json \
+            --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
+            --role warmup \
+            --shared-key macos-latest-workspace-tests \
+            --save true
+      - name: compile workspace tests (cache warmup)
+        env:
+          RUST_TEST_THREADS: "4"
+          CARGO_BUILD_JOBS: "4"
+        shell: bash
+        run: |
+          (
+            waited=0
+            while sleep 60; do
+              waited=$((waited + 60))
+              echo "[macos-latest cache warmup] cargo test --workspace --no-run still running after ${waited}s ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            done
+          ) &
+          hb=$!
+          set +e
+          cargo test --workspace --no-run
+          rc=$?
+          set -e
+          kill "$hb" 2>/dev/null || true
+          wait "$hb" 2>/dev/null || true
+          exit "$rc"
+      - name: upload cache warmup status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-macos-latest-cache-warmup-status
+          path: ci-platform-shards/cache-warmup-status.json
+          if-no-files-found: error
+          retention-days: 14
+
+  rust-windows-cache-warmup:
+    name: rust cache warmup (windows-latest)
+    needs: [rust-windows-cache-probe]
+    if: needs.rust-windows-cache-probe.outputs.cache-hit != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          shared-key: windows-latest-workspace-tests
+          cache-workspace-crates: true
+          cache-on-failure: true
+          lookup-only: false
+          save-if: true
+      - name: record cache writer
+        shell: bash
+        run: |
+          mkdir -p ci-platform-shards
+          sh scripts/ci_record_cache.sh \
+            --out ci-platform-shards/cache-warmup-status.json \
+            --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
+            --role warmup \
+            --shared-key windows-latest-workspace-tests \
+            --save true
+      - name: compile workspace tests (cache warmup)
+        env:
+          RUST_TEST_THREADS: "4"
+          CARGO_BUILD_JOBS: "4"
+        shell: bash
+        run: |
+          (
+            waited=0
+            while sleep 60; do
+              waited=$((waited + 60))
+              echo "[windows-latest cache warmup] cargo test --workspace --no-run still running after ${waited}s ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            done
+          ) &
+          hb=$!
+          set +e
+          cargo test --workspace --no-run
+          rc=$?
+          set -e
+          kill "$hb" 2>/dev/null || true
+          wait "$hb" 2>/dev/null || true
+          exit "$rc"
+      - name: upload cache warmup status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-windows-latest-cache-warmup-status
+          path: ci-platform-shards/cache-warmup-status.json
+          if-no-files-found: error
+          retention-days: 14
+
+  # This preserves the existing rust (macos-latest/windows-latest) checks as
+  # fast restore-only preflight signals. It deliberately does not compile or
+  # execute the workspace suite; the platform shards below remain mandatory.
   rust:
     name: rust (${{ matrix.os }})
+    needs:
+      - rust-macos-cache-probe
+      - rust-windows-cache-probe
+      - rust-macos-cache-warmup
+      - rust-windows-cache-warmup
+    # Run the matrix even when a probe/writer fails so each OS records its
+    # restore state and the preflight check fails closed instead of disappearing.
+    if: always()
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # Three-OS core matrix (#178): Ubuntu lives in `rust-ubuntu` below so
-        # shards can `needs` that job without waiting for Windows/macOS.
         os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
@@ -128,7 +284,8 @@ jobs:
         with:
           shared-key: ${{ matrix.os }}-workspace-tests
           cache-workspace-crates: true
-          cache-on-failure: true
+          lookup-only: false
+          save-if: false
       - name: record cache restore
         shell: bash
         run: |
@@ -136,34 +293,23 @@ jobs:
           sh scripts/ci_record_cache.sh \
             --out ci-platform-shards/cache-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
-            --role warmup \
+            --role preflight \
             --shared-key '${{ matrix.os }}-workspace-tests' \
-            --save true
+            --save false \
+            --restore-dir target
+          echo "CD_CACHE_STATE=$(jq -r .cache_state ci-platform-shards/cache-status.json)" >> "$GITHUB_ENV"
+      - name: require warm cache
+        shell: bash
+        run: |
+          if [ "${CD_CACHE_STATE:-cold}" != warm ]; then
+            echo "::error title=preflight cache cold::${{ matrix.os }} preflight cannot validate the restored workspace"
+            cat ci-platform-shards/cache-status.json
+            exit 1
+          fi
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy (workspace, all targets)
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: compile workspace tests (cache warmup)
-        env:
-          RUST_TEST_THREADS: "4"
-          CARGO_BUILD_JOBS: "4"
-        shell: bash
-        run: |
-          (
-            waited=0
-            while sleep 60; do
-              waited=$((waited + 60))
-              echo "[${{ matrix.os }} warmup] cargo test --workspace --no-run still running after ${waited}s ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            done
-          ) &
-          hb=$!
-          set +e
-          cargo test --workspace --no-run
-          rc=$?
-          set -e
-          kill "$hb" 2>/dev/null || true
-          wait "$hb" 2>/dev/null || true
-          exit "$rc"
       - name: embed_host example build (#170)
         run: cargo build -p cd-core --examples
       - name: server smoke
@@ -380,20 +526,27 @@ jobs:
             exit 1
           fi
 
-  # A platform shard restores the warmup's complete target directory and only
-  # runs its deterministic half of the workspace plan.  `save-if: false` is
-  # intentional: one platform warmup owns the cache write, while both shards
-  # consume it without racing to save partial target trees.
+  # A platform shard restores the cache-writer's complete target directory and
+  # runs its deterministic quarter of the workspace plan. `save-if: false` is
+  # intentional: one platform warmup owns the cache write, while all four
+  # shards consume it without racing to save partial target trees.
   rust-platform-shard:
     name: rust tests (${{ matrix.os }} shard ${{ matrix.shard }})
-    needs: [rust]
+    needs:
+      - rust-macos-cache-probe
+      - rust-windows-cache-probe
+      - rust-macos-cache-warmup
+      - rust-windows-cache-warmup
+    # The cache-state step below fails closed if a probe/writer left no usable
+    # target. Keeping the matrix visible preserves diagnostics for both OSes.
+    if: always()
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -419,7 +572,7 @@ jobs:
           echo "CD_CACHE_STATE=$(jq -r .cache_state ci-platform-shards/cache-status.json)" >> "$GITHUB_ENV"
       - name: shard plan (deterministic, exhaustive)
         shell: bash
-        run: sh scripts/ci_shard_plan.sh verify --shards 2
+        run: sh scripts/ci_shard_plan.sh verify --shards 4
       - name: require warm cache
         shell: bash
         run: |
@@ -438,7 +591,7 @@ jobs:
           sh scripts/ci_run_platform_shard.sh \
             --os "${{ matrix.os == 'macos-latest' && 'macos' || 'windows' }}" \
             --shard "${{ matrix.shard }}" \
-            --shards 2 \
+            --shards 4 \
             --out ci-platform-shards
       - name: shard diagnostic summary
         if: always()
@@ -484,7 +637,7 @@ jobs:
         run: |
           sh scripts/ci_aggregate_shards.sh \
             --dir platform-results \
-            --shards 2 \
+            --shards 4 \
             --label "${{ matrix.os }} workspace test shards"
       - name: every ${{ matrix.os }} shard job must have succeeded
         run: |
