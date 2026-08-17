@@ -28,10 +28,34 @@ if grep -q 'test workspace (macOS/Windows)' "$WF"; then
 fi
 grep -q 'ci_run_platform_shard.sh' "$WF" ||
   fail "ci.yml is missing the portable platform shard runner"
-grep -q 'rust tests (\${{ matrix.os }} aggregate)' "$WF" ||
-  fail "ci.yml is missing platform aggregate check names"
-grep -q 'os: \[macos-latest, windows-latest\]' "$WF" ||
-  fail "ci.yml macOS/Windows matrix changed"
+grep -q 'name: rust tests (macos-latest aggregate)' "$WF" ||
+  fail "ci.yml is missing the macOS aggregate check name"
+grep -q 'name: rust tests (windows-latest aggregate)' "$WF" ||
+  fail "ci.yml is missing the Windows aggregate check name"
+grep -q 'name: rust (macos-latest)' "$WF" ||
+  fail "ci.yml is missing the macOS preflight check name"
+grep -q 'name: rust (windows-latest)' "$WF" ||
+  fail "ci.yml is missing the Windows preflight check name"
+grep -q 'shard: \[1, 2, 3, 4\]' "$WF" ||
+  fail "ci.yml lost the four-way desktop shard matrix"
+# Each OS chain must stay independent: macOS jobs must not wait on Windows
+# warmup/probe, and Windows must not wait on macOS.
+if awk '
+  $0 ~ /^  rust-macos(-shard|-tests)?:/ { in_job=1; next }
+  in_job && $0 ~ /^  [A-Za-z0-9_-]+:/ { in_job=0 }
+  in_job && $0 ~ /rust-windows/ { found=1 }
+  END { exit found ? 0 : 1 }
+' "$WF"; then
+  fail "a macOS job lists a Windows dependency"
+fi
+if awk '
+  $0 ~ /^  rust-windows(-shard|-tests)?:/ { in_job=1; next }
+  in_job && $0 ~ /^  [A-Za-z0-9_-]+:/ { in_job=0 }
+  in_job && $0 ~ /rust-macos/ { found=1 }
+  END { exit found ? 0 : 1 }
+' "$WF"; then
+  fail "a Windows job lists a macOS dependency"
+fi
 
 sh "$PLAN" verify --shards 2 >/dev/null
 sh "$PLAN" verify --shards 3 >/dev/null

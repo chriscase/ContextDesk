@@ -72,9 +72,11 @@ The planner (`scripts/ci_shard_plan.sh`) enumerates every `cargo test --workspac
 unit from `cargo metadata`. The aggregate recomputes that list and fails if any
 unit is missing, duplicated, or left on a cancelled/timed-out shard.
 
-Cache stores are per OS. rust-cache hashes `Cargo.lock` and rustc; the workflow
-also passes `env-vars: RUSTFLAGS`. A restore is warm only when `target/` has
-compiled deps **and** bundled DuckDB artifacts. See
+Cache stores are per OS. rust-cache hashes `Cargo.lock`, rustc, and its
+default env prefixes (`CARGO`, `CC`, `CFLAGS`, `CXX`, `CMAKE`, `RUST`).
+`RUST` already matches `RUSTFLAGS`; the workflow does not override `env-vars`.
+A restore is warm only when `target/` has compiled deps **and** a non-empty
+DuckDB library artifact. See
 [`docs/testing/MACOS_WINDOWS_CI_LANES.md`](testing/MACOS_WINDOWS_CI_LANES.md).
 
 ## Path-aware routing

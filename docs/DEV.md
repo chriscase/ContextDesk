@@ -183,11 +183,13 @@ Properties worth knowing:
   files, do not save). Do **not** set `lookup-only: true`: that reports a hit
   without downloading, which hosted run `31845262696` recorded as warm while
   each shard still compiled for 11–12 minutes. The warmup job is the only
-  writer. rust-cache hashes `Cargo.lock` and rustc; `env-vars: RUSTFLAGS`
-  is added so `-D warnings` is part of the stored key. Shared keys stay
-  per-OS (`ubuntu-workspace-tests`, `macos-latest-workspace-tests-v2`,
-  `windows-latest-workspace-tests-v2`) so a Linux DuckDB build cannot be
-  restored on macOS or Windows.
+  writer. rust-cache hashes `Cargo.lock`, rustc, and compiler env prefixes
+  including `RUST` (so `RUSTFLAGS` is already in the key). Workspace writers
+  set `cache-on-failure: false` so a failed compile or DuckDB assert cannot
+  publish. Shared keys stay per-OS (`ubuntu-workspace-tests`,
+  `macos-latest-workspace-tests-v2`, `windows-latest-workspace-tests-v2`) so
+  a Linux DuckDB build cannot be restored on macOS or Windows. macOS jobs
+  never wait on Windows warmup (or the reverse).
 - **Nothing about the suite is relaxed.** Shards keep `RUST_TEST_THREADS=1`.
   macOS and Windows use the same planner and aggregate the complete unit set.
   Their `rust (macos-latest)` / `rust (windows-latest)` jobs are restore-only
@@ -201,8 +203,10 @@ The warm hosted study found the Windows monolith was the wall-clock bottleneck
 two-way split proved complete coverage but regressed critical-path time because
 the warmup was serialized. Current `main` probes the exact per-OS cache key,
 conditionally runs one `--no-run` writer on a miss, and uses four restore-only
-shards per OS. It deliberately does not copy Ubuntu's eight-way leftover-heavy
-split. The aggregates are named `rust tests (macos-latest aggregate)` and
+shards per OS. macOS probe → warmup → preflight/shards → aggregate is
+independent of the Windows chain. It deliberately does not copy Ubuntu's
+eight-way leftover-heavy split. The aggregates are named
+`rust tests (macos-latest aggregate)` and
 `rust tests (windows-latest aggregate)`; they are not in the active ruleset.
 The measured baseline, regression, and cache-key rationale live in
 [`docs/testing/MACOS_WINDOWS_CI_LANES.md`](testing/MACOS_WINDOWS_CI_LANES.md).
