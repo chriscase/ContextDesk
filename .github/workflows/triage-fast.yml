@@ -51,8 +51,8 @@ jobs:
           cache-workspace-crates: false
           cache-on-failure: true
           # Only main writes cache entries. PR branches restore from main but
-          # never save: two extra full-registry entries per PR would push the
-          # repo past the 10 GB Actions cache quota and evict
+          # never save: two extra dependency/target entries per PR would push
+          # the repo past the 10 GB Actions cache quota and evict
           # `ubuntu-workspace-tests`, whose loss costs the ci.yml shards 36-55
           # minutes of DuckDB compilation each.
           save-if: ${{ github.ref == 'refs/heads/main' }}
