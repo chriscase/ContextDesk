@@ -1,0 +1,43 @@
+{
+  "schema_id": "contextdesk.ci.macos_windows_lane_evidence.v1",
+  "main_sha": "ffe57ff754fefc017f44c925cbc2dd0054e29374",
+  "warm_run_id": "31904068651",
+  "warm_run_url": "https://github.com/chriscase/ContextDesk/actions/runs/31904068651",
+  "replicate_run_id": "31887796502",
+  "replicate_run_url": "https://github.com/chriscase/ContextDesk/actions/runs/31887796502",
+  "recommended_desktop_shards": 2,
+  "cold_ubuntu_duckdb_compile_minutes_min": 36,
+  "cold_ubuntu_duckdb_compile_minutes_max": 55,
+  "warm": {
+    "macos": {
+      "job_seconds": 1691,
+      "test_workspace_seconds": 1415,
+      "clippy_seconds": 99,
+      "cache_restore_seconds": 46
+    },
+    "windows": {
+      "job_seconds": 2560,
+      "test_workspace_seconds": 2085,
+      "clippy_seconds": 130,
+      "cache_restore_seconds": 74
+    },
+    "ubuntu": {
+      "warmup_job_seconds": 614,
+      "warmup_compile_tests_seconds": 284,
+      "worst_shard_job_seconds": 1464,
+      "example_shard_build_seconds": 710,
+      "example_shard_total_seconds": 1203
+    }
+  },
+  "replicate": {
+    "windows": {
+      "test_workspace_seconds": 2082
+    }
+  },
+  "notes": [
+    "Cache restore 37-74s plus clippy 1-2 minutes means both measured main runs were warm. The 35-minute Windows cargo test --workspace step is therefore linking plus execution, not a cold DuckDB compile.",
+    "Cold DuckDB minutes come from Ubuntu shard runs 31828397526 and 31835229724, cited in ci.yml and the #874 merge.",
+    "A preflight job that still requires the full workspace afterwards does not reduce wall clock. Treating preflight as the required gate would skip tests. Do not treat a rust-cache miss as success.",
+    "An 8-way Windows/macOS split without warmup repeats the cold DuckDB tax per shard and imports leftover-heavy isolate timeouts (#898)."
+  ]
+}

@@ -182,6 +182,14 @@ Properties worth knowing:
 - **Nothing about the suite is relaxed.** Shards keep `RUST_TEST_THREADS=1`.
   macOS and Windows still run `cargo test --workspace`.
 
+macOS/Windows remain the wall-clock bottleneck on `main` (Windows
+`cargo test --workspace` ≈ 35 minutes warm). The inventory and the
+exact next workflow patch — 2-way partition **with** per-OS warmup, not
+a preflight-only gate and not an 8-way leftover split — live in
+[`docs/testing/MACOS_WINDOWS_CI_LANES.md`](testing/MACOS_WINDOWS_CI_LANES.md).
+Reproduce: `sh scripts/ci_macos_windows_lane_study.sh`. That study does
+not edit `.github/workflows/ci.yml`.
+
 Required-check / ruleset wiring is **not** workflow behavior; see
 [`docs/CI_REQUIRED_CHECKS.md`](CI_REQUIRED_CHECKS.md).
 

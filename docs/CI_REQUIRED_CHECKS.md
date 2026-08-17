@@ -50,4 +50,5 @@ must block merge.
 
 - Workflow: `.github/workflows/ci.yml`
 - Operator notes: `docs/DEV.md` (CI Ubuntu workspace test shards)
+- macOS/Windows wall-clock study (workflow unchanged): [`docs/testing/MACOS_WINDOWS_CI_LANES.md`](testing/MACOS_WINDOWS_CI_LANES.md)
 - Platform matrix: `docs/PLATFORMS.md`
