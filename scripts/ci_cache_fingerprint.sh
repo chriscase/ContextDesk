@@ -1,11 +1,11 @@
 #!/usr/bin/env sh
 # Deterministic rust-cache fingerprint for CI evidence (#874 follow-up).
 #
-# Swatinem/rust-cache already hashes Cargo.lock, rust-toolchain files, and
-# rustc into the stored key. This script makes that policy auditable: it
-# records the per-OS shared-key family, lock digest, rustc identity, and
-# RUSTFLAGS so a cache-status artifact can explain *why* a restore was
-# expected to be warm. It does not replace rust-cache's own key.
+# Swatinem/rust-cache@v2 already hashes Cargo.lock, rust-toolchain files,
+# rustc, and compiler env prefixes (CARGO, CC, CFLAGS, CXX, CMAKE, RUST).
+# The RUST prefix matches RUSTFLAGS, so the workflow must not set
+# `env-vars: RUSTFLAGS` as if it were missing. This script only records an
+# auditable digest next to cache_state; it does not replace rust-cache's key.
 #
 # No network, no secrets.
 set -eu

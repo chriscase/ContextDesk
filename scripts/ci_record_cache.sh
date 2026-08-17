@@ -102,6 +102,67 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# True when PATH is a regular, non-empty file. Empty files and directories
+# are not compiled artifacts.
+is_nonzero_file() {
+  [ -f "$1" ] && [ -s "$1" ]
+}
+
+# True when PATH looks like a linkable compiled object on Linux, macOS, or
+# Windows (static lib, rust rlib, import lib, or shared library).
+is_compiled_lib() {
+  is_nonzero_file "$1" || return 1
+  case $1 in
+    *.rlib | *.rmeta | *.lib | *.a | *.so | *.dylib | *.dll | *.obj) return 0 ;;
+  esac
+  return 1
+}
+
+# True when PATH's basename mentions duckdb (any common capitalization).
+name_mentions_duckdb() {
+  base=${1##*/}
+  case $base in
+    *[Dd]uck[Dd][Bb]*) return 0 ;;
+  esac
+  return 1
+}
+
+# A restore is honest only when a real DuckDB artifact exists. An empty
+# libduckdb-sys-* directory, a zero-byte stub, or CACHEDIR.TAG is not enough.
+has_duckdb_artifact() {
+  dir=$1
+  if [ -d "$dir/debug/deps" ]; then
+    for probe in "$dir"/debug/deps/*; do
+      [ -e "$probe" ] || continue
+      if name_mentions_duckdb "$probe" && is_compiled_lib "$probe"; then
+        return 0
+      fi
+    done
+  fi
+  for d in "$dir"/debug/build/libduckdb-sys-* "$dir"/debug/build/duckdb-*; do
+    [ -d "$d" ] || continue
+    for probe in "$d"/* "$d"/out/* "$d"/out/.libs/*; do
+      [ -e "$probe" ] || continue
+      if name_mentions_duckdb "$probe" && is_compiled_lib "$probe"; then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+has_compiled_deps() {
+  dir=$1
+  [ -d "$dir/debug/deps" ] || return 1
+  for probe in "$dir"/debug/deps/*; do
+    [ -e "$probe" ] || continue
+    if is_compiled_lib "$probe"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Classify a restored/compiled target tree. Prints one of:
 #   empty | no-artifacts | no-duckdb | ok
 classify_target() {
@@ -122,29 +183,11 @@ classify_target() {
     return 0
   fi
 
-  has_compiled=false
-  has_duckdb=false
-  if [ -d "$dir/debug/deps" ]; then
-    for probe in "$dir"/debug/deps/*.rlib "$dir"/debug/deps/*.rmeta "$dir"/debug/deps/*.lib; do
-      [ -e "$probe" ] || continue
-      has_compiled=true
-      case $probe in
-        *[Dd]uck[Dd][Bb]*) has_duckdb=true ;;
-      esac
-    done
-  fi
-  if [ -d "$dir/debug/build" ]; then
-    for probe in "$dir"/debug/build/libduckdb-sys-* "$dir"/debug/build/duckdb-*; do
-      [ -e "$probe" ] || continue
-      has_duckdb=true
-    done
-  fi
-
-  if [ "$has_compiled" = false ]; then
+  if ! has_compiled_deps "$dir"; then
     echo no-artifacts
     return 0
   fi
-  if [ "$has_duckdb" = false ]; then
+  if ! has_duckdb_artifact "$dir"; then
     echo no-duckdb
     return 0
   fi

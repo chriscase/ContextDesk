@@ -78,23 +78,26 @@ sh scripts/tests/ci_macos_windows_lane_study_test.sh
 
 ## Fast-hit and safe-miss design
 
-Each desktop OS follows this sequence:
+Each desktop OS follows this sequence independently. A macOS job never lists
+a Windows warmup (or probe) in `needs:`, and Windows never waits on macOS:
 
 1. An exact-key `lookup-only` cache probe runs first. It does not pretend to
    restore files; it only decides whether the shared cache key exists.
 2. On a miss, exactly one OS-specific cache-writer job runs
-   `cargo test --workspace --no-run` and saves the complete target tree. On a
-   hit, that writer is skipped, so the test shards do not wait for a redundant
-   build.
-3. The existing `rust (macos-latest)` and `rust (windows-latest)` checks become
-   restore-only preflight signals. They require an actual non-empty `target/`
-   restore, then run fmt, clippy, examples, and server smoke tests. They do not
-   replace the complete workspace suite.
-4. Four restore-only platform shards run the full deterministic plan with
-   `save-if: false`. Every shard fails closed unless its downloaded target is
+   `cargo test --workspace --no-run` and saves the complete target tree. The
+   writer sets `cache-on-failure: false`, so a failed compile or DuckDB
+   assert cannot publish a hollow cache. On a hit, that writer is skipped.
+3. `rust (macos-latest)` and `rust (windows-latest)` are restore-only
+   preflight signals that wait only on their own probe/warmup. They require
+   compiled `target/` artifacts including DuckDB, then run fmt, clippy,
+   examples, and server smoke tests. They do not replace the workspace suite.
+4. Four restore-only shards per OS (`save-if: false`) wait only on that OS's
+   probe/warmup. Every shard fails closed unless its downloaded target is
    actually warm, and every shard uploads status and in-flight evidence.
-5. Per-OS aggregates require all four shard results and the exact 114-unit
-   cover. They remain non-required platform signals until separately promoted.
+5. `rust tests (macos-latest aggregate)` depends only on the macOS shards;
+   `rust tests (windows-latest aggregate)` depends only on the Windows shards.
+   Each requires all four shard results and the exact 114-unit cover. They
+   remain non-required platform signals until separately promoted.
 
 The cache status helper recognizes `warmup`, `preflight`, and `shard` roles.
 Only a warmup may save; preflight and shards restore and verify. A cache key hit
@@ -127,8 +130,9 @@ restore the completed cache; if the writer fails, the shard/aggregate path
 fails closed rather than silently running an untracked cold build.
 
 A restore is `warm` only when `target/debug/deps` has compiled rust artifacts
-**and** a DuckDB marker (`libduckdb-sys-*` build dir or a `*duckdb*` rlib).
-A `CACHEDIR.TAG` or registry-only 113MB hit is recorded as cold
+**and** a real, non-empty DuckDB library (`libduckdb.a` / `duckdb.lib` /
+`*duckdb*.rlib`, etc.). An empty `libduckdb-sys-*` directory, a zero-byte
+stub, a `CACHEDIR.TAG`, or a registry-only 113MB hit is cold
 (`key-hit-without-artifacts` / `key-hit-without-duckdb`). Warmup jobs also
 `--assert-dir target` after `cargo test --workspace --no-run`.
 
@@ -137,8 +141,9 @@ Cache-key boundaries:
 | Input | Who hashes it | Cross-OS? |
 | --- | --- | --- |
 | `shared-key` (`ubuntu-workspace-tests`, `*-workspace-tests-v2`) | workflow | no — keys are per OS |
-| `Cargo.lock`, rustc, rust-toolchain, `.cargo/config.toml` | Swatinem/rust-cache environment hash | no — rustc/target triple differ |
-| `RUSTFLAGS` (`-D warnings`) | rust-cache `env-vars` | same flag, different OS keys |
+| runner OS + arch | rust-cache prefix | no |
+| `Cargo.lock`, rustc, rust-toolchain, `.cargo/config.toml` | rust-cache environment hash | no — rustc/target triple differ |
+| `RUSTFLAGS` (`-D warnings`) | rust-cache default `RUST` env prefix (already matches `RUSTFLAGS`; do not set `env-vars: RUSTFLAGS`) | same flag, different OS keys |
 | lock digest + rustc + `RUSTFLAGS` + shared-key | `scripts/ci_cache_fingerprint.sh` (status JSON only) | recorded, not a second store key |
 
 ## Gates and boundaries
