@@ -6,7 +6,9 @@
 # is set and that directory was not populated — `lookup-only: true` reports
 # a hit without downloading files (hosted run 31845262696).
 #
-# `cache_state` is `warm` only when the files are actually present.
+# `cache_state` is `warm` only when the files are actually present *and*
+# look like a compiled workspace (debug/deps rust artifacts plus DuckDB).
+# A top-level CACHEDIR.TAG or empty target/ is still cold.
 #
 # No network, no secrets. Requires: jq.
 set -eu
@@ -18,18 +20,25 @@ SHARD=""
 SHARED_KEY="ubuntu-workspace-tests"
 SAVE=""
 RESTORE_DIR=""
+FINGERPRINT=""
+ASSERT_DIR=""
 
 usage() {
   cat <<'EOF'
 Usage:
   sh scripts/ci_record_cache.sh --out FILE --hit true|false|'' --role warmup|preflight|shard
                                 [--shard N] [--shared-key NAME] [--save true|false]
-                                [--restore-dir DIR]
+                                [--restore-dir DIR] [--fingerprint HEX]
+  sh scripts/ci_record_cache.sh --assert-dir DIR
 
 Writes a bounded JSON object. `cache_state` is `warm` only when --hit is true
-AND, if --restore-dir is set, that directory exists and is non-empty.
-Swatinem `lookup-only: true` reports cache-hit without downloading files;
-never use it on the shard jobs.
+AND, if --restore-dir is set, that directory contains compiled workspace
+artifacts including bundled DuckDB. Swatinem `lookup-only: true` reports
+cache-hit without downloading files; never use it on the shard jobs.
+
+`--assert-dir` exits 0 only when DIR looks like a compiled workspace with
+DuckDB artifacts. Warmup jobs use it after `cargo test --workspace --no-run`
+so a successful compile that skipped DuckDB cannot save a hollow cache.
 EOF
 }
 
@@ -75,6 +84,16 @@ while [ $# -gt 0 ]; do
       RESTORE_DIR=$2
       shift 2
       ;;
+    --fingerprint)
+      [ $# -ge 2 ] || die "--fingerprint needs a value"
+      FINGERPRINT=$2
+      shift 2
+      ;;
+    --assert-dir)
+      [ $# -ge 2 ] || die "--assert-dir needs a value"
+      ASSERT_DIR=$2
+      shift 2
+      ;;
     -h | --help)
       usage
       exit 0
@@ -82,6 +101,75 @@ while [ $# -gt 0 ]; do
     *) die "unknown argument '$1'" ;;
   esac
 done
+
+# Classify a restored/compiled target tree. Prints one of:
+#   empty | no-artifacts | no-duckdb | ok
+classify_target() {
+  dir=$1
+  if [ ! -d "$dir" ]; then
+    echo empty
+    return 0
+  fi
+  any=false
+  for probe in "$dir"/*; do
+    if [ -e "$probe" ]; then
+      any=true
+      break
+    fi
+  done
+  if [ "$any" = false ]; then
+    echo empty
+    return 0
+  fi
+
+  has_compiled=false
+  has_duckdb=false
+  if [ -d "$dir/debug/deps" ]; then
+    for probe in "$dir"/debug/deps/*.rlib "$dir"/debug/deps/*.rmeta "$dir"/debug/deps/*.lib; do
+      [ -e "$probe" ] || continue
+      has_compiled=true
+      case $probe in
+        *[Dd]uck[Dd][Bb]*) has_duckdb=true ;;
+      esac
+    done
+  fi
+  if [ -d "$dir/debug/build" ]; then
+    for probe in "$dir"/debug/build/libduckdb-sys-* "$dir"/debug/build/duckdb-*; do
+      [ -e "$probe" ] || continue
+      has_duckdb=true
+    done
+  fi
+
+  if [ "$has_compiled" = false ]; then
+    echo no-artifacts
+    return 0
+  fi
+  if [ "$has_duckdb" = false ]; then
+    echo no-duckdb
+    return 0
+  fi
+  echo ok
+}
+
+if [ -n "$ASSERT_DIR" ]; then
+  kind=$(classify_target "$ASSERT_DIR")
+  case $kind in
+    ok)
+      echo "ci_record_cache: $ASSERT_DIR has compiled workspace + DuckDB artifacts"
+      exit 0
+      ;;
+    empty)
+      echo "ci_record_cache: $ASSERT_DIR is missing or empty" >&2
+      ;;
+    no-artifacts)
+      echo "ci_record_cache: $ASSERT_DIR has no compiled rust deps (target/debug/deps)" >&2
+      ;;
+    no-duckdb)
+      echo "ci_record_cache: $ASSERT_DIR is missing bundled DuckDB artifacts" >&2
+      ;;
+  esac
+  exit 1
+fi
 
 [ -n "$OUT" ] || die "--out is required"
 [ -n "$ROLE" ] || die "--role is required"
@@ -109,21 +197,21 @@ fi
 
 RESTORE="none"
 if [ "$STATE" = warm ] && [ -n "$RESTORE_DIR" ]; then
-  restore_has_files=false
-  if [ -d "$RESTORE_DIR" ]; then
-    for probe in "$RESTORE_DIR"/*; do
-      if [ -e "$probe" ]; then
-        restore_has_files=true
-        break
-      fi
-    done
-  fi
-  if [ "$restore_has_files" = true ]; then
-    RESTORE=files
-  else
-    STATE=cold
-    RESTORE=key-hit-without-files
-  fi
+  case $(classify_target "$RESTORE_DIR") in
+    ok) RESTORE=files ;;
+    empty)
+      STATE=cold
+      RESTORE=key-hit-without-files
+      ;;
+    no-artifacts)
+      STATE=cold
+      RESTORE=key-hit-without-artifacts
+      ;;
+    no-duckdb)
+      STATE=cold
+      RESTORE=key-hit-without-duckdb
+      ;;
+  esac
 elif [ "$STATE" = warm ]; then
   RESTORE=assumed
 fi
@@ -143,11 +231,13 @@ jq -n \
   --arg state "$STATE" \
   --arg key "$SHARED_KEY" \
   --arg restore "$RESTORE" \
+  --arg fingerprint "$FINGERPRINT" \
   --argjson hit "$HIT_JSON" \
   --argjson save "$SAVE_JSON" \
   --argjson shard "$shard_json" \
   '{schema: $schema, role: $role, shard: $shard, shared_key: $key,
-    cache_hit: $hit, cache_state: $state, save: $save, restore: $restore}' \
+    cache_hit: $hit, cache_state: $state, save: $save, restore: $restore,
+    fingerprint: (if $fingerprint == "" then null else $fingerprint end)}' \
   >"$OUT"
 
-echo "cache record: role=$ROLE state=$STATE hit=$HIT_JSON save=$SAVE_JSON restore=$RESTORE key=$SHARED_KEY"
+echo "cache record: role=$ROLE state=$STATE hit=$HIT_JSON save=$SAVE_JSON restore=$RESTORE key=$SHARED_KEY fingerprint=${FINGERPRINT:-none}"

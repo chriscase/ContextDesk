@@ -17,6 +17,9 @@ env:
   # do not save). Do not set Swatinem `lookup-only: true` on shards: that
   # checks the key without downloading files. Probes also set `save-if: false`;
   # a lookup-only probe must never create a partial cache before warmup runs.
+  # Per-OS shared keys (`ubuntu-workspace-tests`, `macos-latest-workspace-tests-v2`,
+  # `windows-latest-workspace-tests-v2`) plus rust-cache's lock/toolchain hash
+  # and `env-vars: RUSTFLAGS` keep caches from crossing OS or compile flags.
   #
   # Raised 4 -> 8 after the shard carrying `cd-core/lib/other` was cancelled at
   # the 60-minute job budget on two consecutive runs of PR #892 (31888581827,
@@ -175,6 +178,11 @@ jobs:
         with:
           shared-key: macos-latest-workspace-tests-v2
           cache-workspace-crates: true
+          # RUSTFLAGS is a compile input rust-cache does not hash by default.
+          # Include it so `-D warnings` (and any future flag change) cannot
+          # reuse a target tree built with different rustc flags. Cargo.lock
+          # and rustc are already part of rust-cache's environment hash.
+          env-vars: RUSTFLAGS
           lookup-only: true
           save-if: false
 
@@ -192,6 +200,11 @@ jobs:
         with:
           shared-key: windows-latest-workspace-tests-v2
           cache-workspace-crates: true
+          # RUSTFLAGS is a compile input rust-cache does not hash by default.
+          # Include it so `-D warnings` (and any future flag change) cannot
+          # reuse a target tree built with different rustc flags. Cargo.lock
+          # and rustc are already part of rust-cache's environment hash.
+          env-vars: RUSTFLAGS
           lookup-only: true
           save-if: false
 
@@ -209,6 +222,11 @@ jobs:
         with:
           shared-key: macos-latest-workspace-tests-v2
           cache-workspace-crates: true
+          # RUSTFLAGS is a compile input rust-cache does not hash by default.
+          # Include it so `-D warnings` (and any future flag change) cannot
+          # reuse a target tree built with different rustc flags. Cargo.lock
+          # and rustc are already part of rust-cache's environment hash.
+          env-vars: RUSTFLAGS
           cache-on-failure: true
           lookup-only: false
           save-if: true
@@ -216,12 +234,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p ci-platform-shards
+          fp=$(sh scripts/ci_cache_fingerprint.sh --os macos-latest | awk -F= '$1 == "fingerprint" { print $2 }')
           sh scripts/ci_record_cache.sh \
             --out ci-platform-shards/cache-warmup-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
             --role warmup \
             --shared-key macos-latest-workspace-tests-v2 \
-            --save true
+            --save true \
+            --fingerprint "$fp"
       - name: compile workspace tests (cache warmup)
         env:
           RUST_TEST_THREADS: "4"
@@ -243,6 +263,9 @@ jobs:
           kill "$hb" 2>/dev/null || true
           wait "$hb" 2>/dev/null || true
           exit "$rc"
+      - name: require compiled DuckDB artifacts
+        shell: bash
+        run: sh scripts/ci_record_cache.sh --assert-dir target
       - name: upload cache warmup status
         if: always()
         uses: actions/upload-artifact@v4
@@ -266,6 +289,11 @@ jobs:
         with:
           shared-key: windows-latest-workspace-tests-v2
           cache-workspace-crates: true
+          # RUSTFLAGS is a compile input rust-cache does not hash by default.
+          # Include it so `-D warnings` (and any future flag change) cannot
+          # reuse a target tree built with different rustc flags. Cargo.lock
+          # and rustc are already part of rust-cache's environment hash.
+          env-vars: RUSTFLAGS
           cache-on-failure: true
           lookup-only: false
           save-if: true
@@ -273,12 +301,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p ci-platform-shards
+          fp=$(sh scripts/ci_cache_fingerprint.sh --os windows-latest | awk -F= '$1 == "fingerprint" { print $2 }')
           sh scripts/ci_record_cache.sh \
             --out ci-platform-shards/cache-warmup-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
             --role warmup \
             --shared-key windows-latest-workspace-tests-v2 \
-            --save true
+            --save true \
+            --fingerprint "$fp"
       - name: compile workspace tests (cache warmup)
         env:
           RUST_TEST_THREADS: "4"
@@ -300,6 +330,9 @@ jobs:
           kill "$hb" 2>/dev/null || true
           wait "$hb" 2>/dev/null || true
           exit "$rc"
+      - name: require compiled DuckDB artifacts
+        shell: bash
+        run: sh scripts/ci_record_cache.sh --assert-dir target
       - name: upload cache warmup status
         if: always()
         uses: actions/upload-artifact@v4
@@ -338,19 +371,26 @@ jobs:
         with:
           shared-key: ${{ matrix.os }}-workspace-tests-v2
           cache-workspace-crates: true
+          # RUSTFLAGS is a compile input rust-cache does not hash by default.
+          # Include it so `-D warnings` (and any future flag change) cannot
+          # reuse a target tree built with different rustc flags. Cargo.lock
+          # and rustc are already part of rust-cache's environment hash.
+          env-vars: RUSTFLAGS
           lookup-only: false
           save-if: false
       - name: record cache restore
         shell: bash
         run: |
           mkdir -p ci-platform-shards
+          fp=$(sh scripts/ci_cache_fingerprint.sh --os '${{ matrix.os }}' | awk -F= '$1 == "fingerprint" { print $2 }')
           sh scripts/ci_record_cache.sh \
             --out ci-platform-shards/cache-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
             --role preflight \
             --shared-key '${{ matrix.os }}-workspace-tests-v2' \
             --save false \
-            --restore-dir target
+            --restore-dir target \
+            --fingerprint "$fp"
           echo "CD_CACHE_STATE=$(jq -r .cache_state ci-platform-shards/cache-status.json)" >> "$GITHUB_ENV"
       - name: require warm cache
         shell: bash
@@ -404,16 +444,23 @@ jobs:
         with:
           shared-key: ubuntu-workspace-tests
           cache-workspace-crates: true
+          # RUSTFLAGS is a compile input rust-cache does not hash by default.
+          # Include it so `-D warnings` (and any future flag change) cannot
+          # reuse a target tree built with different rustc flags. Cargo.lock
+          # and rustc are already part of rust-cache's environment hash.
+          env-vars: RUSTFLAGS
           cache-on-failure: true
       - name: record cache restore
         run: |
           mkdir -p ci-shards
+          fp=$(sh scripts/ci_cache_fingerprint.sh --os ubuntu-latest | awk -F= '$1 == "fingerprint" { print $2 }')
           sh scripts/ci_record_cache.sh \
             --out ci-shards/cache-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
             --role warmup \
             --shared-key ubuntu-workspace-tests \
-            --save true
+            --save true \
+            --fingerprint "$fp"
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy (workspace, all targets)
@@ -456,6 +503,8 @@ jobs:
           kill "$hb" 2>/dev/null || true
           wait "$hb" 2>/dev/null || true
           exit "$rc"
+      - name: require compiled DuckDB artifacts
+        run: sh scripts/ci_record_cache.sh --assert-dir target
       - name: embed_host example build (#170)
         run: cargo build -p cd-core --examples
       - name: server smoke
@@ -499,6 +548,11 @@ jobs:
         with:
           shared-key: ubuntu-workspace-tests
           cache-workspace-crates: true
+          # RUSTFLAGS is a compile input rust-cache does not hash by default.
+          # Include it so `-D warnings` (and any future flag change) cannot
+          # reuse a target tree built with different rustc flags. Cargo.lock
+          # and rustc are already part of rust-cache's environment hash.
+          env-vars: RUSTFLAGS
           # save-if: false restores files and skips the save post-step.
           # lookup-only: true would set cache-hit without downloading (run
           # 31845262696): shards compiled 11–12 min while recording warm.
@@ -509,7 +563,9 @@ jobs:
           mkdir -p ci-shards
           # restore-dir keeps cache_state honest: lookup-only reports a hit
           # without downloading files (run 31845262696 compiled 11–12 min
-          # while recording warm).
+          # while recording warm). Warm now also requires compiled deps and
+          # bundled DuckDB, not just a non-empty target/.
+          fp=$(sh scripts/ci_cache_fingerprint.sh --os ubuntu-latest | awk -F= '$1 == "fingerprint" { print $2 }')
           sh scripts/ci_record_cache.sh \
             --out ci-shards/cache-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
@@ -517,7 +573,8 @@ jobs:
             --shard '${{ matrix.shard }}' \
             --shared-key ubuntu-workspace-tests \
             --save false \
-            --restore-dir target
+            --restore-dir target \
+            --fingerprint "$fp"
           echo "CD_CACHE_STATE=$(jq -r .cache_state ci-shards/cache-status.json)" >> "$GITHUB_ENV"
       - name: shard plan (deterministic, exhaustive)
         run: sh scripts/ci_shard_plan.sh verify --shards "$CD_SHARD_COUNT"
@@ -642,12 +699,18 @@ jobs:
         with:
           shared-key: ${{ matrix.os }}-workspace-tests-v2
           cache-workspace-crates: true
+          # RUSTFLAGS is a compile input rust-cache does not hash by default.
+          # Include it so `-D warnings` (and any future flag change) cannot
+          # reuse a target tree built with different rustc flags. Cargo.lock
+          # and rustc are already part of rust-cache's environment hash.
+          env-vars: RUSTFLAGS
           lookup-only: false
           save-if: false
       - name: record cache restore
         shell: bash
         run: |
           mkdir -p ci-platform-shards
+          fp=$(sh scripts/ci_cache_fingerprint.sh --os '${{ matrix.os }}' | awk -F= '$1 == "fingerprint" { print $2 }')
           sh scripts/ci_record_cache.sh \
             --out ci-platform-shards/cache-status.json \
             --hit '${{ steps.rust-cache.outputs.cache-hit }}' \
@@ -655,7 +718,8 @@ jobs:
             --shard '${{ matrix.shard }}' \
             --shared-key '${{ matrix.os }}-workspace-tests-v2' \
             --save false \
-            --restore-dir target
+            --restore-dir target \
+            --fingerprint "$fp"
           echo "CD_CACHE_STATE=$(jq -r .cache_state ci-platform-shards/cache-status.json)" >> "$GITHUB_ENV"
       - name: shard plan (deterministic, exhaustive)
         shell: bash
