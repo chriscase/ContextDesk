@@ -1,0 +1,214 @@
+{
+  "schema_id": "contextdesk.triage.replay.v1",
+  "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+  "request_fingerprint": "req-d078a683fade3667bc6f321d7b151b2997bfefa707abecbc9077d4102db89bdc",
+  "events": [
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+      "sequence": 0,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "run_started",
+        "request_fingerprint": "req-d078a683fade3667bc6f321d7b151b2997bfefa707abecbc9077d4102db89bdc",
+        "policy_fingerprint": "pol-d0b61431e4df22bdff27a48ad81c441a26bda2206e104f173cf0cbb11dc0be6e"
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+      "sequence": 1,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "packet_ready",
+        "packet_id": "pkt-26553b254b1013c6c2a9453d37251961dc4c13420307e41664be73510c186776",
+        "packet_digest": "pkf-6db24b93cfa24ac3b0a4975356757e9550829a920734ec4f82f3380536f7c2c6",
+        "evidence_count": 3
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+      "sequence": 2,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "role_attempt",
+        "attempt": {
+          "attempt_id": "att-eee5ac6e321df4ec5b7cd86949ca02dfc9cb61bca1e591952bbdef64765f6050",
+          "role_slot_id": "observe",
+          "role": {
+            "contributor": "observation_extractor"
+          },
+          "model": {
+            "profile_id": "gateway-alpha",
+            "model_id": "model-observe"
+          },
+          "status": "completed",
+          "elapsed_ms": 1,
+          "input_chars": 1,
+          "output_chars": 1,
+          "physical_provider_calls": 0,
+          "semantic_corrections": 0,
+          "terminal_disposition": "completed"
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+      "sequence": 3,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "role_attempt",
+        "attempt": {
+          "attempt_id": "att-58708ac0b140499e97d2aecd34979e31905028a62346327ee56c6514c37bb034",
+          "role_slot_id": "contradict",
+          "role": {
+            "contributor": "contradiction_checker"
+          },
+          "model": {
+            "profile_id": "gateway-beta",
+            "model_id": "vendor/model-contradict"
+          },
+          "status": "completed",
+          "elapsed_ms": 1,
+          "input_chars": 1,
+          "output_chars": 1,
+          "physical_provider_calls": 0,
+          "semantic_corrections": 0,
+          "terminal_disposition": "completed"
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+      "sequence": 4,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "preliminary_reconciliation",
+        "summary": {
+          "state": "reconciled",
+          "configured_role_slots": 4,
+          "completed_role_slots": 2,
+          "distinct_models": 2,
+          "distinct_gateways": 2,
+          "root_cause_established": false
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+      "sequence": 5,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "role_attempt",
+        "attempt": {
+          "attempt_id": "att-0b9c9c21b894db5681edf570eb38025c610927d1a88c97b38d837db2e7feaead",
+          "role_slot_id": "review",
+          "role": "reviewer",
+          "model": {
+            "profile_id": "gateway-gamma",
+            "model_id": "model-review"
+          },
+          "status": "completed",
+          "elapsed_ms": 1,
+          "input_chars": 1,
+          "output_chars": 1,
+          "physical_provider_calls": 0,
+          "semantic_corrections": 0,
+          "terminal_disposition": "completed"
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+      "sequence": 6,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "final_reconciliation",
+        "summary": {
+          "state": "reconciled",
+          "configured_role_slots": 4,
+          "completed_role_slots": 3,
+          "distinct_models": 3,
+          "distinct_gateways": 3,
+          "root_cause_established": false
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+      "sequence": 7,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "role_attempt",
+        "attempt": {
+          "attempt_id": "att-bd5e3496f2039bbae147c37a40a42743c091b77fc653cdb5065bfa70f763023e",
+          "role_slot_id": "finalize",
+          "role": "finalizer",
+          "model": {
+            "profile_id": "gateway-delta",
+            "model_id": "model-finalize"
+          },
+          "status": "failed",
+          "reason_codes": [
+            "role_failed"
+          ],
+          "elapsed_ms": 0,
+          "input_chars": 0,
+          "output_chars": 0,
+          "physical_provider_calls": 0,
+          "semantic_corrections": 0,
+          "terminal_disposition": "failed"
+        }
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+      "sequence": 8,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "validation",
+        "passed": false,
+        "reason_codes": [
+          "finalizer_failed"
+        ]
+      }
+    },
+    {
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+      "sequence": 9,
+      "privacy": "owner_only",
+      "event": {
+        "kind": "failed",
+        "category": "provider_unavailable",
+        "partial_result": {
+          "schema_id": "contextdesk.triage.result.v2",
+          "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+          "kind": "honest_partial",
+          "validation_state": "partial",
+          "packet_id": "pkt-26553b254b1013c6c2a9453d37251961dc4c13420307e41664be73510c186776",
+          "reconciliation": {
+            "state": "reconciled",
+            "configured_role_slots": 4,
+            "completed_role_slots": 3,
+            "distinct_models": 3,
+            "distinct_gateways": 3,
+            "root_cause_established": false
+          },
+          "reason_codes": [
+            "role_failed",
+            "deterministic_mock",
+            "no_authoritative_answer"
+          ]
+        }
+      }
+    }
+  ]
+}

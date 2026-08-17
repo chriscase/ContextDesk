@@ -646,6 +646,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cd-triage-bench-adapter"
+version = "0.1.0"
+dependencies = [
+ "cd-core",
+ "cd-triage-bench",
+ "cd-triage-sdk",
+ "cd-workflow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cd-triage-sdk"
 version = "0.1.0"
 dependencies = [
