@@ -5,9 +5,10 @@ It does not change workflow behavior. The workflow in `.github/workflows/ci.yml`
 already fail-closes on a missing Ubuntu test shard; a ruleset is what makes that
 job a merge blocker.
 
-As of the #874 sharding work, **no branch protection ruleset is configured** on
-`chriscase/ContextDesk`. Until one is, a red `rust tests (ubuntu aggregate)`
-does not by itself prevent a merge.
+The active `main: require Ubuntu aggregate` ruleset (id `20890073`) on
+`chriscase/ContextDesk` requires exactly `rust tests (ubuntu aggregate)`.
+That aggregate is the merge-blocking Ubuntu test gate; the warmup job
+`rust (ubuntu-latest)` is not the suite gate.
 
 ## What to require
 
@@ -45,6 +46,13 @@ After saving the ruleset, open a draft PR and confirm the “Required” list on
 the PR checks panel matches the table above. A deliberately missing shard
 artifact must keep `rust tests (ubuntu aggregate)` red, and that red check
 must block merge.
+
+The stacked adapter workflow publishes `triage fast (adapter)` as an
+additional advisory check once `cd-triage-bench-adapter` is present. It uses
+its own cache namespace and the same locked-fetch plus full dependency-boundary
+guard as the SDK/bench fast lanes. It does not replace or rename
+`rust tests (ubuntu aggregate)` and must not be added as the Ubuntu workspace
+gate.
 
 ## Related
 
