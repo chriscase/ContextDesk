@@ -336,19 +336,32 @@ jobs:
       - name: shard plan (deterministic, exhaustive)
         run: sh scripts/ci_shard_plan.sh verify --shards "$CD_SHARD_COUNT"
       - name: run shard ${{ matrix.shard }}
-        # Step timeout so GitHub SIGTERM's the script while the VM is still
-        # up; ci_run_shard.sh then writes incomplete status.json and the
-        # always() steps below can upload. A lost VM cannot upload — the
-        # warmup job exists so shards should not reach that window.
+        # Keep an explicit deadline below the step timeout. GNU timeout sends
+        # TERM to ci_run_shard.sh, which writes its in-flight snapshot, then
+        # leaves a grace window for the marker, diagnostics, and upload.
+        # The outer step timeout remains a final safety net; it is not raised.
         timeout-minutes: 50
         env:
           RUST_TEST_THREADS: "1"
           CARGO_BUILD_JOBS: "2"
         run: |
-          stdbuf -oL -eL sh scripts/ci_run_shard.sh \
-            --shard "${{ matrix.shard }}" \
-            --shards "$CD_SHARD_COUNT" \
-            --out ci-shards
+          set +e
+          timeout --signal=TERM --kill-after=60s 45m \
+            stdbuf -oL -eL sh scripts/ci_run_shard.sh \
+              --shard "${{ matrix.shard }}" \
+              --shards "$CD_SHARD_COUNT" \
+              --out ci-shards
+          rc=$?
+          set -e
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            sh scripts/ci_mark_shard_timeout.sh \
+              --dir ci-shards \
+              --shard "${{ matrix.shard }}" \
+              --shards "$CD_SHARD_COUNT" \
+              --reason step-deadline
+            exit 1
+          fi
+          exit "$rc"
       - name: shard diagnostic summary
         if: always()
         run: |
