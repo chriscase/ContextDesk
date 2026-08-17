@@ -9,6 +9,7 @@ members = [
     "crates/cd-triage-sdk",
     "crates/cd-triage-bench",
     "crates/cd-triage-bench-adapter",
+    "crates/cd-triage-bench-adapter-cli",
     # "desktop/src-tauri",  # nested after scaffold
 ]
 
