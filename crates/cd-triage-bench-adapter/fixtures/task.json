@@ -1,0 +1,20 @@
+{
+  "schema_id": "contextdesk.triage_bench.evaluation_task.v1",
+  "task_id": "task-a02e7497a4787cbd965c3b0abb1b03688a0c0ea10eadcb87207a763ed10aae6a",
+  "privacy": "owner_only",
+  "case_id": "case-checkout-500s",
+  "snapshot_id": "snap-5c34bc690d012cc5c147d1ca3f7e08ea872a6c7ffff449a92fb98aedc3be26d3",
+  "question": "What initiated the checkout failures, and what evidence supports it?",
+  "protocol": "Answer only from the visible evidence in this packet. Say so when evidence is missing.",
+  "protocol_version": "v1",
+  "visibility": {
+    "visible_item_ids": [
+      "ev-log-1",
+      "ev-mail-1",
+      "ev-ref-1"
+    ],
+    "include_summaries": true,
+    "include_raw_bytes": true
+  },
+  "created_at": "2026-01-15T07:00:00Z"
+}

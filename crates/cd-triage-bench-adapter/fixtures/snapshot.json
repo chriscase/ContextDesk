@@ -1,0 +1,94 @@
+{
+  "schema_id": "contextdesk.triage_bench.evidence_snapshot.v1",
+  "snapshot_id": "snap-5c34bc690d012cc5c147d1ca3f7e08ea872a6c7ffff449a92fb98aedc3be26d3",
+  "privacy": "owner_only",
+  "case_id": "case-checkout-500s",
+  "captured_at": "2026-01-15T06:00:00Z",
+  "captured_by": "duty-operator",
+  "items": [
+    {
+      "kind": "log",
+      "item_id": "ev-hidden-1",
+      "privacy": "owner_only",
+      "capture_time": "2026-01-15T04:12:00Z",
+      "source": {
+        "reference": "restricted/audit.log",
+        "captured_from": "synthetic fixture"
+      },
+      "media_type": "text/plain",
+      "format": "raw",
+      "content": {
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "acbbc0faed6666d1ec9f09068b3fe08fc47ec2943839e4ca5aa22c39f33c65ba"
+        },
+        "byte_length": 9
+      },
+      "summaries": [],
+      "visible_to_strategies": false
+    },
+    {
+      "kind": "log",
+      "item_id": "ev-log-1",
+      "privacy": "owner_only",
+      "capture_time": "2026-01-15T04:12:00Z",
+      "source": {
+        "reference": "app/checkout.log",
+        "captured_from": "synthetic fixture"
+      },
+      "media_type": "text/plain",
+      "format": "raw",
+      "content": {
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "533239a07d0f3691e3931542aa7feef9a768026beacd612ef5a51f31e0a34014"
+        },
+        "byte_length": 63
+      },
+      "summaries": [
+        {
+          "author": "duty-operator",
+          "kind": "human",
+          "text": "Upstream inventory timeouts start at 04:12Z.",
+          "created_at": "2026-01-15T05:00:00Z"
+        }
+      ],
+      "visible_to_strategies": true
+    },
+    {
+      "kind": "email",
+      "item_id": "ev-mail-1",
+      "privacy": "owner_only",
+      "capture_time": "2026-01-15T04:25:00Z",
+      "source": {
+        "reference": "alerts mailbox",
+        "captured_from": "synthetic fixture"
+      },
+      "media_type": "message/rfc822",
+      "content": {
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "9c602ba7c3208162c03b18ae095f6766d9736226d4fbb64f50ca061ee895b5b1"
+        },
+        "byte_length": 71
+      },
+      "summaries": [],
+      "visible_to_strategies": true
+    },
+    {
+      "kind": "external_file_server_reference",
+      "item_id": "ev-ref-1",
+      "privacy": "owner_only",
+      "capture_time": "2026-01-15T04:30:00Z",
+      "source": {
+        "reference": "fileserver archives, incident bundle",
+        "captured_from": "synthetic fixture"
+      },
+      "uri": "fileserver-archives/incident-bundle.bin",
+      "verification": "unverified",
+      "summaries": [],
+      "visible_to_strategies": true
+    }
+  ],
+  "notes": "synthetic fixture snapshot"
+}
