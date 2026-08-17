@@ -29,6 +29,7 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Notify;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -72,6 +73,7 @@ impl CapturedTraceEvent {
 #[derive(Default)]
 struct ChatTraceCapture {
     events: Mutex<Vec<CapturedTraceEvent>>,
+    wait_observer: Option<Arc<Notify>>,
 }
 
 struct FieldVisitor {
@@ -137,6 +139,9 @@ impl tracing::Subscriber for CaptureHandle {
             fields: BTreeMap::new(),
         };
         event.record(&mut visitor);
+        let is_wait = visitor
+            .message
+            .contains("waiting due to provider rate limit before retry");
         self.0
             .events
             .lock()
@@ -145,6 +150,11 @@ impl tracing::Subscriber for CaptureHandle {
                 message: visitor.message,
                 fields: visitor.fields,
             });
+        if is_wait {
+            if let Some(observer) = &self.0.wait_observer {
+                observer.notify_one();
+            }
+        }
     }
 
     fn enter(&self, _span: &tracing::span::Id) {}
@@ -154,7 +164,16 @@ impl tracing::Subscriber for CaptureHandle {
 
 impl ChatTraceCapture {
     fn install() -> (Arc<Self>, tracing::subscriber::DefaultGuard) {
-        let capture = Arc::new(Self::default());
+        Self::install_with_wait_observer(None)
+    }
+
+    fn install_with_wait_observer(
+        wait_observer: Option<Arc<Notify>>,
+    ) -> (Arc<Self>, tracing::subscriber::DefaultGuard) {
+        let capture = Arc::new(Self {
+            events: Mutex::new(Vec::new()),
+            wait_observer,
+        });
         let guard = tracing::subscriber::set_default(CaptureHandle(capture.clone()));
         (capture, guard)
     }
@@ -313,21 +332,6 @@ async fn complete_streaming_once(
     backend
         .complete_streaming(&user_message("oracle probe"), &[], &mut sink, cancel)
         .await
-}
-
-/// Flip `cancel` as soon as the wire has served `n` responses — the only
-/// deterministic way to cancel *inside* transport backoff.
-fn cancel_after_calls(calls: Arc<AtomicUsize>, n: usize, cancel: Arc<AtomicBool>) {
-    tokio::spawn(async move {
-        for _ in 0..5_000 {
-            if calls.load(Ordering::SeqCst) >= n {
-                cancel.store(true, Ordering::SeqCst);
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        }
-        cancel.store(true, Ordering::SeqCst);
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -566,7 +570,9 @@ async fn exhausted_429_is_an_explicit_rate_limit_failure_with_no_semantic_consum
 async fn traced_delay_for_retry_after(
     retry_after: Option<&'static str>,
 ) -> (Option<u64>, Option<String>) {
-    let (capture, _guard) = ChatTraceCapture::install();
+    let wait_observer = Arc::new(Notify::new());
+    let (capture, _guard) =
+        ChatTraceCapture::install_with_wait_observer(Some(wait_observer.clone()));
     let server = MockServer::start().await;
     let step = match retry_after {
         Some(value) => rate_limited(value),
@@ -576,9 +582,16 @@ async fn traced_delay_for_retry_after(
 
     let (backend, _recorder) = traced_backend(&server.uri()).await;
     let cancel = Arc::new(AtomicBool::new(false));
-    cancel_after_calls(wire_calls.clone(), 1, cancel.clone());
-    let error = complete_streaming_once(backend.as_ref(), Some(cancel.as_ref()))
+    let operation_cancel = cancel.clone();
+    let operation = tokio::spawn(async move {
+        complete_streaming_once(backend.as_ref(), Some(operation_cancel.as_ref())).await
+    });
+    wait_observer.notified().await;
+    tokio::task::yield_now().await;
+    cancel.store(true, Ordering::SeqCst);
+    let error = operation
         .await
+        .expect("transport operation task")
         .expect_err("cancellation interrupts the traced backoff");
     assert!(error.to_string().contains("cancelled"));
     assert_eq!(
@@ -647,17 +660,26 @@ async fn absent_retry_after_falls_back_to_the_bounded_default() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn cancellation_during_backoff_exits_promptly_without_further_requests() {
-    let (capture, _guard) = ChatTraceCapture::install();
+    let wait_observer = Arc::new(Notify::new());
+    let (capture, _guard) =
+        ChatTraceCapture::install_with_wait_observer(Some(wait_observer.clone()));
     let server = MockServer::start().await;
     let wire_calls = mount_steps(&server, vec![rate_limited("60")]).await;
 
     let (backend, recorder) = traced_backend(&server.uri()).await;
     let cancel = Arc::new(AtomicBool::new(false));
-    cancel_after_calls(wire_calls.clone(), 1, cancel.clone());
 
     let started = std::time::Instant::now();
-    let error = complete_streaming_once(backend.as_ref(), Some(cancel.as_ref()))
+    let operation_cancel = cancel.clone();
+    let operation = tokio::spawn(async move {
+        complete_streaming_once(backend.as_ref(), Some(operation_cancel.as_ref())).await
+    });
+    wait_observer.notified().await;
+    tokio::task::yield_now().await;
+    cancel.store(true, Ordering::SeqCst);
+    let error = operation
         .await
+        .expect("transport operation task")
         .expect_err("cancellation interrupts the backoff");
     let elapsed = started.elapsed();
 
@@ -713,14 +735,14 @@ async fn connection_reset_before_headers_is_terminal_without_protocol_replay() {
 // provider status and never as analysis failure.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn connection_refused_classifies_as_transport_failure_not_provider_status() {
-    // Bind then immediately drop a listener: the port is real but closed.
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.local_addr().expect("addr").port()
-    };
+async fn connection_failure_classifies_as_transport_failure_not_provider_status() {
+    // A reset-before-headers server is a cross-platform connection failure
+    // oracle. Binding and immediately dropping an ephemeral port is not
+    // deterministic on Windows because the next connect can race with port
+    // reuse or a delayed close.
+    let (base_url, accepted) = raw_fault_server(vec![RawConn::ResetBeforeHeaders]);
     let client = cd_core::chat::OpenAiCompatibleClient::new(
-        format!("http://127.0.0.1:{port}"),
+        base_url,
         None,
         "oracle-test-model",
         &SsrfPolicy::default(),
@@ -740,6 +762,7 @@ async fn connection_refused_classifies_as_transport_failure_not_provider_status(
         !message.contains("HTTP 4") && !message.contains("HTTP 5"),
         "a refused connection must not masquerade as an HTTP provider status: {message:?}"
     );
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
 }
 
 /// Read timeout before headers under a paused clock: the socket never

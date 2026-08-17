@@ -6,10 +6,11 @@ already fail-closes on a missing test shard; a ruleset is what makes a check a
 merge blocker.
 
 The active `main` ruleset is `20890073` (`main: require Ubuntu aggregate`). Its
-Ubuntu test requirement is exactly `rust tests (ubuntu aggregate)`.
-
-Draft #910 is the hosted-validation follow-up for the new macOS/Windows
-aggregates; it does not change that active requirement.
+Ubuntu suite gate is exactly `rust tests (ubuntu aggregate)`. The
+`rust (ubuntu-latest)` job is warmup (fmt, clippy, examples, smoke, and cache
+population), not the Ubuntu test suite and not the Ubuntu suite gate.
+The macOS/Windows aggregates are coverage signals and do not change that
+active requirement.
 
 ## What to require
 
@@ -47,13 +48,25 @@ only the Ubuntu aggregate named above.
   `cargo test --workspace` inside `rust (ubuntu-latest)`”. That job no longer
   executes the suite; requiring only `rust (ubuntu-latest)` would treat a
   skipped/failed shard matrix as irrelevant as long as fmt/clippy passed.
-- **`rust (ubuntu-latest)`**, **`rust (macos-latest)`**, and
-  **`rust (windows-latest)`** — these are warmup/quality jobs, not complete
-  workspace-suite gates. Requiring one of them alone would not protect the
-  corresponding shard aggregate.
+- `rust (ubuntu-latest)` is warmup and diagnostics only. It is intentionally
+  absent from the Ubuntu suite-gate list above; require exactly
+  `rust tests (ubuntu aggregate)` for that gate.
+- **`rust (macos-latest)`** and **`rust (windows-latest)`** are restore-only
+  preflights, not complete workspace-suite gates. Requiring one of them alone
+  would not protect the corresponding shard aggregate.
 - The macOS/Windows shard indexes are likewise signals. The per-OS aggregate
-  is the stable coverage check; the active ruleset will be revisited only after
-  hosted proof confirms the new lanes are warm and complete.
+  is the stable coverage check; the active ruleset still requires only
+  `rust tests (ubuntu aggregate)`.
+
+## Path-aware routing
+
+For a Rust-touching PR, `rust tests (ubuntu aggregate)` runs the complete
+fail-closed eight-shard workspace gate. A PR that changes only
+`crates/cd-triage-bench/**` (or benchmark documentation) skips the eight
+shards but keeps the same required check name and runs the complete
+`cd-triage-bench` test suite in the aggregate job. A collaboration-only path
+is routed only when no collaboration implementation is present; if source
+appears before its dedicated validator exists, the aggregate fails closed.
 
 ## How to verify a ruleset
 

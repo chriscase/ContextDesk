@@ -143,6 +143,11 @@ while [ "$i" -le "$SHARDS" ]; do
 
   case $status in
     pass) ;;
+    timeout)
+      inflight=$(jq -r '.in_flight // empty' "$file")
+      reason=$(jq -r '.termination // "step deadline"' "$file")
+      fail "shard $i/$SHARDS timed out ($reason)${inflight:+; in flight: $inflight}"
+      ;;
     incomplete | running)
       inflight=$(jq -r '.in_flight // empty' "$file")
       fail "shard $i/$SHARDS reported '$status' (cancelled, timed out, or lost runner)${inflight:+; in flight: $inflight}"

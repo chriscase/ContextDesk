@@ -40,7 +40,7 @@ Workspace roots are user-chosen paths in Settings; path allowlisting is in `cd_c
 ## Known caveats
 
 - **Linux CI** installs `libdbus-1-dev` for keyring compile; runtime Secret Service may be absent — tests must not require it.
-- **Workspace tests** run as eight Ubuntu shards and four macOS/Windows shards, each with a fail-closed aggregate (`docs/DEV.md`, #874). Conditional cache writers compile only on a miss; preflight jobs no longer execute the suite. See `docs/CI_REQUIRED_CHECKS.md` before wiring required checks.
+- **Workspace tests** run as eight Ubuntu shards and four macOS/Windows shards, each with a fail-closed aggregate (`docs/DEV.md`, #874). Conditional cache writers compile only on a miss; preflight jobs no longer execute the suite. See `docs/CI_REQUIRED_CHECKS.md` before wiring required checks. Path-aware PR routing can skip the Ubuntu shards for isolated bench/collab surfaces while keeping the same required check name.
 - **Windows path separators** (`\`) are handled by `std::path`; do not hard-code `/` in allowlist assertions beyond structural checks.
 - **Symlink escape** tests remain `#[cfg(unix)]` (symlink APIs differ on Windows).
 - **Real keychain I/O** is operator-local / `#[ignore]` if added later — never default CI.

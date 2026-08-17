@@ -15,6 +15,7 @@ PLAN="$ROOT/scripts/ci_shard_plan.sh"
 RUN="$ROOT/scripts/ci_run_shard.sh"
 AGG="$ROOT/scripts/ci_aggregate_shards.sh"
 CACHE="$ROOT/scripts/ci_record_cache.sh"
+MARK_TIMEOUT="$ROOT/scripts/ci_mark_shard_timeout.sh"
 WF="$ROOT/.github/workflows/ci.yml"
 
 fail() {
@@ -216,6 +217,40 @@ mv "$TMP/patched.json" "$TMP/incomplete/rust-ubuntu-shard-1/shard-1/status.json"
 expect_fail "an incomplete (cancelled/timed-out) shard must fail the gate" \
   sh "$AGG" --dir "$TMP/incomplete" --shards "$SHARDS"
 grep -q "incomplete" "$TMP/out" || fail "aggregate must mention incomplete status"
+
+make_results "$TMP/timeout"
+jq '.status = "timeout" | .termination = "step-deadline" | .in_flight = "cd-core/lib/log_analysis" | .units_finished = 3' \
+  "$TMP/timeout/rust-ubuntu-shard-1/shard-1/status.json" >"$TMP/patched.json"
+mv "$TMP/patched.json" "$TMP/timeout/rust-ubuntu-shard-1/shard-1/status.json"
+expect_fail "a timed-out shard must fail the gate" \
+  sh "$AGG" --dir "$TMP/timeout" --shards "$SHARDS"
+grep -q "timed out" "$TMP/out" || fail "aggregate must distinguish a timeout"
+grep -q "cd-core/lib/log_analysis" "$TMP/out" || fail "timeout must name the in-flight unit"
+
+# A controlled deadline must rewrite an incomplete status while preserving the
+# unit that was running. This also proves the marker is safe on a real artifact.
+expect_ok "timeout marker records the deadline" \
+  sh "$MARK_TIMEOUT" --dir "$TMP/timeout/rust-ubuntu-shard-1" --shard 1 --shards "$SHARDS"
+[ "$(jq -r '.status' "$TMP/timeout/rust-ubuntu-shard-1/shard-1/status.json")" = timeout ] ||
+  fail "timeout marker must set status=timeout"
+[ "$(jq -r '.in_flight' "$TMP/timeout/rust-ubuntu-shard-1/shard-1/status.json")" = cd-core/lib/log_analysis ] ||
+  fail "timeout marker must preserve in-flight"
+
+MISSING_TIMEOUT="$TMP/timeout-reconstructed/shard-1"
+mkdir -p "$MISSING_TIMEOUT"
+printf '%s\n' cd-core/test/log_lab cd-core/test/golden_retrieval >"$MISSING_TIMEOUT/plan.txt"
+printf '%s\n' \
+  '{"event":"start","phase":"test","unit":"cd-core/test/log_lab","tests_passed":0,"tests_failed":0,"tests_ignored":0}' \
+  >"$MISSING_TIMEOUT/progress.jsonl"
+expect_ok "timeout marker reconstructs missing status" \
+  sh "$MARK_TIMEOUT" --dir "$TMP/timeout-reconstructed" --shard 1 --shards 1
+[ "$(jq -r '.status' "$MISSING_TIMEOUT/status.json")" = timeout ] ||
+  fail "reconstructed timeout must set status=timeout"
+[ "$(jq -r '.in_flight' "$MISSING_TIMEOUT/status.json")" = cd-core/test/log_lab ] ||
+  fail "reconstructed timeout must name in-flight unit"
+expect_fail "reconstructed timeout must fail the aggregate" \
+  sh "$AGG" --dir "$TMP/timeout-reconstructed" --shards 1
+grep -q "cd-core/test/log_lab" "$TMP/out" || fail "reconstructed timeout must name in-flight unit"
 
 make_results "$TMP/hole"
 jq '.units = (.units[1:]) | .units_total = (.units_total - 1) | .units_finished = (.units_finished - 1)' \
@@ -596,6 +631,11 @@ if not run_steps:
     raise SystemExit("missing run shard step")
 if int(run_steps[0].get("timeout-minutes") or 0) < 1:
     raise SystemExit("run shard step must have a timeout so SIGTERM can write artifacts")
+run_text = run_steps[0].get("run") or ""
+if "timeout --signal=TERM --kill-after=60s 45m" not in run_text:
+    raise SystemExit("run shard must have an earlier controlled timeout with grace")
+if "ci_mark_shard_timeout.sh" not in run_text:
+    raise SystemExit("run shard must mark a controlled timeout before upload")
 
 print("workflow contracts ok")
 PY
