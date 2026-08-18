@@ -3321,7 +3321,10 @@ mod tests {
                 sink_cancel.store(true, Ordering::SeqCst);
             }
         });
+        let gap_request = inline_request(&policy);
         let mut gap_input = input();
+        gap_input.request_fingerprint =
+            cd_triage_runtime::canonical_request_fingerprint(&gap_request).expect("fingerprint");
         gap_input.cancel = Some(gap_cancel);
         let gap = runner
             .run_with_event_sink(
@@ -3344,6 +3347,8 @@ mod tests {
             .events
             .iter()
             .any(|event| matches!(&event.event, TriageRunEventPayloadV2::Cancelled { .. })));
+        cd_triage_runtime::replay(gap_request, gap.replay.clone())
+            .expect("late cancellation remains an authoritative runtime replay");
 
         // This cancellation is injected by a test-only seam immediately
         // before the runner's final non-awaiting observation. Earlier checks

@@ -627,6 +627,55 @@ fn replay_refuses_cross_event_packet_model_reconciliation_and_validation_drift()
 }
 
 #[test]
+fn post_validation_cancel_or_deadline_can_only_downgrade_the_terminal() {
+    let request = standard_request();
+    for terminal in [TerminalFixture::Cancelled, TerminalFixture::TimedOut] {
+        let mut interrupted = replay_for(&request, terminal);
+        if let TriageRunEventPayloadV2::Validation { passed, .. } = &mut interrupted.events[4].event
+        {
+            *passed = true;
+        }
+        match &mut interrupted.events[5].event {
+            TriageRunEventPayloadV2::Cancelled {
+                partial_result: Some(result),
+                ..
+            } => {
+                result.validation_state = TriageValidationState::Failed;
+                result.reason_codes.push("cancelled".into());
+            }
+            TriageRunEventPayloadV2::TimedOut {
+                category,
+                partial_result: Some(result),
+            } => {
+                *category = "deadline".into();
+                result.validation_state = TriageValidationState::Failed;
+                result.reason_codes.push("deadline".into());
+            }
+            _ => unreachable!(),
+        }
+        replay(request.clone(), interrupted)
+            .expect("a typed interruption may supersede a passed validation checkpoint");
+    }
+
+    let mut failed = replay_for(&request, TerminalFixture::Failed);
+    if let TriageRunEventPayloadV2::Validation { passed, .. } = &mut failed.events[4].event {
+        *passed = true;
+    }
+    if let TriageRunEventPayloadV2::Failed {
+        partial_result: Some(result),
+        ..
+    } = &mut failed.events[5].event
+    {
+        result.validation_state = TriageValidationState::Failed;
+        result.reason_codes.push("cancelled".into());
+    }
+    assert_eq!(
+        replay(request, failed).unwrap_err(),
+        TriageRuntimeError::ValidationResultMismatch
+    );
+}
+
+#[test]
 fn replay_refuses_malformed_order_and_cancellation_identity() {
     let request = standard_request();
     let mut malformed = replay_for(&request, TerminalFixture::Completed);

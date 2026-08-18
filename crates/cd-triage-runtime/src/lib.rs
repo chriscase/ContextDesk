@@ -490,14 +490,55 @@ fn validate_cross_event_bindings(
             return Err(TriageRuntimeError::ReconciliationMismatch);
         }
         let result_passed = result.validation_state == TriageValidationState::Passed;
-        if validation_passed.is_some_and(|passed| passed != result_passed)
-            || (validation_passed.is_none() && result_passed)
+        let validation_mismatch = validation_passed.is_some_and(|passed| passed != result_passed)
+            || (validation_passed.is_none() && result_passed);
+        // Validation is a checkpoint, not the terminal commit. A cancellation
+        // or whole-turn deadline observed after a passed checkpoint may only
+        // make the outcome more conservative. Accept that exact downgrade
+        // when the terminal strips the answer/evidence and records the typed
+        // interruption; never permit it for Completed or Failed terminals.
+        if validation_mismatch
+            && !post_validation_interruption_downgrade(validation_passed, terminal, result)
         {
             return Err(TriageRuntimeError::ValidationResultMismatch);
         }
     }
 
     Ok(())
+}
+
+fn post_validation_interruption_downgrade(
+    validation_passed: Option<bool>,
+    terminal: &TriageExecutionTerminal,
+    result: &TriageResultV2,
+) -> bool {
+    if validation_passed != Some(true)
+        || result.validation_state != TriageValidationState::Failed
+        || result.answer.is_some()
+        || !result.accepted_evidence_ids.is_empty()
+    {
+        return false;
+    }
+    match terminal {
+        TriageExecutionTerminal::Cancelled {
+            partial_result: Some(_),
+            ..
+        } => result.reason_codes.iter().any(|code| code == "cancelled"),
+        TriageExecutionTerminal::TimedOut {
+            category,
+            partial_result: Some(_),
+        } => category == "deadline" && result.reason_codes.iter().any(|code| code == "deadline"),
+        TriageExecutionTerminal::Completed { .. }
+        | TriageExecutionTerminal::Failed { .. }
+        | TriageExecutionTerminal::TimedOut {
+            partial_result: None,
+            ..
+        }
+        | TriageExecutionTerminal::Cancelled {
+            partial_result: None,
+            ..
+        } => false,
+    }
 }
 
 fn terminal_from_event(

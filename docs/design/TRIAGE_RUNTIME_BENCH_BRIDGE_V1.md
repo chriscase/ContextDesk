@@ -87,6 +87,10 @@ algorithms. Packet and corpus fingerprints remain separate evidence.
 Live event callbacks are provisional views. Before delivery, the facade binds
 each event to the request's run id and fingerprint and enforces contiguous
 sequence. Only the returned, fully cross-bound replay is authoritative.
+A passed validation checkpoint may be superseded only by a later typed
+`cancelled` or `timed_out` terminal whose honest partial is failed, carries no
+answer or accepted evidence, and names the matching interruption reason. A
+completed or ordinary failed terminal may never use that downgrade exception.
 
 ## ContextDesk host implementations
 
