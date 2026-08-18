@@ -477,6 +477,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Linux keyring deps
+        # A mirror outage must fail this mandatory dependency step promptly;
+        # do not let it consume the shard's entire job budget before the
+        # fail-closed aggregate can report the missing result.
         timeout-minutes: 10
         run: |
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
@@ -583,6 +586,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux keyring deps
+        # Keep mandatory dependency setup bounded so a mirror outage cannot
+        # hide the actual shard result behind the job timeout.
         timeout-minutes: 10
         run: |
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
@@ -978,6 +983,8 @@ jobs:
           components: rustfmt, clippy
       - name: Linux deps (keyring + webkit for Tauri link)
         if: runner.os == 'Linux'
+        # Tauri must not remain in-flight indefinitely when the Ubuntu mirror
+        # is unavailable; the dependency is mandatory and still fails closed.
         timeout-minutes: 10
         run: |
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
