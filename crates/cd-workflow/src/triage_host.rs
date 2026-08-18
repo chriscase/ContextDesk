@@ -208,10 +208,10 @@ fn validate_requested_scope(
     Ok(())
 }
 
-/// Align a stock/default phase cap with the host's remaining whole-turn
+/// Clamp a stock/default operation cap to the host's remaining whole-turn
 /// allowance. Explicit provenance is checked by [`align_stock_phase_caps`].
 fn align_stock_phase_cap(configured_ms: u64, remaining_ms: u64) -> u64 {
-    configured_ms.max(remaining_ms)
+    configured_ms.min(remaining_ms)
 }
 
 fn align_stock_phase_caps(policy: &mut TriagePolicyV2, remaining_ms: u64) {
@@ -230,6 +230,28 @@ fn align_stock_phase_caps(policy: &mut TriagePolicyV2, remaining_ms: u64) {
         align_stock_phase_cap(policy.budget.finalizer.operation_timeout_ms, remaining_ms);
     policy.budget.reviewer.operation_timeout_ms =
         align_stock_phase_cap(policy.budget.reviewer.operation_timeout_ms, remaining_ms);
+
+    let finalizer_reserve = policy
+        .finalizer
+        .as_ref()
+        .map(|_| policy.budget.finalizer.reserve_ms)
+        .unwrap_or(0);
+    let reviewer_reserve = policy
+        .reviewer
+        .as_ref()
+        .map(|_| policy.budget.reviewer.reserve_ms)
+        .unwrap_or(0);
+    let total_reserve = finalizer_reserve.saturating_add(reviewer_reserve);
+    if total_reserve > remaining_ms && total_reserve > 0 {
+        let bounded_finalizer = ((u128::from(remaining_ms) * u128::from(finalizer_reserve))
+            / u128::from(total_reserve)) as u64;
+        if policy.finalizer.is_some() {
+            policy.budget.finalizer.reserve_ms = bounded_finalizer;
+        }
+        if policy.reviewer.is_some() {
+            policy.budget.reviewer.reserve_ms = remaining_ms.saturating_sub(bounded_finalizer);
+        }
+    }
 }
 
 fn validate_preflight_profile_bindings(
@@ -662,10 +684,9 @@ pub async fn resolve_v2_host(
     // remaining allowance; otherwise an explicit original deadline would be
     // double-counted and the provider phase could outlive the request.
     //
-    // Align only stock/default phase caps to the remaining whole-turn
-    // allowance. Explicit user-authored caps remain authoritative, including
-    // a deliberately smaller cap that should fail closed rather than being
-    // silently enlarged.
+    // Resolve only stock/default operation caps and terminal reserves against
+    // the remaining whole-turn allowance. Explicit user-authored values remain
+    // authoritative and fail closed when their active reserves cannot fit.
     let mut execution_policy = policy.clone();
     execution_policy.budget.whole_turn_deadline_ms = Some(remaining_deadline_ms);
     align_stock_phase_caps(&mut execution_policy, remaining_deadline_ms);
@@ -726,7 +747,8 @@ mod tests {
     use cd_core::investigation_answer::{EvidenceRole, HostEvidenceEntry, HostEvidenceLedger};
     use cd_core::model_ref::ModelRef;
     use cd_core::multi_model::triage_policy::{
-        RolePreflightV2, RoleQualificationV2, RoleRequirement, TriageBudgetV2, TriageSlotKindV2,
+        ReviewerConditionV2, ReviewerSlotV2, RolePreflightV2, RoleQualificationV2, RoleRequirement,
+        TriageBudgetV2, TriageSlotKindV2,
     };
     use cd_core::providers::ProviderProfile;
     use cd_core::triage_role_qualification::{
@@ -780,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn stock_phase_caps_align_to_remaining_host_budget() {
+    fn stock_phase_caps_preserve_smaller_operation_limits() {
         let mut policy = TriagePolicyV2::standard(
             ModelRef {
                 profile_id: "profile:test".into(),
@@ -794,12 +816,49 @@ mod tests {
         let stock = TriageBudgetV2::default();
         assert_eq!(
             policy.budget.contributors.operation_timeout_ms,
+            stock.contributors.operation_timeout_ms
+        );
+        assert_eq!(
+            policy.budget.corrections.operation_timeout_ms,
+            stock.corrections.operation_timeout_ms
+        );
+        assert_eq!(
+            policy.budget.finalizer.operation_timeout_ms,
+            stock.finalizer.operation_timeout_ms
+        );
+        assert_eq!(
+            policy.budget.reviewer.operation_timeout_ms,
+            stock.reviewer.operation_timeout_ms
+        );
+        assert!(stock.contributors.operation_timeout_ms < remaining_ms);
+    }
+
+    #[test]
+    fn stock_phase_caps_and_active_reserves_fit_shorter_remaining_turn() {
+        let model = ModelRef {
+            profile_id: "profile:test".into(),
+            model_id: "model:test".into(),
+        };
+        let mut policy = TriagePolicyV2::standard(model.clone(), false);
+        policy.mode = TriagePolicyMode::Enhanced;
+        policy.reviewer = Some(ReviewerSlotV2 {
+            slot_id: "reviewer".into(),
+            model,
+            condition: ReviewerConditionV2::ContestedOrIncomplete,
+            requirement: RoleRequirement::Optional,
+            allow_remote: false,
+        });
+        let remaining_ms = 60_000;
+        align_stock_phase_caps(&mut policy, remaining_ms);
+        assert_eq!(
+            policy.budget.contributors.operation_timeout_ms,
             remaining_ms
         );
         assert_eq!(policy.budget.corrections.operation_timeout_ms, remaining_ms);
         assert_eq!(policy.budget.finalizer.operation_timeout_ms, remaining_ms);
         assert_eq!(policy.budget.reviewer.operation_timeout_ms, remaining_ms);
-        assert!(stock.contributors.operation_timeout_ms < remaining_ms);
+        assert_eq!(policy.budget.finalizer.reserve_ms, 30_000);
+        assert_eq!(policy.budget.reviewer.reserve_ms, 30_000);
     }
 
     #[test]

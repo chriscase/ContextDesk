@@ -478,7 +478,7 @@ fn deadlines_are_not_silently_weakened() {
     let mut smaller_cap = policy.clone();
     smaller_cap.budget.whole_turn_deadline_ms = None;
     smaller_cap.budget.contributors.operation_timeout_ms = HOST_DEADLINE_MS - 1;
-    let error = prepare_v2_contribution_runtime(
+    let prepared = prepare_v2_contribution_runtime(
         &smaller_cap,
         &preflight(&smaller_cap),
         vec![empty_backend(&smaller_cap.contributors[0])],
@@ -486,9 +486,10 @@ fn deadlines_are_not_silently_weakened() {
         100_000,
         Default::default(),
     )
-    .expect_err("unsupported smaller operation cap");
+    .expect("smaller per-contributor cap is enforced by the wrapped backend");
     assert_eq!(
-        category(error),
-        TriageProductionAdapterRejectionV1::ContributorOperationCapUnsupported
+        prepared.compiled.budget.contributors.operation_timeout_ms,
+        HOST_DEADLINE_MS - 1
     );
+    assert_eq!(prepared.runtime.plan.policy.max_parallel, 1);
 }
