@@ -20,6 +20,9 @@ request/cancellation identity and its own validated replay and persisted
 shared cache, source limits, and cancellation identity are required. The
 resulting rows are immediately consumable by the existing honest bench report
 projection, which preserves failed/partial runs and does not rank candidates.
+If a later candidate or cleanup fails, `LiveComparisonFailure` carries the
+already persisted rows alongside the error so callers can report their durable
+run identities without presenting an incomplete comparison as successful.
 
 The first live version accepts raw log evidence only. It rejects summaries,
 time filters, non-log evidence, missing raw bytes, external-only references,
