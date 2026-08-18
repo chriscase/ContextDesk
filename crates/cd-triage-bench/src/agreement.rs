@@ -64,7 +64,7 @@ const NOTES: &[&str] = &[
     "Agreement is computed only within one exact evaluation task and evidence snapshot.",
     "Agreement is not correctness: concurring strategies can be wrong together.",
     "An anchor requires a claim cited to a visible snapshot evidence item. Claim text is never compared.",
-    "Independent corroboration counts distinct source identities, not runs: two candidates on one model are not independent.",
+    "Independent model corroboration counts distinct exact model identities, not runs: imported sources are not model witnesses and two candidates on one model are not independent.",
     "The same evidence cited under different causal roles is a conflict, not agreement.",
     "Failed, partial, timed-out, and cancelled runs stay listed and contribute no anchors.",
     "This projection assigns no score, rank, readiness, or winner.",
@@ -232,8 +232,8 @@ pub struct EvidenceAnchor {
     pub distinct_source_count: u32,
     /// Number of distinct exact model identities among SDK rows here.
     pub distinct_model_identity_count: u32,
-    /// Two or more distinct sources. Two candidates on one model are not
-    /// independent and this stays `false`.
+    /// Two or more distinct exact model identities. Imported sources have no
+    /// model identity and therefore never make this `true`.
     pub independent: bool,
     /// Exactly one run claimed this anchor.
     pub sole_support: bool,
@@ -344,7 +344,7 @@ pub struct ShareSafeEvidenceAnchor {
     pub distinct_source_count: u32,
     /// Number of distinct exact model identities.
     pub distinct_model_identity_count: u32,
-    /// Two or more distinct sources.
+    /// Two or more distinct exact model identities.
     pub independent: bool,
     /// Exactly one run claimed this anchor.
     pub sole_support: bool,
@@ -699,7 +699,7 @@ fn build_group_view(
             role_bucket,
             distinct_source_count: sources.len() as u32,
             distinct_model_identity_count: models.len() as u32,
-            independent: sources.len() >= 2,
+            independent: models.len() >= 2,
             sole_support: run_ids.len() == 1,
             concurring_run_ids: run_ids.into_iter().collect(),
             concurring_source_identities: sources.into_iter().collect(),

@@ -676,7 +676,8 @@ fn imported_rows_use_the_unknown_bucket_and_never_merge_with_typed_claims() {
 }
 
 /// Two imported rows from distinct sources do corroborate each other, which is
-/// the path that makes `unknown` useful instead of inert.
+/// the path that makes `unknown` useful instead of inert, but they are not
+/// independent model witnesses because no model identities are available.
 #[test]
 fn two_distinct_imported_sources_concur_in_the_unknown_bucket() {
     let task = task(&["ev-1"]);
@@ -713,7 +714,7 @@ fn two_distinct_imported_sources_concur_in_the_unknown_bucket() {
     assert_eq!(anchor.role_bucket, RoleBucket::Unknown);
     assert_eq!(anchor.distinct_source_count, 2);
     assert_eq!(anchor.distinct_model_identity_count, 0);
-    assert!(anchor.independent);
+    assert!(!anchor.independent);
     assert!(view.role_conflicts.is_empty());
 }
 

@@ -219,12 +219,14 @@ reported in `role_conflicts`, never merged into one anchor. Runs inside a single
 bucket still concur with each other; the disagreement about what the evidence
 *means* is stated rather than averaged away.
 
-**Independence.** `independent` is true only when two or more distinct *source
-identities* claimed an anchor. An SDK row's identity is its exact
+**Independence.** `independent` is true only when two or more distinct exact
+*model identities* claimed an anchor. An SDK row's identity is its exact
 profile/model pair, so two comparison candidates that resolved to one model
-concur without being independent corroboration. An imported row's identity is
-`<source_kind>::<strategy_name>`, so a human write-up and a model are two
-sources. `distinct_model_identity_count` is reported alongside.
+concur without being independent corroboration. Imported rows retain their
+distinct source identities and can show `unknown`-bucket convergence, but they
+have no model identity and therefore are never labeled independent model
+corroboration. `distinct_source_count` and `distinct_model_identity_count` are
+reported separately.
 
 **Full claim graph.** For ContextDesk SDK rows the projection reads the
 owner-only replay envelope, not `TriageRun.claims`: that flattened summary keeps
