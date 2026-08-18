@@ -1077,6 +1077,16 @@ mod tests {
         );
         store.put_blob(bytes).unwrap();
         store.put_snapshot(&snapshot).unwrap();
+        assert!(matches!(
+            store.get_snapshot_bounded(&snapshot.snapshot_id, (bytes.len() - 1) as u64),
+            Err(BenchError::BlobTooLarge { .. })
+        ));
+        assert_eq!(
+            store
+                .get_snapshot_bounded(&snapshot.snapshot_id, bytes.len() as u64)
+                .unwrap(),
+            snapshot
+        );
         let task = EvaluationTask::from_parts(
             PrivacyClass::OwnerOnly,
             "case-1".into(),
