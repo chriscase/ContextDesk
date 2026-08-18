@@ -856,8 +856,8 @@ identities and task-linked provenance are retained; use the existing
 `cd-triage-bench report --privacy share-safe` projection for an explicit
 share-safe artifact. If an infrastructure error stops a later candidate, rows
 already persisted remain durable and can be rendered with the bench report;
-the command returns that error rather than presenting an incomplete comparison
-as successful.
+the command returns that error together with their persisted run IDs rather
+than presenting an incomplete comparison as successful.
 
 Global flags (available on every subcommand): `--format`, `--json`,
 `--jsonl`, `--color`, `--config <path>`, `--app-config <path>`,

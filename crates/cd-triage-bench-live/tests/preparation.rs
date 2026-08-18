@@ -759,7 +759,8 @@ async fn comparison_rejects_empty_candidates_before_preparation() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error, LiveBridgeError::EmptyComparison);
+    assert_eq!(error.error, LiveBridgeError::EmptyComparison);
+    assert!(error.runs.is_empty());
     assert!(!cache.path().join("log_corpora").exists());
 }
 

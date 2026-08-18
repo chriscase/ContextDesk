@@ -274,7 +274,15 @@ pub async fn run(
     .await;
     signal_task.abort();
 
-    let live = live.map_err(map_bridge_error)?;
+    let live = match live {
+        Ok(live) => live,
+        Err(failure) => {
+            return Err(map_bridge_error_with_persisted_runs(
+                failure.error,
+                &failure.runs,
+            ))
+        }
+    };
     let mut attribution = BTreeMap::new();
     let mut runs = Vec::with_capacity(live.runs.len());
     for run in live.runs {
@@ -486,6 +494,22 @@ fn map_bridge_error(error: LiveBridgeError) -> CliError {
         | LiveBridgeError::Cleanup
         | LiveBridgeError::FailureAndCleanup => CliError::internal(message),
     }
+}
+
+fn map_bridge_error_with_persisted_runs(
+    error: LiveBridgeError,
+    runs: &[cd_triage_bench_live::LiveRunResult],
+) -> CliError {
+    let mut mapped = map_bridge_error(error);
+    if !runs.is_empty() {
+        let run_ids = runs
+            .iter()
+            .map(|run| run.recorded.bench_run.run_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        mapped.message = format!("{}; persisted run ids: {}", mapped.message, run_ids);
+    }
+    mapped
 }
 
 #[cfg(test)]

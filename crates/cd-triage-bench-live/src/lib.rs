@@ -194,6 +194,17 @@ pub struct LiveComparisonResult {
     pub runs: Vec<LiveRunResult>,
 }
 
+/// A comparison failure together with every run that was durably persisted
+/// before the failure. The rows remain reportable even when the comparison
+/// cannot honestly be returned as a complete success.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveComparisonFailure {
+    /// The fail-closed bridge error.
+    pub error: LiveBridgeError,
+    /// Durable rows completed before the failure or cleanup error.
+    pub runs: Vec<LiveRunResult>,
+}
+
 /// A verified, run-exclusive corpus prepared from one exact task visibility.
 ///
 /// Dropping this value makes a best-effort discard. Call [`Self::cleanup`]
@@ -596,12 +607,18 @@ pub async fn run_live_comparison(
     task: &EvaluationTask,
     secrets: Arc<dyn SecretStore>,
     candidates: Vec<LiveComparisonCandidate>,
-) -> Result<LiveComparisonResult, LiveBridgeError> {
+) -> Result<LiveComparisonResult, LiveComparisonFailure> {
     if candidates.is_empty() {
-        return Err(LiveBridgeError::EmptyComparison);
+        return Err(comparison_failure(
+            LiveBridgeError::EmptyComparison,
+            Vec::new(),
+        ));
     }
     if candidates.len() > DEFAULT_MAX_COMPARISON_CANDIDATES {
-        return Err(LiveBridgeError::ComparisonCandidateBound);
+        return Err(comparison_failure(
+            LiveBridgeError::ComparisonCandidateBound,
+            Vec::new(),
+        ));
     }
 
     let first = &candidates[0].options;
@@ -618,12 +635,15 @@ pub async fn run_live_comparison(
             || !Arc::ptr_eq(&first.cancel.inner_arc(), &options.cancel.inner_arc())
             || !cancellation_ids.insert(options.cancellation_id.as_str())
         {
-            return Err(LiveBridgeError::ComparisonInvariant);
+            return Err(comparison_failure(
+                LiveBridgeError::ComparisonInvariant,
+                Vec::new(),
+            ));
         }
     }
 
     let started = Instant::now();
-    let mut prepared = prepare_same_snapshot_with_deadline(
+    let mut prepared = match prepare_same_snapshot_with_deadline(
         store,
         case,
         snapshot,
@@ -633,7 +653,11 @@ pub async fn run_live_comparison(
         &first.cancel,
         Some(comparison_deadline_ms),
     )
-    .await?;
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => return Err(comparison_failure(error, Vec::new())),
+    };
 
     let mut runs = Vec::with_capacity(candidates.len());
     for candidate in candidates {
@@ -642,12 +666,18 @@ pub async fn run_live_comparison(
             events,
         } = candidate;
         if options.cancel.is_cancelled() {
-            return finish_with_cleanup(&mut prepared, Err(LiveBridgeError::Cancelled));
+            return finish_comparison_with_cleanup(
+                &mut prepared,
+                Err(comparison_failure(LiveBridgeError::Cancelled, runs)),
+            );
         }
         let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let remaining = comparison_deadline_ms.saturating_sub(elapsed_ms);
         if remaining == 0 {
-            return finish_with_cleanup(&mut prepared, Err(LiveBridgeError::Deadline));
+            return finish_comparison_with_cleanup(
+                &mut prepared,
+                Err(comparison_failure(LiveBridgeError::Deadline, runs)),
+            );
         }
         options.overrides.deadline_ms = Some(
             options
@@ -671,11 +701,16 @@ pub async fn run_live_comparison(
         .await;
         match result {
             Ok(result) => runs.push(result),
-            Err(error) => return finish_with_cleanup(&mut prepared, Err(error)),
+            Err(error) => {
+                return finish_comparison_with_cleanup(
+                    &mut prepared,
+                    Err(comparison_failure(error, runs)),
+                )
+            }
         }
     }
 
-    finish_with_cleanup(&mut prepared, Ok(LiveComparisonResult { runs }))
+    finish_comparison_with_cleanup(&mut prepared, Ok(LiveComparisonResult { runs }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -859,6 +894,26 @@ fn finish_with_cleanup<T>(
     result: Result<T, LiveBridgeError>,
 ) -> Result<T, LiveBridgeError> {
     reconcile_cleanup(result, prepared.discard())
+}
+
+fn comparison_failure(error: LiveBridgeError, runs: Vec<LiveRunResult>) -> LiveComparisonFailure {
+    LiveComparisonFailure { error, runs }
+}
+
+fn finish_comparison_with_cleanup(
+    prepared: &mut PreparedSameSnapshotCorpus,
+    result: Result<LiveComparisonResult, LiveComparisonFailure>,
+) -> Result<LiveComparisonResult, LiveComparisonFailure> {
+    let cleanup = prepared.discard();
+    match (result, cleanup) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Ok(result), Err(_)) => Err(comparison_failure(LiveBridgeError::Cleanup, result.runs)),
+        (Err(failure), Ok(())) => Err(failure),
+        (Err(mut failure), Err(_)) => {
+            failure.error = LiveBridgeError::FailureAndCleanup;
+            Err(failure)
+        }
+    }
 }
 
 fn reconcile_cleanup<T>(
