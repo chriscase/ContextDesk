@@ -10,6 +10,12 @@ import { IconClose, IconExpand, IconSend } from "./icons";
 import type { ModelOptionDto } from "../lib/host";
 import { curateModels } from "../lib/modelCuration";
 import { modelReadinessLabel } from "../lib/modelReadiness";
+import {
+  CONFIGURED_TRIAGE_MODE_UNAVAILABLE,
+  TRIAGE_POLICY_MODES,
+  triageModeAvailable,
+  type TriagePolicyMode,
+} from "../lib/triagePolicyV2";
 
 type Props = {
   /** Return `false` to reject the send (draft is preserved). */
@@ -52,6 +58,9 @@ type Props = {
   onRetryModelTools?: (model: ModelOptionDto) => Promise<void> | void;
   /** Linked-log turns must use host-resolved corpus evidence instead. */
   allowUserSelection?: boolean;
+  /** Triage Policy V2 control, present only for an explicitly linked corpus. */
+  triageMode?: TriagePolicyMode;
+  onTriageModeChange?: (mode: TriagePolicyMode) => void;
 };
 
 export const MAX_USER_SELECTION_CHARS = 2_000;
@@ -72,6 +81,8 @@ export function Composer({
   disabledReason,
   onRetryModelTools,
   allowUserSelection = true,
+  triageMode,
+  onTriageModeChange,
 }: Props) {
   const [retryingTools, setRetryingTools] = useState(false);
   const [localValue, setLocalValue] = useState("");
@@ -150,7 +161,14 @@ export function Composer({
 
   const submit = useCallback(async () => {
     const t = value.trim();
-    if (!t || disabled || busy || submittingRef.current) return;
+    if (
+      !t ||
+      disabled ||
+      busy ||
+      (triageMode != null && !triageModeAvailable(triageMode)) ||
+      submittingRef.current
+    )
+      return;
     // Whether the caret was ours must be decided *now*: by the time the turn
     // resolves, clicking Send has already disabled that button and dropped
     // focus to <body>, which is indistinguishable from the user clicking away.
@@ -185,7 +203,15 @@ export function Composer({
       setValue(t);
       setUserSelection(selected);
     }
-  }, [value, userSelection, disabled, busy, onSubmit, setValue]);
+  }, [
+    value,
+    userSelection,
+    disabled,
+    busy,
+    triageMode,
+    onSubmit,
+    setValue,
+  ]);
 
   const insertSnippet = (snippet: string) => {
     setValue((v) => (v ? `${v}\n${snippet}` : snippet));
@@ -215,7 +241,10 @@ export function Composer({
     models.find((m) => m.selection_key === selectValue)?.is_default,
   );
 
-  const canSend = !disabled && !busy && Boolean(value.trim());
+  const triageUnavailable =
+    triageMode != null && !triageModeAvailable(triageMode);
+  const canSend =
+    !disabled && !busy && !triageUnavailable && Boolean(value.trim());
   /**
    * What the composer is doing, in the user's terms. A streaming turn always
    * keeps its own wording (it is what Stop refers to); any other reason is
@@ -223,14 +252,17 @@ export function Composer({
    * still usable — unresolved setup, say — is shown too, so the explanation
    * never depends on the input also being disabled.
    */
-  const statusHint = busy
-    ? `Waiting for the response — Stop to cancel${
-        disabledReason ? ` · ${disabledReason}` : ""
-      }`
+  const idleStatusHint = triageUnavailable
+    ? CONFIGURED_TRIAGE_MODE_UNAVAILABLE
     : (disabledReason ??
       (disabled
         ? "Sending is paused right now"
         : "Enter ↵ · Shift+Enter newline"));
+  const statusHint = busy
+    ? `Waiting for the response — Stop to cancel${
+        disabledReason ? ` · ${disabledReason}` : ""
+      }`
+    : idleStatusHint;
 
   return (
     <div
@@ -342,6 +374,31 @@ export function Composer({
             </label>
           ) : null}
 
+          {triageMode && onTriageModeChange ? (
+            <label className="composer__pill" title="Triage Policy V2 mode">
+              <span className="composer__pill-label">Policy</span>
+              <select
+                className="composer__pill-select"
+                value={triageMode}
+                disabled={busy}
+                aria-label="Triage Policy V2 mode"
+                aria-describedby={
+                  triageUnavailable ? `${id}-hint` : undefined
+                }
+                onChange={(event) =>
+                  onTriageModeChange(event.target.value as TriagePolicyMode)
+                }
+              >
+                {TRIAGE_POLICY_MODES.map((mode) => (
+                  <option key={mode.value} value={mode.value}>
+                    {mode.label}
+                    {mode.available ? "" : " · unavailable"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+
           {curated.truncated > 0 ? (
             <span className="composer__capability" role="status">
               {curated.truncated} more model
@@ -439,8 +496,16 @@ export function Composer({
           <span
             className="composer__hint"
             id={`${id}-hint`}
-            data-kind={disabled || busy || disabledReason ? "status" : "keys"}
-            role={disabled || busy || disabledReason ? "status" : undefined}
+            data-kind={
+              disabled || busy || disabledReason || triageUnavailable
+                ? "status"
+                : "keys"
+            }
+            role={
+              disabled || busy || disabledReason || triageUnavailable
+                ? "status"
+                : undefined
+            }
           >
             {statusHint}
           </span>

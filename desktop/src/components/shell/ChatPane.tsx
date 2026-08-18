@@ -38,6 +38,10 @@ import { ActivityToggle } from "../activity/ActivityToggle";
 import { ActivityDrawer } from "../activity/ActivityDrawer";
 import { ActivityDock } from "../activity/ActivityDock";
 import { MAX_DOCK_WIDTH, MIN_DOCK_WIDTH } from "../../lib/activity/prefs";
+import type {
+  TriagePolicyMode,
+  TriageTurnSelection,
+} from "../../lib/triagePolicyV2";
 
 export const MIN_CHAT_MAIN_WIDTH_PX = 400;
 const ACTIVITY_DOCK_LAYOUT_GAP_PX = 1;
@@ -153,7 +157,11 @@ export type ChatPaneProps = {
   modelOptions: ModelOptionDto[];
   setSessionModel: (key: string) => void;
   setAppDefaultModel: (key: string) => void;
-  onSubmit: (text: string, userSelection?: string) => Promise<boolean>;
+  onSubmit: (
+    text: string,
+    userSelection?: string,
+    triage?: TriageTurnSelection,
+  ) => Promise<boolean>;
   onStop: () => void;
   preflightBlocking: boolean;
   /**
@@ -249,6 +257,14 @@ export function ChatPane(props: ChatPaneProps) {
     id: number;
     text: string;
   } | null>(null);
+  const [triageMode, setTriageMode] =
+    useState<TriagePolicyMode>("standard");
+
+  // Policy choice is intentionally ephemeral and defaults safely for every
+  // conversation/corpus. Changing it performs no preflight or provider work.
+  useEffect(() => {
+    setTriageMode("standard");
+  }, [resolvedSessionId, linkedCorpusId]);
 
   const fillStarter = (prompt: string) => {
     setSeedRequest({ id: Date.now(), text: prompt });
@@ -994,7 +1010,15 @@ export function ChatPane(props: ChatPaneProps) {
           onLinkedCorpusChange={onLinkedCorpusChange}
         />
         <Composer
-          onSubmit={onSubmit}
+          onSubmit={(text, userSelection) =>
+            onSubmit(
+              text,
+              userSelection,
+              linkedCorpusId
+                ? { mode: triageMode, corpusId: linkedCorpusId }
+                : undefined,
+            )
+          }
           disabled={busy || contextMutationPending}
           busy={busy}
           disabledReason={
@@ -1017,6 +1041,8 @@ export function ChatPane(props: ChatPaneProps) {
           onDraftChange={onDraftChange}
           onRetryModelTools={onRetryModelTools}
           allowUserSelection={!linkedCorpusId}
+          triageMode={linkedCorpusId ? triageMode : undefined}
+          onTriageModeChange={linkedCorpusId ? setTriageMode : undefined}
         />
       </div>
       </div>

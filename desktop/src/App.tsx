@@ -248,6 +248,7 @@ export function App() {
     setSourcePath: shell.setSourcePath,
     setSourceContent: shell.setSourceContent,
     setPaneChat: () => shell.setPane("chat"),
+    triageService: tauriEngine.triage,
   });
 
   const effectiveModelKey = (() => {
