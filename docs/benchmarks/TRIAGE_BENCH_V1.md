@@ -1,10 +1,12 @@
 # Incident-triage evaluation bench v1
 
 **Status:** **Local integration.** The store/entities, manual
-import/provenance, rubric v1 expert adjudication, report-only comparison,
-public-SDK adapter, deterministic mock runner, and validated replay ingestion
-are implemented. Live same-snapshot provider execution remains residual. This
-does not close epic #876 and is not a readiness or release claim.
+import/provenance, rubric v1 expert adjudication, same-snapshot comparison
+reporting, public-SDK adapter, deterministic mock runner, validated replay
+ingestion, and bounded live same-snapshot provider bridge are implemented.
+Broader live visibility shapes, user-facing orchestration, and release
+integration remain residual. This does not close epic #876 and is not a
+readiness or release claim.
 
 ## Purpose
 
