@@ -1,0 +1,184 @@
+{
+  "events": [
+    {
+      "event": {
+        "kind": "run_started",
+        "policy_fingerprint": "pol-c7a235fa5111213dabf63a99638a716270ae514e27fb0679de77a19226e26026",
+        "request_fingerprint": "sha256:cc0b710c06ee8d22d6bc88f115c66288e4c6e8eef4104af99b69dba4b0e23c4d"
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 0
+    },
+    {
+      "event": {
+        "evidence_count": 1,
+        "kind": "packet_ready",
+        "packet_digest": "pkf-88dedf80b356209a89a76b05513e1f8ca338d6124d7914f92637607a377b4bab",
+        "packet_id": "pkt-c27ea96f6e74f80effd0f588d67c86068feda2c08d8867c3241cd73eb7b1bc85"
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 1
+    },
+    {
+      "event": {
+        "attempt": {
+          "attempt_id": "att-6d8ab310e9f714c129ea7178fb0a69277dc274c11c7727071912e4ad9c4e075f",
+          "elapsed_ms": 1,
+          "input_chars": 1,
+          "model": {
+            "model_id": "mock-finalizer-v1",
+            "profile_id": "profile:mock-gateway"
+          },
+          "output_chars": 1,
+          "physical_provider_calls": 0,
+          "role": "finalizer",
+          "role_slot_id": "standard-finalizer",
+          "semantic_corrections": 0,
+          "status": "completed",
+          "terminal_disposition": "completed"
+        },
+        "kind": "role_attempt"
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 2
+    },
+    {
+      "event": {
+        "kind": "reconciliation",
+        "summary": {
+          "completed_role_slots": 1,
+          "configured_role_slots": 1,
+          "distinct_gateways": 1,
+          "distinct_models": 1,
+          "root_cause_established": true,
+          "state": "reconciled",
+          "supported_claim_ids": [
+            "claim-ev-demo-checkout-log"
+          ]
+        }
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 3
+    },
+    {
+      "event": {
+        "kind": "validation",
+        "passed": true
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 4
+    },
+    {
+      "event": {
+        "kind": "completed",
+        "result": {
+          "accepted_evidence_ids": [
+            "ev-demo-checkout-log"
+          ],
+          "answer": {
+            "answer": {
+              "candidates": [
+                {
+                  "candidate_id": "cand-mock-1",
+                  "claims": [
+                    {
+                      "candidate_id": "cand-mock-1",
+                      "claim_id": "claim-ev-demo-checkout-log",
+                      "claim_kind": "observation",
+                      "evidence_ids": [
+                        "ev-demo-checkout-log"
+                      ],
+                      "status": "supported",
+                      "text": "deterministic mock: log evidence ev-demo-checkout-log is in scope for cand-mock-1"
+                    }
+                  ]
+                }
+              ],
+              "canonical_citations": [
+                {
+                  "candidate_id": "cand-mock-1",
+                  "content": "sha256:959969b69cac6ba8280a8cb6836226d91a621122a16703109cb690d5e7a50f75 (487 bytes held)",
+                  "corpus_id": "snap-5a75de4d710765b3fbb87afdc85beb25fd96f23b46ef4c59d416aa7ae61bbceb",
+                  "evidence_id": "ev-demo-checkout-log",
+                  "locator": "ev-demo-checkout-log",
+                  "revision": {
+                    "event_revision": 0,
+                    "suppression_revision": 0,
+                    "template_analysis_revision": 0
+                  },
+                  "source_label": "log"
+                }
+              ],
+              "root_cause_established": true,
+              "schema": "contextdesk.investigation_answer.v1"
+            },
+            "binding": {
+              "corpus_id": "snap-5a75de4d710765b3fbb87afdc85beb25fd96f23b46ef4c59d416aa7ae61bbceb",
+              "ledger_digest": "pkf-88dedf80b356209a89a76b05513e1f8ca338d6124d7914f92637607a377b4bab",
+              "revision": {
+                "event_revision": 0,
+                "suppression_revision": 0,
+                "template_analysis_revision": 0
+              },
+              "session_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+              "turn_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3-turn-1"
+            },
+            "evidence": [
+              {
+                "candidate_id": "cand-mock-1",
+                "content": "sha256:959969b69cac6ba8280a8cb6836226d91a621122a16703109cb690d5e7a50f75 (487 bytes held)",
+                "corpus_id": "snap-5a75de4d710765b3fbb87afdc85beb25fd96f23b46ef4c59d416aa7ae61bbceb",
+                "evidence_id": "ev-demo-checkout-log",
+                "locator": "ev-demo-checkout-log",
+                "revision": {
+                  "event_revision": 0,
+                  "suppression_revision": 0,
+                  "template_analysis_revision": 0
+                },
+                "role": "supporting",
+                "source_label": "log"
+              }
+            ],
+            "semantic_attempts": 1
+          },
+          "kind": "grounded_final",
+          "packet_id": "pkt-c27ea96f6e74f80effd0f588d67c86068feda2c08d8867c3241cd73eb7b1bc85",
+          "reason_codes": [
+            "deterministic_mock"
+          ],
+          "reconciliation": {
+            "completed_role_slots": 1,
+            "configured_role_slots": 1,
+            "distinct_gateways": 1,
+            "distinct_models": 1,
+            "root_cause_established": true,
+            "state": "reconciled",
+            "supported_claim_ids": [
+              "claim-ev-demo-checkout-log"
+            ]
+          },
+          "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+          "schema_id": "contextdesk.triage.result.v2",
+          "validation_state": "passed"
+        }
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 5
+    }
+  ],
+  "request_fingerprint": "sha256:cc0b710c06ee8d22d6bc88f115c66288e4c6e8eef4104af99b69dba4b0e23c4d",
+  "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+  "schema_id": "contextdesk.triage.replay.v1"
+}

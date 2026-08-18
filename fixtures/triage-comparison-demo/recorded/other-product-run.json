@@ -1,0 +1,24 @@
+{
+  "schema_id": "contextdesk.triage_bench.run_import.v1",
+  "task_id": "task-162aec8ca84e72ecfc9164d4168d18b6e41367e7c10e9c23aef086bf83bfd007",
+  "strategy": {
+    "name": "demo-other-product-export",
+    "version": { "status": "unknown" },
+    "build": { "status": "unknown" }
+  },
+  "source_kind": "other_product",
+  "prompt_workflow": {
+    "completeness": "unknown",
+    "prompt": { "status": "unknown" },
+    "workflow": { "status": "unknown" }
+  },
+  "raw_output_utf8": "Exported write-up from a fictional other-product session: checkout request req-demo-1 returned 500 after repeated inventory_client timeout_ms=2000 lines. The snapshot does not identify a downstream host or a measured duration. Usage and cost were not reported.\n",
+  "timing": { "status": "unknown" },
+  "cost": { "status": "unknown" },
+  "uncertainty": { "status": "unknown" },
+  "fairness": { "kind": "same_snapshot" },
+  "status": "completed",
+  "operator": "demo-operator",
+  "privacy": "share_safe",
+  "created_at": "2026-01-15T08:11:00Z"
+}

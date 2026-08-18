@@ -1,0 +1,118 @@
+{
+  "events": [
+    {
+      "event": {
+        "kind": "run_started",
+        "policy_fingerprint": "pol-c7a235fa5111213dabf63a99638a716270ae514e27fb0679de77a19226e26026",
+        "request_fingerprint": "sha256:cc0b710c06ee8d22d6bc88f115c66288e4c6e8eef4104af99b69dba4b0e23c4d"
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 0
+    },
+    {
+      "event": {
+        "evidence_count": 1,
+        "kind": "packet_ready",
+        "packet_digest": "pkf-88dedf80b356209a89a76b05513e1f8ca338d6124d7914f92637607a377b4bab",
+        "packet_id": "pkt-c27ea96f6e74f80effd0f588d67c86068feda2c08d8867c3241cd73eb7b1bc85"
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 1
+    },
+    {
+      "event": {
+        "attempt": {
+          "attempt_id": "att-6d8ab310e9f714c129ea7178fb0a69277dc274c11c7727071912e4ad9c4e075f",
+          "elapsed_ms": 0,
+          "input_chars": 0,
+          "model": {
+            "model_id": "mock-finalizer-v1",
+            "profile_id": "profile:mock-gateway"
+          },
+          "output_chars": 0,
+          "physical_provider_calls": 0,
+          "reason_codes": [
+            "role_failed"
+          ],
+          "role": "finalizer",
+          "role_slot_id": "standard-finalizer",
+          "semantic_corrections": 0,
+          "status": "failed",
+          "terminal_disposition": "failed"
+        },
+        "kind": "role_attempt"
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 2
+    },
+    {
+      "event": {
+        "kind": "reconciliation",
+        "summary": {
+          "completed_role_slots": 0,
+          "configured_role_slots": 1,
+          "distinct_gateways": 0,
+          "distinct_models": 0,
+          "root_cause_established": false,
+          "state": "incomplete"
+        }
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 3
+    },
+    {
+      "event": {
+        "kind": "validation",
+        "passed": false,
+        "reason_codes": [
+          "mock_failed"
+        ]
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 4
+    },
+    {
+      "event": {
+        "category": "mock_failed",
+        "kind": "failed",
+        "partial_result": {
+          "kind": "honest_partial",
+          "packet_id": "pkt-c27ea96f6e74f80effd0f588d67c86068feda2c08d8867c3241cd73eb7b1bc85",
+          "reason_codes": [
+            "role_failed",
+            "deterministic_mock",
+            "no_authoritative_answer"
+          ],
+          "reconciliation": {
+            "completed_role_slots": 0,
+            "configured_role_slots": 1,
+            "distinct_gateways": 0,
+            "distinct_models": 0,
+            "root_cause_established": false,
+            "state": "incomplete"
+          },
+          "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+          "schema_id": "contextdesk.triage.result.v2",
+          "validation_state": "partial"
+        }
+      },
+      "privacy": "owner_only",
+      "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+      "schema_id": "contextdesk.triage.run_event.v2",
+      "sequence": 5
+    }
+  ],
+  "request_fingerprint": "sha256:cc0b710c06ee8d22d6bc88f115c66288e4c6e8eef4104af99b69dba4b0e23c4d",
+  "run_id": "cdrun-189b991ba90df8945e0a9203d32cfb4351d8c2787041c1538b9a5421b1537ee3",
+  "schema_id": "contextdesk.triage.replay.v1"
+}
