@@ -100,10 +100,11 @@ cross the public runtime boundary.
 
 Enhanced/Advanced reuse the existing `preflight_for_policy`,
 `resolve_v2_host`, `TriageProductionRunnerV1`, and `run_v2_host` path. The
-`WorkflowTriageEngineV1` owns that adaptation; CLI and Tauri call
-`triage_with_policy(...)` instead of duplicating policy overrides,
-fingerprinting, resolver calls, terminal projection, or cancellation maps. The
-desktop returns the authoritative replay across IPC; TypeScript validates it
+`WorkflowTriageEngineV1` owns that adaptation; CLI and Tauri dispatch Standard
+to `triage(...)` and Saved/Inline to `triage_with_policy(...)` instead of
+duplicating policy overrides, fingerprinting, resolver calls, terminal
+projection, or cancellation maps. The desktop returns the authoritative replay
+across IPC; TypeScript validates it
 and preserves the existing terminal-event client API. The adapter does not
 create another provider client or policy compiler.
 

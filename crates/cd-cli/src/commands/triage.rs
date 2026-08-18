@@ -1,11 +1,11 @@
 //! `contextdesk triage run` — the provider-neutral Triage SDK facade.
 //!
 //! The public request and replay contracts live in `cd_core`; this module is
-//! deliberately only a thin host boundary.  Standard requests remain on the
-//! established chat path; Enhanced/Advanced requests use the shared trusted
-//! host resolver and production runner only with host-owned qualification
-//! evidence. Caller-authored preflight documents remain provider-free policy
-//! simulation inputs and are never runtime authority.
+//! deliberately only a thin host boundary. Standard, Enhanced, and Advanced
+//! requests use the same shared trusted host resolver and production runner
+//! with host-owned policy and qualification evidence. Caller-authored
+//! preflight documents remain provider-free policy simulation inputs and are
+//! never runtime authority.
 
 use std::io::Read;
 use std::path::Path;
@@ -13,10 +13,9 @@ use std::path::Path;
 use cd_core::triage_policy_store::TriagePolicyStoreV1;
 use cd_core::triage_sdk::TriagePolicySelectionV2;
 use cd_core::triage_sdk::{
-    parse_request_v2, TriageReplayV1, TriageRequestV2, TriageResultKind, TriageResultV2,
-    MAX_TRIAGE_WIRE_BYTES,
+    parse_request_v2, TriageReplayV1, TriageResultKind, TriageResultV2, MAX_TRIAGE_WIRE_BYTES,
 };
-use cd_triage_runtime::{triage_with_policy, TriageExecutionTerminal};
+use cd_triage_runtime::{triage as triage_standard, triage_with_policy, TriageExecutionTerminal};
 use serde::Serialize;
 
 use crate::adapters::{self, Paths};
@@ -25,10 +24,6 @@ use crate::envelope::{CliError, CliResult, Render};
 
 /// Stable schema for the CLI-level triage facade result.
 pub const TRIAGE_RUN_CLI_SCHEMA_ID: &str = "contextdesk.cli.triage_run.v1";
-
-/// Why this facade did not produce a replay. Keep this typed and content-free
-/// for state-free refusals such as the established Standard route.
-pub const TRIAGE_RUNNER_NOT_WIRED: &str = "production_runner_not_wired";
 
 /// Explicit evidence labels attached to every triage facade result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -61,16 +56,14 @@ impl Default for TriageRunEvidence {
     }
 }
 
-/// Result of one `triage run` request. `replay` is optional for typed
-/// state-free refusals and present after a stateful V2 run.
+/// Result of one stateful `triage run` request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TriageRunOutput {
     /// CLI result schema, distinct from the SDK request/replay schema ids.
     pub schema_id: &'static str,
     /// Stable action name.
     pub action: &'static str,
-    /// `completed`, `partial`, `failed`, `timed_out`, or `cancelled` for a
-    /// stateful V2 run; `unsupported` only for an established-path refusal.
+    /// `completed`, `partial`, `failed`, `timed_out`, or `cancelled`.
     pub status: &'static str,
     /// Requests contain task text and policy references, so this remains
     /// owner-only even when a later replay can be exported share-safe.
@@ -91,13 +84,6 @@ pub struct TriageRunOutput {
     pub result: Option<TriageResultV2>,
     /// Explicit no-side-effect accounting.
     pub evidence: TriageRunEvidence,
-}
-
-impl TriageRunOutput {
-    /// Whether the request was valid but execution is not shipped yet.
-    pub fn unsupported(&self) -> bool {
-        self.status == "unsupported"
-    }
 }
 
 impl Render for TriageRunOutput {
@@ -123,18 +109,11 @@ impl Render for TriageRunOutput {
     }
 }
 
-/// Run the provider-neutral triage facade without loading host state.
-#[cfg(test)]
-pub fn run(action: &TriageAction) -> CliResult<TriageRunOutput> {
-    match action {
-        TriageAction::Run(args) => run_request(args),
-    }
-}
-
-/// Parse before application-state resolution. Malformed requests and the
-/// legacy Standard selection retain the state-free, no-Keychain behavior;
-/// Enhanced/Advanced requests continue into the trusted stateful host path.
-pub fn state_free(action: &TriageAction) -> Option<CliResult<TriageRunOutput>> {
+/// Parse before application-state resolution. Malformed requests and an
+/// unauthorized caller preflight remain state-free and cannot trigger config,
+/// credential, or provider access. Every valid Standard/Enhanced/Advanced
+/// request continues into the same trusted stateful host path.
+pub fn state_free(action: &mut TriageAction) -> Option<CliResult<TriageRunOutput>> {
     match action {
         TriageAction::Run(args) => {
             // Runtime preflight authority is host-owned. Reject the legacy
@@ -156,11 +135,8 @@ pub fn state_free(action: &TriageAction) -> Option<CliResult<TriageRunOutput>> {
                     ))))
                 }
             };
-            if matches!(request.policy, TriagePolicySelectionV2::Standard { .. }) {
-                Some(Ok(unsupported_result(request)))
-            } else {
-                None
-            }
+            args.parsed_request = Some(request);
+            None
         }
     }
 }
@@ -174,18 +150,17 @@ pub async fn run_stateful(
     cfg: &cd_core::config::AppConfig,
     secrets: &dyn cd_core::keychain_store::SecretStore,
 ) -> CliResult<TriageRunOutput> {
-    let raw_request = read_request(&args.request)?;
-    let request = parse_request_v2(&raw_request).map_err(|error| {
-        CliError::user(format!(
-            "triage request rejected by the V2 contract: {error}"
-        ))
-    })?;
-    if matches!(&request.policy, TriagePolicySelectionV2::Standard { .. }) {
-        return Ok(unsupported_result_with_reason(
-            request,
-            "standard_uses_established_path",
-        ));
-    }
+    let request = match &args.parsed_request {
+        Some(request) => request.clone(),
+        None => {
+            let raw_request = read_request(&args.request)?;
+            parse_request_v2(&raw_request).map_err(|error| {
+                CliError::user(format!(
+                    "triage request rejected by the V2 contract: {error}"
+                ))
+            })?
+        }
+    };
     // A caller-supplied preflight is useful for provider-free policy
     // simulation, but can never authorize a live run.
     if args.preflight.is_some() {
@@ -198,11 +173,7 @@ pub async fn run_stateful(
                 .map_err(|_| CliError::user("saved triage policy store could not be loaded"))?
         }
         TriagePolicySelectionV2::Inline { .. } => TriagePolicyStoreV1::default(),
-        TriagePolicySelectionV2::Standard { .. } => {
-            return Err(CliError::internal(
-                "standard triage dispatch escaped state-free routing",
-            ));
-        }
+        TriagePolicySelectionV2::Standard { .. } => TriagePolicyStoreV1::default(),
     };
     let qualification_path =
         cd_core::triage_role_qualification::triage_role_qualification_store_path(&paths.config_dir);
@@ -221,9 +192,13 @@ pub async fn run_stateful(
         cd_workflow::triage_runtime_host::TriageCancellationRegistryV1::default(),
     );
     let cancellation_id = request.cancellation_id.clone();
-    let execution = triage_with_policy(&engine, request, None)
-        .await
-        .map_err(|error| CliError::user(error.to_string()))?;
+    let standard = matches!(&request.policy, TriagePolicySelectionV2::Standard { .. });
+    let execution = if standard {
+        triage_standard(&engine, request, None).await
+    } else {
+        triage_with_policy(&engine, request, None).await
+    }
+    .map_err(|error| CliError::user(error.to_string()))?;
     let terminal = execution.terminal().clone();
     let provider_calls = execution
         .replay()
@@ -255,7 +230,11 @@ pub async fn run_stateful(
             app_config_accessed: true,
             qualification: "host_preflighted",
             provider_calls,
-            runner: "cd_triage_runtime::triage_with_policy",
+            runner: if standard {
+                "cd_triage_runtime::triage"
+            } else {
+                "cd_triage_runtime::triage_with_policy"
+            },
         },
     })
 }
@@ -296,40 +275,6 @@ fn project_terminal(
     (status, result, reason_codes)
 }
 
-#[cfg(test)]
-fn run_request(args: &TriageRunArgs) -> CliResult<TriageRunOutput> {
-    let request = read_request(&args.request)?;
-    // `parse_request_v2` performs the schema, privacy, identity, policy, and
-    // bounded override checks owned by the shared SDK.  Do not deserialize a
-    // second CLI-specific request shape here.
-    let request = parse_request_v2(&request).map_err(|error| {
-        CliError::user(format!(
-            "triage request rejected by the V2 contract: {error}"
-        ))
-    })?;
-    Ok(unsupported_result(request))
-}
-
-fn unsupported_result(request: TriageRequestV2) -> TriageRunOutput {
-    unsupported_result_with_reason(request, TRIAGE_RUNNER_NOT_WIRED)
-}
-
-fn unsupported_result_with_reason(request: TriageRequestV2, reason: &str) -> TriageRunOutput {
-    TriageRunOutput {
-        schema_id: TRIAGE_RUN_CLI_SCHEMA_ID,
-        action: "run",
-        status: "unsupported",
-        privacy: "owner_only",
-        run_id: request.run_id,
-        cancellation_id: request.cancellation_id,
-        request_schema_id: cd_core::triage_sdk::TRIAGE_REQUEST_SCHEMA_V2.into(),
-        reason_codes: vec![reason.into()],
-        replay: None,
-        result: None,
-        evidence: TriageRunEvidence::default(),
-    }
-}
-
 fn read_request(path: &Path) -> CliResult<String> {
     let bytes = if path == Path::new("-") {
         let mut bytes = Vec::new();
@@ -362,7 +307,7 @@ fn read_request(path: &Path) -> CliResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{project_terminal, run, TriageRunOutput, TRIAGE_RUNNER_NOT_WIRED};
+    use super::{project_terminal, state_free, TriageRunOutput};
     use crate::cli::{TriageAction, TriageRunArgs};
     use cd_core::triage_sdk::{
         TriageReconciliationV1, TriageResultKind, TriageResultV2, TriageValidationState,
@@ -413,21 +358,24 @@ mod tests {
     }
 
     #[test]
-    fn valid_request_returns_typed_unsupported_without_replay() {
+    fn valid_standard_request_continues_to_the_stateful_runner() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("request.json");
         std::fs::write(&path, request()).expect("write request");
-        let output = run(&TriageAction::Run(TriageRunArgs {
+        let mut action = TriageAction::Run(TriageRunArgs {
             request: path,
             preflight: None,
-        }))
-        .expect("request parses");
-        assert_eq!(output.status, "unsupported");
-        assert_eq!(output.reason_codes, vec![TRIAGE_RUNNER_NOT_WIRED]);
-        assert!(output.replay.is_none());
-        assert_eq!(output.run_id, "run:cli-test");
-        assert!(!output.evidence.network);
-        assert!(!output.evidence.credentials_read);
+            parsed_request: None,
+        });
+        let routed = state_free(&mut action);
+        assert!(routed.is_none());
+        let TriageAction::Run(args) = action;
+        assert_eq!(
+            args.parsed_request
+                .as_ref()
+                .map(|request| request.run_id.as_str()),
+            Some("run:cli-test")
+        );
     }
 
     #[test]
@@ -436,25 +384,28 @@ mod tests {
         let path = dir.path().join("request.json");
         std::fs::write(&path, "{\"schema_id\":\"contextdesk.triage.request.v99\"}")
             .expect("write request");
-        let error = run(&TriageAction::Run(TriageRunArgs {
+        let mut action = TriageAction::Run(TriageRunArgs {
             request: path,
             preflight: None,
-        }))
-        .expect_err("unknown schema must fail");
+            parsed_request: None,
+        });
+        let error = state_free(&mut action)
+            .expect("malformed request is handled state-free")
+            .expect_err("unknown schema must fail");
         assert_eq!(error.category, crate::envelope::ExitCategory::UserError);
     }
 
     #[test]
-    fn output_serializes_without_owner_task_body_or_replay() {
+    fn output_serializes_without_owner_task_body() {
         let output = TriageRunOutput {
             schema_id: super::TRIAGE_RUN_CLI_SCHEMA_ID,
             action: "run",
-            status: "unsupported",
+            status: "failed",
             privacy: "owner_only",
             run_id: "run:one".into(),
             cancellation_id: "cancel:one".into(),
             request_schema_id: TRIAGE_REQUEST_SCHEMA_V2.into(),
-            reason_codes: vec![TRIAGE_RUNNER_NOT_WIRED.into()],
+            reason_codes: vec!["preflight_rejected".into()],
             replay: None,
             result: None,
             evidence: Default::default(),
@@ -473,6 +424,7 @@ mod tests {
         let args = TriageRunArgs {
             request: PathBuf::from("-"),
             preflight: None,
+            parsed_request: None,
         };
         assert_eq!(args.request, PathBuf::from("-"));
     }

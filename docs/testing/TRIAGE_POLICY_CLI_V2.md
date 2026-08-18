@@ -1,8 +1,9 @@
-# Triage Policy V2 provider-free CLI proof
+# Triage Policy V2 CLI proof
 
 Status: **provider-neutral policy compilation, exact-role qualification, and
-the trusted Enhanced/Advanced production runner are available. Live execution
-remains fail-closed until every admitted slot has current role evidence.**
+the trusted Standard/Enhanced/Advanced production runner are available. Live
+execution remains fail-closed until the exact selected profile exists and
+every policy-required role has current host evidence.**
 
 ## Surface
 
@@ -73,8 +74,10 @@ unqualified result is retained as negative evidence and exits with
 
 ## Stateful V2 run
 
-`triage run` accepts one bounded `contextdesk.triage.request.v2` document. An
-Enhanced or Advanced request fails closed with
+`triage run` accepts and validates one bounded
+`contextdesk.triage.request.v2` document before resolving application state.
+Standard uses the exact gateway-scoped model in that request. An Enhanced or
+Advanced request fails closed with
 `triage_role_qualification_unavailable` until the exact role records required
 by the compiled policy exist; if `--preflight` is supplied it is rejected as
 `caller_preflight_not_authoritative` for every runtime mode. This refusal is
@@ -89,11 +92,12 @@ The output is owner-only and contains the authoritative, canonically
 request-bound V2 replay plus its typed terminal projection. Grounded and honest
 partial completions report `completed` and `partial`; failed, timed-out, and
 cancelled terminals remain distinct and retain any honest partial result. CLI
-and Tauri both call `cd_triage_runtime::triage_with_policy` through
-`WorkflowTriageEngineV1`. The Standard selection remains intentionally
-state-free and returns a typed `standard_uses_established_path` refusal;
-ordinary single-model work continues through `contextdesk chat` and the
-established workflow.
+and Tauri call `cd_triage_runtime::triage` for Standard and
+`cd_triage_runtime::triage_with_policy` for Saved/Inline through the same
+`WorkflowTriageEngineV1`. Standard therefore uses the same immutable packet,
+host validation, replay, deadline, cancellation, and cleanup path without
+hidden routing or model substitution. The established `contextdesk chat`
+surface remains available and unchanged.
 
 ## Residuals
 

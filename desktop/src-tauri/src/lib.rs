@@ -10326,9 +10326,9 @@ fn triage_preflight_v2(
         .map_err(|_| "triage policy preflight rejected".to_string())
 }
 
-/// Execute one Enhanced/Advanced Triage Policy V2 run through the existing
+/// Execute one Standard/Enhanced/Advanced Triage Policy V2 run through the existing
 /// corpus, packet, credential, qualification, provider, validation, replay,
-/// and cleanup plumbing. Standard remains on the established chat path.
+/// and cleanup plumbing.
 #[tauri::command]
 async fn triage_run_v2(
     app: tauri::AppHandle,
@@ -10339,9 +10339,6 @@ async fn triage_run_v2(
     use cd_core::triage_sdk::TriagePolicySelectionV2;
 
     let request = parse_tauri_triage_request(request)?;
-    if matches!(&request.policy, TriagePolicySelectionV2::Standard { .. }) {
-        return Err("standard_uses_established_path".into());
-    }
     let cfg = state.config.lock().expect("config").clone();
     let policies = match &request.policy {
         TriagePolicySelectionV2::Saved { .. } => {
@@ -10352,7 +10349,7 @@ async fn triage_run_v2(
                 .map_err(|_| "triage policy store is unavailable".to_string())?
         }
         TriagePolicySelectionV2::Inline { .. } => TriagePolicyStoreV1::default(),
-        TriagePolicySelectionV2::Standard { .. } => unreachable!("checked above"),
+        TriagePolicySelectionV2::Standard { .. } => TriagePolicyStoreV1::default(),
     };
     let qualifications = state
         .triage_role_qualification_store
@@ -10388,7 +10385,11 @@ async fn triage_run_v2(
             qualifications,
             state.triage_cancellations.clone(),
         );
-        cd_triage_runtime::triage_with_policy(&engine, request, Some(event_sink)).await
+        if matches!(&request.policy, TriagePolicySelectionV2::Standard { .. }) {
+            cd_triage_runtime::triage(&engine, request, Some(event_sink)).await
+        } else {
+            cd_triage_runtime::triage_with_policy(&engine, request, Some(event_sink)).await
+        }
     };
     {
         let mut host_guard = state.host.lock().expect("host");
@@ -14834,6 +14835,7 @@ mod triage_replay_host_tests {
         let run_body = &source[run_start..run_end];
         for required in [
             "WorkflowTriageEngineV1",
+            "cd_triage_runtime::triage(&engine",
             "triage_with_policy",
             "ValidatedTriageRequest",
             "TriageEventSink",
@@ -14846,6 +14848,8 @@ mod triage_replay_host_tests {
                 "live run must contain {required}"
             );
         }
+        assert!(run_body.contains("TriagePolicySelectionV2::Standard"));
+        assert!(!run_body.contains("standard_uses_established_path"));
         for duplicate in ["triage_fingerprint", "resolve_v2_host", "run_v2_host"] {
             assert!(
                 !run_body.contains(duplicate),
