@@ -4,8 +4,9 @@ use crate::canonical::{to_canonical_json, to_pretty_json};
 use crate::error::{BenchError, BenchResult};
 use crate::packet::{materialize_task_packet, VisibleEvidence};
 use crate::types::{
-    sha256_hex, Adjudication, BlindingState, Case, CaseResolution, EvaluationTask,
-    EvidenceSnapshot, Observed, RubricDimension, RunStatus, TriageRun, REVIEW_PACKET_SCHEMA_V1,
+    sha256_hex, Adjudication, BlindingState, Case, CaseResolution, ContentDigest, EvaluationTask,
+    EvidenceSnapshot, Observed, PrivacyClass, RubricDimension, RunStatus, TriageRun,
+    REVIEW_PACKET_SCHEMA_V2,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +32,7 @@ pub struct BlindedRunView {
 pub struct ReviewPacket {
     pub schema_id: String,
     pub packet_id: String,
+    pub privacy: PrivacyClass,
     pub phase: ReviewPhase,
     pub case_id: String,
     pub task_id: String,
@@ -48,14 +50,20 @@ pub struct ReviewPacket {
 }
 
 impl ReviewPacket {
+    pub fn parse_json(text: &str) -> BenchResult<Self> {
+        let parsed: Self = serde_json::from_str(text).map_err(BenchError::from_serde)?;
+        parsed.validate()?;
+        Ok(parsed)
+    }
+
     pub fn to_json(&self) -> BenchResult<String> {
         to_pretty_json(self)
     }
 
     pub fn validate(&self) -> BenchResult<()> {
-        if self.schema_id != REVIEW_PACKET_SCHEMA_V1 {
+        if self.schema_id != REVIEW_PACKET_SCHEMA_V2 {
             return Err(BenchError::Schema(format!(
-                "review packet schema must be {REVIEW_PACKET_SCHEMA_V1}, got {}",
+                "review packet schema must be {REVIEW_PACKET_SCHEMA_V2}, got {}; v1 packets must be regenerated from their source records",
                 self.schema_id
             )));
         }
@@ -157,6 +165,7 @@ pub fn materialize_review_packet(
     phase: ReviewPhase,
     support_recorded: bool,
 ) -> BenchResult<ReviewPacket> {
+    run.validate()?;
     if run.task_id != task.task_id {
         return Err(BenchError::Schema(
             "run.task_id does not match the loaded task".into(),
@@ -168,6 +177,16 @@ pub fn materialize_review_packet(
         ));
     }
     let task_packet = materialize_task_packet(case, snapshot, task)?;
+    let raw_digest = ContentDigest::of_bytes(raw);
+    if raw_digest != run.raw_output.digest || raw.len() as u64 != run.raw_output.byte_length {
+        return Err(BenchError::Integrity(
+            "review raw output does not match the run's verified digest and byte length".into(),
+        ));
+    }
+    let mut privacy = task_packet.privacy.restrict_with(run.privacy);
+    if is_adapter_owner_only_envelope(raw) {
+        privacy = privacy.restrict_with(PrivacyClass::OwnerOnly);
+    }
     let view = blinded_run_view_from_raw(run, Some(raw));
     let blinding = match &view.unblindable_reason {
         Some(reason) => BlindingState::Unblinded {
@@ -181,8 +200,9 @@ pub fn materialize_review_packet(
         ReviewPhase::Diagnosis => case.resolution.clone(),
     };
     let mut packet = ReviewPacket {
-        schema_id: REVIEW_PACKET_SCHEMA_V1.into(),
+        schema_id: REVIEW_PACKET_SCHEMA_V2.into(),
         packet_id: String::new(),
+        privacy,
         phase,
         case_id: task.case_id.clone(),
         task_id: task.task_id.clone(),
@@ -200,12 +220,14 @@ pub fn materialize_review_packet(
         "rpkt-{}",
         sha256_hex(to_canonical_json(&review_digest_body(&packet))?.as_bytes())
     );
-    assert_review_packet_invariants(&packet)?;
+    packet.validate()?;
     Ok(packet)
 }
 
 #[derive(Serialize)]
 struct ReviewDigestBody<'a> {
+    schema_id: &'a str,
+    privacy: PrivacyClass,
     phase: ReviewPhase,
     case_id: &'a str,
     task_id: &'a str,
@@ -219,6 +241,8 @@ struct ReviewDigestBody<'a> {
 
 fn review_digest_body(packet: &ReviewPacket) -> ReviewDigestBody<'_> {
     ReviewDigestBody {
+        schema_id: &packet.schema_id,
+        privacy: packet.privacy,
         phase: packet.phase,
         case_id: &packet.case_id,
         task_id: &packet.task_id,

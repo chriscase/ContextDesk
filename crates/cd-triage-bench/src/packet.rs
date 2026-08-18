@@ -4,7 +4,8 @@ use crate::canonical::to_canonical_json;
 use crate::error::{BenchError, BenchResult};
 use crate::types::{
     sha256_hex, AttributedSummary, Case, ContentDigest, EvaluationTask, EvidenceItem,
-    EvidenceSnapshot, HeldContent, TimeConstraint, PACKET_SCHEMA_V1,
+    EvidenceSnapshot, HeldContent, PrivacyClass, TimeConstraint, MAX_STRING_BYTES,
+    PACKET_SCHEMA_V2,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +42,7 @@ pub struct VisibleEvidence {
 pub struct TaskPacket {
     pub schema_id: String,
     pub packet_id: String,
+    pub privacy: PrivacyClass,
     pub task_id: String,
     pub snapshot_id: String,
     pub case_id: String,
@@ -53,8 +55,48 @@ pub struct TaskPacket {
 }
 
 impl TaskPacket {
+    pub fn parse_json(text: &str) -> BenchResult<Self> {
+        let parsed: Self = serde_json::from_str(text).map_err(BenchError::from_serde)?;
+        parsed.validate()?;
+        Ok(parsed)
+    }
+
     pub fn to_json(&self) -> BenchResult<String> {
         crate::canonical::to_pretty_json(self)
+    }
+
+    pub fn validate(&self) -> BenchResult<()> {
+        if self.schema_id != PACKET_SCHEMA_V2 {
+            return Err(BenchError::Schema(format!(
+                "task packet schema must be {PACKET_SCHEMA_V2}, got {}; v1 packets must be regenerated from their source records",
+                self.schema_id
+            )));
+        }
+        crate::types::validate_id("packet_id", &self.packet_id)?;
+        crate::types::validate_id("task_id", &self.task_id)?;
+        crate::types::validate_id("snapshot_id", &self.snapshot_id)?;
+        crate::types::validate_id("case_id", &self.case_id)?;
+        crate::types::validate_bounded_string("question", &self.question, MAX_STRING_BYTES)?;
+        crate::types::validate_bounded_string("protocol", &self.protocol, MAX_STRING_BYTES)?;
+        crate::types::validate_bounded_string(
+            "protocol_version",
+            &self.protocol_version,
+            MAX_STRING_BYTES,
+        )?;
+        if let Some(constraint) = &self.time_constraint {
+            constraint.validate()?;
+        }
+        assert_packet_excludes_resolution(self)?;
+        let expected = format!(
+            "pkt-{}",
+            sha256_hex(to_canonical_json(&packet_digest_body(self))?.as_bytes())
+        );
+        if self.packet_id != expected {
+            return Err(BenchError::Integrity(format!(
+                "task packet id does not match content digest (expected {expected})"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -65,6 +107,9 @@ pub fn materialize_task_packet(
     snapshot: &EvidenceSnapshot,
     task: &EvaluationTask,
 ) -> BenchResult<TaskPacket> {
+    case.validate()?;
+    snapshot.validate()?;
+    task.validate()?;
     if task.case_id != case.case_id {
         return Err(BenchError::Schema(
             "task.case_id does not match the loaded case".into(),
@@ -82,6 +127,10 @@ pub fn materialize_task_packet(
         ));
     }
 
+    let mut privacy = case
+        .privacy
+        .restrict_with(snapshot.privacy)
+        .restrict_with(task.privacy);
     let mut evidence = Vec::new();
     for item_id in &task.visibility.visible_item_ids {
         let item = snapshot.item(item_id).ok_or_else(|| {
@@ -95,12 +144,14 @@ pub fn materialize_task_packet(
                 "item {item_id} is marked not visible to strategies"
             )));
         }
+        privacy = privacy.restrict_with(item.privacy());
         evidence.push(visible_item(item, task.visibility.include_summaries));
     }
 
     let mut packet = TaskPacket {
-        schema_id: PACKET_SCHEMA_V1.into(),
+        schema_id: PACKET_SCHEMA_V2.into(),
         packet_id: String::new(),
+        privacy,
         task_id: task.task_id.clone(),
         snapshot_id: task.snapshot_id.clone(),
         case_id: task.case_id.clone(),
@@ -114,13 +165,14 @@ pub fn materialize_task_packet(
         "pkt-{}",
         sha256_hex(to_canonical_json(&packet_digest_body(&packet))?.as_bytes())
     );
-    assert_packet_excludes_resolution(&packet)?;
+    packet.validate()?;
     Ok(packet)
 }
 
 #[derive(Serialize)]
 struct PacketDigestBody<'a> {
     schema_id: &'a str,
+    privacy: PrivacyClass,
     task_id: &'a str,
     snapshot_id: &'a str,
     case_id: &'a str,
@@ -134,6 +186,7 @@ struct PacketDigestBody<'a> {
 fn packet_digest_body(packet: &TaskPacket) -> PacketDigestBody<'_> {
     PacketDigestBody {
         schema_id: &packet.schema_id,
+        privacy: packet.privacy,
         task_id: &packet.task_id,
         snapshot_id: &packet.snapshot_id,
         case_id: &packet.case_id,

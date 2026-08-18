@@ -200,6 +200,34 @@ pub fn import_named(
     status: RunStatus,
     created_at: &str,
 ) -> String {
+    let privacy = store.get_task(task_id).unwrap().privacy;
+    import_named_with_privacy(
+        store,
+        task_id,
+        source_kind,
+        name,
+        version,
+        raw,
+        fairness,
+        status,
+        privacy,
+        created_at,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn import_named_with_privacy(
+    store: &BenchStore,
+    task_id: &str,
+    source_kind: SourceKind,
+    name: &str,
+    version: Observed<String>,
+    raw: &str,
+    fairness: FairnessClass,
+    status: RunStatus,
+    privacy: PrivacyClass,
+    created_at: &str,
+) -> String {
     let document = RunImport {
         schema_id: RUN_IMPORT_SCHEMA_V1.into(),
         task_id: task_id.into(),
@@ -239,7 +267,7 @@ pub fn import_named(
         status,
         operator: "operator-a".into(),
         importer: Some("importer-b".into()),
-        privacy: PrivacyClass::ShareSafe,
+        privacy,
         created_at: created_at.into(),
     };
     match import_run(store, &document, raw.as_bytes()).unwrap() {

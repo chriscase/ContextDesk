@@ -40,6 +40,30 @@ This lane is separate from:
 - Reports never emit readiness, qualification, or routing badges.
 - Manual import preserves raw bytes byte-exact.
 
+## Durable packet privacy and migration
+
+Newly materialized strategy packets use
+`contextdesk.triage_bench.task_packet.v2`; reviewer packets use
+`contextdesk.triage_bench.review_packet.v2`. Both schemas require an explicit
+`privacy` field, and that field participates in the packet's content-derived
+identity.
+
+Packet privacy is monotonic. A task packet takes the most restrictive label
+from its case, snapshot, evaluation task, and every selected evidence item. A
+review packet additionally includes the run label and accepts raw output only
+when its bytes match the run's recorded digest and length. Recognized
+owner-only SDK replay envelopes remain owner-only. Store reads rematerialize
+packets from their source records and reject a persisted packet whose privacy
+or content does not match.
+
+The v1 packet schemas did not carry privacy and are therefore not accepted as
+durable packets. There is intentionally no blind in-place upgrade: regenerate
+them from the preserved case/snapshot/task/run/blob records. Regeneration
+changes packet ids; adjudications bound to a v1 review-packet id must be
+regenerated and rebound to the corresponding v2 review packet. Missing or
+unverifiable source material fails closed instead of being labeled
+`share_safe`.
+
 ## ContextDesk SDK adapter (#879, draft)
 
 `cd-triage-bench-adapter` runs ContextDesk as one strategy among many over the

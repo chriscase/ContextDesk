@@ -1,6 +1,6 @@
 {
   "schema_id": "contextdesk.triage_bench.triage_run.v2",
-  "run_id": "run-e930bcee81131b7a9e3eff4472338c70a46cb95a612585447c2fac74071e3a92",
+  "run_id": "run-c01da8b7acd882969840432736e431c0b4a4eda6a46742e68bfc6a0005627e38",
   "privacy": "owner_only",
   "case_id": "case-checkout-500s",
   "task_id": "task-a02e7497a4787cbd965c3b0abb1b03688a0c0ea10eadcb87207a763ed10aae6a",
@@ -23,13 +23,13 @@
     },
     "workflow": {
       "status": "known",
-      "value": "cd-triage-bench-adapter public-sdk replay ingest; policy pol-d0b61431e4df22bdff27a48ad81c441a26bda2206e104f173cf0cbb11dc0be6e; packet pkf-6db24b93cfa24ac3b0a4975356757e9550829a920734ec4f82f3380536f7c2c6; corpus cof-2bd75138119918b098f345f90def99b610f75c28e22208ddda5a5a99c8f069b9; slots [slf-598b97cae49f91cec8671b45caffea7bab9ef735eac2a7ab6ba6ea22f5754aec slf-18d33d72373e0bce60d8a085dfefd1f386ecab709770742a982a8f6fc30dff98 slf-2745e9e406a004c18d6763589bf970020ba5bf5cbc12d9c6a14d4948a62206b5 slf-65b2cffd8b8cbb986af0c5800745dbe1308f216227212b56fd90b6edb5c7b253]"
+      "value": "cd-triage-bench-adapter public-sdk replay ingest; policy pol-d0b61431e4df22bdff27a48ad81c441a26bda2206e104f173cf0cbb11dc0be6e; packet pkf-9685a85eb815642a1a5bf99c33e32dbc2cabdd767930ed206151d2d26b3480ec; corpus cof-2bd75138119918b098f345f90def99b610f75c28e22208ddda5a5a99c8f069b9; slots [slf-598b97cae49f91cec8671b45caffea7bab9ef735eac2a7ab6ba6ea22f5754aec slf-18d33d72373e0bce60d8a085dfefd1f386ecab709770742a982a8f6fc30dff98 slf-2745e9e406a004c18d6763589bf970020ba5bf5cbc12d9c6a14d4948a62206b5 slf-65b2cffd8b8cbb986af0c5800745dbe1308f216227212b56fd90b6edb5c7b253]"
     }
   },
   "raw_output": {
     "digest": {
       "algorithm": "sha256",
-      "hex": "c904dd2f8f3a9c53a0d04aad944aae3a0eeb01643b298fdf643c932c30c3d07a"
+      "hex": "dc028afdd83d3ef9e9a2a77ca667de0403c92c377809c8f43fead28f21d1a69d"
     },
     "byte_length": 12520,
     "encoding": "utf-8"

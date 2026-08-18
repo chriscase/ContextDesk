@@ -168,20 +168,14 @@ impl BenchStore {
     pub fn put_task(&self, task: &EvaluationTask) -> BenchResult<()> {
         task.validate()?;
         let snapshot = self.get_snapshot(&task.snapshot_id)?;
-        if snapshot.case_id != task.case_id {
-            return Err(BenchError::CrossSnapshot(
-                "task case_id does not match snapshot.case_id".into(),
+        let case = self.get_case(&task.case_id)?;
+        let derived = materialize_task_packet(&case, &snapshot, task)?;
+        if task.privacy.is_downgrade_from(derived.privacy) {
+            return Err(BenchError::Privacy(
+                "share_safe task would downgrade owner_only case, snapshot, or selected evidence"
+                    .into(),
             ));
         }
-        for item_id in &task.visibility.visible_item_ids {
-            if snapshot.item(item_id).is_none() {
-                return Err(BenchError::Schema(format!(
-                    "task visible item {item_id} is not in snapshot {}",
-                    snapshot.snapshot_id
-                )));
-            }
-        }
-        let _ = self.get_case(&task.case_id)?;
         atomic_write_json(&self.entity_path("tasks", &task.task_id), task)
     }
 
@@ -202,6 +196,21 @@ impl BenchStore {
         Ok(packet)
     }
 
+    pub fn get_packet(&self, packet_id: &str) -> BenchResult<TaskPacket> {
+        let packet = TaskPacket::parse_json(&self.read_entity("packets", packet_id)?)?;
+        let task = self.get_task(&packet.task_id)?;
+        let case = self.get_case(&packet.case_id)?;
+        let snapshot = self.get_snapshot(&packet.snapshot_id)?;
+        let expected = materialize_task_packet(&case, &snapshot, &task)?;
+        if packet != expected {
+            return Err(BenchError::Privacy(
+                "persisted task packet does not match privacy and content derived from its source records"
+                    .into(),
+            ));
+        }
+        Ok(packet)
+    }
+
     pub fn put_run(&self, run: &TriageRun) -> BenchResult<PutRunOutcome> {
         run.validate()?;
         let task = self.get_task(&run.task_id)?;
@@ -214,6 +223,14 @@ impl BenchStore {
         if run.case_id != task.case_id {
             return Err(BenchError::Schema(
                 "run.case_id does not match task.case_id".into(),
+            ));
+        }
+        let case = self.get_case(&task.case_id)?;
+        let snapshot = self.get_snapshot(&task.snapshot_id)?;
+        let task_packet = materialize_task_packet(&case, &snapshot, &task)?;
+        if run.privacy.is_downgrade_from(task_packet.privacy) {
+            return Err(BenchError::Privacy(
+                "share_safe run would downgrade an owner_only task packet".into(),
             ));
         }
         let _ = self.get_blob(&run.raw_output.digest.hex)?;
@@ -276,8 +293,29 @@ impl BenchStore {
 
     pub fn get_review_packet(&self, packet_id: &str) -> BenchResult<ReviewPacket> {
         let text = self.read_entity("review-packets", packet_id)?;
-        let packet: ReviewPacket = serde_json::from_str(&text).map_err(BenchError::from_serde)?;
-        packet.validate()?;
+        let packet = ReviewPacket::parse_json(&text)?;
+        let run = self.get_run(&packet.run_id)?;
+        let task = self.get_task(&packet.task_id)?;
+        let case = self.get_case(&packet.case_id)?;
+        let snapshot = self.get_snapshot(&packet.snapshot_id)?;
+        let raw = self.get_blob(&run.raw_output.digest.hex)?;
+        let support_recorded = packet.phase == ReviewPhase::Support
+            || run_has_support_adjudication(&self.load_adjudications()?, &packet.run_id);
+        let expected = materialize_review_packet(
+            &case,
+            &snapshot,
+            &task,
+            &run,
+            &raw,
+            packet.phase,
+            support_recorded,
+        )?;
+        if packet != expected {
+            return Err(BenchError::Privacy(
+                "persisted review packet does not match privacy and content derived from its source records"
+                    .into(),
+            ));
+        }
         Ok(packet)
     }
 
@@ -321,6 +359,11 @@ impl BenchStore {
             ));
         }
         let packet = self.get_review_packet(packet_id)?;
+        if adj.privacy.is_downgrade_from(packet.privacy) {
+            return Err(BenchError::Privacy(
+                "share_safe adjudication would downgrade an owner_only review packet".into(),
+            ));
+        }
         if packet.phase != phase
             || packet.case_id != adj.case_id
             || packet.task_id != adj.task_id

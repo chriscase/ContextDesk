@@ -1,6 +1,7 @@
 {
-  "schema_id": "contextdesk.triage_bench.task_packet.v1",
-  "packet_id": "pkt-26553b254b1013c6c2a9453d37251961dc4c13420307e41664be73510c186776",
+  "schema_id": "contextdesk.triage_bench.task_packet.v2",
+  "packet_id": "pkt-2df00ac29df16e327610d064803238a2f82359ba38b30884fe89d1b2bf7c5c7e",
+  "privacy": "owner_only",
   "task_id": "task-a02e7497a4787cbd965c3b0abb1b03688a0c0ea10eadcb87207a763ed10aae6a",
   "snapshot_id": "snap-5c34bc690d012cc5c147d1ca3f7e08ea872a6c7ffff449a92fb98aedc3be26d3",
   "case_id": "case-checkout-500s",

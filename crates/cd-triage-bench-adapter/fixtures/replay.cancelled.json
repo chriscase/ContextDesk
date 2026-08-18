@@ -21,8 +21,8 @@
       "privacy": "owner_only",
       "event": {
         "kind": "packet_ready",
-        "packet_id": "pkt-26553b254b1013c6c2a9453d37251961dc4c13420307e41664be73510c186776",
-        "packet_digest": "pkf-6db24b93cfa24ac3b0a4975356757e9550829a920734ec4f82f3380536f7c2c6",
+        "packet_id": "pkt-2df00ac29df16e327610d064803238a2f82359ba38b30884fe89d1b2bf7c5c7e",
+        "packet_digest": "pkf-9685a85eb815642a1a5bf99c33e32dbc2cabdd767930ed206151d2d26b3480ec",
         "evidence_count": 3
       }
     },
