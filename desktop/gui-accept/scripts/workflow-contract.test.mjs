@@ -52,7 +52,7 @@ describe("gui-accept workflow contract", () => {
     const start = y.indexOf("gui-accept-contracts:");
     assert.ok(start > 0, "default CI must contain gui-accept-contracts job");
     const rest = y.slice(start + "gui-accept-contracts:".length);
-    const next = rest.search(/\n  [A-Za-z0-9_-]+:/);
+    const next = rest.search(/\n {2}[A-Za-z0-9_-]+:/);
     assert.ok(next > 0, "gui-accept-contracts job must remain bounded");
     const end = start + "gui-accept-contracts:".length + next;
     const job = y.slice(start, end);
