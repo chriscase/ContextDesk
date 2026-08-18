@@ -297,7 +297,7 @@ pub fn build_report(
         "This report does not assign readiness, qualification, or routing badges.".into(),
         "Disagreement is preserved per reviewer; scores are never silently averaged.".into(),
         "This report is a projection over stored records. It does not execute strategies or create judgments.".into(),
-        "SDK batch execution is out of scope until the public-SDK adapter (#879) exists.".into(),
+        "Public-SDK mock and replay runs join comparisons from the same stored run records as imported strategies; live provider execution remains outside this report projection.".into(),
     ];
 
     let report = BacktestReport {
@@ -653,21 +653,65 @@ fn fairness_incomparable(runs: &[TriageRun]) -> Vec<IncomparablePair> {
     let mut pairs = Vec::new();
     for i in 0..runs.len() {
         for j in (i + 1)..runs.len() {
-            if runs[i].fairness.as_str() != runs[j].fairness.as_str() {
-                pairs.push(IncomparablePair {
-                    left_run_id: runs[i].run_id.clone(),
-                    right_run_id: runs[j].run_id.clone(),
-                    reason: "fairness_class_mismatch".into(),
-                    detail: format!(
-                        "{} vs {}",
-                        runs[i].fairness.as_str(),
-                        runs[j].fairness.as_str()
-                    ),
-                });
-            }
+            let Some((reason, detail)) =
+                fairness_incomparable_reason(&runs[i].fairness, &runs[j].fairness)
+            else {
+                continue;
+            };
+            pairs.push(IncomparablePair {
+                left_run_id: runs[i].run_id.clone(),
+                right_run_id: runs[j].run_id.clone(),
+                reason: reason.into(),
+                detail,
+            });
         }
     }
     pairs
+}
+
+fn fairness_incomparable_reason(
+    left: &FairnessClass,
+    right: &FairnessClass,
+) -> Option<(&'static str, String)> {
+    match (left, right) {
+        (FairnessClass::SameSnapshot, FairnessClass::SameSnapshot) => None,
+        (FairnessClass::UnknownVisibility, FairnessClass::UnknownVisibility) => Some((
+            "unknown_visibility",
+            "both runs have unknown evidence visibility".into(),
+        )),
+        (
+            FairnessClass::ExtraEvidence { description: left },
+            FairnessClass::ExtraEvidence { description: right },
+        ) if left == right => Some((
+            "extra_evidence",
+            format!("both runs used declared extra evidence: {left}"),
+        )),
+        (
+            FairnessClass::ExtraEvidence { description: left },
+            FairnessClass::ExtraEvidence { description: right },
+        ) => Some((
+            "extra_evidence_description_mismatch",
+            format!("left extra evidence={left}; right extra evidence={right}"),
+        )),
+        _ => Some((
+            "fairness_class_mismatch",
+            format!(
+                "left fairness={}; right fairness={}",
+                fairness_detail(left),
+                fairness_detail(right)
+            ),
+        )),
+    }
+}
+
+fn fairness_detail(fairness: &FairnessClass) -> String {
+    match fairness {
+        FairnessClass::SameSnapshot => "same_snapshot".into(),
+        FairnessClass::UnknownVisibility => "unknown_visibility".into(),
+        FairnessClass::ExtraEvidence { description } => {
+            format!("extra_evidence({description})")
+        }
+    }
 }
 
 fn version_pairs(

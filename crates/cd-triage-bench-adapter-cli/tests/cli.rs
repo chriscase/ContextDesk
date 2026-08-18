@@ -1,13 +1,17 @@
 use assert_cmd::Command;
-use cd_triage_bench::report::{build_report, ScoreVisibility};
+use cd_triage_bench::report::{
+    build_report, render_report_json, render_report_jsonl, render_report_markdown, ScoreVisibility,
+};
 use cd_triage_bench::types::{
-    Adjudication, BlindingState, Case, CaseLifecycle, ConflictOfInterest, ContentDigest,
-    DimensionOutcome, DimensionVerdict, EvaluationTask, EvidenceItem, EvidenceSnapshot,
-    EvidenceSource, HeldContent, PrivacyClass, ReportedProblem, ReviewPhase, RubricDimension,
-    VisibilityPolicy, CASE_SCHEMA_V1, RUBRIC_V1, RUN_SCHEMA_V2,
+    Adjudication, BlindingState, Case, CaseLifecycle, CaseResolution, Completeness,
+    ConflictOfInterest, ContentDigest, DimensionOutcome, DimensionVerdict, EvaluationTask,
+    EvidenceItem, EvidenceSnapshot, EvidenceSource, HeldContent, PrivacyClass, PromptWorkflow,
+    ReportedProblem, ReviewPhase, RubricDimension, RunImport, VisibilityPolicy, CASE_SCHEMA_V1,
+    RUBRIC_V1, RUN_IMPORT_SCHEMA_V1, RUN_SCHEMA_V2,
 };
 use cd_triage_bench::{
-    BenchStore, FairnessClass, Observed, RunStatus, SourceKind, StrategyIdentity,
+    import_run, BenchStore, FairnessClass, ImportOutcome, Observed, RunStatus, SourceKind,
+    StrategyIdentity,
 };
 use cd_triage_bench_adapter::{
     decode_replay_json, materialize_bounded_packet, project_share_safe, record_public_replay,
@@ -17,7 +21,6 @@ use cd_triage_bench_adapter::{
 use cd_triage_sdk::{ModelRef, TriagePolicySelectionV2, TriageSlotKindV2};
 
 fn seed_store(root: &std::path::Path) -> (BenchStore, EvaluationTask) {
-    let store = BenchStore::init(root, "2026-01-15T00:00:00Z").unwrap();
     let case = Case {
         schema_id: CASE_SCHEMA_V1.into(),
         case_id: "case-cli-fixture".into(),
@@ -34,6 +37,36 @@ fn seed_store(root: &std::path::Path) -> (BenchStore, EvaluationTask) {
         created_at: "2026-01-15T00:00:00Z".into(),
         resolution: None,
     };
+    seed_store_with_case(root, case)
+}
+
+fn seed_resolved_store(root: &std::path::Path) -> (BenchStore, EvaluationTask) {
+    let case = Case {
+        schema_id: CASE_SCHEMA_V1.into(),
+        case_id: "case-cli-resolved-fixture".into(),
+        privacy: PrivacyClass::OwnerOnly,
+        title: "Synthetic resolved CLI case".into(),
+        reported_problem: ReportedProblem {
+            summary: "checkout timeout".into(),
+            reported_at: None,
+            reporter: None,
+            symptoms: vec!["timeout".into()],
+        },
+        lifecycle: CaseLifecycle::Resolved,
+        timeline_notes: vec![],
+        created_at: "2026-01-15T00:00:00Z".into(),
+        resolution: Some(CaseResolution {
+            adjudicated_root_cause: Some("inventory dependency timeout".into()),
+            fix: Some("raise the bounded inventory client timeout".into()),
+            domain_expertise: Some("synthetic acceptance fixture".into()),
+            notes: None,
+        }),
+    };
+    seed_store_with_case(root, case)
+}
+
+fn seed_store_with_case(root: &std::path::Path, case: Case) -> (BenchStore, EvaluationTask) {
+    let store = BenchStore::init(root, "2026-01-15T00:00:00Z").unwrap();
     store.put_case(&case).unwrap();
     let bytes = b"synthetic timeout\n";
     store.put_blob(bytes).unwrap();
@@ -162,6 +195,86 @@ fn support_outcomes() -> Vec<DimensionOutcome> {
             assist_flags: vec![],
         })
         .collect()
+}
+
+fn import_manual_acceptance_run(
+    store: &BenchStore,
+    task_id: &str,
+    source_kind: SourceKind,
+    strategy_name: &str,
+    raw: &str,
+    created_at: &str,
+) -> String {
+    let document = RunImport {
+        schema_id: RUN_IMPORT_SCHEMA_V1.into(),
+        task_id: task_id.into(),
+        strategy: StrategyIdentity {
+            name: strategy_name.into(),
+            version: Observed::Known("acceptance-v1".into()),
+            build: Observed::Unknown,
+        },
+        source_kind,
+        prompt_workflow: PromptWorkflow {
+            completeness: Completeness::Unknown,
+            prompt: Observed::Unknown,
+            workflow: Observed::Unknown,
+        },
+        raw_output_utf8: Some(raw.into()),
+        claims: vec![],
+        timing: Observed::Unknown,
+        cost: Observed::Unknown,
+        uncertainty: Observed::Unknown,
+        fairness: FairnessClass::SameSnapshot,
+        status: RunStatus::Completed,
+        operator: "acceptance-importer".into(),
+        importer: Some("adapter-cli-acceptance".into()),
+        privacy: PrivacyClass::OwnerOnly,
+        created_at: created_at.into(),
+    };
+    match import_run(store, &document, raw.as_bytes()).unwrap() {
+        ImportOutcome::Created { run_id, .. } | ImportOutcome::Duplicate { run_id } => run_id,
+    }
+}
+
+fn adjudicate_support(store: &BenchStore, run_id: &str, reviewer: &str) -> String {
+    let run = store.get_run(run_id).unwrap();
+    let packet = store
+        .materialize_review_packet(run_id, ReviewPhase::Support)
+        .unwrap();
+    let adjudication = Adjudication::from_parts_with_packet(
+        PrivacyClass::OwnerOnly,
+        run.case_id,
+        run.task_id,
+        run.snapshot_id,
+        run.run_id,
+        reviewer.into(),
+        ConflictOfInterest {
+            declared: false,
+            notes: None,
+        },
+        RUBRIC_V1.into(),
+        ReviewPhase::Support,
+        packet.packet_id,
+        packet.blinding,
+        support_outcomes(),
+        "2026-01-15T09:00:00Z".into(),
+    )
+    .unwrap();
+    store
+        .import_adjudication(adjudication)
+        .unwrap()
+        .adjudication_id
+}
+
+fn build_owner_report(store: &BenchStore) -> cd_triage_bench::report::BacktestReport {
+    build_report(
+        &store.load_runs().unwrap(),
+        &store.load_adjudications().unwrap(),
+        &store.load_scores().unwrap(),
+        &store.load_cases().unwrap(),
+        PrivacyClass::OwnerOnly,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -458,4 +571,137 @@ fn replay_ingest_persists_and_reaches_adjudication_and_comparison() {
             .any(|verdict| verdict.adjudication_id == score.adjudication_id)
     }));
     assert!(report.generated_from.score_ids.contains(&score.score_id));
+}
+
+#[test]
+fn resolved_human_web_and_sdk_runs_share_one_stable_comparison_group() {
+    let directory = tempfile::tempdir().unwrap();
+    let (store, task) = seed_resolved_store(directory.path());
+    let human_run_id = import_manual_acceptance_run(
+        &store,
+        &task.task_id,
+        SourceKind::Human,
+        "human-incident-responder",
+        "Inventory calls timed out; raise the bounded client timeout.",
+        "2026-01-15T08:00:00Z",
+    );
+    let web_run_id = import_manual_acceptance_run(
+        &store,
+        &task.task_id,
+        SourceKind::WebOnly,
+        "web-only-assistant",
+        "Visible logs support an inventory dependency timeout.",
+        "2026-01-15T08:01:00Z",
+    );
+
+    let case = store.get_case(&task.case_id).unwrap();
+    let snapshot = store.get_snapshot(&task.snapshot_id).unwrap();
+    let bounded = materialize_bounded_packet(&case, &snapshot, &task).unwrap();
+    let bound = cd_triage_bench_adapter::build_request(
+        &snapshot,
+        &task,
+        &bounded,
+        TriagePolicySelectionV2::Standard {
+            model: ModelRef {
+                profile_id: "profile:mock-gateway".into(),
+                model_id: "mock-finalizer-v1".into(),
+            },
+        },
+        Default::default(),
+        &format!("cancel-{}", task.task_id),
+    )
+    .unwrap();
+    let mock =
+        run_deterministic_mock(&bound, &bounded, &replay_plan(RunStatus::Completed)).unwrap();
+    let encoded_replay = serde_json::to_vec(&mock.replay).unwrap();
+    let recorded = record_public_replay(
+        &case,
+        &snapshot,
+        &task,
+        &bounded,
+        &bound,
+        decode_replay_json(&encoded_replay).unwrap(),
+        &RecordingContext {
+            strategy: StrategyIdentity {
+                name: "contextdesk-sdk".into(),
+                version: Observed::Known("public-contract-v2".into()),
+                build: Observed::Known("three-strategy-acceptance".into()),
+            },
+            operator: "acceptance-test".into(),
+            created_at: "2026-01-15T08:02:00Z".into(),
+        },
+    )
+    .unwrap();
+    store.put_blob(&recorded.raw_output).unwrap();
+    store.put_run(&recorded.bench_run).unwrap();
+    let sdk_run_id = recorded.bench_run.run_id;
+
+    let expected = [
+        (human_run_id, SourceKind::Human),
+        (web_run_id, SourceKind::WebOnly),
+        (sdk_run_id, SourceKind::ContextdeskSdk),
+    ];
+    let mut adjudication_ids = Vec::new();
+    for (index, (run_id, source_kind)) in expected.iter().enumerate() {
+        let run = store.get_run(run_id).unwrap();
+        assert_eq!(run.case_id, task.case_id);
+        assert_eq!(run.task_id, task.task_id);
+        assert_eq!(run.snapshot_id, task.snapshot_id);
+        assert_eq!(run.source_kind, *source_kind);
+        assert_eq!(run.fairness, FairnessClass::SameSnapshot);
+        adjudication_ids.push(adjudicate_support(
+            &store,
+            run_id,
+            &format!("reviewer-{index}"),
+        ));
+    }
+
+    drop(store);
+    let reopened = BenchStore::open(directory.path()).unwrap();
+    let first = build_owner_report(&reopened);
+    let regenerated = build_owner_report(&BenchStore::open(directory.path()).unwrap());
+    assert_eq!(first, regenerated);
+    assert_eq!(first.privacy, PrivacyClass::OwnerOnly);
+    assert_eq!(first.groups.len(), 1);
+    assert!(first.incomparable.is_empty());
+    let group = &first.groups[0];
+    assert_eq!(group.case_id, task.case_id);
+    assert_eq!(group.task_id, task.task_id);
+    assert_eq!(group.snapshot_id, task.snapshot_id);
+    assert_eq!(group.runs.len(), 3);
+    assert!(group.runs.iter().all(|run| {
+        run.fairness == "same_snapshot"
+            && run.comparison_eligible
+            && run.score_visibility == ScoreVisibility::Partial
+    }));
+    assert_eq!(
+        group
+            .runs
+            .iter()
+            .map(|run| run.source_kind)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
+            SourceKind::Human,
+            SourceKind::WebOnly,
+            SourceKind::ContextdeskSdk,
+        ])
+    );
+    assert_eq!(first.generated_from.adjudication_ids.len(), 3);
+    assert_eq!(first.generated_from.score_ids.len(), 3);
+    assert!(adjudication_ids
+        .iter()
+        .all(|id| first.generated_from.adjudication_ids.contains(id)));
+
+    assert_eq!(
+        render_report_json(&first).unwrap(),
+        render_report_json(&regenerated).unwrap()
+    );
+    assert_eq!(
+        render_report_jsonl(&first).unwrap(),
+        render_report_jsonl(&regenerated).unwrap()
+    );
+    assert_eq!(
+        render_report_markdown(&first).unwrap(),
+        render_report_markdown(&regenerated).unwrap()
+    );
 }

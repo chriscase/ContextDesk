@@ -6,16 +6,17 @@ adjudication, and honest comparison reports.
 
 This crate is **not** the ContextDesk engine, GUI, or web collaboration layer.
 It has no `cd-core` dependency, no network client, and no keychain access.
-ContextDesk participates later as one strategy among many (#879), through public
-SDK contracts, not by absorbing case management.
+ContextDesk participates as one strategy among many through the leaf
+`cd-triage-sdk` contracts, the hermetic `cd-triage-bench-adapter`, and its
+offline mock/replay CLI—not by absorbing case management.
 
 Working name: `cd-triage-bench` (rename-friendly; crate prefix stays `cd-*`).
 
-Status: first slice (#877 store/entities) is on `main` via #890/#891. This
-branch adds **manual import / provenance** (#878), **rubric v1 + expert
-adjudication** (#880), and **report-only comparison** over stored records
-(#881). Not a close of epic #876. Not release-ready. The SDK-driven batch
-runner is residual until #879. No composite leaderboards.
+Status: the store/entities, manual import/provenance, rubric v1 + expert
+adjudication, report-only comparison, public-SDK adapter, deterministic mock
+runner, and validated replay ingestion are implemented. This does not close
+epic #876 or make the bench release-ready: live provider execution and the
+remaining acceptance hardening are separate work. No composite leaderboards.
 
 ## Layout
 
@@ -104,6 +105,10 @@ cd-triage-bench --library ./bench-lib show adjudications "$ADJ_ID"
 cd-triage-bench --library ./bench-lib report --format json --privacy share-safe
 cd-triage-bench --library ./bench-lib report --format jsonl --privacy owner-only
 cd-triage-bench --library ./bench-lib report --format markdown
+
+# Public-SDK adapter: deterministic offline execution or validated replay ingest.
+cd-triage-bench-adapter --library ./bench-lib run "$TASK_ID" --script completed
+cd-triage-bench-adapter --library ./bench-lib record-replay "$TASK_ID" --replay ./replay.json
 ```
 
 Human submission template: [`fixtures/templates/human-run.md`](fixtures/templates/human-run.md).
@@ -159,9 +164,11 @@ records/titles/rationales/reviewers and fails closed on a privacy scan;
 withheld scores are counted separately from genuine absence. `owner_only`
 keeps that detail.
 
-**Residual:** an SDK-driven batch runner that executes ContextDesk across a
-case set, including mid-batch failure coverage. That needs #879. Imported
-runs already join this report from storage.
+The shipped public-SDK adapter records deterministic mock runs and validated
+replays, including failed, partial, timed-out, and cancelled terminals. Those
+runs join imported human and web-only runs through the same stored report
+path. Live production-provider execution remains outside this headless report
+projection.
 
 ## Future scope (explicitly not this slice)
 
@@ -170,7 +177,7 @@ runs already join this report from storage.
 - Direct web-tool / browser automation (manual import is the path here)
 - Multi-strategy synthesis
 - Similar-case retrieval
-- ContextDesk public-SDK adapter (#879)
+- Live production-provider execution through a separately bounded host bridge
 - LLM-as-judge (forbidden as scoring authority; any later judge follows #867)
 
 ## Non-goals
