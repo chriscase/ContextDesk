@@ -1,0 +1,20 @@
+{
+  "policy": {
+    "kind": "standard",
+    "model": {
+      "profile_id": "HOST_PROFILE_ID",
+      "model_id": "HOST_MODEL_ID"
+    }
+  },
+  "cancellation_id": "cancel-demo-candidate-a",
+  "strategy": {
+    "name": "demo-candidate-a",
+    "version": "demo-v1",
+    "operator": "demo-operator",
+    "created_at": "2026-01-15T08:00:00Z"
+  },
+  "overrides": {
+    "deadline_ms": 60000,
+    "max_provider_calls": 4
+  }
+}

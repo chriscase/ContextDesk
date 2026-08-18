@@ -1,0 +1,32 @@
+{
+  "schema_id": "contextdesk.triage_bench.evidence_snapshot.v1",
+  "snapshot_id": "snap-5a75de4d710765b3fbb87afdc85beb25fd96f23b46ef4c59d416aa7ae61bbceb",
+  "privacy": "share_safe",
+  "case_id": "case-demo-checkout-timeout",
+  "captured_at": "2026-01-15T06:00:00Z",
+  "captured_by": "demo-operator",
+  "items": [
+    {
+      "kind": "log",
+      "item_id": "ev-demo-checkout-log",
+      "privacy": "share_safe",
+      "capture_time": "2026-01-15T04:12:00Z",
+      "source": {
+        "reference": "checkout.log",
+        "captured_from": "synthetic demo collector"
+      },
+      "media_type": "text/plain",
+      "format": "raw",
+      "content": {
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "959969b69cac6ba8280a8cb6836226d91a621122a16703109cb690d5e7a50f75"
+        },
+        "byte_length": 487
+      },
+      "summaries": [],
+      "visible_to_strategies": true
+    }
+  ],
+  "notes": "Synthetic, non-sensitive demo snapshot. One raw log only so live bench-compare can materialize it."
+}
