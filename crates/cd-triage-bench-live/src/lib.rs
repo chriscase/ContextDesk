@@ -307,6 +307,13 @@ pub fn prepare_same_snapshot_corpus(
     limits: LiveCorpusLimits,
     cancel: &CancelFlag,
 ) -> Result<PreparedSameSnapshotCorpus, LiveBridgeError> {
+    if limits.max_blob_bytes == 0
+        || limits.max_blob_bytes > DEFAULT_LIVE_MAX_BLOB_BYTES
+        || limits.max_aggregate_bytes == 0
+        || limits.max_aggregate_bytes > DEFAULT_LIVE_MAX_AGGREGATE_BYTES
+    {
+        return Err(LiveBridgeError::BoundExceeded);
+    }
     if cancel.is_cancelled() {
         return Err(LiveBridgeError::Cancelled);
     }

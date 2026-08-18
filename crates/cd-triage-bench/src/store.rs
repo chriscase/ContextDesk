@@ -350,6 +350,25 @@ impl BenchStore {
         Ok(())
     }
 
+    /// Verify snapshot blobs without allocating their complete contents.
+    ///
+    /// The declared size is checked before any bytes are read, and the blob is
+    /// then streamed through the same length and digest proof used by the live
+    /// bridge. This is the bounded entry point for host-facing operations.
+    pub fn verify_snapshot_blobs_bounded(
+        &self,
+        snapshot: &EvidenceSnapshot,
+        max_bytes: u64,
+    ) -> BenchResult<()> {
+        for item in &snapshot.items {
+            if let Some(content) = item.held_content() {
+                let mut sink = std::io::sink();
+                self.copy_snapshot_blob_verified(content, max_bytes, &mut sink, || false)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn put_case(&self, case: &Case) -> BenchResult<()> {
         case.validate()?;
         atomic_write_json(&self.entity_path("cases", &case.case_id), case)
@@ -385,6 +404,17 @@ impl BenchStore {
     pub fn get_snapshot(&self, snapshot_id: &str) -> BenchResult<EvidenceSnapshot> {
         let snapshot = EvidenceSnapshot::parse_json(&self.read_entity("snapshots", snapshot_id)?)?;
         self.verify_snapshot_blobs(&snapshot)?;
+        Ok(snapshot)
+    }
+
+    /// Load and verify a snapshot under a per-blob byte bound.
+    pub fn get_snapshot_bounded(
+        &self,
+        snapshot_id: &str,
+        max_bytes: u64,
+    ) -> BenchResult<EvidenceSnapshot> {
+        let snapshot = EvidenceSnapshot::parse_json(&self.read_entity("snapshots", snapshot_id)?)?;
+        self.verify_snapshot_blobs_bounded(&snapshot, max_bytes)?;
         Ok(snapshot)
     }
 
@@ -582,7 +612,7 @@ impl BenchStore {
         let task = self.get_task(&run.task_id)?;
         let case = self.get_case(&run.case_id)?;
         let snapshot = self.get_snapshot(&run.snapshot_id)?;
-        let raw = self.get_blob(&run.raw_output.digest.hex)?;
+        let raw = self.get_blob_bounded(&run.raw_output.digest.hex, MAX_RAW_INLINE_BYTES as u64)?;
         let support_recorded = run_has_support_adjudication(&self.load_adjudications()?, run_id);
         let packet = materialize_review_packet(
             &case,
@@ -607,7 +637,7 @@ impl BenchStore {
         let task = self.get_task(&packet.task_id)?;
         let case = self.get_case(&packet.case_id)?;
         let snapshot = self.get_snapshot(&packet.snapshot_id)?;
-        let raw = self.get_blob(&run.raw_output.digest.hex)?;
+        let raw = self.get_blob_bounded(&run.raw_output.digest.hex, MAX_RAW_INLINE_BYTES as u64)?;
         let support_recorded = packet.phase == ReviewPhase::Support
             || run_has_support_adjudication(&self.load_adjudications()?, &packet.run_id);
         let expected = materialize_review_packet(

@@ -20,7 +20,7 @@ use cd_core::triage_role_qualification::{
 };
 use cd_triage_bench::{
     build_report_with_attribution, extract_owner_model_attribution, render_report_markdown,
-    BacktestReport, BenchStore, Observed, PrivacyClass, RunAttribution, RunStatus,
+    BacktestReport, BenchError, BenchStore, Observed, PrivacyClass, RunAttribution, RunStatus,
     StrategyIdentity,
 };
 use cd_triage_bench_adapter::RecordingContext;
@@ -182,9 +182,13 @@ pub async fn run(
             cd_triage_bench_live::DEFAULT_MAX_COMPARISON_CANDIDATES
         )));
     }
-    if args.max_blob_bytes == 0 || args.max_aggregate_bytes == 0 {
+    if args.max_blob_bytes == 0
+        || args.max_aggregate_bytes == 0
+        || args.max_blob_bytes > cd_triage_bench_live::DEFAULT_LIVE_MAX_BLOB_BYTES
+        || args.max_aggregate_bytes > cd_triage_bench_live::DEFAULT_LIVE_MAX_AGGREGATE_BYTES
+    {
         return Err(CliError::user(
-            "bench-compare byte limits must both be greater than zero",
+            "bench-compare byte limits must be positive and within the live safety bounds",
         ));
     }
 
@@ -204,8 +208,16 @@ pub async fn run(
         .get_case(&task.case_id)
         .map_err(|_| CliError::not_found("benchmark case linked by the task was not found"))?;
     let snapshot = store
-        .get_snapshot(&task.snapshot_id)
-        .map_err(|_| CliError::not_found("benchmark snapshot linked by the task was not found"))?;
+        .get_snapshot_bounded(&task.snapshot_id, args.max_blob_bytes)
+        .map_err(|error| match error {
+            BenchError::NotFound(_) => {
+                CliError::not_found("benchmark snapshot linked by the task was not found")
+            }
+            BenchError::BlobTooLarge { .. } => {
+                CliError::user("benchmark snapshot exceeds the comparison blob bound")
+            }
+            _ => CliError::internal("benchmark snapshot could not be validated"),
+        })?;
 
     let policy_path = paths.config_dir.join("triage-policies.json");
     let policies = TriagePolicyStoreV1::load(&policy_path)
