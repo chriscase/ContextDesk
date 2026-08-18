@@ -1,0 +1,5 @@
+2026-01-15T04:12:03Z INFO  checkout service=storefront request_id=req-demo-1 started
+2026-01-15T04:12:05Z ERROR checkout service=storefront request_id=req-demo-1 inventory_client timeout_ms=2000
+2026-01-15T04:12:05Z WARN  checkout service=storefront request_id=req-demo-1 retry=1
+2026-01-15T04:12:08Z ERROR checkout service=storefront request_id=req-demo-1 inventory_client timeout_ms=2000
+2026-01-15T04:12:08Z ERROR checkout service=storefront request_id=req-demo-1 response_status=500
