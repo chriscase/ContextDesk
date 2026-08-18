@@ -65,6 +65,8 @@ leaderboards.
   (with description), or `unknown_visibility`.
 - Comparisons are valid only for the same `EvaluationTask` + snapshot.
   Anything else is reported as **incomparable**, never force-ranked.
+- Owner-only live comparison rows show exact provider-profile/model identities
+  recovered from the validated envelope; share-safe output never exposes them.
 - Reports do not emit readiness, qualification, or routing badges.
 
 ## Schema versioning and migration
