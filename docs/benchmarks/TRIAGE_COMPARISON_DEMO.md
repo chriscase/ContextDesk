@@ -9,6 +9,7 @@ This is **not** an offline `bench-compare` mode. Two existing paths stay distinc
 | Live same-snapshot comparison | `contextdesk bench-compare` | **Yes.** Provider execution through the host. |
 | Offline recorded / replay fallback | `cd-triage-bench import-run` and `cd-triage-bench-adapter record-replay` | **No.** Existing import and replay-ingest commands only. |
 | Report projection | `cd-triage-bench report` | **No.** Reads stored runs only; never executes a strategy. |
+| Evidence-agreement projection | `cd-triage-bench agreement` | **No.** Reads stored runs only; never compares raw text or executes a strategy. |
 
 Do not add `--offline` to `bench-compare`. If live credentials are missing, use
 the recorded/replay fallback, then the same report command.
@@ -162,6 +163,10 @@ run instead of ingesting the checked-in replay.
 "$BENCH" --library "$LIB" report --format json --privacy owner-only
 "$BENCH" --library "$LIB" report --format markdown --privacy share-safe
 "$BENCH" --library "$LIB" report --format json --privacy share-safe
+
+# Evidence-backed convergence, independent of claim wording:
+"$BENCH" --library "$LIB" agreement --format markdown --privacy owner-only
+"$BENCH" --library "$LIB" agreement --format json --privacy share-safe
 ```
 
 Owner-only keeps exact model identities recovered from owner-only raw records.
@@ -171,7 +176,17 @@ identities. Use share-safe for anything that leaves the operator's machine.
 ```bash
 ./scripts/triage-comparison-demo.sh report --library "$LIB" --privacy owner-only
 ./scripts/triage-comparison-demo.sh report --library "$LIB" --privacy share-safe
+./scripts/triage-comparison-demo.sh agreement --library "$LIB" --privacy owner-only
+./scripts/triage-comparison-demo.sh agreement --library "$LIB" --privacy share-safe
 ```
+
+The agreement projection is deterministic and host-side. It groups only exact
+task/snapshot runs, anchors claims to visible evidence and typed roles, reports
+role conflicts and unsupported/uncited claims, and marks `independent` only
+when two distinct exact model identities support the same evidence-role anchor.
+The checked-in replay fallback contains one mock model plus imported rows, so
+it proves the projection and privacy path but does not fabricate a two-model
+consensus. A live run with two distinct models can populate that field.
 
 ## Honesty constraints
 

@@ -20,8 +20,9 @@ Commands:
   import       init + import-case + import-snapshot + import-task
   offline      record-replay both checked-in envelopes + import-run both recorded docs
   report       cd-triage-bench report (default privacy: owner-only)
+  agreement    cd-triage-bench agreement (default privacy: owner-only)
   print-live   print the live contextdesk bench-compare command; do not execute it
-  self-check   import + offline + both reports, then fail closed on identity drift
+  self-check   import + offline + reports + agreement views, then fail closed on identity drift
 
 Environment:
   CD_TRIAGE_BENCH, CD_TRIAGE_BENCH_ADAPTER, CONTEXTDESK_BIN
@@ -37,7 +38,7 @@ PRIVACY="owner-only"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    import|offline|report|print-live|self-check)
+    import|offline|report|agreement|print-live|self-check)
       if [[ -n "$COMMAND" ]]; then
         echo "exactly one command is required" >&2
         exit 2
@@ -169,6 +170,18 @@ cmd_report() {
   "$bench" --library "$LIBRARY" report --format markdown --privacy "$PRIVACY"
 }
 
+cmd_agreement() {
+  local bench="$1"
+  case "$PRIVACY" in
+    owner-only|share-safe) ;;
+    *)
+      echo "--privacy must be owner-only or share-safe" >&2
+      exit 2
+      ;;
+  esac
+  "$bench" --library "$LIBRARY" agreement --format markdown --privacy "$PRIVACY"
+}
+
 cmd_print_live() {
   local contextdesk
   contextdesk="${CONTEXTDESK_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/contextdesk}"
@@ -208,6 +221,10 @@ case "$COMMAND" in
     BENCH_BIN="$(resolve_bin CD_TRIAGE_BENCH cd-triage-bench cd-triage-bench)"
     cmd_report "$BENCH_BIN"
     ;;
+  agreement)
+    BENCH_BIN="$(resolve_bin CD_TRIAGE_BENCH cd-triage-bench cd-triage-bench)"
+    cmd_agreement "$BENCH_BIN"
+    ;;
   self-check)
     BENCH_BIN="$(resolve_bin CD_TRIAGE_BENCH cd-triage-bench cd-triage-bench)"
     ADAPTER_BIN="$(resolve_bin CD_TRIAGE_BENCH_ADAPTER cd-triage-bench-adapter-cli cd-triage-bench-adapter)"
@@ -215,13 +232,17 @@ case "$COMMAND" in
     trap 'rm -rf "$LIBRARY"' EXIT
     cmd_import "$BENCH_BIN"
     cmd_offline "$BENCH_BIN" "$ADAPTER_BIN"
-    owner="$("$BENCH_BIN" --library "$LIBRARY" report --format markdown --privacy owner-only)"
-    share="$("$BENCH_BIN" --library "$LIBRARY" report --format markdown --privacy share-safe)"
+   owner="$("$BENCH_BIN" --library "$LIBRARY" report --format markdown --privacy owner-only)"
+   share="$("$BENCH_BIN" --library "$LIBRARY" report --format markdown --privacy share-safe)"
+    owner_agreement="$("$BENCH_BIN" --library "$LIBRARY" agreement --format markdown --privacy owner-only)"
+    share_agreement="$("$BENCH_BIN" --library "$LIBRARY" agreement --format markdown --privacy share-safe)"
     printf '%s\n' "$owner" | grep -q "$TASK_ID"
     printf '%s\n' "$owner" | grep -q "$SNAPSHOT_ID"
     printf '%s\n' "$share" | grep -q "$TASK_ID"
     printf '%s\n' "$share" | grep -q 'Privacy: `share_safe`'
-    printf '%s\n' "$owner" | grep -q 'Privacy: `owner_only`'
+   printf '%s\n' "$owner" | grep -q 'Privacy: `owner_only`'
+    printf '%s\n' "$owner_agreement" | grep -q 'Triage bench evidence agreement'
+    printf '%s\n' "$share_agreement" | grep -q 'Triage bench evidence agreement (share-safe)'
     runs="$("$BENCH_BIN" --library "$LIBRARY" list runs)"
     run_count="$(printf '%s\n' "$runs" | awk 'NF' | wc -l | tr -d ' ')"
     if [[ "$run_count" -lt 4 ]]; then
