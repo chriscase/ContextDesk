@@ -4,8 +4,8 @@
 mod common;
 
 use cd_triage_bench_adapter::{
-    materialize_bounded_packet, record_run, run_deterministic_mock, run_offline, AdapterRun,
-    MockSlotOutcome,
+    materialize_bounded_packet, record_run, run_deterministic_mock, run_offline,
+    validate_public_replay, AdapterRun, MockSlotOutcome,
 };
 use cd_triage_sdk::{TriagePolicySelectionV2, TriageRequestOverridesV1};
 
@@ -159,6 +159,8 @@ fn a_different_model_changes_the_slot_and_model_fingerprints_only() {
     let base = run_deterministic_mock(&bound, &bounded, &base_plan).unwrap();
     let other = run_deterministic_mock(&bound, &bounded, &swapped).unwrap();
     let context = common::context();
+    let base = validate_public_replay(base.replay, &bound).unwrap();
+    let other = validate_public_replay(other.replay, &bound).unwrap();
     let base = record_run(&snapshot, &task, &bound, &bounded, &base, &context).unwrap();
     let other = record_run(&snapshot, &task, &bound, &bounded, &other, &context).unwrap();
 

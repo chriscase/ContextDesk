@@ -7,10 +7,14 @@ public SDK boundary only.
 Case + EvidenceSnapshot + EvaluationTask
   -> materialize_bounded_packet   visibility fail-closed (bench, then adapter)
   -> build_request                real TriageRequestV2::validate
-  -> run_deterministic_mock       real TriageReplayV1::validate
+  -> run_deterministic_mock | imported TriageReplayV1
+  -> validate_public_replay       real TriageReplayV1::validate
   -> record_run                   owner-only; real TriageRun::validate
   -> project_share_safe           explicit projection; real scan_share_safe_text
 ```
+
+Recording is **replay ingest**, not live execution. The mock and an imported
+`TriageReplayV1` share one recording path. Usage and cost stay unknown.
 
 ## Boundary rules
 
@@ -24,6 +28,7 @@ Case + EvidenceSnapshot + EvaluationTask
 | Packet cannot widen past the task visibility policy | `tests/pipeline.rs` |
 | Request identity binds to packet identity | `tests/pipeline.rs`, `tests/fingerprints.rs` |
 | Every terminal is a recorded run, never a discarded attempt | `tests/terminals.rs` |
+| Imported replay uses the same recorder as the mock | `tests/replay_ingest.rs` |
 | Failed-with-partial stays Failed | `tests/terminals.rs` |
 | Share-safe export leaks no model identity, answer, or raw body | `tests/privacy.rs` |
 | Fairness is `same_snapshot`; usage and cost stay unknown | `tests/pipeline.rs` |

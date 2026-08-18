@@ -3,9 +3,10 @@
 //! # What this crate is
 //!
 //! An **offline adapter** that turns a `cd-triage-bench` evidence snapshot and
-//! evaluation task into a real [`cd_triage_sdk`] triage request, runs a
-//! deterministic mock engine, and records the outcome as an owner-only
-//! `cd_triage_bench::TriageRun`.
+//! evaluation task into a real [`cd_triage_sdk`] triage request, accepts a
+//! validated public-SDK [`cd_triage_sdk::TriageReplayV1`] (from the
+//! deterministic mock or an imported replay), and records the outcome as an
+//! owner-only `cd_triage_bench::TriageRun`.
 //!
 //! # Boundary rules this crate holds
 //!
@@ -42,10 +43,13 @@
 //! Case + EvidenceSnapshot + EvaluationTask
 //!   -> materialize_bounded_packet   (visibility fail-closed, twice)
 //!   -> build_request                (real TriageRequestV2::validate)
-//!   -> run_deterministic_mock       (real TriageReplayV1::validate)
+//!   -> run_deterministic_mock | imported TriageReplayV1
+//!   -> validate_public_replay       (real TriageReplayV1::validate)
 //!   -> record_run                   (owner-only; real TriageRun::validate)
 //!   -> project_share_safe           (explicit projection; real scan)
 //! ```
+//!
+//! Replay ingest is **not** live execution. Usage and cost stay unknown.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -55,6 +59,7 @@ pub mod error;
 pub mod fingerprint;
 pub mod packet;
 pub mod record;
+pub mod replay;
 pub mod request;
 pub mod share_safe;
 
@@ -68,6 +73,9 @@ pub use packet::{materialize_bounded_packet, BoundedPacket};
 pub use record::{
     record_run, OwnerOnlyRecord, RecordedContextDeskRun, RecordingContext, RunFingerprints,
     SlotProvenance, TerminalProvenance,
+};
+pub use replay::{
+    decode_replay_json, record_public_replay, validate_public_replay, ValidatedReplayOutcome,
 };
 pub use request::{build_request, BoundRequest};
 pub use share_safe::{project_share_safe, ShareSafeAdapterRun, ShareSafeSlot};
@@ -85,8 +93,8 @@ pub struct AdapterRun {
     pub bounded: BoundedPacket,
     /// The validated public request.
     pub bound: BoundRequest,
-    /// The validated replay and its attempts.
-    pub outcome: MockRunOutcome,
+    /// The validated public-SDK replay and its attempts.
+    pub outcome: ValidatedReplayOutcome,
     /// The owner-only recorded bench run.
     pub recorded: RecordedContextDeskRun,
 }
@@ -105,7 +113,8 @@ pub fn run_offline(
 ) -> AdapterResult<AdapterRun> {
     let bounded = materialize_bounded_packet(case, snapshot, task)?;
     let bound = build_request(snapshot, task, &bounded, policy, overrides, cancellation_id)?;
-    let outcome = run_deterministic_mock(&bound, &bounded, plan)?;
+    let mock = run_deterministic_mock(&bound, &bounded, plan)?;
+    let outcome = validate_public_replay(mock.replay, &bound)?;
     let recorded = record_run(snapshot, task, &bound, &bounded, &outcome, context)?;
     Ok(AdapterRun {
         bounded,

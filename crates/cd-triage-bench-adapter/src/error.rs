@@ -36,6 +36,9 @@ pub enum AdapterError {
     /// Canonical JSON serialization failed.
     #[error("adapter serialization failed")]
     Serialize,
+    /// Bytes were not a `TriageReplayV1` JSON object.
+    #[error("replay JSON is not a TriageReplayV1")]
+    ReplayJson,
 }
 
 impl AdapterError {

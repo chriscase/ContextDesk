@@ -194,28 +194,15 @@ pub struct MockRunOutcome {
 }
 
 impl MockRunOutcome {
-    /// The single terminal payload. The replay validator has already proved
-    /// exactly one exists and that it is last.
+    /// The single terminal payload. Uses the same extractor as replay ingest.
     pub fn terminal(&self) -> &TriageRunEventPayloadV2 {
-        &self
-            .replay
-            .events
-            .last()
+        crate::replay::terminal_payload(&self.replay)
             .expect("validated replay has a terminal event")
-            .event
     }
 
     /// The authoritative or partial result attached to the terminal, if any.
     pub fn result(&self) -> Option<&TriageResultV2> {
-        match self.terminal() {
-            TriageRunEventPayloadV2::Completed { result } => Some(result),
-            TriageRunEventPayloadV2::Failed { partial_result, .. }
-            | TriageRunEventPayloadV2::TimedOut { partial_result, .. }
-            | TriageRunEventPayloadV2::Cancelled { partial_result, .. } => {
-                partial_result.as_deref()
-            }
-            _ => None,
-        }
+        crate::replay::terminal_result(self.terminal())
     }
 }
 

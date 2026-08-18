@@ -1,6 +1,6 @@
 [package]
 name = "cd-triage-bench-adapter"
-description = "Offline ContextDesk-as-a-strategy adapter: bench evidence snapshot to public-SDK triage request, deterministic mock replay, and an owner-only recorded bench run. Default features depend only on cd-triage-sdk and cd-triage-bench."
+description = "Offline ContextDesk-as-a-strategy adapter: bench evidence snapshot to public-SDK triage request, validated replay ingest (mock or imported), and an owner-only recorded bench run. Default features depend only on cd-triage-sdk and cd-triage-bench. Replay ingest is not live execution."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
