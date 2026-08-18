@@ -14,7 +14,7 @@ use cd_core::{
     },
 };
 use cd_test_gateway::{Body, Frame, MockGateway, RecordedRequest, Response, Step};
-use cd_triage_bench::report::build_report;
+use cd_triage_bench::report::{build_report, render_report_markdown};
 use cd_triage_bench::{
     BenchStore, Case, CaseLifecycle, ContentDigest, EvaluationTask, EvidenceItem, EvidenceSnapshot,
     EvidenceSource, HeldContent, Observed, PrivacyClass, ReportedProblem, StrategyIdentity,
@@ -705,6 +705,12 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
     assert_eq!(report.groups.len(), 1);
     assert_eq!(report.groups[0].runs.len(), 2);
     assert!(report.incomparable.is_empty());
+    let markdown = render_report_markdown(&report).unwrap();
+    assert!(markdown.contains("# Triage bench comparison report"));
+    assert!(markdown.contains("ContextDesk live alpha"));
+    assert!(markdown.contains("ContextDesk live beta"));
+    assert!(markdown.contains("same task + snapshot"));
+    assert!(markdown.contains("does not assign readiness, qualification, or routing badges"));
 }
 
 #[tokio::test]
