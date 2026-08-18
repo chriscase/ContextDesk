@@ -124,6 +124,9 @@ cd-triage-bench --library ./bench-lib report --format json --privacy share-safe
 cd-triage-bench --library ./bench-lib report --format jsonl --privacy owner-only
 cd-triage-bench --library ./bench-lib report --format markdown
 
+cd-triage-bench --library ./bench-lib agreement --format markdown
+cd-triage-bench --library ./bench-lib agreement --format json --privacy share-safe
+
 # Public-SDK adapter: deterministic offline execution or validated replay ingest.
 cd-triage-bench-adapter --library ./bench-lib run "$TASK_ID" --script completed
 cd-triage-bench-adapter --library ./bench-lib record-replay "$TASK_ID" --replay ./replay.json
@@ -188,6 +191,71 @@ live bridge records proof-bound production runs against one prepared snapshot;
 those runs join imported human and web-only runs through the same stored report
 path. The report remains a projection: it never executes a strategy or invents
 rankings.
+
+## Evidence agreement (`agreement`)
+
+`agreement` is a second deterministic projection over the same stored runs. It
+answers one question: **which strategies anchored a claim to the same snapshot
+evidence, under the same causal role?** It never executes a strategy, contacts a
+provider, reads a credential, or reads a clock, and it changes no stored record.
+
+Schema ids: `contextdesk.triage_bench.agreement_view.v1` (owner-only) and
+`contextdesk.triage_bench.agreement_view_share_safe.v1`.
+
+**Evidence, not text.** The unit is an *anchor*: one snapshot evidence item plus
+one causal role. Claim text is never compared, hashed for similarity, or scored.
+A supported claim carrying no evidence id is counted as `unanchored` and is
+explicitly not agreement.
+
+**Roles.** SDK `claim_kind` maps to a fixed bucket: `initiating_cause` →
+`cause`; `causal_candidate` / `competing_explanation` → `candidate`; `symptom` →
+`symptom`; `observation` → `observation`; `missing_evidence` → `gap`. Imported
+human / web-only / other-product rows carry no typed kind, so their citations
+land in `unknown`, which never merges with a typed bucket. An unrecognized kind
+or status is counted as `unrecognized` rather than folded into `unknown`.
+
+**Conflicts are conflicts.** The same evidence claimed under two roles is
+reported in `role_conflicts`, never merged into one anchor. Runs inside a single
+bucket still concur with each other; the disagreement about what the evidence
+*means* is stated rather than averaged away.
+
+**Independence.** `independent` is true only when two or more distinct *source
+identities* claimed an anchor. An SDK row's identity is its exact
+profile/model pair, so two comparison candidates that resolved to one model
+concur without being independent corroboration. An imported row's identity is
+`<source_kind>::<strategy_name>`, so a human write-up and a model are two
+sources. `distinct_model_identity_count` is reported alongside.
+
+**Full claim graph.** For ContextDesk SDK rows the projection reads the
+owner-only replay envelope, not `TriageRun.claims`: that flattened summary keeps
+only a claim's text and its *first* evidence id and drops the claim kind, the
+host status, and every later evidence id. Imported rows have no envelope, so
+`claims` is the only source that exists for them.
+
+**Fail closed.** A run is excluded, with the exact reason, when its fairness is
+not `same_snapshot`, when its group's task record is missing or binds another
+snapshot, when an SDK row's raw output is absent, unparseable, or not the
+adapter's owner-only envelope, when the envelope's bounded visibility differs
+from the task's, when no exact model identity can be recovered, or when the
+group's SDK rows do not share one materialized packet. A cited evidence id
+outside the task's visible set is recorded as an `invalid_citation`, never as an
+anchor. Failed, partial, timed-out, and cancelled rows are **not** excluded:
+they stay listed and contribute zero anchors, and `claims_available: false`
+distinguishes "produced no answer" from "answered and cited nothing".
+
+**Share-safe.** `--privacy share-safe` is a projection, not a filter: every
+field is constructed explicitly and the serialized result is passed through the
+same privacy scanner the report uses. It carries fingerprints and counts only —
+never an exact model identity, claim text, locator, evidence excerpt, task or
+protocol text, raw output, or operator. Excluded runs become per-reason counts.
+
+**No ranking.** There is no score, no ordering by concurrence, no winner, and no
+readiness claim. Agreement is not correctness: strategies can concur and be
+wrong together, and every rendered view repeats that.
+
+Follow-up (not in this slice): the projection is a standalone command and is
+deliberately **not** embedded in `backtest_report.v2`. Folding it into the
+report would change that schema, so it belongs in a `v3` bump rather than here.
 
 ## Future scope (explicitly not this slice)
 

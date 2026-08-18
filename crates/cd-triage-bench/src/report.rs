@@ -426,7 +426,7 @@ pub fn extract_owner_model_attribution(raw_output: &[u8]) -> Option<RunAttributi
 /// This mirrors the blinding check in [`crate::review`]: a record that names
 /// an SDK run and carries either the authoritative replay or exact model
 /// slots is the adapter's own output, not a third-party import.
-fn is_adapter_owner_only_envelope(value: &serde_json::Value) -> bool {
+pub(crate) fn is_adapter_owner_only_envelope(value: &serde_json::Value) -> bool {
     let Some(record) = value.as_object() else {
         return false;
     };
@@ -452,7 +452,7 @@ fn is_adapter_owner_only_envelope(value: &serde_json::Value) -> bool {
 /// The renderer escapes every value it emits, so this is the second of two
 /// independent defences: a value carrying table, code-span, or HTML syntax is
 /// refused outright rather than rendered as escaped markup.
-fn safe_report_identity(value: &str) -> bool {
+pub(crate) fn safe_report_identity(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
         && value
@@ -483,7 +483,7 @@ fn safe_model_fingerprint(value: &str) -> bool {
 /// pipe already neutralised a backslash cannot reconstruct markup, and
 /// rewriting it would hide the literal `c:\users` substring that
 /// [`crate::privacy`] scans rendered share-safe text for.
-fn escape_report_value(value: &str) -> String {
+pub(crate) fn escape_report_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
