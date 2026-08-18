@@ -249,10 +249,23 @@ configured-policy selection, authoritative desktop replay return, Rust and
 TypeScript replay validation parity, and the existing default dependency
 direction. The bounded live-bench slice now covers materialization refusal
 cases, replay ingestion independent of the deterministic mock, one
-same-snapshot packet/corpus reused across bounded candidates, owner-only and
-share-safe projections, and comparison-report attribution. Broader visibility
-shapes, citation mapping, user-facing orchestration, and release integration
-remain required before a release-readiness claim.
+same-snapshot packet/corpus reused across bounded candidates, manifest-bounded
+and streaming snapshot verification, a position-independent per-candidate
+wall-clock allowance, durable-run preservation when a comparison stops early,
+bounded
+non-fatal recovery of leaked isolated corpora, and comparison-report
+attribution. Broader visibility shapes, citation mapping, user-facing
+orchestration, and release integration remain required before a
+release-readiness claim.
+
+Share-safe projection is explicit, not a relabelling. Adapter-recorded
+benchmark rows are owner-only, so `report --privacy share-safe` projects none
+of them; the share-safe artifact for a live comparison is the adapter's
+hand-written `project_share_safe` output, surfaced by `contextdesk
+bench-compare` as its `share_safe` field and gated by the real share-safe
+scanner. Model attribution in a report is bound to that same provenance: only
+a `contextdesk_sdk` row whose raw output is recognisably the adapter envelope
+is credited with an exact model identity.
 
 Focused fast lanes should cover the leaf SDK, runtime facade, bench, and
 adapter. Production-path workflow tests belong in the existing Rust shards.

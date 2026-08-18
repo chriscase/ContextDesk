@@ -24,17 +24,16 @@ assert_route() {
   grep -qx "run_ubuntu=$expected_run" "$TMP/out" || fail "$name run_ubuntu"
 }
 
-assert_route "bench-only" bench-only false \
+# The bench crate has shipped in-workspace dependents, so a change confined
+# to it must take the full gate. See the dependency guard below.
+assert_route "bench crate" full true \
   crates/cd-triage-bench/src/lib.rs \
   docs/benchmarks/TRIAGE_BENCH_V1.md
-assert_route "bench live bridge" bench-only false \
-  crates/cd-triage-bench-live/src/lib.rs
-assert_route "bench adapter" bench-only false \
-  crates/cd-triage-bench-adapter/src/record.rs
-assert_route "bench CLI" bench-only false \
-  crates/cd-cli/src/commands/bench_compare.rs
-assert_route "unrelated CLI" full true \
-  crates/cd-cli/src/commands/chat.rs
+assert_route "bench live bridge" full true crates/cd-triage-bench-live/src/lib.rs
+assert_route "bench adapter" full true crates/cd-triage-bench-adapter/src/record.rs
+assert_route "bench adapter cli" full true crates/cd-triage-bench-adapter-cli/src/main.rs
+assert_route "bench cli command" full true crates/cd-cli/src/commands/bench_compare.rs
+assert_route "unrelated cli" full true crates/cd-cli/src/commands/chat.rs
 assert_route "collab-only" collab-only false collab/README.md collab/src/index.ts
 assert_route "mixed bench and rust" full true \
   crates/cd-triage-bench/src/lib.rs crates/cd-core/src/lib.rs
@@ -96,7 +95,6 @@ def guard_result(result, surface, run_ubuntu):
 
 for surface, run_ubuntu in (
     ("full", "true"),
-    ("bench-only", "false"),
     ("collab-only", "false"),
 ):
     result = guard_result("success", surface, run_ubuntu)
@@ -106,7 +104,9 @@ for result_name, surface, run_ubuntu in (
     ("failure", "", ""),
     ("success", "", ""),
     ("success", "full", "false"),
+    ("success", "bench-only", "false"),
     ("success", "bench-only", "true"),
+    ("success", "collab-only", "true"),
     ("success", "unknown", "true"),
 ):
     result = guard_result(result_name, surface, run_ubuntu)
@@ -115,8 +115,54 @@ for result_name, surface, run_ubuntu in (
             f"invalid route {result_name}/{surface}:{run_ubuntu} passed the required aggregate"
         )
 aggregate_runs = "\n".join(s.get("run") or "" for s in aggregate["steps"])
-if "cargo test -p cd-triage-bench --all-targets" not in aggregate_runs:
-    raise SystemExit("bench-only route must run complete bench validation")
+if "cargo test -p cd-triage-bench" in aggregate_runs:
+    raise SystemExit(
+        "the bench crate has shipped in-workspace dependents; it must take the full "
+        "gate rather than an isolated lane that never compiles them"
+    )
+
+# Dependency guard. An isolated surface is only sound while nothing outside it
+# depends on it. This walks the real workspace manifests so re-introducing an
+# isolated route for a crate that has grown dependents fails here instead of
+# silently shipping a green gate that never built them.
+def path_dependents(crate_dir_name):
+    dependents = []
+    for manifest in sorted((root / "crates").glob("*/Cargo.toml")):
+        if manifest.parent.name == crate_dir_name:
+            continue
+        if f'path = "../{crate_dir_name}"' in manifest.read_text():
+            dependents.append(manifest.parent.name)
+    return dependents
+
+isolated_surfaces = {
+    # surface name -> (classifier path prefix, crate directory it claims to isolate)
+    "collab-only": ("collab/", "cd-collab"),
+}
+classify = root / "scripts/ci_classify_paths.sh"
+classifier_text = classify.read_text()
+for surface, (_prefix, crate_dir) in isolated_surfaces.items():
+    if surface not in classifier_text:
+        raise SystemExit(f"isolated surface {surface} disappeared from the classifier")
+    dependents = path_dependents(crate_dir)
+    if dependents:
+        raise SystemExit(
+            f"{surface} claims {crate_dir} is isolated but these crates depend on it: "
+            + ", ".join(dependents)
+        )
+
+bench_dependents = path_dependents("cd-triage-bench")
+if not bench_dependents:
+    raise SystemExit(
+        "cd-triage-bench no longer has in-workspace dependents; revisit whether an "
+        "isolated bench route is sound again and update this guard deliberately"
+    )
+if "bench-only" in classifier_text:
+    raise SystemExit(
+        "cd-triage-bench has in-workspace dependents ("
+        + ", ".join(bench_dependents)
+        + ") so it must not have an isolated CI route"
+    )
+
 if 'if [ "$EVENT_NAME" = "pull_request" ]; then' not in ci_text:
     raise SystemExit("path-aware filtering must be limited to pull requests")
 if "the complete Ubuntu workspace gate" not in ci_text:

@@ -82,6 +82,25 @@ impl Default for LiveCorpusLimits {
     }
 }
 
+impl LiveCorpusLimits {
+    /// Refuse limits a caller cannot legitimately hold.
+    ///
+    /// The defaults are the hard public ceiling, not a suggestion: a host
+    /// boundary exists to bound its callers, so a caller may lower a limit
+    /// and may never raise one above the production import bound. Zero is
+    /// refused too — it can never copy the evidence a task makes visible.
+    pub fn validate(&self) -> Result<(), LiveBridgeError> {
+        if self.max_blob_bytes == 0
+            || self.max_aggregate_bytes == 0
+            || self.max_blob_bytes > DEFAULT_LIVE_MAX_BLOB_BYTES
+            || self.max_aggregate_bytes > DEFAULT_LIVE_MAX_AGGREGATE_BYTES
+        {
+            return Err(LiveBridgeError::BoundExceeded);
+        }
+        Ok(())
+    }
+}
+
 /// Content-free refusal categories for the live bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LiveBridgeError {
@@ -188,21 +207,59 @@ pub struct LiveComparisonCandidate {
 }
 
 /// Completed runs from a same-snapshot comparison.
+///
+/// Every run listed here is already durable in the benchmark store. A
+/// comparison that stopped early still returns the runs it persisted, so an
+/// operator is never told "it failed" without being told what now exists.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveComparisonResult {
     /// Runs persisted by the bridge and ready for the honest bench report.
     pub runs: Vec<LiveRunResult>,
+    /// Why the comparison stopped before every candidate ran, when it did.
+    ///
+    /// `None` means every candidate completed. `Some(_)` means the runs above
+    /// are a partial, durable prefix — never a complete comparison.
+    pub stopped: Option<LiveBridgeError>,
+    /// Cleanup debt this cache root carried into the comparison.
+    pub pending_cleanup: PendingCleanupOutcome,
 }
 
-/// A comparison failure together with every run that was durably persisted
-/// before the failure. The rows remain reportable even when the comparison
-/// cannot honestly be returned as a complete success.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LiveComparisonFailure {
-    /// The fail-closed bridge error.
-    pub error: LiveBridgeError,
-    /// Durable rows completed before the failure or cleanup error.
-    pub runs: Vec<LiveRunResult>,
+impl LiveComparisonResult {
+    /// True only when every requested candidate ran and the corpus was cleaned.
+    pub fn is_complete(&self) -> bool {
+        self.stopped.is_none()
+    }
+
+    /// Durable benchmark run identities produced by this comparison.
+    pub fn persisted_run_ids(&self) -> Vec<String> {
+        self.runs
+            .iter()
+            .map(|run| run.recorded.bench_run.run_id.clone())
+            .collect()
+    }
+}
+
+/// The wall-clock allowance one candidate's request carries.
+///
+/// Candidates run sequentially, so an allowance derived from *remaining*
+/// budget would hand the first candidate nearly the whole comparison and the
+/// last one whatever was left — an ordering bias in a tool whose entire
+/// purpose is a fair same-snapshot comparison. The allowance is therefore
+/// independent of position and of how long earlier candidates took: it is the
+/// candidate's own override, capped by the comparison deadline.
+///
+/// The budget is deliberately **not** divided between candidates. A request
+/// deadline is a bound the host itself must be able to honour — a Standard
+/// policy reserves time for its finalizer — so an evenly divided share can
+/// fall below what any candidate can actually run under and turn a working
+/// comparison into a list of rejected budgets. Boundedness is enforced
+/// separately, by refusing to *start* another candidate once the comparison
+/// budget is spent; see [`run_live_comparison`].
+fn candidate_allowance_ms(comparison_deadline_ms: u64, candidate_override_ms: Option<u64>) -> u64 {
+    match candidate_override_ms {
+        Some(requested) => requested.min(comparison_deadline_ms),
+        None => comparison_deadline_ms,
+    }
 }
 
 /// A verified, run-exclusive corpus prepared from one exact task visibility.
@@ -218,6 +275,7 @@ pub struct PreparedSameSnapshotCorpus {
     corpus_revision: u64,
     source_bytes: u64,
     sources: Vec<HostSourceBinding>,
+    pending_cleanup: PendingCleanupOutcome,
 }
 
 #[derive(Debug)]
@@ -253,6 +311,11 @@ impl PreparedSameSnapshotCorpus {
     /// Complete, sorted one-to-one source-to-benchmark inventory.
     pub fn sources(&self) -> &[HostSourceBinding] {
         &self.sources
+    }
+
+    /// Cleanup debt this cache root still carried when preparation began.
+    pub fn pending_cleanup(&self) -> PendingCleanupOutcome {
+        self.pending_cleanup
     }
 
     /// Discard the isolated corpus now and report cleanup failure.
@@ -318,16 +381,10 @@ pub fn prepare_same_snapshot_corpus(
     limits: LiveCorpusLimits,
     cancel: &CancelFlag,
 ) -> Result<PreparedSameSnapshotCorpus, LiveBridgeError> {
-    if limits.max_blob_bytes == 0
-        || limits.max_blob_bytes > DEFAULT_LIVE_MAX_BLOB_BYTES
-        || limits.max_aggregate_bytes == 0
-        || limits.max_aggregate_bytes > DEFAULT_LIVE_MAX_AGGREGATE_BYTES
-    {
-        return Err(LiveBridgeError::BoundExceeded);
-    }
     if cancel.is_cancelled() {
         return Err(LiveBridgeError::Cancelled);
     }
+    limits.validate()?;
     if !task.visibility.include_raw_bytes
         || task.visibility.include_summaries
         || task.time_constraint.is_some()
@@ -357,7 +414,9 @@ pub fn prepare_same_snapshot_corpus(
     }
 
     std::fs::create_dir_all(cache_root).map_err(|_| LiveBridgeError::Staging)?;
-    retry_pending_live_cleanup(cache_root)?;
+    // Best-effort recovery of earlier leaked corpora. Unresolved debt is
+    // reported to the operator, never a reason to refuse this run.
+    let pending_cleanup = retry_pending_live_cleanup(cache_root)?;
     let staging = tempfile::Builder::new()
         .prefix("contextdesk-triage-live-")
         .tempdir_in(cache_root)
@@ -450,6 +509,7 @@ pub fn prepare_same_snapshot_corpus(
         corpus_revision: 0,
         source_bytes: aggregate_bytes,
         sources,
+        pending_cleanup,
     };
     let verification = (|| {
         if cancel.is_cancelled() {
@@ -600,6 +660,19 @@ pub async fn run_live_same_snapshot(
 /// shared corpus and whole-comparison deadline auditable while still avoiding
 /// repeated source copying and ingest. A cancelled comparison stops before
 /// starting the next candidate and cleans the shared corpus.
+///
+/// Each candidate's request carries its own deadline capped by the comparison
+/// deadline — a value that does not depend on list position or on how long
+/// earlier candidates took, so ordering confers no advantage. The budget is
+/// not divided: a divided share can fall below the deadline a policy needs to
+/// run at all. Boundedness comes from refusing to start another candidate
+/// once the comparison budget is spent, so the comparison can overshoot by at
+/// most the final candidate's own allowance.
+///
+/// A comparison that stops early — cancellation, deadline, execution,
+/// recording, persistence, or cleanup — still returns every run it already
+/// persisted, with [`LiveComparisonResult::stopped`] naming the reason. Only
+/// a comparison that persisted nothing returns `Err`.
 pub async fn run_live_comparison(
     store: &BenchStore,
     case: &Case,
@@ -607,18 +680,12 @@ pub async fn run_live_comparison(
     task: &EvaluationTask,
     secrets: Arc<dyn SecretStore>,
     candidates: Vec<LiveComparisonCandidate>,
-) -> Result<LiveComparisonResult, LiveComparisonFailure> {
+) -> Result<LiveComparisonResult, LiveBridgeError> {
     if candidates.is_empty() {
-        return Err(comparison_failure(
-            LiveBridgeError::EmptyComparison,
-            Vec::new(),
-        ));
+        return Err(LiveBridgeError::EmptyComparison);
     }
     if candidates.len() > DEFAULT_MAX_COMPARISON_CANDIDATES {
-        return Err(comparison_failure(
-            LiveBridgeError::ComparisonCandidateBound,
-            Vec::new(),
-        ));
+        return Err(LiveBridgeError::ComparisonCandidateBound);
     }
 
     let first = &candidates[0].options;
@@ -635,15 +702,13 @@ pub async fn run_live_comparison(
             || !Arc::ptr_eq(&first.cancel.inner_arc(), &options.cancel.inner_arc())
             || !cancellation_ids.insert(options.cancellation_id.as_str())
         {
-            return Err(comparison_failure(
-                LiveBridgeError::ComparisonInvariant,
-                Vec::new(),
-            ));
+            return Err(LiveBridgeError::ComparisonInvariant);
         }
     }
 
     let started = Instant::now();
-    let mut prepared = match prepare_same_snapshot_with_deadline(
+    let candidate_count = candidates.len();
+    let mut prepared = prepare_same_snapshot_with_deadline(
         store,
         case,
         snapshot,
@@ -653,40 +718,32 @@ pub async fn run_live_comparison(
         &first.cancel,
         Some(comparison_deadline_ms),
     )
-    .await
-    {
-        Ok(prepared) => prepared,
-        Err(error) => return Err(comparison_failure(error, Vec::new())),
-    };
+    .await?;
+    let pending_cleanup = prepared.pending_cleanup();
 
-    let mut runs = Vec::with_capacity(candidates.len());
+    let mut runs: Vec<LiveRunResult> = Vec::with_capacity(candidate_count);
+    let mut stopped: Option<LiveBridgeError> = None;
     for candidate in candidates {
         let LiveComparisonCandidate {
             mut options,
             events,
         } = candidate;
         if options.cancel.is_cancelled() {
-            return finish_comparison_with_cleanup(
-                &mut prepared,
-                Err(comparison_failure(LiveBridgeError::Cancelled, runs)),
-            );
+            stopped = Some(LiveBridgeError::Cancelled);
+            break;
         }
+        // Boundedness lives here, in the decision to start another candidate,
+        // and never in the allowance handed to one. A candidate already
+        // running finishes under its own deadline.
         let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        let remaining = comparison_deadline_ms.saturating_sub(elapsed_ms);
-        if remaining == 0 {
-            return finish_comparison_with_cleanup(
-                &mut prepared,
-                Err(comparison_failure(LiveBridgeError::Deadline, runs)),
-            );
+        if elapsed_ms >= comparison_deadline_ms {
+            stopped = Some(LiveBridgeError::Deadline);
+            break;
         }
-        options.overrides.deadline_ms = Some(
-            options
-                .overrides
-                .deadline_ms
-                .map_or(remaining, |candidate_deadline| {
-                    candidate_deadline.min(remaining)
-                }),
-        );
+        options.overrides.deadline_ms = Some(candidate_allowance_ms(
+            comparison_deadline_ms,
+            options.overrides.deadline_ms,
+        ));
 
         let result = execute_prepared_same_snapshot(
             store,
@@ -702,15 +759,31 @@ pub async fn run_live_comparison(
         match result {
             Ok(result) => runs.push(result),
             Err(error) => {
-                return finish_comparison_with_cleanup(
-                    &mut prepared,
-                    Err(comparison_failure(error, runs)),
-                )
+                stopped = Some(error);
+                break;
             }
         }
     }
 
-    finish_comparison_with_cleanup(&mut prepared, Ok(LiveComparisonResult { runs }))
+    let cleanup = prepared.discard();
+    if runs.is_empty() {
+        // Nothing durable was produced, so there is no partial result worth
+        // preserving: the caller gets the same plain refusal as before.
+        return Err(match (stopped, cleanup) {
+            (Some(_), Err(_)) => LiveBridgeError::FailureAndCleanup,
+            (Some(error), Ok(())) => error,
+            (None, Err(cleanup_error)) => cleanup_error,
+            (None, Ok(())) => LiveBridgeError::EmptyComparison,
+        });
+    }
+    // Every run above is already durable in the benchmark store. Report the
+    // identities together with whatever went wrong, rather than dropping the
+    // only handles an operator has for finding those rows.
+    Ok(LiveComparisonResult {
+        runs,
+        stopped: stopped.or_else(|| cleanup.err()),
+        pending_cleanup,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -896,26 +969,6 @@ fn finish_with_cleanup<T>(
     reconcile_cleanup(result, prepared.discard())
 }
 
-fn comparison_failure(error: LiveBridgeError, runs: Vec<LiveRunResult>) -> LiveComparisonFailure {
-    LiveComparisonFailure { error, runs }
-}
-
-fn finish_comparison_with_cleanup(
-    prepared: &mut PreparedSameSnapshotCorpus,
-    result: Result<LiveComparisonResult, LiveComparisonFailure>,
-) -> Result<LiveComparisonResult, LiveComparisonFailure> {
-    let cleanup = prepared.discard();
-    match (result, cleanup) {
-        (Ok(result), Ok(())) => Ok(result),
-        (Ok(result), Err(_)) => Err(comparison_failure(LiveBridgeError::Cleanup, result.runs)),
-        (Err(failure), Ok(())) => Err(failure),
-        (Err(mut failure), Err(_)) => {
-            failure.error = LiveBridgeError::FailureAndCleanup;
-            Err(failure)
-        }
-    }
-}
-
 fn reconcile_cleanup<T>(
     result: Result<T, LiveBridgeError>,
     cleanup: Result<(), LiveBridgeError>,
@@ -966,72 +1019,155 @@ async fn await_blocking_preparation<T: Send + 'static>(
     }
 }
 
+/// Outcome of one bounded sweep over pending cleanup markers.
+///
+/// The counts are content-free: they name how much cleanup debt the cache
+/// root still carries, never what any corpus held.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PendingCleanupOutcome {
+    /// Markers whose isolated corpus was discarded and whose marker was cleared.
+    pub cleared: usize,
+    /// Markers skipped because another live run currently holds their lease.
+    pub leased: usize,
+    /// Markers this sweep could not resolve; they are left for a later retry.
+    pub unresolved: usize,
+}
+
+impl PendingCleanupOutcome {
+    /// True when this sweep left cleanup debt behind.
+    pub fn has_unresolved(&self) -> bool {
+        self.unresolved > 0
+    }
+}
+
 /// Retry cleanup of isolated corpora whose owner process no longer holds the
 /// corresponding lease.
 ///
 /// Each marker is installed and synced before managed ingest can publish a
 /// corpus. It contains only a generated host identity, never evidence or model
-/// content. A malformed, oversized, or non-regular marker fails closed.
-pub fn retry_pending_live_cleanup(cache_root: &Path) -> Result<(), LiveBridgeError> {
+/// content.
+///
+/// This sweep is **bounded and non-fatal by design**. A marker it cannot
+/// resolve — malformed, oversized, non-regular, locked, or naming a corpus
+/// that cannot be opened — is counted and left in place for a later attempt.
+/// Refusing to clean an old corpus is a reason to report debt, never a reason
+/// to block every future live run: failing closed here would delete nothing
+/// and protect nothing while permanently bricking the command. The invariant
+/// that does still fail closed lives in [`record_cleanup_intent`], which
+/// refuses to start a run whose own cleanup cannot be tracked.
+pub fn retry_pending_live_cleanup(
+    cache_root: &Path,
+) -> Result<PendingCleanupOutcome, LiveBridgeError> {
+    let mut outcome = PendingCleanupOutcome::default();
     let directory = cache_root.join(CLEANUP_MARKER_DIR);
     let directory_metadata = match std::fs::symlink_metadata(&directory) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(LiveBridgeError::Cleanup),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(outcome),
+        Err(_) => {
+            outcome.unresolved = 1;
+            return Ok(outcome);
+        }
     };
     if !directory_metadata.is_dir() {
-        return Err(LiveBridgeError::Cleanup);
+        outcome.unresolved = 1;
+        return Ok(outcome);
     }
     let lease_directory = cache_root.join(CLEANUP_LEASE_DIR);
-    ensure_private_directory(&lease_directory)?;
-    let mut entries = std::fs::read_dir(&directory).map_err(|_| LiveBridgeError::Cleanup)?;
+    if ensure_private_directory(&lease_directory).is_err() {
+        outcome.unresolved = 1;
+        return Ok(outcome);
+    }
+    let Ok(mut entries) = std::fs::read_dir(&directory) else {
+        outcome.unresolved = 1;
+        return Ok(outcome);
+    };
     for index in 0..=MAX_CLEANUP_MARKERS {
         let Some(entry) = entries.next() else {
-            let _ = std::fs::remove_dir(&directory);
-            let _ = std::fs::remove_dir(&lease_directory);
-            return Ok(());
+            if outcome.unresolved == 0 && outcome.leased == 0 {
+                let _ = std::fs::remove_dir(&directory);
+                let _ = std::fs::remove_dir(&lease_directory);
+            }
+            return Ok(outcome);
         };
         if index == MAX_CLEANUP_MARKERS {
-            return Err(LiveBridgeError::Cleanup);
+            // More markers than one bounded sweep may examine. The rest stay
+            // for the next run rather than costing this one an unbounded scan.
+            outcome.unresolved = outcome.unresolved.saturating_add(1);
+            return Ok(outcome);
         }
-        let entry = entry.map_err(|_| LiveBridgeError::Cleanup)?;
-        let metadata =
-            std::fs::symlink_metadata(entry.path()).map_err(|_| LiveBridgeError::Cleanup)?;
-        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_CLEANUP_MARKER_BYTES {
-            return Err(LiveBridgeError::Cleanup);
+        let Ok(entry) = entry else {
+            outcome.unresolved += 1;
+            continue;
+        };
+        if !resolvable_marker(&entry.path()) {
+            outcome.unresolved += 1;
+            continue;
         }
-        let managed_identity =
-            std::fs::read_to_string(entry.path()).map_err(|_| LiveBridgeError::Cleanup)?;
+        let Ok(managed_identity) = std::fs::read_to_string(entry.path()) else {
+            outcome.unresolved += 1;
+            continue;
+        };
         if managed_identity.is_empty() || managed_identity.trim() != managed_identity {
-            return Err(LiveBridgeError::Cleanup);
+            outcome.unresolved += 1;
+            continue;
         }
-        let expected_marker =
-            fingerprint("tli", &managed_identity).map_err(|_| LiveBridgeError::Cleanup)?;
+        let Ok(expected_marker) = fingerprint("tli", &managed_identity) else {
+            outcome.unresolved += 1;
+            continue;
+        };
         if entry.file_name().to_str() != Some(expected_marker.as_str()) {
-            return Err(LiveBridgeError::Cleanup);
+            outcome.unresolved += 1;
+            continue;
         }
         let lease_path = lease_directory.join(&expected_marker);
-        let lease = open_cleanup_lease(&lease_path)?;
+        let Ok(lease) = open_cleanup_lease(&lease_path) else {
+            outcome.unresolved += 1;
+            continue;
+        };
         match lease.try_lock_exclusive() {
             Ok(()) => {}
-            Err(error) if is_lock_contended(&error) => continue,
-            Err(_) => return Err(LiveBridgeError::Cleanup),
+            Err(error) if is_lock_contended(&error) => {
+                outcome.leased += 1;
+                continue;
+            }
+            Err(_) => {
+                outcome.unresolved += 1;
+                continue;
+            }
         }
 
-        discard_managed_corpora(cache_root, &managed_identity)?;
+        if !discard_managed_corpora(cache_root, &managed_identity) {
+            outcome.unresolved += 1;
+            continue;
+        }
         match std::fs::remove_file(entry.path()) {
-            Ok(()) => sync_directory(&directory)?,
+            Ok(()) => {
+                let _ = sync_directory(&directory);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(LiveBridgeError::Cleanup),
+            Err(_) => {
+                outcome.unresolved += 1;
+                continue;
+            }
         }
         drop(lease);
-        match std::fs::remove_file(&lease_path) {
-            Ok(()) => sync_directory(&lease_directory)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(LiveBridgeError::Cleanup),
+        if std::fs::remove_file(&lease_path).is_ok() {
+            let _ = sync_directory(&lease_directory);
         }
+        outcome.cleared += 1;
     }
-    Err(LiveBridgeError::Cleanup)
+    outcome.unresolved = outcome.unresolved.saturating_add(1);
+    Ok(outcome)
+}
+
+/// A marker must be a regular, non-empty, bounded file to be worth reading.
+fn resolvable_marker(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            metadata.is_file() && metadata.len() > 0 && metadata.len() <= MAX_CLEANUP_MARKER_BYTES
+        }
+        Err(_) => false,
+    }
 }
 
 fn is_lock_contended(error: &std::io::Error) -> bool {
@@ -1119,29 +1255,40 @@ fn open_cleanup_lease(path: &Path) -> Result<File, LiveBridgeError> {
     Ok(file)
 }
 
-fn discard_managed_corpora(
-    cache_root: &Path,
-    managed_identity: &str,
-) -> Result<(), LiveBridgeError> {
-    let corpus_ids = LogCorpus::list_ids(cache_root).map_err(|_| LiveBridgeError::Cleanup)?;
-    if corpus_ids.len() > MAX_CLEANUP_CORPORA {
-        return Err(LiveBridgeError::Cleanup);
-    }
-    for corpus_id in corpus_ids {
-        let corpus =
-            LogCorpus::open(cache_root, &corpus_id).map_err(|_| LiveBridgeError::Cleanup)?;
-        let matches = corpus
-            .meta()
-            .map_err(|_| LiveBridgeError::Cleanup)?
-            .managed_identity
-            .as_deref()
-            == Some(managed_identity);
+/// Discard every corpus in `cache_root` published under `managed_identity`.
+///
+/// Returns `true` only when the whole cache root was swept. A corpus that
+/// cannot be opened or read is skipped rather than failing the sweep: the
+/// bridge cannot prove such a corpus is one of its own, and one unreadable
+/// corpus belonging to somebody else must not make bench cleanup impossible.
+/// Skipping leaves the marker in place so a later attempt can finish the job.
+fn discard_managed_corpora(cache_root: &Path, managed_identity: &str) -> bool {
+    let Ok(corpus_ids) = LogCorpus::list_ids(cache_root) else {
+        return false;
+    };
+    // The sweep is bounded by work, not by how many corpora the operator
+    // happens to keep: examine at most this many and report an incomplete
+    // sweep instead of refusing to run.
+    let bounded = corpus_ids.len() <= MAX_CLEANUP_CORPORA;
+    let mut swept = bounded;
+    for corpus_id in corpus_ids.into_iter().take(MAX_CLEANUP_CORPORA) {
+        let Ok(corpus) = LogCorpus::open(cache_root, &corpus_id) else {
+            swept = false;
+            continue;
+        };
+        let matches = match corpus.meta() {
+            Ok(meta) => meta.managed_identity.as_deref() == Some(managed_identity),
+            Err(_) => {
+                swept = false;
+                false
+            }
+        };
         drop(corpus);
-        if matches {
-            LogCorpus::discard(cache_root, &corpus_id).map_err(|_| LiveBridgeError::Cleanup)?;
+        if matches && LogCorpus::discard(cache_root, &corpus_id).is_err() {
+            swept = false;
         }
     }
-    Ok(())
+    swept
 }
 
 fn ensure_private_directory(path: &Path) -> Result<(), LiveBridgeError> {
@@ -1379,17 +1526,122 @@ mod tests {
     }
 
     #[test]
-    fn malformed_cleanup_marker_fails_closed() {
+    fn malformed_cleanup_marker_is_reported_and_never_blocks_recovery() {
         let cache = tempfile::tempdir().unwrap();
         let marker_directory = cache.path().join(CLEANUP_MARKER_DIR);
         std::fs::create_dir_all(&marker_directory).unwrap();
         std::fs::write(marker_directory.join("malformed"), "../escape").unwrap();
 
-        assert_eq!(
-            retry_pending_live_cleanup(cache.path()).unwrap_err(),
-            LiveBridgeError::Cleanup
-        );
+        // A marker whose name does not match its content proves nothing and
+        // deletes nothing. It is counted, left in place for inspection, and
+        // must not stop the sweep or any future run.
+        let outcome = retry_pending_live_cleanup(cache.path()).unwrap();
+        assert_eq!(outcome.unresolved, 1);
+        assert_eq!(outcome.cleared, 0);
+        assert!(outcome.has_unresolved());
         assert!(marker_directory.join("malformed").exists());
+
+        // Repeated sweeps stay bounded and keep reporting the same debt
+        // rather than escalating into a permanent refusal.
+        let repeated = retry_pending_live_cleanup(cache.path()).unwrap();
+        assert_eq!(repeated.unresolved, 1);
+    }
+
+    #[test]
+    fn an_unresolvable_marker_does_not_block_cleaning_the_others() {
+        let cache = tempfile::tempdir().unwrap();
+        let marker_directory = cache.path().join(CLEANUP_MARKER_DIR);
+        std::fs::create_dir_all(&marker_directory).unwrap();
+        std::fs::write(marker_directory.join("malformed"), "../escape").unwrap();
+
+        let managed_identity = "triage-bench-live.recoverable";
+        let intent = record_cleanup_intent(cache.path(), managed_identity).unwrap();
+        let corpus = LogCorpus::create(cache.path(), "recoverable live run").unwrap();
+        corpus.write_managed_identity(managed_identity).unwrap();
+        let corpus_root = corpus.root().to_path_buf();
+        drop(corpus);
+        drop(intent);
+
+        let outcome = retry_pending_live_cleanup(cache.path()).unwrap();
+
+        assert_eq!(outcome.cleared, 1, "the resolvable marker must be cleared");
+        assert_eq!(outcome.unresolved, 1, "the malformed marker is still debt");
+        assert!(!corpus_root.exists());
+        assert!(marker_directory.join("malformed").exists());
+    }
+
+    #[test]
+    fn preparation_proceeds_when_earlier_cleanup_debt_cannot_be_resolved() {
+        // A leaked marker from a previous process must never brick the
+        // command: preparation records the debt and keeps going.
+        let cache = tempfile::tempdir().unwrap();
+        let marker_directory = cache.path().join(CLEANUP_MARKER_DIR);
+        std::fs::create_dir_all(&marker_directory).unwrap();
+        std::fs::write(marker_directory.join("malformed"), "../escape").unwrap();
+
+        let outcome = retry_pending_live_cleanup(cache.path()).unwrap();
+        assert!(outcome.has_unresolved());
+        // The new run can still record its own intent, which is the invariant
+        // that genuinely has to fail closed.
+        let intent = record_cleanup_intent(cache.path(), "triage-bench-live.next-run").unwrap();
+        drop(intent);
+    }
+
+    #[test]
+    fn live_corpus_limits_may_be_lowered_but_never_raised() {
+        assert!(LiveCorpusLimits::default().validate().is_ok());
+        assert!(LiveCorpusLimits {
+            max_blob_bytes: 1,
+            max_aggregate_bytes: 1,
+        }
+        .validate()
+        .is_ok());
+        for hostile in [
+            LiveCorpusLimits {
+                max_blob_bytes: DEFAULT_LIVE_MAX_BLOB_BYTES + 1,
+                max_aggregate_bytes: DEFAULT_LIVE_MAX_AGGREGATE_BYTES,
+            },
+            LiveCorpusLimits {
+                max_blob_bytes: DEFAULT_LIVE_MAX_BLOB_BYTES,
+                max_aggregate_bytes: DEFAULT_LIVE_MAX_AGGREGATE_BYTES + 1,
+            },
+            LiveCorpusLimits {
+                max_blob_bytes: u64::MAX,
+                max_aggregate_bytes: u64::MAX,
+            },
+            LiveCorpusLimits {
+                max_blob_bytes: 0,
+                max_aggregate_bytes: 1,
+            },
+        ] {
+            assert_eq!(
+                hostile.validate().unwrap_err(),
+                LiveBridgeError::BoundExceeded
+            );
+        }
+    }
+
+    #[test]
+    fn the_candidate_allowance_does_not_depend_on_list_position() {
+        // Same inputs, same allowance — there is nothing in the signature for
+        // position or elapsed time to influence.
+        assert_eq!(candidate_allowance_ms(180_000, None), 180_000);
+        assert_eq!(candidate_allowance_ms(180_000, Some(120_000)), 120_000);
+        // A candidate never gets more than the comparison deadline.
+        assert_eq!(candidate_allowance_ms(120_000, Some(600_000)), 120_000);
+        // The budget is never divided, so it cannot be pushed under the
+        // minimum a policy needs in order to run at all.
+        for candidates in 1..=DEFAULT_MAX_COMPARISON_CANDIDATES {
+            let allowances: Vec<u64> = (0..candidates)
+                .map(|_| candidate_allowance_ms(DEFAULT_LIVE_COMPARISON_DEADLINE_MS, None))
+                .collect();
+            assert!(
+                allowances.windows(2).all(
+                    |pair| pair[0] == pair[1] && pair[0] == DEFAULT_LIVE_COMPARISON_DEADLINE_MS
+                ) || candidates == 1,
+                "allowances varied across a {candidates}-candidate comparison: {allowances:?}"
+            );
+        }
     }
 
     #[test]

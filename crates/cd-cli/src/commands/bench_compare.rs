@@ -3,7 +3,13 @@
 //! This module is intentionally thin. The live bridge owns materialization,
 //! packet proof, replay validation, persistence, and cleanup; the CLI only
 //! loads the host-owned state, converts bounded candidate documents into
-//! bridge options, and renders the resulting honest report.
+//! bridge options, and renders the resulting honest report plus the adapter's
+//! own share-safe projection.
+//!
+//! Two boundary rules live here rather than in the bridge. Cancellation is
+//! armed before any blocking or provider work, and every blocking load —
+//! including content-addressed snapshot verification — runs off the async
+//! runtime under this command's published byte bounds.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -20,12 +26,13 @@ use cd_core::triage_role_qualification::{
 };
 use cd_triage_bench::{
     build_report_with_attribution, extract_owner_model_attribution, render_report_markdown,
-    BacktestReport, BenchError, BenchStore, Observed, PrivacyClass, RunAttribution, RunStatus,
-    StrategyIdentity,
+    BacktestReport, BenchStore, Case, EvaluationTask, EvidenceSnapshot, Observed, PrivacyClass,
+    RunAttribution, RunStatus, StrategyIdentity,
 };
-use cd_triage_bench_adapter::RecordingContext;
+use cd_triage_bench_adapter::{project_share_safe, RecordingContext, ShareSafeAdapterRun};
 use cd_triage_bench_live::{
     LiveBridgeError, LiveComparisonCandidate, LiveCorpusLimits, LiveRunOptions,
+    DEFAULT_LIVE_MAX_AGGREGATE_BYTES, DEFAULT_LIVE_MAX_BLOB_BYTES,
 };
 use cd_triage_sdk::{TriagePolicySelectionV2, TriageRequestOverridesV1};
 use serde::{Deserialize, Serialize};
@@ -104,10 +111,20 @@ pub struct BenchComparisonRunOutput {
     /// Production packet identity, when packet execution began.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_packet_id: Option<String>,
+    /// Wall-clock allowance this candidate's request actually carried.
+    ///
+    /// Every candidate in one comparison receives the same allowance, so an
+    /// auditor can see that list position bought nobody extra time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_deadline_ms: Option<u64>,
 }
 
-/// Owner-only command result. Use `cd-triage-bench report --privacy
-/// share-safe` for an explicitly share-safe projection.
+/// Owner-only command result.
+///
+/// The payload as a whole is owner-only: it retains exact model identities,
+/// task-linked provenance, and the owner-only comparison report. The
+/// `share_safe` field inside it is the explicitly projected, scanner-gated
+/// artifact that may be shared on its own.
 #[derive(Debug, Clone, Serialize)]
 pub struct BenchComparisonOutput {
     /// CLI payload schema.
@@ -122,9 +139,16 @@ pub struct BenchComparisonOutput {
     pub privacy: &'static str,
     /// Number of candidates executed and persisted.
     pub candidate_count: usize,
-    /// Bridge invariants echoed as independently auditable facts. A failed
-    /// pre-packet candidate may omit the host corpus id, so the shared
-    /// materialization fact is based on the validated benchmark fingerprint.
+    /// Defensive re-check that every returned row came from one preparation.
+    ///
+    /// These are not independent evidence: the bridge hands every candidate
+    /// the same materialized packet, so a `false` here would mean the bridge
+    /// itself is broken rather than that the candidates diverged. They are
+    /// published because a reader can compare them against the per-run
+    /// `packet_fingerprint`/`corpus_fingerprint` values below, which are the
+    /// facts that actually carry the same-snapshot claim. A failed pre-packet
+    /// candidate may omit the host corpus id, so the shared materialization
+    /// check uses the validated benchmark fingerprint rather than that id.
     pub same_packet_fingerprint: bool,
     pub same_materialized_corpus: bool,
     /// Per-candidate durable and provenance identities.
@@ -134,6 +158,21 @@ pub struct BenchComparisonOutput {
     pub report: BacktestReport,
     /// Human-readable form of the same report.
     pub report_markdown: String,
+    /// Explicit share-safe projection of exactly these runs.
+    ///
+    /// Produced by the adapter's hand-written `project_share_safe` and gated
+    /// by the real share-safe scanner, so it carries fingerprints, counts and
+    /// dispositions only — never an exact provider/model identity, the task
+    /// text, the answer envelope, or raw output. Benchmark run rows stay
+    /// owner-only in the store, so this projection — not
+    /// `cd-triage-bench report --privacy share-safe` — is the share-safe
+    /// artifact for a live comparison.
+    pub share_safe: Vec<ShareSafeAdapterRun>,
+    /// Pending isolated-corpus cleanup this cache root still carries.
+    ///
+    /// Non-zero means an earlier run leaked a corpus that a bounded recovery
+    /// sweep could not discard yet. It never blocks this comparison.
+    pub pending_cleanup_markers: usize,
 }
 
 impl Render for BenchComparisonOutput {
@@ -150,11 +189,23 @@ impl Render for BenchComparisonOutput {
         ));
         for run in &self.runs {
             output.push_str(&format!(
-                "- `{}`: {} — packet `{}`, corpus `{}`\n",
+                "- `{}`: {} — packet `{}`, corpus `{}`, deadline {}\n",
                 run.run_id,
                 run.status.as_str(),
                 run.packet_fingerprint,
-                run.corpus_fingerprint
+                run.corpus_fingerprint,
+                run.request_deadline_ms
+                    .map_or_else(|| "unknown".to_string(), |ms| format!("{ms}ms"))
+            ));
+        }
+        output.push_str(&format!(
+            "\nShare-safe projections: {} (use the `share_safe` field of the JSON payload)\n",
+            self.share_safe.len()
+        ));
+        if self.pending_cleanup_markers > 0 {
+            output.push_str(&format!(
+                "Pending isolated-corpus cleanup markers: {}\n",
+                self.pending_cleanup_markers
             ));
         }
         output
@@ -163,6 +214,88 @@ impl Render for BenchComparisonOutput {
     fn render_json(&self) -> serde_json::Value {
         serde_json::to_value(self).expect("bench comparison output is serializable")
     }
+}
+
+/// Everything the host owns, loaded once off the async runtime.
+struct LoadedHostState {
+    specs: Vec<CandidateSpec>,
+    store: BenchStore,
+    case: Case,
+    snapshot: EvidenceSnapshot,
+    task: EvaluationTask,
+    policies: TriagePolicyStoreV1,
+    qualifications: TriageRoleQualificationStoreV1,
+    cache_root: PathBuf,
+}
+
+/// Load the host-owned state this comparison needs.
+///
+/// Every step here is blocking filesystem work, including verifying the
+/// snapshot's content-addressed blobs, so the caller runs it off the async
+/// runtime. The snapshot is loaded through the store's bounded entry point:
+/// the declared sizes are checked against this command's published limits
+/// before a single blob byte is read, and verification then streams rather
+/// than allocating a blob in memory.
+fn load_host_state(
+    candidates: Vec<PathBuf>,
+    library: PathBuf,
+    task_id: String,
+    config_dir: PathBuf,
+    cache_root: PathBuf,
+    limits: LiveCorpusLimits,
+    cancel: CancelFlag,
+) -> CliResult<LoadedHostState> {
+    let specs = candidates
+        .iter()
+        .map(read_candidate)
+        .collect::<CliResult<Vec<_>>>()?;
+    validate_candidates(&specs)?;
+
+    let store = BenchStore::open(&library)
+        .map_err(|_| CliError::not_found("benchmark library could not be opened"))?;
+    let task = store
+        .get_task(&task_id)
+        .map_err(|_| CliError::not_found("benchmark task was not found"))?;
+    let case = store
+        .get_case(&task.case_id)
+        .map_err(|_| CliError::not_found("benchmark case linked by the task was not found"))?;
+    let snapshot = store
+        .get_snapshot_bounded(
+            &task.snapshot_id,
+            limits.max_blob_bytes,
+            limits.max_aggregate_bytes,
+            || cancel.is_cancelled(),
+        )
+        .map_err(|error| match error {
+            cd_triage_bench::BenchError::BlobTooLarge { .. } => CliError::user(
+                "benchmark snapshot exceeds the configured per-blob or aggregate byte bound",
+            ),
+            cd_triage_bench::BenchError::BlobCopyCancelled { .. } => {
+                CliError::cancelled("benchmark snapshot verification was cancelled")
+            }
+            _ => CliError::not_found("benchmark snapshot linked by the task was not found"),
+        })?;
+
+    let policy_path = config_dir.join("triage-policies.json");
+    let policies = TriagePolicyStoreV1::load(&policy_path)
+        .map_err(|_| CliError::user("saved triage policy store could not be loaded"))?;
+    let qualification_path = triage_role_qualification_store_path(&config_dir);
+    let qualifications = TriageRoleQualificationStoreV1::load(&qualification_path)
+        .map_err(|_| CliError::user("triage role qualification store could not be loaded"))?;
+
+    fs::create_dir_all(&cache_root)
+        .map_err(|_| CliError::internal("could not create the live comparison cache root"))?;
+
+    Ok(LoadedHostState {
+        specs,
+        store,
+        case,
+        snapshot,
+        task,
+        policies,
+        qualifications,
+        cache_root,
+    })
 }
 
 /// Execute one bounded live comparison through the production host bridge.
@@ -182,57 +315,22 @@ pub async fn run(
             cd_triage_bench_live::DEFAULT_MAX_COMPARISON_CANDIDATES
         )));
     }
-    if args.max_blob_bytes == 0
-        || args.max_aggregate_bytes == 0
-        || args.max_blob_bytes > cd_triage_bench_live::DEFAULT_LIVE_MAX_BLOB_BYTES
-        || args.max_aggregate_bytes > cd_triage_bench_live::DEFAULT_LIVE_MAX_AGGREGATE_BYTES
-    {
-        return Err(CliError::user(
-            "bench-compare byte limits must be positive and within the live safety bounds",
-        ));
-    }
+    let requested_candidates = args.candidates.len();
+    let limits = LiveCorpusLimits {
+        max_blob_bytes: args.max_blob_bytes,
+        max_aggregate_bytes: args.max_aggregate_bytes,
+    };
+    // A host boundary bounds its callers: a limit may be lowered, never
+    // raised above the production import bound the bridge publishes.
+    limits.validate().map_err(|_| {
+        CliError::user(format!(
+            "bench-compare byte limits must be greater than zero and at most {DEFAULT_LIVE_MAX_BLOB_BYTES} per blob and {DEFAULT_LIVE_MAX_AGGREGATE_BYTES} aggregate"
+        ))
+    })?;
 
-    let specs = args
-        .candidates
-        .iter()
-        .map(read_candidate)
-        .collect::<CliResult<Vec<_>>>()?;
-    validate_candidates(&specs)?;
-
-    let store = BenchStore::open(&args.library)
-        .map_err(|_| CliError::not_found("benchmark library could not be opened"))?;
-    let task = store
-        .get_task(&args.task)
-        .map_err(|_| CliError::not_found("benchmark task was not found"))?;
-    let case = store
-        .get_case(&task.case_id)
-        .map_err(|_| CliError::not_found("benchmark case linked by the task was not found"))?;
-    let snapshot = store
-        .get_snapshot_bounded(&task.snapshot_id, args.max_blob_bytes)
-        .map_err(|error| match error {
-            BenchError::NotFound(_) => {
-                CliError::not_found("benchmark snapshot linked by the task was not found")
-            }
-            BenchError::BlobTooLarge { .. } => {
-                CliError::user("benchmark snapshot exceeds the comparison blob bound")
-            }
-            _ => CliError::internal("benchmark snapshot could not be validated"),
-        })?;
-
-    let policy_path = paths.config_dir.join("triage-policies.json");
-    let policies = TriagePolicyStoreV1::load(&policy_path)
-        .map_err(|_| CliError::user("saved triage policy store could not be loaded"))?;
-    let qualification_path = triage_role_qualification_store_path(&paths.config_dir);
-    let qualifications = TriageRoleQualificationStoreV1::load(&qualification_path)
-        .map_err(|_| CliError::user("triage role qualification store could not be loaded"))?;
-
-    let cache_root = args
-        .cache_root
-        .clone()
-        .unwrap_or_else(|| paths.cache_root.clone());
-    fs::create_dir_all(&cache_root)
-        .map_err(|_| CliError::internal("could not create the live comparison cache root"))?;
-
+    // Cancellation is armed before any blocking or provider work, so Ctrl-C
+    // reaches snapshot verification and corpus preparation, not just the
+    // provider call.
     let cancel = CancelFlag::new();
     let signal_cancel = cancel.clone();
     let signal_task = tokio::spawn(async move {
@@ -240,6 +338,39 @@ pub async fn run(
             signal_cancel.cancel();
         }
     });
+    let guard = SignalGuard {
+        task: Some(signal_task),
+    };
+
+    let cache_root = args
+        .cache_root
+        .clone()
+        .unwrap_or_else(|| paths.cache_root.clone());
+    let loaded = {
+        let candidates = args.candidates.clone();
+        let library = args.library.clone();
+        let task_id = args.task.clone();
+        let config_dir = paths.config_dir.clone();
+        let cache_root = cache_root.clone();
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            load_host_state(
+                candidates, library, task_id, config_dir, cache_root, limits, cancel,
+            )
+        })
+        .await
+        .map_err(|_| CliError::internal("host state loading did not complete"))??
+    };
+    let LoadedHostState {
+        specs,
+        store,
+        case,
+        snapshot,
+        task,
+        policies,
+        qualifications,
+        cache_root,
+    } = loaded;
 
     let candidates = specs
         .into_iter()
@@ -257,10 +388,7 @@ pub async fn run(
                     operator: spec.strategy.operator,
                     created_at: spec.strategy.created_at,
                 },
-                limits: LiveCorpusLimits {
-                    max_blob_bytes: args.max_blob_bytes,
-                    max_aggregate_bytes: args.max_aggregate_bytes,
-                },
+                limits,
                 cancel: cancel.clone(),
             },
             events: None,
@@ -272,25 +400,49 @@ pub async fn run(
         &store, &case, &snapshot, &task, secrets, candidates,
     )
     .await;
-    signal_task.abort();
+    drop(guard);
 
-    let live = match live {
-        Ok(live) => live,
-        Err(failure) => {
-            return Err(map_bridge_error_with_persisted_runs(
-                failure.error,
-                &failure.runs,
-            ))
-        }
+    let live = live.map_err(map_bridge_error)?;
+    let pending_cleanup_markers = live.pending_cleanup.unresolved;
+    let stopped = live.stopped;
+
+    // The bridge only returns runs it already persisted. Once rows exist, no
+    // failure path below may drop their identities: they are the operator's
+    // only handle on durable state this command created.
+    let persisted_run_ids = live
+        .runs
+        .iter()
+        .map(|run| run.recorded.bench_run.run_id.clone())
+        .collect::<Vec<_>>();
+    let durable_rows = DurableRows {
+        run_ids: persisted_run_ids,
+        requested_candidates,
+        pending_cleanup_markers,
     };
+
+    if let Some(error) = stopped {
+        return Err(partial_failure_error(
+            error,
+            durable_rows.describe(&error.to_string()),
+        ));
+    }
+
     let mut attribution = BTreeMap::new();
     let mut runs = Vec::with_capacity(live.runs.len());
+    let mut share_safe = Vec::with_capacity(live.runs.len());
     for run in live.runs {
         let recorded = run.recorded;
         let attribution_for_run = extract_owner_model_attribution(&recorded.raw_output);
         if let Some(value) = attribution_for_run.clone() {
             attribution.insert(recorded.bench_run.run_id.clone(), value);
         }
+        share_safe.push(
+            project_share_safe(&snapshot, &task, &recorded).map_err(|_| {
+                CliError::internal(
+                    durable_rows.describe("share-safe comparison projection could not be produced"),
+                )
+            })?,
+        );
         runs.push(run_output(&recorded, attribution_for_run));
     }
 
@@ -306,10 +458,13 @@ pub async fn run(
         .collect::<BTreeSet<_>>()
         .len()
         == 1;
+    // Unreachable unless the bridge broke its own contract; kept because the
+    // alternative to a loud refusal here is publishing a comparison whose
+    // same-snapshot claim is false.
     if !same_packet_fingerprint || !same_materialized_corpus {
-        return Err(CliError::internal(
+        return Err(CliError::internal(durable_rows.describe(
             "live comparison returned inconsistent same-snapshot provenance",
-        ));
+        )));
     }
 
     let persisted_runs = runs
@@ -318,7 +473,11 @@ pub async fn run(
         .collect::<BTreeSet<_>>();
     let report_runs = store
         .load_runs()
-        .map_err(|_| CliError::internal("persisted comparison runs could not be reloaded"))?
+        .map_err(|_| {
+            CliError::internal(
+                durable_rows.describe("persisted comparison runs could not be reloaded"),
+            )
+        })?
         .into_iter()
         .filter(|run| persisted_runs.contains(run.run_id.as_str()))
         .collect::<Vec<_>>();
@@ -330,9 +489,12 @@ pub async fn run(
         &attribution,
         PrivacyClass::OwnerOnly,
     )
-    .map_err(|_| CliError::internal("comparison report could not be built"))?;
-    let report_markdown = render_report_markdown(&report)
-        .map_err(|_| CliError::internal("comparison report could not be rendered"))?;
+    .map_err(|_| {
+        CliError::internal(durable_rows.describe("comparison report could not be built"))
+    })?;
+    let report_markdown = render_report_markdown(&report).map_err(|_| {
+        CliError::internal(durable_rows.describe("comparison report could not be rendered"))
+    })?;
 
     Ok(BenchComparisonOutput {
         schema_id: BENCH_COMPARE_CLI_SCHEMA_ID,
@@ -347,7 +509,63 @@ pub async fn run(
         runs,
         report,
         report_markdown,
+        share_safe,
+        pending_cleanup_markers,
     })
+}
+
+/// Abort the Ctrl-C listener on every exit path, including an early return.
+struct SignalGuard {
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for SignalGuard {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Durable state this command created, for any message that has to report it.
+struct DurableRows {
+    run_ids: Vec<String>,
+    requested_candidates: usize,
+    pending_cleanup_markers: usize,
+}
+
+impl DurableRows {
+    /// Extend a refusal with the rows an operator now has to know about.
+    ///
+    /// Benchmark run identities are generated, content-free values, so naming
+    /// them costs no privacy and is the difference between an actionable
+    /// failure and orphaned rows nobody can find.
+    fn describe(&self, reason: &str) -> String {
+        let mut message = format!(
+            "{reason}; {} of {} candidates persisted",
+            self.run_ids.len(),
+            self.requested_candidates
+        );
+        if !self.run_ids.is_empty() {
+            message.push_str(&format!(
+                "; durable runs retained in the benchmark library: {}",
+                self.run_ids.join(", ")
+            ));
+        }
+        if self.pending_cleanup_markers > 0 {
+            message.push_str(&format!(
+                "; {} isolated corpus cleanup marker(s) still pending",
+                self.pending_cleanup_markers
+            ));
+        }
+        message
+    }
+}
+
+/// Keep the exit category of the underlying refusal while carrying the
+/// operator-facing detail about what is now durable.
+fn partial_failure_error(error: LiveBridgeError, message: String) -> CliError {
+    CliError::new(map_bridge_error(error).category, message)
 }
 
 fn read_candidate(path: &PathBuf) -> CliResult<CandidateSpec> {
@@ -467,6 +685,7 @@ fn run_output(
         host_corpus_id: host_execution.map(|proof| proof.corpus_id.clone()),
         host_corpus_revision: host_execution.map(|proof| proof.corpus_revision),
         host_packet_id: host_execution.map(|proof| proof.packet_id.clone()),
+        request_deadline_ms: recorded.owner_only.request.overrides.deadline_ms,
     }
 }
 
@@ -494,22 +713,6 @@ fn map_bridge_error(error: LiveBridgeError) -> CliError {
         | LiveBridgeError::Cleanup
         | LiveBridgeError::FailureAndCleanup => CliError::internal(message),
     }
-}
-
-fn map_bridge_error_with_persisted_runs(
-    error: LiveBridgeError,
-    runs: &[cd_triage_bench_live::LiveRunResult],
-) -> CliError {
-    let mut mapped = map_bridge_error(error);
-    if !runs.is_empty() {
-        let run_ids = runs
-            .iter()
-            .map(|run| run.recorded.bench_run.run_id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        mapped.message = format!("{}; persisted run ids: {}", mapped.message, run_ids);
-    }
-    mapped
 }
 
 #[cfg(test)]

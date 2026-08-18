@@ -579,7 +579,7 @@ if routing_guard.get("env") != expected_routing_env:
 routing_run = routing_guard.get("run") or ""
 for required_text in (
     '"$PATH_FILTER_RESULT" != success',
-    "full:true|bench-only:false|collab-only:false",
+    "full:true|collab-only:false",
 ):
     if required_text not in routing_run:
         raise SystemExit(f"Ubuntu aggregate routing guard is missing {required_text!r}")

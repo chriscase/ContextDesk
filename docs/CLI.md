@@ -851,13 +851,48 @@ and credential adapter.
 The command prepares and proves one isolated corpus before any candidate runs,
 reuses its packet/corpus identity sequentially, validates every replay before
 persistence, and preserves failed/partial/timed-out outcomes. It never emits
-rankings or readiness claims. Output is owner-only because exact model
-identities and task-linked provenance are retained; use the existing
-`cd-triage-bench report --privacy share-safe` projection for an explicit
-share-safe artifact. If an infrastructure error stops a later candidate, rows
-already persisted remain durable and can be rendered with the bench report;
-the command returns that error together with their persisted run IDs rather
-than presenting an incomplete comparison as successful.
+rankings or readiness claims.
+
+**Bounds.** `--max-blob-bytes` and `--max-aggregate-bytes` may be *lowered*
+below the published production import bounds (512 MiB per blob, 2 GiB
+aggregate) and can never be raised above them: a host boundary exists to bound
+its callers. Both bounds are checked against the snapshot manifest before any
+blob is opened, and verification then streams rather than loading a blob into
+memory. Ctrl-C is armed before that work begins, so cancellation reaches
+snapshot verification and corpus preparation, not only the provider call.
+
+**Fairness.** Candidates run sequentially against the one prepared corpus.
+Each candidate's request deadline is its own override capped by the comparison
+deadline — a value that does not depend on list position or on how long an
+earlier candidate took, so ordering buys nobody extra wall clock. The budget
+is deliberately not divided between candidates: a divided share can fall below
+the deadline a policy needs in order to run at all (a Standard policy reserves
+time for its finalizer), which would turn a working comparison into a list of
+rejected budgets. Boundedness comes from refusing to *start* another candidate
+once the comparison budget is spent, so a comparison can overshoot by at most
+the final candidate's own allowance. Each row's effective allowance is
+reported as `request_deadline_ms`.
+
+**Privacy.** Output is owner-only because exact model identities and
+task-linked provenance are retained. Benchmark run rows are themselves
+owner-only, so `cd-triage-bench report --privacy share-safe` deliberately
+projects *no* live rows at all. The share-safe artifact for a comparison is
+the `share_safe` field of this command's JSON payload: the adapter's
+hand-written, scanner-gated projection carrying fingerprints, counts and
+dispositions only — never an exact provider/model identity, the task text,
+the answer envelope, or raw output.
+
+**Partial outcomes.** If cancellation, a deadline, or an infrastructure error
+stops the comparison after some candidates have run, those rows are already
+durable. The command fails with the underlying category and names the durable
+run identities in its message, so they can be found with `cd-triage-bench
+report`; it never presents an incomplete comparison as successful, and never
+discards the identities an operator needs to locate the rows.
+
+**Cleanup debt.** A crashed earlier run can leave an isolated corpus behind.
+Each run makes one bounded best-effort recovery sweep and reports what it
+could not resolve as `pending_cleanup_markers`; unresolved debt never blocks
+a new comparison.
 
 Global flags (available on every subcommand): `--format`, `--json`,
 `--jsonl`, `--color`, `--config <path>`, `--app-config <path>`,

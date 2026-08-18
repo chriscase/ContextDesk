@@ -133,7 +133,8 @@ jobs:
         run: |
           set -eu
           # Path-aware skipping is PR feedback only. Every push to main gets
-          # the complete Ubuntu workspace gate, including bench-only commits.
+          # the complete Ubuntu workspace gate, including isolated-surface
+          # commits.
           if [ "$EVENT_NAME" = "pull_request" ]; then
             if [ -n "$BASE_SHA" ] && [ "$BASE_SHA" != "0000000000000000000000000000000000000000" ]; then
               git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$BASE_SHA"
@@ -691,7 +692,7 @@ jobs:
             exit 1
           fi
           case "$SURFACE:$RUN_UBUNTU" in
-            full:true|bench-only:false|collab-only:false) ;;
+            full:true|collab-only:false) ;;
             *)
               echo "::error title=CI path routing::invalid route '$SURFACE:$RUN_UBUNTU'"
               exit 1
@@ -699,14 +700,6 @@ jobs:
           esac
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: run isolated bench validation
-        if: needs.ci-path-filter.outputs.surface == 'bench-only'
-        run: |
-          cargo test -p cd-triage-bench --all-targets
-          cargo test -p cd-triage-bench-live --all-targets
-          cargo test -p cd-triage-bench-adapter --all-targets
-          cargo test -p cd-triage-bench-adapter-cli --all-targets
-          cargo test -p cd-cli --all-targets
       - name: record isolated collab routing
         if: needs.ci-path-filter.outputs.surface == 'collab-only'
         run: |

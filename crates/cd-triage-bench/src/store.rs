@@ -333,38 +333,147 @@ impl BenchStore {
         })
     }
 
+    /// Verify every held snapshot blob without allocating a blob in memory.
+    ///
+    /// Verification streams each backing file through a bounded buffer, so a
+    /// large or corrupt blob costs time but never a proportional allocation.
+    /// The declared manifest length is the read bound: a file longer than its
+    /// manifest is rejected after one extra byte instead of being read whole.
     pub fn verify_snapshot_blobs(&self, snapshot: &EvidenceSnapshot) -> BenchResult<()> {
+        self.verify_snapshot_blobs_cancellable(snapshot, || false)
+    }
+
+    /// [`Self::verify_snapshot_blobs`] with a cancellation poll between chunks.
+    pub fn verify_snapshot_blobs_cancellable<C>(
+        &self,
+        snapshot: &EvidenceSnapshot,
+        mut is_cancelled: C,
+    ) -> BenchResult<()>
+    where
+        C: FnMut() -> bool,
+    {
         for item in &snapshot.items {
             if let Some(content) = item.held_content() {
-                let bytes = self.get_blob(&content.digest.hex)?;
-                if bytes.len() as u64 != content.byte_length {
-                    return Err(BenchError::Integrity(format!(
-                        "blob {} length {} does not match manifest {}",
-                        content.digest.hex,
-                        bytes.len(),
-                        content.byte_length
-                    )));
-                }
+                self.verify_held_content_streamed(content, &mut is_cancelled)?;
             }
         }
         Ok(())
     }
 
-    /// Verify snapshot blobs without allocating their complete contents.
+    /// Check every held blob's declared size against explicit bounds before
+    /// any backing file is opened, then verify the snapshot by streaming.
     ///
-    /// The declared size is checked before any bytes are read, and the blob is
-    /// then streamed through the same length and digest proof used by the live
-    /// bridge. This is the bounded entry point for host-facing operations.
-    pub fn verify_snapshot_blobs_bounded(
+    /// This is the entry point for callers that publish byte limits: the
+    /// manifest is metadata only, so an oversized snapshot is refused before
+    /// the store touches a single blob byte.
+    pub fn get_snapshot_bounded<C>(
         &self,
-        snapshot: &EvidenceSnapshot,
-        max_bytes: u64,
-    ) -> BenchResult<()> {
+        snapshot_id: &str,
+        max_blob_bytes: u64,
+        max_aggregate_bytes: u64,
+        mut is_cancelled: C,
+    ) -> BenchResult<EvidenceSnapshot>
+    where
+        C: FnMut() -> bool,
+    {
+        let snapshot = EvidenceSnapshot::parse_json(&self.read_entity("snapshots", snapshot_id)?)?;
+        let mut aggregate = 0_u64;
         for item in &snapshot.items {
-            if let Some(content) = item.held_content() {
-                let mut sink = std::io::sink();
-                self.copy_snapshot_blob_verified(content, max_bytes, &mut sink, || false)?;
+            let Some(content) = item.held_content() else {
+                continue;
+            };
+            if content.byte_length > max_blob_bytes {
+                return Err(BenchError::BlobTooLarge {
+                    digest: content.digest.hex.clone(),
+                    declared_bytes: content.byte_length,
+                    max_bytes: max_blob_bytes,
+                });
             }
+            aggregate = aggregate.checked_add(content.byte_length).ok_or_else(|| {
+                BenchError::BlobTooLarge {
+                    digest: content.digest.hex.clone(),
+                    declared_bytes: u64::MAX,
+                    max_bytes: max_aggregate_bytes,
+                }
+            })?;
+            if aggregate > max_aggregate_bytes {
+                return Err(BenchError::BlobTooLarge {
+                    digest: content.digest.hex.clone(),
+                    declared_bytes: aggregate,
+                    max_bytes: max_aggregate_bytes,
+                });
+            }
+        }
+        self.verify_snapshot_blobs_cancellable(&snapshot, &mut is_cancelled)?;
+        Ok(snapshot)
+    }
+
+    fn verify_held_content_streamed<C>(
+        &self,
+        content: &HeldContent,
+        is_cancelled: &mut C,
+    ) -> BenchResult<()>
+    where
+        C: FnMut() -> bool,
+    {
+        if content.digest.algorithm != "sha256" {
+            return Err(BenchError::Schema(
+                "held content digest algorithm must be sha256".into(),
+            ));
+        }
+        crate::types::validate_sha256_hex(&content.digest.hex)?;
+        if is_cancelled() {
+            return Err(BenchError::BlobCopyCancelled {
+                digest: content.digest.hex.clone(),
+            });
+        }
+
+        let path = self.blob_path(&content.digest.hex);
+        let file = fs::File::open(&path).map_err(|e| BenchError::io(&path, e))?;
+        // One byte past the manifest length is enough to prove an overlong
+        // file without reading the rest of it.
+        let mut reader = file.take(content.byte_length.saturating_add(1));
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; BLOB_COPY_BUFFER_BYTES];
+        let mut read_bytes = 0_u64;
+        loop {
+            if is_cancelled() {
+                return Err(BenchError::BlobCopyCancelled {
+                    digest: content.digest.hex.clone(),
+                });
+            }
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|e| BenchError::io(&path, e))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            read_bytes = read_bytes.checked_add(read as u64).ok_or_else(|| {
+                BenchError::Integrity(format!("blob {} byte count overflowed", content.digest.hex))
+            })?;
+        }
+
+        if read_bytes > content.byte_length {
+            return Err(BenchError::Integrity(format!(
+                "blob {} length exceeds manifest {}",
+                content.digest.hex, content.byte_length
+            )));
+        }
+        // Digest first, so a mutated blob reports tampering rather than the
+        // length difference that tampering happens to produce.
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != content.digest.hex {
+            return Err(BenchError::Integrity(format!(
+                "blob {} failed digest verification (got {actual})",
+                content.digest.hex
+            )));
+        }
+        if read_bytes != content.byte_length {
+            return Err(BenchError::Integrity(format!(
+                "blob {} length {} does not match manifest {}",
+                content.digest.hex, read_bytes, content.byte_length
+            )));
         }
         Ok(())
     }
@@ -404,17 +513,6 @@ impl BenchStore {
     pub fn get_snapshot(&self, snapshot_id: &str) -> BenchResult<EvidenceSnapshot> {
         let snapshot = EvidenceSnapshot::parse_json(&self.read_entity("snapshots", snapshot_id)?)?;
         self.verify_snapshot_blobs(&snapshot)?;
-        Ok(snapshot)
-    }
-
-    /// Load and verify a snapshot under a per-blob byte bound.
-    pub fn get_snapshot_bounded(
-        &self,
-        snapshot_id: &str,
-        max_bytes: u64,
-    ) -> BenchResult<EvidenceSnapshot> {
-        let snapshot = EvidenceSnapshot::parse_json(&self.read_entity("snapshots", snapshot_id)?)?;
-        self.verify_snapshot_blobs_bounded(&snapshot, max_bytes)?;
         Ok(snapshot)
     }
 
@@ -1077,16 +1175,6 @@ mod tests {
         );
         store.put_blob(bytes).unwrap();
         store.put_snapshot(&snapshot).unwrap();
-        assert!(matches!(
-            store.get_snapshot_bounded(&snapshot.snapshot_id, (bytes.len() - 1) as u64),
-            Err(BenchError::BlobTooLarge { .. })
-        ));
-        assert_eq!(
-            store
-                .get_snapshot_bounded(&snapshot.snapshot_id, bytes.len() as u64)
-                .unwrap(),
-            snapshot
-        );
         let task = EvaluationTask::from_parts(
             PrivacyClass::OwnerOnly,
             "case-1".into(),

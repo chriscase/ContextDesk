@@ -10,7 +10,8 @@ use crate::report::{
 use crate::review::{blinded_run_view_from_raw, ReviewPhase};
 use crate::store::BenchStore;
 use crate::types::{
-    Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass, MAX_RAW_INLINE_BYTES,
+    Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass, SourceKind,
+    MAX_RAW_INLINE_BYTES,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
@@ -268,8 +269,13 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
             if let Some(task_id) = task {
                 runs.retain(|r| r.task_id == task_id);
             }
+            // Attribution is a proof-bound fact, not a rendering convenience:
+            // only a ContextDesk SDK row can carry the adapter's owner-only
+            // envelope, so an imported human/web/other-product row never
+            // contributes a model identity to the report.
             let attribution = runs
                 .iter()
+                .filter(|run| run.source_kind == SourceKind::ContextdeskSdk)
                 .filter_map(|run| {
                     let raw = store
                         .get_blob_bounded(&run.raw_output.digest.hex, MAX_RAW_INLINE_BYTES as u64)

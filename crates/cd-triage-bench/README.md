@@ -66,7 +66,21 @@ leaderboards.
 - Comparisons are valid only for the same `EvaluationTask` + snapshot.
   Anything else is reported as **incomparable**, never force-ranked.
 - Owner-only live comparison rows show exact provider-profile/model identities
-  recovered from the validated envelope; share-safe output never exposes them.
+  recovered from the adapter's owner-only envelope. Attribution is a
+  proof-bound fact, not a rendering convenience: a row is only credited with a
+  model identity when it is a `contextdesk_sdk` row **and** its raw output is
+  recognisably that envelope. Imported human/web/other-product artifacts of
+  the same shape prove nothing and contribute no attribution.
+- Benchmark run rows recorded by the adapter are owner-only, so
+  `report --privacy share-safe` projects none of them. The share-safe artifact
+  for a live comparison is the adapter's explicit `project_share_safe`
+  projection, surfaced by `contextdesk bench-compare` as its `share_safe`
+  field. When a share-safe row *does* exist, it carries opaque model
+  fingerprints and never an exact identity.
+- Every dynamic value in a rendered report is escaped before it reaches the
+  markdown/HTML output, and identity text carrying markup is refused at
+  admission, so a crafted identity in an imported artifact cannot inject
+  markup or split a table row.
 - Reports do not emit readiness, qualification, or routing badges.
 
 ## Schema versioning and migration

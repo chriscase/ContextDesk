@@ -705,6 +705,35 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         result.runs[0].recorded.owner_only.fingerprints.packet,
         result.runs[1].recorded.owner_only.fingerprints.packet
     );
+    assert!(result.is_complete());
+    assert!(result.stopped.is_none());
+    // Fairness: the allowance does not depend on list position or on how long
+    // an earlier candidate took, so running second buys no less wall clock
+    // than running first — and neither is pushed below the deadline a
+    // Standard policy needs in order to run at all.
+    let first_deadline = result.runs[0]
+        .recorded
+        .owner_only
+        .request
+        .overrides
+        .deadline_ms
+        .expect("first candidate carries an explicit deadline");
+    let second_deadline = result.runs[1]
+        .recorded
+        .owner_only
+        .request
+        .overrides
+        .deadline_ms
+        .expect("second candidate carries an explicit deadline");
+    assert_eq!(
+        first_deadline, second_deadline,
+        "candidate order must not change the wall-clock allowance"
+    );
+    assert_eq!(
+        first_deadline,
+        cd_triage_bench_live::DEFAULT_LIVE_COMPARISON_DEADLINE_MS,
+        "an undivided comparison budget reaches each candidate whole"
+    );
 
     let attribution = result
         .runs
@@ -747,6 +776,162 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
 }
 
 #[tokio::test]
+async fn a_stopped_comparison_still_returns_the_runs_it_already_persisted() {
+    // Candidate one is cancelled while its provider call is in flight: the
+    // bridge records and persists it. Candidate two never starts. The caller
+    // must still learn which durable rows now exist — an operator cannot find
+    // rows whose identities were thrown away with the error.
+    let provider_started = Arc::new(tokio::sync::Notify::new());
+    let notify_route = Arc::clone(&provider_started);
+    let gateway = MockGateway::start_routed(move |request| {
+        if request.path.ends_with("/chat/completions") {
+            notify_route.notify_one();
+            Step::respond(
+                Response::new(
+                    200,
+                    Body::Stream(vec![Frame::delayed(
+                        b"data: {}\n\n".to_vec(),
+                        Duration::from_millis(100),
+                    )]),
+                )
+                .with_header("content-type", "text/event-stream"),
+            )
+        } else {
+            Step::respond(Response::status_only(404))
+        }
+    })
+    .await;
+    let second_gateway = MockGateway::start_routed(|request| {
+        if request.path.ends_with("/chat/completions") {
+            Step::respond(Response::json_ok(&answer_from_live_request(request)))
+        } else {
+            Step::respond(Response::status_only(404))
+        }
+    })
+    .await;
+    let (_library, cache, store, case, snapshot, task) = fixture();
+
+    let profile = openai_profile(gateway.base_url());
+    let mut second_profile = openai_profile(second_gateway.base_url());
+    second_profile.id = "profile:live-fixture-second".into();
+    second_profile.label = "live fixture second".into();
+    second_profile.chat_model = "model:live-fixture-second".into();
+    let qualifications = qualified_finalizer(&profile);
+    let second_qualifications = qualified_finalizer(&second_profile);
+    let model = ModelRef {
+        profile_id: profile.id.clone(),
+        model_id: profile.chat_model.clone(),
+    };
+    let second_model = ModelRef {
+        profile_id: second_profile.id.clone(),
+        model_id: second_profile.chat_model.clone(),
+    };
+    let config = cd_core::config::AppConfig {
+        providers: ProviderConfig {
+            active_id: Some(profile.id.clone()),
+            profiles: vec![profile],
+        },
+        ..Default::default()
+    };
+    let second_config = cd_core::config::AppConfig {
+        providers: ProviderConfig {
+            active_id: Some(second_profile.id.clone()),
+            profiles: vec![second_profile],
+        },
+        ..Default::default()
+    };
+
+    let cancel = CancelFlag::new();
+    let cancel_after_start = cancel.clone();
+    let cancellation = tokio::spawn(async move {
+        provider_started.notified().await;
+        cancel_after_start.cancel();
+    });
+
+    let options = |config: cd_core::config::AppConfig,
+                   qualifications: TriageRoleQualificationStoreV1,
+                   model: ModelRef,
+                   cancellation_id: &str,
+                   name: &str| LiveComparisonCandidate {
+        options: LiveRunOptions {
+            cache_root: cache.path().to_path_buf(),
+            config,
+            policies: TriagePolicyStoreV1::default(),
+            qualifications,
+            policy: TriagePolicySelectionV2::Standard { model },
+            overrides: TriageRequestOverridesV1 {
+                deadline_ms: None,
+                max_provider_calls: None,
+            },
+            cancellation_id: cancellation_id.into(),
+            recording: cd_triage_bench_adapter::RecordingContext {
+                strategy: StrategyIdentity {
+                    name: name.into(),
+                    version: Observed::Unknown,
+                    build: Observed::Unknown,
+                },
+                operator: "test".into(),
+                created_at: CREATED_AT.into(),
+            },
+            limits: LiveCorpusLimits::default(),
+            cancel: cancel.clone(),
+        },
+        events: None,
+    };
+
+    let result = run_live_comparison(
+        &store,
+        &case,
+        &snapshot,
+        &task,
+        Arc::new(MemorySecretStore::new()),
+        vec![
+            options(
+                config,
+                qualifications,
+                model,
+                "cancel:partial-first",
+                "ContextDesk live first",
+            ),
+            options(
+                second_config,
+                second_qualifications,
+                second_model,
+                "cancel:partial-second",
+                "ContextDesk live second",
+            ),
+        ],
+    )
+    .await
+    .expect("a partially completed comparison is reported, not discarded");
+    cancellation.await.unwrap();
+
+    assert_eq!(result.runs.len(), 1, "the first candidate was persisted");
+    assert!(!result.is_complete());
+    assert_eq!(result.stopped, Some(LiveBridgeError::Cancelled));
+    assert_eq!(
+        second_gateway.request_count(),
+        0,
+        "the cancelled comparison must not start the next candidate"
+    );
+
+    // The returned identity is the operator's handle on a row that now exists.
+    let persisted = result.persisted_run_ids();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(
+        store.get_run(&persisted[0]).unwrap().run_id,
+        persisted[0],
+        "the reported run identity must resolve in the benchmark library"
+    );
+
+    let corpus_root = cache.path().join("log_corpora");
+    assert!(
+        !corpus_root.exists() || corpus_root.read_dir().unwrap().next().is_none(),
+        "the shared corpus is discarded even when the comparison stopped early"
+    );
+}
+
+#[tokio::test]
 async fn comparison_rejects_empty_candidates_before_preparation() {
     let (_library, cache, store, case, snapshot, task) = fixture();
     let error = run_live_comparison(
@@ -759,8 +944,9 @@ async fn comparison_rejects_empty_candidates_before_preparation() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.error, LiveBridgeError::EmptyComparison);
-    assert!(error.runs.is_empty());
+    // A refusal before preparation persisted nothing, so it is a plain
+    // `Err` with no durable rows to report and no corpus to discard.
+    assert_eq!(error, LiveBridgeError::EmptyComparison);
     assert!(!cache.path().join("log_corpora").exists());
 }
 
