@@ -43,6 +43,68 @@ pub fn build_request(
     overrides: TriageRequestOverridesV1,
     cancellation_id: &str,
 ) -> AdapterResult<BoundRequest> {
+    build_request_for_scope(
+        snapshot,
+        task,
+        bounded,
+        TriageScopeV1 {
+            corpus_id: snapshot.snapshot_id.clone(),
+            corpus_revision: None,
+            source_ids: bounded.visible_item_ids.clone(),
+        },
+        policy,
+        overrides,
+        cancellation_id,
+        true,
+    )
+}
+
+/// Build an owner-only request for a live run over an isolated imported corpus.
+///
+/// The live bridge first copies and verifies the exact visible snapshot bytes,
+/// imports them into a run-exclusive ContextDesk corpus, and then supplies that
+/// corpus identity and its non-zero revision here. `source_ids` is deliberately
+/// empty: the current production host accepts only a whole-corpus scope. The
+/// bridge proves separately that the whole corpus contains exactly the task's
+/// visible evidence and nothing else.
+#[allow(clippy::too_many_arguments)]
+pub fn build_live_request(
+    snapshot: &EvidenceSnapshot,
+    task: &EvaluationTask,
+    bounded: &BoundedPacket,
+    corpus_id: &str,
+    corpus_revision: u64,
+    policy: TriagePolicySelectionV2,
+    overrides: TriageRequestOverridesV1,
+    cancellation_id: &str,
+) -> AdapterResult<BoundRequest> {
+    build_request_for_scope(
+        snapshot,
+        task,
+        bounded,
+        TriageScopeV1 {
+            corpus_id: corpus_id.to_string(),
+            corpus_revision: Some(corpus_revision),
+            source_ids: Vec::new(),
+        },
+        policy,
+        overrides,
+        cancellation_id,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_request_for_scope(
+    snapshot: &EvidenceSnapshot,
+    task: &EvaluationTask,
+    bounded: &BoundedPacket,
+    scope: TriageScopeV1,
+    policy: TriagePolicySelectionV2,
+    overrides: TriageRequestOverridesV1,
+    cancellation_id: &str,
+    require_snapshot_scope: bool,
+) -> AdapterResult<BoundRequest> {
     if task.snapshot_id != snapshot.snapshot_id {
         return Err(AdapterError::IdentityMismatch(format!(
             "task {} is bound to snapshot {}, not {}",
@@ -57,15 +119,6 @@ pub fn build_request(
             text.len()
         )));
     }
-
-    // Bench snapshots are content-addressed, so there is no monotonic corpus
-    // revision to report. Omitting it keeps "unknown" distinct from a
-    // fabricated zero, which the contract would reject anyway.
-    let scope = TriageScopeV1 {
-        corpus_id: snapshot.snapshot_id.clone(),
-        corpus_revision: None,
-        source_ids: bounded.visible_item_ids.clone(),
-    };
 
     let policy_fingerprint = fingerprint(POLICY_PREFIX, &policy)?;
     // The canonical runtime fingerprint excludes run_id specifically so a
@@ -88,7 +141,7 @@ pub fn build_request(
     // Real public validator. The adapter adds no second request validator.
     request.validate()?;
 
-    if request.scope.corpus_id != bounded.packet.snapshot_id {
+    if require_snapshot_scope && request.scope.corpus_id != bounded.packet.snapshot_id {
         return Err(AdapterError::IdentityMismatch(
             "request corpus identity does not match the materialized packet snapshot".into(),
         ));

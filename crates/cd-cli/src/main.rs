@@ -16,6 +16,7 @@ use cli::{Cli, Command, InvocationMode};
 use config::{CliOverrides, OutputFormat, ResolvedConfig};
 use envelope::{CliError, Envelope, ExitCategory, Render};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
@@ -244,10 +245,10 @@ async fn dispatch(
             unreachable!("provider-free triage policy commands return before stateful dispatch")
         }
         Command::Triage { action } => {
-            let secrets = adapters::secret_store();
+            let secrets = Arc::new(adapters::secret_store());
             let result = match action {
                 cli::TriageAction::Run(args) => {
-                    commands::triage::run_stateful(args, paths, app_cfg, &secrets).await
+                    commands::triage::run_stateful(args, paths, app_cfg, secrets).await
                 }
             };
             emit_triage_run(format, resolved.color.value, result)

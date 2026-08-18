@@ -61,12 +61,20 @@ pub struct ShareSafeAdapterRun {
     pub snapshot_fingerprint: String,
     /// Exact policy-selection fingerprint.
     pub policy_fingerprint: String,
+    /// Exact resolved, override-adjusted policy fingerprint for a live host
+    /// run when it differs from the public selection fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_policy_fingerprint: Option<String>,
     /// Whole-request fingerprint.
     pub request_fingerprint: String,
     /// Materialized packet fingerprint.
     pub packet_fingerprint: String,
     /// Bounded evidence-corpus fingerprint.
     pub corpus_fingerprint: String,
+    /// Domain-separated commitment to the complete owner-only live host proof,
+    /// without exposing packet, source, evidence, or content identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_execution_fingerprint: Option<String>,
     /// Distinct model fingerprints, sorted. Never model identities.
     pub model_fingerprints: Vec<String>,
     /// Per-slot share-safe views.
@@ -148,9 +156,15 @@ pub fn project_share_safe(
         task_fingerprint: fingerprint(TASK_PREFIX, &task.task_id)?,
         snapshot_fingerprint: fingerprint(SNAPSHOT_PREFIX, &snapshot.snapshot_id)?,
         policy_fingerprint: record.fingerprints.policy.clone(),
+        executed_policy_fingerprint: record.fingerprints.executed_policy.clone(),
         request_fingerprint: record.fingerprints.request.clone(),
         packet_fingerprint: record.fingerprints.packet.clone(),
         corpus_fingerprint: record.fingerprints.corpus.clone(),
+        host_execution_fingerprint: record
+            .host_execution
+            .as_ref()
+            .map(|proof| fingerprint("hxf", proof))
+            .transpose()?,
         model_fingerprints: record.fingerprints.models.clone(),
         slots: record
             .slots

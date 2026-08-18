@@ -10380,7 +10380,7 @@ async fn triage_run_v2(
             &mut host,
             &cache_root,
             cfg,
-            &state.secrets,
+            Arc::new(state.secrets.clone()),
             policies,
             qualifications,
             state.triage_cancellations.clone(),

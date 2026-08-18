@@ -18,6 +18,7 @@ use crate::process_progress::{
     progress_basename, CancelFlag, LogIngestEvidence, LogIngestEvidenceReason, NoopProcessProgress,
     ProcessProgress, ProcessProgressKind, ProcessProgressObserver, ProcessProgressPhase,
 };
+use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -224,6 +225,23 @@ pub struct IngestReport {
     pub embedding: CorpusEmbeddingStatus,
     /// Phase wall-clock timings (#824); zeroed when not instrumented.
     pub phase_timings: IngestPhaseTimings,
+    /// Exact digests of source bytes read through EOF and admitted as events.
+    ///
+    /// These are computed in the ingest read loop, rather than by reopening a
+    /// path after import, so provenance-sensitive callers can bind the bytes
+    /// actually consumed by the parser.
+    pub source_digests: Vec<IngestSourceDigest>,
+}
+
+/// Digest proof for one source successfully consumed by an ingest run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestSourceDigest {
+    /// Portable source identity used by the imported events.
+    pub source: String,
+    /// SHA-256 digest of the exact source bytes read through EOF.
+    pub content_digest: String,
+    /// Exact number of source bytes included in the digest.
+    pub byte_length: u64,
 }
 
 /// Trusted allowlist carried from a verified import plan (#751).
@@ -1837,9 +1855,10 @@ fn ingest_lines_from_reader(
     kind: ProcessProgressKind,
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
-) -> CoreResult<bool> {
+) -> CoreResult<IngestSourceDigest> {
     let mut raw_line = Vec::new();
     let mut source_bytes_read = 0u64;
+    let mut source_hasher = Sha256::new();
     let mut framer = LogicalRecordFramer::new();
     // Parallel raw-byte accumulation so source_byte_count stays pre-decode.
     let mut pending_raw: Vec<u8> = Vec::new();
@@ -1880,6 +1899,7 @@ fn ingest_lines_from_reader(
                 source_bytes_read, limits.max_file_bytes
             )));
         }
+        source_hasher.update(&raw_line);
         stats.source_bytes = stats.source_bytes.saturating_add(bytes as u64);
         // Physical line → logical record framing (#788). Bound is already
         // enforced per physical read; joined logical text is still capped by
@@ -1960,7 +1980,11 @@ fn ingest_lines_from_reader(
             ops,
         )?;
     }
-    Ok(true)
+    Ok(IngestSourceDigest {
+        source: source_label.to_string(),
+        content_digest: format!("sha256:{:x}", source_hasher.finalize()),
+        byte_length: source_bytes_read,
+    })
 }
 
 /// Map a framer completion + current physical line onto pre-decode raw bytes.
@@ -2233,6 +2257,7 @@ fn ingest_from_zip(
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
     selection: Option<&IngestSelection>,
+    source_digests: &mut Vec<IngestSourceDigest>,
 ) -> CoreResult<u64> {
     let file = open_selected_regular_file(zip_path)?;
     let archive_identity = portable_source_identity(Path::new(&progress_basename(zip_path)))?;
@@ -2255,6 +2280,7 @@ fn ingest_from_zip(
         limits,
         ops,
         selection,
+        source_digests,
     )
 }
 
@@ -2278,6 +2304,7 @@ fn ingest_from_zip_file(
     limits: RawIngestLimits,
     ops: &std::sync::Mutex<IngestPhaseTimingsUs>,
     selection: Option<&IngestSelection>,
+    source_digests: &mut Vec<IngestSourceDigest>,
 ) -> CoreResult<u64> {
     if cancelled(cancel) {
         emit(
@@ -2544,6 +2571,7 @@ fn ingest_from_zip_file(
                 limits,
                 ops,
                 selection,
+                source_digests,
             )?;
             files_done += 1;
             continue;
@@ -2566,7 +2594,7 @@ fn ingest_from_zip_file(
         reader.get_mut().commit_to_aggregate()?;
 
         let lines_before = stats.lines;
-        let completely_read = ingest_lines_from_reader(
+        let source_digest = ingest_lines_from_reader(
             &mut reader,
             &source_identity,
             Some(Path::new(rel)),
@@ -2593,24 +2621,16 @@ fn ingest_from_zip_file(
         }
 
         files_done += 1;
-        if completely_read {
-            if stats.lines == lines_before {
-                stats.excluded("empty", Path::new(&source_identity));
-                emit_ingest_evidence(
-                    progress,
-                    LogIngestEvidenceReason::Empty,
-                    Path::new(&source_identity),
-                );
-            } else {
-                stats.imported();
-            }
-        } else {
-            stats.failed("read_failed", Path::new(&source_identity));
+        if stats.lines == lines_before {
+            stats.excluded("empty", Path::new(&source_identity));
             emit_ingest_evidence(
                 progress,
-                LogIngestEvidenceReason::ReadFailed,
+                LogIngestEvidenceReason::Empty,
                 Path::new(&source_identity),
             );
+        } else {
+            stats.imported();
+            source_digests.push(source_digest);
         }
         if files_done == 1 || files_done == entry_count || files_done.is_multiple_of(5) {
             emit(
@@ -2920,6 +2940,7 @@ fn ingest_path_into_cache(
     let mut seq = 0u64;
     let mut batch = Vec::with_capacity(256);
     let mut budget = RawIngestBudget::default();
+    let mut source_digests = Vec::new();
     let private_archive_root = cache_root.join(".nested_archives");
     let _files_done = if is_zip_file(path) {
         // Stream members without full extraction. Only nested archive
@@ -2940,6 +2961,7 @@ fn ingest_path_into_cache(
             limits,
             ops,
             selection,
+            &mut source_digests,
         )?
     } else {
         let inventory = collect_log_files(path, &mut budget, limits, cancel)?;
@@ -3087,6 +3109,7 @@ fn ingest_path_into_cache(
                     limits,
                     ops,
                     selection,
+                    &mut source_digests,
                 )?;
                 files_done += 1;
                 continue;
@@ -3148,7 +3171,7 @@ fn ingest_path_into_cache(
             reader.get_mut().commit_to_aggregate()?;
 
             let lines_before = stats.lines;
-            let completely_read = ingest_lines_from_reader(
+            let source_digest = ingest_lines_from_reader(
                 &mut reader,
                 &rel,
                 Some(file.as_path()),
@@ -3167,16 +3190,12 @@ fn ingest_path_into_cache(
                 ops,
             )?;
             files_done += 1;
-            if completely_read {
-                if stats.lines == lines_before {
-                    stats.excluded("empty", file);
-                    emit_ingest_evidence(progress, LogIngestEvidenceReason::Empty, file);
-                } else {
-                    stats.imported();
-                }
+            if stats.lines == lines_before {
+                stats.excluded("empty", file);
+                emit_ingest_evidence(progress, LogIngestEvidenceReason::Empty, file);
             } else {
-                stats.failed("read_failed", file);
-                emit_ingest_evidence(progress, LogIngestEvidenceReason::ReadFailed, file);
+                stats.imported();
+                source_digests.push(source_digest);
             }
             if files_done == 1 || files_done == file_count || files_done.is_multiple_of(5) {
                 emit(
@@ -3448,6 +3467,7 @@ fn ingest_path_into_cache(
     )?;
     let confidence = confidence.finish();
 
+    source_digests.sort_by(|left, right| left.source.cmp(&right.source));
     Ok(IngestReport {
         corpus_id: corpus.id().to_string(),
         stats,
@@ -3455,6 +3475,7 @@ fn ingest_path_into_cache(
         top_templates: top,
         embedding,
         phase_timings: IngestPhaseTimings::default(),
+        source_digests,
     })
 }
 
@@ -4913,6 +4934,14 @@ mod tests {
         sources.dedup();
         assert_eq!(sources, ["a.log"], "no deselected member may bleed through");
         assert_eq!(report.stats.exclusion_counts.get("not_selected"), Some(&1));
+        assert_eq!(
+            report.source_digests,
+            [IngestSourceDigest {
+                source: "a.log".into(),
+                content_digest: format!("sha256:{:x}", Sha256::digest(b"level=info msg=alpha\n")),
+                byte_length: b"level=info msg=alpha\n".len() as u64,
+            }]
+        );
 
         // Deselect-all on a direct ZIP refuses to publish anything.
         let err = ingest_path_with_policy_selection_and_observer_managed(
@@ -7681,6 +7710,14 @@ mod tests {
         assert_eq!(report.stats.failed_files, 1);
         assert_eq!(report.stats.ignored_files, 1);
         assert_eq!(report.stats.source_bytes, safe.len() as u64);
+        assert_eq!(
+            report.source_digests,
+            [IngestSourceDigest {
+                source: "safe.log".into(),
+                content_digest: format!("sha256:{:x}", Sha256::digest(safe)),
+                byte_length: safe.len() as u64,
+            }]
+        );
         assert!(report.stats.partial);
         assert_eq!(report.stats.exclusion_counts["binary"], 1);
         assert_eq!(report.stats.exclusion_counts["too_large"], 1);

@@ -9,6 +9,7 @@
 
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 use cd_core::triage_policy_store::TriagePolicyStoreV1;
 use cd_core::triage_sdk::TriagePolicySelectionV2;
@@ -148,7 +149,7 @@ pub async fn run_stateful(
     args: &TriageRunArgs,
     paths: &Paths,
     cfg: &cd_core::config::AppConfig,
-    secrets: &dyn cd_core::keychain_store::SecretStore,
+    secrets: Arc<dyn cd_core::keychain_store::SecretStore>,
 ) -> CliResult<TriageRunOutput> {
     let request = match &args.parsed_request {
         Some(request) => request.clone(),
@@ -181,7 +182,7 @@ pub async fn run_stateful(
         &qualification_path,
     )
     .map_err(|_| CliError::user("triage_role_qualification_store_unavailable"))?;
-    let mut host = adapters::tool_host_with_app_config(&paths.cache_root, cfg, secrets)?;
+    let mut host = adapters::tool_host_with_app_config(&paths.cache_root, cfg, secrets.as_ref())?;
     let engine = cd_workflow::triage_runtime_host::WorkflowTriageEngineV1::new(
         &mut host,
         &paths.cache_root,

@@ -91,8 +91,16 @@ impl TriageCancellationRegistryV1 {
         &self,
         cancellation: &TriageCancellationV1,
     ) -> Result<Arc<AtomicBool>, TriageEngineFailure> {
-        let key = CancellationKey::from(cancellation);
         let owner = Arc::new(AtomicBool::new(false));
+        self.register_owner(cancellation, owner)
+    }
+
+    fn register_owner(
+        &self,
+        cancellation: &TriageCancellationV1,
+        owner: Arc<AtomicBool>,
+    ) -> Result<Arc<AtomicBool>, TriageEngineFailure> {
+        let key = CancellationKey::from(cancellation);
         let mut entries = self
             .inner
             .lock()
@@ -166,11 +174,12 @@ pub struct WorkflowTriageEngineV1<'a> {
     host: tokio::sync::Mutex<&'a mut ToolHost>,
     cache_root: PathBuf,
     config: AppConfig,
-    secrets: &'a dyn SecretStore,
+    secrets: Arc<dyn SecretStore>,
     policies: TriagePolicyStoreV1,
     qualifications: TriageRoleQualificationStoreV1,
     cancellations: TriageCancellationRegistryV1,
     packet_proof_observer: Option<TriagePacketProofObserverV1>,
+    external_cancel_owner: Option<Arc<AtomicBool>>,
 }
 
 impl<'a> WorkflowTriageEngineV1<'a> {
@@ -180,7 +189,7 @@ impl<'a> WorkflowTriageEngineV1<'a> {
         host: &'a mut ToolHost,
         cache_root: &Path,
         config: AppConfig,
-        secrets: &'a dyn SecretStore,
+        secrets: Arc<dyn SecretStore>,
         policies: TriagePolicyStoreV1,
         qualifications: TriageRoleQualificationStoreV1,
         cancellations: TriageCancellationRegistryV1,
@@ -194,6 +203,7 @@ impl<'a> WorkflowTriageEngineV1<'a> {
             qualifications,
             cancellations,
             packet_proof_observer: None,
+            external_cancel_owner: None,
         }
     }
 
@@ -201,6 +211,16 @@ impl<'a> WorkflowTriageEngineV1<'a> {
     /// engine. Existing callers remain no-op by default.
     pub fn with_packet_proof_observer(mut self, observer: TriagePacketProofObserverV1) -> Self {
         self.packet_proof_observer = Some(observer);
+        self
+    }
+
+    /// Use a caller-owned cancellation flag directly for this run.
+    ///
+    /// The same atomic is registered for the public cancellation identity and
+    /// passed into host execution, eliminating polling bridges and preserving
+    /// cancellation that was requested before public preflight began.
+    pub fn with_cancel_owner(mut self, owner: Arc<AtomicBool>) -> Self {
+        self.external_cancel_owner = Some(owner);
         self
     }
 
@@ -342,7 +362,34 @@ impl TriageEngine for WorkflowTriageEngineV1<'_> {
             run_id: request.request().run_id.clone(),
             cancellation_id: request.request().cancellation_id.clone(),
         };
-        let cancel_owner = self.cancellations.register(&cancellation)?;
+        let cancel_owner = match &self.external_cancel_owner {
+            Some(owner) => self
+                .cancellations
+                .register_owner(&cancellation, Arc::clone(owner))?,
+            None => self.cancellations.register(&cancellation)?,
+        };
+        if cancel_owner.load(Ordering::SeqCst) {
+            let policy_fingerprint = match self.unresolved_policy_fingerprint(request) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    self.cancellations
+                        .remove_if_owned(&cancellation, &cancel_owner);
+                    return Err(error);
+                }
+            };
+            return Ok(WorkflowTriagePreflightV1 {
+                policy: None,
+                preflight: None,
+                slots: Vec::new(),
+                failure_category: None,
+                input: None,
+                policy_fingerprint,
+                deadline_ms: self.unresolved_policy_deadline_ms(request),
+                cancellation,
+                cancel_owner,
+                started_at,
+            });
+        }
         let prepared = (|| {
             let policies_valid = self.policies.validate().is_ok();
             let qualifications_valid = self.qualifications.validate().is_ok();
@@ -506,7 +553,7 @@ impl TriageEngine for WorkflowTriageEngineV1<'_> {
                 &mut host,
                 &self.cache_root,
                 &self.config,
-                self.secrets,
+                Arc::clone(&self.secrets),
                 policy,
                 preflight,
                 &input,
@@ -935,7 +982,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             fixture.policies,
             fixture.qualifications,
             registry.clone(),
@@ -969,7 +1016,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             fixture.policies,
             fixture.qualifications,
             registry.clone(),
@@ -1015,7 +1062,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             fixture.policies,
             fixture.qualifications,
             registry.clone(),
@@ -1066,7 +1113,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             fixture.policies,
             fixture.qualifications,
             registry.clone(),
@@ -1117,7 +1164,7 @@ mod tests {
                 &mut fixture.host,
                 fixture.cache.path(),
                 fixture.config,
-                &fixture.secrets,
+                Arc::new(fixture.secrets.clone()),
                 fixture.policies,
                 fixture.qualifications,
                 registry.clone(),
@@ -1162,7 +1209,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             fixture.policies,
             fixture.qualifications,
             registry.clone(),
@@ -1192,6 +1239,61 @@ mod tests {
         assert_eq!(registry.len(), 0);
     }
 
+    #[tokio::test]
+    async fn caller_owned_precancel_is_direct_and_provider_free() {
+        let mut fixture = fixture();
+        let registry = TriageCancellationRegistryV1::default();
+        let reads = Arc::clone(&fixture.secrets.reads);
+        let proof_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_proof_calls = Arc::clone(&proof_calls);
+        let proof_observer: TriagePacketProofObserverV1 = Arc::new(
+            move |_proof: &crate::triage_host::TriageExecutedPacketProofV1| {
+                observed_proof_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        let request = ValidatedTriageRequest::new(request(TriagePolicySelectionV2::Saved {
+            policy_id: "saved:test".into(),
+            policy_revision: 1,
+        }))
+        .expect("request");
+        let owner = Arc::new(AtomicBool::new(true));
+        let engine = WorkflowTriageEngineV1::new(
+            &mut fixture.host,
+            fixture.cache.path(),
+            fixture.config,
+            Arc::new(fixture.secrets.clone()),
+            fixture.policies,
+            fixture.qualifications,
+            registry.clone(),
+        )
+        .with_packet_proof_observer(proof_observer)
+        .with_cancel_owner(Arc::clone(&owner));
+
+        let prepared = engine.preflight(&request).await.expect("preflight");
+        assert!(prepared.policy.is_none());
+        assert!(prepared.input.is_none());
+        assert!(registry.cancel(&prepared.cancellation).expect("registered"));
+        assert!(owner.load(Ordering::SeqCst));
+
+        let replay = engine
+            .execute(request.clone(), prepared, None)
+            .await
+            .expect("cancel replay");
+        let execution = replay_validated(&request, replay).expect("bound replay");
+        assert!(matches!(
+            execution.terminal(),
+            TriageExecutionTerminal::Cancelled {
+                partial_result: None,
+                ..
+            }
+        ));
+        assert_provider_free(execution.replay());
+        assert_eq!(proof_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.len(), 0);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn deadline_before_packet_work_returns_authoritative_replay() {
         let mut fixture = fixture();
@@ -1215,7 +1317,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             fixture.policies,
             fixture.qualifications,
             registry.clone(),
@@ -1263,7 +1365,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             fixture.policies,
             fixture.qualifications,
             registry.clone(),
@@ -1304,7 +1406,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             fixture.policies,
             fixture.qualifications,
             registry.clone(),

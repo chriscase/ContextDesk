@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use cd_core::agent::build_fast_triage_packet;
@@ -26,6 +27,7 @@ use cd_core::multi_model::triage_policy::{
     CompiledRoleSlotV2, CompiledTriagePolicyV2, RolePreflightV2, RoleQualificationV2,
     SlotDispositionV2, TriagePolicyMode, TriagePolicyPreflightV2, TriagePolicyV2, TriageSlotKindV2,
 };
+use cd_core::providers::ProviderProfile;
 use cd_core::tool_host::ToolHost;
 use cd_core::triage_role_qualification::{
     triage_protocol_fingerprint, TriageRoleQualificationKeyV1, TriageRoleQualificationStoreV1,
@@ -44,6 +46,8 @@ use crate::triage_production_runner::{
     TriageProductionRunnerError, TriageProductionRunnerV1,
 };
 use crate::turn::{bind_linked_corpus, unbind_linked_corpus, LinkedCorpusBinding};
+
+const MAX_OUTSTANDING_CREDENTIAL_READS: usize = 4;
 
 /// Inputs owned by a trusted host for one linked V2 run.
 #[derive(Debug, Clone)]
@@ -95,6 +99,8 @@ pub struct TriageExecutedPacketProofV1 {
     pub run_id: String,
     /// Fingerprint of the exact public request associated with the run.
     pub request_fingerprint: String,
+    /// Fingerprint of the exact resolved, override-adjusted policy executed.
+    pub policy_fingerprint: String,
     /// Explicit privacy boundary; this proof must never cross a share-safe seam.
     pub privacy: cd_core::extension_contract::PacketPrivacyBoundary,
     /// Deterministic identity of the complete production packet.
@@ -122,6 +128,7 @@ impl TriageExecutedPacketProofV1 {
         Self {
             run_id: input.run_id.clone(),
             request_fingerprint: input.request_fingerprint.clone(),
+            policy_fingerprint: input.policy_fingerprint.clone(),
             privacy: cd_core::extension_contract::PacketPrivacyBoundary::OwnerOnly,
             packet_id: packet.packet_id().into(),
             packet_digest: authoritative_packet_digest(packet).into(),
@@ -495,6 +502,81 @@ where
     }
 }
 
+async fn preload_provider_credential_with_turn_budget(
+    credentials: &TurnProviderCredentialCache<'_>,
+    secrets: Arc<dyn SecretStore>,
+    profile: &ProviderProfile,
+    started: Instant,
+    deadline_ms: u64,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<(), TriageHostError> {
+    preload_provider_credential_with_limiter(
+        credentials,
+        secrets,
+        profile,
+        started,
+        deadline_ms,
+        cancel,
+        credential_worker_limiter(),
+    )
+    .await
+}
+
+fn credential_worker_limiter() -> Arc<tokio::sync::Semaphore> {
+    static LIMITER: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(LIMITER.get_or_init(|| {
+        Arc::new(tokio::sync::Semaphore::new(
+            MAX_OUTSTANDING_CREDENTIAL_READS,
+        ))
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn preload_provider_credential_with_limiter(
+    credentials: &TurnProviderCredentialCache<'_>,
+    secrets: Arc<dyn SecretStore>,
+    profile: &ProviderProfile,
+    started: Instant,
+    deadline_ms: u64,
+    cancel: Option<Arc<AtomicBool>>,
+    limiter: Arc<tokio::sync::Semaphore>,
+) -> Result<(), TriageHostError> {
+    let Some(reference) = profile.api_key_ref.clone() else {
+        return Ok(());
+    };
+    if credentials.contains_reference(&reference) {
+        return Ok(());
+    }
+    let permit = await_backend_with_turn_budget(started, deadline_ms, cancel.clone(), async move {
+        limiter.acquire_owned().await.map_err(|_| {
+            cd_core::error::CoreError::Message("credential_worker_limiter_closed".into())
+        })
+    })
+    .await?;
+    if cancel
+        .as_ref()
+        .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::SeqCst))
+    {
+        return Err(TriageHostError::Cancelled);
+    }
+    if started.elapsed() >= Duration::from_millis(deadline_ms) {
+        return Err(TriageHostError::Deadline);
+    }
+    let worker_reference = reference.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        Ok::<_, cd_core::error::CoreError>(secrets.get(&worker_reference).ok().flatten())
+    });
+    let value = await_backend_with_turn_budget(started, deadline_ms, cancel, async move {
+        worker
+            .await
+            .map_err(|_| cd_core::error::CoreError::Message("credential_worker_failed".into()))?
+    })
+    .await?;
+    credentials.seed_reference(reference, value);
+    Ok(())
+}
+
 /// A conservative production hook: only a finalizer may create an
 /// authoritative answer envelope.  Contributor slots are validated by the
 /// typed contribution pipeline before this hook is reached.  Reviewer and
@@ -617,7 +699,7 @@ pub async fn resolve_v2_host(
     host: &mut ToolHost,
     cache_root: &Path,
     cfg: &AppConfig,
-    secrets: &dyn SecretStore,
+    secrets: Arc<dyn SecretStore>,
     policy: &TriagePolicyV2,
     preflight: &TriagePolicyPreflightV2,
     input: &TriageHostRunInput,
@@ -639,7 +721,7 @@ pub async fn resolve_v2_host_with_packet_proof_observer(
     host: &mut ToolHost,
     cache_root: &Path,
     cfg: &AppConfig,
-    secrets: &dyn SecretStore,
+    secrets: Arc<dyn SecretStore>,
     policy: &TriagePolicyV2,
     preflight: &TriagePolicyPreflightV2,
     input: &TriageHostRunInput,
@@ -771,7 +853,7 @@ pub async fn resolve_v2_host_with_packet_proof_observer(
 
     let mut budget_cfg = cfg.clone();
     budget_cfg.router.deadline_is_explicit = true;
-    let credentials = TurnProviderCredentialCache::new(secrets);
+    let credentials = TurnProviderCredentialCache::new(secrets.as_ref());
     let mut authorized = Vec::new();
     for slot in compiled
         .slots
@@ -793,63 +875,48 @@ pub async fn resolve_v2_host_with_packet_proof_observer(
                 return Err(TriageHostError::Profile(error));
             }
         };
-        if profile.chat_model != slot.model.model_id {
-            // Do not silently replace the selected catalog id with the profile
-            // default.  The slot is the exact identity returned by discovery.
-            let mut selected = profile.clone();
-            selected.chat_model = slot.model.model_id.clone();
-            let resolved = resolve_turn_inputs_from_profile_with_credential_cache(
-                &credentials,
-                &budget_cfg,
-                selected,
-                Some(slot.model.model_id.as_str()),
-            );
-            let backend = match await_backend_with_turn_budget(
-                started,
-                input.deadline_ms,
-                input.cancel.clone(),
-                backend_for_resolved_turn(&resolved),
-            )
-            .await
-            {
-                Ok(backend) => backend,
-                Err(error) => {
-                    unbind_linked_corpus(host, binding);
-                    return Err(error);
-                }
-            };
-            authorized.push(AuthorizedTriageBackendV1 {
-                slot_id: slot.slot_id.clone(),
-                model: slot.model.clone(),
-                backend: Arc::from(backend),
-            });
-        } else {
-            let resolved = resolve_turn_inputs_from_profile_with_credential_cache(
-                &credentials,
-                &budget_cfg,
-                profile,
-                Some(slot.model.model_id.as_str()),
-            );
-            let backend = match await_backend_with_turn_budget(
-                started,
-                input.deadline_ms,
-                input.cancel.clone(),
-                backend_for_resolved_turn(&resolved),
-            )
-            .await
-            {
-                Ok(backend) => backend,
-                Err(error) => {
-                    unbind_linked_corpus(host, binding);
-                    return Err(error);
-                }
-            };
-            authorized.push(AuthorizedTriageBackendV1 {
-                slot_id: slot.slot_id.clone(),
-                model: slot.model.clone(),
-                backend: Arc::from(backend),
-            });
+        let mut selected = profile;
+        // Do not silently replace the selected catalog id with the profile
+        // default. The slot is the exact identity returned by discovery.
+        selected.chat_model = slot.model.model_id.clone();
+        if let Err(error) = preload_provider_credential_with_turn_budget(
+            &credentials,
+            Arc::clone(&secrets),
+            &selected,
+            started,
+            input.deadline_ms,
+            input.cancel.clone(),
+        )
+        .await
+        {
+            unbind_linked_corpus(host, binding);
+            return Err(error);
         }
+        let resolved = resolve_turn_inputs_from_profile_with_credential_cache(
+            &credentials,
+            &budget_cfg,
+            selected,
+            Some(slot.model.model_id.as_str()),
+        );
+        let backend = match await_backend_with_turn_budget(
+            started,
+            input.deadline_ms,
+            input.cancel.clone(),
+            backend_for_resolved_turn(&resolved),
+        )
+        .await
+        {
+            Ok(backend) => backend,
+            Err(error) => {
+                unbind_linked_corpus(host, binding);
+                return Err(error);
+            }
+        };
+        authorized.push(AuthorizedTriageBackendV1 {
+            slot_id: slot.slot_id.clone(),
+            model: slot.model.clone(),
+            backend: Arc::from(backend),
+        });
     }
 
     // Setup/authentication consumed part of the original turn. Never hand
@@ -959,6 +1026,32 @@ mod tests {
         fn get(&self, _ref_id: &str) -> CoreResult<Option<String>> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             self.order.lock().unwrap().push("credential");
+            Ok(Some("fixture-secret".into()))
+        }
+
+        fn delete(&self, _ref_id: &str) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct BlockingSecretStore {
+        started: Arc<AtomicBool>,
+        reads: Arc<AtomicUsize>,
+        release: Arc<AtomicBool>,
+    }
+
+    impl SecretStore for BlockingSecretStore {
+        fn set(&self, _ref_id: &str, _secret: &str) -> CoreResult<()> {
+            Ok(())
+        }
+
+        fn get(&self, _ref_id: &str) -> CoreResult<Option<String>> {
+            self.started.store(true, Ordering::SeqCst);
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
             Ok(Some("fixture-secret".into()))
         }
 
@@ -1103,6 +1196,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credential_read_is_bounded_by_the_turn_deadline() {
+        let secrets = Arc::new(BlockingSecretStore::default());
+        let credentials = TurnProviderCredentialCache::new(secrets.as_ref());
+        let mut profile = ProviderProfile::ollama_local();
+        profile.api_key_ref = Some("secret:blocked".into());
+
+        let result = preload_provider_credential_with_turn_budget(
+            &credentials,
+            secrets.clone(),
+            &profile,
+            Instant::now(),
+            20,
+            None,
+        )
+        .await;
+
+        secrets.release.store(true, Ordering::SeqCst);
+        assert!(matches!(result, Err(TriageHostError::Deadline)));
+        assert!(secrets.started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn credential_read_is_bounded_by_turn_cancellation() {
+        let secrets = Arc::new(BlockingSecretStore::default());
+        let credentials = TurnProviderCredentialCache::new(secrets.as_ref());
+        let mut profile = ProviderProfile::ollama_local();
+        profile.api_key_ref = Some("secret:blocked".into());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            signal.store(true, Ordering::SeqCst);
+        });
+
+        let result = preload_provider_credential_with_turn_budget(
+            &credentials,
+            secrets.clone(),
+            &profile,
+            Instant::now(),
+            500,
+            Some(cancel),
+        )
+        .await;
+
+        secrets.release.store(true, Ordering::SeqCst);
+        assert!(matches!(result, Err(TriageHostError::Cancelled)));
+        assert!(secrets.started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn credential_worker_limit_bounds_blocked_background_reads() {
+        let secrets = Arc::new(BlockingSecretStore::default());
+        let first_credentials = TurnProviderCredentialCache::new(secrets.as_ref());
+        let second_credentials = TurnProviderCredentialCache::new(secrets.as_ref());
+        let mut first_profile = ProviderProfile::ollama_local();
+        first_profile.api_key_ref = Some("secret:first-blocked".into());
+        let mut second_profile = ProviderProfile::ollama_local();
+        second_profile.api_key_ref = Some("secret:second-blocked".into());
+        let limiter = Arc::new(tokio::sync::Semaphore::new(1));
+
+        let first = preload_provider_credential_with_limiter(
+            &first_credentials,
+            secrets.clone(),
+            &first_profile,
+            Instant::now(),
+            1_000,
+            None,
+            Arc::clone(&limiter),
+        );
+        let second = preload_provider_credential_with_limiter(
+            &second_credentials,
+            secrets.clone(),
+            &second_profile,
+            Instant::now(),
+            1_000,
+            None,
+            limiter,
+        );
+        let release = async {
+            for _ in 0..100 {
+                if secrets.reads.load(Ordering::SeqCst) > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            assert_eq!(secrets.reads.load(Ordering::SeqCst), 1);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            assert_eq!(
+                secrets.reads.load(Ordering::SeqCst),
+                1,
+                "a second blocked credential read escaped the limiter"
+            );
+            secrets.release.store(true, Ordering::SeqCst);
+        };
+
+        let (first_result, second_result, ()) = tokio::join!(first, second, release);
+
+        assert!(first_result.is_ok());
+        assert!(second_result.is_ok());
+        assert_eq!(secrets.reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn packet_proof_precedes_credentials_and_matches_the_executed_packet() {
         let mut fixture = packet_proof_fixture();
         let observed = Arc::new(Mutex::new(None));
@@ -1118,7 +1314,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             &fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             &fixture.policy,
             &fixture.preflight,
             &fixture.input,
@@ -1136,6 +1332,7 @@ mod tests {
         let binding = resolved.packet.ledger().binding();
         assert_eq!(proof.run_id, fixture.input.run_id);
         assert_eq!(proof.request_fingerprint, fixture.input.request_fingerprint);
+        assert_eq!(proof.policy_fingerprint, fixture.input.policy_fingerprint);
         assert_eq!(
             proof.privacy,
             cd_core::extension_contract::PacketPrivacyBoundary::OwnerOnly
@@ -1185,7 +1382,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             &fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             &fixture.policy,
             &fixture.preflight,
             &fixture.input,
@@ -1213,7 +1410,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             &fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             &fixture.policy,
             &fixture.preflight,
             &fixture.input,
@@ -1241,7 +1438,7 @@ mod tests {
             &mut fixture.host,
             fixture.cache.path(),
             &fixture.config,
-            &fixture.secrets,
+            Arc::new(fixture.secrets.clone()),
             &fixture.policy,
             &fixture.preflight,
             &fixture.input,

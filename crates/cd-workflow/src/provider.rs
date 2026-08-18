@@ -41,6 +41,18 @@ impl<'a> TurnProviderCredentialCache<'a> {
         }
     }
 
+    pub(crate) fn contains_reference(&self, reference: &str) -> bool {
+        self.values
+            .lock()
+            .map_or(true, |values| values.contains_key(reference))
+    }
+
+    pub(crate) fn seed_reference(&self, reference: String, value: Option<String>) {
+        if let Ok(mut values) = self.values.lock() {
+            values.entry(reference).or_insert(value);
+        }
+    }
+
     /// Resolve one provider profile's configured credential at most once.
     ///
     /// This deliberately preserves the existing fail-closed-to-keyless

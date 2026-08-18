@@ -72,14 +72,15 @@ pub use error::{AdapterError, AdapterResult};
 pub use fingerprint::fingerprint;
 pub use packet::{materialize_bounded_packet, BoundedPacket};
 pub use record::{
-    record_run, OwnerOnlyRecord, RecordedContextDeskRun, RecordingContext, RunFingerprints,
-    SlotProvenance, TerminalProvenance,
+    record_run, HostExecutionProof, HostPacketEvidenceBinding, HostSourceBinding, OwnerOnlyRecord,
+    RecordedContextDeskRun, RecordingContext, RunFingerprints, SlotProvenance, TerminalProvenance,
 };
 pub use replay::{
-    decode_replay_json, record_public_replay, validate_public_replay, ExecutionPacketState,
+    decode_replay_json, record_live_public_replay, record_public_replay,
+    validate_live_public_replay, validate_public_replay, ExecutionPacketState,
     ValidatedReplayOutcome,
 };
-pub use request::{build_request, BoundRequest};
+pub use request::{build_live_request, build_request, BoundRequest};
 pub use share_safe::{project_share_safe, ShareSafeAdapterRun, ShareSafeSlot};
 
 use cd_triage_bench::{Case, EvaluationTask, EvidenceSnapshot};

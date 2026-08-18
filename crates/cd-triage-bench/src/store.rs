@@ -12,13 +12,16 @@ use crate::types::{
     sha256_hex, Adjudication, Case, ContentDigest, EvaluationTask, EvidenceSnapshot, HeldContent,
     ScoreReview, TriageRun, LIBRARY_SCHEMA_V1,
 };
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const BLOB_COPY_BUFFER_BYTES: usize = 64 * 1024;
+static BLOB_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Library metadata stored at `<root>/library.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,23 +90,57 @@ impl BenchStore {
     }
 
     pub fn put_blob(&self, bytes: &[u8]) -> BenchResult<ContentDigest> {
+        self.with_write_lock(|| self.put_blob_tracked(bytes).map(|outcome| outcome.digest))
+    }
+
+    fn put_blob_tracked(&self, bytes: &[u8]) -> BenchResult<PutBlobOutcome> {
         let digest = ContentDigest::of_bytes(bytes);
         let path = self.blob_path(&digest.hex);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| BenchError::io(parent, e))?;
         }
+
         if path.exists() {
-            let existing = fs::read(&path).map_err(|e| BenchError::io(&path, e))?;
-            if existing.as_slice() != bytes {
-                return Err(BenchError::Integrity(format!(
-                    "blob {} already exists with different bytes",
-                    digest.hex
-                )));
-            }
-            return Ok(digest);
+            verify_existing_blob_bytes(&path, &digest, bytes)?;
+            return Ok(PutBlobOutcome {
+                digest,
+                created: false,
+            });
         }
-        atomic_write_bytes(&path, bytes)?;
-        Ok(digest)
+
+        // Stage complete bytes beside the destination, then atomically link
+        // them into the content-addressed name. Readers can therefore observe
+        // either no blob or the complete blob, never a partially written one.
+        let sequence = BLOB_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|source| BenchError::io(&temporary, source))?;
+        if let Err(source) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = fs::remove_file(&temporary);
+            return Err(BenchError::io(&temporary, source));
+        }
+        drop(file);
+
+        let created = match fs::hard_link(&temporary, &path) {
+            Ok(()) => true,
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Err(error) = verify_existing_blob_bytes(&path, &digest, bytes) {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(error);
+                }
+                false
+            }
+            Err(source) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(BenchError::io(&path, source));
+            }
+        };
+        let _ = fs::remove_file(&temporary);
+        Ok(PutBlobOutcome { digest, created })
     }
 
     pub fn get_blob(&self, hex: &str) -> BenchResult<Vec<u8>> {
@@ -298,12 +335,14 @@ impl BenchStore {
     }
 
     pub fn put_snapshot(&self, snapshot: &EvidenceSnapshot) -> BenchResult<()> {
-        snapshot.validate()?;
-        self.verify_snapshot_blobs(snapshot)?;
-        atomic_write_json(
-            &self.entity_path("snapshots", &snapshot.snapshot_id),
-            snapshot,
-        )
+        self.with_write_lock(|| {
+            snapshot.validate()?;
+            self.verify_snapshot_blobs(snapshot)?;
+            atomic_write_json(
+                &self.entity_path("snapshots", &snapshot.snapshot_id),
+                snapshot,
+            )
+        })
     }
 
     pub fn get_snapshot(&self, snapshot_id: &str) -> BenchResult<EvidenceSnapshot> {
@@ -363,6 +402,68 @@ impl BenchStore {
     }
 
     pub fn put_run(&self, run: &TriageRun) -> BenchResult<PutRunOutcome> {
+        self.with_write_lock(|| {
+            self.validate_run_links(run)?;
+            let raw_output = self.get_blob(&run.raw_output.digest.hex)?;
+            validate_run_raw_output(run, &raw_output)?;
+            self.persist_validated_run(run)
+        })
+    }
+
+    /// Validate and persist a run together with its exact raw output bytes.
+    ///
+    /// All deterministic run and linkage checks happen before the content-addressed blob is
+    /// written. If this call creates the blob but the run record cannot be persisted, the blob is
+    /// removed only after proving that no stored run references it. A blob that already existed is
+    /// never removed by this operation.
+    pub fn put_run_with_raw_output(
+        &self,
+        run: &TriageRun,
+        raw_output: &[u8],
+    ) -> BenchResult<PutRunOutcome> {
+        self.with_write_lock(|| {
+            self.validate_run_links(run)?;
+            validate_run_raw_output(run, raw_output)?;
+
+            let blob = self.put_blob_tracked(raw_output)?;
+            debug_assert_eq!(blob.digest, run.raw_output.digest);
+
+            match self.persist_validated_run(run) {
+                Ok(outcome) => Ok(outcome),
+                Err(run_error) if blob.created => {
+                    if self
+                        .remove_blob_if_unreferenced(&run.raw_output.digest)
+                        .is_err()
+                    {
+                        return Err(BenchError::Message(
+                            "run persistence failed and the newly-created raw output blob could not be rolled back safely"
+                                .into(),
+                        ));
+                    }
+                    Err(run_error)
+                }
+                Err(run_error) => Err(run_error),
+            }
+        })
+    }
+
+    fn with_write_lock<T>(&self, operation: impl FnOnce() -> BenchResult<T>) -> BenchResult<T> {
+        let path = self.root.join(".write.lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|source| BenchError::io(&path, source))?;
+        lock.lock_exclusive()
+            .map_err(|source| BenchError::io(&path, source))?;
+        let result = operation();
+        drop(lock);
+        result
+    }
+
+    fn validate_run_links(&self, run: &TriageRun) -> BenchResult<()> {
         run.validate()?;
         let task = self.get_task(&run.task_id)?;
         if run.snapshot_id != task.snapshot_id {
@@ -384,7 +485,10 @@ impl BenchStore {
                 "share_safe run would downgrade an owner_only task packet".into(),
             ));
         }
-        let _ = self.get_blob(&run.raw_output.digest.hex)?;
+        Ok(())
+    }
+
+    fn persist_validated_run(&self, run: &TriageRun) -> BenchResult<PutRunOutcome> {
         let path = self.entity_path("runs", &run.run_id);
         if path.exists() {
             let existing = TriageRun::parse_json(&self.read_entity("runs", &run.run_id)?)?;
@@ -397,6 +501,22 @@ impl BenchStore {
         Ok(PutRunOutcome::Created {
             run_id: run.run_id.clone(),
         })
+    }
+
+    fn remove_blob_if_unreferenced(&self, digest: &ContentDigest) -> BenchResult<()> {
+        for run_id in self.list_runs()? {
+            let stored_run = self.get_run(&run_id)?;
+            if stored_run.raw_output.digest == *digest {
+                return Ok(());
+            }
+        }
+
+        let path = self.blob_path(&digest.hex);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(BenchError::io(&path, source)),
+        }
     }
 
     pub fn get_run(&self, run_id: &str) -> BenchResult<TriageRun> {
@@ -657,6 +777,40 @@ pub enum PutRunOutcome {
     Duplicate { run_id: String },
 }
 
+struct PutBlobOutcome {
+    digest: ContentDigest,
+    created: bool,
+}
+
+fn validate_run_raw_output(run: &TriageRun, raw_output: &[u8]) -> BenchResult<()> {
+    if raw_output.len() as u64 != run.raw_output.byte_length {
+        return Err(BenchError::Integrity(
+            "raw output byte length does not match the run manifest".into(),
+        ));
+    }
+    if ContentDigest::of_bytes(raw_output) != run.raw_output.digest {
+        return Err(BenchError::Integrity(
+            "raw output digest does not match the run manifest".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_existing_blob_bytes(
+    path: &Path,
+    digest: &ContentDigest,
+    expected: &[u8],
+) -> BenchResult<()> {
+    let existing = fs::read(path).map_err(|source| BenchError::io(path, source))?;
+    if existing.as_slice() != expected {
+        return Err(BenchError::Integrity(format!(
+            "blob {} already exists with different bytes",
+            digest.hex
+        )));
+    }
+    Ok(())
+}
+
 fn list_ids(dir: &Path) -> BenchResult<Vec<String>> {
     let mut ids = Vec::new();
     let entries = match fs::read_dir(dir) {
@@ -715,6 +869,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = BenchStore::init(dir.path(), "2026-01-15T00:00:00Z").unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn write_lock_serializes_mutations_across_store_handles() {
+        let (_dir, store) = temp_store();
+        let lock_path = store.root().join(".write.lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+
+        let worker_store = store.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = worker_store.put_blob(b"serialized-write");
+            finished_tx.send(result).unwrap();
+        });
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            finished_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "mutation completed while another store handle held the write lock"
+        );
+        drop(lock);
+
+        let digest = finished_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(store.get_blob(&digest.hex).unwrap(), b"serialized-write");
     }
 
     #[test]

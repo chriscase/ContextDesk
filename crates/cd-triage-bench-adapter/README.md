@@ -16,6 +16,13 @@ Case + EvidenceSnapshot + EvaluationTask
 Recording is **replay ingest**, not live execution. The mock and an imported
 `TriageReplayV1` share one recording path. Usage and cost stay unknown.
 
+Real execution lives in the separate, intentionally heavy
+`cd-triage-bench-live` crate. It returns through `record_live_public_replay`,
+which requires the workflow host's exact resolved-policy fingerprint, packet
+identity and ledger digest, complete packet evidence-to-source mapping, and a
+verified one-to-one source-to-benchmark inventory. None of those host
+dependencies enter this adapter's default tree.
+
 ## Boundary rules
 
 | Rule | Where it is proved |
@@ -29,6 +36,7 @@ Recording is **replay ingest**, not live execution. The mock and an imported
 | Request identity uses the public runtime algorithm; packet/corpus identities stay separate | `tests/pipeline.rs`, `tests/fingerprints.rs` |
 | Every terminal is a recorded run, never a discarded attempt | `tests/terminals.rs` |
 | Imported replay uses the same recorder as the mock | `tests/replay_ingest.rs` |
+| Live replay binds resolved policy, packet evidence, imported sources, and citations without equating host and benchmark packet ids | `tests/live_replay.rs` |
 | Pre-packet failure records `not_produced` without fabricated packet, model, usage, or cost facts | `tests/replay_ingest.rs` |
 | Recorded runs use provenance- and status-sensitive `TriageRun` v2 identity | `tests/fingerprints.rs` |
 | Failed-with-partial stays Failed | `tests/terminals.rs` |
