@@ -20,13 +20,13 @@ Recording is **replay ingest**, not live execution. The mock and an imported
 
 | Rule | Where it is proved |
 | --- | --- |
-| Default tree is `cd-triage-sdk` + `cd-triage-bench` only | `tests/dependency_direction.rs` |
+| Default tree is `cd-triage-sdk` + `cd-triage-runtime` + `cd-triage-bench` only | `tests/dependency_direction.rs` |
 | No `cd-core`, `cd-workflow`, DuckDB, SQLite, keyring, `reqwest`, `tokio`, Tauri, or network transport by default | `tests/dependency_direction.rs` |
 | No schema id or validator is redeclared here | `tests/dependency_direction.rs` |
 | No filesystem, network, clock, env, or process access | `tests/dependency_direction.rs` |
 | No case / adjudication / score / qualification / readiness / routing / private-store write | `tests/dependency_direction.rs` |
 | Packet cannot widen past the task visibility policy | `tests/pipeline.rs` |
-| Request identity binds to packet identity | `tests/pipeline.rs`, `tests/fingerprints.rs` |
+| Request identity uses the public runtime algorithm; packet/corpus identities stay separate | `tests/pipeline.rs`, `tests/fingerprints.rs` |
 | Every terminal is a recorded run, never a discarded attempt | `tests/terminals.rs` |
 | Imported replay uses the same recorder as the mock | `tests/replay_ingest.rs` |
 | Failed-with-partial stays Failed | `tests/terminals.rs` |
@@ -38,17 +38,17 @@ Recording is **replay ingest**, not live execution. The mock and an imported
 
 | Feature | Default | What it pulls in |
 | --- | --- | --- |
-| *(none)* | yes | `cd-triage-sdk`, `cd-triage-bench`, serde, thiserror |
+| *(none)* | yes | `cd-triage-sdk`, `cd-triage-runtime`, `cd-triage-bench`, serde, thiserror |
 | `workflow-mock` | no | `cd-core` (DuckDB, keyring) + `cd-workflow`, for conformance tests only |
 | `live` | no | nothing — a placeholder, see below |
 
 ## Honest limits
 
-* **There is no `triage()` or `triage_with_policy()` in this workspace.** The
-  adapter drives the versioned request/event/result contracts. It does not call
-  a live entry point, and the `live` feature carries no engine dependency and
-  makes no live claim. A guard test fails if such a function ever appears, so
-  this note cannot go stale silently.
+* **The runtime facade is not a live host implementation.** The adapter uses
+  its canonical request identity and replay validation, but does not call
+  `triage()` / `triage_with_policy()`. The `live` feature carries no host
+  engine dependency and makes no live claim. A guard test fails if default
+  adapter code starts calling those execution functions.
 * **The default engine is a deterministic mock.** It contacts no provider and
   never sees evidence bytes — a `TaskPacket` carries content *digests* only.
   When scripted to produce a grounded final answer, the answer envelope is

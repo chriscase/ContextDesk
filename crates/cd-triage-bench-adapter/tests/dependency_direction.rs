@@ -87,7 +87,7 @@ fn default_bench_tree_avoids_engine_database_credential_and_network_crates() {
 }
 
 #[test]
-fn default_adapter_tree_contains_exactly_the_two_contextdesk_crates_it_claims() {
+fn default_adapter_tree_contains_exactly_the_three_contextdesk_crates_it_claims() {
     let tree = cargo_tree("cd-triage-bench-adapter");
     let contextdesk: Vec<&str> = tree
         .lines()
@@ -99,10 +99,14 @@ fn default_adapter_tree_contains_exactly_the_two_contextdesk_crates_it_claims() 
         .any(|line| line.starts_with("cd-triage-sdk ")));
     assert!(contextdesk
         .iter()
+        .any(|line| line.starts_with("cd-triage-runtime ")));
+    assert!(contextdesk
+        .iter()
         .any(|line| line.starts_with("cd-triage-bench ")));
     for line in &contextdesk {
         assert!(
             line.starts_with("cd-triage-sdk ")
+                || line.starts_with("cd-triage-runtime ")
                 || line.starts_with("cd-triage-bench ")
                 || line.starts_with("cd-triage-bench-adapter "),
             "unexpected ContextDesk crate in the default tree: {line}"
@@ -260,39 +264,24 @@ fn adapter_declares_no_schema_id_and_no_second_validator() {
 }
 
 #[test]
-fn no_live_triage_entry_point_is_claimed() {
-    // `triage()` / `triage_with_policy()` do not exist in this workspace.
-    // Nothing here may imply otherwise.
+fn runtime_facade_exists_but_default_adapter_calls_no_live_entry_point() {
+    // The lightweight facade supplies request identity and replay binding, but
+    // this source-neutral adapter still has no live host implementation.
     for (path, text) in source_files() {
         let code = code_only(&text);
-        for forbidden in ["triage_with_policy(", "fn triage("] {
+        for forbidden in ["triage_with_policy(", "triage("] {
             assert!(
                 !code.contains(forbidden),
-                "{} references `{forbidden}`, which does not exist",
+                "{} calls live runtime entry point `{forbidden}`",
                 path.display()
             );
         }
     }
-    let hits = Command::new("grep")
-        .args([
-            "-rn",
-            "--include=*.rs",
-            "-e",
-            "pub fn triage_with_policy",
-            "crates",
-        ])
-        .current_dir(workspace_root())
-        .output()
-        .expect("grep");
-    let hits = String::from_utf8_lossy(&hits.stdout);
-    // This guard file names the symbol it is looking for, so skip itself.
-    let elsewhere: Vec<&str> = hits
-        .lines()
-        .filter(|line| !line.contains("cd-triage-bench-adapter"))
-        .collect();
+    let runtime = fs::read_to_string(workspace_root().join("crates/cd-triage-runtime/src/lib.rs"))
+        .expect("runtime facade source");
     assert!(
-        elsewhere.is_empty(),
-        "a live triage_with_policy() appeared; revisit this crate's honest limits:\n{}",
-        elsewhere.join("\n")
+        runtime.contains("pub async fn triage_with_policy")
+            && runtime.contains("pub async fn triage<"),
+        "expected the host-neutral runtime facade to exist"
     );
 }

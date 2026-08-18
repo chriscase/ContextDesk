@@ -17,8 +17,6 @@ use crate::error::{AdapterError, AdapterResult};
 
 /// Prefix for a compiled/selected policy fingerprint.
 pub const POLICY_PREFIX: &str = "pol";
-/// Prefix for a whole-request fingerprint.
-pub const REQUEST_PREFIX: &str = "req";
 /// Prefix for a materialized task-packet fingerprint.
 pub const PACKET_PREFIX: &str = "pkf";
 /// Prefix for the bounded evidence-corpus fingerprint.
@@ -49,11 +47,11 @@ mod tests {
 
     #[test]
     fn fingerprints_ignore_field_order_and_change_with_content() {
-        let a = fingerprint(REQUEST_PREFIX, &serde_json::json!({"b": 1, "a": 2})).unwrap();
-        let b = fingerprint(REQUEST_PREFIX, &serde_json::json!({"a": 2, "b": 1})).unwrap();
-        let c = fingerprint(REQUEST_PREFIX, &serde_json::json!({"a": 2, "b": 2})).unwrap();
+        let a = fingerprint("tst", &serde_json::json!({"b": 1, "a": 2})).unwrap();
+        let b = fingerprint("tst", &serde_json::json!({"a": 2, "b": 1})).unwrap();
+        let c = fingerprint("tst", &serde_json::json!({"a": 2, "b": 2})).unwrap();
         assert_eq!(a, b);
         assert_ne!(a, c);
-        assert!(a.starts_with("req-"));
+        assert!(a.starts_with("tst-"));
     }
 }

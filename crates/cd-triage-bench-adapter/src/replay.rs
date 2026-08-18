@@ -7,14 +7,15 @@
 //!
 //! This module fabricates no usage, cost, timing, model, prompt, or
 //! completion facts. Phase order is the real
-//! [`TriageReplayV1::validate`]; identity and packet proofs are extra
-//! fail-closed checks against the adapter's bound request and materialized
-//! packet.
+//! [`TriageReplayV1::validate`]; canonical request and cross-event binding use
+//! `cd-triage-runtime`; policy and packet proofs are extra fail-closed checks
+//! against the adapter's bound request and materialized packet.
 
 use cd_triage_bench::{Case, EvaluationTask, EvidenceSnapshot};
 use cd_triage_sdk::{TriageReplayV1, TriageResultV2, TriageRoleAttemptV1, TriageRunEventPayloadV2};
 
 use crate::error::{AdapterError, AdapterResult};
+use crate::fingerprint::{fingerprint, POLICY_PREFIX, SDK_RUN_PREFIX};
 use crate::packet::{materialize_bounded_packet, BoundedPacket};
 use crate::record::{record_run, RecordedContextDeskRun, RecordingContext, TerminalProvenance};
 use crate::request::BoundRequest;
@@ -57,6 +58,23 @@ pub fn validate_public_replay(
     replay: TriageReplayV1,
     bound: &BoundRequest,
 ) -> AdapterResult<ValidatedReplayOutcome> {
+    let canonical_request = cd_triage_runtime::canonical_request_fingerprint(&bound.request)
+        .map_err(|_| {
+            AdapterError::IdentityMismatch(
+                "bound request failed public runtime validation or identity".into(),
+            )
+        })?;
+    let canonical_policy = fingerprint(POLICY_PREFIX, &bound.request.policy)?;
+    let canonical_run = fingerprint(SDK_RUN_PREFIX, &canonical_request)?;
+    if bound.request_fingerprint != canonical_request
+        || bound.policy_fingerprint != canonical_policy
+        || bound.sdk_run_id != canonical_run
+        || bound.request.run_id != canonical_run
+    {
+        return Err(AdapterError::IdentityMismatch(
+            "bound request provenance is not canonical".into(),
+        ));
+    }
     replay.validate()?;
     if replay.run_id != bound.sdk_run_id {
         return Err(AdapterError::IdentityMismatch(
@@ -81,6 +99,14 @@ pub fn validate_public_replay(
             ));
         }
     }
+
+    let replay = cd_triage_runtime::replay(bound.request.clone(), replay)
+        .map_err(|_| {
+            AdapterError::IdentityMismatch(
+                "replay failed public runtime request or cross-event binding".into(),
+            )
+        })?
+        .into_replay();
 
     let terminal = terminal_payload(&replay)?;
     let _ = terminal_result(terminal);

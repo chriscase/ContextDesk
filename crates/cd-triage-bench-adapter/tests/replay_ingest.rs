@@ -169,6 +169,48 @@ fn mismatched_request_fingerprint_is_rejected() {
 }
 
 #[test]
+fn caller_forged_bound_policy_and_run_provenance_are_rejected() {
+    let (_, _, _, _, mut bound) = bound_fixture();
+    let replay = mock_replay();
+    bound.policy_fingerprint = "pol-caller-forged".into();
+    assert!(matches!(
+        validate_public_replay(replay.clone(), &bound).unwrap_err(),
+        AdapterError::IdentityMismatch(_)
+    ));
+
+    let (_, _, _, _, mut bound) = bound_fixture();
+    bound.sdk_run_id = "cdrun-caller-forged".into();
+    bound.request.run_id.clone_from(&bound.sdk_run_id);
+    let mut forged_replay = replay;
+    forged_replay.run_id.clone_from(&bound.sdk_run_id);
+    for event in &mut forged_replay.events {
+        event.run_id.clone_from(&bound.sdk_run_id);
+        match &mut event.event {
+            TriageRunEventPayloadV2::Completed { result } => {
+                result.run_id.clone_from(&bound.sdk_run_id)
+            }
+            TriageRunEventPayloadV2::Failed {
+                partial_result: Some(result),
+                ..
+            }
+            | TriageRunEventPayloadV2::TimedOut {
+                partial_result: Some(result),
+                ..
+            }
+            | TriageRunEventPayloadV2::Cancelled {
+                partial_result: Some(result),
+                ..
+            } => result.run_id.clone_from(&bound.sdk_run_id),
+            _ => {}
+        }
+    }
+    assert!(matches!(
+        validate_public_replay(forged_replay, &bound).unwrap_err(),
+        AdapterError::IdentityMismatch(_)
+    ));
+}
+
+#[test]
 fn missing_model_is_rejected() {
     let (_, _, _, _, bound) = bound_fixture();
     let mut replay = mock_replay();
@@ -248,6 +290,32 @@ fn packet_ready_mismatch_fails_closed() {
     )
     .unwrap_err();
     assert!(matches!(error, AdapterError::IdentityMismatch(_)));
+}
+
+#[test]
+fn runtime_cross_event_drift_fails_closed_before_recording() {
+    let (_, _, _, _, bound) = bound_fixture();
+    let mut reconciliation_drift = mock_replay();
+    if let TriageRunEventPayloadV2::Completed { result } =
+        &mut reconciliation_drift.events.last_mut().unwrap().event
+    {
+        result.reconciliation.state = "different_but_valid".into();
+    }
+    assert!(matches!(
+        validate_public_replay(reconciliation_drift, &bound).unwrap_err(),
+        AdapterError::IdentityMismatch(_)
+    ));
+
+    let mut validation_drift = mock_replay();
+    for event in &mut validation_drift.events {
+        if let TriageRunEventPayloadV2::Validation { passed, .. } = &mut event.event {
+            *passed = false;
+        }
+    }
+    assert!(matches!(
+        validate_public_replay(validation_drift, &bound).unwrap_err(),
+        AdapterError::IdentityMismatch(_)
+    ));
 }
 
 #[test]

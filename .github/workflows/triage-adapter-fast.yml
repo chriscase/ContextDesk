@@ -4,7 +4,11 @@ on:
   push:
     # Include this draft head so a push can validate the workflow before the
     # stack reaches main or integrate/rc. This check remains advisory.
-    branches: [main, integrate/rc, codex/triage-adapter-fast-lane]
+    branches:
+      - main
+      - integrate/rc
+      - codex/triage-adapter-fast-lane
+      - codex/triage-runtime-replay-integration-v1
   pull_request:
     branches: [main, integrate/rc]
   workflow_dispatch:

@@ -275,7 +275,12 @@ pub fn run_deterministic_mock(
         for slot in &finalizers {
             attempts.push(emit_attempt(&mut events, run_id, slot, attempts.len())?);
         }
-        let summary = reconcile(&plan.slots, &attempts, root_cause)?;
+        let summary = terminal_bound_reconciliation(
+            bound,
+            bounded,
+            &plan.terminal,
+            reconcile(&plan.slots, &attempts, root_cause)?,
+        );
         push(
             &mut events,
             run_id,
@@ -316,7 +321,12 @@ pub fn run_deterministic_mock(
     for slot in &finalizers {
         projected.push(scripted_attempt(run_id, slot, projected.len())?);
     }
-    let summary = reconcile(&plan.slots, &projected, root_cause)?;
+    let summary = terminal_bound_reconciliation(
+        bound,
+        bounded,
+        &plan.terminal,
+        reconcile(&plan.slots, &projected, root_cause)?,
+    );
     push(
         &mut events,
         run_id,
@@ -436,6 +446,28 @@ fn optional_partial(
     } else {
         Ok(None)
     }
+}
+
+fn terminal_bound_reconciliation(
+    bound: &BoundRequest,
+    bounded: &BoundedPacket,
+    terminal: &MockTerminalPlan,
+    mut summary: TriageReconciliationV1,
+) -> TriageReconciliationV1 {
+    if matches!(terminal, MockTerminalPlan::Completed) {
+        let answer = identity_derived_answer(bound, bounded);
+        summary.root_cause_established = true;
+        summary.supported_claim_ids = answer
+            .answer
+            .candidates
+            .iter()
+            .flat_map(|candidate| candidate.claims.iter().map(|claim| claim.claim_id.clone()))
+            .collect();
+    } else {
+        summary.root_cause_established = false;
+        summary.supported_claim_ids.clear();
+    }
+    summary
 }
 
 fn grounded_final(

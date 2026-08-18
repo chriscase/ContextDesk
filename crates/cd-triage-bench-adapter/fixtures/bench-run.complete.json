@@ -1,6 +1,6 @@
 {
   "schema_id": "contextdesk.triage_bench.triage_run.v1",
-  "run_id": "run-abaf2a869716773d79e87dfe621bc0aeabd68a9e6041159e906cad6a9a2491b6",
+  "run_id": "run-dca0c14fb7009393981df9d285a269de93b2a5483ade59a3e46dd68429024240",
   "privacy": "owner_only",
   "case_id": "case-checkout-500s",
   "task_id": "task-a02e7497a4787cbd965c3b0abb1b03688a0c0ea10eadcb87207a763ed10aae6a",
@@ -29,9 +29,9 @@
   "raw_output": {
     "digest": {
       "algorithm": "sha256",
-      "hex": "5221b0760e73d256d076e174749ae1035dfececcb98203b1d88b4671e6b45a20"
+      "hex": "c904dd2f8f3a9c53a0d04aad944aae3a0eeb01643b298fdf643c932c30c3d07a"
     },
-    "byte_length": 12435,
+    "byte_length": 12520,
     "encoding": "utf-8"
   },
   "claims": [

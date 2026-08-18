@@ -1,11 +1,11 @@
 {
   "privacy": "share_safe",
-  "bench_run_id": "run-abaf2a869716773d79e87dfe621bc0aeabd68a9e6041159e906cad6a9a2491b6",
-  "sdk_run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+  "bench_run_id": "run-dca0c14fb7009393981df9d285a269de93b2a5483ade59a3e46dd68429024240",
+  "sdk_run_id": "cdrun-ef4b5ac55020f54e82b90ca4c3d0d315cecb2ca299e79dbc9162d9d0dd1d1df4",
   "task_fingerprint": "tkf-48e82e8fa651d1ec5b7e7751710a32fa708306ad8dbec679c5ce1224d872e8f6",
   "snapshot_fingerprint": "snf-0ddcedab95ee0d1c170a6c521290c0fcfed92565fb8faf76e4f3b8140359d683",
   "policy_fingerprint": "pol-d0b61431e4df22bdff27a48ad81c441a26bda2206e104f173cf0cbb11dc0be6e",
-  "request_fingerprint": "req-d078a683fade3667bc6f321d7b151b2997bfefa707abecbc9077d4102db89bdc",
+  "request_fingerprint": "sha256:0a7975fea879940e34d05d0ccb745e9b96be7a6e35e1820a8999cefe0aa98b58",
   "packet_fingerprint": "pkf-6db24b93cfa24ac3b0a4975356757e9550829a920734ec4f82f3380536f7c2c6",
   "corpus_fingerprint": "cof-2bd75138119918b098f345f90def99b610f75c28e22208ddda5a5a99c8f069b9",
   "model_fingerprints": [
@@ -75,7 +75,7 @@
   "raw_output_included": false,
   "sdk_result": {
     "schema_id": "contextdesk.triage.result_share_safe.v2",
-    "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+    "run_id": "cdrun-ef4b5ac55020f54e82b90ca4c3d0d315cecb2ca299e79dbc9162d9d0dd1d1df4",
     "kind": "grounded_final",
     "validation_state": "passed",
     "packet_id": "pkt-26553b254b1013c6c2a9453d37251961dc4c13420307e41664be73510c186776",

@@ -85,12 +85,12 @@ Two limits matter before you require them anywhere:
 
 - **The draft head has an explicit push trigger for hosted validation.** This
   revision runs on pushes to `main`, `integrate/rc`,
-  `codex/triage-fast-lane`, and `codex/triage-runtime-facade-v1`;
-  pull-request events still target only `main` and `integrate/rc`. The
-  self-head push entries exist so stacked drafts can validate before their
-  stack is integrated. A pull request targeting another stacked branch still
-  gets no PR-triggered fast-lane checks, so these advisory checks must never be
-  required for such branches.
+  `codex/triage-fast-lane`, `codex/triage-runtime-facade-v1`, and
+  `codex/triage-runtime-replay-integration-v1`. Pull-request events still
+  target only `main` and `integrate/rc`. The self-head push entries exist so
+  stacked drafts can validate before their stack is integrated. A pull request
+  targeting another stacked branch still gets no PR-triggered fast-lane
+  checks, so these advisory checks must never be required for such branches.
 - **They assume the sharded Ubuntu CI.** The `rust tests (ubuntu aggregate)`
   gate and the `rust (ubuntu-latest)` warmup described above arrive with the
   #874 shard work. Until that lands, `rust (ubuntu-latest)` still runs
@@ -108,7 +108,8 @@ additional advisory check once `cd-triage-bench-adapter` is present. It uses
 its own cache namespace and the same locked-fetch plus full dependency-boundary
 guard as the SDK/bench fast lanes. It does not replace or rename
 `rust tests (ubuntu aggregate)` and must not be added as the Ubuntu workspace
-gate.
+gate. The adapter and adapter-CLI workflows include the runtime/replay
+integration head as an explicit push target for stacked validation.
 
 ## Related
 

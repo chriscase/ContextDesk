@@ -2,7 +2,11 @@ name: Triage adapter CLI fast
 
 on:
   push:
-    branches: [main, integrate/rc, codex/triage-adapter-cli-promotion]
+    branches:
+      - main
+      - integrate/rc
+      - codex/triage-adapter-cli-promotion
+      - codex/triage-runtime-replay-integration-v1
   pull_request:
     branches: [main, integrate/rc]
   workflow_dispatch:

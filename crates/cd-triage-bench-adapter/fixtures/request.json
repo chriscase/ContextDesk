@@ -1,6 +1,6 @@
 {
   "schema_id": "contextdesk.triage.request.v2",
-  "run_id": "cdrun-0708fc3afc0b0210633844aea48b1bb27170ee5f567eac80a1e58c0c2c86be50",
+  "run_id": "cdrun-ef4b5ac55020f54e82b90ca4c3d0d315cecb2ca299e79dbc9162d9d0dd1d1df4",
   "privacy": "owner_only",
   "task": "What initiated the checkout failures, and what evidence supports it?\n\nProtocol (v1): Answer only from the visible evidence in this packet. Say so when evidence is missing.",
   "scope": {

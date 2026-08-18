@@ -5,14 +5,14 @@
 //! own and re-implements no request validator.
 
 use cd_triage_bench::{EvaluationTask, EvidenceSnapshot};
+use cd_triage_runtime::canonical_request_fingerprint;
 use cd_triage_sdk::{
     PacketPrivacyBoundary, TriagePolicySelectionV2, TriageRequestOverridesV1, TriageRequestV2,
     TriageScopeV1, MAX_TRIAGE_TASK_BYTES, TRIAGE_REQUEST_SCHEMA_V2,
 };
-use serde::Serialize;
 
 use crate::error::{AdapterError, AdapterResult};
-use crate::fingerprint::{fingerprint, POLICY_PREFIX, REQUEST_PREFIX, SDK_RUN_PREFIX};
+use crate::fingerprint::{fingerprint, POLICY_PREFIX, SDK_RUN_PREFIX};
 use crate::packet::BoundedPacket;
 
 /// A validated request together with the fingerprints the replay repeats.
@@ -29,22 +29,6 @@ pub struct BoundRequest {
     /// This is deliberately **not** the bench `TriageRun::run_id`, which is a
     /// separate content fingerprint over the imported run.
     pub sdk_run_id: String,
-}
-
-/// Body hashed for request identity. `run_id` is excluded because it is
-/// derived from this fingerprint; packet and corpus fingerprints are included
-/// so a different packet is always a different request.
-#[derive(Serialize)]
-struct RequestFingerprintBody<'a> {
-    schema_id: &'a str,
-    privacy: PacketPrivacyBoundary,
-    task: &'a str,
-    scope: &'a TriageScopeV1,
-    policy_fingerprint: &'a str,
-    overrides: &'a TriageRequestOverridesV1,
-    cancellation_id: &'a str,
-    packet_fingerprint: &'a str,
-    corpus_fingerprint: &'a str,
 }
 
 /// Build the owner-only triage request for one bench task.
@@ -84,26 +68,11 @@ pub fn build_request(
     };
 
     let policy_fingerprint = fingerprint(POLICY_PREFIX, &policy)?;
-    let overrides_for_body = overrides.clone();
-    let request_fingerprint = fingerprint(
-        REQUEST_PREFIX,
-        &RequestFingerprintBody {
-            schema_id: TRIAGE_REQUEST_SCHEMA_V2,
-            privacy: PacketPrivacyBoundary::OwnerOnly,
-            task: &text,
-            scope: &scope,
-            policy_fingerprint: &policy_fingerprint,
-            overrides: &overrides_for_body,
-            cancellation_id,
-            packet_fingerprint: &bounded.packet_fingerprint,
-            corpus_fingerprint: &bounded.corpus_fingerprint,
-        },
-    )?;
-    let sdk_run_id = fingerprint(SDK_RUN_PREFIX, &request_fingerprint)?;
-
-    let request = TriageRequestV2 {
+    // The canonical runtime fingerprint excludes run_id specifically so a
+    // deterministic adapter may derive run identity from request identity.
+    let mut request = TriageRequestV2 {
         schema_id: TRIAGE_REQUEST_SCHEMA_V2.to_string(),
-        run_id: sdk_run_id.clone(),
+        run_id: "cdrun-pending-request-fingerprint".into(),
         privacy: PacketPrivacyBoundary::OwnerOnly,
         task: text,
         scope,
@@ -111,6 +80,11 @@ pub fn build_request(
         overrides,
         cancellation_id: cancellation_id.to_string(),
     };
+    request.validate()?;
+    let request_fingerprint =
+        canonical_request_fingerprint(&request).map_err(|_| AdapterError::Serialize)?;
+    let sdk_run_id = fingerprint(SDK_RUN_PREFIX, &request_fingerprint)?;
+    request.run_id.clone_from(&sdk_run_id);
     // Real public validator. The adapter adds no second request validator.
     request.validate()?;
 

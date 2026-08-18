@@ -11,14 +11,16 @@
 //! # Boundary rules this crate holds
 //!
 //! * **Public contracts only.** Every DTO, schema id, bound, and validator
-//!   comes from `cd-triage-sdk`. The adapter declares no schema id of its own
-//!   and re-implements no validator — in particular the event stream is
+//!   comes from `cd-triage-sdk`; canonical request identity comes from
+//!   `cd-triage-runtime`. The adapter declares no schema id, request-identity
+//!   algorithm, or validator of its own — in particular the event stream is
 //!   accepted or rejected by the real
 //!   [`cd_triage_sdk::TriageReplayV1::validate`].
 //! * **Pure default features.** The default dependency tree is
-//!   `cd-triage-sdk` + `cd-triage-bench` (and the serde/thiserror leaves those
-//!   crates already use). No `cd-core`, `cd-workflow`, DuckDB, SQLite,
-//!   keyring, `reqwest`, `tokio`, or Tauri. See `tests/dependency_direction.rs`.
+//!   `cd-triage-sdk` + `cd-triage-runtime` + `cd-triage-bench` (and their
+//!   dependency-light leaves). No `cd-core`, `cd-workflow`, DuckDB, SQLite,
+//!   keyring, `reqwest`, `tokio`, or Tauri. See
+//!   `tests/dependency_direction.rs`.
 //! * **No engine writes.** Nothing here writes a ContextDesk case,
 //!   adjudication, score, qualification, readiness, routing, or private-store
 //!   record. The bench owns cases, adjudication, and scoring.
@@ -28,9 +30,8 @@
 //!
 //! # Honest limits
 //!
-//! * There is **no** `triage()` or `triage_with_policy()` function anywhere in
-//!   this workspace. The adapter drives the versioned request/event/result
-//!   contracts; it does not call a live entry point that does not exist.
+//! * The host-neutral runtime facade exists, but this adapter does not call its
+//!   live execution functions and has no host engine implementation.
 //! * The default engine is a deterministic mock. It contacts no provider,
 //!   holds no evidence bytes, and produces no model text. The `live` feature
 //!   is a non-default placeholder and carries no engine dependency.

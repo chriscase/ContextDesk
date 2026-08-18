@@ -182,7 +182,7 @@ fn run(
     };
     let plan = MockEnginePlan {
         slots: vec![MockSlotPlan {
-            role_slot_id: "slot-finalizer".into(),
+            role_slot_id: "standard-finalizer".into(),
             role: TriageSlotKindV2::Finalizer,
             model,
             outcome: slot_outcome,

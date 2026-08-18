@@ -135,7 +135,7 @@ fn record_replay_ingests_a_validated_public_sdk_replay() {
         &bounded,
         &cd_triage_bench_adapter::MockEnginePlan {
             slots: vec![cd_triage_bench_adapter::MockSlotPlan {
-                role_slot_id: "slot-finalizer".into(),
+                role_slot_id: "standard-finalizer".into(),
                 role: cd_triage_sdk::TriageSlotKindV2::Finalizer,
                 model: cd_triage_sdk::ModelRef {
                     profile_id: "profile:mock-gateway".into(),

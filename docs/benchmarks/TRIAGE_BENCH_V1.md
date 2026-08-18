@@ -53,14 +53,16 @@ snapshot -> bounded packet -> TriageRequestV2
          -> explicit share-safe projection
 ```
 
-This is **replay ingestion**, not live execution. A later live ContextDesk
-evaluation still needs the public façade and a same-snapshot host bridge.
+This is **replay ingestion**, not live execution. The host-neutral public
+facade now supplies canonical request identity and replay binding; a later live
+ContextDesk evaluation still needs a host implementation and same-snapshot
+bridge.
 
 What the adapter does **not** claim:
 
-- No live run. `triage()` / `triage_with_policy()` do not exist in this
-  workspace; the adapter drives the versioned contracts only, and its `live`
-  feature is a dependency-free placeholder.
+- No live run. The adapter does not call the runtime facade's `triage()` /
+  `triage_with_policy()` functions, and its `live` feature remains a
+  dependency-free placeholder with no host engine.
 - No token usage or cost. The public envelope reports neither; unknown is
   not recorded as zero.
 - No case, adjudication, score, qualification, readiness, routing, or
@@ -69,9 +71,9 @@ What the adapter does **not** claim:
   `PacketReady` or the terminal packet identity differs from the adapter's
   materialized task packet.
 
-Its default dependency tree is `cd-triage-sdk` + `cd-triage-bench` only;
-`cd-core` / `cd-workflow` are reachable exclusively through the non-default
-`workflow-mock` conformance feature. See
+Its default dependency tree is `cd-triage-sdk` + `cd-triage-runtime` +
+`cd-triage-bench` only; `cd-core` / `cd-workflow` are reachable exclusively
+through the non-default `workflow-mock` conformance feature. See
 [`crates/cd-triage-bench-adapter/README.md`](../../crates/cd-triage-bench-adapter/README.md).
 
 ## CLI

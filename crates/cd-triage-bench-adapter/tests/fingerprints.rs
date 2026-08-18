@@ -7,6 +7,7 @@ use cd_triage_bench_adapter::{
     materialize_bounded_packet, record_run, run_deterministic_mock, run_offline,
     validate_public_replay, AdapterRun, MockSlotOutcome,
 };
+use cd_triage_runtime::{canonical_request_fingerprint, replay};
 use cd_triage_sdk::{TriagePolicySelectionV2, TriageRequestOverridesV1};
 
 fn run_with(
@@ -53,6 +54,17 @@ fn identical_inputs_produce_identical_fingerprints_and_run_identities() {
     );
     assert_eq!(first.recorded.raw_output, second.recorded.raw_output);
     assert_eq!(first.outcome.replay, second.outcome.replay);
+}
+
+#[test]
+fn request_and_replay_conform_to_the_public_runtime_facade() {
+    let run = baseline();
+    assert_eq!(
+        run.bound.request_fingerprint,
+        canonical_request_fingerprint(&run.bound.request).unwrap()
+    );
+    let execution = replay(run.bound.request.clone(), run.outcome.replay.clone()).unwrap();
+    assert_eq!(execution.replay(), &run.outcome.replay);
 }
 
 #[test]

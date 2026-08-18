@@ -26,9 +26,11 @@ The validated baseline already contains:
 - source-neutral adjudication and comparison reporting over stored
   `TriageRun` rows.
 
-The missing pieces are a public runtime facade, Standard execution behind that
-facade, replay ingestion decoupled from the mock, and a provable live bridge
-from a bench evidence snapshot to a ContextDesk corpus and packet.
+This integration adds the public runtime facade and decouples validated replay
+ingestion from the mock while converging both on one canonical request
+identity. The remaining pieces are ContextDesk host implementations, Standard
+execution behind the facade, and a provable live bridge from a bench evidence
+snapshot to a ContextDesk corpus and packet.
 
 ## Dependency direction
 
@@ -119,10 +121,10 @@ binding drift, or packet drift yields an honest partial or typed failure.
 
 ## Replay ingestion
 
-The pure adapter records any public `TriageReplayV1` only after real replay
-validation plus exact run, request, packet, model, slot, and terminal checks.
-The deterministic mock goes through the same recorder so terminal and
-provenance behavior cannot drift.
+The pure adapter now records any public `TriageReplayV1` only after SDK phase
+validation, runtime request/cross-event binding, and exact adapter packet,
+policy, model, slot, and terminal checks. The deterministic mock goes through
+the same recorder so terminal and provenance behavior cannot drift.
 
 A replay that names the adapter's exact bench packet can be ingested directly.
 A production replay normally names a ContextDesk packet instead; it requires
