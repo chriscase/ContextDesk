@@ -186,7 +186,10 @@ role conflicts and unsupported/uncited claims, and marks `independent` only
 when two distinct exact model identities support the same evidence-role anchor.
 The checked-in replay fallback contains one mock model plus imported rows, so
 it proves the projection and privacy path but does not fabricate a two-model
-consensus. A live run with two distinct models can populate that field.
+consensus. A live run with two distinct models can populate that field. A live
+run may remain an honest `partial` when the host has not proven a causal role;
+host-validated evidence observations can still appear in agreement, but they
+never upgrade the run into a grounded root-cause result.
 
 ## Honesty constraints
 

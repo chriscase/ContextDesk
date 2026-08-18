@@ -66,7 +66,7 @@ const NOTES: &[&str] = &[
     "An anchor requires a claim cited to a visible snapshot evidence item. Claim text is never compared.",
     "Independent model corroboration counts distinct exact model identities, not runs: imported sources are not model witnesses and two candidates on one model are not independent.",
     "The same evidence cited under different causal roles is a conflict, not agreement.",
-    "Failed, partial, timed-out, and cancelled runs stay listed and contribute no anchors.",
+    "Runs with no host-validated answer stay listed and contribute no anchors; a partial run may contribute only the evidence claims its validated answer actually contains.",
     "This projection assigns no score, rank, readiness, or winner.",
 ];
 
@@ -134,6 +134,9 @@ pub enum ExclusionReason {
     /// one these runs recorded, so the task's visibility policy does not
     /// describe what they actually saw.
     TaskSnapshotMismatch,
+    /// The evaluation task record belongs to a different case than the run,
+    /// so its visibility policy cannot be used for this group.
+    TaskCaseMismatch,
     /// Fairness is not `same_snapshot`.
     FairnessNotSameSnapshot,
     /// An SDK row's raw output was not supplied to the projection.
@@ -147,6 +150,9 @@ pub enum ExclusionReason {
     /// No exact model identity could be recovered, so independence of this
     /// row from another row cannot be established.
     SdkModelIdentityUnavailable,
+    /// An SDK row did not carry the packet fingerprint required to prove the
+    /// same materialization used by the comparison group.
+    PacketFingerprintUnavailable,
     /// SDK rows in this group do not share one materialized packet.
     PacketFingerprintDivergence,
 }
@@ -157,12 +163,14 @@ impl ExclusionReason {
         match self {
             Self::TaskRecordUnavailable => "task_record_unavailable",
             Self::TaskSnapshotMismatch => "task_snapshot_mismatch",
+            Self::TaskCaseMismatch => "task_case_mismatch",
             Self::FairnessNotSameSnapshot => "fairness_not_same_snapshot",
             Self::SdkRawOutputUnavailable => "sdk_raw_output_unavailable",
             Self::SdkEnvelopeUnparseable => "sdk_envelope_unparseable",
             Self::SdkRowWithoutOwnerOnlyEnvelope => "sdk_row_without_owner_only_envelope",
             Self::SdkVisibilityMismatch => "sdk_visibility_mismatch",
             Self::SdkModelIdentityUnavailable => "sdk_model_identity_unavailable",
+            Self::PacketFingerprintUnavailable => "packet_fingerprint_unavailable",
             Self::PacketFingerprintDivergence => "packet_fingerprint_divergence",
         }
     }
@@ -506,6 +514,7 @@ fn build_group_view(
         Some(task) if task.snapshot_id != snapshot_id => {
             Some(ExclusionReason::TaskSnapshotMismatch)
         }
+        Some(task) if task.case_id != case_id => Some(ExclusionReason::TaskCaseMismatch),
         Some(_) => None,
     };
     if let Some(reason) = unusable_task {
@@ -559,9 +568,7 @@ fn build_group_view(
         match run.source_kind {
             SourceKind::ContextdeskSdk => match sdk_contribution(run, task, raw_outputs) {
                 Ok((contribution, packet_fingerprint)) => {
-                    if let Some(fingerprint) = packet_fingerprint {
-                        packet_fingerprints.insert(fingerprint);
-                    }
+                    packet_fingerprints.insert(packet_fingerprint);
                     contributions.push(contribution);
                 }
                 Err(reason) => excluded.push(ExcludedRun {
@@ -785,7 +792,7 @@ fn sdk_contribution(
     run: &TriageRun,
     task: &EvaluationTask,
     raw_outputs: &BTreeMap<String, Vec<u8>>,
-) -> Result<(RunContribution, Option<String>), ExclusionReason> {
+) -> Result<(RunContribution, String), ExclusionReason> {
     let raw = raw_outputs
         .get(&run.run_id)
         .ok_or(ExclusionReason::SdkRawOutputUnavailable)?;
@@ -825,9 +832,10 @@ fn sdk_contribution(
         .and_then(|fingerprints| fingerprints.get("packet"))
         .and_then(Value::as_str)
         .filter(|value| safe_report_identity(value))
-        .map(str::to_owned);
+        .map(str::to_owned)
+        .ok_or(ExclusionReason::PacketFingerprintUnavailable)?;
 
-    let (claims_available, claims) = sdk_claims(&envelope);
+    let (claims_available, claims) = remap_sdk_claims_to_benchmark_items(&envelope);
 
     Ok((
         RunContribution {
@@ -843,6 +851,91 @@ fn sdk_contribution(
         },
         packet_fingerprint,
     ))
+}
+
+/// Translate host packet evidence identities back to the benchmark item ids
+/// that the task visibility policy governs. Live production packets cite
+/// immutable host-ledger ids such as `e:candidate:ordinal`; the benchmark
+/// agreement surface must compare those citations by their source-neutral
+/// snapshot item, never by an implementation-local host id.
+///
+/// Offline/public SDK envelopes do not carry `host_execution`, so their
+/// citations are already expected to be benchmark item ids and remain
+/// unchanged. When a live mapping is present, an unknown or ambiguous host id
+/// is deliberately left unmapped; the later visibility check reports it as an
+/// invalid citation rather than silently treating it as agreement.
+fn remap_sdk_claims_to_benchmark_items(envelope: &Value) -> (bool, Vec<NormalizedClaim>) {
+    let (claims_available, claims) = sdk_claims(envelope);
+    let Some(host_execution) = envelope.get("host_execution") else {
+        return (claims_available, claims);
+    };
+
+    let mut source_items: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+    if let Some(sources) = host_execution.get("sources").and_then(Value::as_array) {
+        for source in sources {
+            let (Some(label), Some(item_id)) = (
+                source.get("source_label").and_then(Value::as_str),
+                source.get("evidence_item_id").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            match source_items.get(label) {
+                None => {
+                    source_items.insert(label, Some(item_id));
+                }
+                Some(Some(existing)) if *existing == item_id => {}
+                Some(_) => {
+                    // A source label resolving to multiple benchmark items is
+                    // not a safe citation translation.
+                    source_items.insert(label, None);
+                }
+            }
+        }
+    }
+
+    let mut host_items: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+    if let Some(packet_evidence) = host_execution
+        .get("packet_evidence")
+        .and_then(Value::as_array)
+    {
+        for evidence in packet_evidence {
+            let (Some(evidence_id), Some(source_label)) = (
+                evidence.get("evidence_id").and_then(Value::as_str),
+                evidence.get("source_label").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            let item_id = source_items.get(source_label).copied().flatten();
+            match host_items.get(evidence_id) {
+                None => {
+                    host_items.insert(evidence_id, item_id);
+                }
+                Some(Some(existing)) if Some(*existing) == item_id => {}
+                Some(_) => {
+                    host_items.insert(evidence_id, None);
+                }
+            }
+        }
+    }
+
+    let claims = claims
+        .into_iter()
+        .map(|mut claim| {
+            claim.evidence_ids = claim
+                .evidence_ids
+                .into_iter()
+                .map(|evidence_id| {
+                    host_items
+                        .get(evidence_id.as_str())
+                        .and_then(|item_id| *item_id)
+                        .map(str::to_owned)
+                        .unwrap_or(evidence_id)
+                })
+                .collect();
+            claim
+        })
+        .collect();
+    (claims_available, claims)
 }
 
 /// Read the validated claim graph off the terminal event of a replay.

@@ -18,7 +18,8 @@ use cd_core::agent::build_fast_triage_packet;
 use cd_core::chat::{ChatCompletion, ChatMessage, Role};
 use cd_core::config::AppConfig;
 use cd_core::fast_triage::{
-    clock_compatibility_from_time_quality, FastTriageNeighborhoodBudget, FastTriagePacketV1,
+    clock_compatibility_from_time_quality, fast_triage_evidence_block, fast_triage_system_contract,
+    FastTriageNeighborhoodBudget, FastTriagePacketV1,
 };
 use cd_core::investigation_answer::{validate_model_answer, AnswerEnvelopeV1};
 use cd_core::investigation_answer::{AnswerBindingV1, LogSnapshotRevisionV1};
@@ -644,16 +645,18 @@ impl TriageProductionHooks for HostValidatedAnswerHooks {
         Some(vec![
             ChatMessage {
                 role: Role::System,
-                content: "Return exactly one ContextDesk investigation_answer.v1 JSON object. Use only literal evidence ids from the host manifest; do not add host fields.".into(),
+                content: fast_triage_system_contract(),
                 tool_call_id: None,
                 tool_calls: None,
             },
             ChatMessage {
                 role: Role::User,
                 content: format!(
-                    "The previous proposal was rejected for bounded categories: {}. Correct it once.\n\nHOST MANIFEST:\n{}",
+                    "The previous proposal was rejected for bounded categories: {}. Correct it once from the unchanged host packet.\n\nHOST-AUTHORED EVIDENCE MANIFEST (the complete permitted identifier boundary, with host role, scope, and chronology ordinal; JSON):\n{}\n{}\nHOST-AUTHORED OUTPUT SCAFFOLD (copy this exact outer shape; replace empty arrays with grounded claim objects using only permitted evidence ids):\n{}\nReturn only the completed JSON object.",
                     reason_codes.join(","),
-                    packet.manifest_json()
+                    packet.manifest_json(),
+                    fast_triage_evidence_block(packet),
+                    packet.scaffold_json(),
                 ),
                 tool_call_id: None,
                 tool_calls: None,

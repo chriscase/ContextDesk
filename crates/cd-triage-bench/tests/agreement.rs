@@ -476,6 +476,51 @@ fn sdk_agreement_reads_the_envelope_not_the_flattened_claim_summary() {
     }
 }
 
+/// Live host replays cite packet-ledger ids, not the benchmark item's public
+/// id. Agreement must translate that exact host proof before checking task
+/// visibility, or every valid live citation would look uncited.
+#[test]
+fn live_host_packet_evidence_maps_back_to_benchmark_item() {
+    let task = task(&["ev-1"]);
+    let runs = vec![sdk_row("run-live", &task.task_id, RunStatus::Partial)];
+    let mut envelope: Value = serde_json::from_slice(&envelope(
+        "profile:alpha",
+        "model:alpha",
+        'a',
+        &["ev-1"],
+        PACKET,
+        completed_terminal(vec![claim(
+            "claim-live",
+            "observation",
+            "supported",
+            &["e:cand-1:0"],
+        )]),
+    ))
+    .expect("envelope JSON");
+    envelope["host_execution"] = json!({
+        "sources": [{
+            "source_label": "checkout.log",
+            "evidence_item_id": "ev-1"
+        }],
+        "packet_evidence": [{
+            "evidence_id": "e:cand-1:0",
+            "source_label": "checkout.log"
+        }]
+    });
+
+    let mut raw = BTreeMap::new();
+    raw.insert(
+        "run-live".into(),
+        serde_json::to_vec(&envelope).expect("raw"),
+    );
+    let view = &build_agreement_views(&runs, std::slice::from_ref(&task), &raw).expect("views")[0];
+    assert_eq!(view.anchors.len(), 1);
+    assert_eq!(view.anchors[0].evidence_item_id, "ev-1");
+    assert_eq!(view.anchors[0].role_bucket, RoleBucket::Observation);
+    assert!(view.uncited_visible_evidence.is_empty());
+    assert!(view.runs[0].invalid_citations.is_empty());
+}
+
 /// A run whose fairness is not `same_snapshot` is excluded with the reason.
 #[test]
 fn only_same_snapshot_fairness_participates() {
@@ -569,6 +614,23 @@ fn groups_are_exact_and_a_missing_task_record_fails_closed() {
     assert_eq!(same.runs.len(), 1);
     assert_eq!(same.anchors.len(), 1);
 
+    let mut wrong_case_task = task.clone();
+    wrong_case_task.case_id = "case-other".into();
+    let wrong_case = build_agreement_views(
+        &[sdk_row(
+            "run-case-mismatch",
+            &task.task_id,
+            RunStatus::Completed,
+        )],
+        &[wrong_case_task],
+        &raw,
+    )
+    .expect("views");
+    assert_eq!(
+        wrong_case[0].excluded_runs[0].reason,
+        ExclusionReason::TaskCaseMismatch
+    );
+
     // A group whose task record was never supplied fails closed the same way.
     let orphan = build_agreement_views(&runs, &[], &raw).expect("views");
     assert!(orphan.iter().all(|view| view.runs.is_empty()));
@@ -578,9 +640,9 @@ fn groups_are_exact_and_a_missing_task_record_fails_closed() {
         .all(|excluded| excluded.reason == ExclusionReason::TaskRecordUnavailable)));
 }
 
-/// Failed, partial, timed-out, and cancelled rows stay listed and anchor
-/// nothing. A terminal with no answer is reported as "no claim set", which is
-/// a different fact from an answer that cited nothing.
+/// Failed, partial, timed-out, and cancelled rows stay listed. A terminal with
+/// no answer is reported as "no claim set", which is a different fact from a
+/// partial answer whose host-validated evidence claims can still be projected.
 #[test]
 fn failed_and_partial_rows_stay_visible_with_zero_anchors() {
     let task = task(&["ev-1"]);
@@ -728,6 +790,7 @@ fn sdk_provenance_failures_are_named_exclusions() {
         sdk_row("run-unparseable", &task.task_id, RunStatus::Completed),
         sdk_row("run-not-envelope", &task.task_id, RunStatus::Completed),
         sdk_row("run-visibility", &task.task_id, RunStatus::Completed),
+        sdk_row("run-missing-packet", &task.task_id, RunStatus::Completed),
     ];
     let mut raw = BTreeMap::new();
     raw.insert("run-unparseable".to_string(), b"{not json".to_vec());
@@ -745,6 +808,19 @@ fn sdk_provenance_failures_are_named_exclusions() {
             PACKET,
             completed_terminal(vec![claim("c1", "observation", "supported", &["ev-1"])]),
         ),
+    );
+    let mut missing_packet: Value =
+        serde_json::from_slice(&raw["run-visibility"]).expect("envelope");
+    missing_packet["visible_item_ids"] = json!(["ev-1"]);
+    missing_packet["fingerprints"] = json!({
+        "policy": "pol-abc",
+        "request": "sha256:abc",
+        "models": [model_fingerprint('a')],
+        "slots": ["slf-abc"]
+    });
+    raw.insert(
+        "run-missing-packet".to_string(),
+        serde_json::to_vec(&missing_packet).expect("bytes"),
     );
 
     let view = &build_agreement_views(&runs, std::slice::from_ref(&task), &raw).expect("views")[0];
@@ -769,6 +845,10 @@ fn sdk_provenance_failures_are_named_exclusions() {
     assert_eq!(
         reasons["run-visibility"],
         ExclusionReason::SdkVisibilityMismatch
+    );
+    assert_eq!(
+        reasons["run-missing-packet"],
+        ExclusionReason::PacketFingerprintUnavailable
     );
 }
 
