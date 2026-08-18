@@ -37,7 +37,7 @@ use cd_core::multi_model::contribution_pipeline::{
 use cd_core::multi_model::contributions::{
     reconcile_contributions, ContributionAttemptV1, ContributionAvailability,
     ContributionDegradationReason, ContributionIdentity, ContributionRole, ContributionRoutingPlan,
-    ContributionRoutingPolicy, ReconciliationReportV1,
+    ContributionRoutingPolicy, ReconciliationGapKind, ReconciliationGapV1, ReconciliationReportV1,
 };
 use cd_core::multi_model::triage_policy::{
     CompiledRoleSlotV2, CompiledTriagePolicyV2, ContributorSlotV2, ReviewerConditionV2,
@@ -52,6 +52,7 @@ use cd_core::triage_sdk::{
     TriageRunEventV2, TriageTerminalDispositionV1, TriageValidationState, TRIAGE_REPLAY_SCHEMA_V1,
     TRIAGE_RESULT_SCHEMA_V2, TRIAGE_RUN_EVENT_SCHEMA_V2,
 };
+use sha2::{Digest, Sha256};
 
 use crate::triage::compile_preflight;
 use crate::triage_production::{
@@ -2163,6 +2164,13 @@ fn reconciliation_from_report(
         .collect::<Vec<_>>();
     conflict_ids.sort();
     conflict_ids.dedup();
+    let mut gap_ids = report
+        .gaps
+        .iter()
+        .map(reconciliation_gap_id)
+        .collect::<Vec<_>>();
+    gap_ids.sort();
+    gap_ids.dedup();
     TriageReconciliationV1 {
         state: report.state.as_str().into(),
         configured_role_slots: slots.len() as u32,
@@ -2171,8 +2179,23 @@ fn reconciliation_from_report(
         distinct_gateways: gateways.len().min(u32::MAX as usize) as u32,
         supported_claim_ids: Vec::new(),
         conflict_ids,
-        gap_ids: Vec::new(),
+        gap_ids,
         root_cause_established: false,
+    }
+}
+
+fn reconciliation_gap_id(gap: &ReconciliationGapV1) -> String {
+    let kind = match gap.kind {
+        ReconciliationGapKind::MissingObservationCoverage => "missing_observation_coverage",
+        ReconciliationGapKind::MissingCausalCoverage => "missing_causal_coverage",
+        ReconciliationGapKind::UnresolvedQuestion => "unresolved_question",
+    };
+    match &gap.candidate_id {
+        Some(candidate_id) => format!(
+            "gap:{kind}:candidate-sha256:{:x}",
+            Sha256::digest(candidate_id.as_bytes())
+        ),
+        None => format!("gap:{kind}"),
     }
 }
 
@@ -2413,6 +2436,32 @@ mod tests {
             explicit_review_requested: false,
             cancel: None,
         }
+    }
+
+    #[test]
+    fn typed_reconciliation_gaps_project_to_stable_public_ids() {
+        let packet = packet();
+        let mut report = reconcile_contributions(&packet, &[]);
+        report.gaps.push(ReconciliationGapV1 {
+            kind: ReconciliationGapKind::UnresolvedQuestion,
+            candidate_id: Some("candidate-a".into()),
+            reporter_model_count: 1,
+        });
+
+        let projected = reconciliation_from_report(&[], &[], &report);
+        assert_eq!(
+            projected.gap_ids,
+            [
+                "gap:missing_causal_coverage",
+                "gap:missing_observation_coverage",
+                "gap:unresolved_question:candidate-sha256:c24e6a4636f633942a26972a7d0b87c5e0bae3b60bbc9a4cdecff618f80ce3eb",
+            ]
+        );
+        assert!(projected
+            .gap_ids
+            .iter()
+            .all(|gap_id| !gap_id.contains("candidate-a")));
+        projected.validate().expect("valid public reconciliation");
     }
 
     #[test]
