@@ -1093,6 +1093,8 @@ fn restrict_directory(path: &Path) -> Result<(), LiveBridgeError> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .map_err(|_| LiveBridgeError::Staging)?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
