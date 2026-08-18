@@ -17,15 +17,14 @@ use cd_triage_bench::{
 };
 use cd_triage_sdk::{
     ModelRef, TriageAttemptStatus, TriageReplayV1, TriageRequestV2, TriageResultKind,
-    TriageResultV2, TriageRunEventPayloadV2, TriageSlotKindV2, TriageTerminalDispositionV1,
-    TriageValidationState,
+    TriageResultV2, TriageSlotKindV2, TriageTerminalDispositionV1, TriageValidationState,
 };
 use serde::Serialize;
 
-use crate::engine::MockRunOutcome;
 use crate::error::{AdapterError, AdapterResult};
 use crate::fingerprint::{fingerprint, MODEL_PREFIX, SLOT_PREFIX};
 use crate::packet::BoundedPacket;
+use crate::replay::{prove_materialized_packet, terminal_provenance, ValidatedReplayOutcome};
 use crate::request::BoundRequest;
 
 /// Per-slot provenance. Owner-only: it retains the exact model identity.
@@ -145,16 +144,10 @@ pub fn record_run(
     task: &EvaluationTask,
     bound: &BoundRequest,
     bounded: &BoundedPacket,
-    outcome: &MockRunOutcome,
+    outcome: &ValidatedReplayOutcome,
     context: &RecordingContext,
 ) -> AdapterResult<RecordedContextDeskRun> {
-    if outcome.replay.run_id != bound.sdk_run_id
-        || outcome.replay.request_fingerprint != bound.request_fingerprint
-    {
-        return Err(AdapterError::IdentityMismatch(
-            "replay does not carry the bound run identity and request fingerprint".into(),
-        ));
-    }
+    prove_materialized_packet(&outcome.replay, bounded)?;
 
     let mut slots = Vec::with_capacity(outcome.attempts.len());
     for attempt in &outcome.attempts {
@@ -204,13 +197,6 @@ pub fn record_run(
     };
 
     let terminal = terminal_provenance(outcome)?;
-    if let Some(packet_id) = &terminal.packet_id {
-        if packet_id != &bounded.packet.packet_id {
-            return Err(AdapterError::IdentityMismatch(
-                "terminal result packet identity does not match the materialized packet".into(),
-            ));
-        }
-    }
 
     let owner_only = OwnerOnlyRecord {
         sdk_run_id: bound.sdk_run_id.clone(),
@@ -293,7 +279,7 @@ pub fn record_run(
 /// a later share-safe projection of this field cannot leak model identity.
 fn workflow_summary(fingerprints: &RunFingerprints) -> String {
     format!(
-        "cd-triage-bench-adapter deterministic mock; policy {}; packet {}; corpus {}; slots [{}]",
+        "cd-triage-bench-adapter public-sdk replay ingest; policy {}; packet {}; corpus {}; slots [{}]",
         fingerprints.policy,
         fingerprints.packet,
         fingerprints.corpus,
@@ -316,73 +302,4 @@ fn claimed_citations(result: Option<&TriageResultV2>) -> Vec<ClaimedCitation> {
             locator: None,
         })
         .collect()
-}
-
-fn terminal_provenance(outcome: &MockRunOutcome) -> AdapterResult<TerminalProvenance> {
-    let (kind, category, cancellation_id, result, provenance_only) = match outcome.terminal() {
-        TriageRunEventPayloadV2::Completed { result } => {
-            ("completed", None, None, Some(result.as_ref()), false)
-        }
-        TriageRunEventPayloadV2::Failed {
-            category,
-            partial_result,
-        } => (
-            "failed",
-            Some(category.clone()),
-            None,
-            partial_result.as_deref(),
-            partial_result.is_some(),
-        ),
-        TriageRunEventPayloadV2::TimedOut {
-            category,
-            partial_result,
-        } => (
-            "timed_out",
-            Some(category.clone()),
-            None,
-            partial_result.as_deref(),
-            partial_result.is_some(),
-        ),
-        TriageRunEventPayloadV2::Cancelled {
-            cancellation_id,
-            partial_result,
-        } => (
-            "cancelled",
-            None,
-            Some(cancellation_id.clone()),
-            partial_result.as_deref(),
-            partial_result.is_some(),
-        ),
-        _ => {
-            return Err(AdapterError::IdentityMismatch(
-                "validated replay did not end in a terminal event".into(),
-            ))
-        }
-    };
-
-    // A Failed or TimedOut terminal stays Failed or TimedOut in the bench even
-    // when it carried partial output. Partial output is provenance, not a
-    // partial success.
-    let bench_status = match (kind, result.map(|result| result.kind)) {
-        ("completed", Some(TriageResultKind::GroundedFinal)) => RunStatus::Completed,
-        ("completed", _) => RunStatus::Partial,
-        ("failed", _) => RunStatus::Failed,
-        ("timed_out", _) => RunStatus::TimedOut,
-        ("cancelled", _) => RunStatus::Cancelled,
-        _ => unreachable!("terminal kinds are exhaustive above"),
-    };
-
-    Ok(TerminalProvenance {
-        kind: kind.to_string(),
-        category,
-        cancellation_id,
-        result_kind: result.map(|result| result.kind),
-        validation_state: result.map(|result| result.validation_state),
-        packet_id: result.map(|result| result.packet_id.clone()),
-        reason_codes: result
-            .map(|result| result.reason_codes.clone())
-            .unwrap_or_default(),
-        partial_result_is_provenance_only: provenance_only,
-        bench_status,
-    })
 }

@@ -10,12 +10,14 @@
 use cd_triage_bench::store::PutRunOutcome;
 use cd_triage_bench::BenchStore;
 use cd_triage_bench_adapter::{
-    run_offline, MockEnginePlan, MockSlotOutcome, MockSlotPlan, MockTerminalPlan, MockValidation,
+    decode_replay_json, materialize_bounded_packet, record_public_replay, run_offline,
+    MockEnginePlan, MockSlotOutcome, MockSlotPlan, MockTerminalPlan, MockValidation,
     RecordingContext,
 };
-use cd_triage_sdk::{ModelRef, TriagePolicySelectionV2, TriageSlotKindV2};
+use cd_triage_sdk::{ModelRef, TriagePolicySelectionV2, TriageSlotKindV2, MAX_TRIAGE_WIRE_BYTES};
 use clap::{Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 const MOCK_PROFILE: &str = "profile:mock-gateway";
 const MOCK_MODEL: &str = "mock-finalizer-v1";
@@ -42,6 +44,20 @@ enum Command {
         /// Deterministic terminal to record.
         #[arg(long, value_enum, default_value = "completed")]
         script: Script,
+        /// Explicit operator label; no environment or identity is inferred.
+        #[arg(long, default_value = "adapter-cli")]
+        operator: String,
+        /// Explicit RFC3339 creation time; durable identity never reads a clock.
+        #[arg(long, default_value = "2026-01-15T08:00:00Z")]
+        created_at: String,
+    },
+    /// Ingest an owner-only public-SDK replay JSON. This is not live execution.
+    RecordReplay {
+        /// Stored evaluation task id.
+        task_id: String,
+        /// Bounded regular file holding a `TriageReplayV1` JSON object.
+        #[arg(long)]
+        replay: PathBuf,
         /// Explicit operator label; no environment or identity is inferred.
         #[arg(long, default_value = "adapter-cli")]
         operator: String,
@@ -133,6 +149,12 @@ fn main() -> Result<(), String> {
             operator,
             created_at,
         } => run(cli.library, task_id, script, operator, created_at),
+        Command::RecordReplay {
+            task_id,
+            replay,
+            operator,
+            created_at,
+        } => record_replay(cli.library, task_id, replay, operator, created_at),
     }
 }
 
@@ -182,25 +204,112 @@ fn run(
         &case,
         &snapshot,
         &task,
-        TriagePolicySelectionV2::Standard {
-            model: ModelRef {
-                profile_id: MOCK_PROFILE.into(),
-                model_id: MOCK_MODEL.into(),
-            },
-        },
+        cli_policy(),
         Default::default(),
-        &format!("cancel-{}", task.task_id),
+        &cli_cancellation(&task.task_id),
         &plan,
         &context,
     )
     .map_err(|error| error.to_string())?;
+    persist_recorded(&store, &run.recorded)
+}
+
+fn record_replay(
+    library: PathBuf,
+    task_id: String,
+    replay_path: PathBuf,
+    operator: String,
+    created_at: String,
+) -> Result<(), String> {
+    let store = BenchStore::open(library).map_err(|error| error.to_string())?;
+    let task = store
+        .get_task(&task_id)
+        .map_err(|error| error.to_string())?;
+    let case = store
+        .get_case(&task.case_id)
+        .map_err(|error| error.to_string())?;
+    let snapshot = store
+        .get_snapshot(&task.snapshot_id)
+        .map_err(|error| error.to_string())?;
+    let bytes = read_bounded_regular_file(&replay_path)?;
+    let replay = decode_replay_json(&bytes).map_err(|error| error.to_string())?;
+    let bounded =
+        materialize_bounded_packet(&case, &snapshot, &task).map_err(|error| error.to_string())?;
+    let bound = cd_triage_bench_adapter::build_request(
+        &snapshot,
+        &task,
+        &bounded,
+        cli_policy(),
+        Default::default(),
+        &cli_cancellation(&task.task_id),
+    )
+    .map_err(|error| error.to_string())?;
+    let recorded = record_public_replay(
+        &case,
+        &snapshot,
+        &task,
+        &bounded,
+        &bound,
+        replay,
+        &RecordingContext {
+            strategy: cd_triage_bench::StrategyIdentity {
+                name: "contextdesk-sdk".into(),
+                version: cd_triage_bench::Observed::Known("public-contract-v2".into()),
+                build: cd_triage_bench::Observed::Known("replay-ingest".into()),
+            },
+            operator,
+            created_at,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    persist_recorded(&store, &recorded)
+}
+
+fn cli_policy() -> TriagePolicySelectionV2 {
+    TriagePolicySelectionV2::Standard {
+        model: ModelRef {
+            profile_id: MOCK_PROFILE.into(),
+            model_id: MOCK_MODEL.into(),
+        },
+    }
+}
+
+fn cli_cancellation(task_id: &str) -> String {
+    format!("cancel-{task_id}")
+}
+
+fn read_bounded_regular_file(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    if metadata.len() > MAX_TRIAGE_WIRE_BYTES as u64 {
+        return Err(format!(
+            "{} exceeds the public SDK wire bound of {MAX_TRIAGE_WIRE_BYTES} bytes",
+            path.display()
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if bytes.len() > MAX_TRIAGE_WIRE_BYTES {
+        return Err(format!(
+            "{} exceeds the public SDK wire bound of {MAX_TRIAGE_WIRE_BYTES} bytes",
+            path.display()
+        ));
+    }
+    Ok(bytes)
+}
+
+fn persist_recorded(
+    store: &BenchStore,
+    recorded: &cd_triage_bench_adapter::RecordedContextDeskRun,
+) -> Result<(), String> {
     let raw_digest = store
-        .put_blob(&run.recorded.raw_output)
+        .put_blob(&recorded.raw_output)
         .map_err(|error| error.to_string())?;
     let outcome = store
-        .put_run(&run.recorded.bench_run)
+        .put_run(&recorded.bench_run)
         .map_err(|error| error.to_string())?;
-    let status = run.recorded.bench_run.status.as_str();
+    let status = recorded.bench_run.status.as_str();
     match outcome {
         PutRunOutcome::Created { run_id } => {
             println!("created {run_id} status={status} raw={}", raw_digest.wire())

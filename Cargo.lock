@@ -667,6 +667,7 @@ dependencies = [
  "cd-triage-bench-adapter",
  "cd-triage-sdk",
  "clap",
+ "serde_json",
  "tempfile",
 ]
 

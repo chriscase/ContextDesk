@@ -47,18 +47,27 @@ public SDK boundary. It is a sibling crate, not part of `cd-triage-bench`, so
 the bench keeps no engine dependency:
 
 ```text
-snapshot -> bounded packet -> TriageRequestV2 -> deterministic mock replay
-         -> owner-only TriageRun -> explicit share-safe projection
+snapshot -> bounded packet -> TriageRequestV2
+         -> deterministic mock OR imported TriageReplayV1
+         -> validate_public_replay -> owner-only TriageRun
+         -> explicit share-safe projection
 ```
+
+This is **replay ingestion**, not live execution. A later live ContextDesk
+evaluation still needs the public façade and a same-snapshot host bridge.
 
 What the adapter does **not** claim:
 
 - No live run. `triage()` / `triage_with_policy()` do not exist in this
   workspace; the adapter drives the versioned contracts only, and its `live`
   feature is a dependency-free placeholder.
-- No token usage or cost. The public envelope reports neither.
+- No token usage or cost. The public envelope reports neither; unknown is
+  not recorded as zero.
 - No case, adjudication, score, qualification, readiness, routing, or
   private-store write inside ContextDesk crates.
+- No host attestation of a production packet. Recording fails closed when
+  `PacketReady` or the terminal packet identity differs from the adapter's
+  materialized task packet.
 
 Its default dependency tree is `cd-triage-sdk` + `cd-triage-bench` only;
 `cd-core` / `cd-workflow` are reachable exclusively through the non-default
