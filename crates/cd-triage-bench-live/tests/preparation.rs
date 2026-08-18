@@ -567,10 +567,19 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
     .await;
     let (_library, cache, store, case, snapshot, task) = fixture();
     let profile = openai_profile(gateway.base_url());
+    let mut alternate_profile = openai_profile(gateway.base_url());
+    alternate_profile.id = "profile:live-fixture-beta".into();
+    alternate_profile.label = "live fixture beta".into();
+    alternate_profile.chat_model = "model:live-fixture-beta".into();
     let qualifications = qualified_finalizer(&profile);
+    let alternate_qualifications = qualified_finalizer(&alternate_profile);
     let model = ModelRef {
         profile_id: profile.id.clone(),
         model_id: profile.chat_model.clone(),
+    };
+    let alternate_model = ModelRef {
+        profile_id: alternate_profile.id.clone(),
+        model_id: alternate_profile.chat_model.clone(),
     };
     let config = cd_core::config::AppConfig {
         providers: ProviderConfig {
@@ -579,17 +588,26 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         },
         ..Default::default()
     };
+    let alternate_config = cd_core::config::AppConfig {
+        providers: ProviderConfig {
+            active_id: Some(alternate_profile.id.clone()),
+            profiles: vec![alternate_profile],
+        },
+        ..Default::default()
+    };
     let cancel = CancelFlag::new();
 
-    let candidate = |name: &str, cancellation_id: &str| LiveComparisonCandidate {
+    let candidate = |name: &str,
+                     cancellation_id: &str,
+                     config: cd_core::config::AppConfig,
+                     qualifications: TriageRoleQualificationStoreV1,
+                     model: ModelRef| LiveComparisonCandidate {
         options: LiveRunOptions {
             cache_root: cache.path().to_path_buf(),
-            config: config.clone(),
+            config,
             policies: TriagePolicyStoreV1::default(),
-            qualifications: qualifications.clone(),
-            policy: TriagePolicySelectionV2::Standard {
-                model: model.clone(),
-            },
+            qualifications,
+            policy: TriagePolicySelectionV2::Standard { model },
             overrides: TriageRequestOverridesV1 {
                 deadline_ms: Some(300_000),
                 max_provider_calls: None,
@@ -617,8 +635,20 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         &task,
         Arc::new(MemorySecretStore::new()),
         vec![
-            candidate("ContextDesk live alpha", "cancel:comparison-alpha"),
-            candidate("ContextDesk live beta", "cancel:comparison-beta"),
+            candidate(
+                "ContextDesk live alpha",
+                "cancel:comparison-alpha",
+                config,
+                qualifications,
+                model,
+            ),
+            candidate(
+                "ContextDesk live beta",
+                "cancel:comparison-beta",
+                alternate_config,
+                alternate_qualifications,
+                alternate_model,
+            ),
         ],
     )
     .await
@@ -626,6 +656,20 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
 
     assert_eq!(result.runs.len(), 2);
     assert_eq!(gateway.request_count(), 2);
+    let requests = gateway.requests();
+    let models = requests
+        .iter()
+        .map(|request| {
+            request.json_body().unwrap()["model"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        models,
+        vec!["model:live-fixture", "model:live-fixture-beta"]
+    );
     assert_ne!(
         result.runs[0].recorded.bench_run.run_id,
         result.runs[1].recorded.bench_run.run_id
