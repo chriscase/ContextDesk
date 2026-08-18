@@ -9,12 +9,16 @@ use crate::review::{
 };
 use crate::types::citation_assist_flags;
 use crate::types::{
-    sha256_hex, Adjudication, Case, ContentDigest, EvaluationTask, EvidenceSnapshot, ScoreReview,
-    TriageRun, LIBRARY_SCHEMA_V1,
+    sha256_hex, Adjudication, Case, ContentDigest, EvaluationTask, EvidenceSnapshot, HeldContent,
+    ScoreReview, TriageRun, LIBRARY_SCHEMA_V1,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+const BLOB_COPY_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Library metadata stored at `<root>/library.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +32,13 @@ pub struct LibraryMeta {
 #[derive(Debug, Clone)]
 pub struct BenchStore {
     root: PathBuf,
+}
+
+/// Proof returned only after a streamed blob copy matches its declared length and digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedBlobCopy {
+    pub digest: ContentDigest,
+    pub byte_length: u64,
 }
 
 impl BenchStore {
@@ -106,6 +117,146 @@ impl BenchStore {
             )));
         }
         Ok(bytes)
+    }
+
+    /// Stream a snapshot blob into `destination` with a hard byte limit and fail-closed proof.
+    ///
+    /// `content` supplies both immutable claims made by the snapshot: SHA-256 and byte length.
+    /// The cancellation callback is polled before opening the blob, around every bounded read,
+    /// and before returning success. The store's private backing path is never returned or
+    /// included in errors from this API.
+    ///
+    /// A failure can leave a prefix in `destination`; callers must discard that destination
+    /// unless this method returns [`VerifiedBlobCopy`]. The method does not flush the writer.
+    pub fn copy_snapshot_blob_verified<W, C>(
+        &self,
+        content: &HeldContent,
+        max_bytes: u64,
+        destination: &mut W,
+        mut is_cancelled: C,
+    ) -> BenchResult<VerifiedBlobCopy>
+    where
+        W: Write,
+        C: FnMut() -> bool,
+    {
+        if content.digest.algorithm != "sha256" {
+            return Err(BenchError::Schema(
+                "held content digest algorithm must be sha256".into(),
+            ));
+        }
+        crate::types::validate_sha256_hex(&content.digest.hex)?;
+
+        if content.byte_length > max_bytes {
+            return Err(BenchError::BlobTooLarge {
+                digest: content.digest.hex.clone(),
+                declared_bytes: content.byte_length,
+                max_bytes,
+            });
+        }
+        if is_cancelled() {
+            return Err(BenchError::BlobCopyCancelled {
+                digest: content.digest.hex.clone(),
+            });
+        }
+
+        let path = self.blob_path(&content.digest.hex);
+        let mut source = match fs::File::open(&path) {
+            Ok(source) => source,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BenchError::NotFound(format!("blob {}", content.digest.hex)));
+            }
+            Err(source) => {
+                return Err(BenchError::BlobRead {
+                    digest: content.digest.hex.clone(),
+                    source,
+                });
+            }
+        };
+
+        let mut hasher = Sha256::new();
+        let mut copied = 0_u64;
+        let mut buffer = [0_u8; BLOB_COPY_BUFFER_BYTES];
+
+        loop {
+            if is_cancelled() {
+                return Err(BenchError::BlobCopyCancelled {
+                    digest: content.digest.hex.clone(),
+                });
+            }
+
+            // Read one extra byte after the declared length to detect trailing corruption without
+            // ever writing bytes beyond the caller's declared or configured bounds.
+            let remaining = content.byte_length.saturating_sub(copied);
+            let read_limit = if remaining == 0 {
+                1
+            } else {
+                usize::try_from(remaining.min(buffer.len() as u64))
+                    .expect("bounded by the fixed copy buffer")
+            };
+            let read =
+                source
+                    .read(&mut buffer[..read_limit])
+                    .map_err(|source| BenchError::BlobRead {
+                        digest: content.digest.hex.clone(),
+                        source,
+                    })?;
+            if read == 0 {
+                break;
+            }
+            if is_cancelled() {
+                return Err(BenchError::BlobCopyCancelled {
+                    digest: content.digest.hex.clone(),
+                });
+            }
+
+            let next = copied.checked_add(read as u64).ok_or_else(|| {
+                BenchError::Integrity(format!("blob {} byte count overflowed", content.digest.hex))
+            })?;
+            if next > content.byte_length {
+                return Err(BenchError::Integrity(format!(
+                    "blob {} length exceeds manifest {}",
+                    content.digest.hex, content.byte_length
+                )));
+            }
+            if next > max_bytes {
+                return Err(BenchError::BlobTooLarge {
+                    digest: content.digest.hex.clone(),
+                    declared_bytes: next,
+                    max_bytes,
+                });
+            }
+
+            destination
+                .write_all(&buffer[..read])
+                .map_err(|source| BenchError::BlobWrite { source })?;
+            hasher.update(&buffer[..read]);
+            copied = next;
+        }
+
+        if is_cancelled() {
+            return Err(BenchError::BlobCopyCancelled {
+                digest: content.digest.hex.clone(),
+            });
+        }
+        if copied != content.byte_length {
+            return Err(BenchError::Integrity(format!(
+                "blob {} length {} does not match manifest {}",
+                content.digest.hex, copied, content.byte_length
+            )));
+        }
+
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != content.digest.hex {
+            return Err(BenchError::Integrity(format!(
+                "blob {} failed digest verification (got {actual})",
+                content.digest.hex
+            )));
+        }
+
+        Ok(VerifiedBlobCopy {
+            digest: content.digest.clone(),
+            byte_length: copied,
+        })
     }
 
     pub fn verify_snapshot_blobs(&self, snapshot: &EvidenceSnapshot) -> BenchResult<()> {

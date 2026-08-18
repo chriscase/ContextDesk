@@ -25,6 +25,27 @@ pub enum BenchError {
     Duplicate(String),
     #[error("privacy: {0}")]
     Privacy(String),
+    #[error("blob copy cancelled: {digest}")]
+    BlobCopyCancelled { digest: String },
+    #[error(
+        "blob {digest} exceeds copy limit: declared {declared_bytes} bytes, limit {max_bytes} bytes"
+    )]
+    BlobTooLarge {
+        digest: String,
+        declared_bytes: u64,
+        max_bytes: u64,
+    },
+    #[error("blob {digest} read failed: {source}")]
+    BlobRead {
+        digest: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("blob destination write failed: {source}")]
+    BlobWrite {
+        #[source]
+        source: io::Error,
+    },
     #[error("io {path}: {source}")]
     Io {
         path: PathBuf,
