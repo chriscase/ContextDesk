@@ -142,7 +142,7 @@ impl std::fmt::Debug for WorkflowTriagePreflightV1 {
     }
 }
 
-/// Real Saved/Inline public-runtime engine backed by the existing workflow host.
+/// Real Standard/Saved/Inline public-runtime engine backed by the workflow host.
 ///
 /// The engine borrows a run-exclusive [`ToolHost`] and secret store. Policy and
 /// role-qualification stores are already-loaded, bounded host snapshots; this
@@ -189,9 +189,20 @@ impl<'a> WorkflowTriageEngineV1<'a> {
         &self,
         request: &ValidatedTriageRequest,
     ) -> Result<TriagePolicyV2, TriageEngineFailure> {
+        let standard_selection = matches!(
+            &request.request().policy,
+            TriagePolicySelectionV2::Standard { .. }
+        );
         let mut policy = match &request.request().policy {
-            TriagePolicySelectionV2::Standard { .. } => {
-                return Err(preflight_rejected());
+            TriagePolicySelectionV2::Standard { model } => {
+                let profile = self
+                    .config
+                    .providers
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == model.profile_id)
+                    .ok_or_else(preflight_rejected)?;
+                TriagePolicyV2::standard(model.clone(), !profile.local_only)
             }
             TriagePolicySelectionV2::Inline { document, .. } => {
                 serde_json::from_value(document.clone()).map_err(|_| preflight_rejected())?
@@ -207,7 +218,10 @@ impl<'a> WorkflowTriageEngineV1<'a> {
                 .map(|saved| saved.policy.clone())
                 .ok_or_else(preflight_rejected)?,
         };
-        if matches!(policy.mode, TriagePolicyMode::Standard) {
+        // A Standard document cannot enter through the configured-policy
+        // facade. Only the explicit Standard request shape may select the
+        // permanent one-finalizer default.
+        if matches!(policy.mode, TriagePolicyMode::Standard) && !standard_selection {
             return Err(preflight_rejected());
         }
         if let Some(deadline_ms) = request.request().overrides.deadline_ms {
@@ -432,7 +446,7 @@ mod tests {
         TRIAGE_REQUEST_SCHEMA_V2,
     };
     use cd_core::workspace::Workspace;
-    use cd_triage_runtime::{triage_with_policy, TriageEngine, TriageRuntimeError};
+    use cd_triage_runtime::{triage, triage_with_policy, TriageEngine, TriageRuntimeError};
 
     struct Fixture {
         _workspace: tempfile::TempDir,
@@ -545,6 +559,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standard_preflight_builds_the_exact_requested_single_model_policy() {
+        let mut fixture = fixture();
+        let registry = TriageCancellationRegistryV1::default();
+        let model = ModelRef {
+            profile_id: "profile:test".into(),
+            model_id: "model:test".into(),
+        };
+        let engine = WorkflowTriageEngineV1::new(
+            &mut fixture.host,
+            fixture.cache.path(),
+            fixture.config,
+            &fixture.secrets,
+            fixture.policies,
+            fixture.qualifications,
+            registry.clone(),
+        );
+        let request = ValidatedTriageRequest::new(request(TriagePolicySelectionV2::Standard {
+            model: model.clone(),
+        }))
+        .expect("request");
+        let prepared = engine.preflight(&request).await.expect("preflight");
+
+        assert_eq!(prepared.policy.mode, TriagePolicyMode::Standard);
+        assert!(prepared.policy.contributors.is_empty());
+        assert!(prepared.policy.reviewer.is_none());
+        let finalizer = prepared.policy.finalizer.as_ref().expect("finalizer");
+        assert_eq!(finalizer.slot_id, "standard-finalizer");
+        assert_eq!(finalizer.model, model);
+        assert_eq!(prepared.preflight.roles.len(), 1);
+        assert_eq!(prepared.preflight.roles[0].model, finalizer.model);
+        assert_eq!(prepared.input.request_fingerprint, request.fingerprint());
+        assert_eq!(registry.len(), 1);
+        registry.remove_if_owned(&prepared.cancellation, &prepared.cancel_owner);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[tokio::test]
     async fn inline_standard_document_fails_closed_and_cleans_registration() {
         let mut fixture = fixture();
         let registry = TriageCancellationRegistryV1::default();
@@ -604,6 +655,47 @@ mod tests {
         let error = triage_with_policy(&engine, request, None)
             .await
             .expect_err("missing corpus must fail before provider setup");
+        assert!(matches!(
+            error,
+            TriageRuntimeError::Engine(error)
+                if error.category() == TriageEngineFailureCategory::HostUnavailable
+        ));
+        drop(engine);
+
+        assert_eq!(fixture.host.log_corpus_scope(), Some("prior-scope"));
+        assert_eq!(fixture.host.active_log_corpus(), Some("prior-active"));
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn standard_facade_reaches_the_host_and_cleans_failed_preparation() {
+        let mut fixture = fixture();
+        fixture
+            .host
+            .set_log_corpus_scope(Some("prior-scope".into()));
+        fixture
+            .host
+            .set_active_log_corpus(Some("prior-active".into()));
+        let registry = TriageCancellationRegistryV1::default();
+        let request = request(TriagePolicySelectionV2::Standard {
+            model: ModelRef {
+                profile_id: "profile:test".into(),
+                model_id: "model:test".into(),
+            },
+        });
+        let engine = WorkflowTriageEngineV1::new(
+            &mut fixture.host,
+            fixture.cache.path(),
+            fixture.config,
+            &fixture.secrets,
+            fixture.policies,
+            fixture.qualifications,
+            registry.clone(),
+        );
+
+        let error = triage(&engine, request, None)
+            .await
+            .expect_err("missing corpus must fail during host preparation");
         assert!(matches!(
             error,
             TriageRuntimeError::Engine(error)

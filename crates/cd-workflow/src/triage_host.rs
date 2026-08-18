@@ -37,7 +37,7 @@ use crate::provider::{
     resolve_turn_inputs_from_profile_with_credential_cache, TurnProviderCredentialCache,
 };
 use crate::triage::compile_preflight;
-use crate::triage_production::{AuthorizedTriageBackendV1, TriageProductionAdapterRejectionV1};
+use crate::triage_production::AuthorizedTriageBackendV1;
 use crate::triage_production_runner::{
     resolve_v2_production, ResolvedTriageProductionV1, TriageProductionHooks,
     TriageProductionRunInput, TriageProductionRunResultV1, TriageProductionRunnerError,
@@ -478,14 +478,6 @@ pub async fn resolve_v2_host(
     let compiled = compile_preflight(policy, preflight)
         .map_err(|_| TriageHostError::Policy("policy_preflight_rejected".into()))?;
     validate_runtime_egress(cfg, policy, &compiled)?;
-    if compiled.mode == cd_core::multi_model::triage_policy::TriagePolicyMode::Standard {
-        return Err(TriageHostError::Runner(
-            TriageProductionRunnerError::Unsupported {
-                category: TriageProductionAdapterRejectionV1::StandardUsesEstablishedPath,
-                slot_ids: Vec::new(),
-            },
-        ));
-    }
     if input.deadline_ms == 0 || input.context_char_budget == 0 {
         return Err(TriageHostError::Policy("invalid_host_budget".into()));
     }

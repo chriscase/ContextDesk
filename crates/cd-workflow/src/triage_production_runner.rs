@@ -3,16 +3,17 @@
 //! [`crate::triage_production`] remains the narrow bridge to the established
 //! contribution runtime.  This module adds the missing orchestration seam: a
 //! resolver validates an exact, already-qualified backend set and a runner
-//! executes the canonical Enhanced/Advanced graph while retaining the shared
-//! SDK replay ledger.  It never discovers providers, reads credentials, opens
-//! sockets, or chooses a model.
+//! executes the canonical Standard or Enhanced/Advanced graph while retaining
+//! the shared SDK replay ledger.  It never discovers providers, reads
+//! credentials, opens sockets, or chooses a model.
 //!
 //! Contributors that fit the existing production contribution contract are
 //! deliberately sent through [`cd_core::multi_model::run_contribution_pipeline`].
 //! Timeline, reviewer, and finalizer stages use the same opaque
 //! [`cd_core::agent::ChatBackend`] binding but are validated by a host-supplied
 //! hook.  This keeps transport and host authority separate without inventing a
-//! second provider client or silently changing Standard mode.
+//! second provider client. Standard keeps its one-finalizer legacy event
+//! shape while consuming the same immutable host packet and validator hooks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -220,12 +221,6 @@ pub fn resolve_v2_production(
 ) -> Result<ResolvedTriageProductionV1, TriageProductionRunnerError> {
     let compiled =
         compile_preflight(policy, preflight).map_err(TriageProductionRunnerError::Policy)?;
-    if compiled.mode == TriagePolicyMode::Standard {
-        return Err(TriageProductionRunnerError::unsupported(
-            TriageProductionAdapterRejectionV1::StandardUsesEstablishedPath,
-            [],
-        ));
-    }
     if host_turn_deadline_ms == 0 {
         return Err(TriageProductionRunnerError::unsupported(
             TriageProductionAdapterRejectionV1::InvalidHostDeadline,
@@ -572,7 +567,7 @@ impl TriageProductionRunnerV1 {
         &self.resolution
     }
 
-    /// Execute canonical Enhanced/Advanced sequencing with host hooks.
+    /// Execute canonical Standard or Enhanced/Advanced sequencing with host hooks.
     pub async fn run<H: TriageProductionHooks + ?Sized>(
         &self,
         input: TriageProductionRunInput,
@@ -594,6 +589,9 @@ impl TriageProductionRunnerV1 {
         }
         let started = tokio::time::Instant::now();
         let mut ledger = TriageProductionEventLedgerV1::new_with_sink(&input, sink)?;
+        if self.resolution.compiled.mode == TriagePolicyMode::Standard {
+            return self.run_standard(input, hooks, ledger, started).await;
+        }
         let slots = &self.resolution.compiled.slots;
         let contributors = slots
             .iter()
@@ -838,9 +836,16 @@ impl TriageProductionRunnerV1 {
                                 .any(|code| code == "reviewer_not_required")))
                     })
             });
-        let validation_passed = !required_failed && interrupted.is_none();
+        let execution_succeeded = !required_failed && interrupted.is_none();
+        // Passing validation means the terminal can carry a grounded,
+        // authoritative answer. A successfully executed graph without such
+        // an answer is an honest partial, not a passed validation.
+        let grounded_final = execution_succeeded
+            && finalizer_answer
+                .as_ref()
+                .is_some_and(|answer| answer.answer.root_cause_established);
         ledger.push(TriageRunEventPayloadV2::Validation {
-            passed: validation_passed,
+            passed: grounded_final,
             reason_codes: reason_codes.clone(),
         });
         ledger.push(TriageRunEventPayloadV2::Correction {
@@ -861,10 +866,6 @@ impl TriageProductionRunnerV1 {
         // whose `root_cause_established` flag is false; keep that outcome an
         // honest partial rather than upgrading it merely because a finalizer
         // returned JSON.
-        let grounded_final = validation_passed
-            && finalizer_answer
-                .as_ref()
-                .is_some_and(|answer| answer.answer.root_cause_established);
         let accepted_evidence_ids = finalizer_answer
             .as_ref()
             .map(|answer| {
@@ -885,7 +886,7 @@ impl TriageProductionRunnerV1 {
             },
             validation_state: if grounded_final {
                 TriageValidationState::Passed
-            } else if validation_passed {
+            } else if execution_succeeded {
                 TriageValidationState::Partial
             } else {
                 TriageValidationState::Failed
@@ -939,6 +940,194 @@ impl TriageProductionRunnerV1 {
                 }
             }
         }
+        let terminal = if let Some(interruption) = interrupted {
+            match interruption {
+                Interruption::Cancelled => TriageRunEventPayloadV2::Cancelled {
+                    cancellation_id: input.cancellation_id,
+                    partial_result: Some(Box::new(result.clone())),
+                },
+                Interruption::TimedOut => TriageRunEventPayloadV2::TimedOut {
+                    category: "deadline".into(),
+                    partial_result: Some(Box::new(result.clone())),
+                },
+            }
+        } else if required_failed {
+            TriageRunEventPayloadV2::Failed {
+                category: "required_role_failed".into(),
+                partial_result: Some(Box::new(result.clone())),
+            }
+        } else {
+            TriageRunEventPayloadV2::Completed {
+                result: Box::new(result.clone()),
+            }
+        };
+        let completed = matches!(terminal, TriageRunEventPayloadV2::Completed { .. });
+        ledger.push(terminal);
+        let replay = ledger.finish()?;
+        Ok(TriageProductionRunResultV1 {
+            replay,
+            result,
+            completed,
+        })
+    }
+
+    /// Execute the permanent single-finalizer default without widening the
+    /// host-prepared packet or routing through the multi-model phase graph.
+    async fn run_standard<H: TriageProductionHooks + ?Sized>(
+        &self,
+        input: TriageProductionRunInput,
+        hooks: &H,
+        mut ledger: TriageProductionEventLedgerV1,
+        started: tokio::time::Instant,
+    ) -> Result<TriageProductionRunResultV1, TriageProductionRunnerError> {
+        let [slot] = self.resolution.compiled.slots.as_slice() else {
+            return Err(TriageProductionRunnerError::InvalidInput(
+                "standard_finalizer",
+            ));
+        };
+        if !matches!(slot.kind, TriageSlotKindV2::Finalizer) || slot.slot_id != "standard-finalizer"
+        {
+            return Err(TriageProductionRunnerError::InvalidInput(
+                "standard_finalizer",
+            ));
+        }
+
+        let mut interrupted = host_interruption(&input, started, self.resolution.host_deadline_ms);
+        let mut provider_calls = 0u32;
+        let initial_reconciliation =
+            reconciliation_from_attempts(std::slice::from_ref(slot), &[], true);
+        let (mut attempt, response) = if let Some(reason) = interrupted {
+            (not_run_attempt(&input.run_id, slot, reason), None)
+        } else {
+            self.run_generic_slot(
+                slot,
+                &input,
+                started,
+                hooks,
+                &initial_reconciliation,
+                &mut interrupted,
+                &mut provider_calls,
+            )
+            .await
+        };
+
+        let mut finalizer_answer = None;
+        if attempt.status == TriageAttemptStatus::Completed {
+            if let Some(response) = response.as_ref() {
+                let candidate = hooks
+                    .finalize(slot, response, &input.packet, &initial_reconciliation)
+                    .await;
+                if let Some(reason) =
+                    host_interruption(&input, started, self.resolution.host_deadline_ms)
+                {
+                    interrupted = Some(reason);
+                } else if let Some(answer) = candidate {
+                    if envelope_matches_packet(&answer, &input.packet) {
+                        finalizer_answer = Some(answer);
+                    } else {
+                        attempt.status = TriageAttemptStatus::Invalid;
+                        attempt.terminal_disposition = Some(TriageTerminalDispositionV1::Invalid);
+                        attempt
+                            .reason_codes
+                            .push("finalizer_envelope_unbound".into());
+                    }
+                }
+            }
+        }
+        if interrupted.is_some() {
+            finalizer_answer = None;
+        }
+        ledger.push(TriageRunEventPayloadV2::RoleAttempt {
+            attempt: attempt.clone(),
+        });
+
+        // This is the Standard terminal linearization point. Everything that
+        // can await (provider work and host validation) has completed. Observe
+        // cancellation/deadline once more before publishing reconciliation and
+        // validation; later signals are ordered after the committed result.
+        #[cfg(test)]
+        if let Some(cancel) = &self.terminal_commit_cancel {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        if interrupted.is_none() {
+            interrupted = host_interruption(&input, started, self.resolution.host_deadline_ms);
+        }
+        if interrupted.is_some() {
+            finalizer_answer = None;
+        }
+
+        let reconciliation =
+            reconciliation_from_standard_finalizer(slot, &attempt, finalizer_answer.as_ref());
+        ledger.push(TriageRunEventPayloadV2::Reconciliation {
+            summary: reconciliation.clone(),
+        });
+
+        let required_failed = !matches!(
+            attempt.status,
+            TriageAttemptStatus::Completed | TriageAttemptStatus::Abstained
+        );
+        let grounded_final = !required_failed
+            && interrupted.is_none()
+            && finalizer_answer
+                .as_ref()
+                .is_some_and(|answer| answer.answer.root_cause_established);
+        let mut reason_codes = attempt.reason_codes.clone();
+        if let Some(reason) = interrupted {
+            reason_codes.push(
+                match reason {
+                    Interruption::Cancelled => "cancelled",
+                    Interruption::TimedOut => "deadline",
+                }
+                .into(),
+            );
+        } else if finalizer_answer.is_none() && !required_failed {
+            reason_codes.push("no_authoritative_answer".into());
+        } else if !grounded_final {
+            reason_codes.push("root_cause_not_established".into());
+        }
+        let correction_applied = attempt.semantic_corrections.unwrap_or(0) > 0;
+        if correction_applied {
+            reason_codes.push("bounded_correction_applied".into());
+        }
+        reason_codes.sort();
+        reason_codes.dedup();
+
+        ledger.push(TriageRunEventPayloadV2::Validation {
+            passed: grounded_final,
+            reason_codes: reason_codes.clone(),
+        });
+        let accepted_evidence_ids = finalizer_answer
+            .as_ref()
+            .map(|answer| {
+                answer
+                    .answer
+                    .canonical_citations
+                    .iter()
+                    .map(|citation| citation.evidence_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let result = TriageResultV2 {
+            schema_id: TRIAGE_RESULT_SCHEMA_V2.into(),
+            run_id: input.run_id.clone(),
+            kind: if grounded_final {
+                TriageResultKind::GroundedFinal
+            } else {
+                TriageResultKind::HonestPartial
+            },
+            validation_state: if grounded_final {
+                TriageValidationState::Passed
+            } else if required_failed || interrupted.is_some() {
+                TriageValidationState::Failed
+            } else {
+                TriageValidationState::Partial
+            },
+            packet_id: input.packet.packet_id().into(),
+            reconciliation,
+            answer: finalizer_answer,
+            accepted_evidence_ids,
+            reason_codes,
+        };
         let terminal = if let Some(interruption) = interrupted {
             match interruption {
                 Interruption::Cancelled => TriageRunEventPayloadV2::Cancelled {
@@ -1866,6 +2055,60 @@ fn reconciliation_from_attempts(
     }
 }
 
+/// Derive the legacy one-finalizer summary from the exact attempt and the
+/// independently packet-validated answer. Model prose never contributes ids
+/// here unless the host validator already accepted it into the envelope.
+fn reconciliation_from_standard_finalizer(
+    slot: &CompiledRoleSlotV2,
+    attempt: &TriageRoleAttemptV1,
+    answer: Option<&AnswerEnvelopeV1>,
+) -> TriageReconciliationV1 {
+    let completed = matches!(
+        attempt.status,
+        TriageAttemptStatus::Completed | TriageAttemptStatus::Abstained
+    );
+    let mut supported_claim_ids = Vec::new();
+    let mut gap_ids = Vec::new();
+    if let Some(answer) = answer {
+        for claim in answer
+            .answer
+            .candidates
+            .iter()
+            .flat_map(|candidate| candidate.claims.iter())
+        {
+            if claim.claim_kind == ClaimKind::MissingEvidence {
+                gap_ids.push(claim.claim_id.clone());
+            } else if claim.status == ClaimStatus::Supported {
+                supported_claim_ids.push(claim.claim_id.clone());
+            }
+        }
+    }
+    supported_claim_ids.sort();
+    supported_claim_ids.dedup();
+    gap_ids.sort();
+    gap_ids.dedup();
+    let root_cause_established =
+        answer.is_some_and(|answer| completed && answer.answer.root_cause_established);
+    TriageReconciliationV1 {
+        state: if root_cause_established {
+            "supported"
+        } else if completed {
+            "insufficient_evidence"
+        } else {
+            "deterministic_baseline"
+        }
+        .into(),
+        configured_role_slots: 1,
+        completed_role_slots: u32::from(completed),
+        distinct_models: u32::from(completed && attempt.model.as_ref() == Some(&slot.model)),
+        distinct_gateways: u32::from(completed && attempt.model.as_ref() == Some(&slot.model)),
+        supported_claim_ids,
+        conflict_ids: Vec::new(),
+        gap_ids,
+        root_cause_established,
+    }
+}
+
 fn reviewer_needed(
     condition: Option<ReviewerConditionV2>,
     report: &TriageReconciliationV1,
@@ -2557,6 +2800,304 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default, Clone, Copy)]
+    struct AcceptingNoAnswerHooks;
+
+    #[async_trait]
+    impl TriageProductionHooks for AcceptingNoAnswerHooks {
+        async fn validate(
+            &self,
+            _slot: &CompiledRoleSlotV2,
+            _response: &ChatCompletion,
+            _packet: &FastTriagePacketV1,
+            _reconciliation: &TriageReconciliationV1,
+        ) -> TriageValidationDecision {
+            TriageValidationDecision::accepted()
+        }
+
+        async fn correction_messages(
+            &self,
+            _slot: &CompiledRoleSlotV2,
+            _response: &ChatCompletion,
+            _reason_codes: &[String],
+            _packet: &FastTriagePacketV1,
+            _reconciliation: &TriageReconciliationV1,
+        ) -> Option<Vec<ChatMessage>> {
+            None
+        }
+    }
+
+    fn standard_request(
+        model: cd_core::model_ref::ModelRef,
+    ) -> cd_core::triage_sdk::TriageRequestV2 {
+        cd_core::triage_sdk::TriageRequestV2 {
+            schema_id: cd_core::triage_sdk::TRIAGE_REQUEST_SCHEMA_V2.into(),
+            run_id: "run-1".into(),
+            privacy: PacketPrivacyBoundary::OwnerOnly,
+            task: "what happened?".into(),
+            scope: cd_core::triage_sdk::TriageScopeV1 {
+                corpus_id: "corpus".into(),
+                corpus_revision: None,
+                source_ids: Vec::new(),
+            },
+            policy: cd_core::triage_sdk::TriagePolicySelectionV2::Standard { model },
+            overrides: cd_core::triage_sdk::TriageRequestOverridesV1::default(),
+            cancellation_id: "cancel-1".into(),
+        }
+    }
+
+    fn inline_request(policy: &TriagePolicyV2) -> cd_core::triage_sdk::TriageRequestV2 {
+        cd_core::triage_sdk::TriageRequestV2 {
+            schema_id: cd_core::triage_sdk::TRIAGE_REQUEST_SCHEMA_V2.into(),
+            run_id: "run-1".into(),
+            privacy: PacketPrivacyBoundary::OwnerOnly,
+            task: "what happened?".into(),
+            scope: cd_core::triage_sdk::TriageScopeV1 {
+                corpus_id: "corpus".into(),
+                corpus_revision: None,
+                source_ids: Vec::new(),
+            },
+            policy: cd_core::triage_sdk::TriagePolicySelectionV2::Inline {
+                schema_id: cd_core::multi_model::triage_policy::TRIAGE_POLICY_SCHEMA_V2.into(),
+                document: serde_json::to_value(policy).expect("policy JSON"),
+            },
+            overrides: cd_core::triage_sdk::TriageRequestOverridesV1::default(),
+            cancellation_id: "cancel-1".into(),
+        }
+    }
+
+    fn standard_runner(
+        outcome: CorrectionBackendOutcome,
+        host_deadline_ms: u64,
+    ) -> (
+        TriageProductionRunnerV1,
+        cd_core::model_ref::ModelRef,
+        Arc<AtomicUsize>,
+    ) {
+        let model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-standard".into(),
+            model_id: "model-standard".into(),
+        };
+        let policy = TriagePolicyV2::standard(model.clone(), false);
+        let preflight = TriagePolicyPreflightV2 {
+            roles: vec![cd_core::multi_model::triage_policy::RolePreflightV2 {
+                slot_id: "standard-finalizer".into(),
+                model: model.clone(),
+                kind: TriageSlotKindV2::Finalizer,
+                available: true,
+                qualification: cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+                remote: false,
+                qualification_schema_id: None,
+                workflow_id: None,
+                protocol_fingerprint: None,
+            }],
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = CorrectionBackend {
+            outcomes: Mutex::new(VecDeque::from([outcome])),
+            calls: Arc::clone(&calls),
+            cancel_after_dispatch: None,
+        };
+        let resolved = resolve_v2_production(
+            &policy,
+            &preflight,
+            vec![AuthorizedTriageBackendV1 {
+                slot_id: "standard-finalizer".into(),
+                model: model.clone(),
+                backend: Arc::new(backend),
+            }],
+            host_deadline_ms,
+            100_000,
+            FastTriageNeighborhoodBudget::default(),
+        )
+        .expect("Standard resolves exact finalizer backend");
+        (TriageProductionRunnerV1::new(resolved), model, calls)
+    }
+
+    fn bound_standard_input(
+        model: cd_core::model_ref::ModelRef,
+    ) -> (
+        cd_core::triage_sdk::TriageRequestV2,
+        TriageProductionRunInput,
+    ) {
+        let request = standard_request(model);
+        let mut run_input = input();
+        run_input.request_fingerprint =
+            cd_triage_runtime::canonical_request_fingerprint(&request).expect("fingerprint");
+        (request, run_input)
+    }
+
+    fn assert_standard_graph(replay: &TriageReplayV1) {
+        replay.validate().expect("valid Standard replay");
+        assert_eq!(replay.events.len(), 6);
+        assert!(matches!(
+            replay.events[0].event,
+            TriageRunEventPayloadV2::RunStarted { .. }
+        ));
+        assert!(matches!(
+            replay.events[1].event,
+            TriageRunEventPayloadV2::PacketReady { .. }
+        ));
+        assert!(matches!(
+            replay.events[2].event,
+            TriageRunEventPayloadV2::RoleAttempt { .. }
+        ));
+        assert!(matches!(
+            replay.events[3].event,
+            TriageRunEventPayloadV2::Reconciliation { .. }
+        ));
+        assert!(matches!(
+            replay.events[4].event,
+            TriageRunEventPayloadV2::Validation { .. }
+        ));
+        assert!(replay.events[5].event.is_terminal());
+        assert!(!replay.events.iter().any(|event| {
+            matches!(
+                event.event,
+                TriageRunEventPayloadV2::PreliminaryReconciliation { .. }
+                    | TriageRunEventPayloadV2::FinalReconciliation { .. }
+                    | TriageRunEventPayloadV2::Correction { .. }
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn standard_production_runner_returns_exact_grounded_runtime_replay() {
+        let (runner, model, backend_calls) =
+            standard_runner(CorrectionBackendOutcome::Success, 60_000);
+        let (request, run_input) = bound_standard_input(model.clone());
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let run = runner
+            .run(
+                run_input,
+                &FinalizerHook {
+                    calls: Arc::clone(&hook_calls),
+                    delay_ms: 0,
+                    cancel_after_finalize: None,
+                    forge_binding: false,
+                },
+            )
+            .await
+            .expect("grounded Standard run");
+
+        assert_standard_graph(&run.replay);
+        assert!(run.completed);
+        assert_eq!(run.result.kind, TriageResultKind::GroundedFinal);
+        assert_eq!(run.result.validation_state, TriageValidationState::Passed);
+        assert!(run.result.reconciliation.root_cause_established);
+        assert_eq!(run.result.reconciliation.supported_claim_ids, ["claim-a"]);
+        assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
+        let attempt = match &run.replay.events[2].event {
+            TriageRunEventPayloadV2::RoleAttempt { attempt } => attempt,
+            _ => unreachable!(),
+        };
+        assert_eq!(attempt.role_slot_id, "standard-finalizer");
+        assert_eq!(attempt.model.as_ref(), Some(&model));
+        assert!(matches!(
+            run.replay.events[4].event,
+            TriageRunEventPayloadV2::Validation { passed: true, .. }
+        ));
+        cd_triage_runtime::replay(request, run.replay)
+            .expect("runtime accepts exact Standard bindings");
+    }
+
+    #[tokio::test]
+    async fn standard_without_authoritative_root_is_an_honest_completed_partial() {
+        let (runner, model, backend_calls) =
+            standard_runner(CorrectionBackendOutcome::Success, 60_000);
+        let (request, run_input) = bound_standard_input(model);
+        let run = runner
+            .run(run_input, &AcceptingNoAnswerHooks)
+            .await
+            .expect("partial Standard run");
+
+        assert_standard_graph(&run.replay);
+        assert!(run.completed);
+        assert_eq!(run.result.kind, TriageResultKind::HonestPartial);
+        assert_eq!(run.result.validation_state, TriageValidationState::Partial);
+        assert!(!run.result.reconciliation.root_cause_established);
+        assert!(run.result.answer.is_none());
+        assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            run.replay.events[4].event,
+            TriageRunEventPayloadV2::Validation { passed: false, .. }
+        ));
+        cd_triage_runtime::replay(request, run.replay)
+            .expect("runtime accepts honest Standard partial");
+    }
+
+    #[tokio::test]
+    async fn standard_pre_cancellation_never_contacts_provider() {
+        let (runner, model, backend_calls) =
+            standard_runner(CorrectionBackendOutcome::Success, 60_000);
+        let (request, mut run_input) = bound_standard_input(model);
+        run_input.cancel = Some(Arc::new(AtomicBool::new(true)));
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let run = runner
+            .run(
+                run_input,
+                &FinalizerHook {
+                    calls: Arc::clone(&hook_calls),
+                    delay_ms: 0,
+                    cancel_after_finalize: None,
+                    forge_binding: false,
+                },
+            )
+            .await
+            .expect("cancelled Standard replay");
+
+        assert_standard_graph(&run.replay);
+        assert!(!run.completed);
+        assert_eq!(backend_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            run.replay.events[5].event,
+            TriageRunEventPayloadV2::Cancelled { .. }
+        ));
+        cd_triage_runtime::replay(request, run.replay)
+            .expect("runtime accepts exact cancelled Standard replay");
+    }
+
+    #[tokio::test]
+    async fn standard_provider_failure_and_deadline_keep_typed_six_event_terminals() {
+        for (outcome, deadline_ms, expected_status, expected_terminal) in [
+            (
+                CorrectionBackendOutcome::Failure,
+                60_000,
+                TriageAttemptStatus::Failed,
+                "failed",
+            ),
+            (
+                CorrectionBackendOutcome::Sleep(Duration::from_millis(25)),
+                5,
+                TriageAttemptStatus::TimedOut,
+                "timed_out",
+            ),
+        ] {
+            let (runner, model, backend_calls) = standard_runner(outcome, deadline_ms);
+            let (request, run_input) = bound_standard_input(model);
+            let run = runner
+                .run(run_input, &AcceptingNoAnswerHooks)
+                .await
+                .expect("typed Standard terminal");
+            assert_standard_graph(&run.replay);
+            let attempt = match &run.replay.events[2].event {
+                TriageRunEventPayloadV2::RoleAttempt { attempt } => attempt,
+                _ => unreachable!(),
+            };
+            assert_eq!(attempt.status, expected_status);
+            assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
+            match (&run.replay.events[5].event, expected_terminal) {
+                (TriageRunEventPayloadV2::Failed { .. }, "failed")
+                | (TriageRunEventPayloadV2::TimedOut { .. }, "timed_out") => {}
+                (terminal, expected) => panic!("expected {expected}, got {terminal:?}"),
+            }
+            cd_triage_runtime::replay(request, run.replay)
+                .expect("runtime accepts typed Standard failure");
+        }
+    }
+
     #[tokio::test]
     async fn accepted_finalizer_becomes_grounded_final_once() {
         let model = cd_core::model_ref::ModelRef {
@@ -2933,6 +3474,7 @@ mod tests {
             "contradictions": []
         })
         .to_string();
+        let request = inline_request(&policy);
         let resolved = resolve_v2_production(
             &policy,
             &preflight,
@@ -2950,8 +3492,11 @@ mod tests {
             FastTriageNeighborhoodBudget::default(),
         )
         .expect("timeline role resolves");
+        let mut run_input = input();
+        run_input.request_fingerprint =
+            cd_triage_runtime::canonical_request_fingerprint(&request).expect("fingerprint");
         let result = TriageProductionRunnerV1::new(resolved)
-            .run(input(), &RejectingTriageProductionHooks)
+            .run(run_input, &RejectingTriageProductionHooks)
             .await
             .expect("timeline runner succeeds");
         assert!(result.completed);
@@ -2967,6 +3512,19 @@ mod tests {
                         && attempt.physical_provider_calls == Some(1)
             )
         }));
+        assert!(matches!(
+            result
+                .replay
+                .events
+                .iter()
+                .find_map(|event| match event.event {
+                    TriageRunEventPayloadV2::Validation { passed, .. } => Some(passed),
+                    _ => None,
+                }),
+            Some(false)
+        ));
+        cd_triage_runtime::replay(request, result.replay)
+            .expect("runtime accepts a completed configured-policy honest partial");
     }
 
     #[test]

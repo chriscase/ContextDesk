@@ -1,9 +1,8 @@
 # Triage runtime and evaluation-bench bridge v1
 
-**Status:** Saved/Inline production host integration is implemented locally on
-top of the validated #918/#920 baseline. Standard prepared-packet execution and
-live same-snapshot bench execution remain open; this is not a live-bench or
-release-readiness claim.
+**Status:** Standard/Saved/Inline production host integration is implemented
+locally on top of the validated #918/#920 baseline. Live same-snapshot bench
+execution remains open; this is not a live-bench or release-readiness claim.
 
 ## Goal
 
@@ -28,11 +27,11 @@ The validated baseline already contains:
   `TriageRun` rows.
 
 This integration adds the public runtime facade, decouples validated replay
-ingestion from the mock, and connects Saved/Inline CLI and desktop execution to
-one `cd-workflow` engine with canonical request identity, exact cancellation,
+ingestion from the mock, and connects Standard/Saved/Inline execution to one
+`cd-workflow` engine with canonical request identity, exact cancellation,
 validated provisional events, and an authoritative returned replay. The
-remaining pieces are Standard execution behind the facade and a provable live
-bridge from a bench evidence snapshot to a ContextDesk corpus and packet.
+remaining piece is a provable live bridge from a bench evidence snapshot to a
+ContextDesk corpus and packet.
 
 ## Dependency direction
 
@@ -104,20 +103,19 @@ desktop returns the authoritative replay across IPC; TypeScript validates it
 and preserves the existing terminal-event client API. The adapter does not
 create another provider client or policy compiler.
 
-Standard must preserve one exact gateway-scoped model and the established
+Standard preserves one exact gateway-scoped model and the established
 deterministic linked-log behavior. Before provider synthesis begins, its host
-preflight must capture an immutable broad-triage packet from the pinned corpus,
+captures an immutable broad-triage packet from the pinned corpus,
 event/template/suppression revisions, and deterministic brief. The execution
-phase must consume that prepared packet rather than silently rebuilding or
-widening it. Dynamic evidence outside that packet is not permitted in an SDK
-Standard run; an established-path fallback that would widen evidence becomes
-an honest partial/refusal in the SDK surface.
+phase consumes that prepared packet rather than rebuilding or widening it.
+Dynamic evidence outside that packet is not permitted in an SDK Standard run;
+scope or binding drift fails closed.
 
 Standard replay shape remains:
 
 ```text
 run_started -> packet_ready -> standard-finalizer attempt
-            -> reconciliation -> validation -> optional correction -> terminal
+            -> reconciliation -> validation -> terminal
 ```
 
 A grounded final requires a host-validated `AnswerEnvelopeV1` whose binding
@@ -232,12 +230,13 @@ Hermetic tests must cover:
   comparison reports without special report code;
 - default dependency-direction checks and optional-live feature isolation.
 
-The current Saved/Inline slice covers facade dispatch and canonical identity,
-exact cancellation registration/cleanup, all typed terminal projections,
-workflow host cleanup after failed corpus binding, CLI/Tauri façade selection,
-authoritative desktop replay return, TypeScript replay validation, and the
-existing default dependency direction. Standard and live materialization items
-above remain required before their corresponding capability claims.
+The current production-host slice covers Standard and configured-policy facade
+dispatch, canonical identity, exact cancellation registration/cleanup, all
+typed terminal projections, Standard's exact six-event graph and model binding,
+workflow host cleanup after failed corpus binding, CLI/Tauri configured-policy
+selection, authoritative desktop replay return, TypeScript replay validation,
+and the existing default dependency direction. Live materialization items above
+remain required before a same-snapshot live-bench capability claim.
 
 Focused fast lanes should cover the leaf SDK, runtime facade, bench, and
 adapter. Production-path workflow tests belong in the existing Rust shards.

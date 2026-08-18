@@ -184,11 +184,12 @@ the desktop receives no privileged orchestration path.
 
 ## Current production adapter boundary
 
-The trusted-host adapter converts an admitted Enhanced/Advanced plan into the
-established linked-log contribution runtime for typed contributors, timeline
-analysis, finalization, and conditional review. That reuses the existing
-immutable host packet, provider backends, cancellation, budgets, stage events,
-validation, reconciliation, renderer, and cleanup.
+The trusted-host adapter executes Standard through one exact finalizer and
+converts admitted Enhanced/Advanced plans into the established linked-log
+contribution runtime for typed contributors, timeline analysis, finalization,
+and conditional review. Both paths reuse one immutable host packet, exact
+provider backends, cancellation, budgets, validation, reconciliation, and
+cleanup.
 
 The trusted host resolver now binds this production runner for the explicit CLI
 `triage run --request ...` surface. Live preflight is derived only from the
@@ -198,11 +199,12 @@ rejected as runtime authority before application state is loaded. The resolver
 resolves the exact
 corpus, packet, profile, protected-file credentials, qualified model ids, and
 backend through the existing plumbing, then returns the shared typed replay and
-result. It refuses Standard (which stays on the established single-model
-route) and any role or deadline semantics the production runtime cannot
-enforce. Tauri derives the same host-owned preflight facts; broader GUI and
-server live selection must continue to call this resolver rather than recreate
-it. See
+result. Standard retains the established single-model event shape behind
+`cd_triage_runtime::triage`; configured policies use
+`cd_triage_runtime::triage_with_policy`. Unsupported role, scope, identity, or
+deadline semantics still fail closed. Tauri derives the same host-owned
+preflight facts; broader GUI and server live selection must continue to call
+this resolver rather than recreate it. See
 [`TRIAGE_POLICY_V2_PRODUCTION_ADAPTER_V1.md`](../testing/TRIAGE_POLICY_V2_PRODUCTION_ADAPTER_V1.md).
 
 ## Release proof

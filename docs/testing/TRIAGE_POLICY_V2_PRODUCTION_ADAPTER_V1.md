@@ -1,7 +1,7 @@
 # Triage Policy V2 production adapter — contributor subset V1
 
-Status: **production-path adapter and public-runtime host façade implemented;
-live execution remains exact-role-qualification-gated**
+Status: **production-path adapters and public-runtime host façade implemented;
+configured-policy live execution remains exact-role-qualification-gated**
 
 This slice bridges the exact, pure `TriagePolicyV2` compiler output to the
 existing linked-log `ContributionRuntime`. It intentionally prepares only the
@@ -37,18 +37,20 @@ endpoints, qualification storage, corpora, or retrieval state. A trusted Rust
 host resolves those facts first and supplies exact `RolePreflightV2` records
 plus opaque authorized backends. The compiler remains the only policy compiler.
 The resolver seam is shared by CLI and Tauri through
-`WorkflowTriageEngineV1` and `cd_triage_runtime::triage_with_policy`. Live
-Enhanced/Advanced execution fails closed until every required host-owned exact
-V2 role qualification record exists. Provider-free policy validation may still
-use an explicit preflight document; that document is never live execution
-authority.
+`WorkflowTriageEngineV1`, `cd_triage_runtime::triage`, and
+`cd_triage_runtime::triage_with_policy`. Standard uses a dedicated one-finalizer
+runner over the same immutable host packet. Live Enhanced/Advanced execution
+fails closed until every required host-owned exact V2 role qualification record
+exists. Provider-free policy validation may still use an explicit preflight
+document; that document is never live execution authority.
 
 ## Typed pre-provider refusals
 
 The adapter returns a content-free category and inert slot ids before it can
 return any runnable backend when it sees:
 
-- Standard mode (the established single-model path remains authoritative);
+- Standard mode at the contributor-only sub-adapter boundary (the top-level
+  production runner handles it through the dedicated one-finalizer graph);
 - a finalizer or reviewer (timeline analysis is now a typed contributor);
 - an optional role dropout the current production event stream could omit;
 - a missing, duplicate, extra, or exact-identity-mismatched backend;
@@ -84,15 +86,20 @@ The adapter test proves:
    non-root answer rendering are reused;
 3. the existing cooperative cancellation signal prevents every provider call
    and accounts every remaining role as cancelled;
-4. Standard, finalizer, reviewer, optional-dropout, identity, and deadline
-   mismatches refuse before a runtime is returned; a qualified timeline role
-   is admitted and remains typed throughout the runtime binding.
+4. the contributor-only sub-adapter still refuses Standard, finalizer,
+   reviewer, optional-dropout, identity, and deadline mismatches before a
+   runtime is returned; the top-level runner separately proves Standard's exact
+   model binding and six-event terminal graph;
+5. a qualified timeline role is admitted and remains typed throughout the
+   runtime binding.
 
 ## Not proven / residual product blocker
 
-- CLI and Tauri now select the same public-runtime workflow engine, emit only
-  request-bound validated provisional events, and retain the authoritative
-  replay. Standard remains on the established path.
+- CLI and Tauri configured-policy execution select the same public-runtime
+  workflow engine, emit only request-bound validated provisional events, and
+  retain the authoritative replay. The public Standard façade now reaches that
+  engine's dedicated prepared-packet path without changing the existing CLI or
+  desktop default selection behavior.
 - Generic capability reports cannot authorize an exact V2 role. Dedicated
   qualification records are bound to profile, endpoint fingerprint, exact
   catalog model, protocol, and role kind; the desktop refreshes its in-memory
@@ -104,7 +111,7 @@ The adapter test proves:
   additional host/runtime coverage.
 - No provider, gateway, credential store, live corpus, or network was used.
 - This does not establish live compatibility, usefulness, cost, release
-  readiness, or full Triage Policy V2 execution.
+  readiness, or same-snapshot bench execution.
 
 Handbook impact: the Triage Policy V2 row remains **Partial** and now records
 the exact contributor-only production overlap and its typed refusals.
