@@ -247,8 +247,12 @@ timeout, and cancellation replays, Standard's exact six-event graph and model
 binding, workflow host cleanup after failed corpus binding, CLI/Tauri
 configured-policy selection, authoritative desktop replay return, Rust and
 TypeScript replay validation parity, and the existing default dependency
-direction. Live materialization items above remain required before a
-same-snapshot live-bench capability claim.
+direction. The bounded live-bench slice now covers materialization refusal
+cases, replay ingestion independent of the deterministic mock, one
+same-snapshot packet/corpus reused across bounded candidates, owner-only and
+share-safe projections, and comparison-report attribution. Broader visibility
+shapes, citation mapping, user-facing orchestration, and release integration
+remain required before a release-readiness claim.
 
 Focused fast lanes should cover the leaf SDK, runtime facade, bench, and
 adapter. Production-path workflow tests belong in the existing Rust shards.
