@@ -15,11 +15,10 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use cd_core::agent::build_fast_triage_packet;
-use cd_core::chat::{ChatCompletion, ChatMessage, Role};
+use cd_core::chat::{ChatCompletion, ChatMessage};
 use cd_core::config::AppConfig;
 use cd_core::fast_triage::{
-    clock_compatibility_from_time_quality, fast_triage_evidence_block, fast_triage_system_contract,
-    FastTriageNeighborhoodBudget, FastTriagePacketV1,
+    clock_compatibility_from_time_quality, FastTriageNeighborhoodBudget, FastTriagePacketV1,
 };
 use cd_core::investigation_answer::{validate_model_answer, AnswerEnvelopeV1};
 use cd_core::investigation_answer::{AnswerBindingV1, LogSnapshotRevisionV1};
@@ -642,26 +641,11 @@ impl TriageProductionHooks for HostValidatedAnswerHooks {
         if !matches!(slot.kind, TriageSlotKindV2::Finalizer) {
             return None;
         }
-        Some(vec![
-            ChatMessage {
-                role: Role::System,
-                content: fast_triage_system_contract(),
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            ChatMessage {
-                role: Role::User,
-                content: format!(
-                    "The previous proposal was rejected for bounded categories: {}. Correct it once from the unchanged host packet.\n\nHOST-AUTHORED EVIDENCE MANIFEST (the complete permitted identifier boundary, with host role, scope, and chronology ordinal; JSON):\n{}\n{}\nHOST-AUTHORED OUTPUT SCAFFOLD (copy this exact outer shape; replace empty arrays with grounded claim objects using only permitted evidence ids):\n{}\nReturn only the completed JSON object.",
-                    reason_codes.join(","),
-                    packet.manifest_json(),
-                    fast_triage_evidence_block(packet),
-                    packet.scaffold_json(),
-                ),
-                tool_call_id: None,
-                tool_calls: None,
-            },
-        ])
+        Some(crate::triage_production_runner::finalizer_messages(
+            packet,
+            None,
+            Some(reason_codes),
+        ))
     }
 
     async fn finalize(
@@ -1883,5 +1867,148 @@ mod tests {
             .await;
         assert!(!decision.accepted);
         assert_eq!(decision.reason_codes, vec!["typed_role_proposal_required"]);
+    }
+
+    fn two_candidate_packet() -> FastTriagePacketV1 {
+        let revision = LogSnapshotRevisionV1 {
+            event_revision: 1,
+            template_analysis_revision: 1,
+            suppression_revision: 1,
+        };
+        let entries = vec![
+            HostEvidenceEntry {
+                evidence_id: "e:c1:1".into(),
+                candidate_id: "c1".into(),
+                source_label: "synthetic".into(),
+                locator: "seq=1".into(),
+                corpus_id: "corpus:test".into(),
+                revision,
+                role: EvidenceRole::Neutral,
+                content: "synthetic evidence one".into(),
+            },
+            HostEvidenceEntry {
+                evidence_id: "e:c2:2".into(),
+                candidate_id: "c2".into(),
+                source_label: "synthetic".into(),
+                locator: "seq=2".into(),
+                corpus_id: "corpus:test".into(),
+                revision,
+                role: EvidenceRole::Neutral,
+                content: "synthetic evidence two".into(),
+            },
+        ];
+        let binding = AnswerBindingV1 {
+            session_id: "session:test".into(),
+            turn_id: "turn:test".into(),
+            corpus_id: "corpus:test".into(),
+            revision,
+            ledger_digest: HostEvidenceLedger::digest(&entries),
+        };
+        FastTriagePacketV1::from_ledger(
+            HostEvidenceLedger::new(binding, entries).expect("ledger"),
+            None,
+            true,
+        )
+    }
+
+    fn completion(body: impl Into<String>) -> ChatCompletion {
+        ChatCompletion::from_parts(body.into(), Vec::new(), "stop")
+    }
+
+    #[tokio::test]
+    async fn finalizer_prompts_describe_shape_and_include_host_identifier_manifest() {
+        let packet = packet();
+        let rejected = completion("UNIQUE_REJECTED_PROPOSAL_BODY");
+        let messages = HostValidatedAnswerHooks::default()
+            .correction_messages(
+                &finalizer(),
+                &rejected,
+                &["parse".into()],
+                &packet,
+                &reconciliation(),
+            )
+            .await
+            .expect("finalizer correction");
+        let system = &messages[0].content;
+        let user = &messages[1].content;
+        assert_eq!(
+            system.as_str(),
+            cd_core::investigation_answer::investigation_answer_v1_system_contract()
+        );
+        assert!(system.contains(cd_core::investigation_answer::SCHEMA_V1));
+        assert!(system.contains("`candidates`"));
+        assert!(user.contains(&packet.manifest_json()));
+        assert!(user.contains(&packet.scaffold_json()));
+        assert!(user.contains("c1"));
+        assert!(user.contains("e:c1:1"));
+        assert!(user.contains("HOST VALIDATION CATEGORY: parse"));
+        assert!(user.contains("Copy the host scaffold"));
+        assert!(user.contains("first character `{`"));
+        assert!(!user.contains("UNIQUE_REJECTED_PROPOSAL_BODY"));
+        assert!(!system.contains("UNIQUE_REJECTED_PROPOSAL_BODY"));
+    }
+
+    #[tokio::test]
+    async fn finalizer_hook_rejects_malformed_unknown_field_and_wrong_scope() {
+        let hooks = HostValidatedAnswerHooks::default();
+        let malformed = hooks
+            .validate(
+                &finalizer(),
+                &completion("UNIQUE_REJECTED_NOT_JSON"),
+                &packet(),
+                &reconciliation(),
+            )
+            .await;
+        assert!(!malformed.accepted);
+        assert_eq!(malformed.reason_codes, vec!["parse"]);
+
+        let unknown_field = hooks
+            .validate(
+                &finalizer(),
+                &completion(
+                    serde_json::json!({
+                        "schema": cd_core::investigation_answer::SCHEMA_V1,
+                        "candidates": [{
+                            "candidate_id": "c1",
+                            "observations": [{
+                                "claim_id": "claim-1",
+                                "text": "observed",
+                                "evidence_ids": ["e:c1:1"]
+                            }]
+                        }],
+                        "root_cause_established": true
+                    })
+                    .to_string(),
+                ),
+                &packet(),
+                &reconciliation(),
+            )
+            .await;
+        assert!(!unknown_field.accepted);
+        assert_eq!(unknown_field.reason_codes, vec!["parse"]);
+
+        let wrong_scope = hooks
+            .validate(
+                &finalizer(),
+                &completion(
+                    serde_json::json!({
+                        "schema": cd_core::investigation_answer::SCHEMA_V1,
+                        "candidates": [{
+                            "candidate_id": "c1",
+                            "observations": [{
+                                "claim_id": "claim-1",
+                                "text": "observed",
+                                "evidence_ids": ["e:c2:2"]
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ),
+                &two_candidate_packet(),
+                &reconciliation(),
+            )
+            .await;
+        assert!(!wrong_scope.accepted);
+        assert_eq!(wrong_scope.reason_codes, vec!["wrong_scope"]);
     }
 }

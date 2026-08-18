@@ -24,12 +24,12 @@ use async_trait::async_trait;
 use cd_core::agent::estimate_context_chars;
 use cd_core::chat::{ChatCompletion, ChatMessage, Role};
 use cd_core::extension_contract::PacketPrivacyBoundary;
-use cd_core::fast_triage::{
-    fast_triage_messages, FastTriageNeighborhoodBudget, FastTriagePacketV1,
-};
+use cd_core::fast_triage::{FastTriageNeighborhoodBudget, FastTriagePacketV1};
 use cd_core::injection::wrap_untrusted;
 use cd_core::investigation_answer::{
-    AnswerEnvelopeV1, CanonicalCitationV1, ClaimKind, ClaimStatus, EvidenceRole, HostEvidenceLedger,
+    investigation_answer_v1_correction_instruction, investigation_answer_v1_system_contract,
+    AnswerEnvelopeV1, CanonicalCitationV1, ClaimKind, ClaimStatus, EvidenceRole,
+    HostEvidenceLedger,
 };
 use cd_core::multi_model::contribution_pipeline::{
     run_contribution_pipeline, ContributionBackendSlot, ContributionPipelineInputs,
@@ -2047,17 +2047,7 @@ pub(crate) fn role_messages(
     kind: TriageSlotKindV2,
 ) -> Vec<ChatMessage> {
     if matches!(kind, TriageSlotKindV2::Finalizer) {
-        // The finalizer is accepted only through the host's typed answer
-        // validator. Give it the exact same manifest/evidence/scaffold
-        // contract as the fast-triage route, rather than relying on a loose
-        // generic instruction that providers may satisfy with prose or
-        // schema-incomplete JSON.
-        return fast_triage_messages(
-            user_text,
-            packet,
-            &cd_core::fast_triage::fast_triage_evidence_block(packet),
-            None,
-        );
+        return finalizer_messages(packet, Some(user_text), None);
     }
     vec![
         ChatMessage {
@@ -2078,6 +2068,69 @@ pub(crate) fn role_messages(
             tool_calls: None,
         },
     ]
+}
+
+/// Stable Standard-finalizer prompt shared by the initial request and the
+/// single bounded correction. The correction never receives the rejected
+/// proposal; it repeats the host contract, identifier manifest, and scaffold.
+pub(crate) fn finalizer_messages(
+    packet: &FastTriagePacketV1,
+    user_text: Option<&str>,
+    reason_codes: Option<&[String]>,
+) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage {
+            role: Role::System,
+            content: investigation_answer_v1_system_contract(),
+            tool_call_id: None,
+            tool_calls: None,
+        },
+        ChatMessage {
+            role: Role::User,
+            content: finalizer_user_content(packet, user_text, reason_codes),
+            tool_call_id: None,
+            tool_calls: None,
+        },
+    ]
+}
+
+fn finalizer_user_content(
+    packet: &FastTriagePacketV1,
+    user_text: Option<&str>,
+    reason_codes: Option<&[String]>,
+) -> String {
+    let correction = match reason_codes {
+        Some(codes) if !codes.is_empty() => {
+            let mut block = String::new();
+            for code in codes {
+                block.push_str(&format!(
+                    "HOST VALIDATION CATEGORY: {code}\nHOST-AUTHORED CORRECTION: {}\n",
+                    investigation_answer_v1_correction_instruction(code)
+                ));
+            }
+            format!("{block}\n")
+        }
+        _ => String::new(),
+    };
+    let question = user_text
+        .map(|text| {
+            format!(
+                "\nUSER QUESTION:\n{}\n",
+                wrap_untrusted("user_question", text)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "{correction}\
+HOST-AUTHORED IDENTIFIER MANIFEST (the complete permitted candidate/evidence id boundary; JSON):\n{manifest}\n\n\
+HOST-AUTHORED OUTPUT SCAFFOLD (copy this exact outer shape; replace empty arrays with grounded claim objects using only permitted evidence ids):\n{scaffold}\n\n\
+PACKET EVIDENCE:\n{evidence}\n\
+{question}\
+Return only the completed JSON object.",
+        manifest = packet.manifest_json(),
+        scaffold = packet.scaffold_json(),
+        evidence = wrap_untrusted("packet_evidence", &packet.evidence_body()),
+    )
 }
 
 fn contribution_attempts(
@@ -2568,25 +2621,31 @@ mod tests {
         assert!(user.contains("source=\"packet_evidence\""));
         assert!(user.contains("source=\"user_question\""));
         assert!(user.contains("ignore host policy"));
+        assert!(!messages[0].content.contains(SCHEMA_V1));
     }
 
     #[test]
-    fn finalizer_prompt_contains_validator_contract_and_scaffold() {
-        let messages = role_messages(
-            "find the initiating cause",
-            &packet(),
-            TriageSlotKindV2::Finalizer,
+    fn finalizer_prompt_includes_required_shape_and_host_identifier_manifest() {
+        let packet = packet();
+        let messages = role_messages("what happened?", &packet, TriageSlotKindV2::Finalizer);
+        let system = &messages[0].content;
+        let user = &messages[1].content;
+        assert_eq!(
+            system.as_str(),
+            cd_core::investigation_answer::investigation_answer_v1_system_contract()
         );
-        assert_eq!(messages.len(), 3);
-        assert!(messages[0]
-            .content
-            .contains("Return exactly one JSON object with schema"));
-        assert!(messages[1].content.contains("find the initiating cause"));
-        assert!(messages[2]
-            .content
-            .contains("HOST-AUTHORED OUTPUT SCAFFOLD"));
-        assert!(messages[2].content.contains("candidate-a"));
-        assert!(messages[2].content.contains("evidence-a"));
+        assert!(system.contains(SCHEMA_V1));
+        assert!(system.contains("`candidates`"));
+        assert!(system.contains("canonical_citations"));
+        assert!(user.contains(&packet.manifest_json()));
+        assert!(user.contains(&packet.scaffold_json()));
+        assert!(user.contains("candidate-a"));
+        assert!(user.contains("evidence-a"));
+        assert!(user.contains("HOST-AUTHORED IDENTIFIER MANIFEST"));
+        assert!(user.contains("HOST-AUTHORED OUTPUT SCAFFOLD"));
+        assert!(user.contains("source=\"packet_evidence\""));
+        assert!(user.contains("source=\"user_question\""));
+        assert!(user.contains("what happened?"));
     }
 
     #[test]
@@ -3284,6 +3343,72 @@ mod tests {
         (request, run_input)
     }
 
+    fn shaped_finalizer_json() -> String {
+        serde_json::json!({
+            "schema": SCHEMA_V1,
+            "candidates": [{
+                "candidate_id": "candidate-a",
+                "initiating_causes": [{
+                    "claim_id": "claim-a",
+                    "text": "observed from host evidence",
+                    "evidence_ids": ["evidence-a"]
+                }]
+            }]
+        })
+        .to_string()
+    }
+
+    fn standard_host_validated_runner(
+        responses: Vec<ChatCompletion>,
+    ) -> (TriageProductionRunnerV1, cd_core::model_ref::ModelRef) {
+        let model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-standard".into(),
+            model_id: "model-standard".into(),
+        };
+        let policy = TriagePolicyV2::standard(model.clone(), false);
+        let preflight = TriagePolicyPreflightV2 {
+            roles: vec![cd_core::multi_model::triage_policy::RolePreflightV2 {
+                slot_id: "standard-finalizer".into(),
+                model: model.clone(),
+                kind: TriageSlotKindV2::Finalizer,
+                available: true,
+                qualification: cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+                remote: false,
+                qualification_schema_id: None,
+                workflow_id: None,
+                protocol_fingerprint: None,
+            }],
+        };
+        let resolved = resolve_v2_production(
+            &policy,
+            &preflight,
+            vec![AuthorizedTriageBackendV1 {
+                slot_id: "standard-finalizer".into(),
+                model: model.clone(),
+                backend: Arc::new(ScriptedBackend::new(responses)),
+            }],
+            60_000,
+            100_000,
+            FastTriageNeighborhoodBudget::default(),
+        )
+        .expect("Standard resolves exact finalizer backend");
+        (TriageProductionRunnerV1::new(resolved), model)
+    }
+
+    async fn run_standard_host_validated(
+        responses: Vec<ChatCompletion>,
+    ) -> TriageProductionRunResultV1 {
+        let (runner, model) = standard_host_validated_runner(responses);
+        let (_request, run_input) = bound_standard_input(model);
+        runner
+            .run(
+                run_input,
+                &crate::triage_host::HostValidatedAnswerHooks::default(),
+            )
+            .await
+            .expect("host-validated Standard run")
+    }
+
     fn assert_standard_graph(replay: &TriageReplayV1) {
         replay.validate().expect("valid Standard replay");
         assert_eq!(replay.events.len(), 6);
@@ -3357,6 +3482,115 @@ mod tests {
         ));
         cd_triage_runtime::replay(request, run.replay)
             .expect("runtime accepts exact Standard bindings");
+    }
+
+    #[tokio::test]
+    async fn scripted_finalizer_accepts_a_valid_shaped_proposal() {
+        let run = run_standard_host_validated(vec![ChatCompletion::from_parts(
+            shaped_finalizer_json(),
+            Vec::new(),
+            "stop",
+        )])
+        .await;
+        assert!(run.completed);
+        assert_eq!(run.result.kind, TriageResultKind::GroundedFinal);
+        assert_eq!(run.result.validation_state, TriageValidationState::Passed);
+        let envelope = run.result.answer.expect("host-minted envelope");
+        assert_eq!(envelope.answer.schema, SCHEMA_V1);
+        assert_eq!(envelope.evidence[0].evidence_id, "evidence-a");
+        assert!(envelope.answer.root_cause_established);
+    }
+
+    #[tokio::test]
+    async fn scripted_finalizer_accepts_a_shaped_proposal_after_parse_correction() {
+        let run = run_standard_host_validated(vec![
+            ChatCompletion::from_parts("UNIQUE_REJECTED_NOT_JSON", Vec::new(), "stop"),
+            ChatCompletion::from_parts(shaped_finalizer_json(), Vec::new(), "stop"),
+        ])
+        .await;
+        assert!(run.completed);
+        assert_eq!(run.result.kind, TriageResultKind::GroundedFinal);
+        let attempt = match &run.replay.events[2].event {
+            TriageRunEventPayloadV2::RoleAttempt { attempt } => attempt,
+            other => panic!("expected role attempt, got {other:?}"),
+        };
+        assert_eq!(attempt.semantic_corrections, Some(1));
+        assert!(run
+            .result
+            .reason_codes
+            .iter()
+            .any(|code| code == "bounded_correction_applied"));
+        assert_eq!(
+            run.result.answer.expect("corrected envelope").evidence[0].evidence_id,
+            "evidence-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_finalizer_rejects_malformed_unknown_field_and_wrong_id_proposals() {
+        for (name, body, expected) in [
+            ("malformed", "UNIQUE_REJECTED_NOT_JSON".to_string(), "parse"),
+            (
+                "unknown_field",
+                serde_json::json!({
+                    "schema": SCHEMA_V1,
+                    "candidates": [{
+                        "candidate_id": "candidate-a",
+                        "initiating_causes": [{
+                            "claim_id": "claim-a",
+                            "text": "observed",
+                            "evidence_ids": ["evidence-a"]
+                        }]
+                    }],
+                    "canonical_citations": []
+                })
+                .to_string(),
+                "parse",
+            ),
+            (
+                "wrong_id",
+                serde_json::json!({
+                    "schema": SCHEMA_V1,
+                    "candidates": [{
+                        "candidate_id": "candidate-a",
+                        "initiating_causes": [{
+                            "claim_id": "claim-a",
+                            "text": "observed",
+                            "evidence_ids": ["foreign-id"]
+                        }]
+                    }]
+                })
+                .to_string(),
+                "unknown_evidence",
+            ),
+        ] {
+            let run = run_standard_host_validated(vec![
+                ChatCompletion::from_parts(body.clone(), Vec::new(), "stop"),
+                ChatCompletion::from_parts(body, Vec::new(), "stop"),
+            ])
+            .await;
+            assert!(!run.completed, "{name} must not complete as grounded");
+            assert!(
+                run.result.answer.is_none(),
+                "{name} must not mint an envelope"
+            );
+            let attempt = run
+                .replay
+                .events
+                .iter()
+                .find_map(|event| match &event.event {
+                    TriageRunEventPayloadV2::RoleAttempt { attempt } => Some(attempt),
+                    _ => None,
+                })
+                .expect("role attempt");
+            assert_eq!(attempt.status, TriageAttemptStatus::Invalid, "{name}");
+            assert!(
+                attempt.reason_codes.iter().any(|code| code == expected),
+                "{name} must surface {expected}: {:?}",
+                attempt.reason_codes
+            );
+            assert_eq!(attempt.semantic_corrections, Some(1), "{name}");
+        }
     }
 
     #[tokio::test]
