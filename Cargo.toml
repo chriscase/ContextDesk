@@ -7,6 +7,7 @@ members = [
     "crates/cd-cli",
     "crates/cd-test-gateway",
     "crates/cd-triage-sdk",
+    "crates/cd-triage-runtime",
     "crates/cd-triage-bench",
     "crates/cd-triage-bench-adapter",
     "crates/cd-triage-bench-adapter-cli",
@@ -45,6 +46,7 @@ url = "2"
 futures-util = "0.3"
 bytes = "1"
 async-trait = "0.1"
+sha2 = "0.10"
 
 # The bundled DuckDB (libduckdb-sys) is a large C++ build; compiling it with full
 # debug info generates gigabytes of `.debug_str` and overflows the CI runner disk

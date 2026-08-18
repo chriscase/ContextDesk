@@ -4,7 +4,8 @@ on:
   push:
     # Include this draft head so a push can validate the workflow before the
     # stack reaches main or integrate/rc. These checks remain advisory.
-    branches: [main, integrate/rc, codex/triage-fast-lane]
+    branches:
+      [main, integrate/rc, codex/triage-fast-lane, codex/triage-runtime-facade-v1]
   pull_request:
     branches: [main, integrate/rc]
   workflow_dispatch:
@@ -47,8 +48,9 @@ jobs:
           shared-key: triage-sdk-fast-v1
           # The repository is one large workspace. Keeping workspace crates
           # here would retain cd-core/DuckDB artifacts despite this lane
-          # building only cd-triage-sdk; cache dependencies, not workspace
-          # members, and let the main Ubuntu cache own those artifacts.
+          # building only cd-triage-sdk and cd-triage-runtime; cache
+          # dependencies, not workspace members, and let the main Ubuntu cache
+          # own those artifacts.
           cache-all-crates: false
           cache-workspace-crates: false
           cache-on-failure: true
@@ -63,16 +65,16 @@ jobs:
         # invalid YAML (a plain scalar may not contain ": "), which made the
         # whole workflow unloadable.
         run: |
-          echo "triage SDK cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+          echo "triage SDK/runtime cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
       - name: fetch dependencies (locked)
         # Every cargo step below is --offline, so nothing else would ever
         # populate the registry. Without this the lane cannot bootstrap: the
         # first run on main, any Cargo.lock change (the cache key rotates and
         # restore falls back to a stale entry), a new `stable` rustc, or a
         # 7-day cache eviction turns a cold cache into a hard failure instead
-        # of a slower build. `cargo tree -p cd-triage-sdk` needs the *whole*
-        # workspace resolve, so this fetches the full lock, not just the two
-        # light crates.
+        # of a slower build. The dependency-tree checks need the *whole*
+        # workspace resolve, so this fetches the full lock, not just the light
+        # crates.
         run: cargo fetch --locked
       - name: verify dependency boundary
         shell: bash
@@ -81,30 +83,38 @@ jobs:
           # build-dependencies, and `cargo tree` defaults to the host target.
           # `--edges normal` alone therefore inspected only a third of the
           # graph that actually gets built. Cover every edge kind and target.
-          cargo tree --locked --offline -p cd-triage-sdk \
-            --edges normal,build,dev --target all | tee /tmp/triage-sdk-tree.txt
+          cargo tree --locked --offline \
+            -p cd-triage-sdk -p cd-triage-runtime \
+            --edges normal,build,dev --target all \
+            | tee /tmp/triage-sdk-runtime-tree.txt
           # Match whole package names, not substrings anywhere in the rendered
           # tree, so the ban list cannot false-positive on a version string.
-          cargo tree --locked --offline -p cd-triage-sdk \
+          cargo tree --locked --offline \
+            -p cd-triage-sdk -p cd-triage-runtime \
             --edges normal,build,dev --target all --prefix none --format '{p}' \
-            | awk '{print $1}' | sort -u > /tmp/triage-sdk-deps.txt
-          echo "resolved packages: $(wc -l < /tmp/triage-sdk-deps.txt)"
+            | awk '{print $1}' | sort -u > /tmp/triage-sdk-runtime-deps.txt
+          echo "resolved packages: $(wc -l < /tmp/triage-sdk-runtime-deps.txt)"
           # Fail closed: an empty package list means the query matched nothing
           # and the ban check below would vacuously pass.
-          if [ ! -s /tmp/triage-sdk-deps.txt ]; then
-            echo "::error title=triage SDK dependency boundary::empty dependency tree"
+          if [ ! -s /tmp/triage-sdk-runtime-deps.txt ]; then
+            echo "::error title=triage SDK/runtime dependency boundary::empty dependency tree"
             exit 1
           fi
-          if grep -Exi "$CD_TRIAGE_BANNED_DEPS" /tmp/triage-sdk-deps.txt; then
-            echo "::error title=triage SDK dependency boundary::heavy or runtime dependency found"
+          if grep -Exi "$CD_TRIAGE_BANNED_DEPS" /tmp/triage-sdk-runtime-deps.txt; then
+            echo "::error title=triage SDK/runtime dependency boundary::heavy or host dependency found"
             exit 1
           fi
       - name: fmt
-        run: cargo fmt -p cd-triage-sdk -- --check
+        run: cargo fmt -p cd-triage-sdk -p cd-triage-runtime -- --check
       - name: clippy
-        run: cargo clippy --locked --offline -p cd-triage-sdk --all-targets -- -D warnings
+        run: >-
+          cargo clippy --locked --offline
+          -p cd-triage-sdk -p cd-triage-runtime
+          --all-targets -- -D warnings
       - name: test
-        run: cargo test --locked --offline -p cd-triage-sdk
+        run: >-
+          cargo test --locked --offline
+          -p cd-triage-sdk -p cd-triage-runtime
 
   bench:
     name: triage fast (bench)

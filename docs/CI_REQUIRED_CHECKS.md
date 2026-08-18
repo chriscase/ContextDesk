@@ -73,21 +73,24 @@ appears before its dedicated validator exists, the aggregate fails closed.
 The optional `.github/workflows/triage-fast.yml` workflow publishes
 `triage fast (SDK)`, `triage fast (bench)`, and `triage fast (aggregate)`.
 These are advisory acceleration for the dependency-light `cd-triage-sdk` /
-`cd-triage-bench` path. They do not replace or rename
+`cd-triage-runtime` and `cd-triage-bench` paths. The existing SDK job checks
+both leaf SDK crates in one runner/cache rather than adding another job. These
+checks do not replace or rename
 `rust tests (ubuntu aggregate)`, and they must not be used as the full
-workspace Ubuntu gate — the fast lane compiles two crates and never exercises
+workspace Ubuntu gate — the fast lane compiles three crates and never exercises
 `cd-core`, `cd-workflow`, DuckDB, SQLite, keyring, or any network-capable
 engine code.
 
 Two limits matter before you require them anywhere:
 
 - **The draft head has an explicit push trigger for hosted validation.** This
-  revision runs on pushes to `main`, `integrate/rc`, and
-  `codex/triage-fast-lane`; pull-request events still target only `main` and
-  `integrate/rc`. The self-head push entry exists so this draft can validate
-  before its stack is integrated. A pull request targeting another stacked
-  branch still gets no PR-triggered fast-lane checks, so these advisory checks
-  must never be required for such branches.
+  revision runs on pushes to `main`, `integrate/rc`,
+  `codex/triage-fast-lane`, and `codex/triage-runtime-facade-v1`;
+  pull-request events still target only `main` and `integrate/rc`. The
+  self-head push entries exist so stacked drafts can validate before their
+  stack is integrated. A pull request targeting another stacked branch still
+  gets no PR-triggered fast-lane checks, so these advisory checks must never be
+  required for such branches.
 - **They assume the sharded Ubuntu CI.** The `rust tests (ubuntu aggregate)`
   gate and the `rust (ubuntu-latest)` warmup described above arrive with the
   #874 shard work. Until that lands, `rust (ubuntu-latest)` still runs
