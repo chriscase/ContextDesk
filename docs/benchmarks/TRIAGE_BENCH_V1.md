@@ -1,16 +1,16 @@
 # Incident-triage evaluation bench v1
 
-**Status:** **Local integration.** The #877 store/entities first slice is on
-`main` (#890/#891). This branch adds manual import/provenance (#878), rubric
-v1 + file/CLI expert adjudication (#880), and report-only comparison over
-stored records (#881). The SDK-driven batch runner is residual until #879.
-Not a close of epic #876. Not a readiness or release claim.
+**Status:** **Local integration.** The store/entities, manual
+import/provenance, rubric v1 expert adjudication, report-only comparison,
+public-SDK adapter, deterministic mock runner, and validated replay ingestion
+are implemented. Live same-snapshot provider execution remains residual. This
+does not close epic #876 and is not a readiness or release claim.
 
 ## Purpose
 
 Answer, on frozen historical incidents: how did one whole triage strategy
 compare to another — a human expert, a web-only assistant used by hand, another
-product, or (later) ContextDesk behind its public SDK — **without** absorbing
+product, or ContextDesk behind its public SDK — **without** absorbing
 incident management into ContextDesk and **without** requiring a GUI.
 
 This lane is separate from:
@@ -95,9 +95,9 @@ What the adapter does **not** claim:
   `PacketReady` or the terminal packet identity differs from the adapter's
   materialized task packet.
 
-Its default dependency tree is `cd-triage-sdk` + `cd-triage-runtime` +
-`cd-triage-bench` only; `cd-core` / `cd-workflow` are reachable exclusively
-through the non-default `workflow-mock` conformance feature. See
+Its default dependency tree is `cd-triage-sdk` + `cd-triage-bench` only;
+`cd-core` / `cd-workflow` are reachable exclusively through the non-default
+`workflow-mock` conformance feature. See
 [`crates/cd-triage-bench-adapter/README.md`](../../crates/cd-triage-bench-adapter/README.md).
 
 ## CLI
