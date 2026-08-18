@@ -21,7 +21,6 @@ use cd_core::config::AppConfig;
 use cd_core::fast_triage::FastTriagePacketV1;
 use cd_core::investigation_answer::{
     AnswerBindingV1, EvidenceRole, HostEvidenceEntry, HostEvidenceLedger, LogSnapshotRevisionV1,
-    SCHEMA_V1,
 };
 use cd_core::keychain_store::SecretStore;
 use cd_core::model_ref::ModelRef;
@@ -424,22 +423,18 @@ async fn qualify_with_backend(
         );
     }
 
-    // Finalizer qualification uses the same generic prompt, host hook, and
-    // immutable-packet validator as the production runner, with corrections
-    // intentionally disabled so the result measures one exact call.
+    // Finalizer qualification uses the same host-authored finalizer contract,
+    // host hook, and immutable-packet validator as the production runner, with
+    // corrections intentionally disabled so the result measures one exact call.
     let model = ModelRef {
         profile_id: profile_id.clone(),
         model_id: model_id.clone(),
     };
     let slot = finalizer_slot(model);
-    let mut messages = role_messages(
+    let messages = role_messages(
         "Synthetic role qualification probe; return a minimal valid answer.",
         &packet,
         kind,
-    );
-    messages[0].content = format!(
-        "Return exactly one JSON object with schema \"{}\". Use every literal candidate/evidence id from the host packet and no host-owned fields. Do not establish a root cause.",
-        SCHEMA_V1
     );
     // Use the same cooperative cancellation signal for finalizer probes as for
     // contribution probes.  A cancelled probe must never mint qualification.
@@ -582,6 +577,7 @@ pub fn publish_role_qualification_record(
 mod tests {
     use super::*;
     use cd_core::agent::ScriptedBackend;
+    use cd_core::investigation_answer::SCHEMA_V1;
 
     fn protocol() -> &'static str {
         "openai-chat-completions"
