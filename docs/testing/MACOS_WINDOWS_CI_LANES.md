@@ -53,11 +53,14 @@ Ubuntu gate also passed 114/114 units (3670 passed, 0 failed, 21 ignored), and
 the complete workflow finished in 2237s. This is hosted lane evidence; it is
 not a ruleset promotion or a release certification.
 
-## Current inventory
+## Inventory and growth
 
-The same deterministic planner used by Ubuntu enumerates 114 test units from
-113 Cargo test targets. The `cd-core/lib` target remains two complementary
-units (`log_analysis::` and `--skip log_analysis::`) so no tests are dropped.
+The same deterministic planner used by Ubuntu enumerated 114 test units from
+113 Cargo test targets for the hosted runs above. The integrated triage tree
+already contains more targets. The planner and its tests intentionally derive
+the current inventory instead of pinning that historical count. The
+`cd-core/lib` target remains two complementary units (`log_analysis::` and
+`--skip log_analysis::`) so no tests are dropped.
 
 Round-robin partition sizes are:
 
@@ -96,8 +99,9 @@ a Windows warmup (or probe) in `needs:`, and Windows never waits on macOS:
    actually warm, and every shard uploads status and in-flight evidence.
 5. `rust tests (macos-latest aggregate)` depends only on the macOS shards;
    `rust tests (windows-latest aggregate)` depends only on the Windows shards.
-   Each requires all four shard results and the exact 114-unit cover. They
-   remain non-required platform signals until separately promoted.
+   Each requires all four shard results and an exact cover of the dynamically
+   enumerated inventory. They remain non-required platform signals until
+   separately promoted.
 
 The cache status helper recognizes `warmup`, `preflight`, and `shard` roles.
 Only a warmup may save; preflight and shards restore and verify. A cache key hit

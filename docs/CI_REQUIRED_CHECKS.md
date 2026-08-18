@@ -102,7 +102,7 @@ workspace Ubuntu gate — the fast lane compiles three crates and never exercise
 `cd-core`, `cd-workflow`, DuckDB, SQLite, keyring, or any network-capable
 engine code.
 
-Two limits matter before you require them anywhere:
+One limit matters before you require them anywhere:
 
 - **The draft head has an explicit push trigger for hosted validation.** This
   revision runs on pushes to `main`, `integrate/rc`,
@@ -112,11 +112,6 @@ Two limits matter before you require them anywhere:
   stacked drafts can validate before their stack is integrated. A pull request
   targeting another stacked branch still gets no PR-triggered fast-lane
   checks, so these advisory checks must never be required for such branches.
-- **They assume the sharded Ubuntu CI.** The `rust tests (ubuntu aggregate)`
-  gate and the `rust (ubuntu-latest)` warmup described above arrive with the
-  #874 shard work. Until that lands, `rust (ubuntu-latest)` still runs
-  `cargo test --workspace` itself and there is no aggregate check to defer to.
-
 ## How to verify a ruleset
 
 After changing a ruleset, open a draft PR and confirm the “Required” list on the

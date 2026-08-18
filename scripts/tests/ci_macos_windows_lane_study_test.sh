@@ -77,15 +77,28 @@ grep -q 'Staged workflow shape' "$TMP/text" ||
 
 units=$(jq -r .unit_count "$TMP/json")
 base=$(jq -r .cargo_test_targets "$TMP/json")
-[ "$units" -eq 114 ] || fail "expected 114 shard units on this tip, got $units"
-[ "$base" -eq 113 ] || fail "expected 113 cargo test targets on this tip, got $base"
+[ "$units" -gt 0 ] || fail "study enumerated zero shard units"
+[ "$base" -gt 0 ] || fail "study enumerated zero cargo test targets"
+[ "$units" -eq $((base + 1)) ] ||
+  fail "lib split should add exactly one shard unit ($base targets -> $units units)"
 
-s2=$(jq -c .partitions[\"2\"] "$TMP/json")
-[ "$s2" = "[57,57]" ] || fail "2-way partition drifted: $s2"
-s3=$(jq -c .partitions[\"3\"] "$TMP/json")
-[ "$s3" = "[38,38,38]" ] || fail "3-way partition drifted: $s3"
-s4=$(jq -c .partitions[\"4\"] "$TMP/json")
-[ "$s4" = "[29,29,28,28]" ] || fail "4-way partition drifted: $s4"
+assert_balanced_partition() {
+  shards=$1
+  partition=$(jq -c --arg shards "$shards" '.partitions[$shards]' "$TMP/json")
+  jq -e --argjson shards "$shards" --argjson units "$units" '
+    length == $shards and
+    add == $units and
+    (max - min) <= 1 and
+    all(. > 0)
+  ' <<EOF >/dev/null || fail "$shards-way partition drifted: $partition"
+$partition
+EOF
+  printf '%s\n' "$partition"
+}
+
+s2=$(assert_balanced_partition 2)
+s3=$(assert_balanced_partition 3)
+s4=$(assert_balanced_partition 4)
 
 win=$(jq -r .evidence.warm.windows.test_workspace_seconds "$TMP/json")
 mac=$(jq -r .evidence.warm.macos.test_workspace_seconds "$TMP/json")
