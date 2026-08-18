@@ -250,7 +250,8 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
         Command::BlindedRun { run_id } => {
             let store = open_store(cli.library)?;
             let run = store.get_run(&run_id)?;
-            let raw = store.get_blob(&run.raw_output.digest.hex)?;
+            let raw =
+                store.get_blob_bounded(&run.raw_output.digest.hex, MAX_RAW_INLINE_BYTES as u64)?;
             to_pretty_json(&blinded_run_view_from_raw(&run, Some(raw.as_slice())))
         }
         Command::ReviewPacket { run_id, phase } => {
