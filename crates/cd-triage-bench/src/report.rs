@@ -219,7 +219,13 @@ pub fn build_report_with_attribution(
     let mut cases: Vec<Case> = cases.to_vec();
     cases.sort_by(|a, b| a.case_id.cmp(&b.case_id));
     if privacy == PrivacyClass::ShareSafe {
-        runs.retain(|r| r.privacy == PrivacyClass::ShareSafe);
+        runs.retain(|run| {
+            run.privacy == PrivacyClass::ShareSafe
+                || (run.source_kind == SourceKind::ContextdeskSdk
+                    && attribution
+                        .get(&run.run_id)
+                        .is_some_and(|value| !value.model_fingerprints.is_empty()))
+        });
         adjudications.retain(|a| a.privacy == PrivacyClass::ShareSafe);
         scores.retain(|s| s.privacy == PrivacyClass::ShareSafe);
         cases.retain(|c| c.privacy == PrivacyClass::ShareSafe);

@@ -102,14 +102,17 @@ fn issue_881_report_only_acceptance() {
     let snapshot = snapshot_for(&store, "case-checkout-cascade");
     let task = task_for(&store, &snapshot);
 
-    let live_owner_record = r#"{"fingerprints":{"models":["model-fingerprint-cli"]},"slots":[{"model":{"profile_id":"profile:cli","model_id":"model:cli"}}]}"#;
+    let live_owner_record = format!(
+        r#"{{"fingerprints":{{"models":["mdf-{}"]}},"slots":[{{"model":{{"profile_id":"profile:cli","model_id":"model:cli"}}}}]}}"#,
+        "a".repeat(64)
+    );
     let _live_cli = import_named_with_privacy(
         &store,
         &task.task_id,
         SourceKind::ContextdeskSdk,
         "ContextDesk live cli",
         Observed::Known("comparison-v1".into()),
-        live_owner_record,
+        &live_owner_record,
         FairnessClass::SameSnapshot,
         RunStatus::Completed,
         PrivacyClass::OwnerOnly,
@@ -457,7 +460,7 @@ fn issue_881_report_only_acceptance() {
     assert!(share_md.status.success());
     let share_md = String::from_utf8(share_md.stdout).unwrap();
     assert!(!share_md.contains("profile:cli::model:cli"));
-    assert!(!share_md.contains("model-fingerprint-cli"));
+    assert!(share_md.contains(&format!("mdf-{}", "a".repeat(64))));
 
     let owner: serde_json::Value = serde_json::from_slice(&json1.stdout).unwrap();
     assert_eq!(
