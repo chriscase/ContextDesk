@@ -17,7 +17,8 @@ to support a richer V2 contract.
 - the trusted Rust host supplies one already-authorized production backend for
   every exact `(slot_id, profile_id, model_id)` binding;
 - V2 and the host resolve the same finite whole-turn deadline;
-- the V2 contributor operation cap is not smaller than that whole-turn deadline;
+- the V2 contributor operation cap is independently enforced for every
+  admitted contributor;
 - the existing sequential contribution route can represent every call and
   context ceiling without widening it.
 
@@ -55,7 +56,6 @@ return any runnable backend when it sees:
 - an optional role dropout the current production event stream could omit;
 - a missing, duplicate, extra, or exact-identity-mismatched backend;
 - a host/V2 whole-turn deadline mismatch;
-- a smaller per-contributor operation timeout the current runtime cannot honor;
 - an unrepresentable or invalid routing/context bound.
 
 This is deliberate. The existing contribution reviewer is not equivalent to
@@ -93,7 +93,7 @@ The adapter test proves:
 5. a qualified timeline role is admitted and remains typed throughout the
    runtime binding.
 
-## Not proven / residual product blocker
+## Remaining limits and non-claims
 
 - CLI and Tauri configured-policy execution select the same public-runtime
   workflow engine, emit only request-bound validated provisional events, and
@@ -106,9 +106,15 @@ The adapter test proves:
   store after publishing one.
 - The host enforces governed corpus revision and rejects unsupported source
   restrictions instead of silently broadening the packet.
-- A smaller per-contributor operation timeout, finalizer reserve, reviewer
-  reserve/condition/requirement, and visible optional dropout still require
-  additional host/runtime coverage.
+- Contributor execution remains sequential. The one policy-level contributor
+  operation limit is applied independently to every admitted contributor;
+  per-contributor limits are not part of the current schema.
+- Contributor work reserves time for an active conditional reviewer and
+  finalizer, reviewer work cannot consume the finalizer reserve, and impossible
+  explicit reserves fail before provider execution. Provider operations are
+  hard-bounded; host validation/finalization hooks are checked immediately
+  after returning but are not forcibly preempted while stalled inside host
+  code.
 - No provider, gateway, credential store, live corpus, or network was used.
 - This does not establish live compatibility, usefulness, cost, release
   readiness, or same-snapshot bench execution.
