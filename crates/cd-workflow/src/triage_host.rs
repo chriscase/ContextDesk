@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use cd_core::agent::build_fast_triage_packet;
@@ -26,6 +27,7 @@ use cd_core::multi_model::triage_policy::{
     CompiledRoleSlotV2, CompiledTriagePolicyV2, RolePreflightV2, RoleQualificationV2,
     SlotDispositionV2, TriagePolicyMode, TriagePolicyPreflightV2, TriagePolicyV2, TriageSlotKindV2,
 };
+use cd_core::providers::ProviderProfile;
 use cd_core::tool_host::ToolHost;
 use cd_core::triage_role_qualification::{
     triage_protocol_fingerprint, TriageRoleQualificationKeyV1, TriageRoleQualificationStoreV1,
@@ -37,13 +39,15 @@ use crate::provider::{
     resolve_turn_inputs_from_profile_with_credential_cache, TurnProviderCredentialCache,
 };
 use crate::triage::compile_preflight;
-use crate::triage_production::{AuthorizedTriageBackendV1, TriageProductionAdapterRejectionV1};
+use crate::triage_production::AuthorizedTriageBackendV1;
 use crate::triage_production_runner::{
-    resolve_v2_production, ResolvedTriageProductionV1, TriageProductionHooks,
-    TriageProductionRunInput, TriageProductionRunResultV1, TriageProductionRunnerError,
-    TriageProductionRunnerV1,
+    authoritative_packet_digest, resolve_v2_production, ResolvedTriageProductionV1,
+    TriageProductionHooks, TriageProductionRunInput, TriageProductionRunResultV1,
+    TriageProductionRunnerError, TriageProductionRunnerV1,
 };
 use crate::turn::{bind_linked_corpus, unbind_linked_corpus, LinkedCorpusBinding};
+
+const MAX_OUTSTANDING_CREDENTIAL_READS: usize = 4;
 
 /// Inputs owned by a trusted host for one linked V2 run.
 #[derive(Debug, Clone)]
@@ -65,6 +69,132 @@ pub struct TriageHostRunInput {
     pub context_char_budget: usize,
     pub cancel: Option<Arc<AtomicBool>>,
 }
+
+/// Content-free evidence-to-source binding from the exact executed packet.
+///
+/// This is an owner-only process-local proof surface. It intentionally omits
+/// evidence excerpts and every other raw private byte while retaining the
+/// minimum mapping a benchmark recorder needs to translate validated
+/// citations back to its source-neutral item identities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriageExecutedPacketEvidenceV1 {
+    /// Host-minted evidence identity accepted by the production validator.
+    pub evidence_id: String,
+    /// Exact host source label attached to that evidence row.
+    pub source_label: String,
+}
+
+/// Authoritative owner-only proof of the packet actually handed to production
+/// model roles.
+///
+/// `packet_digest` is the deterministic evidence-ledger digest and is also the
+/// value emitted by the production `PacketReady` event. `packet_id` binds that
+/// ledger to the packet's scope, chronology, clock, and neighborhood facts.
+/// Together with the corpus/revision and complete evidence-to-source mapping,
+/// these fields let a host-local benchmark bridge prove same-snapshot identity
+/// without receiving raw evidence bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriageExecutedPacketProofV1 {
+    /// Run identity associated with this materialized packet.
+    pub run_id: String,
+    /// Fingerprint of the exact public request associated with the run.
+    pub request_fingerprint: String,
+    /// Fingerprint of the exact resolved, override-adjusted policy executed.
+    pub policy_fingerprint: String,
+    /// Explicit privacy boundary; this proof must never cross a share-safe seam.
+    pub privacy: cd_core::extension_contract::PacketPrivacyBoundary,
+    /// Deterministic identity of the complete production packet.
+    pub packet_id: String,
+    /// Deterministic digest of the packet's authoritative evidence ledger.
+    pub packet_digest: String,
+    /// Exact bound corpus identity.
+    pub corpus_id: String,
+    /// Monotonic event revision of the exact bound corpus handle.
+    pub corpus_revision: u64,
+    /// Exact event/template/suppression analysis snapshot represented by every
+    /// ledger row.
+    pub snapshot_revision: LogSnapshotRevisionV1,
+    /// Complete deterministic evidence-id to source-label mapping.
+    pub evidence: Vec<TriageExecutedPacketEvidenceV1>,
+}
+
+impl TriageExecutedPacketProofV1 {
+    fn from_packet(
+        input: &TriageHostRunInput,
+        packet: &FastTriagePacketV1,
+        corpus_revision: u64,
+    ) -> Self {
+        let binding = packet.ledger().binding();
+        Self {
+            run_id: input.run_id.clone(),
+            request_fingerprint: input.request_fingerprint.clone(),
+            policy_fingerprint: input.policy_fingerprint.clone(),
+            privacy: cd_core::extension_contract::PacketPrivacyBoundary::OwnerOnly,
+            packet_id: packet.packet_id().into(),
+            packet_digest: authoritative_packet_digest(packet).into(),
+            corpus_id: binding.corpus_id.clone(),
+            corpus_revision,
+            snapshot_revision: binding.revision,
+            evidence: packet
+                .ledger()
+                .entries()
+                .into_iter()
+                .map(|entry| TriageExecutedPacketEvidenceV1 {
+                    evidence_id: entry.evidence_id,
+                    source_label: entry.source_label,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Content-free refusal returned by an owner-only packet-proof observer.
+/// Observer diagnostics remain with the observer and are never copied into a
+/// replay, error string, or share-safe surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TriagePacketProofObserverErrorV1;
+
+impl TriagePacketProofObserverErrorV1 {
+    /// Construct a content-free observer refusal.
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl std::fmt::Display for TriagePacketProofObserverErrorV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("packet_proof_observer_failed")
+    }
+}
+
+impl std::error::Error for TriagePacketProofObserverErrorV1 {}
+
+/// Synchronous owner-only callback invoked exactly once after production
+/// packet materialization and before credentials, providers, or models.
+pub trait TriageExecutedPacketObserverV1: Send + Sync {
+    /// Accept or refuse the authoritative packet proof. Refusal fails closed.
+    fn observe(
+        &self,
+        proof: &TriageExecutedPacketProofV1,
+    ) -> Result<(), TriagePacketProofObserverErrorV1>;
+}
+
+impl<F> TriageExecutedPacketObserverV1 for F
+where
+    F: Fn(&TriageExecutedPacketProofV1) -> Result<(), TriagePacketProofObserverErrorV1>
+        + Send
+        + Sync,
+{
+    fn observe(
+        &self,
+        proof: &TriageExecutedPacketProofV1,
+    ) -> Result<(), TriagePacketProofObserverErrorV1> {
+        self(proof)
+    }
+}
+
+/// Shareable process-local packet-proof observer handle.
+pub type TriagePacketProofObserverV1 = Arc<dyn TriageExecutedPacketObserverV1>;
 
 /// Result of host resolution before a provider operation begins.
 pub struct ResolvedTriageHostV1 {
@@ -190,6 +320,8 @@ pub enum TriageHostError {
     Policy(String),
     Profile(String),
     Backend(String),
+    /// Owner-only packet proof could not be accepted before provider setup.
+    PacketProofObserver,
     Runner(TriageProductionRunnerError),
     Contract(TriageContractError),
 }
@@ -208,10 +340,10 @@ fn validate_requested_scope(
     Ok(())
 }
 
-/// Align a stock/default phase cap with the host's remaining whole-turn
+/// Clamp a stock/default operation cap to the host's remaining whole-turn
 /// allowance. Explicit provenance is checked by [`align_stock_phase_caps`].
 fn align_stock_phase_cap(configured_ms: u64, remaining_ms: u64) -> u64 {
-    configured_ms.max(remaining_ms)
+    configured_ms.min(remaining_ms)
 }
 
 fn align_stock_phase_caps(policy: &mut TriagePolicyV2, remaining_ms: u64) {
@@ -230,6 +362,28 @@ fn align_stock_phase_caps(policy: &mut TriagePolicyV2, remaining_ms: u64) {
         align_stock_phase_cap(policy.budget.finalizer.operation_timeout_ms, remaining_ms);
     policy.budget.reviewer.operation_timeout_ms =
         align_stock_phase_cap(policy.budget.reviewer.operation_timeout_ms, remaining_ms);
+
+    let finalizer_reserve = policy
+        .finalizer
+        .as_ref()
+        .map(|_| policy.budget.finalizer.reserve_ms)
+        .unwrap_or(0);
+    let reviewer_reserve = policy
+        .reviewer
+        .as_ref()
+        .map(|_| policy.budget.reviewer.reserve_ms)
+        .unwrap_or(0);
+    let total_reserve = finalizer_reserve.saturating_add(reviewer_reserve);
+    if total_reserve > remaining_ms && total_reserve > 0 {
+        let bounded_finalizer = ((u128::from(remaining_ms) * u128::from(finalizer_reserve))
+            / u128::from(total_reserve)) as u64;
+        if policy.finalizer.is_some() {
+            policy.budget.finalizer.reserve_ms = bounded_finalizer;
+        }
+        if policy.reviewer.is_some() {
+            policy.budget.reviewer.reserve_ms = remaining_ms.saturating_sub(bounded_finalizer);
+        }
+    }
 }
 
 fn validate_preflight_profile_bindings(
@@ -348,6 +502,81 @@ where
     }
 }
 
+async fn preload_provider_credential_with_turn_budget(
+    credentials: &TurnProviderCredentialCache<'_>,
+    secrets: Arc<dyn SecretStore>,
+    profile: &ProviderProfile,
+    started: Instant,
+    deadline_ms: u64,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<(), TriageHostError> {
+    preload_provider_credential_with_limiter(
+        credentials,
+        secrets,
+        profile,
+        started,
+        deadline_ms,
+        cancel,
+        credential_worker_limiter(),
+    )
+    .await
+}
+
+fn credential_worker_limiter() -> Arc<tokio::sync::Semaphore> {
+    static LIMITER: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(LIMITER.get_or_init(|| {
+        Arc::new(tokio::sync::Semaphore::new(
+            MAX_OUTSTANDING_CREDENTIAL_READS,
+        ))
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn preload_provider_credential_with_limiter(
+    credentials: &TurnProviderCredentialCache<'_>,
+    secrets: Arc<dyn SecretStore>,
+    profile: &ProviderProfile,
+    started: Instant,
+    deadline_ms: u64,
+    cancel: Option<Arc<AtomicBool>>,
+    limiter: Arc<tokio::sync::Semaphore>,
+) -> Result<(), TriageHostError> {
+    let Some(reference) = profile.api_key_ref.clone() else {
+        return Ok(());
+    };
+    if credentials.contains_reference(&reference) {
+        return Ok(());
+    }
+    let permit = await_backend_with_turn_budget(started, deadline_ms, cancel.clone(), async move {
+        limiter.acquire_owned().await.map_err(|_| {
+            cd_core::error::CoreError::Message("credential_worker_limiter_closed".into())
+        })
+    })
+    .await?;
+    if cancel
+        .as_ref()
+        .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::SeqCst))
+    {
+        return Err(TriageHostError::Cancelled);
+    }
+    if started.elapsed() >= Duration::from_millis(deadline_ms) {
+        return Err(TriageHostError::Deadline);
+    }
+    let worker_reference = reference.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        Ok::<_, cd_core::error::CoreError>(secrets.get(&worker_reference).ok().flatten())
+    });
+    let value = await_backend_with_turn_budget(started, deadline_ms, cancel, async move {
+        worker
+            .await
+            .map_err(|_| cd_core::error::CoreError::Message("credential_worker_failed".into()))?
+    })
+    .await?;
+    credentials.seed_reference(reference, value);
+    Ok(())
+}
+
 /// A conservative production hook: only a finalizer may create an
 /// authoritative answer envelope.  Contributor slots are validated by the
 /// typed contribution pipeline before this hook is reached.  Reviewer and
@@ -453,6 +682,7 @@ impl std::fmt::Display for TriageHostError {
             Self::Policy(_) => "policy_preflight_rejected",
             Self::Profile(_) => "provider_profile_unavailable",
             Self::Backend(_) => "provider_backend_unavailable",
+            Self::PacketProofObserver => "packet_proof_observer_failed",
             Self::Runner(error) => return write!(f, "{error}"),
             Self::Contract(_) => "triage_contract_failed",
         })
@@ -469,23 +699,38 @@ pub async fn resolve_v2_host(
     host: &mut ToolHost,
     cache_root: &Path,
     cfg: &AppConfig,
-    secrets: &dyn SecretStore,
+    secrets: Arc<dyn SecretStore>,
     policy: &TriagePolicyV2,
     preflight: &TriagePolicyPreflightV2,
     input: &TriageHostRunInput,
+) -> Result<ResolvedTriageHostV1, TriageHostError> {
+    resolve_v2_host_with_packet_proof_observer(
+        host, cache_root, cfg, secrets, policy, preflight, input, None,
+    )
+    .await
+}
+
+/// Resolve a production host run while exposing the exact materialized packet
+/// to an optional owner-only observer before credential or provider work.
+///
+/// The established [`resolve_v2_host`] entry point is a no-observer wrapper.
+/// An observer refusal restores the prior host corpus binding and fails closed;
+/// no credential lookup or backend construction occurs.
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_v2_host_with_packet_proof_observer(
+    host: &mut ToolHost,
+    cache_root: &Path,
+    cfg: &AppConfig,
+    secrets: Arc<dyn SecretStore>,
+    policy: &TriagePolicyV2,
+    preflight: &TriagePolicyPreflightV2,
+    input: &TriageHostRunInput,
+    packet_proof_observer: Option<&dyn TriageExecutedPacketObserverV1>,
 ) -> Result<ResolvedTriageHostV1, TriageHostError> {
     validate_preflight_profile_bindings(cfg, preflight)?;
     let compiled = compile_preflight(policy, preflight)
         .map_err(|_| TriageHostError::Policy("policy_preflight_rejected".into()))?;
     validate_runtime_egress(cfg, policy, &compiled)?;
-    if compiled.mode == cd_core::multi_model::triage_policy::TriagePolicyMode::Standard {
-        return Err(TriageHostError::Runner(
-            TriageProductionRunnerError::Unsupported {
-                category: TriageProductionAdapterRejectionV1::StandardUsesEstablishedPath,
-                slot_ids: Vec::new(),
-            },
-        ));
-    }
     if input.deadline_ms == 0 || input.context_char_budget == 0 {
         return Err(TriageHostError::Policy("invalid_host_budget".into()));
     }
@@ -572,9 +817,43 @@ pub async fn resolve_v2_host(
         }
     };
 
+    let packet_binding = packet.ledger().binding();
+    if packet_binding.corpus_id != input.corpus_id
+        || packet_binding.revision != binding.snapshot_revision
+    {
+        unbind_linked_corpus(host, binding);
+        return Err(TriageHostError::Contract(
+            TriageContractError::InvalidField("packet_snapshot_binding"),
+        ));
+    }
+
+    if let Some(observer) = packet_proof_observer {
+        let proof = TriageExecutedPacketProofV1::from_packet(input, &packet, binding.revision);
+        if observer.observe(&proof).is_err() {
+            unbind_linked_corpus(host, binding);
+            return Err(TriageHostError::PacketProofObserver);
+        }
+    }
+
+    // A proof observer may synchronously request cancellation. Recheck both
+    // host controls before even constructing the credential cache so that the
+    // observer boundary cannot introduce a secret-read race.
+    if input
+        .cancel
+        .as_ref()
+        .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::SeqCst))
+    {
+        unbind_linked_corpus(host, binding);
+        return Err(TriageHostError::Cancelled);
+    }
+    if started.elapsed() >= Duration::from_millis(input.deadline_ms) {
+        unbind_linked_corpus(host, binding);
+        return Err(TriageHostError::Deadline);
+    }
+
     let mut budget_cfg = cfg.clone();
     budget_cfg.router.deadline_is_explicit = true;
-    let credentials = TurnProviderCredentialCache::new(secrets);
+    let credentials = TurnProviderCredentialCache::new(secrets.as_ref());
     let mut authorized = Vec::new();
     for slot in compiled
         .slots
@@ -596,63 +875,48 @@ pub async fn resolve_v2_host(
                 return Err(TriageHostError::Profile(error));
             }
         };
-        if profile.chat_model != slot.model.model_id {
-            // Do not silently replace the selected catalog id with the profile
-            // default.  The slot is the exact identity returned by discovery.
-            let mut selected = profile.clone();
-            selected.chat_model = slot.model.model_id.clone();
-            let resolved = resolve_turn_inputs_from_profile_with_credential_cache(
-                &credentials,
-                &budget_cfg,
-                selected,
-                Some(slot.model.model_id.as_str()),
-            );
-            let backend = match await_backend_with_turn_budget(
-                started,
-                input.deadline_ms,
-                input.cancel.clone(),
-                backend_for_resolved_turn(&resolved),
-            )
-            .await
-            {
-                Ok(backend) => backend,
-                Err(error) => {
-                    unbind_linked_corpus(host, binding);
-                    return Err(error);
-                }
-            };
-            authorized.push(AuthorizedTriageBackendV1 {
-                slot_id: slot.slot_id.clone(),
-                model: slot.model.clone(),
-                backend: Arc::from(backend),
-            });
-        } else {
-            let resolved = resolve_turn_inputs_from_profile_with_credential_cache(
-                &credentials,
-                &budget_cfg,
-                profile,
-                Some(slot.model.model_id.as_str()),
-            );
-            let backend = match await_backend_with_turn_budget(
-                started,
-                input.deadline_ms,
-                input.cancel.clone(),
-                backend_for_resolved_turn(&resolved),
-            )
-            .await
-            {
-                Ok(backend) => backend,
-                Err(error) => {
-                    unbind_linked_corpus(host, binding);
-                    return Err(error);
-                }
-            };
-            authorized.push(AuthorizedTriageBackendV1 {
-                slot_id: slot.slot_id.clone(),
-                model: slot.model.clone(),
-                backend: Arc::from(backend),
-            });
+        let mut selected = profile;
+        // Do not silently replace the selected catalog id with the profile
+        // default. The slot is the exact identity returned by discovery.
+        selected.chat_model = slot.model.model_id.clone();
+        if let Err(error) = preload_provider_credential_with_turn_budget(
+            &credentials,
+            Arc::clone(&secrets),
+            &selected,
+            started,
+            input.deadline_ms,
+            input.cancel.clone(),
+        )
+        .await
+        {
+            unbind_linked_corpus(host, binding);
+            return Err(error);
         }
+        let resolved = resolve_turn_inputs_from_profile_with_credential_cache(
+            &credentials,
+            &budget_cfg,
+            selected,
+            Some(slot.model.model_id.as_str()),
+        );
+        let backend = match await_backend_with_turn_budget(
+            started,
+            input.deadline_ms,
+            input.cancel.clone(),
+            backend_for_resolved_turn(&resolved),
+        )
+        .await
+        {
+            Ok(backend) => backend,
+            Err(error) => {
+                unbind_linked_corpus(host, binding);
+                return Err(error);
+            }
+        };
+        authorized.push(AuthorizedTriageBackendV1 {
+            slot_id: slot.slot_id.clone(),
+            model: slot.model.clone(),
+            backend: Arc::from(backend),
+        });
     }
 
     // Setup/authentication consumed part of the original turn. Never hand
@@ -670,10 +934,9 @@ pub async fn resolve_v2_host(
     // remaining allowance; otherwise an explicit original deadline would be
     // double-counted and the provider phase could outlive the request.
     //
-    // Align only stock/default phase caps to the remaining whole-turn
-    // allowance. Explicit user-authored caps remain authoritative, including
-    // a deliberately smaller cap that should fail closed rather than being
-    // silently enlarged.
+    // Resolve only stock/default operation caps and terminal reserves against
+    // the remaining whole-turn allowance. Explicit user-authored values remain
+    // authoritative and fail closed when their active reserves cannot fit.
     let mut execution_policy = policy.clone();
     execution_policy.budget.whole_turn_deadline_ms = Some(remaining_deadline_ms);
     align_stock_phase_caps(&mut execution_policy, remaining_deadline_ms);
@@ -731,10 +994,14 @@ pub async fn run_v2_host<H: TriageProductionHooks + ?Sized>(
 mod tests {
     use super::*;
     use cd_core::config::AppConfig;
+    use cd_core::error::CoreResult;
+    use cd_core::index::KeywordIndex;
     use cd_core::investigation_answer::{EvidenceRole, HostEvidenceEntry, HostEvidenceLedger};
+    use cd_core::keychain_store::SecretStore;
     use cd_core::model_ref::ModelRef;
     use cd_core::multi_model::triage_policy::{
-        RolePreflightV2, RoleQualificationV2, RoleRequirement, TriageBudgetV2, TriageSlotKindV2,
+        ReviewerConditionV2, ReviewerSlotV2, RolePreflightV2, RoleQualificationV2, RoleRequirement,
+        TriageBudgetV2, TriageSlotKindV2,
     };
     use cd_core::providers::ProviderProfile;
     use cd_core::triage_role_qualification::{
@@ -742,6 +1009,165 @@ mod tests {
         TriageRoleQualificationStoreV1,
     };
     use cd_core::triage_sdk::TriageReconciliationV1;
+    use cd_core::workspace::Workspace;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Default)]
+    struct SequencedSecretStore {
+        reads: Arc<AtomicUsize>,
+        order: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl SecretStore for SequencedSecretStore {
+        fn set(&self, _ref_id: &str, _secret: &str) -> CoreResult<()> {
+            Ok(())
+        }
+
+        fn get(&self, _ref_id: &str) -> CoreResult<Option<String>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.order.lock().unwrap().push("credential");
+            Ok(Some("fixture-secret".into()))
+        }
+
+        fn delete(&self, _ref_id: &str) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct BlockingSecretStore {
+        started: Arc<AtomicBool>,
+        reads: Arc<AtomicUsize>,
+        release: Arc<AtomicBool>,
+    }
+
+    impl SecretStore for BlockingSecretStore {
+        fn set(&self, _ref_id: &str, _secret: &str) -> CoreResult<()> {
+            Ok(())
+        }
+
+        fn get(&self, _ref_id: &str) -> CoreResult<Option<String>> {
+            self.started.store(true, Ordering::SeqCst);
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(Some("fixture-secret".into()))
+        }
+
+        fn delete(&self, _ref_id: &str) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    struct PacketProofFixture {
+        _workspace: tempfile::TempDir,
+        cache: tempfile::TempDir,
+        host: ToolHost,
+        config: AppConfig,
+        secrets: SequencedSecretStore,
+        policy: TriagePolicyV2,
+        preflight: TriagePolicyPreflightV2,
+        input: TriageHostRunInput,
+    }
+
+    fn packet_proof_fixture() -> PacketProofFixture {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let logs = workspace.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs");
+        std::fs::write(
+            logs.join("worker.log"),
+            concat!(
+                "2026-08-18T01:00:00Z ERROR worker pool exhausted request=req-7\n",
+                "2026-08-18T01:00:01Z WARN worker retrying request=req-7\n"
+            ),
+        )
+        .expect("fixture log");
+        let cache = tempfile::tempdir().expect("cache");
+        let report =
+            cd_core::log_analysis::ingest_path(cache.path(), &logs, "packet-proof", None, "none")
+                .expect("ingest fixture");
+        let index = KeywordIndex::build(&Workspace::new(
+            "packet-proof",
+            vec![workspace.path().to_path_buf()],
+        ))
+        .expect("index");
+        let mut host = ToolHost::new(
+            Workspace::new("packet-proof", vec![workspace.path().to_path_buf()]),
+            index,
+            None,
+        );
+        host.set_log_analysis(true, Some(cache.path().to_path_buf()));
+        host.set_log_corpus_scope(Some("prior-scope".into()));
+        host.set_active_log_corpus(Some("prior-active".into()));
+
+        let mut profile = ProviderProfile::ollama_local();
+        profile.id = "profile:packet-proof".into();
+        profile.chat_model = "model:packet-proof".into();
+        profile.api_key_ref = Some("secret:packet-proof".into());
+        let model = ModelRef {
+            profile_id: profile.id.clone(),
+            model_id: profile.chat_model.clone(),
+        };
+        let policy = TriagePolicyV2::standard(model, false);
+        let mut config = AppConfig::default();
+        config.providers.profiles.push(profile.clone());
+        let transport = cd_core::capability_qualification::QualificationKey::with_provider_kind(
+            &profile.id,
+            &profile.base_url,
+            &profile.chat_model,
+            profile.kind,
+        )
+        .transport_protocol;
+        let kind = TriageSlotKindV2::Finalizer;
+        let mut qualifications = TriageRoleQualificationStoreV1::default();
+        qualifications
+            .put(TriageRoleQualificationRecordV1 {
+                key: TriageRoleQualificationKeyV1::current(
+                    &profile.id,
+                    &profile.base_url,
+                    &profile.chat_model,
+                    kind,
+                    triage_protocol_fingerprint(&transport),
+                ),
+                qualification: RoleQualificationV2::Qualified,
+                physical_provider_calls: 1,
+                semantic_corrections: 0,
+                reason: "fixture-qualified".into(),
+                tested_at: 1,
+            })
+            .expect("qualification");
+        let preflight = preflight_for_policy(&config, &policy, &qualifications);
+        let input = TriageHostRunInput {
+            run_id: "run:packet-proof".into(),
+            request_fingerprint: "request:packet-proof".into(),
+            policy_fingerprint: "policy:packet-proof".into(),
+            corpus_id: report.corpus_id,
+            corpus_revision: None,
+            source_ids: Vec::new(),
+            user_text: "what caused the worker failure?".into(),
+            cancellation_id: "cancel:packet-proof".into(),
+            explicit_review_requested: false,
+            deadline_ms: 60_000,
+            context_char_budget: 100_000,
+            cancel: None,
+        };
+        PacketProofFixture {
+            _workspace: workspace,
+            cache,
+            host,
+            config,
+            secrets: SequencedSecretStore::default(),
+            policy,
+            preflight,
+            input,
+        }
+    }
+
+    fn assert_prior_scope_restored(host: &ToolHost) {
+        assert_eq!(host.log_corpus_scope(), Some("prior-scope"));
+        assert_eq!(host.active_log_corpus(), Some("prior-active"));
+    }
 
     #[tokio::test]
     async fn provider_setup_observes_remaining_turn_deadline() {
@@ -769,6 +1195,263 @@ mod tests {
         assert!(matches!(result, Err(TriageHostError::Cancelled)));
     }
 
+    #[tokio::test]
+    async fn credential_read_is_bounded_by_the_turn_deadline() {
+        let secrets = Arc::new(BlockingSecretStore::default());
+        let credentials = TurnProviderCredentialCache::new(secrets.as_ref());
+        let mut profile = ProviderProfile::ollama_local();
+        profile.api_key_ref = Some("secret:blocked".into());
+
+        let result = preload_provider_credential_with_turn_budget(
+            &credentials,
+            secrets.clone(),
+            &profile,
+            Instant::now(),
+            20,
+            None,
+        )
+        .await;
+
+        secrets.release.store(true, Ordering::SeqCst);
+        assert!(matches!(result, Err(TriageHostError::Deadline)));
+        assert!(secrets.started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn credential_read_is_bounded_by_turn_cancellation() {
+        let secrets = Arc::new(BlockingSecretStore::default());
+        let credentials = TurnProviderCredentialCache::new(secrets.as_ref());
+        let mut profile = ProviderProfile::ollama_local();
+        profile.api_key_ref = Some("secret:blocked".into());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            signal.store(true, Ordering::SeqCst);
+        });
+
+        let result = preload_provider_credential_with_turn_budget(
+            &credentials,
+            secrets.clone(),
+            &profile,
+            Instant::now(),
+            500,
+            Some(cancel),
+        )
+        .await;
+
+        secrets.release.store(true, Ordering::SeqCst);
+        assert!(matches!(result, Err(TriageHostError::Cancelled)));
+        assert!(secrets.started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn credential_worker_limit_bounds_blocked_background_reads() {
+        let secrets = Arc::new(BlockingSecretStore::default());
+        let first_credentials = TurnProviderCredentialCache::new(secrets.as_ref());
+        let second_credentials = TurnProviderCredentialCache::new(secrets.as_ref());
+        let mut first_profile = ProviderProfile::ollama_local();
+        first_profile.api_key_ref = Some("secret:first-blocked".into());
+        let mut second_profile = ProviderProfile::ollama_local();
+        second_profile.api_key_ref = Some("secret:second-blocked".into());
+        let limiter = Arc::new(tokio::sync::Semaphore::new(1));
+
+        let first = preload_provider_credential_with_limiter(
+            &first_credentials,
+            secrets.clone(),
+            &first_profile,
+            Instant::now(),
+            1_000,
+            None,
+            Arc::clone(&limiter),
+        );
+        let second = preload_provider_credential_with_limiter(
+            &second_credentials,
+            secrets.clone(),
+            &second_profile,
+            Instant::now(),
+            1_000,
+            None,
+            limiter,
+        );
+        let release = async {
+            for _ in 0..100 {
+                if secrets.reads.load(Ordering::SeqCst) > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            assert_eq!(secrets.reads.load(Ordering::SeqCst), 1);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            assert_eq!(
+                secrets.reads.load(Ordering::SeqCst),
+                1,
+                "a second blocked credential read escaped the limiter"
+            );
+            secrets.release.store(true, Ordering::SeqCst);
+        };
+
+        let (first_result, second_result, ()) = tokio::join!(first, second, release);
+
+        assert!(first_result.is_ok());
+        assert!(second_result.is_ok());
+        assert_eq!(secrets.reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn packet_proof_precedes_credentials_and_matches_the_executed_packet() {
+        let mut fixture = packet_proof_fixture();
+        let observed = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&observed);
+        let order = Arc::clone(&fixture.secrets.order);
+        let observer = move |proof: &TriageExecutedPacketProofV1| {
+            order.lock().unwrap().push("proof");
+            *captured.lock().unwrap() = Some(proof.clone());
+            Ok(())
+        };
+
+        let resolved = resolve_v2_host_with_packet_proof_observer(
+            &mut fixture.host,
+            fixture.cache.path(),
+            &fixture.config,
+            Arc::new(fixture.secrets.clone()),
+            &fixture.policy,
+            &fixture.preflight,
+            &fixture.input,
+            Some(&observer),
+        )
+        .await
+        .expect("host resolves after proof acceptance");
+
+        assert_eq!(
+            fixture.secrets.order.lock().unwrap().as_slice(),
+            ["proof", "credential"]
+        );
+        assert_eq!(fixture.secrets.reads.load(Ordering::SeqCst), 1);
+        let proof = observed.lock().unwrap().clone().expect("proof");
+        let binding = resolved.packet.ledger().binding();
+        assert_eq!(proof.run_id, fixture.input.run_id);
+        assert_eq!(proof.request_fingerprint, fixture.input.request_fingerprint);
+        assert_eq!(proof.policy_fingerprint, fixture.input.policy_fingerprint);
+        assert_eq!(
+            proof.privacy,
+            cd_core::extension_contract::PacketPrivacyBoundary::OwnerOnly
+        );
+        assert_eq!(proof.packet_id, resolved.packet.packet_id());
+        assert_eq!(proof.packet_digest, binding.ledger_digest);
+        assert_ne!(proof.packet_digest, proof.packet_id);
+        assert_eq!(proof.corpus_id, binding.corpus_id);
+        assert_eq!(proof.corpus_revision, resolved.binding.revision);
+        assert_eq!(proof.snapshot_revision, binding.revision);
+        assert_eq!(proof.snapshot_revision, resolved.binding.snapshot_revision);
+        assert_eq!(
+            proof.evidence,
+            resolved
+                .packet
+                .ledger()
+                .entries()
+                .into_iter()
+                .map(|entry| TriageExecutedPacketEvidenceV1 {
+                    evidence_id: entry.evidence_id,
+                    source_label: entry.source_label,
+                })
+                .collect::<Vec<_>>()
+        );
+        assert!(!proof.evidence.is_empty());
+        assert!(proof
+            .evidence
+            .iter()
+            .all(|entry| !entry.evidence_id.is_empty() && !entry.source_label.is_empty()));
+        assert!(!format!("{proof:?}").contains("pool exhausted"));
+
+        unbind_linked_corpus(&mut fixture.host, resolved.binding);
+        assert_prior_scope_restored(&fixture.host);
+    }
+
+    #[tokio::test]
+    async fn packet_proof_refusal_fails_before_credentials_and_restores_scope() {
+        let mut fixture = packet_proof_fixture();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&calls);
+        let observer = move |_proof: &TriageExecutedPacketProofV1| {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            Err(TriagePacketProofObserverErrorV1::new())
+        };
+
+        let result = resolve_v2_host_with_packet_proof_observer(
+            &mut fixture.host,
+            fixture.cache.path(),
+            &fixture.config,
+            Arc::new(fixture.secrets.clone()),
+            &fixture.policy,
+            &fixture.preflight,
+            &fixture.input,
+            Some(&observer),
+        )
+        .await;
+
+        assert!(matches!(result, Err(TriageHostError::PacketProofObserver)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.secrets.reads.load(Ordering::SeqCst), 0);
+        assert_prior_scope_restored(&fixture.host);
+    }
+
+    #[tokio::test]
+    async fn packet_proof_observer_cancellation_stops_before_credentials_and_cleans_up() {
+        let mut fixture = packet_proof_fixture();
+        let cancel = Arc::new(AtomicBool::new(false));
+        fixture.input.cancel = Some(Arc::clone(&cancel));
+        let observer = move |_proof: &TriageExecutedPacketProofV1| {
+            cancel.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+
+        let result = resolve_v2_host_with_packet_proof_observer(
+            &mut fixture.host,
+            fixture.cache.path(),
+            &fixture.config,
+            Arc::new(fixture.secrets.clone()),
+            &fixture.policy,
+            &fixture.preflight,
+            &fixture.input,
+            Some(&observer),
+        )
+        .await;
+
+        assert!(matches!(result, Err(TriageHostError::Cancelled)));
+        assert_eq!(fixture.secrets.reads.load(Ordering::SeqCst), 0);
+        assert_prior_scope_restored(&fixture.host);
+    }
+
+    #[tokio::test]
+    async fn pre_packet_scope_failure_never_invokes_observer_or_credentials() {
+        let mut fixture = packet_proof_fixture();
+        fixture.input.source_ids.push("unsupported-source".into());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&calls);
+        let observer = move |_proof: &TriageExecutedPacketProofV1| {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        };
+
+        let result = resolve_v2_host_with_packet_proof_observer(
+            &mut fixture.host,
+            fixture.cache.path(),
+            &fixture.config,
+            Arc::new(fixture.secrets.clone()),
+            &fixture.policy,
+            &fixture.preflight,
+            &fixture.input,
+            Some(&observer),
+        )
+        .await;
+
+        assert!(matches!(result, Err(TriageHostError::Scope(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.secrets.reads.load(Ordering::SeqCst), 0);
+        assert_prior_scope_restored(&fixture.host);
+    }
+
     #[test]
     fn requested_scope_accepts_current_revision_without_sources() {
         assert!(validate_requested_scope(Some(7), &[], 7).is_ok());
@@ -788,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn stock_phase_caps_align_to_remaining_host_budget() {
+    fn stock_phase_caps_preserve_smaller_operation_limits() {
         let mut policy = TriagePolicyV2::standard(
             ModelRef {
                 profile_id: "profile:test".into(),
@@ -802,12 +1485,49 @@ mod tests {
         let stock = TriageBudgetV2::default();
         assert_eq!(
             policy.budget.contributors.operation_timeout_ms,
+            stock.contributors.operation_timeout_ms
+        );
+        assert_eq!(
+            policy.budget.corrections.operation_timeout_ms,
+            stock.corrections.operation_timeout_ms
+        );
+        assert_eq!(
+            policy.budget.finalizer.operation_timeout_ms,
+            stock.finalizer.operation_timeout_ms
+        );
+        assert_eq!(
+            policy.budget.reviewer.operation_timeout_ms,
+            stock.reviewer.operation_timeout_ms
+        );
+        assert!(stock.contributors.operation_timeout_ms < remaining_ms);
+    }
+
+    #[test]
+    fn stock_phase_caps_and_active_reserves_fit_shorter_remaining_turn() {
+        let model = ModelRef {
+            profile_id: "profile:test".into(),
+            model_id: "model:test".into(),
+        };
+        let mut policy = TriagePolicyV2::standard(model.clone(), false);
+        policy.mode = TriagePolicyMode::Enhanced;
+        policy.reviewer = Some(ReviewerSlotV2 {
+            slot_id: "reviewer".into(),
+            model,
+            condition: ReviewerConditionV2::ContestedOrIncomplete,
+            requirement: RoleRequirement::Optional,
+            allow_remote: false,
+        });
+        let remaining_ms = 60_000;
+        align_stock_phase_caps(&mut policy, remaining_ms);
+        assert_eq!(
+            policy.budget.contributors.operation_timeout_ms,
             remaining_ms
         );
         assert_eq!(policy.budget.corrections.operation_timeout_ms, remaining_ms);
         assert_eq!(policy.budget.finalizer.operation_timeout_ms, remaining_ms);
         assert_eq!(policy.budget.reviewer.operation_timeout_ms, remaining_ms);
-        assert!(stock.contributors.operation_timeout_ms < remaining_ms);
+        assert_eq!(policy.budget.finalizer.reserve_ms, 30_000);
+        assert_eq!(policy.budget.reviewer.reserve_ms, 30_000);
     }
 
     #[test]

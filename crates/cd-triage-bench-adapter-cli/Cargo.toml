@@ -1,0 +1,22 @@
+[package]
+name = "cd-triage-bench-adapter-cli"
+description = "Offline command-line integration for the public SDK triage-bench adapter."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cd-triage-bench-adapter"
+path = "src/main.rs"
+
+[dependencies]
+cd-triage-bench = { path = "../cd-triage-bench" }
+cd-triage-bench-adapter = { path = "../cd-triage-bench-adapter" }
+cd-triage-sdk = { path = "../cd-triage-sdk" }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+serde_json = { workspace = true }
+tempfile = "3"

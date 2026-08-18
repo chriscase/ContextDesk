@@ -1,0 +1,464 @@
+//! Replay ingest is source-neutral: mock output and imported JSON share one
+//! recording path. This is not live execution.
+
+mod common;
+
+use cd_triage_bench::RunStatus;
+use cd_triage_bench_adapter::{
+    decode_replay_json, materialize_bounded_packet, project_share_safe, record_public_replay,
+    record_run, run_deterministic_mock, run_offline, validate_public_replay, AdapterError,
+    ExecutionPacketState,
+};
+use cd_triage_sdk::{
+    PacketPrivacyBoundary, TriageAttemptStatus, TriageReplayV1, TriageRequestOverridesV1,
+    TriageRoleAttemptV1, TriageRunEventPayloadV2, TriageRunEventV2, TriageSlotKindV2,
+    TriageTerminalDispositionV1, TRIAGE_REPLAY_SCHEMA_V1, TRIAGE_RUN_EVENT_SCHEMA_V2,
+};
+
+fn bound_fixture() -> (
+    cd_triage_bench::Case,
+    cd_triage_bench::EvidenceSnapshot,
+    cd_triage_bench::EvaluationTask,
+    cd_triage_bench_adapter::BoundedPacket,
+    cd_triage_bench_adapter::BoundRequest,
+) {
+    let case = common::case();
+    let snapshot = common::snapshot();
+    let task = common::task(&snapshot);
+    let bounded = materialize_bounded_packet(&case, &snapshot, &task).unwrap();
+    let bound = cd_triage_bench_adapter::build_request(
+        &snapshot,
+        &task,
+        &bounded,
+        common::policy(),
+        TriageRequestOverridesV1::default(),
+        common::CANCELLATION_ID,
+    )
+    .unwrap();
+    (case, snapshot, task, bounded, bound)
+}
+
+fn mock_replay() -> TriageReplayV1 {
+    let (_, _, _, bounded, bound) = bound_fixture();
+    run_deterministic_mock(&bound, &bounded, &common::plan_complete())
+        .unwrap()
+        .replay
+}
+
+fn pre_packet_failure_replay(bound: &cd_triage_bench_adapter::BoundRequest) -> TriageReplayV1 {
+    let event = |sequence, event| TriageRunEventV2 {
+        schema_id: TRIAGE_RUN_EVENT_SCHEMA_V2.into(),
+        run_id: bound.sdk_run_id.clone(),
+        sequence,
+        privacy: PacketPrivacyBoundary::OwnerOnly,
+        event,
+    };
+    TriageReplayV1 {
+        schema_id: TRIAGE_REPLAY_SCHEMA_V1.into(),
+        run_id: bound.sdk_run_id.clone(),
+        request_fingerprint: bound.request_fingerprint.clone(),
+        events: vec![
+            event(
+                0,
+                TriageRunEventPayloadV2::RunStarted {
+                    request_fingerprint: bound.request_fingerprint.clone(),
+                    policy_fingerprint: bound.policy_fingerprint.clone(),
+                },
+            ),
+            event(
+                1,
+                TriageRunEventPayloadV2::RoleAttempt {
+                    attempt: TriageRoleAttemptV1 {
+                        attempt_id: "attempt:preflight:finalizer".into(),
+                        role_slot_id: "finalize".into(),
+                        role: TriageSlotKindV2::Finalizer,
+                        model: None,
+                        status: TriageAttemptStatus::NotAdmitted,
+                        reason_codes: vec!["policy_preflight_rejected".into()],
+                        elapsed_ms: 0,
+                        input_chars: 0,
+                        output_chars: 0,
+                        physical_provider_calls: Some(0),
+                        semantic_corrections: Some(0),
+                        terminal_disposition: Some(TriageTerminalDispositionV1::NotAdmitted),
+                    },
+                },
+            ),
+            event(
+                2,
+                TriageRunEventPayloadV2::Failed {
+                    category: "policy_preflight_rejected".into(),
+                    partial_result: None,
+                },
+            ),
+        ],
+    }
+}
+
+#[test]
+fn mock_recording_and_replay_recording_are_equivalent() {
+    let (case, snapshot, task, bounded, bound) = bound_fixture();
+    let context = common::context();
+    let mock = run_offline(
+        &case,
+        &snapshot,
+        &task,
+        common::policy(),
+        TriageRequestOverridesV1::default(),
+        common::CANCELLATION_ID,
+        &common::plan_complete(),
+        &context,
+    )
+    .unwrap();
+    let imported = record_public_replay(
+        &case,
+        &snapshot,
+        &task,
+        &bounded,
+        &bound,
+        mock.outcome.replay.clone(),
+        &context,
+    )
+    .unwrap();
+    assert_eq!(imported.owner_only, mock.recorded.owner_only);
+    assert_eq!(imported.bench_run.run_id, mock.recorded.bench_run.run_id);
+    assert_eq!(imported.raw_output, mock.recorded.raw_output);
+    assert_eq!(imported.bench_run.status, RunStatus::Completed);
+    assert!(matches!(
+        imported.bench_run.cost,
+        cd_triage_bench::Observed::Unknown
+    ));
+    assert_eq!(
+        imported.owner_only.execution_packet_state,
+        ExecutionPacketState::Matched
+    );
+}
+
+#[test]
+fn pre_packet_failure_is_recorded_without_fabricating_execution_provenance() {
+    let (case, snapshot, task, bounded, bound) = bound_fixture();
+    let replay = pre_packet_failure_replay(&bound);
+    replay.validate().expect("public pre-packet failure");
+
+    let recorded = record_public_replay(
+        &case,
+        &snapshot,
+        &task,
+        &bounded,
+        &bound,
+        replay,
+        &common::context(),
+    )
+    .expect("record pre-packet failure");
+
+    assert_eq!(recorded.bench_run.status, RunStatus::Failed);
+    assert_eq!(
+        recorded.owner_only.execution_packet_state,
+        ExecutionPacketState::NotProduced
+    );
+    assert!(recorded.owner_only.fingerprints.models.is_empty());
+    assert_eq!(recorded.owner_only.slots.len(), 1);
+    assert!(recorded.owner_only.slots[0].model.is_none());
+    assert!(recorded.owner_only.slots[0].model_fingerprint.is_none());
+    assert_eq!(
+        recorded.owner_only.fingerprints.packet,
+        bounded.packet_fingerprint
+    );
+    assert!(!recorded
+        .owner_only
+        .replay
+        .events
+        .iter()
+        .any(|event| { matches!(&event.event, TriageRunEventPayloadV2::PacketReady { .. }) }));
+
+    let projection = project_share_safe(&snapshot, &task, &recorded).unwrap();
+    assert_eq!(
+        projection.execution_packet_state,
+        ExecutionPacketState::NotProduced
+    );
+    assert!(projection.model_fingerprints.is_empty());
+    assert_eq!(projection.slots.len(), 1);
+    assert!(projection.slots[0].model_fingerprint.is_none());
+    assert!(
+        cd_triage_sdk::scan_share_safe_text(&serde_json::to_string(&projection).unwrap())
+            .is_empty()
+    );
+}
+
+#[test]
+fn completed_partial_failed_timed_out_and_cancelled_preserve_bench_status() {
+    let (case, snapshot, task, bounded, bound) = bound_fixture();
+    let context = common::context();
+    let cases = [
+        (common::plan_complete(), RunStatus::Completed),
+        (common::plan_partial(), RunStatus::Partial),
+        (common::plan_failed(), RunStatus::Failed),
+        (common::plan_timed_out(), RunStatus::TimedOut),
+        (common::plan_cancelled(), RunStatus::Cancelled),
+    ];
+    for (plan, expected) in cases {
+        let mock = run_deterministic_mock(&bound, &bounded, &plan).unwrap();
+        let recorded = record_public_replay(
+            &case,
+            &snapshot,
+            &task,
+            &bounded,
+            &bound,
+            mock.replay,
+            &context,
+        )
+        .unwrap();
+        assert_eq!(recorded.bench_run.status, expected);
+        if expected == RunStatus::Failed || expected == RunStatus::TimedOut {
+            assert!(
+                recorded
+                    .owner_only
+                    .terminal
+                    .partial_result_is_provenance_only
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_replay_is_rejected_by_the_real_validator() {
+    let (_, _, _, _, bound) = bound_fixture();
+    let bytes = std::fs::read(common::fixtures_dir().join("replay.bad-sequence.invalid.json"))
+        .expect("fixture");
+    let replay = decode_replay_json(&bytes).unwrap();
+    let error = validate_public_replay(replay, &bound).unwrap_err();
+    assert!(matches!(error, AdapterError::Contract(_)));
+}
+
+#[test]
+fn decode_rejects_non_replay_json() {
+    let error = decode_replay_json(br#"{"not":"a-replay"}"#).unwrap_err();
+    assert_eq!(error, AdapterError::ReplayJson);
+}
+
+#[test]
+fn mismatched_run_id_is_rejected() {
+    let (_, _, _, _, bound) = bound_fixture();
+    let mut replay = mock_replay();
+    let forged = "cdrun-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    replay.run_id = forged.into();
+    for event in &mut replay.events {
+        event.run_id = forged.into();
+        if let TriageRunEventPayloadV2::Completed { result }
+        | TriageRunEventPayloadV2::Failed {
+            partial_result: Some(result),
+            ..
+        }
+        | TriageRunEventPayloadV2::TimedOut {
+            partial_result: Some(result),
+            ..
+        }
+        | TriageRunEventPayloadV2::Cancelled {
+            partial_result: Some(result),
+            ..
+        } = &mut event.event
+        {
+            result.run_id = forged.into();
+        }
+    }
+    let error = validate_public_replay(replay, &bound).unwrap_err();
+    assert!(matches!(error, AdapterError::IdentityMismatch(_)));
+}
+
+#[test]
+fn mismatched_request_fingerprint_is_rejected() {
+    let (_, _, _, _, bound) = bound_fixture();
+    let mut replay = mock_replay();
+    replay.request_fingerprint =
+        "req-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+    let error = validate_public_replay(replay, &bound).unwrap_err();
+    assert!(
+        matches!(error, AdapterError::Contract(_))
+            || matches!(error, AdapterError::IdentityMismatch(_))
+    );
+}
+
+#[test]
+fn caller_forged_bound_policy_and_run_provenance_are_rejected() {
+    let (_, _, _, _, mut bound) = bound_fixture();
+    let replay = mock_replay();
+    bound.policy_fingerprint = "pol-caller-forged".into();
+    assert!(matches!(
+        validate_public_replay(replay.clone(), &bound).unwrap_err(),
+        AdapterError::IdentityMismatch(_)
+    ));
+
+    let (_, _, _, _, mut bound) = bound_fixture();
+    bound.sdk_run_id = "cdrun-caller-forged".into();
+    bound.request.run_id.clone_from(&bound.sdk_run_id);
+    let mut forged_replay = replay;
+    forged_replay.run_id.clone_from(&bound.sdk_run_id);
+    for event in &mut forged_replay.events {
+        event.run_id.clone_from(&bound.sdk_run_id);
+        match &mut event.event {
+            TriageRunEventPayloadV2::Completed { result } => {
+                result.run_id.clone_from(&bound.sdk_run_id)
+            }
+            TriageRunEventPayloadV2::Failed {
+                partial_result: Some(result),
+                ..
+            }
+            | TriageRunEventPayloadV2::TimedOut {
+                partial_result: Some(result),
+                ..
+            }
+            | TriageRunEventPayloadV2::Cancelled {
+                partial_result: Some(result),
+                ..
+            } => result.run_id.clone_from(&bound.sdk_run_id),
+            _ => {}
+        }
+    }
+    assert!(matches!(
+        validate_public_replay(forged_replay, &bound).unwrap_err(),
+        AdapterError::IdentityMismatch(_)
+    ));
+}
+
+#[test]
+fn missing_model_is_rejected() {
+    let (_, _, _, _, bound) = bound_fixture();
+    let mut replay = mock_replay();
+    for event in &mut replay.events {
+        if let TriageRunEventPayloadV2::RoleAttempt { attempt } = &mut event.event {
+            attempt.model = None;
+            break;
+        }
+    }
+    let error = validate_public_replay(replay, &bound).unwrap_err();
+    assert!(matches!(error, AdapterError::IdentityMismatch(message) if message.contains("model")));
+}
+
+#[test]
+fn missing_terminal_disposition_is_rejected() {
+    let (_, _, _, _, bound) = bound_fixture();
+    let mut replay = mock_replay();
+    for event in &mut replay.events {
+        if let TriageRunEventPayloadV2::RoleAttempt { attempt } = &mut event.event {
+            attempt.terminal_disposition = None;
+            break;
+        }
+    }
+    let error = validate_public_replay(replay, &bound).unwrap_err();
+    assert!(
+        matches!(error, AdapterError::IdentityMismatch(message) if message.contains("disposition"))
+    );
+}
+
+#[test]
+fn differing_production_packet_fails_closed() {
+    let (case, snapshot, task, bounded, bound) = bound_fixture();
+    let replay = mock_replay();
+    let mut foreign = bounded.clone();
+    foreign.packet.packet_id =
+        "pkt-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+    foreign.packet_fingerprint =
+        "pkf-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+    let error = record_public_replay(
+        &case,
+        &snapshot,
+        &task,
+        &foreign,
+        &bound,
+        replay,
+        &common::context(),
+    )
+    .unwrap_err();
+    assert!(matches!(error, AdapterError::IdentityMismatch(_)));
+}
+
+#[test]
+fn packet_ready_mismatch_fails_closed() {
+    let (case, snapshot, task, bounded, bound) = bound_fixture();
+    let mut replay = mock_replay();
+    for event in &mut replay.events {
+        if let TriageRunEventPayloadV2::PacketReady {
+            packet_id,
+            packet_digest,
+            ..
+        } = &mut event.event
+        {
+            *packet_id =
+                "pkt-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+            *packet_digest =
+                "pkf-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+        }
+    }
+    let error = record_public_replay(
+        &case,
+        &snapshot,
+        &task,
+        &bounded,
+        &bound,
+        replay,
+        &common::context(),
+    )
+    .unwrap_err();
+    assert!(matches!(error, AdapterError::IdentityMismatch(_)));
+}
+
+#[test]
+fn runtime_cross_event_drift_fails_closed_before_recording() {
+    let (_, _, _, _, bound) = bound_fixture();
+    let mut reconciliation_drift = mock_replay();
+    if let TriageRunEventPayloadV2::Completed { result } =
+        &mut reconciliation_drift.events.last_mut().unwrap().event
+    {
+        result.reconciliation.state = "different_but_valid".into();
+    }
+    assert!(matches!(
+        validate_public_replay(reconciliation_drift, &bound).unwrap_err(),
+        AdapterError::IdentityMismatch(_)
+    ));
+
+    let mut validation_drift = mock_replay();
+    for event in &mut validation_drift.events {
+        if let TriageRunEventPayloadV2::Validation { passed, .. } = &mut event.event {
+            *passed = false;
+        }
+    }
+    assert!(matches!(
+        validate_public_replay(validation_drift, &bound).unwrap_err(),
+        AdapterError::IdentityMismatch(_)
+    ));
+}
+
+#[test]
+fn ingested_replay_share_safe_projection_still_scans() {
+    let (case, snapshot, task, bounded, bound) = bound_fixture();
+    let recorded = record_public_replay(
+        &case,
+        &snapshot,
+        &task,
+        &bounded,
+        &bound,
+        mock_replay(),
+        &common::context(),
+    )
+    .unwrap();
+    let projection = project_share_safe(&snapshot, &task, &recorded).unwrap();
+    assert!(!projection.model_fingerprints.is_empty());
+    let encoded = serde_json::to_string(&projection).unwrap();
+    assert!(cd_triage_sdk::scan_share_safe_text(&encoded).is_empty());
+}
+
+#[test]
+fn record_run_requires_validated_replay_not_a_caller_assertion() {
+    let (_, snapshot, task, bounded, bound) = bound_fixture();
+    let replay = mock_replay();
+    let outcome = validate_public_replay(replay, &bound).unwrap();
+    record_run(
+        &snapshot,
+        &task,
+        &bound,
+        &bounded,
+        &outcome,
+        &common::context(),
+    )
+    .unwrap();
+}

@@ -1,9 +1,9 @@
 # Triage SDK Contract V2
 
-Status: additive contract foundation; no production orchestration or provider
-readiness claim.
+Status: additive public contract used by the production CLI/Tauri runtime and
+the hermetic bench adapter; no provider-readiness claim.
 
-This contract is the host-neutral boundary shared by a future Rust SDK, CLI
+This contract is the host-neutral boundary shared by the Rust SDK, CLI
 JSON/JSONL, Tauri IPC, HTTP/SSE, and deterministic mock/replay adapters. It has
 no dependency on `AppConfig`, Tauri state, CLI arguments, Keychain, or a fixed
 filesystem.
@@ -69,10 +69,14 @@ continue to use the legacy single-finalizer sequence for byte/behavior
 compatibility. Legacy aliases and unknown V2 roles fail closed during
 deserialization.
 
-The correction event is a host checkpoint, not model output: the current mock
-runner reports `applied: false` because no correction backend is wired. The
-production adapter is currently contributor-only and default-off; CLI/Tauri do
-not execute this V2 graph yet.
+The correction event is a host checkpoint, not model output: the deterministic
+mock runner reports `applied: false`, while the production workflow runner owns
+the bounded validation/correction hook. `WorkflowTriageEngineV1` resolves
+Standard, saved, and inline selections for both CLI and Tauri, binds exact
+authorized backends, and emits the same validated replay vocabulary. Standard
+keeps its dedicated one-finalizer graph; Enhanced and Advanced remain
+qualification-gated and fail closed before provider work when the host cannot
+prove every required binding.
 
 ## Qualification binding and physical accounting
 
@@ -108,7 +112,9 @@ the missing request/run/result/cancellation/replay boundary.
 
 ## Non-claims
 
-These DTOs do not run a provider, qualify a model, schedule contributors,
+These DTOs alone do not run a provider, qualify a model, schedule contributors,
 allocate budgets, validate a final causal answer, or make a release-readiness
-claim. Production paths must later dogfood the same workflow and event stream;
-the desktop receives no privileged orchestration API.
+claim. Those responsibilities live in the production workflow host, which uses
+this same request/event/result/replay boundary; the desktop receives no
+privileged orchestration contract. Exact model qualification, live usefulness,
+cost, and release readiness remain separate evidence.

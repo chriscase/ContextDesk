@@ -1,0 +1,63 @@
+dn: ou=people,dc=example,dc=test
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=example,dc=test
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=alice,ou=people,dc=example,dc=test
+objectClass: inetOrgPerson
+objectClass: organizationalPerson
+objectClass: person
+cn: Alice
+sn: Fixture
+uid: alice
+userPassword: fixture-alice-secret
+
+dn: uid=bob,ou=people,dc=example,dc=test
+objectClass: inetOrgPerson
+objectClass: organizationalPerson
+objectClass: person
+cn: Bob
+sn: Fixture
+uid: bob
+userPassword: fixture-bob-secret
+
+dn: uid=carol,ou=people,dc=example,dc=test
+objectClass: inetOrgPerson
+objectClass: organizationalPerson
+objectClass: person
+cn: Carol
+sn: Fixture
+uid: carol
+userPassword: fixture-carol-secret
+
+dn: uid=dave,ou=people,dc=example,dc=test
+objectClass: inetOrgPerson
+objectClass: organizationalPerson
+objectClass: person
+cn: Dave
+sn: Fixture
+uid: dave
+userPassword: fixture-dave-secret
+
+dn: cn=viewers,ou=groups,dc=example,dc=test
+objectClass: groupOfNames
+cn: viewers
+member: uid=carol,ou=people,dc=example,dc=test
+
+dn: cn=contributors,ou=groups,dc=example,dc=test
+objectClass: groupOfNames
+cn: contributors
+member: uid=alice,ou=people,dc=example,dc=test
+
+dn: cn=admins,ou=groups,dc=example,dc=test
+objectClass: groupOfNames
+cn: admins
+member: uid=dave,ou=people,dc=example,dc=test
+
+dn: cn=unmapped,ou=groups,dc=example,dc=test
+objectClass: groupOfNames
+cn: unmapped
+member: uid=bob,ou=people,dc=example,dc=test

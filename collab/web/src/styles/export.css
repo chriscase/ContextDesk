@@ -1,0 +1,58 @@
+.export {
+  border-top: 1px solid var(--border);
+  margin-top: 1rem;
+  padding-top: 0.85rem;
+}
+
+.export__title {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
+}
+
+.export__copy,
+.export__error,
+.export__label {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.export__error {
+  color: #f7768e;
+}
+
+.export__select {
+  border: 1px solid var(--border);
+  margin: 0;
+  padding: 0.5rem 0.65rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.export__item {
+  display: flex;
+  gap: 0.45rem;
+  align-items: flex-start;
+  font-size: 0.8rem;
+}
+
+.export__findings {
+  margin: 0 0 0.6rem;
+  padding-left: 1.1rem;
+  color: #f7768e;
+  font-size: 0.8rem;
+}
+
+.export__markdown {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: 0.8rem;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--border);
+  padding: 0.6rem;
+  margin: 0.35rem 0 0;
+  max-height: 22rem;
+  overflow: auto;
+}

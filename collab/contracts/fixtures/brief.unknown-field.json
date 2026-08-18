@@ -1,0 +1,19 @@
+{
+  "schemaId": "cd-collab.brief.v1",
+  "privacyClass": "owner_only",
+  "header": {
+    "caseId": "c",
+    "title": "t",
+    "severity": "low",
+    "status": "open",
+    "legalHold": false,
+    "retentionClass": "standard"
+  },
+  "timeline": [],
+  "hypotheses": [],
+  "actions": [],
+  "evidence": [],
+  "attributions": [],
+  "importedRuns": [],
+  "leak": true
+}

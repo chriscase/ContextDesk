@@ -3,16 +3,17 @@
 //! [`crate::triage_production`] remains the narrow bridge to the established
 //! contribution runtime.  This module adds the missing orchestration seam: a
 //! resolver validates an exact, already-qualified backend set and a runner
-//! executes the canonical Enhanced/Advanced graph while retaining the shared
-//! SDK replay ledger.  It never discovers providers, reads credentials, opens
-//! sockets, or chooses a model.
+//! executes the canonical Standard or Enhanced/Advanced graph while retaining
+//! the shared SDK replay ledger.  It never discovers providers, reads
+//! credentials, opens sockets, or chooses a model.
 //!
 //! Contributors that fit the existing production contribution contract are
 //! deliberately sent through [`cd_core::multi_model::run_contribution_pipeline`].
 //! Timeline, reviewer, and finalizer stages use the same opaque
 //! [`cd_core::agent::ChatBackend`] binding but are validated by a host-supplied
 //! hook.  This keeps transport and host authority separate without inventing a
-//! second provider client or silently changing Standard mode.
+//! second provider client. Standard keeps its one-finalizer legacy event
+//! shape while consuming the same immutable host packet and validator hooks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,11 +31,13 @@ use cd_core::investigation_answer::{
 };
 use cd_core::multi_model::contribution_pipeline::{
     run_contribution_pipeline, ContributionBackendSlot, ContributionPipelineInputs,
-    ContributionPipelineOutcome, ContributionQualification,
+    ContributionPipelineOutcome, ContributionPipelineTelemetry, ContributionQualification,
+    ContributionStageTelemetry,
 };
 use cd_core::multi_model::contributions::{
-    reconcile_contributions, ContributionAttemptV1, ContributionAvailability, ContributionIdentity,
-    ContributionRole, ContributionRoutingPlan, ContributionRoutingPolicy,
+    reconcile_contributions, ContributionAttemptV1, ContributionAvailability,
+    ContributionDegradationReason, ContributionIdentity, ContributionRole, ContributionRoutingPlan,
+    ContributionRoutingPolicy, ReconciliationGapKind, ReconciliationGapV1, ReconciliationReportV1,
 };
 use cd_core::multi_model::triage_policy::{
     CompiledRoleSlotV2, CompiledTriagePolicyV2, ContributorSlotV2, ReviewerConditionV2,
@@ -49,6 +52,7 @@ use cd_core::triage_sdk::{
     TriageRunEventV2, TriageTerminalDispositionV1, TriageValidationState, TRIAGE_REPLAY_SCHEMA_V1,
     TRIAGE_RESULT_SCHEMA_V2, TRIAGE_RUN_EVENT_SCHEMA_V2,
 };
+use sha2::{Digest, Sha256};
 
 use crate::triage::compile_preflight;
 use crate::triage_production::{
@@ -220,12 +224,6 @@ pub fn resolve_v2_production(
 ) -> Result<ResolvedTriageProductionV1, TriageProductionRunnerError> {
     let compiled =
         compile_preflight(policy, preflight).map_err(TriageProductionRunnerError::Policy)?;
-    if compiled.mode == TriagePolicyMode::Standard {
-        return Err(TriageProductionRunnerError::unsupported(
-            TriageProductionAdapterRejectionV1::StandardUsesEstablishedPath,
-            [],
-        ));
-    }
     if host_turn_deadline_ms == 0 {
         return Err(TriageProductionRunnerError::unsupported(
             TriageProductionAdapterRejectionV1::InvalidHostDeadline,
@@ -246,6 +244,28 @@ pub fn resolve_v2_production(
         return Err(TriageProductionRunnerError::unsupported(
             TriageProductionAdapterRejectionV1::InvalidHostContextBudget,
             [],
+        ));
+    }
+    // Standard has no earlier phase that can consume a finalizer reserve; its
+    // sole operation is bounded directly by the operation and whole-turn
+    // deadlines. Multi-phase modes must be able to honor every active
+    // terminal reserve before any contributor is admitted.
+    if compiled.mode != TriagePolicyMode::Standard
+        && active_terminal_reserve_ms(&compiled) > host_turn_deadline_ms
+    {
+        return Err(TriageProductionRunnerError::unsupported(
+            TriageProductionAdapterRejectionV1::TerminalReserveExceedsWholeTurn,
+            compiled
+                .slots
+                .iter()
+                .filter(|slot| {
+                    slot.disposition == SlotDispositionV2::Admitted
+                        && matches!(
+                            slot.kind,
+                            TriageSlotKindV2::Finalizer | TriageSlotKindV2::Reviewer
+                        )
+                })
+                .map(|slot| slot.slot_id.clone()),
         ));
     }
 
@@ -294,10 +314,9 @@ pub fn resolve_v2_production(
     // preparation clone: their richer V2 semantics remain owned by this
     // runner below.
     //
-    // Fail closed: never discard a prepare rejection with `.ok()`. A default
-    // 120s contributor operation cap under a longer host deadline must surface
-    // `ContributorOperationCapUnsupported` instead of silently falling back to
-    // the generic-slot path (which cannot execute typed TimelineAnalyst roles).
+    // Fail closed: never discard a prepare rejection with `.ok()`. Typed
+    // contributors remain on the contribution pipeline, whose backends are
+    // wrapped with the exact V2 per-operation cap by the adapter.
     let contribution_runtime = {
         let contributor_slots = compiled
             .slots
@@ -490,7 +509,7 @@ impl TriageProductionEventLedgerV1 {
         });
         ledger.push(TriageRunEventPayloadV2::PacketReady {
             packet_id: input.packet.packet_id().into(),
-            packet_digest: input.packet.packet_id().into(),
+            packet_digest: authoritative_packet_digest(&input.packet).into(),
             evidence_count: input.packet.rows().len() as u32,
         });
         Ok(ledger)
@@ -530,6 +549,15 @@ impl TriageProductionEventLedgerV1 {
     }
 }
 
+/// Digest of the authoritative evidence ledger carried by a production
+/// packet.  This is deliberately distinct from `packet_id`: the packet id also
+/// binds packet-shaping facts such as scope, chronology, clock compatibility,
+/// and neighborhood policy, while this digest binds the exact host evidence
+/// rows (including their source labels and snapshot revisions).
+pub(crate) fn authoritative_packet_digest(packet: &FastTriagePacketV1) -> &str {
+    packet.ledger().binding().ledger_digest.as_str()
+}
+
 /// Completed runner result: replay plus the owner-local typed partial result.
 #[derive(Debug, Clone)]
 pub struct TriageProductionRunResultV1 {
@@ -541,6 +569,12 @@ pub struct TriageProductionRunResultV1 {
     /// `GroundedFinal`: until a hook returns a validated envelope, `result`
     /// remains an honest partial deterministic floor.
     pub completed: bool,
+}
+
+struct ProductionContributionOutcomeV1 {
+    attempts: Vec<ContributionAttemptV1>,
+    report: ReconciliationReportV1,
+    telemetry: ContributionPipelineTelemetry,
 }
 
 /// Reusable async runner over one resolved policy.
@@ -572,7 +606,7 @@ impl TriageProductionRunnerV1 {
         &self.resolution
     }
 
-    /// Execute canonical Enhanced/Advanced sequencing with host hooks.
+    /// Execute canonical Standard or Enhanced/Advanced sequencing with host hooks.
     pub async fn run<H: TriageProductionHooks + ?Sized>(
         &self,
         input: TriageProductionRunInput,
@@ -594,6 +628,9 @@ impl TriageProductionRunnerV1 {
         }
         let started = tokio::time::Instant::now();
         let mut ledger = TriageProductionEventLedgerV1::new_with_sink(&input, sink)?;
+        if self.resolution.compiled.mode == TriagePolicyMode::Standard {
+            return self.run_standard(input, hooks, ledger, started).await;
+        }
         let slots = &self.resolution.compiled.slots;
         let contributors = slots
             .iter()
@@ -634,24 +671,26 @@ impl TriageProductionRunnerV1 {
                 typed_contributions.extend(outcome.attempts.iter().cloned());
                 attempts.extend(contribution_attempts(
                     &contributors,
-                    &outcome,
+                    &outcome.attempts,
+                    &outcome.telemetry.stages,
                     &self.resolution.backends,
                 ));
                 generic_provider_calls = attempts
                     .iter()
                     .filter_map(|attempt| attempt.physical_provider_calls)
                     .sum();
-                if attempts.iter().any(|attempt| {
-                    matches!(
-                        attempt.status,
-                        TriageAttemptStatus::Cancelled | TriageAttemptStatus::TimedOut
-                    )
-                }) {
-                    interrupted = attempts.iter().find_map(|attempt| match attempt.status {
-                        TriageAttemptStatus::Cancelled => Some(Interruption::Cancelled),
-                        TriageAttemptStatus::TimedOut => Some(Interruption::TimedOut),
-                        _ => None,
-                    });
+                if attempts
+                    .iter()
+                    .any(|attempt| attempt.status == TriageAttemptStatus::Cancelled)
+                {
+                    interrupted = Some(Interruption::Cancelled);
+                } else if attempts
+                    .iter()
+                    .any(|attempt| attempt.status == TriageAttemptStatus::TimedOut)
+                    && host_interruption(&input, started, self.resolution.host_deadline_ms)
+                        == Some(Interruption::TimedOut)
+                {
+                    interrupted = Some(Interruption::TimedOut);
                 }
                 reconciliation_from_report(&contributors, &attempts, &outcome.report)
             } else {
@@ -838,9 +877,16 @@ impl TriageProductionRunnerV1 {
                                 .any(|code| code == "reviewer_not_required")))
                     })
             });
-        let validation_passed = !required_failed && interrupted.is_none();
+        let execution_succeeded = !required_failed && interrupted.is_none();
+        // Passing validation means the terminal can carry a grounded,
+        // authoritative answer. A successfully executed graph without such
+        // an answer is an honest partial, not a passed validation.
+        let grounded_final = execution_succeeded
+            && finalizer_answer
+                .as_ref()
+                .is_some_and(|answer| answer.answer.root_cause_established);
         ledger.push(TriageRunEventPayloadV2::Validation {
-            passed: validation_passed,
+            passed: grounded_final,
             reason_codes: reason_codes.clone(),
         });
         ledger.push(TriageRunEventPayloadV2::Correction {
@@ -861,10 +907,6 @@ impl TriageProductionRunnerV1 {
         // whose `root_cause_established` flag is false; keep that outcome an
         // honest partial rather than upgrading it merely because a finalizer
         // returned JSON.
-        let grounded_final = validation_passed
-            && finalizer_answer
-                .as_ref()
-                .is_some_and(|answer| answer.answer.root_cause_established);
         let accepted_evidence_ids = finalizer_answer
             .as_ref()
             .map(|answer| {
@@ -885,7 +927,7 @@ impl TriageProductionRunnerV1 {
             },
             validation_state: if grounded_final {
                 TriageValidationState::Passed
-            } else if validation_passed {
+            } else if execution_succeeded {
                 TriageValidationState::Partial
             } else {
                 TriageValidationState::Failed
@@ -970,27 +1012,222 @@ impl TriageProductionRunnerV1 {
         })
     }
 
+    /// Execute the permanent single-finalizer default without widening the
+    /// host-prepared packet or routing through the multi-model phase graph.
+    async fn run_standard<H: TriageProductionHooks + ?Sized>(
+        &self,
+        input: TriageProductionRunInput,
+        hooks: &H,
+        mut ledger: TriageProductionEventLedgerV1,
+        started: tokio::time::Instant,
+    ) -> Result<TriageProductionRunResultV1, TriageProductionRunnerError> {
+        let [slot] = self.resolution.compiled.slots.as_slice() else {
+            return Err(TriageProductionRunnerError::InvalidInput(
+                "standard_finalizer",
+            ));
+        };
+        if !matches!(slot.kind, TriageSlotKindV2::Finalizer) || slot.slot_id != "standard-finalizer"
+        {
+            return Err(TriageProductionRunnerError::InvalidInput(
+                "standard_finalizer",
+            ));
+        }
+
+        let mut interrupted = host_interruption(&input, started, self.resolution.host_deadline_ms);
+        let mut provider_calls = 0u32;
+        let initial_reconciliation =
+            reconciliation_from_attempts(std::slice::from_ref(slot), &[], true);
+        let (mut attempt, response) = if let Some(reason) = interrupted {
+            (not_run_attempt(&input.run_id, slot, reason), None)
+        } else {
+            self.run_generic_slot(
+                slot,
+                &input,
+                started,
+                hooks,
+                &initial_reconciliation,
+                &mut interrupted,
+                &mut provider_calls,
+            )
+            .await
+        };
+
+        let mut finalizer_answer = None;
+        if attempt.status == TriageAttemptStatus::Completed {
+            if let Some(response) = response.as_ref() {
+                let candidate = hooks
+                    .finalize(slot, response, &input.packet, &initial_reconciliation)
+                    .await;
+                if let Some(reason) =
+                    host_interruption(&input, started, self.resolution.host_deadline_ms)
+                {
+                    interrupted = Some(reason);
+                } else if let Some(answer) = candidate {
+                    if envelope_matches_packet(&answer, &input.packet) {
+                        finalizer_answer = Some(answer);
+                    } else {
+                        attempt.status = TriageAttemptStatus::Invalid;
+                        attempt.terminal_disposition = Some(TriageTerminalDispositionV1::Invalid);
+                        attempt
+                            .reason_codes
+                            .push("finalizer_envelope_unbound".into());
+                    }
+                }
+            }
+        }
+        if interrupted.is_some() {
+            finalizer_answer = None;
+        }
+        ledger.push(TriageRunEventPayloadV2::RoleAttempt {
+            attempt: attempt.clone(),
+        });
+
+        // This is the Standard terminal linearization point. Everything that
+        // can await (provider work and host validation) has completed. Observe
+        // cancellation/deadline once more before publishing reconciliation and
+        // validation; later signals are ordered after the committed result.
+        #[cfg(test)]
+        if let Some(cancel) = &self.terminal_commit_cancel {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        if interrupted.is_none() {
+            interrupted = host_interruption(&input, started, self.resolution.host_deadline_ms);
+        }
+        if interrupted.is_some() {
+            finalizer_answer = None;
+        }
+
+        let reconciliation =
+            reconciliation_from_standard_finalizer(slot, &attempt, finalizer_answer.as_ref());
+        ledger.push(TriageRunEventPayloadV2::Reconciliation {
+            summary: reconciliation.clone(),
+        });
+
+        let required_failed = !matches!(
+            attempt.status,
+            TriageAttemptStatus::Completed | TriageAttemptStatus::Abstained
+        );
+        let grounded_final = !required_failed
+            && interrupted.is_none()
+            && finalizer_answer
+                .as_ref()
+                .is_some_and(|answer| answer.answer.root_cause_established);
+        let mut reason_codes = attempt.reason_codes.clone();
+        if let Some(reason) = interrupted {
+            reason_codes.push(
+                match reason {
+                    Interruption::Cancelled => "cancelled",
+                    Interruption::TimedOut => "deadline",
+                }
+                .into(),
+            );
+        } else if finalizer_answer.is_none() && !required_failed {
+            reason_codes.push("no_authoritative_answer".into());
+        } else if !grounded_final {
+            reason_codes.push("root_cause_not_established".into());
+        }
+        let correction_applied = attempt.semantic_corrections.unwrap_or(0) > 0;
+        if correction_applied {
+            reason_codes.push("bounded_correction_applied".into());
+        }
+        reason_codes.sort();
+        reason_codes.dedup();
+
+        ledger.push(TriageRunEventPayloadV2::Validation {
+            passed: grounded_final,
+            reason_codes: reason_codes.clone(),
+        });
+        let accepted_evidence_ids = finalizer_answer
+            .as_ref()
+            .map(|answer| {
+                answer
+                    .answer
+                    .canonical_citations
+                    .iter()
+                    .map(|citation| citation.evidence_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let result = TriageResultV2 {
+            schema_id: TRIAGE_RESULT_SCHEMA_V2.into(),
+            run_id: input.run_id.clone(),
+            kind: if grounded_final {
+                TriageResultKind::GroundedFinal
+            } else {
+                TriageResultKind::HonestPartial
+            },
+            validation_state: if grounded_final {
+                TriageValidationState::Passed
+            } else if required_failed || interrupted.is_some() {
+                TriageValidationState::Failed
+            } else {
+                TriageValidationState::Partial
+            },
+            packet_id: input.packet.packet_id().into(),
+            reconciliation,
+            answer: finalizer_answer,
+            accepted_evidence_ids,
+            reason_codes,
+        };
+        let terminal = if let Some(interruption) = interrupted {
+            match interruption {
+                Interruption::Cancelled => TriageRunEventPayloadV2::Cancelled {
+                    cancellation_id: input.cancellation_id,
+                    partial_result: Some(Box::new(result.clone())),
+                },
+                Interruption::TimedOut => TriageRunEventPayloadV2::TimedOut {
+                    category: "deadline".into(),
+                    partial_result: Some(Box::new(result.clone())),
+                },
+            }
+        } else if required_failed {
+            TriageRunEventPayloadV2::Failed {
+                category: "required_role_failed".into(),
+                partial_result: Some(Box::new(result.clone())),
+            }
+        } else {
+            TriageRunEventPayloadV2::Completed {
+                result: Box::new(result.clone()),
+            }
+        };
+        let completed = matches!(terminal, TriageRunEventPayloadV2::Completed { .. });
+        ledger.push(terminal);
+        let replay = ledger.finish()?;
+        Ok(TriageProductionRunResultV1 {
+            replay,
+            result,
+            completed,
+        })
+    }
+
     async fn run_contributions(
         &self,
         runtime: &PreparedV2ContributionRuntimeV1,
         input: &TriageProductionRunInput,
         started: tokio::time::Instant,
-    ) -> Result<ContributionPipelineOutcome, cd_core::error::CoreError> {
+    ) -> Result<ProductionContributionOutcomeV1, cd_core::error::CoreError> {
+        runtime.reset_operation_timeouts();
         let mut stage_events = Vec::new();
-        run_contribution_pipeline(
+        let mut outcome = run_contribution_pipeline(
             ContributionPipelineInputs {
                 user_text: &input.user_text,
                 packet: &input.packet,
                 slots: &runtime.runtime.slots,
                 budget: runtime.runtime.budget,
-                deadline_ms: self.resolution.host_deadline_ms,
+                deadline_ms: self.contributor_phase_deadline_ms(input),
                 started_at: Some(started),
                 cancel: input.cancel.clone(),
                 plan: &runtime.runtime.plan,
             },
             &mut |event| stage_events.push(event),
         )
-        .await
+        .await?;
+        normalize_contributor_operation_timeouts(runtime, &input.packet, &mut outcome);
+        Ok(ProductionContributionOutcomeV1 {
+            attempts: outcome.attempts,
+            report: outcome.report,
+            telemetry: outcome.telemetry,
+        })
     }
 
     /// Run the conditional reviewer through the existing typed contribution
@@ -1052,6 +1289,7 @@ impl TriageProductionRunnerV1 {
             Ok(plan) => plan,
             Err(_) => return fail(TriageAttemptStatus::Invalid, "reviewer_plan_rejected"),
         };
+        let reviewer_deadline_ms = self.reviewer_phase_deadline_ms(started);
         let budget = MultiModelBudget {
             max_total_provider_rounds: self
                 .resolution
@@ -1068,7 +1306,7 @@ impl TriageProductionRunnerV1 {
                 ),
             max_semantic_corrections_per_stage: 0,
             context_char_budget: reviewer_context,
-            deadline_ms: self.resolution.host_deadline_ms,
+            deadline_ms: reviewer_deadline_ms,
             max_context_chars_total: Some(reviewer_context as u64),
         };
         let identity = ContributionIdentity {
@@ -1093,7 +1331,7 @@ impl TriageProductionRunnerV1 {
                 packet: &input.packet,
                 slots: std::slice::from_ref(&reviewer_slot),
                 budget,
-                deadline_ms: self.resolution.host_deadline_ms,
+                deadline_ms: reviewer_deadline_ms,
                 started_at: Some(started),
                 cancel: input.cancel.clone(),
                 plan: &plan,
@@ -1115,7 +1353,8 @@ impl TriageProductionRunnerV1 {
         );
         let role_attempt = contribution_attempts(
             std::slice::from_ref(slot),
-            &outcome,
+            &outcome.attempts,
+            &outcome.telemetry.stages,
             &self.resolution.backends,
         )
         .into_iter()
@@ -1123,10 +1362,65 @@ impl TriageProductionRunnerV1 {
         .unwrap_or_else(|| not_admitted_attempt(&input.run_id, slot, "reviewer_missing"));
         match role_attempt.status {
             TriageAttemptStatus::Cancelled => *interrupted = Some(Interruption::Cancelled),
-            TriageAttemptStatus::TimedOut => *interrupted = Some(Interruption::TimedOut),
+            TriageAttemptStatus::TimedOut
+                if host_interruption(input, started, self.resolution.host_deadline_ms)
+                    == Some(Interruption::TimedOut) =>
+            {
+                *interrupted = Some(Interruption::TimedOut);
+            }
             _ => {}
         }
         (role_attempt, outcome.attempts.into_iter().next())
+    }
+
+    fn contributor_phase_deadline_ms(&self, input: &TriageProductionRunInput) -> u64 {
+        let finalizer =
+            admitted_phase_reserve_ms(&self.resolution.compiled, TriageSlotKindV2::Finalizer);
+        let reviewer = self
+            .resolution
+            .compiled
+            .slots
+            .iter()
+            .find(|slot| {
+                slot.disposition == SlotDispositionV2::Admitted
+                    && matches!(slot.kind, TriageSlotKindV2::Reviewer)
+            })
+            .and_then(|slot| {
+                self.resolution
+                    .reviewer_conditions
+                    .get(&slot.slot_id)
+                    .copied()
+            })
+            .filter(|condition| {
+                !matches!(condition, ReviewerConditionV2::ExplicitRequest)
+                    || input.explicit_review_requested
+            })
+            .map(|_| self.resolution.compiled.budget.reviewer.reserve_ms)
+            .unwrap_or(0);
+        self.resolution
+            .host_deadline_ms
+            .saturating_sub(finalizer.saturating_add(reviewer))
+    }
+
+    fn reviewer_phase_deadline_ms(&self, started: tokio::time::Instant) -> u64 {
+        let finalizer_boundary =
+            self.resolution
+                .host_deadline_ms
+                .saturating_sub(admitted_phase_reserve_ms(
+                    &self.resolution.compiled,
+                    TriageSlotKindV2::Finalizer,
+                ));
+        let elapsed = elapsed_ms(started);
+        let operation_boundary = elapsed.saturating_add(
+            self.resolution
+                .compiled
+                .budget
+                .reviewer
+                .operation_timeout_ms,
+        );
+        finalizer_boundary
+            .min(operation_boundary)
+            .min(self.resolution.host_deadline_ms)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1558,6 +1852,73 @@ impl TriageProductionRunnerV1 {
     }
 }
 
+fn admitted_phase_reserve_ms(compiled: &CompiledTriagePolicyV2, kind: TriageSlotKindV2) -> u64 {
+    if !compiled
+        .slots
+        .iter()
+        .any(|slot| slot.disposition == SlotDispositionV2::Admitted && slot.kind == kind)
+    {
+        return 0;
+    }
+    match kind {
+        TriageSlotKindV2::Finalizer => compiled.budget.finalizer.reserve_ms,
+        TriageSlotKindV2::Reviewer => compiled.budget.reviewer.reserve_ms,
+        TriageSlotKindV2::Contributor(_) => 0,
+    }
+}
+
+fn active_terminal_reserve_ms(compiled: &CompiledTriagePolicyV2) -> u64 {
+    admitted_phase_reserve_ms(compiled, TriageSlotKindV2::Finalizer).saturating_add(
+        admitted_phase_reserve_ms(compiled, TriageSlotKindV2::Reviewer),
+    )
+}
+
+fn elapsed_ms(started: tokio::time::Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn normalize_contributor_operation_timeouts(
+    runtime: &PreparedV2ContributionRuntimeV1,
+    packet: &FastTriagePacketV1,
+    outcome: &mut ContributionPipelineOutcome,
+) {
+    // `run_contribution_pipeline` emits exactly one attempt and one telemetry
+    // stage per input slot, in input-slot order, including every dropout. The
+    // production adapter also fixes `max_parallel` at one. Keep this mapping
+    // positional until a future parallel pipeline adds a stable slot id or
+    // explicitly preserves the same ordered-output contract; the multi-slot
+    // timeout test below guards against marker drift between adjacent slots.
+    let mut changed = false;
+    for (index, timed_out) in runtime.take_operation_timeouts().into_iter().enumerate() {
+        if !timed_out {
+            continue;
+        }
+        let Some(slot) = runtime.runtime.slots.get(index) else {
+            continue;
+        };
+        if let Some(attempt) = outcome.attempts.get_mut(index) {
+            *attempt = ContributionAttemptV1::unavailable(
+                slot.role,
+                slot.identity.clone(),
+                ContributionAvailability::TimedOut,
+            );
+            changed = true;
+        }
+        if let Some(stage) = outcome.telemetry.stages.get_mut(index) {
+            // Keep the already-recorded provider round/context accounting. The
+            // timeout changes only the semantic disposition and never erases a
+            // physical call that was actually dispatched.
+            stage.outcome = ContributionAvailability::TimedOut;
+            stage.degradation = Some(ContributionDegradationReason::Deadline);
+        }
+    }
+    if changed {
+        outcome.report = reconcile_contributions(packet, &outcome.attempts);
+        outcome.telemetry.state = outcome.report.state.as_str().into();
+        outcome.telemetry.escalation_recommended = outcome.report.escalation_recommended;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Interruption {
     Cancelled,
@@ -1706,14 +2067,15 @@ pub(crate) fn role_messages(
 
 fn contribution_attempts(
     slots: &[CompiledRoleSlotV2],
-    outcome: &ContributionPipelineOutcome,
+    contribution_attempts: &[ContributionAttemptV1],
+    stages: &[ContributionStageTelemetry],
     backends: &BTreeMap<String, AuthorizedTriageBackendV1>,
 ) -> Vec<TriageRoleAttemptV1> {
     slots
         .iter()
         .enumerate()
         .map(|(index, slot)| {
-            let attempt = outcome.attempts.get(index);
+            let attempt = contribution_attempts.get(index);
             let availability = attempt
                 .map(|attempt| attempt.availability)
                 .unwrap_or(ContributionAvailability::Unavailable);
@@ -1739,7 +2101,7 @@ fn contribution_attempts(
                     (TriageAttemptStatus::Failed, Some("provider_failed"))
                 }
             };
-            let telemetry = outcome.telemetry.stages.iter().find(|stage| {
+            let telemetry = stages.iter().find(|stage| {
                 stage.profile_id == slot.model.profile_id
                     && stage.model == slot.model.model_id
                     && stage.outcome == availability
@@ -1811,6 +2173,13 @@ fn reconciliation_from_report(
         .collect::<Vec<_>>();
     conflict_ids.sort();
     conflict_ids.dedup();
+    let mut gap_ids = report
+        .gaps
+        .iter()
+        .map(reconciliation_gap_id)
+        .collect::<Vec<_>>();
+    gap_ids.sort();
+    gap_ids.dedup();
     TriageReconciliationV1 {
         state: report.state.as_str().into(),
         configured_role_slots: slots.len() as u32,
@@ -1819,8 +2188,23 @@ fn reconciliation_from_report(
         distinct_gateways: gateways.len().min(u32::MAX as usize) as u32,
         supported_claim_ids: Vec::new(),
         conflict_ids,
-        gap_ids: Vec::new(),
+        gap_ids,
         root_cause_established: false,
+    }
+}
+
+fn reconciliation_gap_id(gap: &ReconciliationGapV1) -> String {
+    let kind = match gap.kind {
+        ReconciliationGapKind::MissingObservationCoverage => "missing_observation_coverage",
+        ReconciliationGapKind::MissingCausalCoverage => "missing_causal_coverage",
+        ReconciliationGapKind::UnresolvedQuestion => "unresolved_question",
+    };
+    match &gap.candidate_id {
+        Some(candidate_id) => format!(
+            "gap:{kind}:candidate-sha256:{:x}",
+            Sha256::digest(candidate_id.as_bytes())
+        ),
+        None => format!("gap:{kind}"),
     }
 }
 
@@ -1863,6 +2247,60 @@ fn reconciliation_from_attempts(
         conflict_ids: Vec::new(),
         gap_ids: Vec::new(),
         root_cause_established: false,
+    }
+}
+
+/// Derive the legacy one-finalizer summary from the exact attempt and the
+/// independently packet-validated answer. Model prose never contributes ids
+/// here unless the host validator already accepted it into the envelope.
+fn reconciliation_from_standard_finalizer(
+    slot: &CompiledRoleSlotV2,
+    attempt: &TriageRoleAttemptV1,
+    answer: Option<&AnswerEnvelopeV1>,
+) -> TriageReconciliationV1 {
+    let completed = matches!(
+        attempt.status,
+        TriageAttemptStatus::Completed | TriageAttemptStatus::Abstained
+    );
+    let mut supported_claim_ids = Vec::new();
+    let mut gap_ids = Vec::new();
+    if let Some(answer) = answer {
+        for claim in answer
+            .answer
+            .candidates
+            .iter()
+            .flat_map(|candidate| candidate.claims.iter())
+        {
+            if claim.claim_kind == ClaimKind::MissingEvidence {
+                gap_ids.push(claim.claim_id.clone());
+            } else if claim.status == ClaimStatus::Supported {
+                supported_claim_ids.push(claim.claim_id.clone());
+            }
+        }
+    }
+    supported_claim_ids.sort();
+    supported_claim_ids.dedup();
+    gap_ids.sort();
+    gap_ids.dedup();
+    let root_cause_established =
+        answer.is_some_and(|answer| completed && answer.answer.root_cause_established);
+    TriageReconciliationV1 {
+        state: if root_cause_established {
+            "supported"
+        } else if completed {
+            "insufficient_evidence"
+        } else {
+            "deterministic_baseline"
+        }
+        .into(),
+        configured_role_slots: 1,
+        completed_role_slots: u32::from(completed),
+        distinct_models: u32::from(completed && attempt.model.as_ref() == Some(&slot.model)),
+        distinct_gateways: u32::from(completed && attempt.model.as_ref() == Some(&slot.model)),
+        supported_claim_ids,
+        conflict_ids: Vec::new(),
+        gap_ids,
+        root_cause_established,
     }
 }
 
@@ -2010,6 +2448,32 @@ mod tests {
     }
 
     #[test]
+    fn typed_reconciliation_gaps_project_to_stable_public_ids() {
+        let packet = packet();
+        let mut report = reconcile_contributions(&packet, &[]);
+        report.gaps.push(ReconciliationGapV1 {
+            kind: ReconciliationGapKind::UnresolvedQuestion,
+            candidate_id: Some("candidate-a".into()),
+            reporter_model_count: 1,
+        });
+
+        let projected = reconciliation_from_report(&[], &[], &report);
+        assert_eq!(
+            projected.gap_ids,
+            [
+                "gap:missing_causal_coverage",
+                "gap:missing_observation_coverage",
+                "gap:unresolved_question:candidate-sha256:c24e6a4636f633942a26972a7d0b87c5e0bae3b60bbc9a4cdecff618f80ce3eb",
+            ]
+        );
+        assert!(projected
+            .gap_ids
+            .iter()
+            .all(|gap_id| !gap_id.contains("candidate-a")));
+        projected.validate().expect("valid public reconciliation");
+    }
+
+    #[test]
     fn ledger_rejects_empty_identity_and_preserves_owner_boundary() {
         let mut value = input();
         value.run_id.clear();
@@ -2027,6 +2491,28 @@ mod tests {
             ledger.finish(),
             Err(TriageProductionRunnerError::Contract(_))
         ));
+    }
+
+    #[test]
+    fn packet_ready_emits_the_authoritative_ledger_digest() {
+        let input = input();
+        let ledger = TriageProductionEventLedgerV1::new(&input).expect("prelude");
+        let TriageRunEventPayloadV2::PacketReady {
+            packet_id,
+            packet_digest,
+            evidence_count,
+        } = &ledger.events()[1].event
+        else {
+            panic!("second event must be packet_ready");
+        };
+
+        assert_eq!(packet_id, input.packet.packet_id());
+        assert_eq!(
+            packet_digest,
+            &input.packet.ledger().binding().ledger_digest
+        );
+        assert_ne!(packet_digest, packet_id);
+        assert_eq!(*evidence_count, input.packet.rows().len() as u32);
     }
 
     #[test]
@@ -2231,7 +2717,7 @@ mod tests {
     enum CorrectionBackendOutcome {
         Success,
         Failure,
-        Sleep(Duration),
+        Pending,
     }
 
     struct CorrectionBackend {
@@ -2264,11 +2750,30 @@ mod tests {
                     }
                     Err(CoreError::Message("correction failure".into()))
                 }
-                CorrectionBackendOutcome::Sleep(delay) => {
-                    tokio::time::sleep(delay).await;
-                    Ok(ChatCompletion::from_parts("{}", Vec::new(), "stop"))
-                }
+                CorrectionBackendOutcome::Pending => std::future::pending().await,
             }
+        }
+    }
+
+    fn qualified_preflight(
+        slot_id: &str,
+        model: &cd_core::model_ref::ModelRef,
+        kind: TriageSlotKindV2,
+    ) -> cd_core::multi_model::triage_policy::RolePreflightV2 {
+        cd_core::multi_model::triage_policy::RolePreflightV2 {
+            slot_id: slot_id.into(),
+            model: model.clone(),
+            kind,
+            available: true,
+            qualification: cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+            remote: false,
+            qualification_schema_id: Some(
+                cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_SCHEMA_V2.into(),
+            ),
+            workflow_id: Some(
+                cd_core::multi_model::triage_policy::TRIAGE_QUALIFICATION_WORKFLOW_V2.into(),
+            ),
+            protocol_fingerprint: Some("sha256:test".into()),
         }
     }
 
@@ -2393,7 +2898,7 @@ mod tests {
         (TriageProductionRunnerV1::new(resolved), calls, slot)
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn correction_outcomes_are_typed_and_physical_calls_preserved() {
         struct Case {
             name: &'static str,
@@ -2419,7 +2924,7 @@ mod tests {
             },
             Case {
                 name: "correction timeout",
-                outcome: CorrectionBackendOutcome::Sleep(Duration::from_millis(25)),
+                outcome: CorrectionBackendOutcome::Pending,
                 expected_status: TriageAttemptStatus::TimedOut,
                 expected_code: "correction_deadline",
                 cancel: false,
@@ -2495,6 +3000,67 @@ mod tests {
         assert_eq!(provider_calls, 3);
     }
 
+    #[tokio::test]
+    async fn total_provider_call_cap_blocks_dispatch_without_fabricating_a_call() {
+        let (runner, calls, slot) = correction_runner(CorrectionBackendOutcome::Success, 1, None);
+        let mut interrupted = None;
+        let mut provider_calls = 1;
+        let (attempt, response) = runner
+            .run_generic_slot(
+                &slot,
+                &input(),
+                tokio::time::Instant::now(),
+                &AcceptingNoAnswerHooks,
+                &reconciliation_from_attempts(std::slice::from_ref(&slot), &[], true),
+                &mut interrupted,
+                &mut provider_calls,
+            )
+            .await;
+
+        assert_eq!(attempt.status, TriageAttemptStatus::NotAdmitted);
+        assert_eq!(attempt.reason_codes, ["provider_call_budget_exhausted"]);
+        assert_eq!(attempt.physical_provider_calls, Some(0));
+        assert_eq!(attempt.semantic_corrections, Some(0));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider_calls, 1);
+        assert!(response.is_none());
+        assert!(interrupted.is_none());
+    }
+
+    #[tokio::test]
+    async fn correction_call_cap_is_independent_from_semantic_correction_count() {
+        let (runner, calls, slot) = correction_runner(CorrectionBackendOutcome::Success, 1, None);
+        let hook = CorrectionHook {
+            validations: AtomicUsize::new(0),
+            cancel_on_correction: None,
+        };
+        let mut interrupted = None;
+        let mut provider_calls = 0;
+        let (attempt, response) = runner
+            .run_generic_slot(
+                &slot,
+                &input(),
+                tokio::time::Instant::now(),
+                &hook,
+                &reconciliation_from_attempts(std::slice::from_ref(&slot), &[], true),
+                &mut interrupted,
+                &mut provider_calls,
+            )
+            .await;
+
+        assert_eq!(attempt.status, TriageAttemptStatus::Invalid);
+        assert_eq!(
+            attempt.reason_codes,
+            ["correction_provider_call_budget_exhausted"]
+        );
+        assert_eq!(attempt.physical_provider_calls, Some(1));
+        assert_eq!(attempt.semantic_corrections, Some(0));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider_calls, 1);
+        assert!(response.is_none());
+        assert!(interrupted.is_none());
+    }
+
     #[async_trait]
     impl TriageProductionHooks for FinalizerHook {
         async fn validate(
@@ -2555,6 +3121,572 @@ mod tests {
             }
             Some(envelope)
         }
+    }
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct AcceptingNoAnswerHooks;
+
+    #[async_trait]
+    impl TriageProductionHooks for AcceptingNoAnswerHooks {
+        async fn validate(
+            &self,
+            _slot: &CompiledRoleSlotV2,
+            _response: &ChatCompletion,
+            _packet: &FastTriagePacketV1,
+            _reconciliation: &TriageReconciliationV1,
+        ) -> TriageValidationDecision {
+            TriageValidationDecision::accepted()
+        }
+
+        async fn correction_messages(
+            &self,
+            _slot: &CompiledRoleSlotV2,
+            _response: &ChatCompletion,
+            _reason_codes: &[String],
+            _packet: &FastTriagePacketV1,
+            _reconciliation: &TriageReconciliationV1,
+        ) -> Option<Vec<ChatMessage>> {
+            None
+        }
+    }
+
+    fn standard_request(
+        model: cd_core::model_ref::ModelRef,
+    ) -> cd_core::triage_sdk::TriageRequestV2 {
+        cd_core::triage_sdk::TriageRequestV2 {
+            schema_id: cd_core::triage_sdk::TRIAGE_REQUEST_SCHEMA_V2.into(),
+            run_id: "run-1".into(),
+            privacy: PacketPrivacyBoundary::OwnerOnly,
+            task: "what happened?".into(),
+            scope: cd_core::triage_sdk::TriageScopeV1 {
+                corpus_id: "corpus".into(),
+                corpus_revision: None,
+                source_ids: Vec::new(),
+            },
+            policy: cd_core::triage_sdk::TriagePolicySelectionV2::Standard { model },
+            overrides: cd_core::triage_sdk::TriageRequestOverridesV1::default(),
+            cancellation_id: "cancel-1".into(),
+        }
+    }
+
+    fn inline_request(policy: &TriagePolicyV2) -> cd_core::triage_sdk::TriageRequestV2 {
+        cd_core::triage_sdk::TriageRequestV2 {
+            schema_id: cd_core::triage_sdk::TRIAGE_REQUEST_SCHEMA_V2.into(),
+            run_id: "run-1".into(),
+            privacy: PacketPrivacyBoundary::OwnerOnly,
+            task: "what happened?".into(),
+            scope: cd_core::triage_sdk::TriageScopeV1 {
+                corpus_id: "corpus".into(),
+                corpus_revision: None,
+                source_ids: Vec::new(),
+            },
+            policy: cd_core::triage_sdk::TriagePolicySelectionV2::Inline {
+                schema_id: cd_core::multi_model::triage_policy::TRIAGE_POLICY_SCHEMA_V2.into(),
+                document: serde_json::to_value(policy).expect("policy JSON"),
+            },
+            overrides: cd_core::triage_sdk::TriageRequestOverridesV1::default(),
+            cancellation_id: "cancel-1".into(),
+        }
+    }
+
+    fn standard_runner(
+        outcome: CorrectionBackendOutcome,
+        host_deadline_ms: u64,
+    ) -> (
+        TriageProductionRunnerV1,
+        cd_core::model_ref::ModelRef,
+        Arc<AtomicUsize>,
+    ) {
+        let model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-standard".into(),
+            model_id: "model-standard".into(),
+        };
+        let policy = TriagePolicyV2::standard(model.clone(), false);
+        let preflight = TriagePolicyPreflightV2 {
+            roles: vec![cd_core::multi_model::triage_policy::RolePreflightV2 {
+                slot_id: "standard-finalizer".into(),
+                model: model.clone(),
+                kind: TriageSlotKindV2::Finalizer,
+                available: true,
+                qualification: cd_core::multi_model::triage_policy::RoleQualificationV2::Qualified,
+                remote: false,
+                qualification_schema_id: None,
+                workflow_id: None,
+                protocol_fingerprint: None,
+            }],
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = CorrectionBackend {
+            outcomes: Mutex::new(VecDeque::from([outcome])),
+            calls: Arc::clone(&calls),
+            cancel_after_dispatch: None,
+        };
+        let resolved = resolve_v2_production(
+            &policy,
+            &preflight,
+            vec![AuthorizedTriageBackendV1 {
+                slot_id: "standard-finalizer".into(),
+                model: model.clone(),
+                backend: Arc::new(backend),
+            }],
+            host_deadline_ms,
+            100_000,
+            FastTriageNeighborhoodBudget::default(),
+        )
+        .expect("Standard resolves exact finalizer backend");
+        (TriageProductionRunnerV1::new(resolved), model, calls)
+    }
+
+    fn bound_standard_input(
+        model: cd_core::model_ref::ModelRef,
+    ) -> (
+        cd_core::triage_sdk::TriageRequestV2,
+        TriageProductionRunInput,
+    ) {
+        let request = standard_request(model);
+        let mut run_input = input();
+        run_input.request_fingerprint =
+            cd_triage_runtime::canonical_request_fingerprint(&request).expect("fingerprint");
+        (request, run_input)
+    }
+
+    fn assert_standard_graph(replay: &TriageReplayV1) {
+        replay.validate().expect("valid Standard replay");
+        assert_eq!(replay.events.len(), 6);
+        assert!(matches!(
+            replay.events[0].event,
+            TriageRunEventPayloadV2::RunStarted { .. }
+        ));
+        assert!(matches!(
+            replay.events[1].event,
+            TriageRunEventPayloadV2::PacketReady { .. }
+        ));
+        assert!(matches!(
+            replay.events[2].event,
+            TriageRunEventPayloadV2::RoleAttempt { .. }
+        ));
+        assert!(matches!(
+            replay.events[3].event,
+            TriageRunEventPayloadV2::Reconciliation { .. }
+        ));
+        assert!(matches!(
+            replay.events[4].event,
+            TriageRunEventPayloadV2::Validation { .. }
+        ));
+        assert!(replay.events[5].event.is_terminal());
+        assert!(!replay.events.iter().any(|event| {
+            matches!(
+                event.event,
+                TriageRunEventPayloadV2::PreliminaryReconciliation { .. }
+                    | TriageRunEventPayloadV2::FinalReconciliation { .. }
+                    | TriageRunEventPayloadV2::Correction { .. }
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn standard_production_runner_returns_exact_grounded_runtime_replay() {
+        let (runner, model, backend_calls) =
+            standard_runner(CorrectionBackendOutcome::Success, 60_000);
+        let (request, run_input) = bound_standard_input(model.clone());
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let run = runner
+            .run(
+                run_input,
+                &FinalizerHook {
+                    calls: Arc::clone(&hook_calls),
+                    delay_ms: 0,
+                    cancel_after_finalize: None,
+                    forge_binding: false,
+                },
+            )
+            .await
+            .expect("grounded Standard run");
+
+        assert_standard_graph(&run.replay);
+        assert!(run.completed);
+        assert_eq!(run.result.kind, TriageResultKind::GroundedFinal);
+        assert_eq!(run.result.validation_state, TriageValidationState::Passed);
+        assert!(run.result.reconciliation.root_cause_established);
+        assert_eq!(run.result.reconciliation.supported_claim_ids, ["claim-a"]);
+        assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
+        let attempt = match &run.replay.events[2].event {
+            TriageRunEventPayloadV2::RoleAttempt { attempt } => attempt,
+            _ => unreachable!(),
+        };
+        assert_eq!(attempt.role_slot_id, "standard-finalizer");
+        assert_eq!(attempt.model.as_ref(), Some(&model));
+        assert!(matches!(
+            run.replay.events[4].event,
+            TriageRunEventPayloadV2::Validation { passed: true, .. }
+        ));
+        cd_triage_runtime::replay(request, run.replay)
+            .expect("runtime accepts exact Standard bindings");
+    }
+
+    #[tokio::test]
+    async fn standard_without_authoritative_root_is_an_honest_completed_partial() {
+        let (runner, model, backend_calls) =
+            standard_runner(CorrectionBackendOutcome::Success, 60_000);
+        let (request, run_input) = bound_standard_input(model);
+        let run = runner
+            .run(run_input, &AcceptingNoAnswerHooks)
+            .await
+            .expect("partial Standard run");
+
+        assert_standard_graph(&run.replay);
+        assert!(run.completed);
+        assert_eq!(run.result.kind, TriageResultKind::HonestPartial);
+        assert_eq!(run.result.validation_state, TriageValidationState::Partial);
+        assert!(!run.result.reconciliation.root_cause_established);
+        assert!(run.result.answer.is_none());
+        assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            run.replay.events[4].event,
+            TriageRunEventPayloadV2::Validation { passed: false, .. }
+        ));
+        cd_triage_runtime::replay(request, run.replay)
+            .expect("runtime accepts honest Standard partial");
+    }
+
+    #[tokio::test]
+    async fn standard_pre_cancellation_never_contacts_provider() {
+        let (runner, model, backend_calls) =
+            standard_runner(CorrectionBackendOutcome::Success, 60_000);
+        let (request, mut run_input) = bound_standard_input(model);
+        run_input.cancel = Some(Arc::new(AtomicBool::new(true)));
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let run = runner
+            .run(
+                run_input,
+                &FinalizerHook {
+                    calls: Arc::clone(&hook_calls),
+                    delay_ms: 0,
+                    cancel_after_finalize: None,
+                    forge_binding: false,
+                },
+            )
+            .await
+            .expect("cancelled Standard replay");
+
+        assert_standard_graph(&run.replay);
+        assert!(!run.completed);
+        assert_eq!(backend_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            run.replay.events[5].event,
+            TriageRunEventPayloadV2::Cancelled { .. }
+        ));
+        cd_triage_runtime::replay(request, run.replay)
+            .expect("runtime accepts exact cancelled Standard replay");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn standard_provider_failure_and_deadline_keep_typed_six_event_terminals() {
+        for (outcome, deadline_ms, expected_status, expected_terminal) in [
+            (
+                CorrectionBackendOutcome::Failure,
+                60_000,
+                TriageAttemptStatus::Failed,
+                "failed",
+            ),
+            (
+                CorrectionBackendOutcome::Pending,
+                5,
+                TriageAttemptStatus::TimedOut,
+                "timed_out",
+            ),
+        ] {
+            let (runner, model, backend_calls) = standard_runner(outcome, deadline_ms);
+            let (request, run_input) = bound_standard_input(model);
+            let run = runner
+                .run(run_input, &AcceptingNoAnswerHooks)
+                .await
+                .expect("typed Standard terminal");
+            assert_standard_graph(&run.replay);
+            let attempt = match &run.replay.events[2].event {
+                TriageRunEventPayloadV2::RoleAttempt { attempt } => attempt,
+                _ => unreachable!(),
+            };
+            assert_eq!(attempt.status, expected_status);
+            assert_eq!(backend_calls.load(Ordering::SeqCst), 1);
+            match (&run.replay.events[5].event, expected_terminal) {
+                (TriageRunEventPayloadV2::Failed { .. }, "failed")
+                | (TriageRunEventPayloadV2::TimedOut { .. }, "timed_out") => {}
+                (terminal, expected) => panic!("expected {expected}, got {terminal:?}"),
+            }
+            cd_triage_runtime::replay(request, run.replay)
+                .expect("runtime accepts typed Standard failure");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn contributor_timeout_markers_match_multi_slot_attempt_order() {
+        let timed_out_model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-contributor-timeout".into(),
+            model_id: "model-contributor-timeout".into(),
+        };
+        let following_model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-contributor-following".into(),
+            model_id: "model-contributor-following".into(),
+        };
+        let timed_out_calls = Arc::new(AtomicUsize::new(0));
+        let following_calls = Arc::new(AtomicUsize::new(0));
+        let mut policy = TriagePolicyV2 {
+            schema_id: cd_core::multi_model::triage_policy::TRIAGE_POLICY_SCHEMA_V2.into(),
+            mode: TriagePolicyMode::Enhanced,
+            contributors: vec![
+                ContributorSlotV2 {
+                    slot_id: "timeline".into(),
+                    role: TriageContributorRole::TimelineAnalyst,
+                    model: timed_out_model.clone(),
+                    requirement: RoleRequirement::Required,
+                    allow_remote: false,
+                },
+                ContributorSlotV2 {
+                    slot_id: "observe".into(),
+                    role: TriageContributorRole::ObservationExtractor,
+                    model: following_model.clone(),
+                    requirement: RoleRequirement::Optional,
+                    allow_remote: false,
+                },
+            ],
+            finalizer: None,
+            reviewer: None,
+            budget: Default::default(),
+            execution: Default::default(),
+        };
+        policy.budget.whole_turn_deadline_ms = Some(100);
+        policy.budget.contributors.operation_timeout_ms = 5;
+        policy.budget.phase_cap_authority =
+            cd_core::multi_model::triage_policy::TriagePhaseCapAuthorityV2::Explicit;
+        let preflight = TriagePolicyPreflightV2 {
+            roles: vec![
+                qualified_preflight(
+                    "timeline",
+                    &timed_out_model,
+                    TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst),
+                ),
+                qualified_preflight(
+                    "observe",
+                    &following_model,
+                    TriageSlotKindV2::Contributor(TriageContributorRole::ObservationExtractor),
+                ),
+            ],
+        };
+        let resolved = resolve_v2_production(
+            &policy,
+            &preflight,
+            vec![
+                AuthorizedTriageBackendV1 {
+                    slot_id: "timeline".into(),
+                    model: timed_out_model,
+                    backend: Arc::new(CorrectionBackend {
+                        outcomes: Mutex::new(VecDeque::from([CorrectionBackendOutcome::Pending])),
+                        calls: Arc::clone(&timed_out_calls),
+                        cancel_after_dispatch: None,
+                    }),
+                },
+                AuthorizedTriageBackendV1 {
+                    slot_id: "observe".into(),
+                    model: following_model,
+                    backend: Arc::new(CorrectionBackend {
+                        outcomes: Mutex::new(VecDeque::from([CorrectionBackendOutcome::Success])),
+                        calls: Arc::clone(&following_calls),
+                        cancel_after_dispatch: None,
+                    }),
+                },
+            ],
+            100,
+            100_000,
+            FastTriageNeighborhoodBudget::default(),
+        )
+        .expect("independent contributor timeout resolves");
+        assert_eq!(
+            resolved
+                .contribution_runtime
+                .as_ref()
+                .expect("contribution runtime")
+                .runtime
+                .plan
+                .policy
+                .max_parallel,
+            1,
+            "production contributor execution remains sequential"
+        );
+        let started = tokio::time::Instant::now();
+        let run = TriageProductionRunnerV1::new(resolved)
+            .run(input(), &AcceptingNoAnswerHooks)
+            .await
+            .expect("contributor timeout stays in the typed replay");
+
+        let attempts = run
+            .replay
+            .events
+            .iter()
+            .filter_map(|event| match &event.event {
+                TriageRunEventPayloadV2::RoleAttempt { attempt } => {
+                    Some((attempt.role_slot_id.as_str(), attempt))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let timed_out = attempts.get("timeline").expect("timeline attempt");
+        let following = attempts.get("observe").expect("observation attempt");
+        assert_eq!(timed_out.status, TriageAttemptStatus::TimedOut);
+        assert_eq!(timed_out.physical_provider_calls, Some(1));
+        assert_eq!(timed_out.semantic_corrections, Some(0));
+        assert_eq!(following.status, TriageAttemptStatus::Invalid);
+        assert_eq!(following.physical_provider_calls, Some(1));
+        assert_ne!(following.status, TriageAttemptStatus::TimedOut);
+        assert_eq!(timed_out_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(following_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(started.elapsed(), Duration::from_millis(5));
+        assert!(matches!(
+            run.replay.events.last().map(|event| &event.event),
+            Some(TriageRunEventPayloadV2::Failed { .. })
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reviewer_timeout_and_terminal_reserves_leave_finalizer_time() {
+        let contributor_model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-reserve-contributor".into(),
+            model_id: "model-reserve-contributor".into(),
+        };
+        let reviewer_model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-reserve-reviewer".into(),
+            model_id: "model-reserve-reviewer".into(),
+        };
+        let finalizer_model = cd_core::model_ref::ModelRef {
+            profile_id: "profile-reserve-finalizer".into(),
+            model_id: "model-reserve-finalizer".into(),
+        };
+        let contributor_calls = Arc::new(AtomicUsize::new(0));
+        let reviewer_calls = Arc::new(AtomicUsize::new(0));
+        let finalizer_calls = Arc::new(AtomicUsize::new(0));
+        let mut policy = TriagePolicyV2 {
+            schema_id: cd_core::multi_model::triage_policy::TRIAGE_POLICY_SCHEMA_V2.into(),
+            mode: TriagePolicyMode::Enhanced,
+            contributors: vec![ContributorSlotV2 {
+                slot_id: "timeline".into(),
+                role: TriageContributorRole::TimelineAnalyst,
+                model: contributor_model.clone(),
+                requirement: RoleRequirement::Optional,
+                allow_remote: false,
+            }],
+            finalizer: Some(cd_core::multi_model::triage_policy::FinalizerSlotV2 {
+                slot_id: "finalizer".into(),
+                model: finalizer_model.clone(),
+                requirement: RoleRequirement::Required,
+                allow_remote: false,
+            }),
+            reviewer: Some(cd_core::multi_model::triage_policy::ReviewerSlotV2 {
+                slot_id: "reviewer".into(),
+                model: reviewer_model.clone(),
+                condition: ReviewerConditionV2::ContestedOrIncomplete,
+                requirement: RoleRequirement::Optional,
+                allow_remote: false,
+            }),
+            budget: Default::default(),
+            execution: Default::default(),
+        };
+        policy.budget.whole_turn_deadline_ms = Some(100);
+        policy.budget.contributors.operation_timeout_ms = 100;
+        policy.budget.corrections.operation_timeout_ms = 10;
+        policy.budget.reviewer.reserve_ms = 20;
+        policy.budget.reviewer.operation_timeout_ms = 10;
+        policy.budget.finalizer.reserve_ms = 20;
+        policy.budget.finalizer.operation_timeout_ms = 20;
+        policy.budget.phase_cap_authority =
+            cd_core::multi_model::triage_policy::TriagePhaseCapAuthorityV2::Explicit;
+        let preflight = TriagePolicyPreflightV2 {
+            roles: vec![
+                qualified_preflight(
+                    "timeline",
+                    &contributor_model,
+                    TriageSlotKindV2::Contributor(TriageContributorRole::TimelineAnalyst),
+                ),
+                qualified_preflight("finalizer", &finalizer_model, TriageSlotKindV2::Finalizer),
+                qualified_preflight("reviewer", &reviewer_model, TriageSlotKindV2::Reviewer),
+            ],
+        };
+        let pending_backend = |calls: Arc<AtomicUsize>| {
+            Arc::new(CorrectionBackend {
+                outcomes: Mutex::new(VecDeque::from([CorrectionBackendOutcome::Pending])),
+                calls,
+                cancel_after_dispatch: None,
+            }) as Arc<dyn cd_core::agent::ChatBackend>
+        };
+        let resolved = resolve_v2_production(
+            &policy,
+            &preflight,
+            vec![
+                AuthorizedTriageBackendV1 {
+                    slot_id: "timeline".into(),
+                    model: contributor_model,
+                    backend: pending_backend(Arc::clone(&contributor_calls)),
+                },
+                AuthorizedTriageBackendV1 {
+                    slot_id: "reviewer".into(),
+                    model: reviewer_model,
+                    backend: pending_backend(Arc::clone(&reviewer_calls)),
+                },
+                AuthorizedTriageBackendV1 {
+                    slot_id: "finalizer".into(),
+                    model: finalizer_model,
+                    backend: Arc::new(CorrectionBackend {
+                        outcomes: Mutex::new(VecDeque::from([CorrectionBackendOutcome::Success])),
+                        calls: Arc::clone(&finalizer_calls),
+                        cancel_after_dispatch: None,
+                    }),
+                },
+            ],
+            100,
+            100_000,
+            FastTriageNeighborhoodBudget::default(),
+        )
+        .expect("reserves fit the whole-turn deadline");
+        let started = tokio::time::Instant::now();
+        let run = TriageProductionRunnerV1::new(resolved)
+            .run(input(), &AcceptingNoAnswerHooks)
+            .await
+            .expect("reserved finalizer completes after bounded earlier phases");
+        let attempts = run
+            .replay
+            .events
+            .iter()
+            .filter_map(|event| match &event.event {
+                TriageRunEventPayloadV2::RoleAttempt { attempt } => {
+                    Some((attempt.role_slot_id.as_str(), attempt.status))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            attempts.get("timeline"),
+            Some(&TriageAttemptStatus::TimedOut)
+        );
+        assert_eq!(
+            attempts.get("reviewer"),
+            Some(&TriageAttemptStatus::TimedOut)
+        );
+        assert_eq!(
+            attempts.get("finalizer"),
+            Some(&TriageAttemptStatus::Completed)
+        );
+        assert_eq!(contributor_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(reviewer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(finalizer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(started.elapsed(), Duration::from_millis(70));
+        assert!(started.elapsed() < Duration::from_millis(80));
+        assert!(run.completed);
+        assert!(matches!(
+            run.replay.events.last().map(|event| &event.event),
+            Some(TriageRunEventPayloadV2::Completed { .. })
+        ));
     }
 
     #[tokio::test]
@@ -2739,7 +3871,7 @@ mod tests {
                     ])),
                 },
             ],
-            60_000,
+            300_000,
             100_000,
             FastTriageNeighborhoodBudget::default(),
         )
@@ -2780,7 +3912,10 @@ mod tests {
                 sink_cancel.store(true, Ordering::SeqCst);
             }
         });
+        let gap_request = inline_request(&policy);
         let mut gap_input = input();
+        gap_input.request_fingerprint =
+            cd_triage_runtime::canonical_request_fingerprint(&gap_request).expect("fingerprint");
         gap_input.cancel = Some(gap_cancel);
         let gap = runner
             .run_with_event_sink(
@@ -2803,6 +3938,8 @@ mod tests {
             .events
             .iter()
             .any(|event| matches!(&event.event, TriageRunEventPayloadV2::Cancelled { .. })));
+        cd_triage_runtime::replay(gap_request, gap.replay.clone())
+            .expect("late cancellation remains an authoritative runtime replay");
 
         // This cancellation is injected by a test-only seam immediately
         // before the runner's final non-awaiting observation. Earlier checks
@@ -2933,6 +4070,7 @@ mod tests {
             "contradictions": []
         })
         .to_string();
+        let request = inline_request(&policy);
         let resolved = resolve_v2_production(
             &policy,
             &preflight,
@@ -2950,8 +4088,11 @@ mod tests {
             FastTriageNeighborhoodBudget::default(),
         )
         .expect("timeline role resolves");
+        let mut run_input = input();
+        run_input.request_fingerprint =
+            cd_triage_runtime::canonical_request_fingerprint(&request).expect("fingerprint");
         let result = TriageProductionRunnerV1::new(resolved)
-            .run(input(), &RejectingTriageProductionHooks)
+            .run(run_input, &RejectingTriageProductionHooks)
             .await
             .expect("timeline runner succeeds");
         assert!(result.completed);
@@ -2967,10 +4108,23 @@ mod tests {
                         && attempt.physical_provider_calls == Some(1)
             )
         }));
+        assert!(matches!(
+            result
+                .replay
+                .events
+                .iter()
+                .find_map(|event| match event.event {
+                    TriageRunEventPayloadV2::Validation { passed, .. } => Some(passed),
+                    _ => None,
+                }),
+            Some(false)
+        ));
+        cd_triage_runtime::replay(request, result.replay)
+            .expect("runtime accepts a completed configured-policy honest partial");
     }
 
     #[test]
-    fn contributor_operation_cap_below_host_deadline_fails_closed_instead_of_ok_none() {
+    fn contributor_operation_cap_below_host_deadline_keeps_typed_runtime() {
         let model = cd_core::model_ref::ModelRef {
             profile_id: "profile-timeline".into(),
             model_id: "model-timeline".into(),
@@ -3010,7 +4164,7 @@ mod tests {
                 protocol_fingerprint: Some("sha256:test".into()),
             }],
         };
-        let error = resolve_v2_production(
+        let resolved = resolve_v2_production(
             &policy,
             &preflight,
             vec![AuthorizedTriageBackendV1 {
@@ -3026,16 +4180,12 @@ mod tests {
             100_000,
             FastTriageNeighborhoodBudget::default(),
         )
-        .expect_err("smaller contributor op cap must not resolve as Ok(None)");
-        match error {
-            TriageProductionRunnerError::Unsupported { category, .. } => {
-                assert_eq!(
-                    category,
-                    TriageProductionAdapterRejectionV1::ContributorOperationCapUnsupported
-                );
-            }
-            other => panic!("unexpected rejection: {other:?}"),
-        }
+        .expect("smaller contributor operation cap is enforceable");
+        assert!(resolved.contribution_runtime.is_some());
+        assert_eq!(
+            resolved.compiled.budget.contributors.operation_timeout_ms,
+            120_000
+        );
     }
 
     #[test]

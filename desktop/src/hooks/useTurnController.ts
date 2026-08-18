@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useRef, useState } from "react";
+import type { TriageService } from "@contextdesk/client";
 import type { PermissionPrompt } from "../components/PermissionModal";
 import {
   agentTurn,
@@ -31,6 +32,14 @@ import {
 } from "../lib/turn";
 import { classifyCompletedCitation } from "../lib/citations";
 import { loadDeveloperActivityDetail } from "../lib/activity/prefs";
+import {
+  CONFIGURED_TRIAGE_MODE_UNAVAILABLE,
+  projectTriageTerminalEvent,
+  resolveSelectedTriageModel,
+  runTriageSelection,
+  triageModeAvailable,
+  type TriageTurnSelection,
+} from "../lib/triagePolicyV2";
 
 export { classifyCompletedCitation } from "../lib/citations";
 
@@ -54,6 +63,8 @@ type Args = {
   setSourcePath: (p: string | null) => void;
   setSourceContent: (c: string) => void;
   setPaneChat: () => void;
+  /** Optional host-backed Triage Policy V2 namespace. */
+  triageService?: TriageService;
 };
 
 export function useTurnController(args: Args) {
@@ -75,6 +86,7 @@ export function useTurnController(args: Args) {
     setSourcePath,
     setSourceContent,
     setPaneChat,
+    triageService,
   } = args;
 
   const [busy, setBusy] = useState(false);
@@ -103,11 +115,30 @@ export function useTurnController(args: Args) {
   const permissionInFlightRef = useRef(false);
   /** Synchronous in-flight latch: two sends in one frame must not both start. */
   const turnInFlightRef = useRef(false);
+  /** Abort ownership for a V2 run; ordinary turns keep their existing cancel. */
+  const activeTriageAbortRef = useRef<AbortController | null>(null);
 
   const startTurn = useCallback(
-    async (text: string, userSelection?: string): Promise<boolean> => {
+    async (
+      text: string,
+      userSelection?: string,
+      triageSelection?: TriageTurnSelection,
+    ): Promise<boolean> => {
       if (preflightBlocking) {
         onNeedPreflight();
+        return false;
+      }
+      if (triageSelection && !triageModeAvailable(triageSelection.mode)) {
+        setAgentError(CONFIGURED_TRIAGE_MODE_UNAVAILABLE);
+        return false;
+      }
+      const triageCapability = triageService?.capability;
+      if (triageSelection && !triageCapability?.supported) {
+        setAgentError(
+          triageCapability && !triageCapability.supported
+            ? triageCapability.reason
+            : "Triage Policy V2 is unavailable in this desktop host.",
+        );
         return false;
       }
       // `busy` only reaches the composer on the next render, so a second send
@@ -116,14 +147,39 @@ export function useTurnController(args: Args) {
       if (turnInFlightRef.current) {
         return false;
       }
+      // First send / empty list / post-trash: always have a real session id.
+      const target = ensureActiveSession();
+      const sid = target.id;
+      const sess = sessions.find((s) => s.id === sid) ?? target;
+      const sessionModel = sess.chatModel ?? null;
+      const sessionProvider = sess.providerProfileId ?? null;
+      const pinnedSkillId = sess.pinnedSkillId ?? null;
+      const metaAtSend: MessageMetaDto = snapshotMessageMeta({
+        sessionModel,
+        sessionProvider,
+        modelOptions,
+        defaultModelKey,
+        setup,
+      });
+      const triageModel = triageSelection
+        ? resolveSelectedTriageModel({
+            sessionModel,
+            sessionProvider,
+            modelOptions,
+            defaultModelKey,
+          })
+        : null;
+      if (triageSelection && !triageModel) {
+        setAgentError(
+          "Standard triage needs an exact provider profile and model. Select a configured model in the composer, then retry.",
+        );
+        return false;
+      }
       turnInFlightRef.current = true;
       turnTokenRef.current += 1;
       const myToken = turnTokenRef.current;
       /** This turn has been stopped, or superseded by a newer one. */
       const isRetired = () => turnTokenRef.current !== myToken;
-      // First send / empty list / post-trash: always have a real session id.
-      const target = ensureActiveSession();
-      const sid = target.id;
       activeTurnSessionRef.current = sid;
       setAgentError(null);
       setBusy(true);
@@ -174,26 +230,68 @@ export function useTurnController(args: Args) {
 
       const forceLocal =
         setup.providerKind === "ollama" && setup.ollamaReachable === false;
-      const sess = sessions.find((s) => s.id === sid) ?? target;
-      const sessionModel = sess?.chatModel ?? null;
-      const sessionProvider = sess?.providerProfileId ?? null;
-      const pinnedSkillId = sess?.pinnedSkillId ?? null;
-      const metaAtSend: MessageMetaDto = snapshotMessageMeta({
-        sessionModel,
-        sessionProvider,
-        modelOptions,
-        defaultModelKey,
-        setup,
-      });
-
+      let triageAbort: AbortController | null = null;
       try {
-        await agentTurn(
-          sid,
-          text,
-          forceLocal,
-          sessionModel,
-          sessionProvider,
-          (ev) => {
+        if (triageSelection && triageModel && triageService) {
+          triageAbort = new AbortController();
+          activeTriageAbortRef.current = triageAbort;
+          let terminalApplied = false;
+          const applyTriageEvent = (
+            event: Parameters<typeof projectTriageTerminalEvent>[0],
+          ) => {
+            if (isRetired()) return;
+            const projected = projectTriageTerminalEvent(event);
+            if (!projected) return;
+            terminalApplied = true;
+            setSessions((all) => {
+              const cur = all.find((session) => session.id === sid);
+              if (!cur) return all;
+              const messages = cur.messages.map((message) =>
+                message.id === assistantId
+                  ? {
+                      ...message,
+                      ...projected,
+                      streaming: false,
+                      meta: metaAtSend,
+                    }
+                  : message,
+              );
+              const updated: ChatSession = {
+                ...cur,
+                messages,
+                updatedAt: nowIso(),
+              };
+              void persistSession(updated);
+              return all.map((session) =>
+                session.id === sid ? updated : session,
+              );
+            });
+          };
+          const terminal = await runTriageSelection(
+            triageService,
+            {
+              mode: triageSelection.mode,
+              task: text,
+              corpusId: triageSelection.corpusId,
+              profileId: triageModel.profileId,
+              modelId: triageModel.modelId,
+              runId: `triage-${crypto.randomUUID()}`,
+              cancellationId: `triage-cancel-${crypto.randomUUID()}`,
+            },
+            {
+              signal: triageAbort.signal,
+              onEvent: applyTriageEvent,
+            },
+          );
+          if (!terminalApplied) applyTriageEvent(terminal);
+        } else {
+          await agentTurn(
+            sid,
+            text,
+            forceLocal,
+            sessionModel,
+            sessionProvider,
+            (ev) => {
             // #249: do not drop turn_completed/error after Stop — that left
             // streaming:true forever (original #105 AC#3). Host cancel: #90/#109.
             if (!shouldProcessEventWhileStopped(isRetired(), ev.kind)) {
@@ -312,25 +410,26 @@ export function useTurnController(args: Args) {
               }
               return all.map((s) => (s.id === sid ? updated : s));
             });
-          },
-          pinnedSkillId,
-          null,
-          false,
-          // Hand the host the ids this transcript already uses. When the host
-          // persists a terminal turn itself (e.g. a chat pinned to a provider
-          // profile that no longer exists) it de-duplicates against these
-          // instead of writing a second copy of the same exchange.
-          {
-            userMessageId: user.id,
-            assistantMessageId: assistantId,
-            ...(loadDeveloperActivityDetail()
-              ? { developerActivityDetail: true }
-              : {}),
-            ...(userSelection?.trim()
-              ? { userSelection: userSelection.trim() }
-              : {}),
-          },
-        );
+            },
+            pinnedSkillId,
+            null,
+            false,
+            // Hand the host the ids this transcript already uses. When the host
+            // persists a terminal turn itself (e.g. a chat pinned to a provider
+            // profile that no longer exists) it de-duplicates against these
+            // instead of writing a second copy of the same exchange.
+            {
+              userMessageId: user.id,
+              assistantMessageId: assistantId,
+              ...(loadDeveloperActivityDetail()
+                ? { developerActivityDetail: true }
+                : {}),
+              ...(userSelection?.trim()
+                ? { userSelection: userSelection.trim() }
+                : {}),
+            },
+          );
+        }
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
         // A turn the user already stopped (or replaced) must not reach back and
@@ -363,6 +462,9 @@ export function useTurnController(args: Args) {
           return all.map((s) => (s.id === sid ? updated : s));
         });
       } finally {
+        if (activeTriageAbortRef.current === triageAbort) {
+          activeTriageAbortRef.current = null;
+        }
         // A retired turn must not clear the latch or the busy flag belonging to
         // the turn that replaced it.
         if (!isRetired()) {
@@ -391,6 +493,7 @@ export function useTurnController(args: Args) {
       setSourcePath,
       setSourceContent,
       setPaneChat,
+      triageService,
     ],
   );
 
@@ -493,8 +596,13 @@ export function useTurnController(args: Args) {
     // session would cancel the wrong turn after a mid-stream chat switch and
     // leave the real one pinned as streaming forever.
     const target = activeTurnSessionRef.current ?? sessionId;
+    const triageAbort = activeTriageAbortRef.current;
+    if (triageAbort) {
+      activeTriageAbortRef.current = null;
+      triageAbort.abort();
+    }
     if (target) {
-      void hostCancelTurn(target);
+      if (!triageAbort) void hostCancelTurn(target);
       setSessions((all) => {
         const cur = all.find((s) => s.id === target);
         if (!cur) return all;

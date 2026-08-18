@@ -1,0 +1,9 @@
+# Collab surface identity — rename-friendly (mirrors repo branding norms).
+# Do not hardcode employer hostnames or company-specific display strings elsewhere.
+
+[product]
+# Working name for this separately deployable surface.
+name = "cd-collab"
+# Short slug for package ids, data dirs, container names (lowercase, no spaces).
+slug = "cd-collab"
+tagline = "Internal collaboration and case-memory layer."

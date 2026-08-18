@@ -5,6 +5,7 @@
  * Usage (from desktop/): node scripts/gen-tauri-conf.mjs
  * Invoked by beforeDevCommand / beforeBuildCommand so renames need only branding.toml + rebuild.
  */
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,7 +76,21 @@ function main() {
     );
     return;
   }
-  fs.writeFileSync(confPath, out, "utf8");
+  const mode = fs.existsSync(confPath) ? fs.statSync(confPath).mode & 0o777 : 0o644;
+  const temporary = path.join(
+    path.dirname(confPath),
+    `.${path.basename(confPath)}.${process.pid}.${crypto.randomUUID()}.tmp`,
+  );
+  try {
+    fs.writeFileSync(temporary, out, {
+      encoding: "utf8",
+      flag: "wx",
+      mode,
+    });
+    fs.renameSync(temporary, confPath);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
   console.log(
     `[gen-tauri-conf] productName=${name} identifier=${conf.identifier} window.title=${name}`,
   );

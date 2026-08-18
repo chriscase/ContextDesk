@@ -1,0 +1,75 @@
+name: Triage adapter CLI fast
+
+on:
+  push:
+    branches:
+      - main
+      - integrate/rc
+      - codex/triage-adapter-cli-promotion
+      - codex/triage-runtime-replay-integration-v1
+  pull_request:
+    branches: [main, integrate/rc]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CD_TRIAGE_BANNED_DEPS: 'cd-core|cd-workflow|duckdb|libduckdb-sys|rusqlite|libsqlite3-sys|sqlx.*|keyring|reqwest|tokio.*|hyper.*|ureq|curl|isahc|async-std|smol|native-tls|openssl.*|tonic'
+
+concurrency:
+  group: triage-adapter-cli-fast-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Advisory dependency-light validation for the file-backed adapter CLI.
+jobs:
+  adapter-cli:
+    name: triage fast (adapter CLI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          workspaces: .
+          shared-key: triage-adapter-cli-fast-v1
+          cache-all-crates: false
+          cache-workspace-crates: false
+          cache-on-failure: true
+          # Main is the only writer; PRs restore without creating duplicate
+          # registry entries alongside the main Ubuntu workspace cache.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: report cache result
+        run: |
+          echo "triage adapter CLI cache hit: ${{ steps.rust-cache.outputs.cache-hit }}"
+      - name: fetch dependencies (locked)
+        run: cargo fetch --locked
+      - name: verify dependency boundary
+        shell: bash
+        run: |
+          cargo tree --locked --offline -p cd-triage-bench-adapter-cli \
+            --edges normal,build,dev --target all | tee /tmp/triage-adapter-cli-tree.txt
+          cargo tree --locked --offline -p cd-triage-bench-adapter-cli \
+            --edges normal,build,dev --target all --prefix none --format '{p}' \
+            | awk '{print $1}' | sort -u > /tmp/triage-adapter-cli-deps.txt
+          echo "resolved packages: $(wc -l < /tmp/triage-adapter-cli-deps.txt)"
+          if [ ! -s /tmp/triage-adapter-cli-deps.txt ]; then
+            echo "::error title=triage adapter CLI dependency boundary::empty dependency tree"
+            exit 1
+          fi
+          if grep -Exi "$CD_TRIAGE_BANNED_DEPS" /tmp/triage-adapter-cli-deps.txt; then
+            echo "::error title=triage adapter CLI dependency boundary::heavy or runtime dependency found"
+            exit 1
+          fi
+      - name: fmt
+        run: cargo fmt -p cd-triage-bench-adapter-cli -- --check
+      - name: clippy
+        run: cargo clippy --locked --offline -p cd-triage-bench-adapter-cli --all-targets -- -D warnings
+      - name: test
+        run: cargo test --locked --offline -p cd-triage-bench-adapter-cli

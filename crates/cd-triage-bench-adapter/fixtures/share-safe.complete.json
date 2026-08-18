@@ -1,0 +1,105 @@
+{
+  "privacy": "share_safe",
+  "bench_run_id": "run-37bf01b4819ffcceebf4d2ff6b139786213deb6e1ff65e4214c8d3b7c3337729",
+  "sdk_run_id": "cdrun-ef4b5ac55020f54e82b90ca4c3d0d315cecb2ca299e79dbc9162d9d0dd1d1df4",
+  "task_fingerprint": "tkf-48e82e8fa651d1ec5b7e7751710a32fa708306ad8dbec679c5ce1224d872e8f6",
+  "snapshot_fingerprint": "snf-0ddcedab95ee0d1c170a6c521290c0fcfed92565fb8faf76e4f3b8140359d683",
+  "policy_fingerprint": "pol-d0b61431e4df22bdff27a48ad81c441a26bda2206e104f173cf0cbb11dc0be6e",
+  "request_fingerprint": "sha256:0a7975fea879940e34d05d0ccb745e9b96be7a6e35e1820a8999cefe0aa98b58",
+  "packet_fingerprint": "pkf-9685a85eb815642a1a5bf99c33e32dbc2cabdd767930ed206151d2d26b3480ec",
+  "corpus_fingerprint": "cof-2bd75138119918b098f345f90def99b610f75c28e22208ddda5a5a99c8f069b9",
+  "model_fingerprints": [
+    "mdf-35f9a3f0687732724a7447f25701618bc751d8b2b42298efe5fc4ce8ae54a66f",
+    "mdf-4c8591c73786619716d4968535a913a8f836f3df4fca4f1ea20615932ca86e78",
+    "mdf-7f30ccd3829c9009c358ef516bfc5e21ddc9c590f4f975d30b787b7a82e184b4",
+    "mdf-a73def940dd4fd13f6422a86b9a62bccfec7d0a9cfb358692e798a29cad6f2a4"
+  ],
+  "slots": [
+    {
+      "slot_fingerprint": "slf-598b97cae49f91cec8671b45caffea7bab9ef735eac2a7ab6ba6ea22f5754aec",
+      "model_fingerprint": "mdf-7f30ccd3829c9009c358ef516bfc5e21ddc9c590f4f975d30b787b7a82e184b4",
+      "role": {
+        "contributor": "observation_extractor"
+      },
+      "status": "completed",
+      "terminal_disposition": "completed",
+      "reason_codes": []
+    },
+    {
+      "slot_fingerprint": "slf-18d33d72373e0bce60d8a085dfefd1f386ecab709770742a982a8f6fc30dff98",
+      "model_fingerprint": "mdf-4c8591c73786619716d4968535a913a8f836f3df4fca4f1ea20615932ca86e78",
+      "role": {
+        "contributor": "contradiction_checker"
+      },
+      "status": "completed",
+      "terminal_disposition": "completed",
+      "reason_codes": []
+    },
+    {
+      "slot_fingerprint": "slf-2745e9e406a004c18d6763589bf970020ba5bf5cbc12d9c6a14d4948a62206b5",
+      "model_fingerprint": "mdf-35f9a3f0687732724a7447f25701618bc751d8b2b42298efe5fc4ce8ae54a66f",
+      "role": "reviewer",
+      "status": "completed",
+      "terminal_disposition": "completed",
+      "reason_codes": []
+    },
+    {
+      "slot_fingerprint": "slf-65b2cffd8b8cbb986af0c5800745dbe1308f216227212b56fd90b6edb5c7b253",
+      "model_fingerprint": "mdf-a73def940dd4fd13f6422a86b9a62bccfec7d0a9cfb358692e798a29cad6f2a4",
+      "role": "finalizer",
+      "status": "completed",
+      "terminal_disposition": "completed",
+      "reason_codes": []
+    }
+  ],
+  "source_kind": "contextdesk_sdk",
+  "fairness": "same_snapshot",
+  "status": "completed",
+  "terminal_kind": "completed",
+  "execution_packet_state": "matched",
+  "terminal_category": null,
+  "result_kind": "grounded_final",
+  "validation_state": "passed",
+  "partial_result_is_provenance_only": false,
+  "reason_codes": [
+    "deterministic_mock"
+  ],
+  "configured_role_slots": 4,
+  "completed_role_slots": 4,
+  "distinct_models": 4,
+  "distinct_gateways": 4,
+  "root_cause_established": true,
+  "visible_evidence_count": 3,
+  "usage": "unknown",
+  "cost": "unknown",
+  "answer_included": false,
+  "raw_output_included": false,
+  "sdk_result": {
+    "schema_id": "contextdesk.triage.result_share_safe.v2",
+    "run_id": "cdrun-ef4b5ac55020f54e82b90ca4c3d0d315cecb2ca299e79dbc9162d9d0dd1d1df4",
+    "kind": "grounded_final",
+    "validation_state": "passed",
+    "packet_id": "pkt-2df00ac29df16e327610d064803238a2f82359ba38b30884fe89d1b2bf7c5c7e",
+    "reconciliation": {
+      "state": "reconciled",
+      "configured_role_slots": 4,
+      "completed_role_slots": 4,
+      "distinct_models": 4,
+      "distinct_gateways": 4,
+      "supported_claim_ids": [
+        "claim-ev-log-1",
+        "claim-ev-mail-1",
+        "claim-ev-ref-1"
+      ],
+      "root_cause_established": true
+    },
+    "accepted_evidence_ids": [
+      "ev-log-1",
+      "ev-mail-1",
+      "ev-ref-1"
+    ],
+    "reason_codes": [
+      "deterministic_mock"
+    ]
+  }
+}

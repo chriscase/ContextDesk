@@ -1,0 +1,73 @@
+{
+  "schemaId": "cd-collab.brief.v1",
+  "privacyClass": "owner_only",
+  "header": {
+    "caseId": "11111111-1111-1111-1111-111111111111",
+    "title": "Fixture incident",
+    "severity": "high",
+    "status": "open",
+    "legalHold": false,
+    "retentionClass": "standard"
+  },
+  "timeline": [
+    {
+      "seq": 1,
+      "kind": "case_created",
+      "actorLabel": "alice",
+      "targetId": "11111111-1111-1111-1111-111111111111",
+      "payloadDigest": "2d95bbe9bfed19e3019942530f73f4a73d324fc404d491406b681057c405908c"
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "22222222-2222-2222-2222-222222222222",
+      "status": "supported",
+      "body": "Mailer pool exhaustion",
+      "contentHash": "abc",
+      "sourceLabel": "alice",
+      "supporting": [{ "kind": "artifact", "id": "33333333-3333-3333-3333-333333333333" }],
+      "contradicting": []
+    }
+  ],
+  "actions": [
+    {
+      "id": "44444444-4444-4444-4444-444444444444",
+      "body": "Page the mailer on-call.",
+      "contentHash": "def",
+      "actorLabel": "alice",
+      "sourceLabel": "alice"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "33333333-3333-3333-3333-333333333333",
+      "kind": "log",
+      "filename": "app.log",
+      "contentHash": "hash-log",
+      "sourceLabel": "alice",
+      "privacyClass": "owner_only",
+      "verificationStatus": null,
+      "content": "timeout",
+      "bytesIncluded": true
+    }
+  ],
+  "attributions": [
+    {
+      "actorLabel": "alice",
+      "action": "case_created",
+      "targetKind": "case",
+      "targetId": "11111111-1111-1111-1111-111111111111"
+    }
+  ],
+  "importedRuns": [
+    {
+      "id": "55555555-5555-5555-5555-555555555555",
+      "sourceLabel": "Web assistant",
+      "corroborationState": "unverified",
+      "snapshotBinding": null,
+      "presentation": "imported_response",
+      "outputIncluded": true,
+      "outputText": "pool exhausted"
+    }
+  ]
+}

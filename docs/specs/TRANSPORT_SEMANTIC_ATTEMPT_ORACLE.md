@@ -188,7 +188,7 @@ Three files, 35 tests, ~2s total runtime, no product sleeps.
 * `retry_after_http_date_is_honored_and_bounded`, `malformed_retry_after_falls_back_to_the_bounded_default`, `past_http_date_retry_after_falls_back_to_the_bounded_default`, `absent_retry_after_falls_back_to_the_bounded_default` (scenario 3; delta-seconds form covered by scenario 1's `Retry-After: 0`; pure bound arithmetic already unit-tested in `cd_core::chat`)
 * `cancellation_during_backoff_exits_promptly_without_further_requests` (scenario 5; mutants 3+4)
 * `connection_reset_before_headers_is_terminal_without_protocol_replay` (scenario 4; RST via SO_LINGER(0), scripted second response remains unused)
-* `connection_refused_classifies_as_transport_failure_not_provider_status`, `read_timeout_before_headers_classifies_as_transport_failure` (scenario 4b; the latter under `start_paused` against a never-responding socket)
+* `connection_refused_classifies_as_transport_failure_not_provider_status`, `read_timeout_before_headers_classifies_as_transport_failure` (scenario 4b; refused uses a TCP-proven closed non-ephemeral loopback port so a sibling `MockServer` cannot inherit a just-released `:0` bind; the timeout case runs under `start_paused` against a never-responding socket)
 * `empty_visible_answer_…`, `length_truncation_…`, `malformed_sse_stream_…`, `persistently_malformed_provider_output_…`, `partial_utf8_sse_fragments_…` (scenario 8 categories)
 
 `crates/cd-core/src/agent_transport_semantic_oracle_tests.rs` (6 of 8):

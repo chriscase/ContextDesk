@@ -1,12 +1,15 @@
 # macOS / Windows rust CI lanes
 
-**Status:** staged draft implementation with hosted proof. This lane preserves
-macOS/Windows workspace coverage and reduced the desktop critical path in run
+**Status:** on `main` via #910 (four-way shards) and #912 (probe must not
+save). This lane preserves macOS/Windows workspace coverage and reduced the
+desktop critical path in run
 [`32008278389`](https://github.com/chriscase/ContextDesk/actions/runs/32008278389).
-It does not change the Ubuntu ruleset, merge anything, or make a release claim.
+It does not change the Ubuntu ruleset or make a release claim.
 
-The active branch is [`codex/ci-macos-windows-2way`](https://github.com/chriscase/ContextDesk/pull/910),
-which remains draft-only.
+Post-merge run [`32059232242`](https://github.com/chriscase/ContextDesk/actions/runs/32059232242)
+(`#912` on `main`) was a cold write then a warm restore: desktop probes
+missed, one warmup per OS compiled DuckDB, and every desktop shard recorded
+`cache_state=warm` / `restore=files`. Ubuntu reused `ubuntu-workspace-tests`.
 
 ## What the hosted evidence says
 
@@ -50,11 +53,14 @@ Ubuntu gate also passed 114/114 units (3670 passed, 0 failed, 21 ignored), and
 the complete workflow finished in 2237s. This is hosted lane evidence; it is
 not a ruleset promotion or a release certification.
 
-## Current inventory
+## Inventory and growth
 
-The same deterministic planner used by Ubuntu enumerates 114 test units from
-113 Cargo test targets. The `cd-core/lib` target remains two complementary
-units (`log_analysis::` and `--skip log_analysis::`) so no tests are dropped.
+The same deterministic planner used by Ubuntu enumerated 114 test units from
+113 Cargo test targets for the hosted runs above. The integrated triage tree
+already contains more targets. The planner and its tests intentionally derive
+the current inventory instead of pinning that historical count. The
+`cd-core/lib` target remains two complementary units (`log_analysis::` and
+`--skip log_analysis::`) so no tests are dropped.
 
 Round-robin partition sizes are:
 
@@ -75,23 +81,27 @@ sh scripts/tests/ci_macos_windows_lane_study_test.sh
 
 ## Fast-hit and safe-miss design
 
-Each desktop OS follows this sequence:
+Each desktop OS follows this sequence independently. A macOS job never lists
+a Windows warmup (or probe) in `needs:`, and Windows never waits on macOS:
 
 1. An exact-key `lookup-only` cache probe runs first. It does not pretend to
    restore files; it only decides whether the shared cache key exists.
 2. On a miss, exactly one OS-specific cache-writer job runs
-   `cargo test --workspace --no-run` and saves the complete target tree. On a
-   hit, that writer is skipped, so the test shards do not wait for a redundant
-   build.
-3. The existing `rust (macos-latest)` and `rust (windows-latest)` checks become
-   restore-only preflight signals. They require an actual non-empty `target/`
-   restore, then run fmt, clippy, examples, and server smoke tests. They do not
-   replace the complete workspace suite.
-4. Four restore-only platform shards run the full deterministic plan with
-   `save-if: false`. Every shard fails closed unless its downloaded target is
+   `cargo test --workspace --no-run` and saves the complete target tree. The
+   writer sets `cache-on-failure: false`, so a failed compile or DuckDB
+   assert cannot publish a hollow cache. On a hit, that writer is skipped.
+3. `rust (macos-latest)` and `rust (windows-latest)` are restore-only
+   preflight signals that wait only on their own probe/warmup. They require
+   compiled `target/` artifacts including DuckDB, then run fmt, clippy,
+   examples, and server smoke tests. They do not replace the workspace suite.
+4. Four restore-only shards per OS (`save-if: false`) wait only on that OS's
+   probe/warmup. Every shard fails closed unless its downloaded target is
    actually warm, and every shard uploads status and in-flight evidence.
-5. Per-OS aggregates require all four shard results and the exact 114-unit
-   cover. They remain non-required platform signals until separately promoted.
+5. `rust tests (macos-latest aggregate)` depends only on the macOS shards;
+   `rust tests (windows-latest aggregate)` depends only on the Windows shards.
+   Each requires all four shard results and an exact cover of the dynamically
+   enumerated inventory. They remain non-required platform signals until
+   separately promoted.
 
 The cache status helper recognizes `warmup`, `preflight`, and `shard` roles.
 Only a warmup may save; preflight and shards restore and verify. A cache key hit
@@ -123,6 +133,23 @@ save partial state. On a cold miss, shards wait for the one writer and then
 restore the completed cache; if the writer fails, the shard/aggregate path
 fails closed rather than silently running an untracked cold build.
 
+A restore is `warm` only when `target/debug/deps` has compiled rust artifacts
+**and** a real, non-empty DuckDB library (`libduckdb.a` / `duckdb.lib` /
+`*duckdb*.rlib`, etc.). An empty `libduckdb-sys-*` directory, a zero-byte
+stub, a `CACHEDIR.TAG`, or a registry-only 113MB hit is cold
+(`key-hit-without-artifacts` / `key-hit-without-duckdb`). Warmup jobs also
+`--assert-dir target` after `cargo test --workspace --no-run`.
+
+Cache-key boundaries:
+
+| Input | Who hashes it | Cross-OS? |
+| --- | --- | --- |
+| `shared-key` (`ubuntu-workspace-tests`, `*-workspace-tests-v2`) | workflow | no — keys are per OS |
+| runner OS + arch | rust-cache prefix | no |
+| `Cargo.lock`, rustc, rust-toolchain, `.cargo/config.toml` | rust-cache environment hash | no — rustc/target triple differ |
+| `RUSTFLAGS` (`-D warnings`) | rust-cache default `RUST` env prefix (already matches `RUSTFLAGS`; do not set `env-vars: RUSTFLAGS`) | same flag, different OS keys |
+| lock digest + rustc + `RUSTFLAGS` + shared-key | `scripts/ci_cache_fingerprint.sh` (status JSON only) | recorded, not a second store key |
+
 ## Gates and boundaries
 
 - The required main-branch check remains exactly `rust tests (ubuntu aggregate)`.
@@ -134,7 +161,8 @@ fails closed rather than silently running an untracked cold build.
   this draft.
 - No timeout is raised to hide a slow shard, and no test unit is skipped.
 - The four-way desktop speed improvement is proven by hosted run `32008278389`;
-  no release or required-check promotion is implied.
+  the first `main` cold-then-warm path is run `32059232242`. No release or
+  required-check promotion is implied.
 
 Pinned baseline, two-way regression, and four-way evidence lives in
 [`ci_macos_windows_lane_evidence.json`](../../scripts/fixtures/ci_macos_windows_lane_evidence.json).

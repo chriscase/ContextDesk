@@ -16,6 +16,7 @@ use cli::{Cli, Command, InvocationMode};
 use config::{CliOverrides, OutputFormat, ResolvedConfig};
 use envelope::{CliError, Envelope, ExitCategory, Render};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
@@ -37,8 +38,8 @@ async fn main() {
     std::process::exit(code);
 }
 
-async fn run(cli: Cli, invocation: InvocationMode) -> i32 {
-    if let Some(code) = run_state_free(&cli).await {
+async fn run(mut cli: Cli, invocation: InvocationMode) -> i32 {
+    if let Some(code) = run_state_free(&mut cli).await {
         return code;
     }
     let paths = match adapters::Paths::resolve(
@@ -118,7 +119,7 @@ async fn run(cli: Cli, invocation: InvocationMode) -> i32 {
 
 /// Commands in this lane are pure over explicit inputs and must not resolve,
 /// read, create, migrate, or save ContextDesk application/CLI state.
-async fn run_state_free(cli: &Cli) -> Option<i32> {
+async fn run_state_free(cli: &mut Cli) -> Option<i32> {
     let format = if cli.global.json {
         OutputFormat::Json
     } else if cli.global.jsonl {
@@ -131,7 +132,7 @@ async fn run_state_free(cli: &Cli) -> Option<i32> {
     } else {
         cli.global.color.unwrap_or(config::ColorMode::Auto)
     };
-    match &cli.command {
+    match &mut cli.command {
         Command::Normalize(args) => {
             let result = commands::normalize::run(args, format, color).await;
             let verdict = result
@@ -244,10 +245,10 @@ async fn dispatch(
             unreachable!("provider-free triage policy commands return before stateful dispatch")
         }
         Command::Triage { action } => {
-            let secrets = adapters::secret_store();
+            let secrets = Arc::new(adapters::secret_store());
             let result = match action {
                 cli::TriageAction::Run(args) => {
-                    commands::triage::run_stateful(args, paths, app_cfg, &secrets).await
+                    commands::triage::run_stateful(args, paths, app_cfg, secrets).await
                 }
             };
             emit_triage_run(format, resolved.color.value, result)
@@ -546,54 +547,27 @@ fn emit_completed<T: Render>(
     completed_verdict_exit(code, verdict)
 }
 
-/// Render a typed state-free triage refusal. Unlike a completed verdict,
-/// `not_implemented` must not look like a successful command to machine
-/// clients even though the typed data explains exactly which request was
-/// accepted.
 fn emit_triage_run(
     format: OutputFormat,
     color: config::ColorMode,
     result: Result<commands::triage::TriageRunOutput, CliError>,
 ) -> i32 {
-    match result {
-        Ok(output) if output.unsupported() => {
-            let reason = output
-                .reason_codes
-                .first()
-                .map(String::as_str)
-                .unwrap_or("triage_route_unavailable");
-            let message = if reason == "standard_uses_established_path" {
-                "Standard triage uses the established chat path; use `contextdesk chat`"
-            } else {
-                "the requested Triage V2 route is unavailable on this build"
-            };
-            let error = CliError::not_implemented(message);
-            match format {
-                OutputFormat::Text => {
-                    println!("{}", presentation::present(&output.render_text(), color));
-                }
-                OutputFormat::Json | OutputFormat::Jsonl => {
-                    let envelope = Envelope {
-                        schema_version: envelope::ENVELOPE_SCHEMA_VERSION,
-                        ok: false,
-                        command: "triage_run",
-                        data: Some(output.render_json()),
-                        error: Some(envelope::ErrorEnvelope {
-                            kind: error.category.kind(),
-                            message: error.message.clone(),
-                        }),
-                    };
-                    println!(
-                        "{}",
-                        serde_json::to_string(&envelope)
-                            .expect("triage unsupported envelope is serializable")
-                    );
-                }
-            }
-            error.category.code()
-        }
-        Ok(output) => emit(format, color, "triage_run", Ok(output)),
-        Err(error) => emit_error(format, "triage_run", error),
+    let verdict = result
+        .as_ref()
+        .ok()
+        .and_then(|output| triage_run_verdict(output.status));
+    emit_completed(format, color, "triage_run", result, verdict)
+}
+
+fn triage_run_verdict(status: &str) -> Option<ExitCategory> {
+    match status {
+        "completed" => None,
+        "partial" => Some(ExitCategory::Partial),
+        "failed" | "timed_out" => Some(ExitCategory::NotReady),
+        "cancelled" => Some(ExitCategory::Cancelled),
+        // The producer owns this closed status vocabulary. Treat drift as an
+        // internal failure signal without discarding the emitted report.
+        _ => Some(ExitCategory::Internal),
     }
 }
 
@@ -640,5 +614,24 @@ mod verdict_tests {
         );
         assert_eq!(completed_verdict_exit(0, Some(ExitCategory::Partial)), 10);
         assert_eq!(completed_verdict_exit(70, Some(ExitCategory::Partial)), 70);
+    }
+
+    #[test]
+    fn triage_terminal_statuses_have_authoritative_exit_verdicts() {
+        assert_eq!(triage_run_verdict("completed"), None);
+        assert_eq!(triage_run_verdict("partial"), Some(ExitCategory::Partial));
+        assert_eq!(triage_run_verdict("failed"), Some(ExitCategory::NotReady));
+        assert_eq!(
+            triage_run_verdict("timed_out"),
+            Some(ExitCategory::NotReady)
+        );
+        assert_eq!(
+            triage_run_verdict("cancelled"),
+            Some(ExitCategory::Cancelled)
+        );
+        assert_eq!(
+            triage_run_verdict("unexpected"),
+            Some(ExitCategory::Internal)
+        );
     }
 }

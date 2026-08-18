@@ -41,6 +41,8 @@ pub mod triage_production_runner;
 /// Host-neutral exact-role qualification using the production backend and
 /// packet/validator seams.
 pub mod triage_role_qualification;
+/// Public-runtime adapter over the trusted V2 host and production runner.
+pub mod triage_runtime_host;
 pub mod turn;
 
 /// Re-export core context plan types at the shared workflow boundary.

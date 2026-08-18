@@ -1,0 +1,24 @@
+[package]
+name = "cd-triage-bench-live"
+description = "Run-exclusive ContextDesk host bridge for same-snapshot triage benchmark execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cd-core = { path = "../cd-core" }
+cd-workflow = { path = "../cd-workflow" }
+cd-triage-sdk = { path = "../cd-triage-sdk" }
+cd-triage-runtime = { path = "../cd-triage-runtime" }
+cd-triage-bench = { path = "../cd-triage-bench" }
+cd-triage-bench-adapter = { path = "../cd-triage-bench-adapter" }
+tempfile = "3"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+fs2 = "0.4"
+
+[dev-dependencies]
+cd-test-gateway = { path = "../cd-test-gateway" }
+serde_json = { workspace = true }

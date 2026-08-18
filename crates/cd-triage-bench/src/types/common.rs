@@ -9,12 +9,19 @@ pub const CASE_SCHEMA_V1: &str = "contextdesk.triage_bench.case.v1";
 pub const SNAPSHOT_SCHEMA_V1: &str = "contextdesk.triage_bench.evidence_snapshot.v1";
 pub const TASK_SCHEMA_V1: &str = "contextdesk.triage_bench.evaluation_task.v1";
 pub const PACKET_SCHEMA_V1: &str = "contextdesk.triage_bench.task_packet.v1";
+pub const PACKET_SCHEMA_V2: &str = "contextdesk.triage_bench.task_packet.v2";
+pub const REVIEW_PACKET_SCHEMA_V1: &str = "contextdesk.triage_bench.review_packet.v1";
+pub const REVIEW_PACKET_SCHEMA_V2: &str = "contextdesk.triage_bench.review_packet.v2";
 pub const RUN_SCHEMA_V1: &str = "contextdesk.triage_bench.triage_run.v1";
+pub const RUN_SCHEMA_V2: &str = "contextdesk.triage_bench.triage_run.v2";
 pub const RUN_IMPORT_SCHEMA_V1: &str = "contextdesk.triage_bench.run_import.v1";
 pub const ADJUDICATION_SCHEMA_V1: &str = "contextdesk.triage_bench.adjudication.v1";
+pub const ADJUDICATION_SCHEMA_V2: &str = "contextdesk.triage_bench.adjudication.v2";
 pub const SCORE_SCHEMA_V1: &str = "contextdesk.triage_bench.score_review.v1";
 pub const REPORT_SCHEMA_V1: &str = "contextdesk.triage_bench.backtest_report.v1";
+pub const REPORT_SCHEMA_V2: &str = "contextdesk.triage_bench.backtest_report.v2";
 pub const RUBRIC_V1: &str = "contextdesk.triage_bench.rubric.v1";
+pub const RUBRIC_V2: &str = "contextdesk.triage_bench.rubric.v2";
 
 pub const MAX_ID_CHARS: usize = 192;
 pub const MAX_STRING_BYTES: usize = 64 * 1024;
@@ -41,6 +48,20 @@ impl PrivacyClass {
             Self::ShareSafe => "share_safe",
         }
     }
+
+    /// Combine privacy labels without ever weakening either input.
+    pub fn restrict_with(self, other: Self) -> Self {
+        if self == Self::OwnerOnly || other == Self::OwnerOnly {
+            Self::OwnerOnly
+        } else {
+            Self::ShareSafe
+        }
+    }
+
+    /// True when `self` would expose material classified as `source`.
+    pub fn is_downgrade_from(self, source: Self) -> bool {
+        self == Self::ShareSafe && source == Self::OwnerOnly
+    }
 }
 
 /// Per-field completeness. Never reconstructed by the bench.
@@ -63,7 +84,7 @@ impl Completeness {
 }
 
 /// Observed value that can be genuinely unknown. Distinct from zero or empty.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(tag = "status", content = "value", rename_all = "snake_case")]
 pub enum Observed<T> {
     #[default]

@@ -26,6 +26,7 @@ serde_json = "1"
 # log-fastembed: product default local ONNX template embed (#359)
 cd-core = { path = "../../crates/cd-core", features = ["log-fastembed", "s3-object-store"] }
 cd-workflow = { path = "../../crates/cd-workflow" }
+cd-triage-runtime = { path = "../../crates/cd-triage-runtime" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 dirs = "5"
 tracing = "0.1"

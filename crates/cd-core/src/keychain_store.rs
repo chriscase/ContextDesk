@@ -228,6 +228,7 @@ pub fn looks_like_raw_secret(value: &str) -> bool {
 }
 
 /// OS keychain-backed store. Service name derived from product slug.
+#[derive(Clone)]
 pub struct KeychainSecretStore {
     service: String,
 }
@@ -292,6 +293,7 @@ impl SecretStore for KeychainSecretStore {
 /// or `keychain` profile reference and is routed to the OS keychain. A missing
 /// or unsafe file never falls back to Keychain, which prevents surprise macOS
 /// authorization dialogs during source tests and evaluations.
+#[derive(Clone)]
 pub struct ReferencedSecretStore {
     keychain: KeychainSecretStore,
 }

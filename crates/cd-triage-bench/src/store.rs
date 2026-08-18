@@ -3,13 +3,25 @@
 use crate::canonical::to_pretty_json;
 use crate::error::{BenchError, BenchResult};
 use crate::packet::{materialize_task_packet, TaskPacket};
-use crate::types::{
-    sha256_hex, Adjudication, Case, ContentDigest, EvaluationTask, EvidenceSnapshot, ScoreReview,
-    TriageRun, LIBRARY_SCHEMA_V1,
+use crate::review::{
+    materialize_review_packet, merge_citation_assists, run_has_support_adjudication, ReviewPacket,
+    ReviewPhase,
 };
+use crate::types::citation_assist_flags;
+use crate::types::{
+    sha256_hex, Adjudication, Case, ContentDigest, EvaluationTask, EvidenceSnapshot, HeldContent,
+    ScoreReview, TriageRun, LIBRARY_SCHEMA_V1,
+};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const BLOB_COPY_BUFFER_BYTES: usize = 64 * 1024;
+static BLOB_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Library metadata stored at `<root>/library.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +37,13 @@ pub struct BenchStore {
     root: PathBuf,
 }
 
+/// Proof returned only after a streamed blob copy matches its declared length and digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedBlobCopy {
+    pub digest: ContentDigest,
+    pub byte_length: u64,
+}
+
 impl BenchStore {
     pub fn init(root: impl Into<PathBuf>, created_at: &str) -> BenchResult<Self> {
         let root = root.into();
@@ -37,6 +56,7 @@ impl BenchStore {
             "adjudications",
             "scores",
             "packets",
+            "review-packets",
             "blobs/sha256",
         ] {
             let path = root.join(dir);
@@ -70,23 +90,57 @@ impl BenchStore {
     }
 
     pub fn put_blob(&self, bytes: &[u8]) -> BenchResult<ContentDigest> {
+        self.with_write_lock(|| self.put_blob_tracked(bytes).map(|outcome| outcome.digest))
+    }
+
+    fn put_blob_tracked(&self, bytes: &[u8]) -> BenchResult<PutBlobOutcome> {
         let digest = ContentDigest::of_bytes(bytes);
         let path = self.blob_path(&digest.hex);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| BenchError::io(parent, e))?;
         }
+
         if path.exists() {
-            let existing = fs::read(&path).map_err(|e| BenchError::io(&path, e))?;
-            if existing.as_slice() != bytes {
-                return Err(BenchError::Integrity(format!(
-                    "blob {} already exists with different bytes",
-                    digest.hex
-                )));
-            }
-            return Ok(digest);
+            verify_existing_blob_bytes(&path, &digest, bytes)?;
+            return Ok(PutBlobOutcome {
+                digest,
+                created: false,
+            });
         }
-        atomic_write_bytes(&path, bytes)?;
-        Ok(digest)
+
+        // Stage complete bytes beside the destination, then atomically link
+        // them into the content-addressed name. Readers can therefore observe
+        // either no blob or the complete blob, never a partially written one.
+        let sequence = BLOB_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|source| BenchError::io(&temporary, source))?;
+        if let Err(source) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = fs::remove_file(&temporary);
+            return Err(BenchError::io(&temporary, source));
+        }
+        drop(file);
+
+        let created = match fs::hard_link(&temporary, &path) {
+            Ok(()) => true,
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Err(error) = verify_existing_blob_bytes(&path, &digest, bytes) {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(error);
+                }
+                false
+            }
+            Err(source) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(BenchError::io(&path, source));
+            }
+        };
+        let _ = fs::remove_file(&temporary);
+        Ok(PutBlobOutcome { digest, created })
     }
 
     pub fn get_blob(&self, hex: &str) -> BenchResult<Vec<u8>> {
@@ -100,6 +154,146 @@ impl BenchStore {
             )));
         }
         Ok(bytes)
+    }
+
+    /// Stream a snapshot blob into `destination` with a hard byte limit and fail-closed proof.
+    ///
+    /// `content` supplies both immutable claims made by the snapshot: SHA-256 and byte length.
+    /// The cancellation callback is polled before opening the blob, around every bounded read,
+    /// and before returning success. The store's private backing path is never returned or
+    /// included in errors from this API.
+    ///
+    /// A failure can leave a prefix in `destination`; callers must discard that destination
+    /// unless this method returns [`VerifiedBlobCopy`]. The method does not flush the writer.
+    pub fn copy_snapshot_blob_verified<W, C>(
+        &self,
+        content: &HeldContent,
+        max_bytes: u64,
+        destination: &mut W,
+        mut is_cancelled: C,
+    ) -> BenchResult<VerifiedBlobCopy>
+    where
+        W: Write,
+        C: FnMut() -> bool,
+    {
+        if content.digest.algorithm != "sha256" {
+            return Err(BenchError::Schema(
+                "held content digest algorithm must be sha256".into(),
+            ));
+        }
+        crate::types::validate_sha256_hex(&content.digest.hex)?;
+
+        if content.byte_length > max_bytes {
+            return Err(BenchError::BlobTooLarge {
+                digest: content.digest.hex.clone(),
+                declared_bytes: content.byte_length,
+                max_bytes,
+            });
+        }
+        if is_cancelled() {
+            return Err(BenchError::BlobCopyCancelled {
+                digest: content.digest.hex.clone(),
+            });
+        }
+
+        let path = self.blob_path(&content.digest.hex);
+        let mut source = match fs::File::open(&path) {
+            Ok(source) => source,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BenchError::NotFound(format!("blob {}", content.digest.hex)));
+            }
+            Err(source) => {
+                return Err(BenchError::BlobRead {
+                    digest: content.digest.hex.clone(),
+                    source,
+                });
+            }
+        };
+
+        let mut hasher = Sha256::new();
+        let mut copied = 0_u64;
+        let mut buffer = [0_u8; BLOB_COPY_BUFFER_BYTES];
+
+        loop {
+            if is_cancelled() {
+                return Err(BenchError::BlobCopyCancelled {
+                    digest: content.digest.hex.clone(),
+                });
+            }
+
+            // Read one extra byte after the declared length to detect trailing corruption without
+            // ever writing bytes beyond the caller's declared or configured bounds.
+            let remaining = content.byte_length.saturating_sub(copied);
+            let read_limit = if remaining == 0 {
+                1
+            } else {
+                usize::try_from(remaining.min(buffer.len() as u64))
+                    .expect("bounded by the fixed copy buffer")
+            };
+            let read =
+                source
+                    .read(&mut buffer[..read_limit])
+                    .map_err(|source| BenchError::BlobRead {
+                        digest: content.digest.hex.clone(),
+                        source,
+                    })?;
+            if read == 0 {
+                break;
+            }
+            if is_cancelled() {
+                return Err(BenchError::BlobCopyCancelled {
+                    digest: content.digest.hex.clone(),
+                });
+            }
+
+            let next = copied.checked_add(read as u64).ok_or_else(|| {
+                BenchError::Integrity(format!("blob {} byte count overflowed", content.digest.hex))
+            })?;
+            if next > content.byte_length {
+                return Err(BenchError::Integrity(format!(
+                    "blob {} length exceeds manifest {}",
+                    content.digest.hex, content.byte_length
+                )));
+            }
+            if next > max_bytes {
+                return Err(BenchError::BlobTooLarge {
+                    digest: content.digest.hex.clone(),
+                    declared_bytes: next,
+                    max_bytes,
+                });
+            }
+
+            destination
+                .write_all(&buffer[..read])
+                .map_err(|source| BenchError::BlobWrite { source })?;
+            hasher.update(&buffer[..read]);
+            copied = next;
+        }
+
+        if is_cancelled() {
+            return Err(BenchError::BlobCopyCancelled {
+                digest: content.digest.hex.clone(),
+            });
+        }
+        if copied != content.byte_length {
+            return Err(BenchError::Integrity(format!(
+                "blob {} length {} does not match manifest {}",
+                content.digest.hex, copied, content.byte_length
+            )));
+        }
+
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != content.digest.hex {
+            return Err(BenchError::Integrity(format!(
+                "blob {} failed digest verification (got {actual})",
+                content.digest.hex
+            )));
+        }
+
+        Ok(VerifiedBlobCopy {
+            digest: content.digest.clone(),
+            byte_length: copied,
+        })
     }
 
     pub fn verify_snapshot_blobs(&self, snapshot: &EvidenceSnapshot) -> BenchResult<()> {
@@ -132,13 +326,23 @@ impl BenchStore {
         list_ids(&self.root.join("cases"))
     }
 
+    pub fn load_cases(&self) -> BenchResult<Vec<Case>> {
+        let mut cases = Vec::new();
+        for id in self.list_cases()? {
+            cases.push(self.get_case(&id)?);
+        }
+        Ok(cases)
+    }
+
     pub fn put_snapshot(&self, snapshot: &EvidenceSnapshot) -> BenchResult<()> {
-        snapshot.validate()?;
-        self.verify_snapshot_blobs(snapshot)?;
-        atomic_write_json(
-            &self.entity_path("snapshots", &snapshot.snapshot_id),
-            snapshot,
-        )
+        self.with_write_lock(|| {
+            snapshot.validate()?;
+            self.verify_snapshot_blobs(snapshot)?;
+            atomic_write_json(
+                &self.entity_path("snapshots", &snapshot.snapshot_id),
+                snapshot,
+            )
+        })
     }
 
     pub fn get_snapshot(&self, snapshot_id: &str) -> BenchResult<EvidenceSnapshot> {
@@ -154,20 +358,14 @@ impl BenchStore {
     pub fn put_task(&self, task: &EvaluationTask) -> BenchResult<()> {
         task.validate()?;
         let snapshot = self.get_snapshot(&task.snapshot_id)?;
-        if snapshot.case_id != task.case_id {
-            return Err(BenchError::CrossSnapshot(
-                "task case_id does not match snapshot.case_id".into(),
+        let case = self.get_case(&task.case_id)?;
+        let derived = materialize_task_packet(&case, &snapshot, task)?;
+        if task.privacy.is_downgrade_from(derived.privacy) {
+            return Err(BenchError::Privacy(
+                "share_safe task would downgrade owner_only case, snapshot, or selected evidence"
+                    .into(),
             ));
         }
-        for item_id in &task.visibility.visible_item_ids {
-            if snapshot.item(item_id).is_none() {
-                return Err(BenchError::Schema(format!(
-                    "task visible item {item_id} is not in snapshot {}",
-                    snapshot.snapshot_id
-                )));
-            }
-        }
-        let _ = self.get_case(&task.case_id)?;
         atomic_write_json(&self.entity_path("tasks", &task.task_id), task)
     }
 
@@ -188,7 +386,84 @@ impl BenchStore {
         Ok(packet)
     }
 
+    pub fn get_packet(&self, packet_id: &str) -> BenchResult<TaskPacket> {
+        let packet = TaskPacket::parse_json(&self.read_entity("packets", packet_id)?)?;
+        let task = self.get_task(&packet.task_id)?;
+        let case = self.get_case(&packet.case_id)?;
+        let snapshot = self.get_snapshot(&packet.snapshot_id)?;
+        let expected = materialize_task_packet(&case, &snapshot, &task)?;
+        if packet != expected {
+            return Err(BenchError::Privacy(
+                "persisted task packet does not match privacy and content derived from its source records"
+                    .into(),
+            ));
+        }
+        Ok(packet)
+    }
+
     pub fn put_run(&self, run: &TriageRun) -> BenchResult<PutRunOutcome> {
+        self.with_write_lock(|| {
+            self.validate_run_links(run)?;
+            let raw_output = self.get_blob(&run.raw_output.digest.hex)?;
+            validate_run_raw_output(run, &raw_output)?;
+            self.persist_validated_run(run)
+        })
+    }
+
+    /// Validate and persist a run together with its exact raw output bytes.
+    ///
+    /// All deterministic run and linkage checks happen before the content-addressed blob is
+    /// written. If this call creates the blob but the run record cannot be persisted, the blob is
+    /// removed only after proving that no stored run references it. A blob that already existed is
+    /// never removed by this operation.
+    pub fn put_run_with_raw_output(
+        &self,
+        run: &TriageRun,
+        raw_output: &[u8],
+    ) -> BenchResult<PutRunOutcome> {
+        self.with_write_lock(|| {
+            self.validate_run_links(run)?;
+            validate_run_raw_output(run, raw_output)?;
+
+            let blob = self.put_blob_tracked(raw_output)?;
+            debug_assert_eq!(blob.digest, run.raw_output.digest);
+
+            match self.persist_validated_run(run) {
+                Ok(outcome) => Ok(outcome),
+                Err(run_error) if blob.created => {
+                    if self
+                        .remove_blob_if_unreferenced(&run.raw_output.digest)
+                        .is_err()
+                    {
+                        return Err(BenchError::Message(
+                            "run persistence failed and the newly-created raw output blob could not be rolled back safely"
+                                .into(),
+                        ));
+                    }
+                    Err(run_error)
+                }
+                Err(run_error) => Err(run_error),
+            }
+        })
+    }
+
+    fn with_write_lock<T>(&self, operation: impl FnOnce() -> BenchResult<T>) -> BenchResult<T> {
+        let path = self.root.join(".write.lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|source| BenchError::io(&path, source))?;
+        lock.lock_exclusive()
+            .map_err(|source| BenchError::io(&path, source))?;
+        let result = operation();
+        drop(lock);
+        result
+    }
+
+    fn validate_run_links(&self, run: &TriageRun) -> BenchResult<()> {
         run.validate()?;
         let task = self.get_task(&run.task_id)?;
         if run.snapshot_id != task.snapshot_id {
@@ -202,7 +477,18 @@ impl BenchStore {
                 "run.case_id does not match task.case_id".into(),
             ));
         }
-        let _ = self.get_blob(&run.raw_output.digest.hex)?;
+        let case = self.get_case(&task.case_id)?;
+        let snapshot = self.get_snapshot(&task.snapshot_id)?;
+        let task_packet = materialize_task_packet(&case, &snapshot, &task)?;
+        if run.privacy.is_downgrade_from(task_packet.privacy) {
+            return Err(BenchError::Privacy(
+                "share_safe run would downgrade an owner_only task packet".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn persist_validated_run(&self, run: &TriageRun) -> BenchResult<PutRunOutcome> {
         let path = self.entity_path("runs", &run.run_id);
         if path.exists() {
             let existing = TriageRun::parse_json(&self.read_entity("runs", &run.run_id)?)?;
@@ -215,6 +501,22 @@ impl BenchStore {
         Ok(PutRunOutcome::Created {
             run_id: run.run_id.clone(),
         })
+    }
+
+    fn remove_blob_if_unreferenced(&self, digest: &ContentDigest) -> BenchResult<()> {
+        for run_id in self.list_runs()? {
+            let stored_run = self.get_run(&run_id)?;
+            if stored_run.raw_output.digest == *digest {
+                return Ok(());
+            }
+        }
+
+        let path = self.blob_path(&digest.hex);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(BenchError::io(&path, source)),
+        }
     }
 
     pub fn get_run(&self, run_id: &str) -> BenchResult<TriageRun> {
@@ -233,6 +535,74 @@ impl BenchStore {
         Ok(runs)
     }
 
+    pub fn materialize_review_packet(
+        &self,
+        run_id: &str,
+        phase: ReviewPhase,
+    ) -> BenchResult<ReviewPacket> {
+        let run = self.get_run(run_id)?;
+        let task = self.get_task(&run.task_id)?;
+        let case = self.get_case(&run.case_id)?;
+        let snapshot = self.get_snapshot(&run.snapshot_id)?;
+        let raw = self.get_blob(&run.raw_output.digest.hex)?;
+        let support_recorded = run_has_support_adjudication(&self.load_adjudications()?, run_id);
+        let packet = materialize_review_packet(
+            &case,
+            &snapshot,
+            &task,
+            &run,
+            &raw,
+            phase,
+            support_recorded,
+        )?;
+        atomic_write_json(
+            &self.entity_path("review-packets", &packet.packet_id),
+            &packet,
+        )?;
+        Ok(packet)
+    }
+
+    pub fn get_review_packet(&self, packet_id: &str) -> BenchResult<ReviewPacket> {
+        let text = self.read_entity("review-packets", packet_id)?;
+        let packet = ReviewPacket::parse_json(&text)?;
+        let run = self.get_run(&packet.run_id)?;
+        let task = self.get_task(&packet.task_id)?;
+        let case = self.get_case(&packet.case_id)?;
+        let snapshot = self.get_snapshot(&packet.snapshot_id)?;
+        let raw = self.get_blob(&run.raw_output.digest.hex)?;
+        let support_recorded = packet.phase == ReviewPhase::Support
+            || run_has_support_adjudication(&self.load_adjudications()?, &packet.run_id);
+        let expected = materialize_review_packet(
+            &case,
+            &snapshot,
+            &task,
+            &run,
+            &raw,
+            packet.phase,
+            support_recorded,
+        )?;
+        if packet != expected {
+            return Err(BenchError::Privacy(
+                "persisted review packet does not match privacy and content derived from its source records"
+                    .into(),
+            ));
+        }
+        Ok(packet)
+    }
+
+    pub fn import_adjudication(&self, adj: Adjudication) -> BenchResult<ScoreReview> {
+        let run = self.get_run(&adj.run_id)?;
+        let snapshot = self.get_snapshot(&run.snapshot_id)?;
+        let item_ids = snapshot
+            .items
+            .iter()
+            .map(|item| item.item_id().to_string())
+            .collect();
+        let flags = citation_assist_flags(&item_ids, &run.claims);
+        let adj = merge_citation_assists(adj, flags)?;
+        self.put_adjudication(&adj)
+    }
+
     pub fn put_adjudication(&self, adj: &Adjudication) -> BenchResult<ScoreReview> {
         adj.validate()?;
         let run = self.get_run(&adj.run_id)?;
@@ -243,6 +613,85 @@ impl BenchStore {
             return Err(BenchError::CrossSnapshot(
                 "adjudication identities do not match the run".into(),
             ));
+        }
+        let phase = adj.phase.ok_or_else(|| {
+            BenchError::Schema(
+                "new adjudications must declare phase and bind a generated review packet; diagnosis also requires a prior support-phase review".into(),
+            )
+        })?;
+        let packet_id = adj.review_packet_id.as_deref().ok_or_else(|| {
+            BenchError::Schema(
+                "new adjudications must declare phase and bind a generated review packet; diagnosis also requires a prior support-phase review".into(),
+            )
+        })?;
+        if adj.schema_id != crate::types::ADJUDICATION_SCHEMA_V2 {
+            return Err(BenchError::Schema(
+                "new adjudications must use adjudication.v2 when packet-bound".into(),
+            ));
+        }
+        let packet = self.get_review_packet(packet_id)?;
+        if adj.privacy.is_downgrade_from(packet.privacy) {
+            return Err(BenchError::Privacy(
+                "share_safe adjudication would downgrade an owner_only review packet".into(),
+            ));
+        }
+        if packet.phase != phase
+            || packet.case_id != adj.case_id
+            || packet.task_id != adj.task_id
+            || packet.snapshot_id != adj.snapshot_id
+            || packet.run_id != adj.run_id
+            || packet.blinding != adj.blinding
+        {
+            return Err(BenchError::Integrity(format!(
+                "adjudication does not match its generated review packet (packet phase={:?}, case={}, task={}, snapshot={}, run={}, blinding={:?}; adjudication phase={:?}, case={}, task={}, snapshot={}, run={}, blinding={:?})",
+                packet.phase,
+                packet.case_id,
+                packet.task_id,
+                packet.snapshot_id,
+                packet.run_id,
+                packet.blinding,
+                phase,
+                adj.case_id,
+                adj.task_id,
+                adj.snapshot_id,
+                adj.run_id,
+                adj.blinding
+            )));
+        }
+        if phase == ReviewPhase::Diagnosis {
+            let existing = self.load_adjudications()?;
+            let diagnosis_has_prior_support = existing.iter().any(|support| {
+                support.run_id == adj.run_id
+                    && support.reviewer == adj.reviewer
+                    && support.phase == Some(ReviewPhase::Support)
+                    && support
+                        .created_at
+                        .parse::<chrono::DateTime<chrono::FixedOffset>>()
+                        .ok()
+                        .zip(
+                            adj.created_at
+                                .parse::<chrono::DateTime<chrono::FixedOffset>>()
+                                .ok(),
+                        )
+                        .is_some_and(|(support_at, diagnosis_at)| support_at <= diagnosis_at)
+            });
+            if !diagnosis_has_prior_support {
+                return Err(BenchError::Schema(
+                    format!(
+                        "diagnosis-phase adjudication requires a prior support-phase review by the same reviewer (existing: {:?})",
+                        existing
+                            .iter()
+                            .map(|support| (
+                                support.run_id.as_str(),
+                                support.reviewer.as_str(),
+                                support.rubric_version.as_str(),
+                                support.phase,
+                                support.created_at.as_str()
+                            ))
+                            .collect::<Vec<_>>()
+                    ),
+                ));
+            }
         }
         let case = self.get_case(&adj.case_id)?;
         if !case.diagnosis_is_applicable() {
@@ -328,6 +777,40 @@ pub enum PutRunOutcome {
     Duplicate { run_id: String },
 }
 
+struct PutBlobOutcome {
+    digest: ContentDigest,
+    created: bool,
+}
+
+fn validate_run_raw_output(run: &TriageRun, raw_output: &[u8]) -> BenchResult<()> {
+    if raw_output.len() as u64 != run.raw_output.byte_length {
+        return Err(BenchError::Integrity(
+            "raw output byte length does not match the run manifest".into(),
+        ));
+    }
+    if ContentDigest::of_bytes(raw_output) != run.raw_output.digest {
+        return Err(BenchError::Integrity(
+            "raw output digest does not match the run manifest".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_existing_blob_bytes(
+    path: &Path,
+    digest: &ContentDigest,
+    expected: &[u8],
+) -> BenchResult<()> {
+    let existing = fs::read(path).map_err(|source| BenchError::io(path, source))?;
+    if existing.as_slice() != expected {
+        return Err(BenchError::Integrity(format!(
+            "blob {} already exists with different bytes",
+            digest.hex
+        )));
+    }
+    Ok(())
+}
+
 fn list_ids(dir: &Path) -> BenchResult<Vec<String>> {
     let mut ids = Vec::new();
     let entries = match fs::read_dir(dir) {
@@ -386,6 +869,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = BenchStore::init(dir.path(), "2026-01-15T00:00:00Z").unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn write_lock_serializes_mutations_across_store_handles() {
+        let (_dir, store) = temp_store();
+        let lock_path = store.root().join(".write.lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+
+        let worker_store = store.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = worker_store.put_blob(b"serialized-write");
+            finished_tx.send(result).unwrap();
+        });
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            finished_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "mutation completed while another store handle held the write lock"
+        );
+        drop(lock);
+
+        let digest = finished_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(store.get_blob(&digest.hex).unwrap(), b"serialized-write");
     }
 
     #[test]

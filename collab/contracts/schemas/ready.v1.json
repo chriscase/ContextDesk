@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/ready.v1.json",
+  "title": "cd-collab ReadyResponse v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "status", "database", "evidenceStore"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.ready.v1" },
+    "status": { "type": "string", "enum": ["ready", "not_ready"] },
+    "database": { "type": "string", "enum": ["up", "down"] },
+    "evidenceStore": { "type": "string", "enum": ["up", "down"] }
+  }
+}

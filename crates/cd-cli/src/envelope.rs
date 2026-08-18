@@ -66,8 +66,9 @@ pub enum ExitCategory {
     /// A normalized stream inspection completed and found one or more files
     /// non-conforming. The report is complete; this code makes it gateable.
     NonConforming = 9,
-    /// Normalize safely published valid artifacts, but the result was partial
-    /// and `--fail-on-partial` requested a failing automation verdict.
+    /// An operation safely produced a valid but partial result. Normalize uses
+    /// this when `--fail-on-partial` is set; triage uses it for an honest
+    /// partial terminal.
     Partial = 10,
     /// Any failure that does not fit an above category — a bug, not an
     /// expected outcome a caller should branch on.

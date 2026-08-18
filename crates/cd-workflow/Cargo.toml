@@ -8,9 +8,11 @@ repository.workspace = true
 
 [dependencies]
 cd-core = { path = "../cd-core" }
+cd-triage-runtime = { path = "../cd-triage-runtime" }
 tempfile = "3"
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

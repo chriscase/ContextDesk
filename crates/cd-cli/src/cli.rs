@@ -191,10 +191,8 @@ pub enum Command {
     },
     /// Run one versioned Triage SDK request.
     ///
-    /// The command currently exposes the host-neutral request/replay boundary
-    /// only; until a trusted production runner is wired, it fails closed with
-    /// a typed unsupported result and never reads provider configuration or
-    /// credentials.
+    /// Standard, Enhanced, and Advanced requests execute through the same
+    /// trusted production host and return the shared replay contract.
     Triage {
         #[command(subcommand)]
         action: TriageAction,
@@ -378,6 +376,11 @@ pub struct TriageRunArgs {
     /// rejects it because the CLI cannot prove its authorship.
     #[arg(long, value_name = "FILE")]
     pub preflight: Option<PathBuf>,
+    /// Host-neutral request parsed before any application state is resolved.
+    /// This also makes bounded stdin requests single-read while preserving the
+    /// state-free malformed-input boundary.
+    #[arg(skip)]
+    pub(crate) parsed_request: Option<cd_core::triage_sdk::TriageRequestV2>,
 }
 
 /// Explicit-file operations for the revisioned Triage Policy V2 store.

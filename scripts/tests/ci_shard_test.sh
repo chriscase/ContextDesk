@@ -438,13 +438,73 @@ expect_ok "hit without restored files is cold" \
 [ "$(jq -r '.restore' "$TMP/cache-hit-nofiles.json")" = "key-hit-without-files" ] ||
   fail "must name the lookup-only miss"
 
-mkdir -p "$TMP/full-target/debug"
-echo stub >"$TMP/full-target/debug/foo"
-expect_ok "hit with restored files is warm" \
+mkdir -p "$TMP/tag-only-target"
+echo 'Signature: 8a477f597d28d172789f06886806bc55' >"$TMP/tag-only-target/CACHEDIR.TAG"
+expect_ok "CACHEDIR.TAG alone is not a warm workspace" \
+  sh "$CACHE" --out "$TMP/cache-hit-tag.json" --hit true --role shard --save false \
+  --restore-dir "$TMP/tag-only-target"
+[ "$(jq -r '.cache_state' "$TMP/cache-hit-tag.json")" = cold ] ||
+  fail "CACHEDIR.TAG-only target must stay cold"
+[ "$(jq -r '.restore' "$TMP/cache-hit-tag.json")" = "key-hit-without-artifacts" ] ||
+  fail "must name a hit without compiled artifacts"
+
+mkdir -p "$TMP/deps-only-target/debug/deps"
+echo stub >"$TMP/deps-only-target/debug/deps/cd_core-deadbeef.rlib"
+expect_ok "compiled deps without DuckDB are cold" \
+  sh "$CACHE" --out "$TMP/cache-hit-noduck.json" --hit true --role shard --save false \
+  --restore-dir "$TMP/deps-only-target"
+[ "$(jq -r '.cache_state' "$TMP/cache-hit-noduck.json")" = cold ] ||
+  fail "missing DuckDB must not claim warm"
+[ "$(jq -r '.restore' "$TMP/cache-hit-noduck.json")" = "key-hit-without-duckdb" ] ||
+  fail "must name a hit without DuckDB"
+
+mkdir -p "$TMP/empty-duckdb-dir/debug/deps" "$TMP/empty-duckdb-dir/debug/build/libduckdb-sys-abc123"
+echo stub >"$TMP/empty-duckdb-dir/debug/deps/cd_core-deadbeef.rlib"
+expect_fail "assert-dir rejects an empty libduckdb-sys directory" \
+  sh "$CACHE" --assert-dir "$TMP/empty-duckdb-dir"
+expect_ok "empty DuckDB dir records no-duckdb" \
+  sh "$CACHE" --out "$TMP/cache-empty-duckdir.json" --hit true --role shard --save false \
+  --restore-dir "$TMP/empty-duckdb-dir"
+[ "$(jq -r '.restore' "$TMP/cache-empty-duckdir.json")" = "key-hit-without-duckdb" ] ||
+  fail "empty libduckdb-sys dir must not count as an artifact"
+
+mkdir -p "$TMP/zerobyte-duckdb/debug/deps" "$TMP/zerobyte-duckdb/debug/build/libduckdb-sys-abc123/out"
+echo stub >"$TMP/zerobyte-duckdb/debug/deps/cd_core-deadbeef.rlib"
+: >"$TMP/zerobyte-duckdb/debug/build/libduckdb-sys-abc123/out/libduckdb.a"
+expect_fail "assert-dir rejects a zero-byte DuckDB stub" \
+  sh "$CACHE" --assert-dir "$TMP/zerobyte-duckdb"
+
+mkdir -p "$TMP/missing-target"
+rmdir "$TMP/missing-target"
+expect_fail "assert-dir rejects a missing target directory" \
+  sh "$CACHE" --assert-dir "$TMP/missing-target"
+
+mkdir -p "$TMP/full-target/debug/deps"
+echo stub >"$TMP/full-target/debug/deps/cd_core-deadbeef.rlib"
+echo stub >"$TMP/full-target/debug/deps/libduckdb-cafebabe.rlib"
+expect_ok "hit with compiled workspace + DuckDB rlib is warm" \
   sh "$CACHE" --out "$TMP/cache-hit-files.json" --hit true --role shard --save false \
-  --restore-dir "$TMP/full-target"
-[ "$(jq -r '.cache_state' "$TMP/cache-hit-files.json")" = warm ] || fail "hit+files must be warm"
+  --restore-dir "$TMP/full-target" --fingerprint cafe1234
+[ "$(jq -r '.cache_state' "$TMP/cache-hit-files.json")" = warm ] || fail "hit+artifacts must be warm"
 [ "$(jq -r '.restore' "$TMP/cache-hit-files.json")" = files ] || fail "restore=files"
+[ "$(jq -r '.fingerprint' "$TMP/cache-hit-files.json")" = cafe1234 ] || fail "fingerprint recorded"
+
+mkdir -p "$TMP/win-target/debug/deps" "$TMP/win-target/debug/build/libduckdb-sys-win/out"
+echo stub >"$TMP/win-target/debug/deps/cd_core-deadbeef.rlib"
+echo stub >"$TMP/win-target/debug/build/libduckdb-sys-win/out/duckdb.lib"
+expect_ok "Windows duckdb.lib in out/ is a valid artifact" \
+  sh "$CACHE" --assert-dir "$TMP/win-target"
+
+mkdir -p "$TMP/mac-target/debug/deps" "$TMP/mac-target/debug/build/libduckdb-sys-mac/out"
+echo stub >"$TMP/mac-target/debug/deps/cd_core-deadbeef.rlib"
+echo stub >"$TMP/mac-target/debug/build/libduckdb-sys-mac/out/libduckdb.a"
+expect_ok "macOS/Linux libduckdb.a in out/ is a valid artifact" \
+  sh "$CACHE" --assert-dir "$TMP/mac-target"
+
+expect_fail "assert-dir rejects a CACHEDIR.TAG-only tree" \
+  sh "$CACHE" --assert-dir "$TMP/tag-only-target"
+expect_ok "assert-dir accepts a compiled workspace + DuckDB tree" \
+  sh "$CACHE" --assert-dir "$TMP/full-target"
 
 expect_ok "preflight role is restore-only by default" \
   sh "$CACHE" --out "$TMP/cache-preflight.json" --hit true --role preflight
@@ -467,7 +527,8 @@ required = [
     "claims",
     "close-proof",
     "gui-accept-contracts",
-    "rust",
+    "rust-macos",
+    "rust-windows",
     "rust-macos-cache-probe",
     "rust-windows-cache-probe",
     "rust-macos-cache-warmup",
@@ -475,29 +536,53 @@ required = [
     "rust-ubuntu",
     "rust-ubuntu-shard",
     "rust-ubuntu-tests",
-    "rust-platform-shard",
-    "rust-platform-tests",
+    "rust-macos-shard",
+    "rust-windows-shard",
+    "rust-macos-tests",
+    "rust-windows-tests",
     "tauri-host",
     "desktop",
 ]
 for name in required:
     if name not in jobs:
         raise SystemExit(f"missing job {name}")
+for gone in ("rust", "rust-platform-shard", "rust-platform-tests"):
+    if gone in jobs:
+        raise SystemExit(f"{gone} must be split into per-OS jobs")
 
 if jobs["secrets"]["name"] != "gitleaks":
     raise SystemExit("gitleaks job renamed")
 if jobs["gui-accept-contracts"]["name"] != "GUI integration contracts (no WebDriver)":
     raise SystemExit("GUI contract job renamed")
 
-rust_os = jobs["rust"]["strategy"]["matrix"]["os"]
-if rust_os != ["macos-latest", "windows-latest"]:
-    raise SystemExit(f"rust matrix should be macOS/Windows only, got {rust_os}")
+if jobs["rust-macos"]["name"] != "rust (macos-latest)":
+    raise SystemExit("macos preflight check name must stay rust (macos-latest)")
+if jobs["rust-windows"]["name"] != "rust (windows-latest)":
+    raise SystemExit("windows preflight check name must stay rust (windows-latest)")
 if jobs["rust-ubuntu"]["name"] != "rust (ubuntu-latest)":
     raise SystemExit("ubuntu rust check name must stay rust (ubuntu-latest)")
 if jobs["rust-ubuntu-tests"]["name"] != "rust tests (ubuntu aggregate)":
     raise SystemExit("aggregate check name changed")
 if jobs["rust-ubuntu-tests"].get("if") != "always()":
     raise SystemExit("aggregate must run if: always()")
+ubuntu_aggregate_steps = jobs["rust-ubuntu-tests"]["steps"]
+if not ubuntu_aggregate_steps or ubuntu_aggregate_steps[0].get("name") != "require valid CI routing":
+    raise SystemExit("Ubuntu aggregate must fail closed on invalid path routing before validation")
+routing_guard = ubuntu_aggregate_steps[0]
+expected_routing_env = {
+    "PATH_FILTER_RESULT": "${{ needs.ci-path-filter.result }}",
+    "SURFACE": "${{ needs.ci-path-filter.outputs.surface }}",
+    "RUN_UBUNTU": "${{ needs.ci-path-filter.outputs.run_ubuntu }}",
+}
+if routing_guard.get("env") != expected_routing_env:
+    raise SystemExit(f"Ubuntu aggregate routing guard env drifted: {routing_guard.get('env')}")
+routing_run = routing_guard.get("run") or ""
+for required_text in (
+    '"$PATH_FILTER_RESULT" != success',
+    "full:true|bench-only:false|collab-only:false",
+):
+    if required_text not in routing_run:
+        raise SystemExit(f"Ubuntu aggregate routing guard is missing {required_text!r}")
 
 shard_ids = jobs["rust-ubuntu-shard"]["strategy"]["matrix"]["shard"]
 if shard_ids != list(range(1, count + 1)):
@@ -520,6 +605,10 @@ if wu.get("lookup-only") in (True, "true"):
     raise SystemExit("warmup must save, not lookup-only")
 if wu.get("save-if") in (False, "false"):
     raise SystemExit("warmup must be allowed to save")
+if wu.get("cache-on-failure") in (True, "true"):
+    raise SystemExit("ubuntu warmup must not save a cache after a failed compile or DuckDB assert")
+if wu.get("env-vars"):
+    raise SystemExit("do not override rust-cache env-vars; default RUST prefix already hashes RUSTFLAGS")
 
 sh = cache_step(jobs["rust-ubuntu-shard"])["with"]
 if sh.get("shared-key") != "ubuntu-workspace-tests":
@@ -528,6 +617,8 @@ if sh.get("lookup-only") in (True, "true"):
     raise SystemExit("shards must not use lookup-only (that skips the download)")
 if sh.get("save-if") not in (False, "false"):
     raise SystemExit("shards must not save the shared cache")
+if sh.get("env-vars"):
+    raise SystemExit("ubuntu shards must keep rust-cache default env prefixes")
 
 uploads = [s for s in steps(jobs["rust-ubuntu-shard"]) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
 if len(uploads) != 1:
@@ -541,6 +632,8 @@ if int(up["with"]["retention-days"]) != 14:
     raise SystemExit(f"retention-days {up['with'].get('retention-days')}")
 if up["with"].get("path") != "ci-shards/":
     raise SystemExit("artifact path must be ci-shards/")
+if up["with"].get("overwrite") not in (True, "true"):
+    raise SystemExit("Ubuntu shard upload must replace its artifact on failed-job reruns")
 
 cache_uploads = [s for s in steps(jobs["rust-ubuntu"]) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
 if not cache_uploads:
@@ -552,22 +645,30 @@ if cu["with"].get("name") != "rust-ubuntu-cache-status":
     raise SystemExit("cache-status artifact name")
 if int(cu["with"]["retention-days"]) != 14:
     raise SystemExit("cache-status retention")
+if cu["with"].get("overwrite") not in (True, "true"):
+    raise SystemExit("Ubuntu cache-status upload must support failed-job reruns")
 
 # Ubuntu rust job warms with --no-run and must not run the suite itself.
 ubuntu_runs = "\n".join(s.get("run") or "" for s in steps(jobs["rust-ubuntu"]))
 if "cargo test --workspace --no-run" not in ubuntu_runs:
     raise SystemExit("ubuntu rust job must compile tests with --no-run")
+if "--assert-dir target" not in ubuntu_runs:
+    raise SystemExit("ubuntu rust job must assert compiled DuckDB artifacts after --no-run")
 # A bare `cargo test --workspace` (no --no-run) would reintroduce the monolith.
 for block in ubuntu_runs.splitlines():
     stripped = block.strip()
     if stripped == "cargo test --workspace":
         raise SystemExit("ubuntu rust job must not run cargo test --workspace")
 
-macwin_runs = "\n".join(s.get("run") or "" for s in steps(jobs["rust"]))
-if "cargo test --workspace --no-run" in macwin_runs:
-    raise SystemExit("macOS/Windows preflight must not rebuild the workspace suite")
-if "ci_record_cache.sh" not in macwin_runs or "--role preflight" not in macwin_runs:
-    raise SystemExit("macOS/Windows preflight must record its restore-only cache role")
+for preflight in ("rust-macos", "rust-windows"):
+    runs = "\n".join(s.get("run") or "" for s in steps(jobs[preflight]))
+    if "cargo test --workspace --no-run" in runs:
+        raise SystemExit(f"{preflight} must not rebuild the workspace suite")
+    if "ci_record_cache.sh" not in runs or "--role preflight" not in runs:
+        raise SystemExit(f"{preflight} must record its restore-only cache role")
+    uploads = [s for s in steps(jobs[preflight]) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
+    if not uploads or uploads[0]["with"].get("overwrite") not in (True, "true"):
+        raise SystemExit(f"{preflight} cache-status upload must support failed-job reruns")
 
 for name, os_name in (("rust-macos-cache-probe", "macos-latest"),
                       ("rust-windows-cache-probe", "windows-latest")):
@@ -581,6 +682,8 @@ for name, os_name in (("rust-macos-cache-probe", "macos-latest"),
         raise SystemExit(f"{name} must be lookup-only")
     if cache.get("save-if") not in (False, "false"):
         raise SystemExit(f"{name} must not save a partial cache")
+    if cache.get("env-vars"):
+        raise SystemExit(f"{name} must keep rust-cache default env prefixes")
 
 for name, os_name in (("rust-macos-cache-warmup", "macos-latest"),
                       ("rust-windows-cache-warmup", "windows-latest")):
@@ -592,37 +695,68 @@ for name, os_name in (("rust-macos-cache-warmup", "macos-latest"),
         raise SystemExit(f"{name} cache key mismatch")
     if cache.get("lookup-only") in (True, "true") or cache.get("save-if") in (False, "false"):
         raise SystemExit(f"{name} must be a cache writer")
+    if cache.get("cache-on-failure") in (True, "true"):
+        raise SystemExit(f"{name} must not save after a failed compile or DuckDB assert")
+    if cache.get("env-vars"):
+        raise SystemExit(f"{name} must keep rust-cache default env prefixes")
+    warmup_runs = "\n".join(s.get("run") or "" for s in steps(warmup))
+    if "--assert-dir target" not in warmup_runs:
+        raise SystemExit(f"{name} must assert compiled DuckDB artifacts before save")
+    uploads = [s for s in steps(warmup) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
+    if not uploads or uploads[0]["with"].get("overwrite") not in (True, "true"):
+        raise SystemExit(f"{name} cache-status upload must support failed-job reruns")
 
-platform_shard = jobs["rust-platform-shard"]
-platform_matrix = platform_shard["strategy"]["matrix"]
-if platform_matrix["os"] != ["macos-latest", "windows-latest"]:
-    raise SystemExit(f"platform shard OS matrix changed: {platform_matrix['os']}")
-if platform_matrix["shard"] != [1, 2, 3, 4]:
-    raise SystemExit(f"platform shard matrix changed: {platform_matrix['shard']}")
-platform_cache = cache_step(platform_shard)["with"]
-if platform_cache.get("shared-key") != "${{ matrix.os }}-workspace-tests-v2":
-    raise SystemExit("platform shard cache key mismatch")
-if platform_cache.get("lookup-only") in (True, "true"):
-    raise SystemExit("platform shards must download cache files")
-if platform_cache.get("save-if") not in (False, "false"):
-    raise SystemExit("platform shards must not save the shared cache")
-platform_runs = "\n".join(s.get("run") or "" for s in steps(platform_shard))
-if "ci_run_platform_shard.sh" not in platform_runs:
-    raise SystemExit("platform shard must use the portable runner")
-platform_uploads = [s for s in steps(platform_shard) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
-if not platform_uploads or platform_uploads[0].get("if") != "always()":
-    raise SystemExit("platform shard results must upload on failure")
+def need_list(job):
+    needs = job.get("needs") or []
+    if isinstance(needs, str):
+        return [needs]
+    return list(needs)
 
-platform_aggregate = jobs["rust-platform-tests"]
-if platform_aggregate["name"] != "rust tests (${{ matrix.os }} aggregate)":
-    raise SystemExit("platform aggregate check name changed")
-if platform_aggregate.get("if") != "always()":
-    raise SystemExit("platform aggregate must run if: always()")
-if platform_aggregate["strategy"]["matrix"]["os"] != ["macos-latest", "windows-latest"]:
-    raise SystemExit("platform aggregate OS matrix changed")
-aggregate_runs = "\n".join(s.get("run") or "" for s in steps(platform_aggregate))
-if "ci_aggregate_shards.sh" not in aggregate_runs or "--shards 4" not in aggregate_runs:
-    raise SystemExit("platform aggregate must use the fail-closed four-way aggregate")
+for name, forbidden in (
+    ("rust-macos", "windows"),
+    ("rust-macos-shard", "windows"),
+    ("rust-macos-tests", "windows"),
+    ("rust-windows", "macos"),
+    ("rust-windows-shard", "macos"),
+    ("rust-windows-tests", "macos"),
+):
+    if any(forbidden in n for n in need_list(jobs[name])):
+        raise SystemExit(f"{name} must not wait on the other desktop OS")
+
+for os_name, shard_job, agg_job, preflight in (
+    ("macos-latest", "rust-macos-shard", "rust-macos-tests", "rust-macos"),
+    ("windows-latest", "rust-windows-shard", "rust-windows-tests", "rust-windows"),
+):
+    if jobs[preflight]["name"] != f"rust ({os_name})":
+        raise SystemExit(f"{preflight} check name changed")
+    if jobs[shard_job]["name"] != f"rust tests ({os_name} shard ${{{{ matrix.shard }}}})":
+        raise SystemExit(f"{shard_job} check name changed")
+    if jobs[shard_job]["strategy"]["matrix"]["shard"] != [1, 2, 3, 4]:
+        raise SystemExit(f"{shard_job} must stay four-way")
+    cache = cache_step(jobs[shard_job])["with"]
+    if cache.get("shared-key") != f"{os_name}-workspace-tests-v2":
+        raise SystemExit(f"{shard_job} cache key mismatch")
+    if cache.get("lookup-only") in (True, "true"):
+        raise SystemExit(f"{shard_job} must download cache files")
+    if cache.get("save-if") not in (False, "false"):
+        raise SystemExit(f"{shard_job} must not save the shared cache")
+    runs = "\n".join(s.get("run") or "" for s in steps(jobs[shard_job]))
+    if "ci_run_platform_shard.sh" not in runs:
+        raise SystemExit(f"{shard_job} must use the portable runner")
+    uploads = [s for s in steps(jobs[shard_job]) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
+    if not uploads or uploads[0].get("if") != "always()":
+        raise SystemExit(f"{shard_job} results must upload on failure")
+    if uploads[0]["with"].get("overwrite") not in (True, "true"):
+        raise SystemExit(f"{shard_job} upload must replace its artifact on failed-job reruns")
+    if jobs[agg_job]["name"] != f"rust tests ({os_name} aggregate)":
+        raise SystemExit(f"{agg_job} check name changed")
+    if jobs[agg_job].get("if") != "always()":
+        raise SystemExit(f"{agg_job} must run if: always()")
+    if need_list(jobs[agg_job]) != [shard_job]:
+        raise SystemExit(f"{agg_job} must depend only on {shard_job}")
+    agg_runs = "\n".join(s.get("run") or "" for s in steps(jobs[agg_job]))
+    if "ci_aggregate_shards.sh" not in agg_runs or "--shards 4" not in agg_runs:
+        raise SystemExit(f"{agg_job} must use the fail-closed four-way aggregate")
 
 tauri_os = jobs["tauri-host"]["strategy"]["matrix"]["os"]
 if tauri_os != ["ubuntu-latest", "macos-latest"]:

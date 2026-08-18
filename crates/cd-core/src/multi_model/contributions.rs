@@ -816,8 +816,77 @@ pub struct ReconciledClaim {
     pub kind: ContributionClaimKind,
     /// Sorted host evidence ids.
     pub evidence_ids: Vec<String>,
-    /// Number of distinct contributors supporting the key.
+    /// Number of distinct functional roles supporting the key.
+    #[serde(default)]
+    pub role_count: usize,
+    /// Number of distinct exact gateway-scoped model identities supporting
+    /// the key. Reusing one exact model in several roles counts once.
     pub contributor_count: usize,
+    /// Number of distinct catalog model ids, independent of gateway profile.
+    #[serde(default)]
+    pub model_id_count: usize,
+    /// Number of distinct gateway profiles.
+    #[serde(default)]
+    pub gateway_count: usize,
+}
+
+/// Deterministic kind of support between independently sourced claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationSupportKind {
+    /// Independent model identities cited the exact same evidence set.
+    ExactAgreement,
+    /// Independent model identities cited overlapping, non-identical evidence
+    /// sets for the same candidate and claim kind.
+    CompatibleSupport,
+}
+
+/// Host-normalized support relation. Model prose and model-authored claim ids
+/// are intentionally absent.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ReconciliationSupportV1 {
+    /// Candidate id shared by the supported claims.
+    pub candidate_id: String,
+    /// Shared non-root claim kind.
+    pub kind: ContributionClaimKind,
+    /// Exact agreement or compatible partial support.
+    pub support_kind: ReconciliationSupportKind,
+    /// Sorted union of host evidence ids participating in the relation.
+    pub evidence_ids: Vec<String>,
+    /// Distinct functional roles participating in the relation.
+    pub role_count: usize,
+    /// Distinct exact gateway-scoped model identities. This is always at
+    /// least two; one model reused across roles never creates a relation.
+    pub model_ref_count: usize,
+    /// Distinct catalog model ids, independent of gateway profile.
+    pub model_id_count: usize,
+    /// Distinct gateway profiles.
+    pub gateway_count: usize,
+}
+
+/// Typed deterministic coverage or unresolved-question class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationGapKind {
+    /// No accepted observation claim exists.
+    MissingObservationCoverage,
+    /// No accepted symptom/causal/competing claim exists.
+    MissingCausalCoverage,
+    /// A completed contributor reported absent evidence for an unresolved
+    /// question. Model prose is not retained in this normalized class.
+    UnresolvedQuestion,
+}
+
+/// One typed reconciliation gap without model prose.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ReconciliationGapV1 {
+    /// Gap class.
+    pub kind: ReconciliationGapKind,
+    /// Host candidate id when the report was candidate-specific.
+    pub candidate_id: Option<String>,
+    /// Number of distinct exact gateway-scoped models reporting this gap.
+    /// Deterministic host coverage gaps use zero.
+    pub reporter_model_count: usize,
 }
 
 /// One deterministic disagreement between bounded contributors.
@@ -844,8 +913,14 @@ pub struct ReconciliationReportV1 {
     pub availability: Vec<(ContributionRole, ContributionAvailability)>,
     /// Normalized supported claims.
     pub claims: Vec<ReconciledClaim>,
+    /// Exact agreement and compatible support between independent models.
+    #[serde(default)]
+    pub support: Vec<ReconciliationSupportV1>,
     /// Normalized conflicts.
     pub conflicts: Vec<ReconciliationConflict>,
+    /// Typed missing coverage and unresolved questions.
+    #[serde(default)]
+    pub gaps: Vec<ReconciliationGapV1>,
     /// Host-scoped contradiction reports from checker/reviewer roles.
     pub reported_contradictions: Vec<ValidatedContributionContradictionV1>,
     /// Host answer floor.
@@ -928,10 +1003,12 @@ pub fn reconcile_contributions(
         .collect::<Vec<_>>();
     availability.sort();
 
-    let mut support = BTreeMap::<
+    let mut claim_supporters = BTreeMap::<
         (String, ContributionClaimKind, Vec<String>),
         BTreeSet<(ContributionRole, String, String)>,
     >::new();
+    let mut unresolved_gap_reporters =
+        BTreeMap::<Option<String>, BTreeSet<(String, String)>>::new();
     let mut completed = 0usize;
     let mut non_abstained = 0usize;
     let mut has_observation_claim = false;
@@ -961,25 +1038,148 @@ pub fn reconcile_contributions(
                 claim.kind,
                 claim.evidence_ids.clone(),
             );
-            support.entry(key).or_default().insert((
+            claim_supporters.entry(key).or_default().insert((
                 contribution.role,
                 contribution.identity.profile_id.clone(),
                 contribution.identity.model.clone(),
             ));
         }
+        for gap in &contribution.evidence_gaps {
+            unresolved_gap_reporters
+                .entry(gap.candidate_id.clone())
+                .or_default()
+                .insert((
+                    contribution.identity.profile_id.clone(),
+                    contribution.identity.model.clone(),
+                ));
+        }
         reported_contradictions.extend(contribution.contradictions.iter().cloned());
     }
-    let claims = support
+    let contributor_counts = |contributors: &BTreeSet<(ContributionRole, String, String)>| {
+        let roles = contributors
+            .iter()
+            .map(|(role, _, _)| *role)
+            .collect::<BTreeSet<_>>();
+        let model_refs = contributors
+            .iter()
+            .map(|(_, profile_id, model_id)| (profile_id.clone(), model_id.clone()))
+            .collect::<BTreeSet<_>>();
+        let model_ids = contributors
+            .iter()
+            .map(|(_, _, model_id)| model_id.clone())
+            .collect::<BTreeSet<_>>();
+        let gateways = contributors
+            .iter()
+            .map(|(_, profile_id, _)| profile_id.clone())
+            .collect::<BTreeSet<_>>();
+        (
+            roles.len(),
+            model_refs.len(),
+            model_ids.len(),
+            gateways.len(),
+        )
+    };
+    let claims = claim_supporters
         .iter()
-        .map(
-            |((candidate_id, kind, evidence_ids), contributors)| ReconciledClaim {
+        .map(|((candidate_id, kind, evidence_ids), contributors)| {
+            let (role_count, model_ref_count, model_id_count, gateway_count) =
+                contributor_counts(contributors);
+            ReconciledClaim {
                 candidate_id: candidate_id.clone(),
                 kind: *kind,
                 evidence_ids: evidence_ids.clone(),
-                contributor_count: contributors.len(),
-            },
-        )
+                role_count,
+                contributor_count: model_ref_count,
+                model_id_count,
+                gateway_count,
+            }
+        })
         .collect::<Vec<_>>();
+
+    let mut support_relations = BTreeSet::new();
+    for ((candidate_id, kind, evidence_ids), contributors) in &claim_supporters {
+        let (role_count, model_ref_count, model_id_count, gateway_count) =
+            contributor_counts(contributors);
+        if model_ref_count >= 2 {
+            support_relations.insert(ReconciliationSupportV1 {
+                candidate_id: candidate_id.clone(),
+                kind: *kind,
+                support_kind: ReconciliationSupportKind::ExactAgreement,
+                evidence_ids: evidence_ids.clone(),
+                role_count,
+                model_ref_count,
+                model_id_count,
+                gateway_count,
+            });
+        }
+    }
+    let claim_entries = claim_supporters.iter().collect::<Vec<_>>();
+    for left_index in 0..claim_entries.len() {
+        let ((left_candidate, left_kind, left_evidence), left_contributors) =
+            claim_entries[left_index];
+        for ((right_candidate, right_kind, right_evidence), right_contributors) in
+            claim_entries.iter().skip(left_index + 1).copied()
+        {
+            if left_candidate != right_candidate
+                || left_kind != right_kind
+                || left_evidence == right_evidence
+                || !left_evidence
+                    .iter()
+                    .any(|evidence_id| right_evidence.binary_search(evidence_id).is_ok())
+            {
+                continue;
+            }
+            let mut contributors = left_contributors.clone();
+            contributors.extend(right_contributors.iter().cloned());
+            let (role_count, model_ref_count, model_id_count, gateway_count) =
+                contributor_counts(&contributors);
+            if model_ref_count < 2 {
+                continue;
+            }
+            let evidence_ids = left_evidence
+                .iter()
+                .chain(right_evidence.iter())
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            support_relations.insert(ReconciliationSupportV1 {
+                candidate_id: left_candidate.clone(),
+                kind: *left_kind,
+                support_kind: ReconciliationSupportKind::CompatibleSupport,
+                evidence_ids,
+                role_count,
+                model_ref_count,
+                model_id_count,
+                gateway_count,
+            });
+        }
+    }
+    let support = support_relations.into_iter().collect::<Vec<_>>();
+
+    let mut gaps = BTreeSet::new();
+    if !has_observation_claim {
+        gaps.insert(ReconciliationGapV1 {
+            kind: ReconciliationGapKind::MissingObservationCoverage,
+            candidate_id: None,
+            reporter_model_count: 0,
+        });
+    }
+    if !has_causal_claim {
+        gaps.insert(ReconciliationGapV1 {
+            kind: ReconciliationGapKind::MissingCausalCoverage,
+            candidate_id: None,
+            reporter_model_count: 0,
+        });
+    }
+    for (candidate_id, reporters) in unresolved_gap_reporters {
+        gaps.insert(ReconciliationGapV1 {
+            kind: ReconciliationGapKind::UnresolvedQuestion,
+            candidate_id,
+            reporter_model_count: reporters.len(),
+        });
+    }
+    let gaps = gaps.into_iter().collect::<Vec<_>>();
 
     let mut by_candidate_evidence =
         BTreeMap::<(String, Vec<String>), BTreeSet<ContributionClaimKind>>::new();
@@ -1029,7 +1229,8 @@ pub fn reconcile_contributions(
     });
     let has_conflict = !conflicts.is_empty() || !reported_contradictions.is_empty();
     let missing_role_coverage = !has_observation_claim || !has_causal_claim;
-    let escalation_recommended = has_conflict || has_dropout || missing_role_coverage;
+    let escalation_recommended =
+        has_conflict || has_dropout || missing_role_coverage || !gaps.is_empty();
     let state = if attempts.is_empty() {
         ReconciliationState::DeterministicBaseline
     } else if completed == 0 {
@@ -1040,7 +1241,7 @@ pub fn reconcile_contributions(
         ReconciliationState::Contested
     } else if missing_role_coverage {
         ReconciliationState::InsufficientEvidence
-    } else if has_dropout {
+    } else if has_dropout || !gaps.is_empty() {
         ReconciliationState::EscalationRecommended
     } else {
         ReconciliationState::Supported
@@ -1051,7 +1252,9 @@ pub fn reconcile_contributions(
         escalation_recommended,
         availability,
         claims,
+        support,
         conflicts,
+        gaps,
         reported_contradictions,
         baseline,
         root_cause_established: false,
@@ -1235,6 +1438,48 @@ mod tests {
         FastTriagePacketV1::from_ledger(
             HostEvidenceLedger::new(binding, entries).unwrap(),
             Some("timeline"),
+            true,
+        )
+    }
+
+    fn packet_with_overlapping_candidate_evidence() -> FastTriagePacketV1 {
+        let revision = LogSnapshotRevisionV1 {
+            event_revision: 1,
+            template_analysis_revision: 2,
+            suppression_revision: 3,
+        };
+        let entries = vec![
+            HostEvidenceEntry {
+                evidence_id: "opaque-a".into(),
+                candidate_id: "candidate-a".into(),
+                source_label: "a.log".into(),
+                locator: "seq=10".into(),
+                corpus_id: "corpus".into(),
+                revision,
+                role: EvidenceRole::Cause,
+                content: "cause".into(),
+            },
+            HostEvidenceEntry {
+                evidence_id: "opaque-a-support".into(),
+                candidate_id: "candidate-a".into(),
+                source_label: "a.log".into(),
+                locator: "seq=11".into(),
+                corpus_id: "corpus".into(),
+                revision,
+                role: EvidenceRole::Supporting,
+                content: "support".into(),
+            },
+        ];
+        let binding = AnswerBindingV1 {
+            session_id: "session".into(),
+            turn_id: "turn".into(),
+            corpus_id: "corpus".into(),
+            revision,
+            ledger_digest: HostEvidenceLedger::digest(&entries),
+        };
+        FastTriagePacketV1::from_ledger(
+            HostEvidenceLedger::new(binding, entries).unwrap(),
+            None,
             true,
         )
     }
@@ -1449,7 +1694,145 @@ mod tests {
         );
         assert_eq!(report.state, ReconciliationState::Supported);
         assert_eq!(report.claims[0].contributor_count, 2);
+        assert_eq!(report.support.len(), 2);
+        assert!(report.support.iter().all(|support| {
+            support.support_kind == ReconciliationSupportKind::ExactAgreement
+                && support.model_ref_count == 2
+        }));
         assert!(!report.root_cause_established);
+    }
+
+    #[test]
+    fn one_exact_model_reused_across_roles_does_not_inflate_consensus() {
+        let packet = packet();
+        let extractor = extraction(&packet, "shared-model");
+        let reviewer_raw = proposal(
+            &packet,
+            ContributionRole::Reviewer,
+            json!([{"claim_id":"review-obs","candidate_id":"candidate-a","kind":"observation","text":"same claim","evidence_ids":["opaque-a"]}]),
+        );
+        let reviewer = ContributionAttemptV1::completed(
+            validate_contribution(
+                &reviewer_raw,
+                &packet,
+                identity("shared-model"),
+                ContributionRole::Reviewer,
+            )
+            .unwrap(),
+        );
+        let report = reconcile_contributions(&packet, &[extractor, reviewer]);
+        let observation = report
+            .claims
+            .iter()
+            .find(|claim| claim.kind == ContributionClaimKind::Observation)
+            .unwrap();
+        assert_eq!(observation.role_count, 2);
+        assert_eq!(observation.contributor_count, 1);
+        assert_eq!(observation.model_id_count, 1);
+        assert_eq!(observation.gateway_count, 1);
+        assert!(report.support.is_empty());
+    }
+
+    #[test]
+    fn independent_overlapping_claims_are_compatible_support() {
+        let packet = packet_with_overlapping_candidate_evidence();
+        let narrow = proposal(
+            &packet,
+            ContributionRole::CausalProposer,
+            json!([{"claim_id":"narrow","candidate_id":"candidate-a","kind":"causal_candidate","text":"narrow","evidence_ids":["opaque-a"]}]),
+        );
+        let broad = proposal(
+            &packet,
+            ContributionRole::Reviewer,
+            json!([{"claim_id":"broad","candidate_id":"candidate-a","kind":"causal_candidate","text":"broad","evidence_ids":["opaque-a","opaque-a-support"]}]),
+        );
+        let attempts = [
+            ContributionAttemptV1::completed(
+                validate_contribution(
+                    &narrow,
+                    &packet,
+                    identity("model-a"),
+                    ContributionRole::CausalProposer,
+                )
+                .unwrap(),
+            ),
+            ContributionAttemptV1::completed(
+                validate_contribution(
+                    &broad,
+                    &packet,
+                    identity("model-b"),
+                    ContributionRole::Reviewer,
+                )
+                .unwrap(),
+            ),
+        ];
+        let report = reconcile_contributions(&packet, &attempts);
+        assert_eq!(report.support.len(), 1);
+        assert_eq!(
+            report.support[0].support_kind,
+            ReconciliationSupportKind::CompatibleSupport
+        );
+        assert_eq!(
+            report.support[0].evidence_ids,
+            ["opaque-a", "opaque-a-support"]
+        );
+        assert_eq!(report.support[0].model_ref_count, 2);
+    }
+
+    #[test]
+    fn unresolved_questions_and_missing_coverage_are_typed() {
+        let packet = packet();
+        let gap_raw = json!({
+            "schema": CONTRIBUTION_SCHEMA_V1,
+            "packet_id": packet.packet_id(),
+            "role": "evidence_gap",
+            "evidence_gaps": [{
+                "gap_id": "missing-trace",
+                "candidate_id": "candidate-a",
+                "text": "a bounded trace would resolve this"
+            }]
+        })
+        .to_string();
+        let gap = ContributionAttemptV1::completed(
+            validate_contribution(
+                &gap_raw,
+                &packet,
+                identity("gap-model"),
+                ContributionRole::EvidenceGap,
+            )
+            .unwrap(),
+        );
+        let report = reconcile_contributions(
+            &packet,
+            &[
+                extraction(&packet, "extractor"),
+                causal(&packet, "causal"),
+                gap,
+            ],
+        );
+        assert_eq!(report.state, ReconciliationState::EscalationRecommended);
+        assert!(report.escalation_recommended);
+        assert_eq!(
+            report.gaps,
+            [ReconciliationGapV1 {
+                kind: ReconciliationGapKind::UnresolvedQuestion,
+                candidate_id: Some("candidate-a".into()),
+                reporter_model_count: 1,
+            }]
+        );
+
+        let baseline = reconcile_contributions(&packet, &[]);
+        assert_eq!(
+            baseline
+                .gaps
+                .iter()
+                .map(|gap| gap.kind)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                ReconciliationGapKind::MissingObservationCoverage,
+                ReconciliationGapKind::MissingCausalCoverage,
+            ])
+        );
     }
 
     #[test]

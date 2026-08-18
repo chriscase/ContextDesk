@@ -1,8 +1,7 @@
 # Triage Policy V2 production adapter — contributor subset V1
 
-Status: **provider-free production-path adapter; typed contributors (including
-`timeline_analyst`) and the shared host resolver are implemented, while live
-execution remains qualification-gated**
+Status: **production-path adapters and public-runtime host façade implemented;
+configured-policy live execution remains exact-role-qualification-gated**
 
 This slice bridges the exact, pure `TriagePolicyV2` compiler output to the
 existing linked-log `ContributionRuntime`. It intentionally prepares only the
@@ -18,7 +17,8 @@ to support a richer V2 contract.
 - the trusted Rust host supplies one already-authorized production backend for
   every exact `(slot_id, profile_id, model_id)` binding;
 - V2 and the host resolve the same finite whole-turn deadline;
-- the V2 contributor operation cap is not smaller than that whole-turn deadline;
+- the V2 contributor operation cap is independently enforced for every
+  admitted contributor;
 - the existing sequential contribution route can represent every call and
   context ceiling without widening it.
 
@@ -37,22 +37,25 @@ The adapter does not read `AppConfig`, credentials, Keychain, protected files,
 endpoints, qualification storage, corpora, or retrieval state. A trusted Rust
 host resolves those facts first and supplies exact `RolePreflightV2` records
 plus opaque authorized backends. The compiler remains the only policy compiler.
-The resolver seam is shared by CLI and Tauri, but live Enhanced/Advanced
-execution is currently fail-closed until a dedicated host-owned exact V2 role
-qualification record exists. Provider-free policy validation may still use an
-explicit preflight document; that document is never live execution authority.
+The resolver seam is shared by CLI and Tauri through
+`WorkflowTriageEngineV1`, `cd_triage_runtime::triage`, and
+`cd_triage_runtime::triage_with_policy`. Standard uses a dedicated one-finalizer
+runner over the same immutable host packet. Live Enhanced/Advanced execution
+fails closed until every required host-owned exact V2 role qualification record
+exists. Provider-free policy validation may still use an explicit preflight
+document; that document is never live execution authority.
 
 ## Typed pre-provider refusals
 
 The adapter returns a content-free category and inert slot ids before it can
 return any runnable backend when it sees:
 
-- Standard mode (the established single-model path remains authoritative);
+- Standard mode at the contributor-only sub-adapter boundary (the top-level
+  production runner handles it through the dedicated one-finalizer graph);
 - a finalizer or reviewer (timeline analysis is now a typed contributor);
 - an optional role dropout the current production event stream could omit;
 - a missing, duplicate, extra, or exact-identity-mismatched backend;
 - a host/V2 whole-turn deadline mismatch;
-- a smaller per-contributor operation timeout the current runtime cannot honor;
 - an unrepresentable or invalid routing/context bound.
 
 This is deliberate. The existing contribution reviewer is not equivalent to
@@ -83,26 +86,38 @@ The adapter test proves:
    non-root answer rendering are reused;
 3. the existing cooperative cancellation signal prevents every provider call
    and accounts every remaining role as cancelled;
-4. Standard, finalizer, reviewer, optional-dropout, identity, and deadline
-   mismatches refuse before a runtime is returned; a qualified timeline role
-   is admitted and remains typed throughout the runtime binding.
+4. the contributor-only sub-adapter still refuses Standard, finalizer,
+   reviewer, optional-dropout, identity, and deadline mismatches before a
+   runtime is returned; the top-level runner separately proves Standard's exact
+   model binding and six-event terminal graph;
+5. a qualified timeline role is admitted and remains typed throughout the
+   runtime binding.
 
-## Not proven / residual product blocker
+## Remaining limits and non-claims
 
-- Tauri selects the shared resolver and emits validated events progressively;
-  CLI live execution remains fail-closed until host-owned role qualification is
-  available.
-- Generic capability reports cannot authorize an exact V2 role. The next
-  production step is a dedicated qualification record bound to profile,
-  endpoint fingerprint, exact catalog model, protocol, and role kind.
+- CLI and Tauri configured-policy execution select the same public-runtime
+  workflow engine, emit only request-bound validated provisional events, and
+  retain the authoritative replay. The public Standard façade now reaches that
+  engine's dedicated prepared-packet path without changing the existing CLI or
+  desktop default selection behavior.
+- Generic capability reports cannot authorize an exact V2 role. Dedicated
+  qualification records are bound to profile, endpoint fingerprint, exact
+  catalog model, protocol, and role kind; the desktop refreshes its in-memory
+  store after publishing one.
 - The host enforces governed corpus revision and rejects unsupported source
   restrictions instead of silently broadening the packet.
-- A smaller per-contributor operation timeout, finalizer reserve, reviewer
-  reserve/condition/requirement, and visible optional dropout still require
-  additional host/runtime coverage.
+- Contributor execution remains sequential. The one policy-level contributor
+  operation limit is applied independently to every admitted contributor;
+  per-contributor limits are not part of the current schema.
+- Contributor work reserves time for an active conditional reviewer and
+  finalizer, reviewer work cannot consume the finalizer reserve, and impossible
+  explicit reserves fail before provider execution. Provider operations are
+  hard-bounded; host validation/finalization hooks are checked immediately
+  after returning but are not forcibly preempted while stalled inside host
+  code.
 - No provider, gateway, credential store, live corpus, or network was used.
 - This does not establish live compatibility, usefulness, cost, release
-  readiness, or full Triage Policy V2 execution.
+  readiness, or same-snapshot bench execution.
 
 Handbook impact: the Triage Policy V2 row remains **Partial** and now records
 the exact contributor-only production overlap and its typed refusals.

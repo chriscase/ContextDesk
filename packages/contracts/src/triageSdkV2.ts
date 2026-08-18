@@ -594,6 +594,34 @@ function checkAttempt(path: string, value: unknown): void {
     );
 }
 
+function checkPrePacketAttempt(
+  path: string,
+  attempt: Record<string, unknown>,
+  slotIds: Set<string>,
+): void {
+  if (
+    !["unavailable", "timed_out", "cancelled", "failed", "not_admitted"]
+      .includes(attempt.status as string) ||
+    attempt.elapsed_ms !== 0 ||
+    attempt.input_chars !== 0 ||
+    attempt.output_chars !== 0 ||
+    attempt.physical_provider_calls !== 0 ||
+    attempt.semantic_corrections !== 0 ||
+    attempt.terminal_disposition !== attempt.status
+  )
+    throw new ContractViolation(
+      path,
+      "pre-packet role attempt must be an explicit zero-work disposition",
+    );
+  const slotId = attempt.role_slot_id as string;
+  if (slotIds.has(slotId))
+    throw new ContractViolation(
+      `${path}.role_slot_id`,
+      "duplicate pre-packet role slot identity",
+    );
+  slotIds.add(slotId);
+}
+
 function checkReconciliation(path: string, value: unknown): void {
   const row = objectValue(path, value);
   boundedOpaque(`${path}.state`, row.state);
@@ -872,6 +900,7 @@ export function parseTriageReplayV1(value: unknown): TriageReplayV1 {
   let finalizerAttempt = false;
   let reviewerAttempt = false;
   let contributorAttempt = false;
+  const prePacketSlotIds = new Set<string>();
   events.forEach((event, index) => {
     if (event.run_id !== replay.run_id)
       throw new ContractViolation(`replay.events[${index}].run_id`, "run identity mismatch");
@@ -884,6 +913,21 @@ export function parseTriageReplayV1(value: unknown): TriageReplayV1 {
       terminals += 1;
       if (index + 1 !== events.length)
         throw new ContractViolation(`replay.events[${index}]`, "event after terminal");
+      const prePacketTerminal = !packetReady && !legacyReconciliation &&
+        !preliminaryReconciliation && !finalReconciliation && !validation &&
+        !correction;
+      if (prePacketTerminal) {
+        const payload = event.event as Record<string, unknown>;
+        if (
+          payload.kind === "completed" ||
+          payload.partial_result !== undefined
+        )
+          throw new ContractViolation(
+            `replay.events[${index}]`,
+            "pre-packet terminal must be failed, timed_out, or cancelled without a partial result",
+          );
+        return;
+      }
       if (!validation && event.event.kind !== "cancelled")
         throw new ContractViolation(`replay.events[${index}]`, "terminal before validation");
       return;
@@ -900,6 +944,18 @@ export function parseTriageReplayV1(value: unknown): TriageReplayV1 {
         break;
       case "role_attempt": {
         const attempt = payload.attempt as Record<string, unknown>;
+        if (
+          !packetReady && !legacyReconciliation && !preliminaryReconciliation &&
+          !finalReconciliation && !validation && !correction
+        ) {
+          checkPrePacketAttempt(
+            `replay.events[${index}].event.attempt`,
+            attempt,
+            prePacketSlotIds,
+          );
+          phaseOk = index > 0;
+          break;
+        }
         const role = attempt.role as Record<string, unknown> | string;
         const contributor = typeof role === "object" && role !== null &&
           typeof role.contributor === "string";

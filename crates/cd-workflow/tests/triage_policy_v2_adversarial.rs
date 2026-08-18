@@ -439,7 +439,7 @@ fn replay_rejects_reordered_events_and_duplicate_terminal_delivery() {
     }
     assert_eq!(
         reordered.validate(),
-        Err(TriageContractError::InvalidPhaseOrder)
+        Err(TriageContractError::InvalidField("pre_packet_role_attempt"))
     );
 
     let mut duplicated = baseline.clone();

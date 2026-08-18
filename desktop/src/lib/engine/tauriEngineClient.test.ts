@@ -97,10 +97,30 @@ function createFakeTransport(): TauriTransport {
           return rethrowAsHostString(
             model.triage.preflight(args!.request as never),
           ) as Promise<T>;
-        case "triage_run_v2":
-          return rethrowAsHostString(
-            model.triage.run(args!.request as never),
-          ) as Promise<T>;
+        case "triage_run_v2": {
+          const request = args!.request as { run_id: string };
+          const events: ReturnType<typeof loadTriageReplay>["events"] = [];
+          const stop = model.triage.onRunEvent((event) => {
+            if (event.run_id === request.run_id) events.push(event);
+          });
+          return rethrowAsHostString((async () => {
+            try {
+              await model.triage.run(args!.request as never);
+              const requestFingerprint = events[0]?.event.request_fingerprint;
+              if (typeof requestFingerprint !== "string") {
+                throw new Error("triage run did not emit a request fingerprint");
+              }
+              return {
+                schema_id: "contextdesk.triage.replay.v1",
+                run_id: request.run_id,
+                request_fingerprint: requestFingerprint,
+                events,
+              };
+            } finally {
+              stop();
+            }
+          })()) as Promise<T>;
+        }
         case "triage_cancel_v2":
           return rethrowAsHostString(
             model.triage.cancel(args!.request as never),

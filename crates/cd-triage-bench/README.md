@@ -6,13 +6,17 @@ adjudication, and honest comparison reports.
 
 This crate is **not** the ContextDesk engine, GUI, or web collaboration layer.
 It has no `cd-core` dependency, no network client, and no keychain access.
-ContextDesk participates later as one strategy among many (#879), through public
-SDK contracts, not by absorbing case management.
+ContextDesk participates as one strategy among many through the leaf
+`cd-triage-sdk` contracts, the hermetic `cd-triage-bench-adapter`, and its
+offline mock/replay CLI—not by absorbing case management.
 
 Working name: `cd-triage-bench` (rename-friendly; crate prefix stays `cd-*`).
 
-Status on this branch: **local integration** (Refs #877, #878, and the
-report-only slice of #880/#881). Not shipped on `main`. Not release-ready.
+Status: the store/entities, manual import/provenance, rubric v1 + expert
+adjudication, report-only comparison, public-SDK adapter, deterministic mock
+runner, and validated replay ingestion are implemented. This does not close
+epic #876 or make the bench release-ready: live provider execution and the
+remaining acceptance hardening are separate work. No composite leaderboards.
 
 ## Layout
 
@@ -26,13 +30,14 @@ report-only slice of #880/#881). Not shipped on `main`. Not release-ready.
   adjudications/<adjudication_id>.json
   scores/<score_id>.json
   packets/<packet_id>.json
+  review-packets/<packet_id>.json
   blobs/sha256/<hh>/<hex>
 ```
 
 - Snapshot, task, run, adjudication, and score identities are content-addressed
   (SHA-256 of canonical JSON of the digest body).
 - Records are **immutable**. A second write with different bytes fails closed.
-  Identical bytes are idempotent. Corrections are new records.
+  Identical full payloads are idempotent. Corrections are new records.
 - Default privacy class is `owner_only`. `share_safe` is explicit.
 - Original evidence bytes live in the blob store. Attributed summaries sit
   beside items and never replace originals.
@@ -46,8 +51,8 @@ report-only slice of #880/#881). Not shipped on `main`. Not release-ready.
 | `Case` | caller-assigned `case_id` |
 | `EvidenceSnapshot` | `snap-<sha256>` of canonical manifest **without** `snapshot_id` |
 | `EvaluationTask` | `task-<sha256>` of question, protocol, visibility, snapshot |
-| `TriageRun` | `run-<sha256>` of task, snapshot, source, strategy, raw digest, fairness |
-| `Adjudication` | `adj-<sha256>` of reviewer, rubric, outcomes, run binding |
+| `TriageRun` | `run-<sha256>` of task, snapshot, source, strategy, raw digest, metadata, and fairness |
+| `Adjudication` | `adj-<sha256>` of reviewer, rubric, outcomes, phase, and review-packet binding |
 | `ScoreReview` | `score-<sha256>` derived from an adjudication; never rewritten |
 
 ## Privacy, unknown, and fairness
@@ -65,9 +70,10 @@ report-only slice of #880/#881). Not shipped on `main`. Not release-ready.
 Schema ids are exact strings (`contextdesk.triage_bench.*.v1`). Unknown fields
 are rejected on stored records **and** on CLI import documents, including the
 happy path that omits generated `snapshot_id` / `task_id` / `adjudication_id` /
-`score_id` / `run_id`. Additive change requires a new schema id (`v2`); v1
-records stay readable and are never rewritten in place. There is no implicit
-upgrade.
+`score_id` / `run_id`. Additive changes use a new schema id (`v2`); legacy v1
+adjudications without phase or packet fields remain readable with their
+historical digest and are never rewritten in place. There is no implicit
+upgrade. Current report output is `backtest_report.v2`.
 
 Valid and invalid fixtures live in [`fixtures/valid`](fixtures/valid) and
 [`fixtures/invalid`](fixtures/invalid). Content-addressed identity mismatches
@@ -92,23 +98,77 @@ cd-triage-bench --library ./bench-lib import-run ./other.json --raw ./other.txt
 cd-triage-bench --library ./bench-lib list runs
 cd-triage-bench --library ./bench-lib show runs "$RUN_ID"
 cd-triage-bench --library ./bench-lib packet "$TASK_ID"
+cd-triage-bench --library ./bench-lib review-packet "$RUN_ID" --phase support
 cd-triage-bench --library ./bench-lib import-adjudication ./adj.json
+cd-triage-bench --library ./bench-lib review-packet "$RUN_ID" --phase diagnosis
+cd-triage-bench --library ./bench-lib show adjudications "$ADJ_ID"
 cd-triage-bench --library ./bench-lib report --format json --privacy share-safe
+cd-triage-bench --library ./bench-lib report --format jsonl --privacy owner-only
+cd-triage-bench --library ./bench-lib report --format markdown
+
+# Public-SDK adapter: deterministic offline execution or validated replay ingest.
+cd-triage-bench-adapter --library ./bench-lib run "$TASK_ID" --script completed
+cd-triage-bench-adapter --library ./bench-lib record-replay "$TASK_ID" --replay ./replay.json
 ```
 
 Human submission template: [`fixtures/templates/human-run.md`](fixtures/templates/human-run.md).
+Worked example: [`fixtures/templates/human-run.example.md`](fixtures/templates/human-run.example.md).
 
-## Rubric v1 dimensions
+The markdown body after the closing ` ``` ` fence is the raw write-up. Import
+skips only that one leading newline and otherwise stores the body byte-exact
+(trailing spaces included). `raw_output_utf8` in the JSON, when present, wins
+over the markdown body. `--raw` wins over both and is the binary-safe path.
 
-1. Diagnosis correctness (n/a on unresolved cases)
-2. Evidence support
-3. Actionability
-4. Uncertainty/calibration
-5. Unsafe unsupported claims
+`show runs <id>` prints completeness (`exact` / `partial` / `unknown`) and
+leaves unknown cost, timing, prompt, workflow, and strategy version as
+`{"status":"unknown"}`. Re-importing an identical payload prints
+`duplicate <run_id>`. A different raw hash, or the same raw bytes with
+different material metadata, fairness, or strategy identity, prints
+`created <run_id>` (and `near_duplicate_of=` when the raw digest already
+exists). There is no edit verb; changing fairness or other metadata on a
+stored record fails closed.
 
-Deterministic citation-existence checks may set **assist flags**. They never
-produce scores. Human experts remain the scoring authority. Disagreement is
-preserved as separate adjudications.
+## Rubric v1 and adjudication
+
+Documented rubric and score schema:
+[`docs/RUBRIC_V1.md`](docs/RUBRIC_V1.md).
+Worked adjudication example:
+[`fixtures/templates/adjudication.example.json`](fixtures/templates/adjudication.example.json).
+
+`review-packet --phase support` is a blinded review packet: no structured
+strategy identity and no case resolution. If masking is impossible, the
+packet records why (`blinding.kind = unblinded`). Each adjudication carries
+the generated `review_packet_id`; the store verifies packet identity and
+blinding, and diagnosis phase also requires a prior support record by the same
+reviewer. Missing raw artifacts fail closed rather than claiming blinding.
+
+`import-adjudication` attaches deterministic citation-existence **flags**
+(`citation_not_in_snapshot:<id>`). It never writes scores. Two reviewers
+are two records; `show adjudications` renders both rationales. Re-scoring
+under rubric v2 creates new records and leaves v1 scores byte-identical.
+
+## Report-only comparison (#881)
+
+`report` is a deterministic projection over stored runs and adjudications.
+It never creates judgments and never executes a strategy. JSON, JSONL, and
+markdown are byte-stable for the same records. Groups are exact
+task + snapshot identity. Different snapshots or fairness classes are
+**incomparable** (reason included), never force-ranked. Version N vs N−1
+pairs list improved/regressed/unchanged dimensions with drill-down to runs
+and adjudications. Unscored, failed, and partial runs stay visible and are
+not treated as zero. Partial dimension coverage is reported separately from
+fully scored runs. Version pairs skip incomparable fairness/snapshot pairs,
+non-completed baselines, and source/build identity mismatches. Scores are
+never pooled across rubric versions. `share_safe` drops owner-only
+records/titles/rationales/reviewers and fails closed on a privacy scan;
+withheld scores are counted separately from genuine absence. `owner_only`
+keeps that detail.
+
+The shipped public-SDK adapter records deterministic mock runs and validated
+replays, including failed, partial, timed-out, and cancelled terminals. Those
+runs join imported human and web-only runs through the same stored report
+path. Live production-provider execution remains outside this headless report
+projection.
 
 ## Future scope (explicitly not this slice)
 
@@ -117,7 +177,7 @@ preserved as separate adjudications.
 - Direct web-tool / browser automation (manual import is the path here)
 - Multi-strategy synthesis
 - Similar-case retrieval
-- ContextDesk public-SDK adapter (#879)
+- Live production-provider execution through a separately bounded host bridge
 - LLM-as-judge (forbidden as scoring authority; any later judge follows #867)
 
 ## Non-goals

@@ -14,8 +14,7 @@ use crate::model_ref::ModelRef;
 
 use super::{ContributionRole, ContributionRoutingPolicy, MultiModelBudget, MultiModelMode};
 
-/// Stable schema identifier for [`TriagePolicyV2`].
-pub const TRIAGE_POLICY_SCHEMA_V2: &str = "contextdesk.triage_policy.v2";
+pub use cd_triage_sdk::{TriageContributorRole, TriageSlotKindV2, TRIAGE_POLICY_SCHEMA_V2};
 
 /// Stable schema identifier for compiled policy plans.
 pub const COMPILED_TRIAGE_POLICY_SCHEMA_V2: &str = "contextdesk.triage_policy.compiled.v2";
@@ -51,23 +50,6 @@ pub enum TriagePolicyMode {
     Enhanced,
     /// The same policy with all consequential controls visible.
     Advanced,
-}
-
-/// A contributor's bounded analytical role. Finalization and review are
-/// deliberately separate slot types and cannot be disguised as contributors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TriageContributorRole {
-    /// Extract host-grounded observations.
-    ObservationExtractor,
-    /// Analyze host-provided chronology without changing host ordinals.
-    TimelineAnalyst,
-    /// Propose symptoms, causal candidates, and competing explanations.
-    CausalProposer,
-    /// Identify contradictions between bounded candidates.
-    ContradictionChecker,
-    /// Identify evidence absent from the bounded packet.
-    EvidenceGapFinder,
 }
 
 /// Whether failure of a configured role prevents the policy from compiling.
@@ -471,18 +453,6 @@ pub enum SlotDispositionV2 {
     OptionalDegraded,
     /// Required slot cannot run; compilation fails.
     RequiredRejected,
-}
-
-/// Kind of a policy slot, with finalizer/reviewer kept distinct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TriageSlotKindV2 {
-    /// Initial bounded analytical contribution.
-    Contributor(TriageContributorRole),
-    /// Answer drafting from accepted reconciliation only.
-    Finalizer,
-    /// Conditional post-reconciliation review.
-    Reviewer,
 }
 
 /// Compiled record for one configured slot.

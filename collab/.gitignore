@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.eslintcache
+.data/
+.env
+.env.*
+!.env.example
+deploy/.env
+*.log

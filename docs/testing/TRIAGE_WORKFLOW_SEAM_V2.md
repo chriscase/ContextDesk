@@ -1,6 +1,7 @@
 # Triage Workflow Seam V2
 
-Status: host-neutral compilation and deterministic mock/replay contract only.
+Status: host-neutral compiler/mock contract plus a production CLI/Tauri runtime
+over the same public replay boundary.
 
 `cd_workflow::triage::compile_preflight` maps an explicit
 `TriagePolicyV2` plus host-supplied `RolePreflightV2` facts to the pure core
@@ -33,15 +34,16 @@ a claim that a provider correction backend exists. Same-model role attempts
 are counted once in reconciliation's distinct-model fields. The same input and
 script produce the same replay.
 
-Residual work is the real host adapter: resolve policy selections and packet
-identity in the CLI/desktop host, construct authorized role backends, and
-implement `TriageRoleExecutor` around those backends. The existing
-`triage_production` adapter is a narrower contributor-only preparation seam;
-it is not selected by CLI/Tauri and does not execute the full graph. No host
-currently wires finalizer, reviewer, correction, or these V2 replay events to
-a live provider. Any future adapter must retain the same preflight facts,
-event ordering, slot accounting, privacy boundary, and terminal invariant;
-this seam intentionally makes no readiness or provider compatibility claim.
+The real host adapter now exists. `WorkflowTriageEngineV1` resolves exact
+policy selection and packet identity, derives host-owned preflight facts,
+binds authorized backends, and is selected by both CLI and Tauri through the
+public runtime facade. `triage_production` remains the narrow contributor
+preparation seam; `triage_production_runner` owns Standard's finalizer path and
+the Enhanced/Advanced contributor, conditional-reviewer, finalizer,
+validation, and bounded-correction graph. Provider work remains gated by exact
+host qualification and cancellation/deadline/budget checks. This proves a
+production path, not universal provider compatibility, answer usefulness, or
+release readiness.
 
 ## Hardened integration checkpoint
 
@@ -73,5 +75,6 @@ vocabulary and phase rules. TypeScript now validates `preliminary_reconciliation
 rules (including the intentional cancellation-before-validation boundary).
 The contract test also fixes the qualification-binding mutation to remove a
 field rather than reassign the already-valid fixture value. Rust's focused SDK
-contract suite remains green after the cancellation parity correction. This is
-still a contract milestone, not production host wiring.
+contract suite remains green after the cancellation parity correction. This
+checkpoint was a contract milestone; the later production runtime host now
+consumes the same cross-language boundary.

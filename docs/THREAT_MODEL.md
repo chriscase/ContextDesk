@@ -40,7 +40,7 @@ Last security reconciliation: 2026-07-17 (remediation #140–#145).
 | Secret filename denylist on read | Implemented (heuristic list) |
 | Keychain for API keys | Implemented (`secrets` + Tauri commands; never over IPC) |
 | S3 backup egress gate | Implemented: Rust-owned traversal + native confirmation; keychain-only runtime credentials; save/request SSRF validation; DNS pinning; no redirects/proxies; bounded streaming; secret/internal/build exclusions; completed manifest only after full success (#292 Phase A) |
-| SSRF policy on bases & web | Implemented: literal IPs + mapped IPv6 + **DNS resolve-and-vet** + **socket pin** (`resolve_and_validate` / `build_pinned_client`, #140/#141); **per-redirect hop re-vet** on web_fetch. Residual: TOCTOU narrowed by pin; OS DNS still trusted for the resolve step. |
+| SSRF policy on bases & web | Implemented: literal IPs + mapped IPv6 + **DNS resolve-and-vet** + **socket pin** (`resolve_and_validate` / `build_pinned_client`, #140/#141); **per-redirect hop re-vet** on web_fetch; **loopback/localhost clients disable HTTP proxies** so a corp/WPAD proxy cannot rewrite local transport or bypass the pin. Residual: TOCTOU narrowed by pin; OS DNS still trusted for the resolve step; public (non-loopback) hosts still honor `HTTP_PROXY`. |
 | Untrusted labeling of tool results | Implemented: **per-call nonce** open/close markers + body defang of `<<<` prefixes (`injection`, #142). Fixed forgeable delimiters removed. |
 | Audit denials + tamper-evidence | Implemented: outcomes include `denied`/`granted`/`pending`/`allowed`/`error`; SHA-256 hash chain + `verify_chain` (#143). |
 | Grok session opt-in + URL pin | Implemented (exact host `api.x.ai`; refresh prefers pinned auth host) |

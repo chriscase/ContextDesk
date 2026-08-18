@@ -526,6 +526,7 @@ dependencies = [
  "assert_cmd",
  "cd-core",
  "cd-test-gateway",
+ "cd-triage-runtime",
  "cd-workflow",
  "chrono",
  "clap",
@@ -555,6 +556,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cd-test-gateway",
+ "cd-triage-sdk",
  "chrono",
  "chrono-tz",
  "dirs 5.0.1",
@@ -636,11 +638,78 @@ dependencies = [
  "assert_cmd",
  "chrono",
  "clap",
+ "fs2",
  "predicates",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cd-triage-bench-adapter"
+version = "0.1.0"
+dependencies = [
+ "cd-core",
+ "cd-triage-bench",
+ "cd-triage-runtime",
+ "cd-triage-sdk",
+ "cd-workflow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cd-triage-bench-adapter-cli"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "cd-triage-bench",
+ "cd-triage-bench-adapter",
+ "cd-triage-sdk",
+ "clap",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "cd-triage-bench-live"
+version = "0.1.0"
+dependencies = [
+ "cd-core",
+ "cd-test-gateway",
+ "cd-triage-bench",
+ "cd-triage-bench-adapter",
+ "cd-triage-runtime",
+ "cd-triage-sdk",
+ "cd-workflow",
+ "fs2",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "cd-triage-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cd-triage-sdk",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cd-triage-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -651,10 +720,12 @@ dependencies = [
  "async-trait",
  "cd-core",
  "cd-test-gateway",
+ "cd-triage-runtime",
  "chrono",
  "libc",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",
@@ -1482,6 +1553,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

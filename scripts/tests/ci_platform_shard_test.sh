@@ -23,6 +23,8 @@ if grep -q 'tail -c' "$COMMON"; then fail "common runner must not depend on GNU 
 
 REAL_CARGO=$(command -v cargo || true)
 [ -n "$REAL_CARGO" ] || fail "cargo is required for metadata planning"
+UNIT_COUNT=$(sh "$PLAN" units | wc -l | tr -d ' ')
+[ "$UNIT_COUNT" -gt 0 ] || fail "shard plan must contain at least one unit"
 mkdir -p "$TMP/bin"
 apply_stub="$TMP/bin/cargo"
 printf '%s\n' \
@@ -46,7 +48,7 @@ chmod +x "$apply_stub"
 # schema without paying for the entire workspace.
 mkdir -p "$TMP/pass"
 PATH="$TMP/bin:$PATH" REAL_CARGO="$REAL_CARGO" CD_CACHE_STATE=warm \
-  sh "$RUNNER" --os macos --shard 1 --shards 114 --out "$TMP/pass" \
+  sh "$RUNNER" --os macos --shard 1 --shards "$UNIT_COUNT" --out "$TMP/pass" \
   --heartbeat 0 --unit-timeout 0 >/dev/null
 
 status="$TMP/pass/shard-1/status.json"
@@ -57,13 +59,14 @@ status="$TMP/pass/shard-1/status.json"
 [ "$(jq -r .tests_passed "$status")" -gt 0 ] || fail "stub shard must record passed tests"
 
 # Verify the platform label is accepted by the same fail-closed aggregate used
-# by Ubuntu, without needing to run 114 real cargo commands.
+# by Ubuntu, without needing to run every real cargo command.
 mkdir -p "$TMP/aggregate/shard-1"
 all_units=$(sh "$PLAN" units | tr '\n' ' ')
 jq -n \
   --arg units "$all_units" \
-  '{os: "windows", shard: 1, shards: 1, status: "pass", units_total: 114,
-    units_finished: 114, tests_passed: 1, tests_failed: 0, tests_ignored: 0,
+  --argjson unit_count "$UNIT_COUNT" \
+  '{os: "windows", shard: 1, shards: 1, status: "pass", units_total: $unit_count,
+    units_finished: $unit_count, tests_passed: 1, tests_failed: 0, tests_ignored: 0,
     seconds: 1, build_seconds: 0, in_flight: null,
     units: ($units | split(" ") | map(select(length > 0))), failed_units: []}' \
   >"$TMP/aggregate/shard-1/status.json"
@@ -78,7 +81,7 @@ grep -q 'windows workspace test shards gate passed' "$TMP/aggregate.out" ||
 mkdir -p "$TMP/term"
 set +e
 PATH="$TMP/bin:$PATH" REAL_CARGO="$REAL_CARGO" PLATFORM_STUB_MODE=slow \
-  CD_CACHE_STATE=warm sh "$RUNNER" --os windows --shard 1 --shards 114 \
+  CD_CACHE_STATE=warm sh "$RUNNER" --os windows --shard 1 --shards "$UNIT_COUNT" \
   --out "$TMP/term" --heartbeat 0 --unit-timeout 0 >"$TMP/term.out" 2>&1 &
 pid=$!
 set -e

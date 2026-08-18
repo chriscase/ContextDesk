@@ -1,0 +1,64 @@
+.workbench {
+  display: grid;
+  grid-template-columns: 16rem 1fr;
+  gap: 1.25rem;
+  margin-top: 1.5rem;
+}
+
+.case-list,
+.case-view {
+  border: 1px solid var(--border);
+  padding: 0.85rem;
+}
+
+.case-list__title,
+.case-view__title {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+}
+
+.case-list__items {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+}
+
+.case-list__items button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--fg);
+  border: 0;
+  padding: 0.35rem 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.case-form,
+.composer {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.timeline {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+}
+
+.timeline__item {
+  border-top: 1px solid var(--border);
+  padding: 0.5rem 0;
+  font-size: 0.85rem;
+}
+
+.timeline__meta {
+  color: var(--muted);
+}
+
+@media (max-width: 720px) {
+  .workbench {
+    grid-template-columns: 1fr;
+  }
+}

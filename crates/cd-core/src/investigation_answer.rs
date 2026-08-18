@@ -5,48 +5,15 @@
 
 #![allow(missing_docs)] // DTO field names are the external schema contract.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Stable schema for model proposals and validated answers.
-pub const SCHEMA_V1: &str = "contextdesk.investigation_answer.v1";
-
-/// Exact log-analysis snapshot which grounds one typed answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LogSnapshotRevisionV1 {
-    pub event_revision: u64,
-    pub template_analysis_revision: u64,
-    pub suppression_revision: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaimKind {
-    Observation,
-    Symptom,
-    CausalCandidate,
-    InitiatingCause,
-    CompetingExplanation,
-    MissingEvidence,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvidenceRole {
-    Cause,
-    Supporting,
-    Symptom,
-    Neutral,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaimStatus {
-    Supported,
-    Unsupported,
-    Withheld,
-}
+pub use cd_triage_sdk::{
+    AnswerBindingV1, AnswerEnvelopeV1, CanonicalCitationV1, ClaimKind, ClaimStatus, EvidenceRole,
+    HostEvidenceEntry, InvestigationAnswerV1, InvestigationCandidateV1, InvestigationClaimV1,
+    LogSnapshotRevisionV1, SCHEMA_V1,
+};
 
 /// The only model-owned claim fields.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -84,53 +51,6 @@ pub struct ModelInvestigationAnswerV1 {
     pub candidates: Vec<ModelCandidateV1>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InvestigationClaimV1 {
-    pub claim_id: String,
-    pub claim_kind: ClaimKind,
-    pub text: String,
-    pub candidate_id: String,
-    pub evidence_ids: Vec<String>,
-    pub status: ClaimStatus,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InvestigationCandidateV1 {
-    pub candidate_id: String,
-    pub claims: Vec<InvestigationClaimV1>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CanonicalCitationV1 {
-    pub evidence_id: String,
-    pub candidate_id: String,
-    pub source_label: String,
-    pub locator: String,
-    pub corpus_id: String,
-    pub revision: LogSnapshotRevisionV1,
-    /// Host-owned bounded excerpt used by future renderers.
-    pub content: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InvestigationAnswerV1 {
-    pub schema: String,
-    pub candidates: Vec<InvestigationCandidateV1>,
-    pub canonical_citations: Vec<CanonicalCitationV1>,
-    pub root_cause_established: bool,
-}
-
-/// Host-owned row, immutable for the turn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostEvidenceEntry {
-    pub evidence_id: String,
-    pub candidate_id: String,
-    pub source_label: String,
-    pub locator: String,
-    pub corpus_id: String,
-    pub revision: LogSnapshotRevisionV1,
-    pub role: EvidenceRole,
-    /// Host-owned bounded excerpt; never supplied by the model.
-    pub content: String,
-}
-
 /// Content-free, host-authored final-answer boundary for one candidate.
 ///
 /// This is deliberately narrower than [`HostEvidenceEntry`]: a final-answer
@@ -153,23 +73,6 @@ pub(crate) struct FinalAnswerCandidateManifestV1 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FinalAnswerManifestV1 {
     pub(crate) candidates: Vec<FinalAnswerCandidateManifestV1>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnswerBindingV1 {
-    pub session_id: String,
-    pub turn_id: String,
-    pub corpus_id: String,
-    pub revision: LogSnapshotRevisionV1,
-    pub ledger_digest: String,
-}
-/// Persistable authoritative state for later host-only CLI/GUI/session lookup.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnswerEnvelopeV1 {
-    pub binding: AnswerBindingV1,
-    pub evidence: Vec<HostEvidenceEntry>,
-    pub answer: InvestigationAnswerV1,
-    pub semantic_attempts: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

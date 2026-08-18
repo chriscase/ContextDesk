@@ -200,6 +200,34 @@ pub fn import_named(
     status: RunStatus,
     created_at: &str,
 ) -> String {
+    let privacy = store.get_task(task_id).unwrap().privacy;
+    import_named_with_privacy(
+        store,
+        task_id,
+        source_kind,
+        name,
+        version,
+        raw,
+        fairness,
+        status,
+        privacy,
+        created_at,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn import_named_with_privacy(
+    store: &BenchStore,
+    task_id: &str,
+    source_kind: SourceKind,
+    name: &str,
+    version: Observed<String>,
+    raw: &str,
+    fairness: FairnessClass,
+    status: RunStatus,
+    privacy: PrivacyClass,
+    created_at: &str,
+) -> String {
     let document = RunImport {
         schema_id: RUN_IMPORT_SCHEMA_V1.into(),
         task_id: task_id.into(),
@@ -239,7 +267,7 @@ pub fn import_named(
         status,
         operator: "operator-a".into(),
         importer: Some("importer-b".into()),
-        privacy: PrivacyClass::ShareSafe,
+        privacy,
         created_at: created_at.into(),
     };
     match import_run(store, &document, raw.as_bytes()).unwrap() {
@@ -287,6 +315,75 @@ pub fn outcomes(
             assist_flags: vec![],
         },
     ]
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn put_support_then_diagnosis(
+    store: &BenchStore,
+    privacy: PrivacyClass,
+    case_id: &str,
+    task_id: &str,
+    snapshot_id: &str,
+    run_id: &str,
+    reviewer: &str,
+    conflict_of_interest: ConflictOfInterest,
+    rubric_version: &str,
+    blinding: BlindingState,
+    diagnosis: DimensionVerdict,
+    evidence: DimensionVerdict,
+    action: DimensionVerdict,
+    uncertainty: DimensionVerdict,
+    unsafe_claims: DimensionVerdict,
+    created_at: &str,
+) {
+    let support_packet = store
+        .materialize_review_packet(run_id, ReviewPhase::Support)
+        .unwrap();
+    let support = Adjudication::from_parts(
+        privacy,
+        case_id.into(),
+        task_id.into(),
+        snapshot_id.into(),
+        run_id.into(),
+        reviewer.into(),
+        conflict_of_interest.clone(),
+        rubric_version.into(),
+        ReviewPhase::Support,
+        blinding.clone(),
+        outcomes(
+            DimensionVerdict::NotApplicable,
+            evidence.clone(),
+            action.clone(),
+            uncertainty.clone(),
+            unsafe_claims.clone(),
+        ),
+        created_at.into(),
+    )
+    .unwrap()
+    .bind_review_packet(support_packet.packet_id)
+    .unwrap();
+    store.put_adjudication(&support).unwrap();
+    let diagnosis_packet = store
+        .materialize_review_packet(run_id, ReviewPhase::Diagnosis)
+        .unwrap();
+    let diagnosis_adj = Adjudication::from_parts(
+        privacy,
+        case_id.into(),
+        task_id.into(),
+        snapshot_id.into(),
+        run_id.into(),
+        reviewer.into(),
+        conflict_of_interest,
+        rubric_version.into(),
+        ReviewPhase::Diagnosis,
+        blinding,
+        outcomes(diagnosis, evidence, action, uncertainty, unsafe_claims),
+        created_at.into(),
+    )
+    .unwrap()
+    .bind_review_packet(diagnosis_packet.packet_id)
+    .unwrap();
+    store.put_adjudication(&diagnosis_adj).unwrap();
 }
 
 pub fn snapshot_ids(snapshot: &EvidenceSnapshot) -> BTreeSet<String> {

@@ -13,9 +13,14 @@
 //! before any backend can be returned.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
+use async_trait::async_trait;
 use cd_core::agent::{ChatBackend, ContributionRuntime};
+use cd_core::chat::{ChatCompletion, ChatMessage};
+use cd_core::error::{CoreError, CoreResult};
 use cd_core::fast_triage::FastTriageNeighborhoodBudget;
 use cd_core::model_ref::ModelRef;
 use cd_core::multi_model::triage_policy::{
@@ -27,6 +32,7 @@ use cd_core::multi_model::{
     ContributionBackendSlot, ContributionIdentity, ContributionQualification, ContributionRole,
     ContributionRoutingPlan, ContributionRoutingPolicy, MultiModelBudget,
 };
+use cd_core::tools::ToolSpec;
 
 use crate::triage::compile_preflight;
 
@@ -43,6 +49,52 @@ pub struct AuthorizedTriageBackendV1 {
     pub model: ModelRef,
     /// Existing production chat backend.
     pub backend: Arc<dyn ChatBackend>,
+}
+
+struct OperationTimeoutBackendV1 {
+    backend: Arc<dyn ChatBackend>,
+    timeout: Duration,
+    timed_out: Arc<AtomicBool>,
+}
+
+impl OperationTimeoutBackendV1 {
+    fn timeout_error(&self) -> CoreError {
+        self.timed_out.store(true, Ordering::SeqCst);
+        CoreError::Message("triage_contributor_operation_timeout".into())
+    }
+}
+
+#[async_trait]
+impl ChatBackend for OperationTimeoutBackendV1 {
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> CoreResult<ChatCompletion> {
+        match tokio::time::timeout(self.timeout, self.backend.complete(messages, tools)).await {
+            Ok(result) => result,
+            Err(_) => Err(self.timeout_error()),
+        }
+    }
+
+    async fn complete_streaming(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_text: &mut (dyn FnMut(String) + Send),
+        cancel: Option<&AtomicBool>,
+    ) -> CoreResult<ChatCompletion> {
+        match tokio::time::timeout(
+            self.timeout,
+            self.backend
+                .complete_streaming(messages, tools, on_text, cancel),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(self.timeout_error()),
+        }
+    }
 }
 
 impl std::fmt::Debug for AuthorizedTriageBackendV1 {
@@ -73,8 +125,11 @@ pub enum TriageProductionAdapterRejectionV1 {
     InvalidHostDeadline,
     /// An explicit V2 whole-turn deadline differs from the host-resolved one.
     WholeTurnDeadlineMismatch,
-    /// The established route cannot enforce a smaller per-contributor cap yet.
+    /// Legacy category retained for readers of older adapter diagnostics. The
+    /// current production adapter enforces the cap per admitted contributor.
     ContributorOperationCapUnsupported,
+    /// Active finalizer/reviewer reserves exceed the resolved whole-turn budget.
+    TerminalReserveExceedsWholeTurn,
     /// The host supplied no usable per-call context allowance.
     InvalidHostContextBudget,
     /// More than one backend binding named the same slot.
@@ -101,6 +156,7 @@ impl TriageProductionAdapterRejectionV1 {
             Self::InvalidHostDeadline => "invalid_host_deadline",
             Self::WholeTurnDeadlineMismatch => "whole_turn_deadline_mismatch",
             Self::ContributorOperationCapUnsupported => "contributor_operation_cap_unsupported",
+            Self::TerminalReserveExceedsWholeTurn => "terminal_reserve_exceeds_whole_turn",
             Self::InvalidHostContextBudget => "invalid_host_context_budget",
             Self::DuplicateBackendSlot => "duplicate_backend_slot",
             Self::BackendSetMismatch => "backend_set_mismatch",
@@ -180,15 +236,31 @@ pub struct PreparedV2ContributionRuntimeV1 {
     pub runtime: ContributionRuntime,
     /// Deterministic exact slot-to-production-role bindings.
     pub bindings: Vec<V2ContributionSlotBindingV1>,
+    operation_timeouts: Vec<Arc<AtomicBool>>,
+}
+
+impl PreparedV2ContributionRuntimeV1 {
+    pub(crate) fn reset_operation_timeouts(&self) {
+        for marker in &self.operation_timeouts {
+            marker.store(false, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn take_operation_timeouts(&self) -> Vec<bool> {
+        self.operation_timeouts
+            .iter()
+            .map(|marker| marker.swap(false, Ordering::SeqCst))
+            .collect()
+    }
 }
 
 /// Compile and adapt the exact V2 contributor-only subset to the established
 /// production contribution runtime.
 ///
 /// `host_turn_deadline_ms` and `host_context_char_budget` must be the already
-/// resolved values the linked turn will actually enforce. The current runtime
-/// has only a whole-turn clock, so a smaller V2 per-contributor operation cap
-/// is rejected rather than silently ignored.
+/// resolved values the linked turn will actually enforce. Each contributor
+/// backend is wrapped with the compiled per-operation timeout; the outer
+/// contribution clock continues to enforce the whole phase/turn boundary.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_v2_contribution_runtime(
     policy: &TriagePolicyV2,
@@ -221,12 +293,6 @@ pub fn prepare_v2_contribution_runtime(
         return Err(TriageProductionAdapterErrorV1::unsupported(
             TriageProductionAdapterRejectionV1::WholeTurnDeadlineMismatch,
             std::iter::empty(),
-        ));
-    }
-    if compiled.budget.contributors.operation_timeout_ms < host_turn_deadline_ms {
-        return Err(TriageProductionAdapterErrorV1::unsupported(
-            TriageProductionAdapterRejectionV1::ContributorOperationCapUnsupported,
-            contributor_slot_ids(&compiled),
         ));
     }
     if host_context_char_budget == 0 {
@@ -313,6 +379,7 @@ pub fn prepare_v2_contribution_runtime(
     let mut slots = Vec::with_capacity(contributor_slots.len());
     let mut bindings = Vec::with_capacity(contributor_slots.len());
     let mut roles = Vec::with_capacity(contributor_slots.len());
+    let mut operation_timeouts = Vec::with_capacity(contributor_slots.len());
     for slot in contributor_slots {
         let backend = backend_map
             .remove(&slot.slot_id)
@@ -330,6 +397,15 @@ pub fn prepare_v2_contribution_runtime(
             model: slot.model.clone(),
             production_role: role,
         });
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let bounded_backend: Arc<dyn ChatBackend> = Arc::new(OperationTimeoutBackendV1 {
+            backend: backend.backend,
+            timeout: Duration::from_millis(
+                compiled.budget.contributors.operation_timeout_ms.max(1),
+            ),
+            timed_out: Arc::clone(&timed_out),
+        });
+        operation_timeouts.push(timed_out);
         slots.push(ContributionBackendSlot {
             role,
             identity: ContributionIdentity {
@@ -339,7 +415,7 @@ pub fn prepare_v2_contribution_runtime(
             // The pure compiler admitted this exact role/model only after the
             // trusted host supplied current exact-role qualification facts.
             qualification: ContributionQualification::Qualified,
-            backend: backend.backend,
+            backend: bounded_backend,
         });
     }
 
@@ -394,6 +470,7 @@ pub fn prepare_v2_contribution_runtime(
         compiled,
         runtime,
         bindings,
+        operation_timeouts,
     })
 }
 

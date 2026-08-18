@@ -3,8 +3,8 @@
 use crate::error::{BenchError, BenchResult};
 use crate::store::{BenchStore, PutRunOutcome};
 use crate::types::{
-    run_fingerprint, Completeness, Observed, PromptWorkflow, RawOutput, RunImport,
-    StrategyIdentity, TriageRun, RUN_SCHEMA_V1,
+    Completeness, Observed, PromptWorkflow, RawOutput, RunImport, StrategyIdentity, TriageRun,
+    RUN_SCHEMA_V2,
 };
 
 /// Result of attempting to import a run.
@@ -30,16 +30,7 @@ pub fn import_run(
     }
     let task = store.get_task(&document.task_id)?;
     let digest = store.put_blob(raw_bytes)?;
-    let fingerprint = run_fingerprint(
-        &task.task_id,
-        &task.snapshot_id,
-        document.source_kind,
-        &document.strategy.name,
-        &document.strategy.version,
-        &digest.hex,
-        &document.fairness,
-    )?;
-    let run_id = format!("run-{fingerprint}");
+    let run_id = String::new();
     let near_duplicate_of = find_near_duplicate(store, &digest.hex, &run_id)?;
     let encoding = if std::str::from_utf8(raw_bytes).is_ok() {
         "utf-8"
@@ -47,8 +38,8 @@ pub fn import_run(
         "binary"
     };
 
-    let run = TriageRun {
-        schema_id: RUN_SCHEMA_V1.into(),
+    let mut run = TriageRun {
+        schema_id: RUN_SCHEMA_V2.into(),
         run_id,
         privacy: document.privacy,
         case_id: task.case_id.clone(),
@@ -73,6 +64,7 @@ pub fn import_run(
         created_at: document.created_at.clone(),
         near_duplicate_of: near_duplicate_of.clone(),
     };
+    run.run_id = format!("run-{}", run.fingerprint()?);
 
     match store.put_run(&run)? {
         PutRunOutcome::Duplicate { run_id } => Ok(ImportOutcome::Duplicate { run_id }),
@@ -112,10 +104,14 @@ pub fn parse_import_json(text: &str) -> BenchResult<RunImport> {
 /// The first fenced `json` block is metadata ([`RUN_IMPORT_SCHEMA_V1`]). The
 /// remainder of the file after that fence is the raw write-up unless
 /// `raw_output_utf8` is already present.
+///
+/// Raw capture is byte-exact: only a single leading `\n` or `\r\n` after the
+/// closing fence is skipped. Trailing whitespace is preserved. The importer
+/// never trims, reconstructs, or invents the write-up.
 pub fn parse_import_markdown(text: &str) -> BenchResult<(RunImport, Option<String>)> {
     let (json, rest) = extract_first_json_fence(text)?;
     let mut import = RunImport::parse_json(&json)?;
-    let rest = rest.trim();
+    let rest = strip_one_leading_newline(&rest);
     if import.raw_output_utf8.is_none() && !rest.is_empty() {
         import.raw_output_utf8 = Some(rest.to_string());
     }
@@ -140,6 +136,16 @@ fn extract_first_json_fence(text: &str) -> BenchResult<(String, String)> {
     let json = text[body_start..body_start + end_rel].trim().to_string();
     let rest = text[body_start + end_rel + 3..].to_string();
     Ok((json, rest))
+}
+
+fn strip_one_leading_newline(text: &str) -> &str {
+    if let Some(rest) = text.strip_prefix("\r\n") {
+        rest
+    } else if let Some(rest) = text.strip_prefix('\n') {
+        rest
+    } else {
+        text
+    }
 }
 
 pub fn default_unknown_prompt_workflow() -> PromptWorkflow {
@@ -168,7 +174,14 @@ mod tests {
         let text = "<!-- submission -->\n```json\n{\"schema_id\":\"contextdesk.triage_bench.run_import.v1\",\"task_id\":\"task-x\",\"strategy\":{\"name\":\"human\",\"version\":{\"status\":\"unknown\"},\"build\":{\"status\":\"unknown\"}},\"source_kind\":\"human\",\"prompt_workflow\":{\"completeness\":\"unknown\",\"prompt\":{\"status\":\"unknown\"},\"workflow\":{\"status\":\"unknown\"}},\"timing\":{\"status\":\"unknown\"},\"cost\":{\"status\":\"unknown\"},\"uncertainty\":{\"status\":\"unknown\"},\"fairness\":{\"kind\":\"same_snapshot\"},\"status\":\"completed\",\"operator\":\"alice\",\"created_at\":\"2026-01-15T08:00:00Z\"}\n```\n\nRoot cause looks like a timeout.\n";
         let (import, raw) = parse_import_markdown(text).unwrap();
         assert_eq!(import.source_kind, SourceKind::Human);
-        assert_eq!(raw.as_deref(), Some("Root cause looks like a timeout."));
+        assert_eq!(raw.as_deref(), Some("\nRoot cause looks like a timeout.\n"));
         assert_eq!(import.schema_id, RUN_IMPORT_SCHEMA_V1);
+    }
+
+    #[test]
+    fn markdown_body_preserves_trailing_whitespace_byte_exact() {
+        let text = "```json\n{\"schema_id\":\"contextdesk.triage_bench.run_import.v1\",\"task_id\":\"task-x\",\"strategy\":{\"name\":\"human\",\"version\":{\"status\":\"unknown\"},\"build\":{\"status\":\"unknown\"}},\"source_kind\":\"human\",\"prompt_workflow\":{\"completeness\":\"unknown\",\"prompt\":{\"status\":\"unknown\"},\"workflow\":{\"status\":\"unknown\"}},\"timing\":{\"status\":\"unknown\"},\"cost\":{\"status\":\"unknown\"},\"uncertainty\":{\"status\":\"unknown\"},\"fairness\":{\"kind\":\"same_snapshot\"},\"status\":\"completed\",\"operator\":\"alice\",\"created_at\":\"2026-01-15T08:00:00Z\"}\n```\nkeep trailing spaces   \n";
+        let (_import, raw) = parse_import_markdown(text).unwrap();
+        assert_eq!(raw.as_deref(), Some("keep trailing spaces   \n"));
     }
 }

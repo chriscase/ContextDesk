@@ -147,11 +147,11 @@ function createTauriTriageService(transport: TauriTransport): TriageService {
       if (options.signal?.aborted) {
         throw new EngineError("cancelled", "triage run cancelled before provider work");
       }
-      const delivered = new Set<number>();
+      const delivered = new Map<number, TriageRunEventV2>();
       const runListener = await transport.listen("triage-run-event", (event) => {
         const parsed = parseTriageEvent(event.payload);
         if (parsed.run_id !== request.run_id || delivered.has(parsed.sequence)) return;
-        delivered.add(parsed.sequence);
+        delivered.set(parsed.sequence, parsed);
         options.onEvent?.(parsed);
       });
       const abort = () => {
@@ -165,15 +165,18 @@ function createTauriTriageService(transport: TauriTransport): TriageService {
       };
       options.signal?.addEventListener("abort", abort, { once: true });
       try {
-        const terminal = parseTriageEvent(
-          await call<TriageRunEventV2>(transport, "triage_run_v2", { request }),
+        const replay = parseTriageReplay(
+          await call<unknown>(transport, "triage_run_v2", { request }),
         );
-        if (terminal.run_id !== request.run_id) {
-          throw new EngineError("failed", "triage terminal run identity mismatch");
+        if (replay.run_id !== request.run_id) {
+          throw new EngineError("failed", "triage replay run identity mismatch");
         }
-        if (!delivered.has(terminal.sequence)) {
-          options.onEvent?.(terminal);
+        const terminal = replay.events.at(-1)!;
+        const streamedTerminal = delivered.get(terminal.sequence);
+        if (streamedTerminal) {
+          return streamedTerminal;
         }
+        options.onEvent?.(terminal);
         return terminal;
       } finally {
         options.signal?.removeEventListener("abort", abort);

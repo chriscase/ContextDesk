@@ -1,0 +1,419 @@
+//! Owner-only recorded run.
+//!
+//! An owner-only record may retain everything the run actually produced: the
+//! exact request (including task text), the full replay, and every exact
+//! gateway-scoped [`ModelRef`]. The share-safe export is a separate, explicit
+//! projection in [`crate::share_safe`] — never this record with a relabelled
+//! privacy boundary.
+//!
+//! The durable artifacts are the real `cd_triage_sdk` replay and the real
+//! `cd_triage_bench::TriageRun`; both carry their own published schema ids.
+//! This module declares no schema id of its own.
+
+use cd_triage_bench::{
+    canonical::to_canonical_json, ClaimedCitation, Completeness, ContentDigest, EvaluationTask,
+    EvidenceSnapshot, FairnessClass, Observed, PrivacyClass, PromptWorkflow, RawOutput, RunStatus,
+    SourceKind, StrategyIdentity, TriageRun, RUN_SCHEMA_V2,
+};
+use cd_triage_sdk::{
+    LogSnapshotRevisionV1, ModelRef, TriageAttemptStatus, TriageReplayV1, TriageRequestV2,
+    TriageResultKind, TriageResultV2, TriageSlotKindV2, TriageTerminalDispositionV1,
+    TriageValidationState,
+};
+use serde::Serialize;
+
+use crate::error::{AdapterError, AdapterResult};
+use crate::fingerprint::{fingerprint, MODEL_PREFIX, SLOT_PREFIX};
+use crate::packet::BoundedPacket;
+use crate::replay::{
+    prove_materialized_packet, terminal_provenance, ExecutionPacketState, ValidatedReplayOutcome,
+};
+use crate::request::BoundRequest;
+
+/// Per-slot provenance. Owner-only: it retains the exact model identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SlotProvenance {
+    /// Host-owned slot identity.
+    pub role_slot_id: String,
+    /// Slot kind.
+    pub role: TriageSlotKindV2,
+    /// Exact gateway-scoped model identity, when host preflight resolved one.
+    pub model: Option<ModelRef>,
+    /// Fingerprint of the exact model identity, when known.
+    pub model_fingerprint: Option<String>,
+    /// Fingerprint of the slot identity, kind, and model together.
+    pub slot_fingerprint: String,
+    /// Recorded attempt status.
+    pub status: TriageAttemptStatus,
+    /// Explicit per-role terminal disposition.
+    pub terminal_disposition: TriageTerminalDispositionV1,
+    /// Bounded reason codes.
+    pub reason_codes: Vec<String>,
+}
+
+/// Every fingerprint the run preserves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunFingerprints {
+    /// Exact policy selection.
+    pub policy: String,
+    /// Exact resolved/override-adjusted policy reported by a live host when
+    /// it differs from the public selection fingerprint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executed_policy: Option<String>,
+    /// Whole request, binding task, scope, policy, and packet together.
+    pub request: String,
+    /// Materialized task packet.
+    pub packet: String,
+    /// Bounded evidence corpus the strategy could see.
+    pub corpus: String,
+    /// Distinct exact model identities, sorted.
+    pub models: Vec<String>,
+    /// Per-slot fingerprints, in execution order.
+    pub slots: Vec<String>,
+}
+
+/// Which SDK terminal the run reached, and how the bench records it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TerminalProvenance {
+    /// Terminal event kind, as the public contract names it.
+    pub kind: String,
+    /// Opaque host failure category for failed/timed-out terminals.
+    pub category: Option<String>,
+    /// Cancellation identity for a cancelled terminal.
+    pub cancellation_id: Option<String>,
+    /// Result kind, when the terminal carries a result.
+    pub result_kind: Option<TriageResultKind>,
+    /// Host validation state, when the terminal carries a result.
+    pub validation_state: Option<TriageValidationState>,
+    /// Packet identity echoed by the result.
+    pub packet_id: Option<String>,
+    /// Bounded reason codes from the result.
+    pub reason_codes: Vec<String>,
+    /// True when a non-completed terminal carried a partial result. The
+    /// partial output is provenance only; it never upgrades the bench status.
+    pub partial_result_is_provenance_only: bool,
+    /// Bench terminal status. Failed stays Failed even with partial output.
+    pub bench_status: RunStatus,
+}
+
+/// One exact, digest-only binding from an isolated live corpus source back to
+/// the benchmark evidence item whose verified bytes produced it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostSourceBinding {
+    /// Exact source label stored in the isolated ContextDesk corpus.
+    pub source_label: String,
+    /// Evidence item in the benchmark snapshot.
+    pub evidence_item_id: String,
+    /// Expected `sha256:<hex>` digest of the copied bytes.
+    pub content_digest: String,
+    /// Exact number of copied and imported source bytes.
+    pub byte_length: u64,
+}
+
+/// One exact host packet evidence identity and the imported source that
+/// produced it. Content and locators remain owner-only inside the replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostPacketEvidenceBinding {
+    /// Host-minted evidence identity from the immutable packet ledger.
+    pub evidence_id: String,
+    /// Exact imported source label carried by that ledger row.
+    pub source_label: String,
+}
+
+/// Owner-only proof captured from the host packet before any provider work.
+///
+/// This is deliberately separate from the source-neutral benchmark packet:
+/// ContextDesk deterministically selects a host packet from an isolated corpus,
+/// so those two packet identities are related by provenance rather than equal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostExecutionProof {
+    /// Exact production packet identity repeated by the terminal result.
+    pub packet_id: String,
+    /// Truthful production packet digest repeated by `PacketReady`.
+    pub packet_digest: String,
+    /// Exact resolved, override-adjusted policy reported by the workflow host.
+    pub policy_fingerprint: String,
+    /// Number of host evidence rows in the production packet.
+    pub evidence_count: u32,
+    /// Run-exclusive imported corpus identity.
+    pub corpus_id: String,
+    /// Public request scope revision for that corpus.
+    pub corpus_revision: u64,
+    /// Exact event/template/suppression revision bound into the host ledger.
+    pub snapshot_revision: LogSnapshotRevisionV1,
+    /// Host evidence ledger digest.
+    pub ledger_digest: String,
+    /// Complete one-to-one inventory of imported sources and benchmark items.
+    pub sources: Vec<HostSourceBinding>,
+    /// Complete, sorted host evidence-id to imported-source mapping.
+    pub packet_evidence: Vec<HostPacketEvidenceBinding>,
+    /// Distinct source labels actually selected into the production packet.
+    pub packet_source_labels: Vec<String>,
+}
+
+/// The full owner-only record. Serialized canonically as the bench run's raw
+/// output, so the run's content digest covers all of it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OwnerOnlyRecord {
+    /// SDK-side run identity.
+    pub sdk_run_id: String,
+    /// The exact request, including task text. Owner-only by contract.
+    pub request: TriageRequestV2,
+    /// The complete replay, retaining exact model identities.
+    pub replay: TriageReplayV1,
+    /// Whether execution produced and exactly bound a packet.
+    pub execution_packet_state: ExecutionPacketState,
+    /// Production packet/corpus proof for a live run. Offline mock and
+    /// pre-packet terminal records omit it rather than inventing host facts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_execution: Option<HostExecutionProof>,
+    /// Preserved fingerprints.
+    pub fingerprints: RunFingerprints,
+    /// Per-slot provenance.
+    pub slots: Vec<SlotProvenance>,
+    /// Terminal provenance.
+    pub terminal: TerminalProvenance,
+    /// Evidence visibility the packet was bounded to.
+    pub visible_item_ids: Vec<String>,
+}
+
+/// A recorded ContextDesk run: the owner-only record plus the bench row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordedContextDeskRun {
+    /// The real bench run, already accepted by `TriageRun::validate`.
+    pub bench_run: TriageRun,
+    /// Canonical JSON of [`OwnerOnlyRecord`]; the bench raw-output bytes.
+    pub raw_output: Vec<u8>,
+    /// The owner-only record itself.
+    pub owner_only: OwnerOnlyRecord,
+}
+
+/// Who ran the strategy and when. Supplied by the caller; the adapter reads no
+/// clock, no environment, and no configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingContext {
+    /// Bench strategy identity.
+    pub strategy: StrategyIdentity,
+    /// Operator label.
+    pub operator: String,
+    /// RFC3339 creation timestamp.
+    pub created_at: String,
+}
+
+/// Record one deterministic run as an owner-only bench row.
+///
+/// Fairness is [`FairnessClass::SameSnapshot`] by construction: the packet was
+/// materialized from this snapshot under this task's visibility policy and the
+/// run records the packet identity that proves it. Usage and cost stay
+/// [`Observed::Unknown`] — the public envelope reports neither, and a gateway
+/// that does not report them must not be recorded as zero.
+pub fn record_run(
+    snapshot: &EvidenceSnapshot,
+    task: &EvaluationTask,
+    bound: &BoundRequest,
+    bounded: &BoundedPacket,
+    outcome: &ValidatedReplayOutcome,
+    context: &RecordingContext,
+) -> AdapterResult<RecordedContextDeskRun> {
+    let execution_packet_state = prove_materialized_packet(&outcome.replay, bounded)?;
+    record_validated_run(
+        snapshot,
+        task,
+        bound,
+        bounded,
+        outcome,
+        context,
+        execution_packet_state,
+        None,
+        claimed_citations(outcome.result()),
+        "cd-triage-bench-adapter",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_validated_run(
+    snapshot: &EvidenceSnapshot,
+    task: &EvaluationTask,
+    bound: &BoundRequest,
+    bounded: &BoundedPacket,
+    outcome: &ValidatedReplayOutcome,
+    context: &RecordingContext,
+    execution_packet_state: ExecutionPacketState,
+    host_execution: Option<HostExecutionProof>,
+    claims: Vec<ClaimedCitation>,
+    importer: &str,
+) -> AdapterResult<RecordedContextDeskRun> {
+    let mut slots = Vec::with_capacity(outcome.attempts.len());
+    for attempt in &outcome.attempts {
+        let model = attempt.model.clone();
+        slots.push(SlotProvenance {
+            model_fingerprint: model
+                .as_ref()
+                .map(|model| fingerprint(MODEL_PREFIX, model))
+                .transpose()?,
+            slot_fingerprint: fingerprint(
+                SLOT_PREFIX,
+                &(&attempt.role_slot_id, &attempt.role, &model),
+            )?,
+            role_slot_id: attempt.role_slot_id.clone(),
+            role: attempt.role,
+            model,
+            status: attempt.status,
+            terminal_disposition: attempt.terminal_disposition.ok_or_else(|| {
+                AdapterError::IdentityMismatch(format!(
+                    "attempt {} does not record a terminal disposition",
+                    attempt.attempt_id
+                ))
+            })?,
+            reason_codes: attempt.reason_codes.clone(),
+        });
+    }
+
+    let mut models: Vec<String> = slots
+        .iter()
+        .filter_map(|slot| slot.model_fingerprint.clone())
+        .collect();
+    models.sort();
+    models.dedup();
+
+    let fingerprints = RunFingerprints {
+        policy: bound.policy_fingerprint.clone(),
+        executed_policy: (outcome.executed_policy_fingerprint != bound.policy_fingerprint)
+            .then(|| outcome.executed_policy_fingerprint.clone()),
+        request: bound.request_fingerprint.clone(),
+        packet: bounded.packet_fingerprint.clone(),
+        corpus: bounded.corpus_fingerprint.clone(),
+        models,
+        slots: slots
+            .iter()
+            .map(|slot| slot.slot_fingerprint.clone())
+            .collect(),
+    };
+
+    let terminal = terminal_provenance(outcome)?;
+
+    let owner_only = OwnerOnlyRecord {
+        sdk_run_id: bound.sdk_run_id.clone(),
+        request: bound.request.clone(),
+        replay: outcome.replay.clone(),
+        execution_packet_state,
+        host_execution: host_execution.clone(),
+        fingerprints: fingerprints.clone(),
+        slots,
+        terminal: terminal.clone(),
+        visible_item_ids: bounded.visible_item_ids.clone(),
+    };
+
+    let raw_output = to_canonical_json(&owner_only)
+        .map_err(|_| AdapterError::Serialize)?
+        .into_bytes();
+    let digest = ContentDigest::of_bytes(&raw_output);
+    let fairness = FairnessClass::SameSnapshot;
+
+    let mut bench_run = TriageRun {
+        schema_id: RUN_SCHEMA_V2.to_string(),
+        run_id: "run-pending-v2-fingerprint".to_string(),
+        // The record retains task text, exact model identities, and an
+        // owner-only answer envelope, so the row is owner-only.
+        privacy: PrivacyClass::OwnerOnly,
+        case_id: task.case_id.clone(),
+        task_id: task.task_id.clone(),
+        snapshot_id: snapshot.snapshot_id.clone(),
+        strategy: context.strategy.clone(),
+        source_kind: SourceKind::ContextdeskSdk,
+        prompt_workflow: PromptWorkflow {
+            // The adapter knows the workflow shape exactly and holds no model
+            // prompt at all, so completeness is partial rather than exact.
+            completeness: Completeness::Partial,
+            prompt: Observed::Unknown,
+            workflow: Observed::Known(workflow_summary(&fingerprints, host_execution.as_ref())),
+        },
+        raw_output: RawOutput {
+            byte_length: raw_output.len() as u64,
+            digest,
+            encoding: "utf-8".to_string(),
+        },
+        claims,
+        // Scripted elapsed values are not measurements, so timing stays
+        // unknown rather than reporting fabricated durations.
+        timing: Observed::Unknown,
+        // The public envelope reports no usage or cost. Unknown is not zero.
+        cost: Observed::Unknown,
+        uncertainty: if terminal.reason_codes.is_empty() {
+            Observed::Unknown
+        } else {
+            Observed::Known(terminal.reason_codes.join(","))
+        },
+        fairness,
+        status: terminal.bench_status,
+        operator: context.operator.clone(),
+        importer: Some(importer.to_string()),
+        created_at: context.created_at.clone(),
+        near_duplicate_of: None,
+    };
+    bench_run.run_id = format!(
+        "run-{}",
+        bench_run.fingerprint().map_err(AdapterError::bench)?
+    );
+    // Real bench validator, including the run-identity fingerprint check.
+    bench_run.validate().map_err(AdapterError::bench)?;
+
+    Ok(RecordedContextDeskRun {
+        bench_run,
+        raw_output,
+        owner_only,
+    })
+}
+
+/// Identity-only workflow description. Deliberately carries no `ModelRef`, so
+/// a later share-safe projection of this field cannot leak model identity.
+fn workflow_summary(
+    fingerprints: &RunFingerprints,
+    host_execution: Option<&HostExecutionProof>,
+) -> String {
+    if let Some(proof) = host_execution {
+        format!(
+            "cd-triage-bench-live host execution; policy {}; benchmark packet {}; benchmark corpus {}; host packet {}; host packet digest {}; slots [{}]",
+            fingerprints.policy,
+            fingerprints.packet,
+            fingerprints.corpus,
+            proof.packet_id,
+            proof.packet_digest,
+            fingerprints.slots.join(" ")
+        )
+    } else if let Some(executed_policy) = &fingerprints.executed_policy {
+        format!(
+            "cd-triage-bench-live host replay; selected policy {}; executed policy {}; benchmark packet {}; benchmark corpus {}; slots [{}]",
+            fingerprints.policy,
+            executed_policy,
+            fingerprints.packet,
+            fingerprints.corpus,
+            fingerprints.slots.join(" ")
+        )
+    } else {
+        format!(
+            "cd-triage-bench-adapter public-sdk replay ingest; policy {}; packet {}; corpus {}; slots [{}]",
+            fingerprints.policy,
+            fingerprints.packet,
+            fingerprints.corpus,
+            fingerprints.slots.join(" ")
+        )
+    }
+}
+
+fn claimed_citations(result: Option<&TriageResultV2>) -> Vec<ClaimedCitation> {
+    let Some(answer) = result.and_then(|result| result.answer.as_ref()) else {
+        return Vec::new();
+    };
+    answer
+        .answer
+        .candidates
+        .iter()
+        .flat_map(|candidate| candidate.claims.iter())
+        .map(|claim| ClaimedCitation {
+            claim: claim.text.clone(),
+            evidence_item_id: claim.evidence_ids.first().cloned(),
+            locator: None,
+        })
+        .collect()
+}
