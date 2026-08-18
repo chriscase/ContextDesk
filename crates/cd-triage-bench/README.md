@@ -13,10 +13,12 @@ offline mock/replay CLI—not by absorbing case management.
 Working name: `cd-triage-bench` (rename-friendly; crate prefix stays `cd-*`).
 
 Status: the store/entities, manual import/provenance, rubric v1 + expert
-adjudication, report-only comparison, public-SDK adapter, deterministic mock
-runner, and validated replay ingestion are implemented. This does not close
-epic #876 or make the bench release-ready: live provider execution and the
-remaining acceptance hardening are separate work. No composite leaderboards.
+adjudication, deterministic comparison reports, public-SDK adapter,
+deterministic mock runner, validated replay ingestion, and the bounded live
+same-snapshot comparison bridge are implemented. This does not close epic
+#876 or make the bench release-ready: provider quality, broader visibility
+shapes, and remaining acceptance hardening are separate work. No composite
+leaderboards.
 
 ## Layout
 
@@ -165,19 +167,19 @@ withheld scores are counted separately from genuine absence. `owner_only`
 keeps that detail.
 
 The shipped public-SDK adapter records deterministic mock runs and validated
-replays, including failed, partial, timed-out, and cancelled terminals. Those
-runs join imported human and web-only runs through the same stored report
-path. Live production-provider execution remains outside this headless report
-projection.
+replays, including failed, partial, timed-out, and cancelled terminals. The
+live bridge records proof-bound production runs against one prepared snapshot;
+those runs join imported human and web-only runs through the same stored report
+path. The report remains a projection: it never executes a strategy or invents
+rankings.
 
 ## Future scope (explicitly not this slice)
 
 - Web collaboration / shared review UI (#883–#888)
 - Object-storage ingestion for large corpora
 - Direct web-tool / browser automation (manual import is the path here)
-- Multi-strategy synthesis
+- Multi-strategy synthesis and composite leaderboards
 - Similar-case retrieval
-- Live production-provider execution through a separately bounded host bridge
 - LLM-as-judge (forbidden as scoring authority; any later judge follows #867)
 
 ## Non-goals

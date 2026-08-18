@@ -297,7 +297,7 @@ pub fn build_report(
         "This report does not assign readiness, qualification, or routing badges.".into(),
         "Disagreement is preserved per reviewer; scores are never silently averaged.".into(),
         "This report is a projection over stored records. It does not execute strategies or create judgments.".into(),
-        "Public-SDK mock and replay runs join comparisons from the same stored run records as imported strategies; live provider execution remains outside this report projection.".into(),
+        "Public-SDK mock, replay, and live same-snapshot runs join comparisons from the same stored run records as imported strategies; this report only projects persisted records and never executes a strategy.".into(),
     ];
 
     let report = BacktestReport {
