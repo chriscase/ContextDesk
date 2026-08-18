@@ -83,6 +83,11 @@ impl DimensionVerdict {
             }
             Self::NotApplicable => Ok(()),
             Self::Unscorable { reason } => {
+                if reason.trim().is_empty() {
+                    return Err(BenchError::Schema(
+                        "unscorable.reason must not be empty".into(),
+                    ));
+                }
                 validate_bounded_string("unscorable.reason", reason, 1024)
             }
         }
@@ -869,6 +874,25 @@ mod tests {
             .validate(RubricDimension::Actionability)
             .unwrap_err();
         assert!(err.to_string().contains("0..=3"));
+    }
+
+    #[test]
+    fn unscorable_requires_a_nonempty_reason() {
+        for reason in ["", "  \n\t"] {
+            let error = DimensionVerdict::Unscorable {
+                reason: reason.into(),
+            }
+            .validate(RubricDimension::DiagnosisCorrectness)
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("unscorable.reason must not be empty"));
+        }
+        DimensionVerdict::Unscorable {
+            reason: "case lacks a verified resolution".into(),
+        }
+        .validate(RubricDimension::DiagnosisCorrectness)
+        .unwrap();
     }
 
     fn five_outcomes(diagnosis: DimensionVerdict) -> Vec<DimensionOutcome> {
