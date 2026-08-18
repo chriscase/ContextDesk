@@ -600,6 +600,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cd-triage-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cd-triage-sdk",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cd-triage-sdk"
 version = "0.1.0"
 dependencies = [
@@ -614,10 +625,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cd-core",
+ "cd-triage-runtime",
  "chrono",
  "libc",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",
@@ -807,6 +820,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cd-core",
+ "cd-triage-runtime",
  "cd-workflow",
  "dirs 5.0.1",
  "serde",

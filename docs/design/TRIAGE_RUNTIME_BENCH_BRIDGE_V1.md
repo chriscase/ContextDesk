@@ -1,8 +1,9 @@
 # Triage runtime and evaluation-bench bridge v1
 
-**Status:** implementation in progress on top of the validated #918 baseline.
-This document defines the boundary required to finish #872/#879 without
-claiming that live bench execution already ships.
+**Status:** Saved/Inline production host integration is implemented locally on
+top of the validated #918/#920 baseline. Standard prepared-packet execution and
+live same-snapshot bench execution remain open; this is not a live-bench or
+release-readiness claim.
 
 ## Goal
 
@@ -26,11 +27,12 @@ The validated baseline already contains:
 - source-neutral adjudication and comparison reporting over stored
   `TriageRun` rows.
 
-This integration adds the public runtime facade and decouples validated replay
-ingestion from the mock while converging both on one canonical request
-identity. The remaining pieces are ContextDesk host implementations, Standard
-execution behind the facade, and a provable live bridge from a bench evidence
-snapshot to a ContextDesk corpus and packet.
+This integration adds the public runtime facade, decouples validated replay
+ingestion from the mock, and connects Saved/Inline CLI and desktop execution to
+one `cd-workflow` engine with canonical request identity, exact cancellation,
+validated provisional events, and an authoritative returned replay. The
+remaining pieces are Standard execution behind the facade and a provable live
+bridge from a bench evidence snapshot to a ContextDesk corpus and packet.
 
 ## Dependency direction
 
@@ -93,10 +95,14 @@ Host-specific adapters may receive `AppConfig`, credential stores, policy and
 qualification stores, cache roots, and `ToolHost`, but none of those types
 cross the public runtime boundary.
 
-Enhanced/Advanced should reuse the existing `preflight_for_policy`,
+Enhanced/Advanced reuse the existing `preflight_for_policy`,
 `resolve_v2_host`, `TriageProductionRunnerV1`, and `run_v2_host` path. The
-facade removes duplicate orchestration currently present in CLI and Tauri; it
-does not create another provider client or policy compiler.
+`WorkflowTriageEngineV1` owns that adaptation; CLI and Tauri call
+`triage_with_policy(...)` instead of duplicating policy overrides,
+fingerprinting, resolver calls, terminal projection, or cancellation maps. The
+desktop returns the authoritative replay across IPC; TypeScript validates it
+and preserves the existing terminal-event client API. The adapter does not
+create another provider client or policy compiler.
 
 Standard must preserve one exact gateway-scoped model and the established
 deterministic linked-log behavior. Before provider synthesis begins, its host
@@ -225,6 +231,13 @@ Hermetic tests must cover:
 - stored live and replayed runs appearing in existing adjudication packets and
   comparison reports without special report code;
 - default dependency-direction checks and optional-live feature isolation.
+
+The current Saved/Inline slice covers facade dispatch and canonical identity,
+exact cancellation registration/cleanup, all typed terminal projections,
+workflow host cleanup after failed corpus binding, CLI/Tauri façade selection,
+authoritative desktop replay return, TypeScript replay validation, and the
+existing default dependency direction. Standard and live materialization items
+above remain required before their corresponding capability claims.
 
 Focused fast lanes should cover the leaf SDK, runtime facade, bench, and
 adapter. Production-path workflow tests belong in the existing Rust shards.

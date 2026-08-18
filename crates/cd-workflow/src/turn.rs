@@ -218,11 +218,22 @@ pub fn bind_linked_corpus(
 
     host.set_log_corpus_scope(Some(corpus_id.to_string()));
     host.set_active_log_corpus(Some(corpus_id.to_string()));
-    let corpus = Arc::new(LogCorpus::open(cache_root, corpus_id)?);
-    let revision = corpus.revision();
-    host.seed_log_corpus_handle(corpus_id, corpus)?;
-    host.pin_log_suppression_lens(corpus_id)?;
-    let snapshot_revision = host.linked_log_snapshot_revision(corpus_id)?;
+    let prepared = (|| {
+        let corpus = Arc::new(LogCorpus::open(cache_root, corpus_id)?);
+        let revision = corpus.revision();
+        host.seed_log_corpus_handle(corpus_id, corpus)?;
+        host.pin_log_suppression_lens(corpus_id)?;
+        let snapshot_revision = host.linked_log_snapshot_revision(corpus_id)?;
+        Ok::<_, cd_core::error::CoreError>((revision, snapshot_revision))
+    })();
+    let (revision, snapshot_revision) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            host.set_log_corpus_scope(previous_scope.clone());
+            host.set_active_log_corpus(previous_active.clone());
+            return Err(error);
+        }
+    };
 
     Ok(LinkedCorpusBinding {
         previous_scope,
@@ -368,6 +379,22 @@ mod tests {
     const SSE_BODY: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n\
          data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
          data: [DONE]\n\n";
+
+    #[test]
+    fn failed_linked_corpus_bind_restores_previous_host_scope() {
+        let workspace_dir = tempfile::tempdir().expect("workspace");
+        let workspace = Workspace::new("t", vec![workspace_dir.path().to_path_buf()]);
+        let index = KeywordIndex::build(&workspace).expect("index");
+        let mut host = ToolHost::new(workspace, index, None);
+        host.set_log_corpus_scope(Some("prior-scope".into()));
+        host.set_active_log_corpus(Some("prior-active".into()));
+        let empty_cache = tempfile::tempdir().expect("cache");
+
+        assert!(bind_linked_corpus(&mut host, empty_cache.path(), "missing-corpus").is_err());
+
+        assert_eq!(host.log_corpus_scope(), Some("prior-scope"));
+        assert_eq!(host.active_log_corpus(), Some("prior-active"));
+    }
 
     /// `checkpoint_out` is the "resume synthesis from preserved evidence"
     /// slot Tauri's `agent_turn` needs and no other caller has used before

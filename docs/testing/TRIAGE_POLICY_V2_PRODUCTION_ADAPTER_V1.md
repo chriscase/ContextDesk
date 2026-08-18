@@ -1,8 +1,7 @@
 # Triage Policy V2 production adapter — contributor subset V1
 
-Status: **provider-free production-path adapter; typed contributors (including
-`timeline_analyst`) and the shared host resolver are implemented, while live
-execution remains qualification-gated**
+Status: **production-path adapter and public-runtime host façade implemented;
+live execution remains exact-role-qualification-gated**
 
 This slice bridges the exact, pure `TriagePolicyV2` compiler output to the
 existing linked-log `ContributionRuntime`. It intentionally prepares only the
@@ -37,10 +36,12 @@ The adapter does not read `AppConfig`, credentials, Keychain, protected files,
 endpoints, qualification storage, corpora, or retrieval state. A trusted Rust
 host resolves those facts first and supplies exact `RolePreflightV2` records
 plus opaque authorized backends. The compiler remains the only policy compiler.
-The resolver seam is shared by CLI and Tauri, but live Enhanced/Advanced
-execution is currently fail-closed until a dedicated host-owned exact V2 role
-qualification record exists. Provider-free policy validation may still use an
-explicit preflight document; that document is never live execution authority.
+The resolver seam is shared by CLI and Tauri through
+`WorkflowTriageEngineV1` and `cd_triage_runtime::triage_with_policy`. Live
+Enhanced/Advanced execution fails closed until every required host-owned exact
+V2 role qualification record exists. Provider-free policy validation may still
+use an explicit preflight document; that document is never live execution
+authority.
 
 ## Typed pre-provider refusals
 
@@ -89,12 +90,13 @@ The adapter test proves:
 
 ## Not proven / residual product blocker
 
-- Tauri selects the shared resolver and emits validated events progressively;
-  CLI live execution remains fail-closed until host-owned role qualification is
-  available.
-- Generic capability reports cannot authorize an exact V2 role. The next
-  production step is a dedicated qualification record bound to profile,
-  endpoint fingerprint, exact catalog model, protocol, and role kind.
+- CLI and Tauri now select the same public-runtime workflow engine, emit only
+  request-bound validated provisional events, and retain the authoritative
+  replay. Standard remains on the established path.
+- Generic capability reports cannot authorize an exact V2 role. Dedicated
+  qualification records are bound to profile, endpoint fingerprint, exact
+  catalog model, protocol, and role kind; the desktop refreshes its in-memory
+  store after publishing one.
 - The host enforces governed corpus revision and rejects unsupported source
   restrictions instead of silently broadening the packet.
 - A smaller per-contributor operation timeout, finalizer reserve, reviewer

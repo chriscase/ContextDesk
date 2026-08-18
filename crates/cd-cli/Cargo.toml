@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 cd-core = { path = "../cd-core" }
 cd-workflow = { path = "../cd-workflow" }
+cd-triage-runtime = { path = "../cd-triage-runtime" }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

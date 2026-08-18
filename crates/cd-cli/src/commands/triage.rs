@@ -10,15 +10,14 @@
 use std::io::Read;
 use std::path::Path;
 
-use cd_core::multi_model::triage_policy::{TriagePolicyPreflightV2, TriagePolicyV2};
 use cd_core::triage_policy_store::TriagePolicyStoreV1;
 use cd_core::triage_sdk::TriagePolicySelectionV2;
 use cd_core::triage_sdk::{
     parse_request_v2, TriageReplayV1, TriageRequestV2, TriageResultKind, TriageResultV2,
     MAX_TRIAGE_WIRE_BYTES,
 };
+use cd_triage_runtime::{triage_with_policy, TriageExecutionTerminal};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::adapters::{self, Paths};
 use crate::cli::{TriageAction, TriageRunArgs};
@@ -70,8 +69,8 @@ pub struct TriageRunOutput {
     pub schema_id: &'static str,
     /// Stable action name.
     pub action: &'static str,
-    /// `completed` or `partial` for a stateful V2 run; `unsupported` only for
-    /// an established-path or other typed refusal.
+    /// `completed`, `partial`, `failed`, `timed_out`, or `cancelled` for a
+    /// stateful V2 run; `unsupported` only for an established-path refusal.
     pub status: &'static str,
     /// Requests contain task text and policy references, so this remains
     /// owner-only even when a later replay can be exported share-safe.
@@ -181,106 +180,53 @@ pub async fn run_stateful(
             "triage request rejected by the V2 contract: {error}"
         ))
     })?;
-    let mut policy = match &request.policy {
+    if matches!(&request.policy, TriagePolicySelectionV2::Standard { .. }) {
+        return Ok(unsupported_result_with_reason(
+            request,
+            "standard_uses_established_path",
+        ));
+    }
+    // A caller-supplied preflight is useful for provider-free policy
+    // simulation, but can never authorize a live run.
+    if args.preflight.is_some() {
+        return Err(CliError::user("caller_preflight_not_authoritative"));
+    }
+    let policies = match &request.policy {
+        TriagePolicySelectionV2::Saved { .. } => {
+            let path = paths.config_dir.join("triage-policies.json");
+            TriagePolicyStoreV1::load(&path)
+                .map_err(|_| CliError::user("saved triage policy store could not be loaded"))?
+        }
+        TriagePolicySelectionV2::Inline { .. } => TriagePolicyStoreV1::default(),
         TriagePolicySelectionV2::Standard { .. } => {
-            return Ok(unsupported_result_with_reason(
-                request,
-                "standard_uses_established_path",
+            return Err(CliError::internal(
+                "standard triage dispatch escaped state-free routing",
             ));
         }
-        TriagePolicySelectionV2::Inline { document, .. } => {
-            serde_json::from_value::<TriagePolicyV2>(document.clone())
-                .map_err(|_| CliError::user("inline triage policy could not be decoded"))?
-        }
-        TriagePolicySelectionV2::Saved {
-            policy_id,
-            policy_revision,
-        } => {
-            let path = paths.config_dir.join("triage-policies.json");
-            let store = TriagePolicyStoreV1::load(&path)
-                .map_err(|_| CliError::user("saved triage policy store could not be loaded"))?;
-            let saved = store
-                .policies
-                .iter()
-                .find(|saved| saved.policy_id == *policy_id && saved.revision == *policy_revision)
-                .ok_or_else(|| CliError::user("requested triage policy revision is unavailable"))?;
-            saved.policy.clone()
-        }
     };
-    // A caller-supplied preflight is useful for provider-free policy
-    // simulation, but cannot authorize a live run: the CLI cannot prove who
-    // authored it or that its qualification/egress facts came from this
-    // host. Keep the refusal before ToolHost construction and credential
-    // resolution. A future dedicated V2 role-qualification store will supply
-    // host-derived facts here, shared with Tauri.
-    let preflight = load_live_v2_preflight(args, paths, cfg, &policy)?;
-
-    if let Some(deadline_ms) = request.overrides.deadline_ms {
-        policy.budget.whole_turn_deadline_ms = Some(deadline_ms);
-    }
-    if let Some(max_provider_calls) = request.overrides.max_provider_calls {
-        policy.budget.max_provider_calls = max_provider_calls;
-    }
-    // Reject before ToolHost construction or credential resolution when an
-    // exact role record is absent/stale/mismatched.  The caller-supplied JSON
-    // preflight was already rejected above and cannot affect this decision.
-    cd_workflow::triage::compile_preflight(&policy, &preflight)
-        .map_err(|_| CliError::user("triage_role_qualification_unavailable"))?;
-    let deadline_ms =
-        policy
-            .budget
-            .whole_turn_deadline_ms
-            .unwrap_or(if cfg.router.deadline_is_explicit {
-                cfg.router.deadline_ms
-            } else {
-                300_000
-            });
-    let context_budget = usize::try_from(policy.budget.max_context_chars)
-        .map_err(|_| CliError::user("triage context budget is not representable"))?;
-    if context_budget == 0 {
-        return Err(CliError::user("triage context budget must be positive"));
-    }
+    let qualification_path =
+        cd_core::triage_role_qualification::triage_role_qualification_store_path(&paths.config_dir);
+    let qualifications = cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(
+        &qualification_path,
+    )
+    .map_err(|_| CliError::user("triage_role_qualification_store_unavailable"))?;
     let mut host = adapters::tool_host_with_app_config(&paths.cache_root, cfg, secrets)?;
-    let policy_fingerprint = fingerprint_json(&policy)?;
-    let request_fingerprint = fingerprint_bytes(raw_request.as_bytes());
-    let input = cd_workflow::triage_host::TriageHostRunInput {
-        run_id: request.run_id.clone(),
-        request_fingerprint,
-        policy_fingerprint,
-        corpus_id: request.scope.corpus_id.clone(),
-        corpus_revision: request.scope.corpus_revision,
-        source_ids: request.scope.source_ids.clone(),
-        user_text: request.task.clone(),
-        cancellation_id: request.cancellation_id.clone(),
-        explicit_review_requested: false,
-        deadline_ms,
-        context_char_budget: context_budget,
-        cancel: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-            false,
-        ))),
-    };
-    let resolved = cd_workflow::triage_host::resolve_v2_host(
+    let engine = cd_workflow::triage_runtime_host::WorkflowTriageEngineV1::new(
         &mut host,
         &paths.cache_root,
-        cfg,
+        cfg.clone(),
         secrets,
-        &policy,
-        &preflight,
-        &input,
-    )
-    .await
-    .map_err(|error| CliError::user(error.to_string()))?;
-    let result = cd_workflow::triage_host::run_v2_host(
-        &mut host,
-        resolved,
-        input,
-        &cd_workflow::triage_host::HostValidatedAnswerHooks::default(),
-        None,
-    )
-    .await
-    .map_err(|error| CliError::user(error.to_string()))?;
-    let provider_calls = result
-        .replay
+        policies,
+        qualifications,
+        cd_workflow::triage_runtime_host::TriageCancellationRegistryV1::default(),
+    );
+    let cancellation_id = request.cancellation_id.clone();
+    let execution = triage_with_policy(&engine, request, None)
+        .await
+        .map_err(|error| CliError::user(error.to_string()))?;
+    let terminal = execution.terminal().clone();
+    let provider_calls = execution
+        .replay()
         .events
         .iter()
         .filter_map(|event| match &event.event {
@@ -290,53 +236,64 @@ pub async fn run_stateful(
             _ => None,
         })
         .sum();
-    let status = match result.result.kind {
-        TriageResultKind::GroundedFinal => "completed",
-        TriageResultKind::HonestPartial => "partial",
-    };
+    let (status, result, reason_codes) = project_terminal(&terminal);
+    let replay = execution.into_replay();
     Ok(TriageRunOutput {
         schema_id: TRIAGE_RUN_CLI_SCHEMA_ID,
         action: "run",
         status,
         privacy: "owner_only",
-        run_id: result.result.run_id.clone(),
-        cancellation_id: request.cancellation_id,
+        run_id: replay.run_id.clone(),
+        cancellation_id,
         request_schema_id: cd_core::triage_sdk::TRIAGE_REQUEST_SCHEMA_V2.into(),
-        reason_codes: result.result.reason_codes.clone(),
-        replay: Some(result.replay),
-        result: Some(result.result),
+        reason_codes,
+        replay: Some(replay),
+        result,
         evidence: TriageRunEvidence {
             network: provider_calls > 0,
             credentials_read: true,
             app_config_accessed: true,
             qualification: "host_preflighted",
             provider_calls,
-            runner: "cd_workflow::triage_host::run_v2_host",
+            runner: "cd_triage_runtime::triage_with_policy",
         },
     })
 }
 
-/// Resolve live V2 qualification from host-owned evidence only. Arbitrary
-/// `--preflight` JSON remains simulation-only and can never become provider or
-/// egress authority. The store is secret-free and is keyed by the exact
-/// profile, endpoint fingerprint, catalog model, role, protocol, and probe
-/// contract; a missing record remains an honest unverified refusal.
-fn load_live_v2_preflight(
-    args: &TriageRunArgs,
-    paths: &Paths,
-    cfg: &cd_core::config::AppConfig,
-    policy: &TriagePolicyV2,
-) -> CliResult<TriagePolicyPreflightV2> {
-    if args.preflight.is_some() {
-        return Err(CliError::user("caller_preflight_not_authoritative"));
+fn project_terminal(
+    terminal: &TriageExecutionTerminal,
+) -> (&'static str, Option<TriageResultV2>, Vec<String>) {
+    let (status, result, category) = match terminal {
+        TriageExecutionTerminal::Completed { result } => (
+            match result.kind {
+                TriageResultKind::GroundedFinal => "completed",
+                TriageResultKind::HonestPartial => "partial",
+            },
+            Some(result.clone()),
+            None,
+        ),
+        TriageExecutionTerminal::Failed {
+            category,
+            partial_result,
+        } => ("failed", partial_result.clone(), Some(category.as_str())),
+        TriageExecutionTerminal::TimedOut {
+            category,
+            partial_result,
+        } => ("timed_out", partial_result.clone(), Some(category.as_str())),
+        TriageExecutionTerminal::Cancelled { partial_result, .. } => {
+            ("cancelled", partial_result.clone(), Some("cancelled"))
+        }
+    };
+    let mut reason_codes = result
+        .as_ref()
+        .map(|result| result.reason_codes.clone())
+        .unwrap_or_default();
+    if let Some(category) = category {
+        if !reason_codes.iter().any(|reason| reason == category) {
+            reason_codes.push(category.into());
+        }
     }
-    let path =
-        cd_core::triage_role_qualification::triage_role_qualification_store_path(&paths.config_dir);
-    let store = cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::load(&path)
-        .map_err(|_| CliError::user("triage_role_qualification_store_unavailable"))?;
-    Ok(cd_workflow::triage_host::preflight_for_policy(
-        cfg, policy, &store,
-    ))
+    (status, result, reason_codes)
 }
 
 #[cfg(test)]
@@ -373,18 +330,6 @@ fn unsupported_result_with_reason(request: TriageRequestV2, reason: &str) -> Tri
     }
 }
 
-fn fingerprint_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
-}
-
-fn fingerprint_json<T: serde::Serialize>(value: &T) -> CliResult<String> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|_| CliError::internal("could not fingerprint triage policy"))?;
-    Ok(fingerprint_bytes(&bytes))
-}
-
 fn read_request(path: &Path) -> CliResult<String> {
     let bytes = if path == Path::new("-") {
         let mut bytes = Vec::new();
@@ -417,9 +362,13 @@ fn read_request(path: &Path) -> CliResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{run, TriageRunOutput, TRIAGE_RUNNER_NOT_WIRED};
+    use super::{project_terminal, run, TriageRunOutput, TRIAGE_RUNNER_NOT_WIRED};
     use crate::cli::{TriageAction, TriageRunArgs};
-    use cd_core::triage_sdk::TRIAGE_REQUEST_SCHEMA_V2;
+    use cd_core::triage_sdk::{
+        TriageReconciliationV1, TriageResultKind, TriageResultV2, TriageValidationState,
+        TRIAGE_REQUEST_SCHEMA_V2, TRIAGE_RESULT_SCHEMA_V2,
+    };
+    use cd_triage_runtime::TriageExecutionTerminal;
     use std::path::PathBuf;
 
     fn request() -> String {
@@ -437,6 +386,30 @@ mod tests {
             "cancellation_id": "cancel:cli-test"
         })
         .to_string()
+    }
+
+    fn honest_partial() -> TriageResultV2 {
+        TriageResultV2 {
+            schema_id: TRIAGE_RESULT_SCHEMA_V2.into(),
+            run_id: "run:cli-test".into(),
+            kind: TriageResultKind::HonestPartial,
+            validation_state: TriageValidationState::Partial,
+            packet_id: "packet:cli-test".into(),
+            reconciliation: TriageReconciliationV1 {
+                state: "honest_partial".into(),
+                configured_role_slots: 1,
+                completed_role_slots: 0,
+                distinct_models: 0,
+                distinct_gateways: 0,
+                supported_claim_ids: Vec::new(),
+                conflict_ids: Vec::new(),
+                gap_ids: vec!["gap:root-cause".into()],
+                root_cause_established: false,
+            },
+            answer: None,
+            accepted_evidence_ids: Vec::new(),
+            reason_codes: vec!["root_cause_not_established".into()],
+        }
     }
 
     #[test]
@@ -502,5 +475,43 @@ mod tests {
             preflight: None,
         };
         assert_eq!(args.request, PathBuf::from("-"));
+    }
+
+    #[test]
+    fn terminal_projection_preserves_status_partial_and_reason_identity() {
+        let partial = honest_partial();
+        let (status, result, reasons) = project_terminal(&TriageExecutionTerminal::Completed {
+            result: partial.clone(),
+        });
+        assert_eq!(status, "partial");
+        assert_eq!(result, Some(partial.clone()));
+        assert_eq!(reasons, vec!["root_cause_not_established"]);
+
+        let (status, result, reasons) = project_terminal(&TriageExecutionTerminal::Failed {
+            category: "provider_unavailable".into(),
+            partial_result: Some(partial.clone()),
+        });
+        assert_eq!(status, "failed");
+        assert_eq!(result, Some(partial.clone()));
+        assert_eq!(
+            reasons,
+            vec!["root_cause_not_established", "provider_unavailable"]
+        );
+
+        let (status, result, reasons) = project_terminal(&TriageExecutionTerminal::TimedOut {
+            category: "whole_turn_deadline".into(),
+            partial_result: None,
+        });
+        assert_eq!(status, "timed_out");
+        assert!(result.is_none());
+        assert_eq!(reasons, vec!["whole_turn_deadline"]);
+
+        let (status, result, reasons) = project_terminal(&TriageExecutionTerminal::Cancelled {
+            cancellation_id: "cancel:cli-test".into(),
+            partial_result: Some(partial.clone()),
+        });
+        assert_eq!(status, "cancelled");
+        assert_eq!(result, Some(partial));
+        assert_eq!(reasons, vec!["root_cause_not_established", "cancelled"]);
     }
 }
