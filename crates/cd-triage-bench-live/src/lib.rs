@@ -791,7 +791,7 @@ pub fn retry_pending_live_cleanup(cache_root: &Path) -> Result<(), LiveBridgeErr
         let lease = open_cleanup_lease(&lease_path)?;
         match lease.try_lock_exclusive() {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) if is_lock_contended(&error) => continue,
             Err(_) => return Err(LiveBridgeError::Cleanup),
         }
 
@@ -809,6 +809,11 @@ pub fn retry_pending_live_cleanup(cache_root: &Path) -> Result<(), LiveBridgeErr
         }
     }
     Err(LiveBridgeError::Cleanup)
+}
+
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    let expected = fs2::lock_contended_error();
+    error.raw_os_error() == expected.raw_os_error()
 }
 
 fn record_cleanup_intent(
