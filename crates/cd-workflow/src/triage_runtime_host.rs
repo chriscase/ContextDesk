@@ -36,8 +36,8 @@ use sha2::{Digest, Sha256};
 
 use crate::triage::compile_preflight;
 use crate::triage_host::{
-    preflight_for_policy, resolve_v2_host, run_v2_host, HostValidatedAnswerHooks, TriageHostError,
-    TriageHostRunInput,
+    preflight_for_policy, resolve_v2_host_with_packet_proof_observer, run_v2_host,
+    HostValidatedAnswerHooks, TriageHostError, TriageHostRunInput, TriagePacketProofObserverV1,
 };
 use crate::triage_production_runner::TriageEventSink as ProductionEventSink;
 
@@ -170,6 +170,7 @@ pub struct WorkflowTriageEngineV1<'a> {
     policies: TriagePolicyStoreV1,
     qualifications: TriageRoleQualificationStoreV1,
     cancellations: TriageCancellationRegistryV1,
+    packet_proof_observer: Option<TriagePacketProofObserverV1>,
 }
 
 impl<'a> WorkflowTriageEngineV1<'a> {
@@ -192,7 +193,15 @@ impl<'a> WorkflowTriageEngineV1<'a> {
             policies,
             qualifications,
             cancellations,
+            packet_proof_observer: None,
         }
+    }
+
+    /// Attach an owner-only observer for the exact packet executed by this
+    /// engine. Existing callers remain no-op by default.
+    pub fn with_packet_proof_observer(mut self, observer: TriagePacketProofObserverV1) -> Self {
+        self.packet_proof_observer = Some(observer);
+        self
     }
 
     /// Return the shared cancellation registry used by this engine.
@@ -493,7 +502,7 @@ impl TriageEngine for WorkflowTriageEngineV1<'_> {
                 .expect("resolved preflight checked above");
             let input = prepared.input.take().expect("resolved input checked above");
             let mut host = self.host.lock().await;
-            let resolved = resolve_v2_host(
+            let resolved = resolve_v2_host_with_packet_proof_observer(
                 &mut host,
                 &self.cache_root,
                 &self.config,
@@ -501,6 +510,7 @@ impl TriageEngine for WorkflowTriageEngineV1<'_> {
                 policy,
                 preflight,
                 &input,
+                self.packet_proof_observer.as_deref(),
             )
             .await;
             match resolved {
@@ -729,6 +739,7 @@ fn map_preflight_host_error(error: TriageHostError) -> TriageEngineFailure {
         TriageHostError::Corpus(_) | TriageHostError::Backend(_) => {
             TriageEngineFailureCategory::HostUnavailable
         }
+        TriageHostError::PacketProofObserver => TriageEngineFailureCategory::ExecutionFailed,
         TriageHostError::Contract(_) => TriageEngineFailureCategory::ExecutionFailed,
     };
     TriageEngineFailure::new(category)
@@ -739,6 +750,7 @@ fn map_execution_host_error(error: TriageHostError) -> TriageEngineFailure {
         TriageHostError::Cancelled => TriageEngineFailureCategory::Cancelled,
         TriageHostError::Deadline => TriageEngineFailureCategory::DeadlineExceeded,
         TriageHostError::Contract(_) => TriageEngineFailureCategory::InvalidEvent,
+        TriageHostError::PacketProofObserver => TriageEngineFailureCategory::ExecutionFailed,
         TriageHostError::Corpus(_)
         | TriageHostError::Scope(_)
         | TriageHostError::Policy(_)
@@ -1133,6 +1145,14 @@ mod tests {
         let mut fixture = fixture();
         let registry = TriageCancellationRegistryV1::default();
         let reads = Arc::clone(&fixture.secrets.reads);
+        let proof_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_proof_calls = Arc::clone(&proof_calls);
+        let proof_observer: TriagePacketProofObserverV1 = Arc::new(
+            move |_proof: &crate::triage_host::TriageExecutedPacketProofV1| {
+                observed_proof_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
         let request = ValidatedTriageRequest::new(request(TriagePolicySelectionV2::Saved {
             policy_id: "saved:test".into(),
             policy_revision: 1,
@@ -1146,7 +1166,8 @@ mod tests {
             fixture.policies,
             fixture.qualifications,
             registry.clone(),
-        );
+        )
+        .with_packet_proof_observer(proof_observer);
         let prepared = engine.preflight(&request).await.expect("preflight");
         assert!(registry.cancel(&prepared.cancellation).expect("cancel"));
 
@@ -1166,6 +1187,7 @@ mod tests {
         assert!(replay_attempts(execution.replay())
             .iter()
             .all(|attempt| attempt.status == TriageAttemptStatus::Cancelled));
+        assert_eq!(proof_calls.load(Ordering::SeqCst), 0);
         assert_eq!(reads.load(Ordering::SeqCst), 0);
         assert_eq!(registry.len(), 0);
     }
@@ -1175,6 +1197,14 @@ mod tests {
         let mut fixture = fixture();
         let registry = TriageCancellationRegistryV1::default();
         let reads = Arc::clone(&fixture.secrets.reads);
+        let proof_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_proof_calls = Arc::clone(&proof_calls);
+        let proof_observer: TriagePacketProofObserverV1 = Arc::new(
+            move |_proof: &crate::triage_host::TriageExecutedPacketProofV1| {
+                observed_proof_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
         let mut request = request(TriagePolicySelectionV2::Saved {
             policy_id: "saved:test".into(),
             policy_revision: 1,
@@ -1189,7 +1219,8 @@ mod tests {
             fixture.policies,
             fixture.qualifications,
             registry.clone(),
-        );
+        )
+        .with_packet_proof_observer(proof_observer);
         let prepared = engine.preflight(&request).await.expect("preflight");
         tokio::time::advance(Duration::from_millis(300_001)).await;
 
@@ -1209,6 +1240,7 @@ mod tests {
         assert!(replay_attempts(execution.replay())
             .iter()
             .all(|attempt| attempt.status == TriageAttemptStatus::TimedOut));
+        assert_eq!(proof_calls.load(Ordering::SeqCst), 0);
         assert_eq!(reads.load(Ordering::SeqCst), 0);
         assert_eq!(registry.len(), 0);
     }

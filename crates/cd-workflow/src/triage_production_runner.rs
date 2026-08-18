@@ -509,7 +509,7 @@ impl TriageProductionEventLedgerV1 {
         });
         ledger.push(TriageRunEventPayloadV2::PacketReady {
             packet_id: input.packet.packet_id().into(),
-            packet_digest: input.packet.packet_id().into(),
+            packet_digest: authoritative_packet_digest(&input.packet).into(),
             evidence_count: input.packet.rows().len() as u32,
         });
         Ok(ledger)
@@ -547,6 +547,15 @@ impl TriageProductionEventLedgerV1 {
             .map_err(TriageProductionRunnerError::Contract)?;
         Ok(replay)
     }
+}
+
+/// Digest of the authoritative evidence ledger carried by a production
+/// packet.  This is deliberately distinct from `packet_id`: the packet id also
+/// binds packet-shaping facts such as scope, chronology, clock compatibility,
+/// and neighborhood policy, while this digest binds the exact host evidence
+/// rows (including their source labels and snapshot revisions).
+pub(crate) fn authoritative_packet_digest(packet: &FastTriagePacketV1) -> &str {
+    packet.ledger().binding().ledger_digest.as_str()
 }
 
 /// Completed runner result: replay plus the owner-local typed partial result.
@@ -2482,6 +2491,28 @@ mod tests {
             ledger.finish(),
             Err(TriageProductionRunnerError::Contract(_))
         ));
+    }
+
+    #[test]
+    fn packet_ready_emits_the_authoritative_ledger_digest() {
+        let input = input();
+        let ledger = TriageProductionEventLedgerV1::new(&input).expect("prelude");
+        let TriageRunEventPayloadV2::PacketReady {
+            packet_id,
+            packet_digest,
+            evidence_count,
+        } = &ledger.events()[1].event
+        else {
+            panic!("second event must be packet_ready");
+        };
+
+        assert_eq!(packet_id, input.packet.packet_id());
+        assert_eq!(
+            packet_digest,
+            &input.packet.ledger().binding().ledger_digest
+        );
+        assert_ne!(packet_digest, packet_id);
+        assert_eq!(*evidence_count, input.packet.rows().len() as u32);
     }
 
     #[test]
