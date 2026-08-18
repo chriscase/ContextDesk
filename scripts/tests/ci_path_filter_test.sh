@@ -27,6 +27,14 @@ assert_route() {
 assert_route "bench-only" bench-only false \
   crates/cd-triage-bench/src/lib.rs \
   docs/benchmarks/TRIAGE_BENCH_V1.md
+assert_route "bench live bridge" bench-only false \
+  crates/cd-triage-bench-live/src/lib.rs
+assert_route "bench adapter" bench-only false \
+  crates/cd-triage-bench-adapter/src/record.rs
+assert_route "bench CLI" bench-only false \
+  crates/cd-cli/src/commands/bench_compare.rs
+assert_route "unrelated CLI" full true \
+  crates/cd-cli/src/commands/chat.rs
 assert_route "collab-only" collab-only false collab/README.md collab/src/index.ts
 assert_route "mixed bench and rust" full true \
   crates/cd-triage-bench/src/lib.rs crates/cd-core/src/lib.rs

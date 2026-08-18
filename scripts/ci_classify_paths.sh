@@ -13,7 +13,15 @@ while IFS= read -r path; do
   [ -n "$path" ] || continue
   changed_count=$((changed_count + 1))
   case "$path" in
-    crates/cd-triage-bench/* | docs/benchmarks/*)
+    crates/cd-triage-bench/* \
+      | crates/cd-triage-bench-live/* \
+      | crates/cd-triage-bench-adapter/* \
+      | crates/cd-triage-bench-adapter-cli/* \
+      | crates/cd-cli/src/commands/bench_compare.rs \
+      | crates/cd-cli/tests/bench_compare_cli.rs \
+      | crates/cd-cli/Cargo.toml \
+      | docs/benchmarks/* \
+      | docs/CLI.md)
       collab_only=0
       ;;
     collab/* | crates/cd-collab/* | docs/collab/*)

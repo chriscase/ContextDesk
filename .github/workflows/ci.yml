@@ -701,7 +701,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: run isolated bench validation
         if: needs.ci-path-filter.outputs.surface == 'bench-only'
-        run: cargo test -p cd-triage-bench --all-targets
+        run: |
+          cargo test -p cd-triage-bench --all-targets
+          cargo test -p cd-triage-bench-live --all-targets
+          cargo test -p cd-triage-bench-adapter --all-targets
+          cargo test -p cd-triage-bench-adapter-cli --all-targets
+          cargo test -p cd-cli --all-targets
       - name: record isolated collab routing
         if: needs.ci-path-filter.outputs.surface == 'collab-only'
         run: |
