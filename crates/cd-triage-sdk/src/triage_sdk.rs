@@ -693,6 +693,7 @@ impl TriageReplayV1 {
         let mut finalizer_attempt = false;
         let mut reviewer_attempt = false;
         let mut contributor_attempt = false;
+        let mut pre_packet_slot_ids = BTreeSet::new();
         for (index, event) in self.events.iter().enumerate() {
             event.validate()?;
             if event.run_id != self.run_id {
@@ -705,6 +706,43 @@ impl TriageReplayV1 {
                 terminal_count += 1;
                 if index + 1 != self.events.len() {
                     return Err(TriageContractError::EventAfterTerminal);
+                }
+                let pre_packet_terminal = !packet_ready
+                    && !legacy_reconciliation
+                    && !preliminary_reconciliation
+                    && !final_reconciliation
+                    && !validation
+                    && !correction;
+                if pre_packet_terminal {
+                    match &event.event {
+                        TriageRunEventPayloadV2::Failed {
+                            partial_result: None,
+                            ..
+                        }
+                        | TriageRunEventPayloadV2::TimedOut {
+                            partial_result: None,
+                            ..
+                        }
+                        | TriageRunEventPayloadV2::Cancelled {
+                            partial_result: None,
+                            ..
+                        } => {}
+                        TriageRunEventPayloadV2::Completed { .. }
+                        | TriageRunEventPayloadV2::Failed {
+                            partial_result: Some(_),
+                            ..
+                        }
+                        | TriageRunEventPayloadV2::TimedOut {
+                            partial_result: Some(_),
+                            ..
+                        }
+                        | TriageRunEventPayloadV2::Cancelled {
+                            partial_result: Some(_),
+                            ..
+                        } => return Err(TriageContractError::InvalidPhaseOrder),
+                        _ => unreachable!("terminal event checked above"),
+                    }
+                    continue;
                 }
                 // Cancellation may be observed before the host reaches its
                 // validation checkpoint. Failed/timed-out terminals still
@@ -724,6 +762,17 @@ impl TriageReplayV1 {
                         && !legacy_reconciliation
                         && !preliminary_reconciliation
                         && !validation
+                }
+                TriageRunEventPayloadV2::RoleAttempt { attempt }
+                    if !packet_ready
+                        && !legacy_reconciliation
+                        && !preliminary_reconciliation
+                        && !final_reconciliation
+                        && !validation
+                        && !correction =>
+                {
+                    validate_pre_packet_attempt(attempt, &mut pre_packet_slot_ids)?;
+                    index > 0
                 }
                 TriageRunEventPayloadV2::RoleAttempt { attempt } => match attempt.role {
                     TriageSlotKindV2::Contributor(_) => {
@@ -814,6 +863,32 @@ impl TriageReplayV1 {
         }
         Ok(())
     }
+}
+
+fn validate_pre_packet_attempt(
+    attempt: &TriageRoleAttemptV1,
+    slot_ids: &mut BTreeSet<String>,
+) -> Result<(), TriageContractError> {
+    if !matches!(
+        attempt.status,
+        TriageAttemptStatus::Unavailable
+            | TriageAttemptStatus::TimedOut
+            | TriageAttemptStatus::Cancelled
+            | TriageAttemptStatus::Failed
+            | TriageAttemptStatus::NotAdmitted
+    ) || attempt.elapsed_ms != 0
+        || attempt.input_chars != 0
+        || attempt.output_chars != 0
+        || attempt.physical_provider_calls != Some(0)
+        || attempt.semantic_corrections != Some(0)
+        || attempt.terminal_disposition != Some(terminal_disposition_for_status(attempt.status))
+    {
+        return Err(TriageContractError::InvalidField("pre_packet_role_attempt"));
+    }
+    if !slot_ids.insert(attempt.role_slot_id.clone()) {
+        return Err(TriageContractError::InvalidField("pre_packet_role_slot_id"));
+    }
+    Ok(())
 }
 
 pub fn parse_request_v2(raw: &str) -> Result<TriageRequestV2, TriageContractError> {

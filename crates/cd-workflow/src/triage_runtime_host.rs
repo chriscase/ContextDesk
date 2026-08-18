@@ -10,17 +10,24 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cd_core::config::AppConfig;
+use cd_core::extension_contract::PacketPrivacyBoundary;
 use cd_core::keychain_store::SecretStore;
 use cd_core::multi_model::triage_policy::{
-    TriagePolicyMode, TriagePolicyPreflightV2, TriagePolicyV2,
+    CompiledRoleSlotV2, PolicyRejectionCategoryV2, SlotDispositionV2, TriagePolicyMode,
+    TriagePolicyPreflightV2, TriagePolicyV2,
 };
 use cd_core::tool_host::ToolHost;
 use cd_core::triage_policy_store::TriagePolicyStoreV1;
 use cd_core::triage_role_qualification::TriageRoleQualificationStoreV1;
-use cd_core::triage_sdk::{TriageCancellationV1, TriagePolicySelectionV2, TriageReplayV1};
+use cd_core::triage_sdk::{
+    TriageAttemptStatus, TriageCancellationV1, TriagePolicySelectionV2, TriageReplayV1,
+    TriageRoleAttemptV1, TriageRunEventPayloadV2, TriageRunEventV2, TriageTerminalDispositionV1,
+    TRIAGE_REPLAY_SCHEMA_V1, TRIAGE_RUN_EVENT_SCHEMA_V2,
+};
 use cd_triage_runtime::{
     TriageEngine, TriageEngineFailure, TriageEngineFailureCategory, TriageEventSink,
     ValidatedTriageRequest,
@@ -124,20 +131,28 @@ impl TriageCancellationRegistryV1 {
 /// provider construction, credential reads, packet materialization, and
 /// network calls have not happened yet.
 pub struct WorkflowTriagePreflightV1 {
-    policy: TriagePolicyV2,
-    preflight: TriagePolicyPreflightV2,
-    input: TriageHostRunInput,
+    policy: Option<TriagePolicyV2>,
+    preflight: Option<TriagePolicyPreflightV2>,
+    slots: Vec<CompiledRoleSlotV2>,
+    failure_category: Option<&'static str>,
+    input: Option<TriageHostRunInput>,
+    policy_fingerprint: String,
+    deadline_ms: u64,
     cancellation: TriageCancellationV1,
     cancel_owner: Arc<AtomicBool>,
+    started_at: tokio::time::Instant,
 }
 
 impl std::fmt::Debug for WorkflowTriagePreflightV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WorkflowTriagePreflightV1")
-            .field("policy_mode", &self.policy.mode)
-            .field("run_id", &self.input.run_id)
-            .field("request_fingerprint", &self.input.request_fingerprint)
+            .field(
+                "policy_mode",
+                &self.policy.as_ref().map(|policy| policy.mode),
+            )
+            .field("run_id", &self.cancellation.run_id)
+            .field("policy_resolved", &self.policy.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -188,11 +203,12 @@ impl<'a> WorkflowTriageEngineV1<'a> {
     fn policy_for_request(
         &self,
         request: &ValidatedTriageRequest,
-    ) -> Result<TriagePolicyV2, TriageEngineFailure> {
+    ) -> Option<(TriagePolicyV2, bool)> {
         let standard_selection = matches!(
             &request.request().policy,
             TriagePolicySelectionV2::Standard { .. }
         );
+        let mut rejected = false;
         let mut policy = match &request.request().policy {
             TriagePolicySelectionV2::Standard { model } => {
                 let profile = self
@@ -200,12 +216,17 @@ impl<'a> WorkflowTriageEngineV1<'a> {
                     .providers
                     .profiles
                     .iter()
-                    .find(|profile| profile.id == model.profile_id)
-                    .ok_or_else(preflight_rejected)?;
-                TriagePolicyV2::standard(model.clone(), !profile.local_only)
+                    .find(|profile| profile.id == model.profile_id);
+                if profile.is_none() {
+                    rejected = true;
+                }
+                TriagePolicyV2::standard(
+                    model.clone(),
+                    profile.is_some_and(|profile| !profile.local_only),
+                )
             }
             TriagePolicySelectionV2::Inline { document, .. } => {
-                serde_json::from_value(document.clone()).map_err(|_| preflight_rejected())?
+                serde_json::from_value(document.clone()).ok()?
             }
             TriagePolicySelectionV2::Saved {
                 policy_id,
@@ -215,14 +236,13 @@ impl<'a> WorkflowTriageEngineV1<'a> {
                 .policies
                 .iter()
                 .find(|saved| saved.policy_id == *policy_id && saved.revision == *policy_revision)
-                .map(|saved| saved.policy.clone())
-                .ok_or_else(preflight_rejected)?,
+                .map(|saved| saved.policy.clone())?,
         };
         // A Standard document cannot enter through the configured-policy
         // facade. Only the explicit Standard request shape may select the
         // permanent one-finalizer default.
         if matches!(policy.mode, TriagePolicyMode::Standard) && !standard_selection {
-            return Err(preflight_rejected());
+            rejected = true;
         }
         if let Some(deadline_ms) = request.request().overrides.deadline_ms {
             policy.budget.whole_turn_deadline_ms = Some(deadline_ms);
@@ -230,7 +250,7 @@ impl<'a> WorkflowTriageEngineV1<'a> {
         if let Some(max_provider_calls) = request.request().overrides.max_provider_calls {
             policy.budget.max_provider_calls = max_provider_calls;
         }
-        Ok(policy)
+        Some((policy, rejected))
     }
 
     fn host_input(
@@ -248,9 +268,6 @@ impl<'a> WorkflowTriageEngineV1<'a> {
         );
         let context_char_budget =
             usize::try_from(policy.budget.max_context_chars).map_err(|_| preflight_rejected())?;
-        if deadline_ms == 0 || context_char_budget == 0 {
-            return Err(preflight_rejected());
-        }
         let policy_bytes = serde_json::to_vec(policy).map_err(|_| preflight_rejected())?;
         let policy_fingerprint = format!("sha256:{:x}", Sha256::digest(policy_bytes));
         Ok(TriageHostRunInput {
@@ -268,6 +285,38 @@ impl<'a> WorkflowTriageEngineV1<'a> {
             cancel: Some(cancel),
         })
     }
+
+    fn unresolved_policy_fingerprint(
+        &self,
+        request: &ValidatedTriageRequest,
+    ) -> Result<String, TriageEngineFailure> {
+        let bytes =
+            serde_json::to_vec(&request.request().policy).map_err(|_| preflight_rejected())?;
+        Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+    }
+
+    fn unresolved_policy_deadline_ms(&self, request: &ValidatedTriageRequest) -> u64 {
+        request.request().overrides.deadline_ms.unwrap_or(
+            if self.config.router.deadline_is_explicit {
+                self.config.router.deadline_ms
+            } else {
+                300_000
+            },
+        )
+    }
+
+    fn finish_pre_provider(
+        &self,
+        request: &ValidatedTriageRequest,
+        prepared: &WorkflowTriagePreflightV1,
+        terminal: PreProviderTerminalV1,
+        events: Option<TriageEventSink>,
+    ) -> Result<TriageReplayV1, TriageEngineFailure> {
+        let replay = pre_provider_replay(request, prepared, terminal);
+        self.cancellations
+            .remove_if_owned(&prepared.cancellation, &prepared.cancel_owner);
+        emit_authoritative_replay(replay?, events)
+    }
 }
 
 #[async_trait]
@@ -278,6 +327,7 @@ impl TriageEngine for WorkflowTriageEngineV1<'_> {
         &self,
         request: &ValidatedTriageRequest,
     ) -> Result<Self::Preflight, TriageEngineFailure> {
+        let started_at = tokio::time::Instant::now();
         let cancellation = TriageCancellationV1 {
             schema_id: cd_core::triage_sdk::TRIAGE_CANCELLATION_SCHEMA_V1.into(),
             run_id: request.request().run_id.clone(),
@@ -285,50 +335,138 @@ impl TriageEngine for WorkflowTriageEngineV1<'_> {
         };
         let cancel_owner = self.cancellations.register(&cancellation)?;
         let prepared = (|| {
-            self.policies.validate().map_err(|_| preflight_rejected())?;
-            self.qualifications
-                .validate()
-                .map_err(|_| preflight_rejected())?;
-            let policy = self.policy_for_request(request)?;
-            let preflight = preflight_for_policy(&self.config, &policy, &self.qualifications);
-            compile_preflight(&policy, &preflight).map_err(|_| preflight_rejected())?;
+            let policies_valid = self.policies.validate().is_ok();
+            let qualifications_valid = self.qualifications.validate().is_ok();
+            let saved_policy_untrusted = !policies_valid
+                && matches!(
+                    &request.request().policy,
+                    TriagePolicySelectionV2::Saved { .. }
+                );
+            let policy_resolution = (!saved_policy_untrusted)
+                .then(|| self.policy_for_request(request))
+                .flatten();
+            let Some((policy, request_rejected)) = policy_resolution else {
+                let policy_fingerprint = self.unresolved_policy_fingerprint(request)?;
+                let deadline_ms = self.unresolved_policy_deadline_ms(request);
+                return Ok::<_, TriageEngineFailure>((
+                    None,
+                    None,
+                    Vec::new(),
+                    Some("policy_preflight_rejected"),
+                    None,
+                    policy_fingerprint,
+                    deadline_ms,
+                ));
+            };
+            let empty_qualifications = TriageRoleQualificationStoreV1::default();
+            let qualification_store = if qualifications_valid {
+                &self.qualifications
+            } else {
+                &empty_qualifications
+            };
+            let preflight = preflight_for_policy(&self.config, &policy, qualification_store);
+            let compiled = compile_preflight(&policy, &preflight);
+            let (slots, compilation_failed) = match compiled {
+                Ok(compiled) => (compiled.slots, false),
+                Err(failure) => (failure.slots, true),
+            };
+            let failure_category = if request_rejected
+                || compilation_failed
+                || !policies_valid
+                || !qualifications_valid
+            {
+                Some("policy_preflight_rejected")
+            } else {
+                None
+            };
             let input = self.host_input(request, &policy, Arc::clone(&cancel_owner))?;
-            Ok::<_, TriageEngineFailure>((policy, preflight, input))
+            let policy_fingerprint = input.policy_fingerprint.clone();
+            let deadline_ms = input.deadline_ms;
+            Ok::<_, TriageEngineFailure>((
+                Some(policy),
+                Some(preflight),
+                slots,
+                failure_category,
+                Some(input),
+                policy_fingerprint,
+                deadline_ms,
+            ))
         })();
-        let (policy, preflight, input) = match prepared {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.cancellations
-                    .remove_if_owned(&cancellation, &cancel_owner);
-                return Err(error);
-            }
-        };
+        let (policy, preflight, slots, failure_category, input, policy_fingerprint, deadline_ms) =
+            match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.cancellations
+                        .remove_if_owned(&cancellation, &cancel_owner);
+                    return Err(error);
+                }
+            };
         Ok(WorkflowTriagePreflightV1 {
             policy,
             preflight,
+            slots,
+            failure_category,
             input,
+            policy_fingerprint,
+            deadline_ms,
             cancellation,
             cancel_owner,
+            started_at,
         })
     }
 
     async fn execute(
         &self,
         request: ValidatedTriageRequest,
-        prepared: Self::Preflight,
-        events: Option<TriageEventSink>,
+        mut prepared: Self::Preflight,
+        mut events: Option<TriageEventSink>,
     ) -> Result<TriageReplayV1, TriageEngineFailure> {
-        if prepared.input.run_id != request.request().run_id
-            || prepared.input.request_fingerprint != request.fingerprint()
-            || prepared.input.cancellation_id != request.request().cancellation_id
+        if prepared.cancellation.run_id != request.request().run_id
+            || prepared.cancellation.cancellation_id != request.request().cancellation_id
+            || prepared.input.as_ref().is_some_and(|input| {
+                input.run_id != request.request().run_id
+                    || input.request_fingerprint != request.fingerprint()
+                    || input.cancellation_id != request.request().cancellation_id
+            })
         {
             self.cancellations
                 .remove_if_owned(&prepared.cancellation, &prepared.cancel_owner);
             return Err(preflight_rejected());
         }
 
+        if prepared.cancel_owner.load(Ordering::SeqCst) {
+            return self.finish_pre_provider(
+                &request,
+                &prepared,
+                PreProviderTerminalV1::Cancelled,
+                events,
+            );
+        }
+        if let Some(category) = prepared.failure_category {
+            return self.finish_pre_provider(
+                &request,
+                &prepared,
+                PreProviderTerminalV1::Failed { category },
+                events,
+            );
+        }
+        if prepared.started_at.elapsed() >= Duration::from_millis(prepared.deadline_ms) {
+            return self.finish_pre_provider(
+                &request,
+                &prepared,
+                PreProviderTerminalV1::TimedOut,
+                events,
+            );
+        }
+
+        if prepared.policy.is_none() || prepared.preflight.is_none() || prepared.input.is_none() {
+            self.cancellations
+                .remove_if_owned(&prepared.cancellation, &prepared.cancel_owner);
+            return Err(preflight_rejected());
+        }
+
         let event_failed = Arc::new(AtomicBool::new(false));
-        let production_sink = events.map(|sink| {
+        let production_sink = events.take().map(|sink| {
             let sink = Arc::new(Mutex::new(sink));
             let event_failed = Arc::clone(&event_failed);
             let cancel = Arc::clone(&prepared.cancel_owner);
@@ -345,30 +483,38 @@ impl TriageEngine for WorkflowTriageEngineV1<'_> {
         });
 
         let result = {
+            let policy = prepared
+                .policy
+                .as_ref()
+                .expect("resolved policy checked above");
+            let preflight = prepared
+                .preflight
+                .as_ref()
+                .expect("resolved preflight checked above");
+            let input = prepared.input.take().expect("resolved input checked above");
             let mut host = self.host.lock().await;
             let resolved = resolve_v2_host(
                 &mut host,
                 &self.cache_root,
                 &self.config,
                 self.secrets,
-                &prepared.policy,
-                &prepared.preflight,
-                &prepared.input,
+                policy,
+                preflight,
+                &input,
             )
-            .await
-            .map_err(map_preflight_host_error);
+            .await;
             match resolved {
                 Ok(resolved) => run_v2_host(
                     &mut host,
                     resolved,
-                    prepared.input,
+                    input,
                     &HostValidatedAnswerHooks::default(),
                     production_sink,
                 )
                 .await
                 .map(|result| result.replay)
                 .map_err(map_execution_host_error),
-                Err(error) => Err(error),
+                Err(error) => Err(map_preflight_host_error(error)),
             }
         };
         self.cancellations
@@ -388,6 +534,182 @@ impl TriageEngine for WorkflowTriageEngineV1<'_> {
             Err(TriageEngineFailure::new(
                 TriageEngineFailureCategory::CancellationFailed,
             ))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PreProviderTerminalV1 {
+    Failed { category: &'static str },
+    TimedOut,
+    Cancelled,
+}
+
+impl PreProviderTerminalV1 {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Failed { category } => category,
+            Self::TimedOut => "deadline",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn admitted_status(self) -> TriageAttemptStatus {
+        match self {
+            Self::Failed { .. } => TriageAttemptStatus::NotAdmitted,
+            Self::TimedOut => TriageAttemptStatus::TimedOut,
+            Self::Cancelled => TriageAttemptStatus::Cancelled,
+        }
+    }
+
+    fn failure_category(self) -> TriageEngineFailureCategory {
+        match self {
+            Self::Failed { .. } => TriageEngineFailureCategory::PreflightRejected,
+            Self::TimedOut => TriageEngineFailureCategory::DeadlineExceeded,
+            Self::Cancelled => TriageEngineFailureCategory::Cancelled,
+        }
+    }
+
+    fn payload(self, cancellation_id: &str) -> TriageRunEventPayloadV2 {
+        match self {
+            Self::Failed { category } => TriageRunEventPayloadV2::Failed {
+                category: category.into(),
+                partial_result: None,
+            },
+            Self::TimedOut => TriageRunEventPayloadV2::TimedOut {
+                category: "deadline".into(),
+                partial_result: None,
+            },
+            Self::Cancelled => TriageRunEventPayloadV2::Cancelled {
+                cancellation_id: cancellation_id.into(),
+                partial_result: None,
+            },
+        }
+    }
+}
+
+fn pre_provider_replay(
+    request: &ValidatedTriageRequest,
+    prepared: &WorkflowTriagePreflightV1,
+    terminal: PreProviderTerminalV1,
+) -> Result<TriageReplayV1, TriageEngineFailure> {
+    let mut events = vec![pre_provider_event(
+        request.request().run_id.as_str(),
+        0,
+        TriageRunEventPayloadV2::RunStarted {
+            request_fingerprint: request.fingerprint().into(),
+            policy_fingerprint: prepared.policy_fingerprint.clone(),
+        },
+    )];
+    for slot in &prepared.slots {
+        let status = if slot.disposition == SlotDispositionV2::Admitted {
+            terminal.admitted_status()
+        } else {
+            TriageAttemptStatus::NotAdmitted
+        };
+        let mut reason_codes = slot
+            .rejections
+            .iter()
+            .map(|category| pre_provider_rejection_code(*category).into())
+            .collect::<Vec<_>>();
+        if reason_codes.is_empty() {
+            reason_codes.push(terminal.reason().into());
+        }
+        let attempt = TriageRoleAttemptV1 {
+            attempt_id: format!("attempt:{}:{}", request.request().run_id, slot.slot_id),
+            role_slot_id: slot.slot_id.clone(),
+            role: slot.kind,
+            model: slot.model.validate().is_ok().then(|| slot.model.clone()),
+            status,
+            reason_codes,
+            elapsed_ms: 0,
+            input_chars: 0,
+            output_chars: 0,
+            physical_provider_calls: Some(0),
+            semantic_corrections: Some(0),
+            terminal_disposition: Some(pre_provider_disposition(status)),
+        };
+        events.push(pre_provider_event(
+            request.request().run_id.as_str(),
+            events.len() as u64,
+            TriageRunEventPayloadV2::RoleAttempt { attempt },
+        ));
+    }
+    events.push(pre_provider_event(
+        request.request().run_id.as_str(),
+        events.len() as u64,
+        terminal.payload(&prepared.cancellation.cancellation_id),
+    ));
+    let replay = TriageReplayV1 {
+        schema_id: TRIAGE_REPLAY_SCHEMA_V1.into(),
+        run_id: request.request().run_id.clone(),
+        request_fingerprint: request.fingerprint().into(),
+        events,
+    };
+    replay
+        .validate()
+        .map_err(|_| TriageEngineFailure::new(terminal.failure_category()))?;
+    Ok(replay)
+}
+
+fn emit_authoritative_replay(
+    replay: TriageReplayV1,
+    mut events: Option<TriageEventSink>,
+) -> Result<TriageReplayV1, TriageEngineFailure> {
+    if let Some(sink) = &mut events {
+        for event in &replay.events {
+            sink.emit(event)?;
+        }
+    }
+    Ok(replay)
+}
+
+fn pre_provider_event(
+    run_id: &str,
+    sequence: u64,
+    event: TriageRunEventPayloadV2,
+) -> TriageRunEventV2 {
+    TriageRunEventV2 {
+        schema_id: TRIAGE_RUN_EVENT_SCHEMA_V2.into(),
+        run_id: run_id.into(),
+        sequence,
+        privacy: PacketPrivacyBoundary::OwnerOnly,
+        event,
+    }
+}
+
+fn pre_provider_disposition(status: TriageAttemptStatus) -> TriageTerminalDispositionV1 {
+    match status {
+        TriageAttemptStatus::Completed => TriageTerminalDispositionV1::Completed,
+        TriageAttemptStatus::Abstained => TriageTerminalDispositionV1::Abstained,
+        TriageAttemptStatus::Invalid => TriageTerminalDispositionV1::Invalid,
+        TriageAttemptStatus::Unavailable => TriageTerminalDispositionV1::Unavailable,
+        TriageAttemptStatus::TimedOut => TriageTerminalDispositionV1::TimedOut,
+        TriageAttemptStatus::Cancelled => TriageTerminalDispositionV1::Cancelled,
+        TriageAttemptStatus::Failed => TriageTerminalDispositionV1::Failed,
+        TriageAttemptStatus::NotAdmitted => TriageTerminalDispositionV1::NotAdmitted,
+    }
+}
+
+fn pre_provider_rejection_code(category: PolicyRejectionCategoryV2) -> &'static str {
+    match category {
+        PolicyRejectionCategoryV2::SchemaMismatch => "schema_mismatch",
+        PolicyRejectionCategoryV2::InvalidSlotId => "invalid_slot_id",
+        PolicyRejectionCategoryV2::DuplicateSlotId => "duplicate_slot_id",
+        PolicyRejectionCategoryV2::InvalidModelRef => "invalid_model_ref",
+        PolicyRejectionCategoryV2::StandardModeExpanded => "standard_mode_expanded",
+        PolicyRejectionCategoryV2::StandardFinalizerRequired => "standard_finalizer_required",
+        PolicyRejectionCategoryV2::EmptyPolicy => "empty_policy",
+        PolicyRejectionCategoryV2::InvalidBudget => "invalid_budget",
+        PolicyRejectionCategoryV2::PolicyLimitExceeded => "policy_limit_exceeded",
+        PolicyRejectionCategoryV2::RoleUnavailable => "role_unavailable",
+        PolicyRejectionCategoryV2::QualificationUnavailable => "qualification_unavailable",
+        PolicyRejectionCategoryV2::EgressDenied => "egress_denied",
+        PolicyRejectionCategoryV2::UnknownPreflightSlot => "unknown_preflight_slot",
+        PolicyRejectionCategoryV2::DuplicatePreflightSlot => "duplicate_preflight_slot",
+        PolicyRejectionCategoryV2::PreflightBindingMismatch => "preflight_binding_mismatch",
+        PolicyRejectionCategoryV2::ProviderCallBudgetInsufficient => {
+            "provider_call_budget_insufficient"
         }
     }
 }
@@ -430,6 +752,7 @@ fn map_execution_host_error(error: TriageHostError) -> TriageEngineFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cd_core::error::CoreResult;
     use cd_core::extension_contract::PacketPrivacyBoundary;
     use cd_core::index::KeywordIndex;
     use cd_core::keychain_store::MemorySecretStore;
@@ -442,18 +765,42 @@ mod tests {
         triage_protocol_fingerprint, TriageRoleQualificationKeyV1, TriageRoleQualificationRecordV1,
     };
     use cd_core::triage_sdk::{
-        TriagePolicySelectionV2, TriageRequestOverridesV1, TriageRequestV2, TriageScopeV1,
-        TRIAGE_REQUEST_SCHEMA_V2,
+        TriageAttemptStatus, TriagePolicySelectionV2, TriageRequestOverridesV1, TriageRequestV2,
+        TriageRunEventPayloadV2, TriageRunEventV2, TriageScopeV1, TRIAGE_REQUEST_SCHEMA_V2,
     };
     use cd_core::workspace::Workspace;
-    use cd_triage_runtime::{triage, triage_with_policy, TriageEngine, TriageRuntimeError};
+    use cd_triage_runtime::{
+        replay_validated, triage, triage_with_policy, TriageEngine, TriageExecutionTerminal,
+        TriageRuntimeError,
+    };
+
+    #[derive(Debug, Clone, Default)]
+    struct CountingSecretStore {
+        inner: MemorySecretStore,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SecretStore for CountingSecretStore {
+        fn set(&self, ref_id: &str, secret: &str) -> CoreResult<()> {
+            self.inner.set(ref_id, secret)
+        }
+
+        fn get(&self, ref_id: &str) -> CoreResult<Option<String>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.get(ref_id)
+        }
+
+        fn delete(&self, ref_id: &str) -> CoreResult<()> {
+            self.inner.delete(ref_id)
+        }
+    }
 
     struct Fixture {
         _workspace: tempfile::TempDir,
         cache: tempfile::TempDir,
         host: ToolHost,
         config: AppConfig,
-        secrets: MemorySecretStore,
+        secrets: CountingSecretStore,
         policies: TriagePolicyStoreV1,
         qualifications: TriageRoleQualificationStoreV1,
     }
@@ -477,7 +824,24 @@ mod tests {
         policy.mode = TriagePolicyMode::Enhanced;
         let mut policies = TriagePolicyStoreV1::default();
         policies.upsert("saved:test", policy).expect("saved policy");
-        let kind = TriageSlotKindV2::Finalizer;
+        let mut qualifications = TriageRoleQualificationStoreV1::default();
+        qualify(&mut qualifications, &profile, TriageSlotKindV2::Finalizer);
+        Fixture {
+            _workspace: workspace_dir,
+            cache,
+            host,
+            config,
+            secrets: CountingSecretStore::default(),
+            policies,
+            qualifications,
+        }
+    }
+
+    fn qualify(
+        store: &mut TriageRoleQualificationStoreV1,
+        profile: &ProviderProfile,
+        kind: TriageSlotKindV2,
+    ) {
         let transport = cd_core::capability_qualification::QualificationKey::with_provider_kind(
             &profile.id,
             &profile.base_url,
@@ -492,8 +856,7 @@ mod tests {
             kind,
             triage_protocol_fingerprint(&transport),
         );
-        let mut qualifications = TriageRoleQualificationStoreV1::default();
-        qualifications
+        store
             .put(TriageRoleQualificationRecordV1 {
                 key,
                 qualification: RoleQualificationV2::Qualified,
@@ -503,15 +866,6 @@ mod tests {
                 tested_at: 1,
             })
             .expect("qualification");
-        Fixture {
-            _workspace: workspace_dir,
-            cache,
-            host,
-            config,
-            secrets: MemorySecretStore::new(),
-            policies,
-            qualifications,
-        }
     }
 
     fn request(policy: TriagePolicySelectionV2) -> TriageRequestV2 {
@@ -529,6 +883,36 @@ mod tests {
             overrides: TriageRequestOverridesV1::default(),
             cancellation_id: "cancel:test".into(),
         }
+    }
+
+    fn replay_attempts(replay: &TriageReplayV1) -> Vec<&TriageRoleAttemptV1> {
+        replay
+            .events
+            .iter()
+            .filter_map(|event| match &event.event {
+                TriageRunEventPayloadV2::RoleAttempt { attempt } => Some(attempt),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_provider_free(replay: &TriageReplayV1) {
+        assert!(replay.events.iter().all(|event| !matches!(
+            &event.event,
+            TriageRunEventPayloadV2::PacketReady { .. }
+                | TriageRunEventPayloadV2::Reconciliation { .. }
+                | TriageRunEventPayloadV2::PreliminaryReconciliation { .. }
+                | TriageRunEventPayloadV2::FinalReconciliation { .. }
+                | TriageRunEventPayloadV2::Validation { .. }
+                | TriageRunEventPayloadV2::Correction { .. }
+        )));
+        assert!(replay_attempts(replay).iter().all(|attempt| {
+            attempt.elapsed_ms == 0
+                && attempt.input_chars == 0
+                && attempt.output_chars == 0
+                && attempt.physical_provider_calls == Some(0)
+                && attempt.semantic_corrections == Some(0)
+        }));
     }
 
     #[tokio::test]
@@ -550,7 +934,10 @@ mod tests {
         }))
         .expect("request");
         let prepared = engine.preflight(&request).await.expect("preflight");
-        assert_eq!(prepared.input.request_fingerprint, request.fingerprint());
+        assert_eq!(
+            prepared.input.as_ref().unwrap().request_fingerprint,
+            request.fingerprint()
+        );
         assert_eq!(registry.len(), 1);
         assert!(registry.cancel(&prepared.cancellation).expect("cancel"));
         assert!(prepared.cancel_owner.load(Ordering::SeqCst));
@@ -581,24 +968,30 @@ mod tests {
         .expect("request");
         let prepared = engine.preflight(&request).await.expect("preflight");
 
-        assert_eq!(prepared.policy.mode, TriagePolicyMode::Standard);
-        assert!(prepared.policy.contributors.is_empty());
-        assert!(prepared.policy.reviewer.is_none());
-        let finalizer = prepared.policy.finalizer.as_ref().expect("finalizer");
+        let policy = prepared.policy.as_ref().expect("policy");
+        assert_eq!(policy.mode, TriagePolicyMode::Standard);
+        assert!(policy.contributors.is_empty());
+        assert!(policy.reviewer.is_none());
+        let finalizer = policy.finalizer.as_ref().expect("finalizer");
         assert_eq!(finalizer.slot_id, "standard-finalizer");
         assert_eq!(finalizer.model, model);
-        assert_eq!(prepared.preflight.roles.len(), 1);
-        assert_eq!(prepared.preflight.roles[0].model, finalizer.model);
-        assert_eq!(prepared.input.request_fingerprint, request.fingerprint());
+        let preflight = prepared.preflight.as_ref().expect("preflight");
+        assert_eq!(preflight.roles.len(), 1);
+        assert_eq!(preflight.roles[0].model, finalizer.model);
+        assert_eq!(
+            prepared.input.as_ref().unwrap().request_fingerprint,
+            request.fingerprint()
+        );
         assert_eq!(registry.len(), 1);
         registry.remove_if_owned(&prepared.cancellation, &prepared.cancel_owner);
         assert_eq!(registry.len(), 0);
     }
 
     #[tokio::test]
-    async fn inline_standard_document_fails_closed_and_cleans_registration() {
+    async fn inline_standard_document_returns_authoritative_failed_replay() {
         let mut fixture = fixture();
         let registry = TriageCancellationRegistryV1::default();
+        let reads = Arc::clone(&fixture.secrets.reads);
         let standard = TriagePolicyV2::standard(
             ModelRef {
                 profile_id: "profile:test".into(),
@@ -615,16 +1008,208 @@ mod tests {
             fixture.qualifications,
             registry.clone(),
         );
-        let request = ValidatedTriageRequest::new(request(TriagePolicySelectionV2::Inline {
+        let request = request(TriagePolicySelectionV2::Inline {
             schema_id: TRIAGE_POLICY_SCHEMA_V2.into(),
             document: serde_json::to_value(standard).expect("policy"),
+        });
+        let validated = ValidatedTriageRequest::new(request.clone()).expect("request");
+        let streamed = Arc::new(Mutex::new(Vec::<TriageRunEventV2>::new()));
+        let captured = Arc::clone(&streamed);
+        let sink = TriageEventSink::new(&validated, move |event| {
+            captured.lock().unwrap().push(event.clone());
+        });
+        let execution = triage_with_policy(&engine, request, Some(sink))
+            .await
+            .expect("authoritative failed execution");
+        assert!(matches!(
+            execution.terminal(),
+            TriageExecutionTerminal::Failed { category, partial_result: None }
+                if category == "policy_preflight_rejected"
+        ));
+        execution.replay().validate().unwrap();
+        assert_provider_free(execution.replay());
+        let attempts = replay_attempts(execution.replay());
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].role_slot_id, "standard-finalizer");
+        assert_eq!(attempts[0].status, TriageAttemptStatus::NotAdmitted);
+        assert_eq!(
+            streamed.lock().unwrap().as_slice(),
+            execution.replay().events.as_slice()
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn compile_rejection_accounts_the_resolved_slot_without_host_work() {
+        let mut fixture = fixture();
+        fixture.qualifications = TriageRoleQualificationStoreV1::default();
+        let registry = TriageCancellationRegistryV1::default();
+        let reads = Arc::clone(&fixture.secrets.reads);
+        let request = request(TriagePolicySelectionV2::Saved {
+            policy_id: "saved:test".into(),
+            policy_revision: 1,
+        });
+        let engine = WorkflowTriageEngineV1::new(
+            &mut fixture.host,
+            fixture.cache.path(),
+            fixture.config,
+            &fixture.secrets,
+            fixture.policies,
+            fixture.qualifications,
+            registry.clone(),
+        );
+
+        let execution = triage_with_policy(&engine, request, None)
+            .await
+            .expect("compile rejection replay");
+        assert!(matches!(
+            execution.terminal(),
+            TriageExecutionTerminal::Failed {
+                partial_result: None,
+                ..
+            }
+        ));
+        assert_provider_free(execution.replay());
+        let attempts = replay_attempts(execution.replay());
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].role_slot_id, "standard-finalizer");
+        assert_eq!(attempts[0].status, TriageAttemptStatus::NotAdmitted);
+        assert!(attempts[0]
+            .reason_codes
+            .contains(&"qualification_unavailable".into()));
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn unresolved_policy_identity_fails_without_fabricating_slots() {
+        let selections = [
+            TriagePolicySelectionV2::Saved {
+                policy_id: "saved:missing".into(),
+                policy_revision: 1,
+            },
+            TriagePolicySelectionV2::Inline {
+                schema_id: TRIAGE_POLICY_SCHEMA_V2.into(),
+                document: serde_json::json!({
+                    "schema_id": TRIAGE_POLICY_SCHEMA_V2,
+                    "mode": 7
+                }),
+            },
+        ];
+        for selection in selections {
+            let mut fixture = fixture();
+            let registry = TriageCancellationRegistryV1::default();
+            let reads = Arc::clone(&fixture.secrets.reads);
+            let engine = WorkflowTriageEngineV1::new(
+                &mut fixture.host,
+                fixture.cache.path(),
+                fixture.config,
+                &fixture.secrets,
+                fixture.policies,
+                fixture.qualifications,
+                registry.clone(),
+            );
+
+            let execution = triage_with_policy(&engine, request(selection), None)
+                .await
+                .expect("unresolved policy replay");
+            assert!(matches!(
+                execution.terminal(),
+                TriageExecutionTerminal::Failed {
+                    partial_result: None,
+                    ..
+                }
+            ));
+            assert_provider_free(execution.replay());
+            assert!(replay_attempts(execution.replay()).is_empty());
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+            assert_eq!(registry.len(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_packet_work_returns_authoritative_replay() {
+        let mut fixture = fixture();
+        let registry = TriageCancellationRegistryV1::default();
+        let reads = Arc::clone(&fixture.secrets.reads);
+        let request = ValidatedTriageRequest::new(request(TriagePolicySelectionV2::Saved {
+            policy_id: "saved:test".into(),
+            policy_revision: 1,
         }))
         .expect("request");
-        let error = engine.preflight(&request).await.expect_err("must reject");
-        assert_eq!(
-            error.category(),
-            TriageEngineFailureCategory::PreflightRejected
+        let engine = WorkflowTriageEngineV1::new(
+            &mut fixture.host,
+            fixture.cache.path(),
+            fixture.config,
+            &fixture.secrets,
+            fixture.policies,
+            fixture.qualifications,
+            registry.clone(),
         );
+        let prepared = engine.preflight(&request).await.expect("preflight");
+        assert!(registry.cancel(&prepared.cancellation).expect("cancel"));
+
+        let replay = engine
+            .execute(request.clone(), prepared, None)
+            .await
+            .expect("cancel replay");
+        let execution = replay_validated(&request, replay).expect("bound replay");
+        assert!(matches!(
+            execution.terminal(),
+            TriageExecutionTerminal::Cancelled {
+                partial_result: None,
+                ..
+            }
+        ));
+        assert_provider_free(execution.replay());
+        assert!(replay_attempts(execution.replay())
+            .iter()
+            .all(|attempt| attempt.status == TriageAttemptStatus::Cancelled));
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_before_packet_work_returns_authoritative_replay() {
+        let mut fixture = fixture();
+        let registry = TriageCancellationRegistryV1::default();
+        let reads = Arc::clone(&fixture.secrets.reads);
+        let mut request = request(TriagePolicySelectionV2::Saved {
+            policy_id: "saved:test".into(),
+            policy_revision: 1,
+        });
+        request.overrides.deadline_ms = Some(300_000);
+        let request = ValidatedTriageRequest::new(request).expect("request");
+        let engine = WorkflowTriageEngineV1::new(
+            &mut fixture.host,
+            fixture.cache.path(),
+            fixture.config,
+            &fixture.secrets,
+            fixture.policies,
+            fixture.qualifications,
+            registry.clone(),
+        );
+        let prepared = engine.preflight(&request).await.expect("preflight");
+        tokio::time::advance(Duration::from_millis(300_001)).await;
+
+        let replay = engine
+            .execute(request.clone(), prepared, None)
+            .await
+            .expect("timeout replay");
+        let execution = replay_validated(&request, replay).expect("bound replay");
+        assert!(matches!(
+            execution.terminal(),
+            TriageExecutionTerminal::TimedOut {
+                partial_result: None,
+                ..
+            }
+        ));
+        assert_provider_free(execution.replay());
+        assert!(replay_attempts(execution.replay())
+            .iter()
+            .all(|attempt| attempt.status == TriageAttemptStatus::TimedOut));
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
         assert_eq!(registry.len(), 0);
     }
 

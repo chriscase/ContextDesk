@@ -19,6 +19,76 @@ const fixtureDir = join(
 const load = (name: string): unknown =>
   JSON.parse(readFileSync(join(fixtureDir, name), "utf8"));
 
+const prePacketReplay = (
+  terminalKind: "failed" | "timed_out" | "cancelled",
+): Record<string, any> => {
+  const status = terminalKind === "timed_out"
+    ? "timed_out"
+    : terminalKind === "cancelled"
+      ? "cancelled"
+      : "failed";
+  const reason = terminalKind === "failed"
+    ? "policy_preflight_rejected"
+    : terminalKind === "timed_out"
+      ? "deadline"
+      : "cancelled";
+  const terminal = terminalKind === "cancelled"
+    ? { kind: "cancelled", cancellation_id: "cancel:early" }
+    : { kind: terminalKind, category: reason };
+  const event = (sequence: number, payload: Record<string, unknown>) => ({
+    schema_id: "contextdesk.triage.run_event.v2",
+    run_id: "run:early",
+    sequence,
+    privacy: "owner_only",
+    event: payload,
+  });
+  const attempt = (
+    slot: string,
+    role: Record<string, string> | string,
+    attemptStatus: string,
+    attemptReason: string,
+  ) => ({
+    attempt_id: `attempt:early:${slot}`,
+    role_slot_id: slot,
+    role,
+    model: { profile_id: `profile:${slot}`, model_id: `model:${slot}` },
+    status: attemptStatus,
+    reason_codes: [attemptReason],
+    elapsed_ms: 0,
+    input_chars: 0,
+    output_chars: 0,
+    physical_provider_calls: 0,
+    semantic_corrections: 0,
+    terminal_disposition: attemptStatus,
+  });
+  return {
+    schema_id: "contextdesk.triage.replay.v1",
+    run_id: "run:early",
+    request_fingerprint: "sha256:request:early",
+    events: [
+      event(0, {
+        kind: "run_started",
+        request_fingerprint: "sha256:request:early",
+        policy_fingerprint: "sha256:policy:early",
+      }),
+      event(1, {
+        kind: "role_attempt",
+        attempt: attempt(
+          "observe",
+          { contributor: "observation_extractor" },
+          "not_admitted",
+          "policy_preflight_rejected",
+        ),
+      }),
+      event(2, {
+        kind: "role_attempt",
+        attempt: attempt("finalize", "finalizer", status, reason),
+      }),
+      event(3, terminal),
+    ],
+  };
+};
+
 describe("Rust-generated triage SDK v2 contracts", () => {
   it("accepts the bounded exact-role qualification result", () => {
     const result = parseTriageRoleQualificationResultV1({
@@ -261,5 +331,69 @@ describe("Rust-generated triage SDK v2 contracts", () => {
     attempt.status = "not_admitted";
     attempt.physical_provider_calls = 1;
     expect(() => parseTriageReplayV1(replay)).toThrow();
+  });
+
+  it.each(["failed", "timed_out", "cancelled"] as const)(
+    "accepts a provider-free pre-packet %s replay",
+    (terminal) => {
+      expect(parseTriageReplayV1(prePacketReplay(terminal)).events).toHaveLength(4);
+    },
+  );
+
+  it("accepts a pre-packet failure when no policy slots were resolvable", () => {
+    const replay = prePacketReplay("failed");
+    replay.events.splice(1, 2);
+    replay.events[1].sequence = 1;
+    expect(parseTriageReplayV1(replay).events).toHaveLength(2);
+  });
+
+  it("rejects packet and provider-work claims in the pre-packet path", () => {
+    const packet = prePacketReplay("failed");
+    packet.events.splice(1, 0, {
+      schema_id: "contextdesk.triage.run_event.v2",
+      run_id: "run:early",
+      sequence: 1,
+      privacy: "owner_only",
+      event: {
+        kind: "packet_ready",
+        packet_id: "packet:fabricated",
+        packet_digest: "sha256:fabricated",
+        evidence_count: 0,
+      },
+    });
+    packet.events.forEach((event: Record<string, any>, sequence: number) => {
+      event.sequence = sequence;
+    });
+    expect(() => parseTriageReplayV1(packet)).toThrow();
+
+    for (const [field, value] of [
+      ["physical_provider_calls", 1],
+      ["semantic_corrections", 1],
+      ["input_chars", 1],
+      ["output_chars", 1],
+      ["elapsed_ms", 1],
+    ] as const) {
+      const replay = prePacketReplay("failed");
+      (replay.events[1].event.attempt as Record<string, unknown>)[field] = value;
+      expect(() => parseTriageReplayV1(replay), field).toThrow();
+    }
+
+    const completed = prePacketReplay("failed");
+    completed.events[1].event.attempt.status = "completed";
+    completed.events[1].event.attempt.terminal_disposition = "completed";
+    expect(() => parseTriageReplayV1(completed)).toThrow();
+  });
+
+  it("rejects duplicate pre-packet slots and early partial results", () => {
+    const duplicate = prePacketReplay("cancelled");
+    duplicate.events[2].event.attempt.role_slot_id = "observe";
+    expect(() => parseTriageReplayV1(duplicate)).toThrow();
+
+    const partial = prePacketReplay("failed");
+    const full = load("replay.partial.json") as {
+      events: Array<{ event: Record<string, unknown> }>;
+    };
+    partial.events[3].event.partial_result = full.events[5].event.result;
+    expect(() => parseTriageReplayV1(partial)).toThrow();
   });
 });
