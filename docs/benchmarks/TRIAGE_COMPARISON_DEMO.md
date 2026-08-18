@@ -29,7 +29,7 @@ v1 visibility rules can accept it.
 
 ## 0. Build the tools
 
-From this branch (based on `f3d5188f`):
+From the demo branch:
 
 ```bash
 REPO="$(git rev-parse --show-toplevel)"
@@ -79,15 +79,18 @@ Prerequisites that remain outside this package:
 2. Credentials in the OS keychain (or an explicit owner-only `file:` secret
    reference already configured on that profile). This package does not ship
    keys, endpoints, or `auth.json`.
-3. Edit both candidate files so `policy.model.profile_id` and
-   `policy.model.model_id` are the **exact** host profile and model ids — replace
-   the placeholders `HOST_PROFILE_ID` and `HOST_MODEL_ID`.
+3. Edit both candidate files so `policy.model.profile_id` is the **exact** host
+   profile id and the two `policy.model.model_id` values are **different,
+   exact** model ids available under that profile. Replace `HOST_PROFILE_ID`
+   and `HOST_MODEL_ID`; do not leave both candidates pointing at the same
+   model if the demo is intended to show model-to-model convergence.
 4. Role qualification evidence already saved by the host for that exact
    profile/model, if your host requires it before triage.
 5. Network reachability to that already-configured provider.
 
 ```bash
-# After replacing HOST_PROFILE_ID / HOST_MODEL_ID in both candidate files:
+# After replacing HOST_PROFILE_ID and HOST_MODEL_ID in both candidate files,
+# using two distinct model ids:
 "$CONTEXTDESK" --data-dir "$HOME/Library/Application Support/ContextDesk" \
   bench-compare \
   --library "$LIB" \

@@ -174,7 +174,8 @@ cmd_print_live() {
   contextdesk="${CONTEXTDESK_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/contextdesk}"
   cat <<EOF
 # Live provider path only. This is not an offline command.
-# Replace HOST_PROFILE_ID and HOST_MODEL_ID in both candidate files first.
+# Replace HOST_PROFILE_ID in both candidate files and use two distinct
+# HOST_MODEL_ID values before running the live comparison.
 # Point --data-dir at an existing host profile that already has credentials.
 
 $contextdesk --data-dir "\$HOME/Library/Application Support/ContextDesk" \\
