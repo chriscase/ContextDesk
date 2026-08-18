@@ -413,7 +413,11 @@ pub fn extract_owner_model_attribution(raw_output: &[u8]) -> Option<RunAttributi
 }
 
 fn safe_report_identity(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 256 && value.chars().all(|c| !c.is_control() && c != '|')
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .chars()
+            .all(|c| !c.is_control() && !matches!(c, '|' | '`' | '<' | '>'))
 }
 
 fn safe_model_fingerprint(value: &str) -> bool {
@@ -423,11 +427,36 @@ fn safe_model_fingerprint(value: &str) -> bool {
     digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn markdown_safe(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '|' => escaped.push_str("\\|"),
+            '`' => escaped.push('\''),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' | '\r' => escaped.push(' '),
+            character if character.is_control() => escaped.push('\u{fffd}'),
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn markdown_code(value: &str) -> String {
+    format!("`{}`", markdown_safe(value))
+}
+
 pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
     let mut out = String::new();
     out.push_str("# Triage bench comparison report\n\n");
-    out.push_str(&format!("Schema: `{}`\n\n", report.schema_id));
-    out.push_str(&format!("Privacy: `{}`\n\n", report.privacy.as_str()));
+    out.push_str(&format!("Schema: {}\n\n", markdown_code(&report.schema_id)));
+    out.push_str(&format!(
+        "Privacy: {}\n\n",
+        markdown_code(report.privacy.as_str())
+    ));
     out.push_str(&format!(
         "Rubric versions: {}\n\n",
         if report.rubric_versions.is_empty() {
@@ -436,7 +465,7 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
             report
                 .rubric_versions
                 .iter()
-                .map(|v| format!("`{v}`"))
+                .map(|v| markdown_code(v))
                 .collect::<Vec<_>>()
                 .join(", ")
         }
@@ -464,23 +493,30 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
         for case in &report.cases {
             match &case.title {
                 Some(title) => out.push_str(&format!(
-                    "- `{}` ({}) — {title}\n",
-                    case.case_id, case.lifecycle
+                    "- {} ({}) — {}\n",
+                    markdown_code(&case.case_id),
+                    markdown_safe(&case.lifecycle),
+                    markdown_safe(title)
                 )),
-                None => out.push_str(&format!("- `{}` ({})\n", case.case_id, case.lifecycle)),
+                None => out.push_str(&format!(
+                    "- {} ({})\n",
+                    markdown_code(&case.case_id),
+                    markdown_safe(&case.lifecycle)
+                )),
             }
         }
         out.push('\n');
     }
     out.push_str("## Honesty notes\n\n");
     for note in &report.notes {
-        out.push_str(&format!("- {note}\n"));
+        out.push_str(&format!("- {}\n", markdown_safe(note)));
     }
     out.push_str("\n## Groups (same task + snapshot)\n\n");
     for group in &report.groups {
         out.push_str(&format!(
-            "### task `{}` snapshot `{}`\n\n",
-            group.task_id, group.snapshot_id
+            "### task {} snapshot {}\n\n",
+            markdown_code(&group.task_id),
+            markdown_code(&group.snapshot_id)
         ));
         out.push_str(
             "| run | strategy | model(s) | version | source | status | fairness | scored |\n",
@@ -494,28 +530,28 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
             let models = if !run.model_identities.is_empty() {
                 run.model_identities
                     .iter()
-                    .map(|model| format!("`{model}`"))
+                    .map(|model| markdown_code(model))
                     .collect::<Vec<_>>()
                     .join("<br>")
             } else if !run.model_fingerprints.is_empty() {
                 run.model_fingerprints
                     .iter()
-                    .map(|fingerprint| format!("`{fingerprint}`"))
+                    .map(|fingerprint| markdown_code(fingerprint))
                     .collect::<Vec<_>>()
                     .join("<br>")
             } else {
                 "unknown".into()
             };
             out.push_str(&format!(
-                "| `{}` | {} | {} | {} | {} | {} | {} | {} |\n",
-                run.run_id,
-                run.strategy_name,
+                "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                markdown_code(&run.run_id),
+                markdown_safe(&run.strategy_name),
                 models,
-                version,
-                run.source_kind.as_str(),
-                run.status.as_str(),
-                run.fairness,
-                run.score_visibility.as_str()
+                markdown_safe(&version),
+                markdown_safe(run.source_kind.as_str()),
+                markdown_safe(run.status.as_str()),
+                markdown_safe(&run.fairness),
+                markdown_safe(run.score_visibility.as_str())
             ));
         }
         out.push('\n');
@@ -524,8 +560,11 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
         out.push_str("## Incomparable pairs\n\n");
         for pair in &report.incomparable {
             out.push_str(&format!(
-                "- `{}` vs `{}`: {} — {}\n",
-                pair.left_run_id, pair.right_run_id, pair.reason, pair.detail
+                "- {} vs {}: {} — {}\n",
+                markdown_code(&pair.left_run_id),
+                markdown_code(&pair.right_run_id),
+                markdown_safe(&pair.reason),
+                markdown_safe(&pair.detail)
             ));
         }
         out.push('\n');
@@ -534,24 +573,28 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
         out.push_str("## Strategy version pairs\n\n");
         for pair in &report.version_pairs {
             out.push_str(&format!(
-                "- {} source `{}` build `{:?}` `{}` → `{}` (case `{}`, task `{}`)\n",
-                pair.strategy_name,
-                pair.source_kind.as_str(),
-                pair.strategy_build,
-                pair.older_version,
-                pair.newer_version,
-                pair.case_id,
-                pair.task_id
+                "- {} source {} build {} {} → {} (case {}, task {})\n",
+                markdown_safe(&pair.strategy_name),
+                markdown_code(pair.source_kind.as_str()),
+                markdown_code(&format!("{:?}", pair.strategy_build)),
+                markdown_code(&pair.older_version),
+                markdown_code(&pair.newer_version),
+                markdown_code(&pair.case_id),
+                markdown_code(&pair.task_id)
             ));
             out.push_str(&format!(
-                "  - drill-down: older run `{}` adjudications {}; newer run `{}` adjudications {}\n",
-                pair.older_run_id,
-                pair.older_adjudication_ids.join(", "),
-                pair.newer_run_id,
-                pair.newer_adjudication_ids.join(", ")
+                "  - drill-down: older run {} adjudications {}; newer run {} adjudications {}\n",
+                markdown_code(&pair.older_run_id),
+                markdown_safe(&pair.older_adjudication_ids.join(", ")),
+                markdown_code(&pair.newer_run_id),
+                markdown_safe(&pair.newer_adjudication_ids.join(", "))
             ));
             for dim in &pair.dimensions {
-                out.push_str(&format!("  - {}: {}\n", dim.dimension.as_str(), dim.change));
+                out.push_str(&format!(
+                    "  - {}: {}\n",
+                    markdown_safe(dim.dimension.as_str()),
+                    markdown_safe(&dim.change)
+                ));
             }
         }
         out.push('\n');
@@ -1069,6 +1112,19 @@ mod tests {
             vec![format!("mdf-{}", "a".repeat(64))]
         );
         assert!(attribution.model_identities.is_empty());
+    }
+
+    #[test]
+    fn report_attribution_rejects_markdown_delimiters_in_identities() {
+        let raw = serde_json::json!({
+            "slots": [{
+                "model": {
+                    "profile_id": "profile:provider`|<unsafe>",
+                    "model_id": "model:exact"
+                }
+            }]
+        });
+        assert!(extract_owner_model_attribution(raw.to_string().as_bytes()).is_none());
     }
 
     fn dummy_run(run_id: &str, task_id: &str, snapshot_id: &str) -> TriageRun {
