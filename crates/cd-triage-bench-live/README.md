@@ -12,6 +12,15 @@ packet and ledger digest, every host evidence id to its imported source, and
 every recorded citation back to a task-visible benchmark evidence item. The
 isolated corpus is discarded after every terminal or failure.
 
+For comparisons, `run_live_comparison` prepares that isolated corpus once and
+executes a bounded, sequential candidate list against the same proven
+`BoundedPacket` and corpus revision. Each candidate still gets a distinct
+request/cancellation identity and its own validated replay and persisted
+`TriageRun`. The strictest candidate deadline bounds the entire comparison;
+shared cache, source limits, and cancellation identity are required. The
+resulting rows are immediately consumable by the existing honest bench report
+projection, which preserves failed/partial runs and does not rank candidates.
+
 The first live version accepts raw log evidence only. It rejects summaries,
 time filters, non-log evidence, missing raw bytes, external-only references,
 partial imports, and any source inventory drift.

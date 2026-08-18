@@ -14,14 +14,15 @@ use cd_core::{
     },
 };
 use cd_test_gateway::{Body, Frame, MockGateway, RecordedRequest, Response, Step};
+use cd_triage_bench::report::build_report;
 use cd_triage_bench::{
     BenchStore, Case, CaseLifecycle, ContentDigest, EvaluationTask, EvidenceItem, EvidenceSnapshot,
     EvidenceSource, HeldContent, Observed, PrivacyClass, ReportedProblem, StrategyIdentity,
     VisibilityPolicy, CASE_SCHEMA_V1,
 };
 use cd_triage_bench_live::{
-    prepare_same_snapshot_corpus, run_live_same_snapshot, LiveBridgeError, LiveCorpusLimits,
-    LiveRunOptions,
+    prepare_same_snapshot_corpus, run_live_comparison, run_live_same_snapshot, LiveBridgeError,
+    LiveComparisonCandidate, LiveCorpusLimits, LiveRunOptions,
 };
 use cd_triage_sdk::{ModelRef, TriagePolicySelectionV2, TriageRequestOverridesV1};
 use serde_json::{json, Value};
@@ -552,6 +553,131 @@ async fn real_packet_and_provider_path_records_same_snapshot_proof_and_cleans_up
         !corpus_root.exists() || corpus_root.read_dir().unwrap().next().is_none(),
         "run-exclusive corpus must be removed"
     );
+}
+
+#[tokio::test]
+async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
+    let gateway = MockGateway::start_routed(|request| {
+        if request.path.ends_with("/chat/completions") {
+            Step::respond(Response::json_ok(&answer_from_live_request(request)))
+        } else {
+            Step::respond(Response::status_only(404))
+        }
+    })
+    .await;
+    let (_library, cache, store, case, snapshot, task) = fixture();
+    let profile = openai_profile(gateway.base_url());
+    let qualifications = qualified_finalizer(&profile);
+    let model = ModelRef {
+        profile_id: profile.id.clone(),
+        model_id: profile.chat_model.clone(),
+    };
+    let config = cd_core::config::AppConfig {
+        providers: ProviderConfig {
+            active_id: Some(profile.id.clone()),
+            profiles: vec![profile],
+        },
+        ..Default::default()
+    };
+    let cancel = CancelFlag::new();
+
+    let candidate = |name: &str, cancellation_id: &str| LiveComparisonCandidate {
+        options: LiveRunOptions {
+            cache_root: cache.path().to_path_buf(),
+            config: config.clone(),
+            policies: TriagePolicyStoreV1::default(),
+            qualifications: qualifications.clone(),
+            policy: TriagePolicySelectionV2::Standard {
+                model: model.clone(),
+            },
+            overrides: TriageRequestOverridesV1 {
+                deadline_ms: Some(300_000),
+                max_provider_calls: None,
+            },
+            cancellation_id: cancellation_id.into(),
+            recording: cd_triage_bench_adapter::RecordingContext {
+                strategy: StrategyIdentity {
+                    name: name.into(),
+                    version: Observed::Known("comparison-v1".into()),
+                    build: Observed::Unknown,
+                },
+                operator: "test".into(),
+                created_at: CREATED_AT.into(),
+            },
+            limits: LiveCorpusLimits::default(),
+            cancel: cancel.clone(),
+        },
+        events: None,
+    };
+
+    let result = run_live_comparison(
+        &store,
+        &case,
+        &snapshot,
+        &task,
+        Arc::new(MemorySecretStore::new()),
+        vec![
+            candidate("ContextDesk live alpha", "cancel:comparison-alpha"),
+            candidate("ContextDesk live beta", "cancel:comparison-beta"),
+        ],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.runs.len(), 2);
+    assert_eq!(gateway.request_count(), 2);
+    assert_ne!(
+        result.runs[0].recorded.bench_run.run_id,
+        result.runs[1].recorded.bench_run.run_id
+    );
+    let first_proof = result.runs[0]
+        .recorded
+        .owner_only
+        .host_execution
+        .as_ref()
+        .expect("first host proof");
+    let second_proof = result.runs[1]
+        .recorded
+        .owner_only
+        .host_execution
+        .as_ref()
+        .expect("second host proof");
+    assert_eq!(first_proof.corpus_id, second_proof.corpus_id);
+    assert_eq!(first_proof.corpus_revision, second_proof.corpus_revision);
+    assert_eq!(
+        result.runs[0].recorded.owner_only.fingerprints.packet,
+        result.runs[1].recorded.owner_only.fingerprints.packet
+    );
+
+    let report = build_report(
+        &store.load_runs().unwrap(),
+        &[],
+        &[],
+        &store.load_cases().unwrap(),
+        PrivacyClass::OwnerOnly,
+    )
+    .unwrap();
+    assert_eq!(report.counts.runs, 2);
+    assert_eq!(report.groups.len(), 1);
+    assert_eq!(report.groups[0].runs.len(), 2);
+    assert!(report.incomparable.is_empty());
+}
+
+#[tokio::test]
+async fn comparison_rejects_empty_candidates_before_preparation() {
+    let (_library, cache, store, case, snapshot, task) = fixture();
+    let error = run_live_comparison(
+        &store,
+        &case,
+        &snapshot,
+        &task,
+        Arc::new(MemorySecretStore::new()),
+        Vec::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, LiveBridgeError::EmptyComparison);
+    assert!(!cache.path().join("log_corpora").exists());
 }
 
 #[tokio::test]

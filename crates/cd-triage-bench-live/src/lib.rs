@@ -47,6 +47,8 @@ use fs2::FileExt;
 pub const DEFAULT_LIVE_MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 /// Default aggregate source-byte limit for one isolated live run.
 pub const DEFAULT_LIVE_MAX_AGGREGATE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Maximum number of candidate runs in one same-snapshot comparison.
+pub const DEFAULT_MAX_COMPARISON_CANDIDATES: usize = 16;
 const PREPARATION_RUNNING: u8 = 0;
 const PREPARATION_COMPLETED: u8 = 1;
 const PREPARATION_TIMED_OUT: u8 = 2;
@@ -122,6 +124,15 @@ pub enum LiveBridgeError {
     /// The primary run failed and cleanup also failed; neither fact is hidden.
     #[error("live triage failed and isolated corpus cleanup also failed")]
     FailureAndCleanup,
+    /// A comparison was requested without any candidates.
+    #[error("live triage comparison has no candidates")]
+    EmptyComparison,
+    /// A comparison exceeded its bounded candidate count.
+    #[error("live triage comparison candidate bound exceeded")]
+    ComparisonCandidateBound,
+    /// Candidate options could not share one exact preparation safely.
+    #[error("live triage comparison candidates are not safely shareable")]
+    ComparisonInvariant,
 }
 
 /// Host-owned execution configuration for one live benchmark run.
@@ -154,6 +165,27 @@ pub struct LiveRunOptions {
 pub struct LiveRunResult {
     /// Proof-complete owner-only record and validated benchmark row.
     pub recorded: RecordedContextDeskRun,
+}
+
+/// One candidate in a same-snapshot live comparison.
+///
+/// Candidate options may select different policies, providers, or recording
+/// identities. The cache root, source bounds, and cancellation signal must be
+/// shared with every other candidate so preparation and cancellation remain a
+/// single bounded operation.
+#[derive(Debug)]
+pub struct LiveComparisonCandidate {
+    /// Host-owned options for this candidate execution.
+    pub options: LiveRunOptions,
+    /// Optional event sink for this candidate's validated public replay.
+    pub events: Option<TriageEventSink>,
+}
+
+/// Completed runs from a same-snapshot comparison.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveComparisonResult {
+    /// Runs persisted by the bridge and ready for the honest bench report.
+    pub runs: Vec<LiveRunResult>,
 }
 
 /// A verified, run-exclusive corpus prepared from one exact task visibility.
@@ -426,30 +458,23 @@ pub fn prepare_same_snapshot_corpus(
     Ok(prepared)
 }
 
-/// Prepare, execute, proof-bind, record, persist, and clean up one live run.
-///
-/// Blocking copy/import work runs outside the async executor. An explicit
-/// request deadline starts before that work, cancels preparation when elapsed,
-/// and passes only its remaining allowance into the public workflow request.
-/// The isolated corpus is discarded on every exit path.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_live_same_snapshot(
+async fn prepare_same_snapshot_with_deadline(
     store: &BenchStore,
     case: &Case,
     snapshot: &EvidenceSnapshot,
     task: &EvaluationTask,
-    secrets: Arc<dyn SecretStore>,
-    mut options: LiveRunOptions,
-    events: Option<TriageEventSink>,
-) -> Result<LiveRunResult, LiveBridgeError> {
-    let started = Instant::now();
+    cache_root: &Path,
+    limits: LiveCorpusLimits,
+    cancel: &CancelFlag,
+    deadline_ms: Option<u64>,
+) -> Result<PreparedSameSnapshotCorpus, LiveBridgeError> {
     let worker_store = store.clone();
     let worker_case = case.clone();
     let worker_snapshot = snapshot.clone();
     let worker_task = task.clone();
-    let worker_cache = options.cache_root.clone();
-    let worker_cancel = options.cancel.clone();
-    let limits = options.limits;
+    let worker_cache = cache_root.to_path_buf();
+    let worker_cancel = cancel.clone();
     let preparation_state = Arc::new(AtomicU8::new(PREPARATION_RUNNING));
     let worker_state = Arc::clone(&preparation_state);
     let worker = tokio::task::spawn_blocking(move || {
@@ -479,11 +504,36 @@ pub async fn run_live_same_snapshot(
             Err(_) => Err(LiveBridgeError::Import),
         }
     });
-    let mut prepared = await_blocking_preparation(
-        worker,
-        preparation_state,
-        options.overrides.deadline_ms,
+
+    await_blocking_preparation(worker, preparation_state, deadline_ms, cancel).await
+}
+
+/// Prepare, execute, proof-bind, record, persist, and clean up one live run.
+///
+/// Blocking copy/import work runs outside the async executor. An explicit
+/// request deadline starts before that work, cancels preparation when elapsed,
+/// and passes only its remaining allowance into the public workflow request.
+/// The isolated corpus is discarded on every exit path.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_live_same_snapshot(
+    store: &BenchStore,
+    case: &Case,
+    snapshot: &EvidenceSnapshot,
+    task: &EvaluationTask,
+    secrets: Arc<dyn SecretStore>,
+    mut options: LiveRunOptions,
+    events: Option<TriageEventSink>,
+) -> Result<LiveRunResult, LiveBridgeError> {
+    let started = Instant::now();
+    let mut prepared = prepare_same_snapshot_with_deadline(
+        store,
+        case,
+        snapshot,
+        task,
+        &options.cache_root,
+        options.limits,
         &options.cancel,
+        options.overrides.deadline_ms,
     )
     .await?;
 
@@ -508,6 +558,110 @@ pub async fn run_live_same_snapshot(
     )
     .await;
     finish_with_cleanup(&mut prepared, result)
+}
+
+/// Execute multiple live candidates against one prepared task snapshot.
+///
+/// The source bytes are copied, imported, and proven exactly once. Every
+/// candidate then receives that same bounded benchmark packet and the same
+/// run-exclusive production corpus. Each candidate still gets its own public
+/// request, cancellation identity, replay proof, and immutable bench run.
+/// Runs are persisted as they complete, so the existing `cd-triage-bench
+/// report` command can project the comparison without inventing rankings.
+///
+/// The strictest candidate deadline bounds the entire comparison, including
+/// preparation. Candidate execution is sequential by design: this keeps the
+/// shared corpus and whole-comparison deadline auditable while still avoiding
+/// repeated source copying and ingest. A cancelled comparison stops before
+/// starting the next candidate and cleans the shared corpus.
+pub async fn run_live_comparison(
+    store: &BenchStore,
+    case: &Case,
+    snapshot: &EvidenceSnapshot,
+    task: &EvaluationTask,
+    secrets: Arc<dyn SecretStore>,
+    candidates: Vec<LiveComparisonCandidate>,
+) -> Result<LiveComparisonResult, LiveBridgeError> {
+    if candidates.is_empty() {
+        return Err(LiveBridgeError::EmptyComparison);
+    }
+    if candidates.len() > DEFAULT_MAX_COMPARISON_CANDIDATES {
+        return Err(LiveBridgeError::ComparisonCandidateBound);
+    }
+
+    let first = &candidates[0].options;
+    let comparison_deadline_ms = candidates
+        .iter()
+        .filter_map(|candidate| candidate.options.overrides.deadline_ms)
+        .min();
+    let mut cancellation_ids = BTreeSet::new();
+    for candidate in &candidates {
+        let options = &candidate.options;
+        if options.cache_root != first.cache_root
+            || options.limits != first.limits
+            || !Arc::ptr_eq(&first.cancel.inner_arc(), &options.cancel.inner_arc())
+            || !cancellation_ids.insert(options.cancellation_id.as_str())
+        {
+            return Err(LiveBridgeError::ComparisonInvariant);
+        }
+    }
+
+    let started = Instant::now();
+    let mut prepared = prepare_same_snapshot_with_deadline(
+        store,
+        case,
+        snapshot,
+        task,
+        &first.cache_root,
+        first.limits,
+        &first.cancel,
+        comparison_deadline_ms,
+    )
+    .await?;
+
+    let mut runs = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let LiveComparisonCandidate {
+            mut options,
+            events,
+        } = candidate;
+        if options.cancel.is_cancelled() {
+            return finish_with_cleanup(&mut prepared, Err(LiveBridgeError::Cancelled));
+        }
+        if let Some(deadline_ms) = comparison_deadline_ms {
+            let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            let remaining = deadline_ms.saturating_sub(elapsed_ms);
+            if remaining == 0 {
+                return finish_with_cleanup(&mut prepared, Err(LiveBridgeError::Deadline));
+            }
+            options.overrides.deadline_ms = Some(
+                options
+                    .overrides
+                    .deadline_ms
+                    .map_or(remaining, |candidate_deadline| {
+                        candidate_deadline.min(remaining)
+                    }),
+            );
+        }
+
+        let result = execute_prepared_same_snapshot(
+            store,
+            case,
+            snapshot,
+            task,
+            &prepared,
+            Arc::clone(&secrets),
+            &options,
+            events,
+        )
+        .await;
+        match result {
+            Ok(result) => runs.push(result),
+            Err(error) => return finish_with_cleanup(&mut prepared, Err(error)),
+        }
+    }
+
+    finish_with_cleanup(&mut prepared, Ok(LiveComparisonResult { runs }))
 }
 
 #[allow(clippy::too_many_arguments)]
