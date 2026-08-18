@@ -247,10 +247,66 @@ fn a_different_outcome_changes_the_recorded_run_identity() {
 #[test]
 fn the_bench_run_identity_is_the_bench_fingerprint_not_the_sdk_run_id() {
     let run = baseline();
+    assert_eq!(
+        run.recorded.bench_run.schema_id,
+        cd_triage_bench::RUN_SCHEMA_V2
+    );
     assert!(run.recorded.bench_run.run_id.starts_with("run-"));
     assert!(run.bound.sdk_run_id.starts_with("cdrun-"));
     assert_ne!(run.recorded.bench_run.run_id, run.bound.sdk_run_id);
     // `TriageRun::validate` recomputes the bench fingerprint, so a validated
     // run proves the identity was not hand-written.
     run.recorded.bench_run.validate().unwrap();
+}
+
+#[test]
+fn v2_identity_prevents_legacy_provenance_collisions() {
+    let case = common::case();
+    let snapshot = common::snapshot();
+    let task = common::task(&snapshot);
+    let record = |context: &cd_triage_bench_adapter::RecordingContext| {
+        run_offline(
+            &case,
+            &snapshot,
+            &task,
+            common::policy(),
+            TriageRequestOverridesV1::default(),
+            common::CANCELLATION_ID,
+            &common::plan_complete(),
+            context,
+        )
+        .unwrap()
+        .recorded
+    };
+
+    let base_context = common::context();
+    let base = record(&base_context);
+
+    let mut different_build_context = base_context.clone();
+    different_build_context.strategy.build = cd_triage_bench::Observed::Known("build-2".into());
+    let different_build = record(&different_build_context);
+
+    let mut different_operator_context = base_context.clone();
+    different_operator_context.operator = "backup-operator".into();
+    let different_operator = record(&different_operator_context);
+
+    let mut different_timestamp_context = base_context;
+    different_timestamp_context.created_at = "2026-01-15T07:01:00Z".into();
+    let different_timestamp = record(&different_timestamp_context);
+
+    for other in [&different_build, &different_operator, &different_timestamp] {
+        assert_eq!(base.raw_output, other.raw_output);
+        assert_ne!(base.bench_run.run_id, other.bench_run.run_id);
+        assert_eq!(other.bench_run.schema_id, cd_triage_bench::RUN_SCHEMA_V2);
+        assert_eq!(
+            other.bench_run.run_id,
+            format!("run-{}", other.bench_run.fingerprint().unwrap())
+        );
+    }
+
+    let mut different_status = base.bench_run.clone();
+    different_status.status = cd_triage_bench::RunStatus::Failed;
+    different_status.run_id = format!("run-{}", different_status.fingerprint().unwrap());
+    assert_ne!(base.bench_run.run_id, different_status.run_id);
+    different_status.validate().unwrap();
 }

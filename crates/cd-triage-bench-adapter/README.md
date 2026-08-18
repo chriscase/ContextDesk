@@ -29,6 +29,7 @@ Recording is **replay ingest**, not live execution. The mock and an imported
 | Request identity uses the public runtime algorithm; packet/corpus identities stay separate | `tests/pipeline.rs`, `tests/fingerprints.rs` |
 | Every terminal is a recorded run, never a discarded attempt | `tests/terminals.rs` |
 | Imported replay uses the same recorder as the mock | `tests/replay_ingest.rs` |
+| Recorded runs use provenance- and status-sensitive `TriageRun` v2 identity | `tests/fingerprints.rs` |
 | Failed-with-partial stays Failed | `tests/terminals.rs` |
 | Share-safe export leaks no model identity, answer, or raw body | `tests/privacy.rs` |
 | Fairness is `same_snapshot`; usage and cost stay unknown | `tests/pipeline.rs` |

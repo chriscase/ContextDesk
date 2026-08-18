@@ -13,7 +13,7 @@
 use cd_triage_bench::{
     canonical::to_canonical_json, ClaimedCitation, Completeness, ContentDigest, EvaluationTask,
     EvidenceSnapshot, FairnessClass, Observed, PrivacyClass, PromptWorkflow, RawOutput, RunStatus,
-    SourceKind, StrategyIdentity, TriageRun, RUN_SCHEMA_V1,
+    SourceKind, StrategyIdentity, TriageRun, RUN_SCHEMA_V2,
 };
 use cd_triage_sdk::{
     ModelRef, TriageAttemptStatus, TriageReplayV1, TriageRequestV2, TriageResultKind,
@@ -213,20 +213,10 @@ pub fn record_run(
         .into_bytes();
     let digest = ContentDigest::of_bytes(&raw_output);
     let fairness = FairnessClass::SameSnapshot;
-    let run_fingerprint = cd_triage_bench::run_fingerprint(
-        &task.task_id,
-        &snapshot.snapshot_id,
-        SourceKind::ContextdeskSdk,
-        &context.strategy.name,
-        &context.strategy.version,
-        &digest.hex,
-        &fairness,
-    )
-    .map_err(AdapterError::bench)?;
 
-    let bench_run = TriageRun {
-        schema_id: RUN_SCHEMA_V1.to_string(),
-        run_id: format!("run-{run_fingerprint}"),
+    let mut bench_run = TriageRun {
+        schema_id: RUN_SCHEMA_V2.to_string(),
+        run_id: "run-pending-v2-fingerprint".to_string(),
         // The record retains task text, exact model identities, and an
         // owner-only answer envelope, so the row is owner-only.
         privacy: PrivacyClass::OwnerOnly,
@@ -265,6 +255,10 @@ pub fn record_run(
         created_at: context.created_at.clone(),
         near_duplicate_of: None,
     };
+    bench_run.run_id = format!(
+        "run-{}",
+        bench_run.fingerprint().map_err(AdapterError::bench)?
+    );
     // Real bench validator, including the run-identity fingerprint check.
     bench_run.validate().map_err(AdapterError::bench)?;
 

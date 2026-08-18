@@ -1,6 +1,6 @@
 {
-  "schema_id": "contextdesk.triage_bench.triage_run.v1",
-  "run_id": "run-dca0c14fb7009393981df9d285a269de93b2a5483ade59a3e46dd68429024240",
+  "schema_id": "contextdesk.triage_bench.triage_run.v2",
+  "run_id": "run-e930bcee81131b7a9e3eff4472338c70a46cb95a612585447c2fac74071e3a92",
   "privacy": "owner_only",
   "case_id": "case-checkout-500s",
   "task_id": "task-a02e7497a4787cbd965c3b0abb1b03688a0c0ea10eadcb87207a763ed10aae6a",

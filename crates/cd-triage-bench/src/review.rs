@@ -105,7 +105,15 @@ pub fn distinctive_format_reason(run: &TriageRun, raw: Option<&[u8]>) -> Option<
             return Some("raw artifact was not loaded; blinding could not be established".into())
         }
     };
-    let text = std::str::from_utf8(raw).ok()?;
+    let text = match std::str::from_utf8(raw) {
+        Ok(text) => text,
+        Err(_) => {
+            return Some("raw artifact declared utf-8 but contains invalid bytes".into());
+        }
+    };
+    if is_adapter_owner_only_envelope(raw) {
+        return Some("raw output is an owner-only ContextDesk SDK replay envelope".into());
+    }
     let name = run.strategy.name.trim();
     if !name.is_empty()
         && text
@@ -115,6 +123,29 @@ pub fn distinctive_format_reason(run: &TriageRun, raw: Option<&[u8]>) -> Option<
         return Some(format!("raw output contains the strategy name `{name}`"));
     }
     None
+}
+
+fn is_adapter_owner_only_envelope(raw: &[u8]) -> bool {
+    let Ok(serde_json::Value::Object(record)) = serde_json::from_slice(raw) else {
+        return false;
+    };
+
+    let has_sdk_run_identity = record
+        .get("sdk_run_id")
+        .is_some_and(serde_json::Value::is_string);
+    let carries_full_replay = record
+        .get("replay")
+        .is_some_and(serde_json::Value::is_object);
+    let carries_exact_models = record
+        .get("slots")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|slots| {
+            slots
+                .iter()
+                .any(|slot| slot.get("model").is_some_and(serde_json::Value::is_object))
+        });
+
+    has_sdk_run_identity && (carries_full_replay || carries_exact_models)
 }
 
 pub fn materialize_review_packet(
@@ -312,6 +343,24 @@ mod tests {
         let view = blinded_run_view_from_raw(&run, Some(b"plain write-up"));
         assert!(view.strategy_masked);
         assert!(view.unblindable_reason.is_none());
+    }
+
+    #[test]
+    fn adapter_owner_only_replay_envelope_is_never_reported_as_blinded() {
+        let run = sample_run("contextdesk-sdk", "utf-8");
+        let raw = br#"{
+            "sdk_run_id":"cdrun-fixture",
+            "replay":{"schema_id":"contextdesk.triage.replay.v1"},
+            "slots":[{"model":{"profile_id":"private-gateway","model_id":"exact-model"}}]
+        }"#;
+
+        assert!(!String::from_utf8_lossy(raw).contains("contextdesk-sdk"));
+        let view = blinded_run_view_from_raw(&run, Some(raw));
+        assert!(!view.strategy_masked);
+        assert_eq!(
+            view.unblindable_reason.as_deref(),
+            Some("raw output is an owner-only ContextDesk SDK replay envelope")
+        );
     }
 
     #[test]
