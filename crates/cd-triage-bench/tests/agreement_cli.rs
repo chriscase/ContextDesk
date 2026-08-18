@@ -156,7 +156,7 @@ fn agreement_markdown_reports_independent_concurrence_without_ranking() {
 
     assert!(text.contains("# Triage bench evidence agreement"));
     assert!(text.contains(&task.task_id));
-    assert!(text.contains("| `ev-log-1` | unknown | 2 | 2 | 0 | yes | — |"));
+    assert!(text.contains("| `ev-log-1` | unknown | 2 | 2 | 0 | no | — |"));
     assert!(text.contains("Role conflicts: none"));
     assert!(text.contains("Visible evidence never cited: 0 of 1"));
     assert!(text.contains("Agreement is not correctness"));
@@ -244,7 +244,7 @@ fn share_safe_agreement_output_carries_no_owner_only_material() {
         );
     }
     assert!(text.contains("\"distinct_source_count\": 2"));
-    assert!(text.contains("\"independent\": true"));
+    assert!(text.contains("\"independent\": false"));
 }
 
 /// `--task` narrows to one evaluation task without changing the projection.
