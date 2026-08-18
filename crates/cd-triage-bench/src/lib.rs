@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agreement;
 pub mod canonical;
 pub mod cli;
 pub mod error;
@@ -20,6 +21,13 @@ pub mod review;
 pub mod store;
 pub mod types;
 
+pub use agreement::{
+    build_agreement_views, project_agreement_share_safe, project_all_share_safe,
+    render_agreement_json, render_agreement_markdown, render_agreement_share_safe_json,
+    render_agreement_share_safe_markdown, AgreementRun, AgreementView, EvidenceAnchor, ExcludedRun,
+    ExclusionReason, RoleBucket, RoleConflict, ShareSafeAgreementView, AGREEMENT_VIEW_SCHEMA_V1,
+    AGREEMENT_VIEW_SHARE_SAFE_SCHEMA_V1,
+};
 pub use error::{BenchError, BenchResult};
 pub use import::{import_run, ImportOutcome};
 pub use packet::{materialize_task_packet, TaskPacket};

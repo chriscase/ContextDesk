@@ -1,5 +1,10 @@
 //! Offline CLI for the triage evaluation bench.
 
+use crate::agreement::{
+    build_agreement_views, project_all_share_safe, render_agreement_json,
+    render_agreement_markdown, render_agreement_share_safe_json,
+    render_agreement_share_safe_markdown,
+};
 use crate::canonical::to_pretty_json;
 use crate::error::{BenchError, BenchResult};
 use crate::import::{import_run, parse_import_json, parse_import_markdown, ImportOutcome};
@@ -87,6 +92,27 @@ pub enum Command {
         #[arg(long)]
         task: Option<String>,
     },
+    /// Deterministic evidence-agreement projection over stored runs.
+    ///
+    /// Reports which strategies anchored a claim to the same snapshot evidence
+    /// under the same causal role. Never compares claim text, never scores,
+    /// ranks, or names a winner.
+    Agreement {
+        #[arg(long, value_enum, default_value = "json")]
+        format: AgreementFormat,
+        #[arg(long, value_enum, default_value = "owner-only")]
+        privacy: ReportPrivacy,
+        #[arg(long)]
+        task: Option<String>,
+    },
+}
+
+/// Output shapes for `agreement`. There is no JSONL form: the projection has
+/// no per-record streaming semantics to define one against.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum AgreementFormat {
+    Json,
+    Markdown,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -295,6 +321,50 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                 ReportFormat::Json => render_report_json(&report),
                 ReportFormat::Jsonl => render_report_jsonl(&report),
                 ReportFormat::Markdown => render_report_markdown(&report),
+            }
+        }
+        Command::Agreement {
+            format,
+            privacy,
+            task,
+        } => {
+            let store = open_store(cli.library)?;
+            let mut runs = store.load_runs()?;
+            if let Some(task_id) = &task {
+                runs.retain(|run| &run.task_id == task_id);
+            }
+            let tasks = store
+                .list_tasks()?
+                .iter()
+                .map(|task_id| store.get_task(task_id))
+                .collect::<BenchResult<Vec<_>>>()?;
+            // Only ContextDesk SDK rows carry the owner-only replay envelope.
+            // A blob that cannot be read is deliberately left absent: the
+            // projection then names that row excluded rather than crediting it
+            // with an empty claim set.
+            let mut raw_outputs = BTreeMap::new();
+            for run in &runs {
+                if run.source_kind != SourceKind::ContextdeskSdk {
+                    continue;
+                }
+                if let Ok(bytes) =
+                    store.get_blob_bounded(&run.raw_output.digest.hex, MAX_RAW_INLINE_BYTES as u64)
+                {
+                    raw_outputs.insert(run.run_id.clone(), bytes);
+                }
+            }
+            let views = build_agreement_views(&runs, &tasks, &raw_outputs)?;
+            match (format, privacy) {
+                (AgreementFormat::Json, ReportPrivacy::OwnerOnly) => render_agreement_json(&views),
+                (AgreementFormat::Markdown, ReportPrivacy::OwnerOnly) => {
+                    render_agreement_markdown(&views)
+                }
+                (AgreementFormat::Json, ReportPrivacy::ShareSafe) => {
+                    render_agreement_share_safe_json(&project_all_share_safe(&views)?)
+                }
+                (AgreementFormat::Markdown, ReportPrivacy::ShareSafe) => {
+                    render_agreement_share_safe_markdown(&project_all_share_safe(&views)?)
+                }
             }
         }
     }
