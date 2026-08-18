@@ -4,7 +4,7 @@ use crate::error::{BenchError, BenchResult};
 use crate::store::{BenchStore, PutRunOutcome};
 use crate::types::{
     Completeness, Observed, PromptWorkflow, RawOutput, RunImport, StrategyIdentity, TriageRun,
-    RUN_SCHEMA_V2,
+    MAX_RAW_INLINE_BYTES, RUN_SCHEMA_V2,
 };
 
 /// Result of attempting to import a run.
@@ -27,6 +27,13 @@ pub fn import_run(
     document.validate_metadata()?;
     if raw_bytes.is_empty() {
         return Err(BenchError::Schema("raw output must not be empty".into()));
+    }
+    if raw_bytes.len() > MAX_RAW_INLINE_BYTES {
+        return Err(BenchError::BlobTooLarge {
+            digest: "import-raw-output".into(),
+            declared_bytes: raw_bytes.len() as u64,
+            max_bytes: MAX_RAW_INLINE_BYTES as u64,
+        });
     }
     let task = store.get_task(&document.task_id)?;
     let digest = store.put_blob(raw_bytes)?;

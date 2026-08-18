@@ -843,7 +843,9 @@ requires an explicit benchmark library/task and at least two bounded candidate
 JSON files. Each candidate supplies a `policy`, a unique `cancellation_id`,
 and explicit strategy metadata (`name`, `operator`, `created_at`, with optional
 `version`/`build`); `overrides` may set the public deadline and provider-call
-bound. Provider endpoints and credentials remain in the existing host config
+bound. When no deadline is supplied, the bridge applies the bounded Standard
+180-second whole-comparison deadline. Provider endpoints and credentials remain
+in the existing host config
 and credential adapter.
 
 The command prepares and proves one isolated corpus before any candidate runs,
@@ -852,7 +854,10 @@ persistence, and preserves failed/partial/timed-out outcomes. It never emits
 rankings or readiness claims. Output is owner-only because exact model
 identities and task-linked provenance are retained; use the existing
 `cd-triage-bench report --privacy share-safe` projection for an explicit
-share-safe artifact.
+share-safe artifact. If an infrastructure error stops a later candidate, rows
+already persisted remain durable and can be rendered with the bench report;
+the command returns that error rather than presenting an incomplete comparison
+as successful.
 
 Global flags (available on every subcommand): `--format`, `--json`,
 `--jsonl`, `--color`, `--config <path>`, `--app-config <path>`,

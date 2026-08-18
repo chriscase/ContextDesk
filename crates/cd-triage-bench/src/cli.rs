@@ -9,10 +9,13 @@ use crate::report::{
 };
 use crate::review::{blinded_run_view_from_raw, ReviewPhase};
 use crate::store::BenchStore;
-use crate::types::{Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass};
+use crate::types::{
+    Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass, MAX_RAW_INLINE_BYTES,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -188,7 +191,7 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                 parse_import_json(&text)?
             };
             let raw_bytes = if let Some(path) = raw {
-                fs::read(&path).map_err(|e| BenchError::io(&path, e))?
+                read_bounded_regular_file(&path, MAX_RAW_INLINE_BYTES as u64)?
             } else if let Some(inline) = &import.raw_output_utf8 {
                 inline.as_bytes().to_vec()
             } else {
@@ -267,7 +270,9 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
             let attribution = runs
                 .iter()
                 .filter_map(|run| {
-                    let raw = store.get_blob(&run.raw_output.digest.hex).ok()?;
+                    let raw = store
+                        .get_blob_bounded(&run.raw_output.digest.hex, MAX_RAW_INLINE_BYTES as u64)
+                        .ok()?;
                     Some((run.run_id.clone(), extract_owner_model_attribution(&raw)?))
                 })
                 .collect::<BTreeMap<_, _>>();
@@ -286,6 +291,36 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
             }
         }
     }
+}
+
+fn read_bounded_regular_file(path: &PathBuf, max_bytes: u64) -> BenchResult<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| BenchError::io(path, e))?;
+    if !metadata.file_type().is_file() {
+        return Err(BenchError::Schema(
+            "raw output must be a regular file".into(),
+        ));
+    }
+    if metadata.len() > max_bytes {
+        return Err(BenchError::BlobTooLarge {
+            digest: "raw-output".into(),
+            declared_bytes: metadata.len(),
+            max_bytes,
+        });
+    }
+    let mut file = fs::File::open(path).map_err(|e| BenchError::io(path, e))?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| BenchError::io(path, e))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(BenchError::BlobTooLarge {
+            digest: "raw-output".into(),
+            declared_bytes: bytes.len() as u64,
+            max_bytes,
+        });
+    }
+    Ok(bytes)
 }
 
 fn require_library(library: Option<PathBuf>) -> BenchResult<PathBuf> {

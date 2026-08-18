@@ -10,7 +10,7 @@ use crate::review::{
 use crate::types::citation_assist_flags;
 use crate::types::{
     sha256_hex, Adjudication, Case, ContentDigest, EvaluationTask, EvidenceSnapshot, HeldContent,
-    ScoreReview, TriageRun, LIBRARY_SCHEMA_V1,
+    ScoreReview, TriageRun, LIBRARY_SCHEMA_V1, MAX_RAW_INLINE_BYTES,
 };
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -147,6 +147,43 @@ impl BenchStore {
         crate::types::validate_sha256_hex(hex)?;
         let path = self.blob_path(hex);
         let bytes = fs::read(&path).map_err(|e| BenchError::io(&path, e))?;
+        let actual = sha256_hex(&bytes);
+        if actual != hex {
+            return Err(BenchError::Integrity(format!(
+                "blob {hex} failed digest verification (got {actual})"
+            )));
+        }
+        Ok(bytes)
+    }
+
+    /// Read and verify a blob without allocating beyond `max_bytes`.
+    pub fn get_blob_bounded(&self, hex: &str, max_bytes: u64) -> BenchResult<Vec<u8>> {
+        crate::types::validate_sha256_hex(hex)?;
+        let path = self.blob_path(hex);
+        let metadata = fs::symlink_metadata(&path).map_err(|e| BenchError::io(&path, e))?;
+        if !metadata.file_type().is_file() {
+            return Err(BenchError::Integrity("blob is not a regular file".into()));
+        }
+        if metadata.len() > max_bytes {
+            return Err(BenchError::BlobTooLarge {
+                digest: hex.to_string(),
+                declared_bytes: metadata.len(),
+                max_bytes,
+            });
+        }
+        let mut file = fs::File::open(&path).map_err(|e| BenchError::io(&path, e))?;
+        let mut bytes = Vec::new();
+        std::io::Read::by_ref(&mut file)
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|e| BenchError::io(&path, e))?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(BenchError::BlobTooLarge {
+                digest: hex.to_string(),
+                declared_bytes: bytes.len() as u64,
+                max_bytes,
+            });
+        }
         let actual = sha256_hex(&bytes);
         if actual != hex {
             return Err(BenchError::Integrity(format!(
@@ -404,7 +441,8 @@ impl BenchStore {
     pub fn put_run(&self, run: &TriageRun) -> BenchResult<PutRunOutcome> {
         self.with_write_lock(|| {
             self.validate_run_links(run)?;
-            let raw_output = self.get_blob(&run.raw_output.digest.hex)?;
+            let raw_output =
+                self.get_blob_bounded(&run.raw_output.digest.hex, MAX_RAW_INLINE_BYTES as u64)?;
             validate_run_raw_output(run, &raw_output)?;
             self.persist_validated_run(run)
         })
@@ -783,6 +821,13 @@ struct PutBlobOutcome {
 }
 
 fn validate_run_raw_output(run: &TriageRun, raw_output: &[u8]) -> BenchResult<()> {
+    if raw_output.len() > MAX_RAW_INLINE_BYTES {
+        return Err(BenchError::BlobTooLarge {
+            digest: run.raw_output.digest.hex.clone(),
+            declared_bytes: raw_output.len() as u64,
+            max_bytes: MAX_RAW_INLINE_BYTES as u64,
+        });
+    }
     if raw_output.len() as u64 != run.raw_output.byte_length {
         return Err(BenchError::Integrity(
             "raw output byte length does not match the run manifest".into(),

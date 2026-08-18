@@ -49,6 +49,12 @@ pub const DEFAULT_LIVE_MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_LIVE_MAX_AGGREGATE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Maximum number of candidate runs in one same-snapshot comparison.
 pub const DEFAULT_MAX_COMPARISON_CANDIDATES: usize = 16;
+/// Default whole-comparison deadline when candidates omit an override.
+///
+/// This matches the host's Standard deadline and bounds source preparation as
+/// well as sequential candidate execution. An omitted override must never
+/// make the blocking preparation phase unbounded.
+pub const DEFAULT_LIVE_COMPARISON_DEADLINE_MS: u64 = 180_000;
 const PREPARATION_RUNNING: u8 = 0;
 const PREPARATION_COMPLETED: u8 = 1;
 const PREPARATION_TIMED_OUT: u8 = 2;
@@ -525,6 +531,10 @@ pub async fn run_live_same_snapshot(
     events: Option<TriageEventSink>,
 ) -> Result<LiveRunResult, LiveBridgeError> {
     let started = Instant::now();
+    let deadline_ms = options
+        .overrides
+        .deadline_ms
+        .unwrap_or(DEFAULT_LIVE_COMPARISON_DEADLINE_MS);
     let mut prepared = prepare_same_snapshot_with_deadline(
         store,
         case,
@@ -533,18 +543,16 @@ pub async fn run_live_same_snapshot(
         &options.cache_root,
         options.limits,
         &options.cancel,
-        options.overrides.deadline_ms,
+        Some(deadline_ms),
     )
     .await?;
 
-    if let Some(deadline_ms) = options.overrides.deadline_ms {
-        let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        let remaining = deadline_ms.saturating_sub(elapsed_ms);
-        if remaining == 0 {
-            return finish_with_cleanup(&mut prepared, Err(LiveBridgeError::Deadline));
-        }
-        options.overrides.deadline_ms = Some(remaining);
+    let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let remaining = deadline_ms.saturating_sub(elapsed_ms);
+    if remaining == 0 {
+        return finish_with_cleanup(&mut prepared, Err(LiveBridgeError::Deadline));
     }
+    options.overrides.deadline_ms = Some(remaining);
 
     let result = execute_prepared_same_snapshot(
         store,
@@ -593,7 +601,8 @@ pub async fn run_live_comparison(
     let comparison_deadline_ms = candidates
         .iter()
         .filter_map(|candidate| candidate.options.overrides.deadline_ms)
-        .min();
+        .min()
+        .unwrap_or(DEFAULT_LIVE_COMPARISON_DEADLINE_MS);
     let mut cancellation_ids = BTreeSet::new();
     for candidate in &candidates {
         let options = &candidate.options;
@@ -615,7 +624,7 @@ pub async fn run_live_comparison(
         &first.cache_root,
         first.limits,
         &first.cancel,
-        comparison_deadline_ms,
+        Some(comparison_deadline_ms),
     )
     .await?;
 
@@ -628,21 +637,19 @@ pub async fn run_live_comparison(
         if options.cancel.is_cancelled() {
             return finish_with_cleanup(&mut prepared, Err(LiveBridgeError::Cancelled));
         }
-        if let Some(deadline_ms) = comparison_deadline_ms {
-            let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            let remaining = deadline_ms.saturating_sub(elapsed_ms);
-            if remaining == 0 {
-                return finish_with_cleanup(&mut prepared, Err(LiveBridgeError::Deadline));
-            }
-            options.overrides.deadline_ms = Some(
-                options
-                    .overrides
-                    .deadline_ms
-                    .map_or(remaining, |candidate_deadline| {
-                        candidate_deadline.min(remaining)
-                    }),
-            );
+        let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let remaining = comparison_deadline_ms.saturating_sub(elapsed_ms);
+        if remaining == 0 {
+            return finish_with_cleanup(&mut prepared, Err(LiveBridgeError::Deadline));
         }
+        options.overrides.deadline_ms = Some(
+            options
+                .overrides
+                .deadline_ms
+                .map_or(remaining, |candidate_deadline| {
+                    candidate_deadline.min(remaining)
+                }),
+        );
 
         let result = execute_prepared_same_snapshot(
             store,

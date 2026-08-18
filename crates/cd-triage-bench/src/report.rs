@@ -398,7 +398,7 @@ pub fn extract_owner_model_attribution(raw_output: &[u8]) -> Option<RunAttributi
         .into_iter()
         .flatten()
         .filter_map(serde_json::Value::as_str)
-        .filter(|fingerprint| safe_report_identity(fingerprint))
+        .filter(|fingerprint| safe_model_fingerprint(fingerprint))
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
 
@@ -414,6 +414,13 @@ pub fn extract_owner_model_attribution(raw_output: &[u8]) -> Option<RunAttributi
 
 fn safe_report_identity(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && value.chars().all(|c| !c.is_control() && c != '|')
+}
+
+fn safe_model_fingerprint(value: &str) -> bool {
+    let Some(digest) = value.strip_prefix("mdf-") else {
+        return false;
+    };
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
@@ -1041,6 +1048,27 @@ mod tests {
         let right = dummy_run("run-b", "task-1", "snap-2");
         assert!(reject_cross_snapshot_rank(&left, &right).is_err());
         assert!(reject_cross_snapshot_rank(&left, &left).is_ok());
+    }
+
+    #[test]
+    fn share_safe_attribution_accepts_only_opaque_model_fingerprints() {
+        let raw = serde_json::json!({
+            "slots": [],
+            "fingerprints": {
+                "models": [
+                    "profile:provider::model:exact",
+                    "mdf-not-a-digest",
+                    format!("mdf-{}", "a".repeat(64))
+                ]
+            }
+        });
+        let attribution = extract_owner_model_attribution(raw.to_string().as_bytes())
+            .expect("valid opaque fingerprint should be retained");
+        assert_eq!(
+            attribution.model_fingerprints,
+            vec![format!("mdf-{}", "a".repeat(64))]
+        );
+        assert!(attribution.model_identities.is_empty());
     }
 
     fn dummy_run(run_id: &str, task_id: &str, snapshot_id: &str) -> TriageRun {

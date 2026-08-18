@@ -491,7 +491,7 @@ async fn real_packet_and_provider_path_records_same_snapshot_proof_and_cleans_up
             qualifications,
             policy: TriagePolicySelectionV2::Standard { model },
             overrides: TriageRequestOverridesV1 {
-                deadline_ms: Some(300_000),
+                deadline_ms: None,
                 max_provider_calls: None,
             },
             cancellation_id: "cancel:live-success".into(),
@@ -620,7 +620,7 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
             qualifications,
             policy: TriagePolicySelectionV2::Standard { model },
             overrides: TriageRequestOverridesV1 {
-                deadline_ms: Some(300_000),
+                deadline_ms: None,
                 max_provider_calls: None,
             },
             cancellation_id: cancellation_id.into(),
