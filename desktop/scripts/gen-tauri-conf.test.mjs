@@ -39,11 +39,13 @@ test("gen-tauri-conf writes productName/identifier/title from branding.toml", ()
     assert.equal(conf.app.windows[0].minHeight, 600);
   } finally {
     fs.writeFileSync(brandingPath, brandingBak, "utf8");
-    fs.writeFileSync(confPath, confBak, "utf8");
-    // restore conf via generator from original branding
-    spawnSync(process.execPath, ["scripts/gen-tauri-conf.mjs"], {
+    // Restore through the same atomic generator path. A direct truncate/write
+    // races the other node:test files that validate the checked-in config.
+    const restore = spawnSync(process.execPath, ["scripts/gen-tauri-conf.mjs"], {
       cwd: desktopRoot,
       encoding: "utf8",
     });
+    assert.equal(restore.status, 0, restore.stderr || restore.stdout);
+    assert.equal(fs.readFileSync(confPath, "utf8"), confBak);
   }
 });
