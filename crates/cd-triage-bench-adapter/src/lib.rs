@@ -76,7 +76,8 @@ pub use record::{
     SlotProvenance, TerminalProvenance,
 };
 pub use replay::{
-    decode_replay_json, record_public_replay, validate_public_replay, ValidatedReplayOutcome,
+    decode_replay_json, record_public_replay, validate_public_replay, ExecutionPacketState,
+    ValidatedReplayOutcome,
 };
 pub use request::{build_request, BoundRequest};
 pub use share_safe::{project_share_safe, ShareSafeAdapterRun, ShareSafeSlot};

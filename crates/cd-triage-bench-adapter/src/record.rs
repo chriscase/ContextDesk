@@ -24,7 +24,9 @@ use serde::Serialize;
 use crate::error::{AdapterError, AdapterResult};
 use crate::fingerprint::{fingerprint, MODEL_PREFIX, SLOT_PREFIX};
 use crate::packet::BoundedPacket;
-use crate::replay::{prove_materialized_packet, terminal_provenance, ValidatedReplayOutcome};
+use crate::replay::{
+    prove_materialized_packet, terminal_provenance, ExecutionPacketState, ValidatedReplayOutcome,
+};
 use crate::request::BoundRequest;
 
 /// Per-slot provenance. Owner-only: it retains the exact model identity.
@@ -34,10 +36,10 @@ pub struct SlotProvenance {
     pub role_slot_id: String,
     /// Slot kind.
     pub role: TriageSlotKindV2,
-    /// Exact gateway-scoped model identity.
-    pub model: ModelRef,
-    /// Fingerprint of the exact model identity.
-    pub model_fingerprint: String,
+    /// Exact gateway-scoped model identity, when host preflight resolved one.
+    pub model: Option<ModelRef>,
+    /// Fingerprint of the exact model identity, when known.
+    pub model_fingerprint: Option<String>,
     /// Fingerprint of the slot identity, kind, and model together.
     pub slot_fingerprint: String,
     /// Recorded attempt status.
@@ -99,6 +101,8 @@ pub struct OwnerOnlyRecord {
     pub request: TriageRequestV2,
     /// The complete replay, retaining exact model identities.
     pub replay: TriageReplayV1,
+    /// Whether execution produced and exactly bound a packet.
+    pub execution_packet_state: ExecutionPacketState,
     /// Preserved fingerprints.
     pub fingerprints: RunFingerprints,
     /// Per-slot provenance.
@@ -147,18 +151,16 @@ pub fn record_run(
     outcome: &ValidatedReplayOutcome,
     context: &RecordingContext,
 ) -> AdapterResult<RecordedContextDeskRun> {
-    prove_materialized_packet(&outcome.replay, bounded)?;
+    let execution_packet_state = prove_materialized_packet(&outcome.replay, bounded)?;
 
     let mut slots = Vec::with_capacity(outcome.attempts.len());
     for attempt in &outcome.attempts {
-        let model = attempt.model.clone().ok_or_else(|| {
-            AdapterError::IdentityMismatch(format!(
-                "attempt {} does not record an exact model identity",
-                attempt.attempt_id
-            ))
-        })?;
+        let model = attempt.model.clone();
         slots.push(SlotProvenance {
-            model_fingerprint: fingerprint(MODEL_PREFIX, &model)?,
+            model_fingerprint: model
+                .as_ref()
+                .map(|model| fingerprint(MODEL_PREFIX, model))
+                .transpose()?,
             slot_fingerprint: fingerprint(
                 SLOT_PREFIX,
                 &(&attempt.role_slot_id, &attempt.role, &model),
@@ -179,7 +181,7 @@ pub fn record_run(
 
     let mut models: Vec<String> = slots
         .iter()
-        .map(|slot| slot.model_fingerprint.clone())
+        .filter_map(|slot| slot.model_fingerprint.clone())
         .collect();
     models.sort();
     models.dedup();
@@ -202,6 +204,7 @@ pub fn record_run(
         sdk_run_id: bound.sdk_run_id.clone(),
         request: bound.request.clone(),
         replay: outcome.replay.clone(),
+        execution_packet_state,
         fingerprints: fingerprints.clone(),
         slots,
         terminal: terminal.clone(),

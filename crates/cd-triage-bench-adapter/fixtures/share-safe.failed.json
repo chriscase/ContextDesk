@@ -1,6 +1,6 @@
 {
   "privacy": "share_safe",
-  "bench_run_id": "run-865266980dad5c4adcc9503faec1d95313b1ebda2dbdb9d4ce60244f65f3b422",
+  "bench_run_id": "run-5113e6f8533c474743dd22200165eebd748ef94d851bf0c33a5bf6b3ef30dab9",
   "sdk_run_id": "cdrun-ef4b5ac55020f54e82b90ca4c3d0d315cecb2ca299e79dbc9162d9d0dd1d1df4",
   "task_fingerprint": "tkf-48e82e8fa651d1ec5b7e7751710a32fa708306ad8dbec679c5ce1224d872e8f6",
   "snapshot_fingerprint": "snf-0ddcedab95ee0d1c170a6c521290c0fcfed92565fb8faf76e4f3b8140359d683",
@@ -58,6 +58,7 @@
   "fairness": "same_snapshot",
   "status": "failed",
   "terminal_kind": "failed",
+  "execution_packet_state": "matched",
   "terminal_category": "provider_unavailable",
   "result_kind": "honest_partial",
   "validation_state": "partial",

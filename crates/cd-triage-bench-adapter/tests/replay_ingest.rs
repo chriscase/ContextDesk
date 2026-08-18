@@ -7,8 +7,13 @@ use cd_triage_bench::RunStatus;
 use cd_triage_bench_adapter::{
     decode_replay_json, materialize_bounded_packet, project_share_safe, record_public_replay,
     record_run, run_deterministic_mock, run_offline, validate_public_replay, AdapterError,
+    ExecutionPacketState,
 };
-use cd_triage_sdk::{TriageReplayV1, TriageRequestOverridesV1, TriageRunEventPayloadV2};
+use cd_triage_sdk::{
+    PacketPrivacyBoundary, TriageAttemptStatus, TriageReplayV1, TriageRequestOverridesV1,
+    TriageRoleAttemptV1, TriageRunEventPayloadV2, TriageRunEventV2, TriageSlotKindV2,
+    TriageTerminalDispositionV1, TRIAGE_REPLAY_SCHEMA_V1, TRIAGE_RUN_EVENT_SCHEMA_V2,
+};
 
 fn bound_fixture() -> (
     cd_triage_bench::Case,
@@ -38,6 +43,56 @@ fn mock_replay() -> TriageReplayV1 {
     run_deterministic_mock(&bound, &bounded, &common::plan_complete())
         .unwrap()
         .replay
+}
+
+fn pre_packet_failure_replay(bound: &cd_triage_bench_adapter::BoundRequest) -> TriageReplayV1 {
+    let event = |sequence, event| TriageRunEventV2 {
+        schema_id: TRIAGE_RUN_EVENT_SCHEMA_V2.into(),
+        run_id: bound.sdk_run_id.clone(),
+        sequence,
+        privacy: PacketPrivacyBoundary::OwnerOnly,
+        event,
+    };
+    TriageReplayV1 {
+        schema_id: TRIAGE_REPLAY_SCHEMA_V1.into(),
+        run_id: bound.sdk_run_id.clone(),
+        request_fingerprint: bound.request_fingerprint.clone(),
+        events: vec![
+            event(
+                0,
+                TriageRunEventPayloadV2::RunStarted {
+                    request_fingerprint: bound.request_fingerprint.clone(),
+                    policy_fingerprint: bound.policy_fingerprint.clone(),
+                },
+            ),
+            event(
+                1,
+                TriageRunEventPayloadV2::RoleAttempt {
+                    attempt: TriageRoleAttemptV1 {
+                        attempt_id: "attempt:preflight:finalizer".into(),
+                        role_slot_id: "finalize".into(),
+                        role: TriageSlotKindV2::Finalizer,
+                        model: None,
+                        status: TriageAttemptStatus::NotAdmitted,
+                        reason_codes: vec!["policy_preflight_rejected".into()],
+                        elapsed_ms: 0,
+                        input_chars: 0,
+                        output_chars: 0,
+                        physical_provider_calls: Some(0),
+                        semantic_corrections: Some(0),
+                        terminal_disposition: Some(TriageTerminalDispositionV1::NotAdmitted),
+                    },
+                },
+            ),
+            event(
+                2,
+                TriageRunEventPayloadV2::Failed {
+                    category: "policy_preflight_rejected".into(),
+                    partial_result: None,
+                },
+            ),
+        ],
+    }
 }
 
 #[test]
@@ -73,6 +128,61 @@ fn mock_recording_and_replay_recording_are_equivalent() {
         imported.bench_run.cost,
         cd_triage_bench::Observed::Unknown
     ));
+    assert_eq!(
+        imported.owner_only.execution_packet_state,
+        ExecutionPacketState::Matched
+    );
+}
+
+#[test]
+fn pre_packet_failure_is_recorded_without_fabricating_execution_provenance() {
+    let (case, snapshot, task, bounded, bound) = bound_fixture();
+    let replay = pre_packet_failure_replay(&bound);
+    replay.validate().expect("public pre-packet failure");
+
+    let recorded = record_public_replay(
+        &case,
+        &snapshot,
+        &task,
+        &bounded,
+        &bound,
+        replay,
+        &common::context(),
+    )
+    .expect("record pre-packet failure");
+
+    assert_eq!(recorded.bench_run.status, RunStatus::Failed);
+    assert_eq!(
+        recorded.owner_only.execution_packet_state,
+        ExecutionPacketState::NotProduced
+    );
+    assert!(recorded.owner_only.fingerprints.models.is_empty());
+    assert_eq!(recorded.owner_only.slots.len(), 1);
+    assert!(recorded.owner_only.slots[0].model.is_none());
+    assert!(recorded.owner_only.slots[0].model_fingerprint.is_none());
+    assert_eq!(
+        recorded.owner_only.fingerprints.packet,
+        bounded.packet_fingerprint
+    );
+    assert!(!recorded
+        .owner_only
+        .replay
+        .events
+        .iter()
+        .any(|event| { matches!(&event.event, TriageRunEventPayloadV2::PacketReady { .. }) }));
+
+    let projection = project_share_safe(&snapshot, &task, &recorded).unwrap();
+    assert_eq!(
+        projection.execution_packet_state,
+        ExecutionPacketState::NotProduced
+    );
+    assert!(projection.model_fingerprints.is_empty());
+    assert_eq!(projection.slots.len(), 1);
+    assert!(projection.slots[0].model_fingerprint.is_none());
+    assert!(
+        cd_triage_sdk::scan_share_safe_text(&serde_json::to_string(&projection).unwrap())
+            .is_empty()
+    );
 }
 
 #[test]

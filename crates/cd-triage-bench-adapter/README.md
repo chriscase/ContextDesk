@@ -29,6 +29,7 @@ Recording is **replay ingest**, not live execution. The mock and an imported
 | Request identity uses the public runtime algorithm; packet/corpus identities stay separate | `tests/pipeline.rs`, `tests/fingerprints.rs` |
 | Every terminal is a recorded run, never a discarded attempt | `tests/terminals.rs` |
 | Imported replay uses the same recorder as the mock | `tests/replay_ingest.rs` |
+| Pre-packet failure records `not_produced` without fabricated packet, model, usage, or cost facts | `tests/replay_ingest.rs` |
 | Recorded runs use provenance- and status-sensitive `TriageRun` v2 identity | `tests/fingerprints.rs` |
 | Failed-with-partial stays Failed | `tests/terminals.rs` |
 | Share-safe export leaks no model identity, answer, or raw body | `tests/privacy.rs` |
@@ -59,9 +60,10 @@ Recording is **replay ingest**, not live execution. The mock and an imported
   unknown is not zero. Scripted `elapsed_ms` values are not measurements, so
   timing stays unknown too.
 * **Owner-only is the default recording boundary.** The recorded run keeps the
-  task text, the exact `ModelRef` per slot, and the full replay. Share-safe
-  output is a separate, hand-written projection — never the same record with a
-  relabelled boundary.
+  task text, each exact resolved `ModelRef`, and the full replay. A provider-free
+  pre-packet attempt may truthfully have no model; that absence remains unknown
+  rather than becoming a fabricated identity. Share-safe output is a separate,
+  hand-written projection — never the same record with a relabelled boundary.
 * **`scan_share_safe_text` is substring-based.** A literal bench `task-<hex>`
   identity contains `sk-` and is flagged as credential-shaped. The projection
   therefore exports a task *fingerprint*. See

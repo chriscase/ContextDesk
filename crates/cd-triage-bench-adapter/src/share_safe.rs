@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AdapterError, AdapterResult};
 use crate::fingerprint::{fingerprint, SNAPSHOT_PREFIX, TASK_PREFIX};
 use crate::record::RecordedContextDeskRun;
+use crate::replay::ExecutionPacketState;
 
 /// Share-safe view of one role slot. Carries fingerprints and dispositions
 /// only: no slot identity, no model identity.
@@ -31,8 +32,9 @@ use crate::record::RecordedContextDeskRun;
 pub struct ShareSafeSlot {
     /// Fingerprint over slot identity, kind, and model.
     pub slot_fingerprint: String,
-    /// Fingerprint over the exact model identity. Not the identity itself.
-    pub model_fingerprint: String,
+    /// Fingerprint over the exact model identity when preflight resolved one.
+    /// Never the identity itself.
+    pub model_fingerprint: Option<String>,
     /// Slot kind.
     pub role: TriageSlotKindV2,
     /// Recorded attempt status.
@@ -78,6 +80,8 @@ pub struct ShareSafeAdapterRun {
     pub status: String,
     /// Public terminal event kind.
     pub terminal_kind: String,
+    /// Whether the engine produced and exactly bound an execution packet.
+    pub execution_packet_state: ExecutionPacketState,
     /// Opaque host failure category, when the terminal carried one.
     pub terminal_category: Option<String>,
     /// Result kind, when the terminal carried a result.
@@ -164,6 +168,7 @@ pub fn project_share_safe(
         fairness: "same_snapshot".to_string(),
         status: recorded.bench_run.status.as_str().to_string(),
         terminal_kind: terminal.kind.clone(),
+        execution_packet_state: record.execution_packet_state,
         terminal_category: terminal.category.clone(),
         result_kind: terminal.result_kind,
         validation_state: terminal.validation_state,

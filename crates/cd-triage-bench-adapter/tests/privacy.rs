@@ -58,25 +58,30 @@ fn share_safe_projection_passes_the_real_share_safe_scan() {
 fn share_safe_projection_carries_no_model_identity() {
     let (run, json) = project(&common::plan_complete());
 
-    for model in &run.recorded.owner_only.slots {
+    for slot in &run.recorded.owner_only.slots {
+        let model = slot.model.as_ref().expect("completed slot model");
         assert!(
-            !json.contains(&model.model.profile_id),
+            !json.contains(&model.profile_id),
             "share-safe export leaked gateway profile {}",
-            model.model.profile_id
+            model.profile_id
         );
         assert!(
-            !json.contains(&model.model.model_id),
+            !json.contains(&model.model_id),
             "share-safe export leaked model id {}",
-            model.model.model_id
+            model.model_id
         );
         // The fingerprint is what survives, not the identity.
-        assert!(json.contains(&model.model_fingerprint));
-        assert!(json.contains(&model.slot_fingerprint));
+        assert!(json.contains(
+            slot.model_fingerprint
+                .as_deref()
+                .expect("completed slot model fingerprint")
+        ));
+        assert!(json.contains(&slot.slot_fingerprint));
         // Host-authored slot identities do not survive either.
         assert!(
-            !json.contains(&format!("\"{}\"", model.role_slot_id)),
+            !json.contains(&format!("\"{}\"", slot.role_slot_id)),
             "share-safe export leaked slot identity {}",
-            model.role_slot_id
+            slot.role_slot_id
         );
     }
 }

@@ -36,6 +36,21 @@ pub struct ValidatedReplayOutcome {
     pub attempts: Vec<TriageRoleAttemptV1>,
 }
 
+/// What the authoritative replay proves about an execution packet.
+///
+/// The bench packet is always materialized before recording. A normal replay
+/// must repeat that packet exactly. A contract-valid pre-packet terminal is
+/// instead explicit proof that execution stopped before any engine packet was
+/// produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPacketState {
+    /// `PacketReady` repeated the exact materialized packet identity.
+    Matched,
+    /// The validated replay terminated before `PacketReady` without a result.
+    NotProduced,
+}
+
 impl ValidatedReplayOutcome {
     /// The single terminal payload.
     pub fn terminal(&self) -> &TriageRunEventPayloadV2 {
@@ -111,10 +126,14 @@ pub fn validate_public_replay(
     let terminal = terminal_payload(&replay)?;
     let _ = terminal_result(terminal);
 
+    let pre_packet = !replay
+        .events
+        .iter()
+        .any(|event| matches!(&event.event, TriageRunEventPayloadV2::PacketReady { .. }));
     let mut attempts = Vec::new();
     for event in &replay.events {
         if let TriageRunEventPayloadV2::RoleAttempt { attempt } = &event.event {
-            if attempt.model.is_none() {
+            if attempt.model.is_none() && !pre_packet {
                 return Err(AdapterError::IdentityMismatch(format!(
                     "attempt {} does not record an exact model identity",
                     attempt.attempt_id
@@ -143,10 +162,11 @@ pub fn decode_replay_json(bytes: &[u8]) -> AdapterResult<TriageReplayV1> {
 /// bound request.
 ///
 /// Rematerializes the packet from `case`/`snapshot`/`task` and refuses if
-/// `bounded` is not that packet. Recording then requires [`PacketReady`] and
+/// `bounded` is not that packet. A normal replay requires [`PacketReady`] and
 /// the terminal packet identity (when a result is present) to match the
-/// materialized packet. A differing production packet fails closed. No host
-/// attestation is invented.
+/// materialized packet. A validated pre-packet terminal is recorded as
+/// [`ExecutionPacketState::NotProduced`]. A differing production packet fails
+/// closed. No host attestation is invented.
 pub fn record_public_replay(
     case: &Case,
     snapshot: &EvidenceSnapshot,
@@ -217,7 +237,7 @@ pub(crate) fn terminal_result(terminal: &TriageRunEventPayloadV2) -> Option<&Tri
 pub(crate) fn prove_materialized_packet(
     replay: &TriageReplayV1,
     bounded: &BoundedPacket,
-) -> AdapterResult<()> {
+) -> AdapterResult<ExecutionPacketState> {
     let ready = replay.events.iter().find_map(|event| match &event.event {
         TriageRunEventPayloadV2::PacketReady {
             packet_id,
@@ -227,9 +247,12 @@ pub(crate) fn prove_materialized_packet(
         _ => None,
     });
     let Some((packet_id, packet_digest)) = ready else {
-        return Err(AdapterError::IdentityMismatch(
-            "replay has no PacketReady event proving the materialized packet".into(),
-        ));
+        if terminal_result(terminal_payload(replay)?).is_some() {
+            return Err(AdapterError::IdentityMismatch(
+                "replay has a terminal result without a PacketReady proof".into(),
+            ));
+        }
+        return Ok(ExecutionPacketState::NotProduced);
     };
     if packet_id != bounded.packet.packet_id || packet_digest != bounded.packet_fingerprint {
         return Err(AdapterError::IdentityMismatch(
@@ -243,7 +266,7 @@ pub(crate) fn prove_materialized_packet(
             ));
         }
     }
-    Ok(())
+    Ok(ExecutionPacketState::Matched)
 }
 
 pub(crate) fn terminal_provenance(

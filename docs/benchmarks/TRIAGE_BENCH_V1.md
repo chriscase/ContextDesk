@@ -93,11 +93,13 @@ What the adapter does **not** claim:
   private-store write inside ContextDesk crates.
 - No host attestation of a production packet. Recording fails closed when
   `PacketReady` or the terminal packet identity differs from the adapter's
-  materialized task packet.
+  materialized task packet. A validated provider-free pre-packet terminal is
+  recorded separately as `execution_packet_state: not_produced`; it cannot
+  carry a result or nonzero provider work.
 
-Its default dependency tree is `cd-triage-sdk` + `cd-triage-bench` only;
-`cd-core` / `cd-workflow` are reachable exclusively through the non-default
-`workflow-mock` conformance feature. See
+Its default ContextDesk dependency tree is `cd-triage-sdk` +
+`cd-triage-runtime` + `cd-triage-bench`; `cd-core` / `cd-workflow` are reachable
+exclusively through the non-default `workflow-mock` conformance feature. See
 [`crates/cd-triage-bench-adapter/README.md`](../../crates/cd-triage-bench-adapter/README.md).
 
 ## CLI

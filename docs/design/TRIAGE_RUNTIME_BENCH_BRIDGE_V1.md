@@ -63,11 +63,13 @@ The runtime facade owns no providers. It validates and fingerprints a
 `preflight -> execute`, validates the returned replay, checks exact request and
 run identity, and derives the typed terminal outcome.
 
-Expected host refusals are typed attempt outcomes, not discarded calls.
-Preflight rejection can legitimately occur before an SDK packet/replay exists;
-the live bench runner records that failure against its already-materialized
-bench packet with an explicit `replay: none` provenance fact. Contract-invalid
-requests remain import errors rather than fabricated engine attempts.
+Expected host refusals are typed attempt outcomes, not discarded calls. A
+resolved request that fails, times out, or is cancelled before an engine packet
+exists returns an authoritative provider-free replay: `run_started`, zero or
+more unique zero-work role dispositions, and one terminal without a partial
+result. The replay explicitly proves that no execution packet was produced;
+contract-invalid requests remain import errors rather than fabricated engine
+attempts.
 
 `triage(...)` accepts Standard selection only.
 `triage_with_policy(...)` accepts Saved or Inline selection only. Calling the
@@ -138,9 +140,10 @@ the same recorder so terminal and provenance behavior cannot drift.
 A replay that names the adapter's exact bench packet can be ingested directly.
 A production replay normally names a ContextDesk packet instead; it requires
 the live materialization proof below and must otherwise fail closed.
-Cancellation before an engine packet exists is recordable only when the
-adapter already established the bench visibility boundary; the record must say
-that no execution packet or replay was produced.
+A validated pre-packet failure replay is recordable only after the adapter has
+established the bench visibility boundary. Its owner-only and share-safe
+provenance both say `execution_packet_state: not_produced`; the adapter never
+invents `PacketReady`, a result, model identity, timing, usage, or cost.
 
 ## Live same-snapshot proof
 
@@ -237,11 +240,13 @@ Hermetic tests must cover:
 
 The current production-host slice covers Standard and configured-policy facade
 dispatch, canonical identity, exact cancellation registration/cleanup, all
-typed terminal projections, Standard's exact six-event graph and model binding,
-workflow host cleanup after failed corpus binding, CLI/Tauri configured-policy
-selection, authoritative desktop replay return, TypeScript replay validation,
-and the existing default dependency direction. Live materialization items above
-remain required before a same-snapshot live-bench capability claim.
+typed terminal projections, authoritative provider-free pre-packet failure,
+timeout, and cancellation replays, Standard's exact six-event graph and model
+binding, workflow host cleanup after failed corpus binding, CLI/Tauri
+configured-policy selection, authoritative desktop replay return, Rust and
+TypeScript replay validation parity, and the existing default dependency
+direction. Live materialization items above remain required before a
+same-snapshot live-bench capability claim.
 
 Focused fast lanes should cover the leaf SDK, runtime facade, bench, and
 adapter. Production-path workflow tests belong in the existing Rust shards.

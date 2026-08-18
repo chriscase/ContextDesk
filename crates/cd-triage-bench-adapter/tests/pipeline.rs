@@ -94,7 +94,10 @@ fn owner_only_record_retains_exact_model_refs_and_the_full_replay() {
     let exact: Vec<String> = record
         .slots
         .iter()
-        .map(|slot| format!("{}/{}", slot.model.profile_id, slot.model.model_id))
+        .map(|slot| {
+            let model = slot.model.as_ref().expect("completed slot model");
+            format!("{}/{}", model.profile_id, model.model_id)
+        })
         .collect();
     assert_eq!(
         exact,
