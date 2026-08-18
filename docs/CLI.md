@@ -77,6 +77,7 @@ metacharacters literal. If a question begins with a command name such as
 | `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
 | `triage-policy validate\|compile\|example` | Offline, owner-only Triage Policy V2 validation over explicit policy/preflight JSON files. Retains exact profile/model identities; does not read AppConfig, credentials, Keychain, discovery state, or a corpus, and never contacts a provider. |
 | `triage-policy qualify` | One explicit, bounded synthetic role probe through the production backend; atomically saves host-owned exact-role evidence and never infers compatibility from a model name. |
+| `bench-compare` | Host-only, bounded live comparison over one benchmark task. Materializes one exact snapshot/corpus, runs two or more explicit candidates, persists validated runs, and renders the honest owner-only comparison report. |
 | `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
 | `gateway ledger` | Offline cost/reliability comparison over share-safe diagnostic bundles and documented historical rows. Never makes live calls; never emits readiness claims from aggregates. See [Gateway cost/reliability ledger](benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md). |
 
@@ -829,9 +830,29 @@ contextdesk models verify <model-id> [<model-id> ...]
 contextdesk models verify --all [--role chat|embedding|reranker|unknown] [--match <text>] --yes
 contextdesk logging-assessment [corpus-id] [--report-format json|markdown] [--output <file>]
 contextdesk exception-episodes [corpus-id]
+contextdesk bench-compare --library <dir> --task <task-id> \
+            --candidate <candidate-a.json> --candidate <candidate-b.json>
 # Friendly aliases: ask=chat, search=explore, assess=logging-assessment,
 #                   episodes=exception-episodes
 ```
+
+### Same-snapshot comparison (`contextdesk bench-compare`)
+
+This command is the host-facing entry point for the live benchmark bridge. It
+requires an explicit benchmark library/task and at least two bounded candidate
+JSON files. Each candidate supplies a `policy`, a unique `cancellation_id`,
+and explicit strategy metadata (`name`, `operator`, `created_at`, with optional
+`version`/`build`); `overrides` may set the public deadline and provider-call
+bound. Provider endpoints and credentials remain in the existing host config
+and credential adapter.
+
+The command prepares and proves one isolated corpus before any candidate runs,
+reuses its packet/corpus identity sequentially, validates every replay before
+persistence, and preserves failed/partial/timed-out outcomes. It never emits
+rankings or readiness claims. Output is owner-only because exact model
+identities and task-linked provenance are retained; use the existing
+`cd-triage-bench report --privacy share-safe` projection for an explicit
+share-safe artifact.
 
 Global flags (available on every subcommand): `--format`, `--json`,
 `--jsonl`, `--color`, `--config <path>`, `--app-config <path>`,
