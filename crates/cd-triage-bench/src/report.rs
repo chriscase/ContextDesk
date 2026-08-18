@@ -85,6 +85,12 @@ pub struct RunSummary {
     pub run_id: String,
     pub strategy_name: String,
     pub strategy_version: Observed<String>,
+    /// Exact provider-profile/model identities in an owner-only report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_identities: Vec<String>,
+    /// Stable model fingerprints in a share-safe report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_fingerprints: Vec<String>,
     pub source_kind: SourceKind,
     pub status: RunStatus,
     pub fairness: String,
@@ -163,11 +169,43 @@ pub struct VersionDelta {
     pub change: String,
 }
 
+/// Model attribution recovered from a validated owner-only run envelope.
+///
+/// Exact identities are emitted only in owner-only reports. Share-safe
+/// reports use the fingerprints instead, so comparison rows remain useful
+/// without exposing provider/model identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunAttribution {
+    pub model_identities: Vec<String>,
+    pub model_fingerprints: Vec<String>,
+}
+
 pub fn build_report(
     runs: &[TriageRun],
     adjudications: &[Adjudication],
     scores: &[ScoreReview],
     cases: &[Case],
+    privacy: PrivacyClass,
+) -> BenchResult<BacktestReport> {
+    build_report_with_attribution(
+        runs,
+        adjudications,
+        scores,
+        cases,
+        &BTreeMap::new(),
+        privacy,
+    )
+}
+
+/// Build a report while retaining validated provider/model attribution for
+/// live ContextDesk runs. Callers that only have [`TriageRun`] rows should use
+/// [`build_report`], which preserves the historical source-neutral behavior.
+pub fn build_report_with_attribution(
+    runs: &[TriageRun],
+    adjudications: &[Adjudication],
+    scores: &[ScoreReview],
+    cases: &[Case],
+    attribution: &BTreeMap<String, RunAttribution>,
     privacy: PrivacyClass,
 ) -> BenchResult<BacktestReport> {
     let mut runs: Vec<TriageRun> = runs.to_vec();
@@ -220,6 +258,7 @@ pub fn build_report(
                 run,
                 &adjudications,
                 &all_adjudications,
+                attribution.get(&run.run_id),
                 privacy,
             ));
         }
@@ -327,6 +366,56 @@ pub fn render_report_json(report: &BacktestReport) -> BenchResult<String> {
     Ok(text)
 }
 
+/// Recover model attribution from the adapter's canonical owner-only envelope.
+///
+/// The report crate deliberately treats the envelope as an opaque JSON
+/// boundary: malformed or unrelated raw output simply has no attribution.
+/// Only bounded, non-control-string provider/model values are admitted into a
+/// rendered report.
+pub fn extract_owner_model_attribution(raw_output: &[u8]) -> Option<RunAttribution> {
+    let value: serde_json::Value = serde_json::from_slice(raw_output).ok()?;
+    let slots = value.get("slots")?.as_array()?;
+    let mut identities = BTreeSet::new();
+    for slot in slots {
+        let Some(model) = slot.get("model").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        let Some(profile_id) = model.get("profile_id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(model_id) = model.get("model_id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if safe_report_identity(profile_id) && safe_report_identity(model_id) {
+            identities.insert(format!("{profile_id}::{model_id}"));
+        }
+    }
+
+    let fingerprints = value
+        .get("fingerprints")
+        .and_then(|fingerprints| fingerprints.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|fingerprint| safe_report_identity(fingerprint))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+
+    if identities.is_empty() && fingerprints.is_empty() {
+        None
+    } else {
+        Some(RunAttribution {
+            model_identities: identities.into_iter().collect(),
+            model_fingerprints: fingerprints.into_iter().collect(),
+        })
+    }
+}
+
+fn safe_report_identity(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && value.chars().all(|c| !c.is_control() && c != '|')
+}
+
 pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
     let mut out = String::new();
     out.push_str("# Triage bench comparison report\n\n");
@@ -386,17 +475,35 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
             "### task `{}` snapshot `{}`\n\n",
             group.task_id, group.snapshot_id
         ));
-        out.push_str("| run | strategy | version | source | status | fairness | scored |\n");
-        out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
+        out.push_str(
+            "| run | strategy | model(s) | version | source | status | fairness | scored |\n",
+        );
+        out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
         for run in &group.runs {
             let version = match &run.strategy_version {
                 Observed::Unknown => "unknown".to_string(),
                 Observed::Known(v) => v.clone(),
             };
+            let models = if !run.model_identities.is_empty() {
+                run.model_identities
+                    .iter()
+                    .map(|model| format!("`{model}`"))
+                    .collect::<Vec<_>>()
+                    .join("<br>")
+            } else if !run.model_fingerprints.is_empty() {
+                run.model_fingerprints
+                    .iter()
+                    .map(|fingerprint| format!("`{fingerprint}`"))
+                    .collect::<Vec<_>>()
+                    .join("<br>")
+            } else {
+                "unknown".into()
+            };
             out.push_str(&format!(
-                "| `{}` | {} | {} | {} | {} | {} | {} |\n",
+                "| `{}` | {} | {} | {} | {} | {} | {} | {} |\n",
                 run.run_id,
                 run.strategy_name,
+                models,
                 version,
                 run.source_kind.as_str(),
                 run.status.as_str(),
@@ -582,6 +689,7 @@ fn run_summary(
     run: &TriageRun,
     visible: &[Adjudication],
     all: &[Adjudication],
+    attribution: Option<&RunAttribution>,
     privacy: PrivacyClass,
 ) -> RunSummary {
     let related: Vec<&Adjudication> = visible.iter().filter(|a| a.run_id == run.run_id).collect();
@@ -610,6 +718,20 @@ fn run_summary(
         run_id: run.run_id.clone(),
         strategy_name: run.strategy.name.clone(),
         strategy_version: run.strategy.version.clone(),
+        model_identities: if privacy == PrivacyClass::OwnerOnly {
+            attribution
+                .map(|attribution| attribution.model_identities.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        model_fingerprints: if privacy == PrivacyClass::ShareSafe {
+            attribution
+                .map(|attribution| attribution.model_fingerprints.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
         source_kind: run.source_kind,
         status: run.status,
         fairness: run.fairness.as_str().to_string(),

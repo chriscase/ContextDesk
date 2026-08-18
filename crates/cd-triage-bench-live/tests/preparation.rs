@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,7 +15,9 @@ use cd_core::{
     },
 };
 use cd_test_gateway::{Body, Frame, MockGateway, RecordedRequest, Response, Step};
-use cd_triage_bench::report::{build_report, render_report_markdown};
+use cd_triage_bench::report::{
+    build_report_with_attribution, extract_owner_model_attribution, render_report_markdown,
+};
 use cd_triage_bench::{
     BenchStore, Case, CaseLifecycle, ContentDigest, EvaluationTask, EvidenceItem, EvidenceSnapshot,
     EvidenceSource, HeldContent, Observed, PrivacyClass, ReportedProblem, StrategyIdentity,
@@ -565,9 +568,17 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         }
     })
     .await;
+    let alternate_gateway = MockGateway::start_routed(|request| {
+        if request.path.ends_with("/chat/completions") {
+            Step::respond(Response::json_ok(&answer_from_live_request(request)))
+        } else {
+            Step::respond(Response::status_only(404))
+        }
+    })
+    .await;
     let (_library, cache, store, case, snapshot, task) = fixture();
     let profile = openai_profile(gateway.base_url());
-    let mut alternate_profile = openai_profile(gateway.base_url());
+    let mut alternate_profile = openai_profile(alternate_gateway.base_url());
     alternate_profile.id = "profile:live-fixture-beta".into();
     alternate_profile.label = "live fixture beta".into();
     alternate_profile.chat_model = "model:live-fixture-beta".into();
@@ -655,8 +666,10 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
     .unwrap();
 
     assert_eq!(result.runs.len(), 2);
-    assert_eq!(gateway.request_count(), 2);
-    let requests = gateway.requests();
+    assert_eq!(gateway.request_count(), 1);
+    assert_eq!(alternate_gateway.request_count(), 1);
+    let mut requests = gateway.requests();
+    requests.extend(alternate_gateway.requests());
     let models = requests
         .iter()
         .map(|request| {
@@ -693,22 +706,42 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         result.runs[1].recorded.owner_only.fingerprints.packet
     );
 
-    let report = build_report(
+    let attribution = result
+        .runs
+        .iter()
+        .filter_map(|run| {
+            Some((
+                run.recorded.bench_run.run_id.clone(),
+                extract_owner_model_attribution(&run.recorded.raw_output)?,
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let report = build_report_with_attribution(
         &store.load_runs().unwrap(),
         &[],
         &[],
         &store.load_cases().unwrap(),
+        &attribution,
         PrivacyClass::OwnerOnly,
     )
     .unwrap();
     assert_eq!(report.counts.runs, 2);
     assert_eq!(report.groups.len(), 1);
     assert_eq!(report.groups[0].runs.len(), 2);
+    assert!(report.groups[0].runs.iter().any(|run| {
+        run.model_identities == vec!["profile:live-fixture::model:live-fixture".to_string()]
+    }));
+    assert!(report.groups[0].runs.iter().any(|run| {
+        run.model_identities
+            == vec!["profile:live-fixture-beta::model:live-fixture-beta".to_string()]
+    }));
     assert!(report.incomparable.is_empty());
     let markdown = render_report_markdown(&report).unwrap();
     assert!(markdown.contains("# Triage bench comparison report"));
     assert!(markdown.contains("ContextDesk live alpha"));
     assert!(markdown.contains("ContextDesk live beta"));
+    assert!(markdown.contains("profile:live-fixture::model:live-fixture"));
+    assert!(markdown.contains("profile:live-fixture-beta::model:live-fixture-beta"));
     assert!(markdown.contains("same task + snapshot"));
     assert!(markdown.contains("does not assign readiness, qualification, or routing badges"));
 }

@@ -102,6 +102,20 @@ fn issue_881_report_only_acceptance() {
     let snapshot = snapshot_for(&store, "case-checkout-cascade");
     let task = task_for(&store, &snapshot);
 
+    let live_owner_record = r#"{"fingerprints":{"models":["model-fingerprint-cli"]},"slots":[{"model":{"profile_id":"profile:cli","model_id":"model:cli"}}]}"#;
+    let _live_cli = import_named_with_privacy(
+        &store,
+        &task.task_id,
+        SourceKind::ContextdeskSdk,
+        "ContextDesk live cli",
+        Observed::Known("comparison-v1".into()),
+        live_owner_record,
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        PrivacyClass::OwnerOnly,
+        "2026-01-15T08:01:00Z",
+    );
+
     let human = import_named(
         &store,
         &task.task_id,
@@ -423,9 +437,27 @@ fn issue_881_report_only_acceptance() {
     assert!(md.contains("partial"));
     assert!(md.contains("drill-down"));
     assert!(md.contains("incomparable") || md.contains("Incomparable"));
+    assert!(md.contains("profile:cli::model:cli"));
     assert!(md.contains("/Users/alex/incidents/ticket.md"));
     assert!(!md.to_ascii_lowercase().contains("ready"));
     assert!(!md.contains("leaderboard"));
+
+    let share_md = bench()
+        .args([
+            "--library",
+            library,
+            "report",
+            "--format",
+            "markdown",
+            "--privacy",
+            "share-safe",
+        ])
+        .output()
+        .unwrap();
+    assert!(share_md.status.success());
+    let share_md = String::from_utf8(share_md.stdout).unwrap();
+    assert!(!share_md.contains("profile:cli::model:cli"));
+    assert!(!share_md.contains("model-fingerprint-cli"));
 
     let owner: serde_json::Value = serde_json::from_slice(&json1.stdout).unwrap();
     assert_eq!(

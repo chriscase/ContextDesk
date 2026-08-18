@@ -1,8 +1,9 @@
 # Triage runtime and evaluation-bench bridge v1
 
-**Status:** Standard/Saved/Inline production host integration is implemented
-locally on top of the validated #918/#920 baseline. Live same-snapshot bench
-execution remains open; this is not a live-bench or release-readiness claim.
+**Status:** Standard/Saved/Inline production host integration and the bounded
+live same-snapshot bench bridge are implemented locally on top of the
+validated #918/#920 baseline. Broader live visibility shapes and user-facing
+orchestration remain open; this is not a release-readiness claim.
 
 ## Goal
 
@@ -30,8 +31,9 @@ This integration adds the public runtime facade, decouples validated replay
 ingestion from the mock, and connects Standard/Saved/Inline execution to one
 `cd-workflow` engine with canonical request identity, exact cancellation,
 validated provisional events, and an authoritative returned replay. The
-remaining piece is a provable live bridge from a bench evidence snapshot to a
-ContextDesk corpus and packet.
+bounded live bridge from a bench evidence snapshot to a ContextDesk corpus,
+packet, replay, and persisted run is now implemented separately from the
+dependency-light adapter.
 
 ## Dependency direction
 

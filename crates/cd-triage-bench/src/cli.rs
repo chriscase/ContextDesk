@@ -4,12 +4,14 @@ use crate::canonical::to_pretty_json;
 use crate::error::{BenchError, BenchResult};
 use crate::import::{import_run, parse_import_json, parse_import_markdown, ImportOutcome};
 use crate::report::{
-    build_report, render_report_json, render_report_jsonl, render_report_markdown,
+    build_report_with_attribution, extract_owner_model_attribution, render_report_json,
+    render_report_jsonl, render_report_markdown,
 };
 use crate::review::{blinded_run_view_from_raw, ReviewPhase};
 use crate::store::BenchStore;
 use crate::types::{Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass};
 use clap::{Parser, Subcommand, ValueEnum};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -262,11 +264,19 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
             if let Some(task_id) = task {
                 runs.retain(|r| r.task_id == task_id);
             }
-            let report = build_report(
+            let attribution = runs
+                .iter()
+                .filter_map(|run| {
+                    let raw = store.get_blob(&run.raw_output.digest.hex).ok()?;
+                    Some((run.run_id.clone(), extract_owner_model_attribution(&raw)?))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let report = build_report_with_attribution(
                 &runs,
                 &store.load_adjudications()?,
                 &store.load_scores()?,
                 &store.load_cases()?,
+                &attribution,
                 privacy.class(),
             )?;
             match format {
