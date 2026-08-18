@@ -34,6 +34,8 @@ assert_route "workflow change" full true .github/workflows/ci.yml
 assert_route "empty input" full true
 
 python3 - "$ROOT" <<'PY'
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -63,6 +65,47 @@ if aggregate["name"] != "rust tests (ubuntu aggregate)":
     raise SystemExit("aggregate check name changed")
 if aggregate.get("if") != "always()":
     raise SystemExit("aggregate must always report scoped or full validation")
+guard = aggregate["steps"][0]
+if guard.get("name") != "require valid CI routing":
+    raise SystemExit("aggregate must validate routing before any scoped validation")
+guard_script = guard.get("run") or ""
+
+def guard_result(result, surface, run_ubuntu):
+    env = os.environ.copy()
+    env.update({
+        "PATH_FILTER_RESULT": result,
+        "SURFACE": surface,
+        "RUN_UBUNTU": run_ubuntu,
+    })
+    return subprocess.run(
+        ["sh", "-eu", "-c", guard_script],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+for surface, run_ubuntu in (
+    ("full", "true"),
+    ("bench-only", "false"),
+    ("collab-only", "false"),
+):
+    result = guard_result("success", surface, run_ubuntu)
+    if result.returncode != 0:
+        raise SystemExit(f"valid route {surface}:{run_ubuntu} was rejected: {result.stdout}")
+for result_name, surface, run_ubuntu in (
+    ("failure", "", ""),
+    ("success", "", ""),
+    ("success", "full", "false"),
+    ("success", "bench-only", "true"),
+    ("success", "unknown", "true"),
+):
+    result = guard_result(result_name, surface, run_ubuntu)
+    if result.returncode == 0:
+        raise SystemExit(
+            f"invalid route {result_name}/{surface}:{run_ubuntu} passed the required aggregate"
+        )
 aggregate_runs = "\n".join(s.get("run") or "" for s in aggregate["steps"])
 if "cargo test -p cd-triage-bench --all-targets" not in aggregate_runs:
     raise SystemExit("bench-only route must run complete bench validation")

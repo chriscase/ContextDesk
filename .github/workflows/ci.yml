@@ -264,6 +264,7 @@ jobs:
           name: rust-macos-latest-cache-warmup-status
           path: ci-platform-shards/cache-warmup-status.json
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   rust-windows-cache-warmup:
@@ -329,6 +330,7 @@ jobs:
           name: rust-windows-latest-cache-warmup-status
           path: ci-platform-shards/cache-warmup-status.json
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   # Restore-only preflight signals. Each OS waits only on its own probe and
@@ -395,6 +397,7 @@ jobs:
           name: rust-macos-latest-cache-status
           path: ci-platform-shards/cache-status.json
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   rust-windows:
@@ -454,6 +457,7 @@ jobs:
           name: rust-windows-latest-cache-status
           path: ci-platform-shards/cache-status.json
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   # Ubuntu fmt/clippy/examples/smoke plus the one cache write for the test
@@ -553,6 +557,7 @@ jobs:
           name: rust-ubuntu-cache-status
           path: ci-shards/cache-status.json
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   rust-ubuntu-shard:
@@ -653,6 +658,7 @@ jobs:
           name: rust-ubuntu-shard-${{ matrix.shard }}
           path: ci-shards/
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   rust-ubuntu-tests:
@@ -662,6 +668,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: require valid CI routing
+        env:
+          PATH_FILTER_RESULT: ${{ needs.ci-path-filter.result }}
+          SURFACE: ${{ needs.ci-path-filter.outputs.surface }}
+          RUN_UBUNTU: ${{ needs.ci-path-filter.outputs.run_ubuntu }}
+        run: |
+          set -eu
+          if [ "$PATH_FILTER_RESULT" != success ]; then
+            echo "::error title=CI path routing::ci-path-filter reported '$PATH_FILTER_RESULT'"
+            exit 1
+          fi
+          case "$SURFACE:$RUN_UBUNTU" in
+            full:true|bench-only:false|collab-only:false) ;;
+            *)
+              echo "::error title=CI path routing::invalid route '$SURFACE:$RUN_UBUNTU'"
+              exit 1
+              ;;
+          esac
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: run isolated bench validation
@@ -782,6 +806,7 @@ jobs:
           name: rust-macos-latest-shard-${{ matrix.shard }}
           path: ci-platform-shards/
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   rust-windows-shard:
@@ -859,6 +884,7 @@ jobs:
           name: rust-windows-latest-shard-${{ matrix.shard }}
           path: ci-platform-shards/
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   rust-macos-tests:

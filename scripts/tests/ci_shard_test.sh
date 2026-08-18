@@ -565,6 +565,24 @@ if jobs["rust-ubuntu-tests"]["name"] != "rust tests (ubuntu aggregate)":
     raise SystemExit("aggregate check name changed")
 if jobs["rust-ubuntu-tests"].get("if") != "always()":
     raise SystemExit("aggregate must run if: always()")
+ubuntu_aggregate_steps = jobs["rust-ubuntu-tests"]["steps"]
+if not ubuntu_aggregate_steps or ubuntu_aggregate_steps[0].get("name") != "require valid CI routing":
+    raise SystemExit("Ubuntu aggregate must fail closed on invalid path routing before validation")
+routing_guard = ubuntu_aggregate_steps[0]
+expected_routing_env = {
+    "PATH_FILTER_RESULT": "${{ needs.ci-path-filter.result }}",
+    "SURFACE": "${{ needs.ci-path-filter.outputs.surface }}",
+    "RUN_UBUNTU": "${{ needs.ci-path-filter.outputs.run_ubuntu }}",
+}
+if routing_guard.get("env") != expected_routing_env:
+    raise SystemExit(f"Ubuntu aggregate routing guard env drifted: {routing_guard.get('env')}")
+routing_run = routing_guard.get("run") or ""
+for required_text in (
+    '"$PATH_FILTER_RESULT" != success',
+    "full:true|bench-only:false|collab-only:false",
+):
+    if required_text not in routing_run:
+        raise SystemExit(f"Ubuntu aggregate routing guard is missing {required_text!r}")
 
 shard_ids = jobs["rust-ubuntu-shard"]["strategy"]["matrix"]["shard"]
 if shard_ids != list(range(1, count + 1)):
@@ -614,6 +632,8 @@ if int(up["with"]["retention-days"]) != 14:
     raise SystemExit(f"retention-days {up['with'].get('retention-days')}")
 if up["with"].get("path") != "ci-shards/":
     raise SystemExit("artifact path must be ci-shards/")
+if up["with"].get("overwrite") not in (True, "true"):
+    raise SystemExit("Ubuntu shard upload must replace its artifact on failed-job reruns")
 
 cache_uploads = [s for s in steps(jobs["rust-ubuntu"]) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
 if not cache_uploads:
@@ -625,6 +645,8 @@ if cu["with"].get("name") != "rust-ubuntu-cache-status":
     raise SystemExit("cache-status artifact name")
 if int(cu["with"]["retention-days"]) != 14:
     raise SystemExit("cache-status retention")
+if cu["with"].get("overwrite") not in (True, "true"):
+    raise SystemExit("Ubuntu cache-status upload must support failed-job reruns")
 
 # Ubuntu rust job warms with --no-run and must not run the suite itself.
 ubuntu_runs = "\n".join(s.get("run") or "" for s in steps(jobs["rust-ubuntu"]))
@@ -644,6 +666,9 @@ for preflight in ("rust-macos", "rust-windows"):
         raise SystemExit(f"{preflight} must not rebuild the workspace suite")
     if "ci_record_cache.sh" not in runs or "--role preflight" not in runs:
         raise SystemExit(f"{preflight} must record its restore-only cache role")
+    uploads = [s for s in steps(jobs[preflight]) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
+    if not uploads or uploads[0]["with"].get("overwrite") not in (True, "true"):
+        raise SystemExit(f"{preflight} cache-status upload must support failed-job reruns")
 
 for name, os_name in (("rust-macos-cache-probe", "macos-latest"),
                       ("rust-windows-cache-probe", "windows-latest")):
@@ -677,6 +702,9 @@ for name, os_name in (("rust-macos-cache-warmup", "macos-latest"),
     warmup_runs = "\n".join(s.get("run") or "" for s in steps(warmup))
     if "--assert-dir target" not in warmup_runs:
         raise SystemExit(f"{name} must assert compiled DuckDB artifacts before save")
+    uploads = [s for s in steps(warmup) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
+    if not uploads or uploads[0]["with"].get("overwrite") not in (True, "true"):
+        raise SystemExit(f"{name} cache-status upload must support failed-job reruns")
 
 def need_list(job):
     needs = job.get("needs") or []
@@ -718,6 +746,8 @@ for os_name, shard_job, agg_job, preflight in (
     uploads = [s for s in steps(jobs[shard_job]) if (s.get("uses") or "").startswith("actions/upload-artifact@")]
     if not uploads or uploads[0].get("if") != "always()":
         raise SystemExit(f"{shard_job} results must upload on failure")
+    if uploads[0]["with"].get("overwrite") not in (True, "true"):
+        raise SystemExit(f"{shard_job} upload must replace its artifact on failed-job reruns")
     if jobs[agg_job]["name"] != f"rust tests ({os_name} aggregate)":
         raise SystemExit(f"{agg_job} check name changed")
     if jobs[agg_job].get("if") != "always()":
