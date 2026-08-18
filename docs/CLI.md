@@ -766,11 +766,11 @@ line — `verdict` on completion, `interrupted` on Ctrl-C. See
 | 5 | `permission_denied` | A tool call requiring permission was denied. |
 | 6 | `provider_error` | The configured provider could not be reached or errored. |
 | 7 | `not_implemented` | Grammar accepted, behavior intentionally not implemented yet. Never conflated with success. |
-| 8 | `not_ready` | `contextdesk doctor` completed its full check but the verdict was "not ready" — this is not a bug, the command did exactly what it promised. |
+| 8 | `not_ready` | A completed readiness, evaluation, policy, or triage report has a non-ready/failed verdict; inspect the preserved report. |
 | 9 | `non_conforming` | `normalized validate` or `normalized summarize` completed and found invalid normalized content; inspect the emitted report. |
-| 10 | `partial` | `normalize --fail-on-partial` published valid output but its report is partial; output is preserved. |
+| 10 | `partial` | An operation produced valid partial output (`normalize --fail-on-partial` or an honest partial triage terminal); output is preserved. |
 | 70 | `internal` | Unexpected failure — a bug, not an expected branch. |
-| 130 | `cancelled` | The operation was interrupted by Ctrl-C before it finished (`import`, `normalize`, `doctor`, `chat`). |
+| 130 | `cancelled` | The operation was cancelled or interrupted before it finished (`import`, `normalize`, `doctor`, `chat`, `triage`). |
 
 Clap's own usage errors (bad flags, missing required args) use clap's
 default exit code (2) and are not part of this table.

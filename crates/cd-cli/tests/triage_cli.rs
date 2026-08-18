@@ -64,7 +64,7 @@ fn run_request(request_path: &Path, format: &str) -> std::process::Output {
 }
 
 #[test]
-fn standard_request_reaches_the_stateful_runtime_and_fails_closed_at_preflight() {
+fn standard_request_reaches_the_stateful_runtime_and_reports_failed_terminal() {
     let dir = tempfile::tempdir().expect("tempdir");
     let request_path = dir.path().join("request.json");
     std::fs::write(&request_path, request_json()).expect("write request");
@@ -83,16 +83,18 @@ fn standard_request_reaches_the_stateful_runtime_and_fails_closed_at_preflight()
         .arg(&request_path)
         .output()
         .expect("run contextdesk triage");
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(8));
     let json: Value = serde_json::from_slice(&output.stdout).expect("one JSONL object");
-    assert_eq!(json["ok"], false);
+    assert_eq!(json["ok"], true);
     assert_eq!(json["command"], "triage_run");
-    assert_eq!(json["error"]["kind"], "user_error");
+    assert_eq!(json["data"]["status"], "failed");
+    assert_eq!(json["data"]["reason_codes"][0], "policy_preflight_rejected");
+    assert_eq!(json["data"]["evidence"]["provider_calls"], 0);
+    assert_eq!(json["data"]["evidence"]["network"], false);
     assert_eq!(
-        json["error"]["message"],
-        "triage engine failure (preflight_rejected)"
+        json["data"]["replay"]["events"][2]["event"]["kind"],
+        "failed"
     );
-    assert!(json.get("data").is_none());
     assert_eq!(
         std::fs::read(poison_home).expect("HOME bytes"),
         b"unchanged"
@@ -112,13 +114,12 @@ fn standard_stdin_request_is_parsed_once_before_stateful_dispatch() {
         .output()
         .expect("run contextdesk triage from stdin");
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(8));
     let json: Value = serde_json::from_slice(&output.stdout).expect("one JSONL object");
+    assert_eq!(json["ok"], true);
     assert_eq!(json["command"], "triage_run");
-    assert_eq!(
-        json["error"]["message"],
-        "triage engine failure (preflight_rejected)"
-    );
+    assert_eq!(json["data"]["status"], "failed");
+    assert_eq!(json["data"]["reason_codes"][0], "policy_preflight_rejected");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("could not be parsed"));
 }
 

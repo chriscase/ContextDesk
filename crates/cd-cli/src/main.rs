@@ -552,7 +552,23 @@ fn emit_triage_run(
     color: config::ColorMode,
     result: Result<commands::triage::TriageRunOutput, CliError>,
 ) -> i32 {
-    emit(format, color, "triage_run", result)
+    let verdict = result
+        .as_ref()
+        .ok()
+        .and_then(|output| triage_run_verdict(output.status));
+    emit_completed(format, color, "triage_run", result, verdict)
+}
+
+fn triage_run_verdict(status: &str) -> Option<ExitCategory> {
+    match status {
+        "completed" => None,
+        "partial" => Some(ExitCategory::Partial),
+        "failed" | "timed_out" => Some(ExitCategory::NotReady),
+        "cancelled" => Some(ExitCategory::Cancelled),
+        // The producer owns this closed status vocabulary. Treat drift as an
+        // internal failure signal without discarding the emitted report.
+        _ => Some(ExitCategory::Internal),
+    }
 }
 
 fn completed_verdict_exit(base_code: i32, verdict: Option<ExitCategory>) -> i32 {
@@ -598,5 +614,24 @@ mod verdict_tests {
         );
         assert_eq!(completed_verdict_exit(0, Some(ExitCategory::Partial)), 10);
         assert_eq!(completed_verdict_exit(70, Some(ExitCategory::Partial)), 70);
+    }
+
+    #[test]
+    fn triage_terminal_statuses_have_authoritative_exit_verdicts() {
+        assert_eq!(triage_run_verdict("completed"), None);
+        assert_eq!(triage_run_verdict("partial"), Some(ExitCategory::Partial));
+        assert_eq!(triage_run_verdict("failed"), Some(ExitCategory::NotReady));
+        assert_eq!(
+            triage_run_verdict("timed_out"),
+            Some(ExitCategory::NotReady)
+        );
+        assert_eq!(
+            triage_run_verdict("cancelled"),
+            Some(ExitCategory::Cancelled)
+        );
+        assert_eq!(
+            triage_run_verdict("unexpected"),
+            Some(ExitCategory::Internal)
+        );
     }
 }

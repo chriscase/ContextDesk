@@ -99,6 +99,11 @@ host validation, replay, deadline, cancellation, and cleanup path without
 hidden routing or model substitution. The established `contextdesk chat`
 surface remains available and unchanged.
 
+The CLI preserves every well-formed terminal as an `ok:true` report envelope,
+including failed, timed-out, and cancelled replays. Its process exit remains
+authoritative for automation: `completed` exits 0, `partial` exits 10,
+`failed`/`timed_out` exit 8, and `cancelled` exits 130.
+
 ## Residuals
 
 - Automatic AppConfig migration and implicit policy selection remain deferred;
