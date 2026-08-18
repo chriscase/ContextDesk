@@ -1,10 +1,12 @@
 # Incident-triage evaluation bench v1
 
 **Status:** **Local integration.** The store/entities, manual
-import/provenance, rubric v1 expert adjudication, report-only comparison,
-public-SDK adapter, deterministic mock runner, and validated replay ingestion
-are implemented. Live same-snapshot provider execution remains residual. This
-does not close epic #876 and is not a readiness or release claim.
+import/provenance, rubric v1 expert adjudication, same-snapshot comparison
+reporting, public-SDK adapter, deterministic mock runner, validated replay
+ingestion, and bounded live same-snapshot provider bridge are implemented.
+Broader live visibility shapes, user-facing orchestration, and release
+integration remain residual. This does not close epic #876 and is not a
+readiness or release claim.
 
 ## Purpose
 
@@ -64,7 +66,7 @@ regenerated and rebound to the corresponding v2 review packet. Missing or
 unverifiable source material fails closed instead of being labeled
 `share_safe`.
 
-## ContextDesk SDK adapter (#879, draft)
+## ContextDesk SDK adapter and live comparison bridge (#879)
 
 `cd-triage-bench-adapter` runs ContextDesk as one strategy among many over the
 public SDK boundary. It is a sibling crate, not part of `cd-triage-bench`, so
@@ -77,21 +79,29 @@ snapshot -> bounded packet -> TriageRequestV2
          -> explicit share-safe projection
 ```
 
-This is **replay ingestion**, not live execution. The host-neutral public
-facade now supplies canonical request identity and replay binding; a later live
-ContextDesk evaluation still needs a host implementation and same-snapshot
-bridge.
+The separate `cd-triage-bench-live` bridge now supplies bounded live execution
+against the exact same task snapshot. It prepares and proves one isolated
+corpus once, runs a sequential candidate list under one position-independent
+wall-clock allowance, and persists one proof-bound immutable run per
+candidate. The existing report command then groups those runs with imported
+and replayed strategies without force-ranking them.
+
+Those rows are owner-only, so a share-safe report deliberately contains none
+of them. The share-safe artifact for a live comparison is the adapter's
+explicit `project_share_safe` projection, which `contextdesk bench-compare`
+returns alongside the owner-only report.
 
 What the adapter does **not** claim:
 
-- No live run. The adapter does not call the runtime facade's `triage()` /
+- No live run in the dependency-light adapter. The adapter does not call the runtime facade's `triage()` /
   `triage_with_policy()` functions, and its `live` feature remains a
   dependency-free placeholder with no host engine.
 - No token usage or cost. The public envelope reports neither; unknown is
   not recorded as zero.
 - No case, adjudication, score, qualification, readiness, routing, or
   private-store write inside ContextDesk crates.
-- No host attestation of a production packet. Recording fails closed when
+- The live bridge supplies host attestation separately; adapter recording still
+  fails closed when
   `PacketReady` or the terminal packet identity differs from the adapter's
   materialized task packet. A validated provider-free pre-packet terminal is
   recorded separately as `execution_packet_state: not_produced`; it cannot
@@ -114,12 +124,13 @@ cargo run -p cd-triage-bench -- --library /tmp/bench-lib init
 ## Production anchors (this branch only)
 
 - `crates/cd-triage-bench/`
-- `crates/cd-triage-bench-adapter/` (#879 draft; mock only, no live path)
+- `crates/cd-triage-bench-adapter/` (offline public-SDK adapter)
+- `crates/cd-triage-bench-live/` (bounded same-snapshot production bridge)
 - Handbook row: Incident-triage evaluation bench in
   `docs/design/PROVEN_METHODS.md`
 
 ## Future scope (not this slice)
 
 Web collaboration, object-storage ingestion, direct web-tool automation,
-multi-strategy synthesis, similar-case retrieval, a batch runner over the
-adapter, and any live ContextDesk provider execution (#879 residual).
+multi-strategy synthesis, composite leaderboards, similar-case retrieval, and
+broader live visibility shapes remain future scope.

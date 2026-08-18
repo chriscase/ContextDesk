@@ -77,6 +77,7 @@ metacharacters literal. If a question begins with a command name such as
 | `eval suites\|validate\|run` | Offline hermetic quality-evaluation fixtures (no config, Keychain, network, or readiness store). Does **not** measure live model usefulness or compatibility. File export uses `--report-format json\|jsonl` + `--output` (no clobber without `--force`). See [QUALITY_EVAL_HARNESS.md](benchmarks/QUALITY_EVAL_HARNESS.md). |
 | `triage-policy validate\|compile\|example` | Offline, owner-only Triage Policy V2 validation over explicit policy/preflight JSON files. Retains exact profile/model identities; does not read AppConfig, credentials, Keychain, discovery state, or a corpus, and never contacts a provider. |
 | `triage-policy qualify` | One explicit, bounded synthetic role probe through the production backend; atomically saves host-owned exact-role evidence and never infers compatibility from a model name. |
+| `bench-compare` | Host-only, bounded live comparison over one benchmark task. Materializes one exact snapshot/corpus, runs two or more explicit candidates, persists validated runs, and renders the honest owner-only comparison report. |
 | `gateway diagnose` | Bounded direct-provider vs product-path differential for one explicitly selected model, plus a versioned checksummed diagnostic bundle. See [Gateway diagnostics](#gateway-diagnostics-contextdesk-gateway-diagnose) below. |
 | `gateway ledger` | Offline cost/reliability comparison over share-safe diagnostic bundles and documented historical rows. Never makes live calls; never emits readiness claims from aggregates. See [Gateway cost/reliability ledger](benchmarks/GATEWAY_COST_RELIABILITY_LEDGER_V1.md). |
 
@@ -829,9 +830,69 @@ contextdesk models verify <model-id> [<model-id> ...]
 contextdesk models verify --all [--role chat|embedding|reranker|unknown] [--match <text>] --yes
 contextdesk logging-assessment [corpus-id] [--report-format json|markdown] [--output <file>]
 contextdesk exception-episodes [corpus-id]
+contextdesk bench-compare --library <dir> --task <task-id> \
+            --candidate <candidate-a.json> --candidate <candidate-b.json>
 # Friendly aliases: ask=chat, search=explore, assess=logging-assessment,
 #                   episodes=exception-episodes
 ```
+
+### Same-snapshot comparison (`contextdesk bench-compare`)
+
+This command is the host-facing entry point for the live benchmark bridge. It
+requires an explicit benchmark library/task and at least two bounded candidate
+JSON files. Each candidate supplies a `policy`, a unique `cancellation_id`,
+and explicit strategy metadata (`name`, `operator`, `created_at`, with optional
+`version`/`build`); `overrides` may set the public deadline and provider-call
+bound. When no deadline is supplied, the bridge applies the bounded Standard
+180-second whole-comparison deadline. Provider endpoints and credentials remain
+in the existing host config
+and credential adapter.
+
+The command prepares and proves one isolated corpus before any candidate runs,
+reuses its packet/corpus identity sequentially, validates every replay before
+persistence, and preserves failed/partial/timed-out outcomes. It never emits
+rankings or readiness claims.
+
+**Bounds.** `--max-blob-bytes` and `--max-aggregate-bytes` may be *lowered*
+below the published production import bounds (512 MiB per blob, 2 GiB
+aggregate) and can never be raised above them: a host boundary exists to bound
+its callers. Both bounds are checked against the snapshot manifest before any
+blob is opened, and verification then streams rather than loading a blob into
+memory. Ctrl-C is armed before that work begins, so cancellation reaches
+snapshot verification and corpus preparation, not only the provider call.
+
+**Fairness.** Candidates run sequentially against the one prepared corpus.
+Each candidate's request deadline is its own override capped by the comparison
+deadline — a value that does not depend on list position or on how long an
+earlier candidate took, so ordering buys nobody extra wall clock. The budget
+is deliberately not divided between candidates: a divided share can fall below
+the deadline a policy needs in order to run at all (a Standard policy reserves
+time for its finalizer), which would turn a working comparison into a list of
+rejected budgets. Boundedness comes from refusing to *start* another candidate
+once the comparison budget is spent, so a comparison can overshoot by at most
+the final candidate's own allowance. Each row's effective allowance is
+reported as `request_deadline_ms`.
+
+**Privacy.** Output is owner-only because exact model identities and
+task-linked provenance are retained. Benchmark run rows are themselves
+owner-only, so `cd-triage-bench report --privacy share-safe` deliberately
+projects *no* live rows at all. The share-safe artifact for a comparison is
+the `share_safe` field of this command's JSON payload: the adapter's
+hand-written, scanner-gated projection carrying fingerprints, counts and
+dispositions only — never an exact provider/model identity, the task text,
+the answer envelope, or raw output.
+
+**Partial outcomes.** If cancellation, a deadline, or an infrastructure error
+stops the comparison after some candidates have run, those rows are already
+durable. The command fails with the underlying category and names the durable
+run identities in its message, so they can be found with `cd-triage-bench
+report`; it never presents an incomplete comparison as successful, and never
+discards the identities an operator needs to locate the rows.
+
+**Cleanup debt.** A crashed earlier run can leave an isolated corpus behind.
+Each run makes one bounded best-effort recovery sweep and reports what it
+could not resolve as `pending_cleanup_markers`; unresolved debt never blocks
+a new comparison.
 
 Global flags (available on every subcommand): `--format`, `--json`,
 `--jsonl`, `--color`, `--config <path>`, `--app-config <path>`,

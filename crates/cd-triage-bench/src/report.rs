@@ -85,6 +85,12 @@ pub struct RunSummary {
     pub run_id: String,
     pub strategy_name: String,
     pub strategy_version: Observed<String>,
+    /// Exact provider-profile/model identities in an owner-only report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_identities: Vec<String>,
+    /// Stable model fingerprints in a share-safe report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_fingerprints: Vec<String>,
     pub source_kind: SourceKind,
     pub status: RunStatus,
     pub fairness: String,
@@ -163,11 +169,43 @@ pub struct VersionDelta {
     pub change: String,
 }
 
+/// Model attribution recovered from a validated owner-only run envelope.
+///
+/// Exact identities are emitted only in owner-only reports. Share-safe
+/// reports use the fingerprints instead, so comparison rows remain useful
+/// without exposing provider/model identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunAttribution {
+    pub model_identities: Vec<String>,
+    pub model_fingerprints: Vec<String>,
+}
+
 pub fn build_report(
     runs: &[TriageRun],
     adjudications: &[Adjudication],
     scores: &[ScoreReview],
     cases: &[Case],
+    privacy: PrivacyClass,
+) -> BenchResult<BacktestReport> {
+    build_report_with_attribution(
+        runs,
+        adjudications,
+        scores,
+        cases,
+        &BTreeMap::new(),
+        privacy,
+    )
+}
+
+/// Build a report while retaining validated provider/model attribution for
+/// live ContextDesk runs. Callers that only have [`TriageRun`] rows should use
+/// [`build_report`], which preserves the historical source-neutral behavior.
+pub fn build_report_with_attribution(
+    runs: &[TriageRun],
+    adjudications: &[Adjudication],
+    scores: &[ScoreReview],
+    cases: &[Case],
+    attribution: &BTreeMap<String, RunAttribution>,
     privacy: PrivacyClass,
 ) -> BenchResult<BacktestReport> {
     let mut runs: Vec<TriageRun> = runs.to_vec();
@@ -220,6 +258,7 @@ pub fn build_report(
                 run,
                 &adjudications,
                 &all_adjudications,
+                attribution.get(&run.run_id),
                 privacy,
             ));
         }
@@ -297,7 +336,7 @@ pub fn build_report(
         "This report does not assign readiness, qualification, or routing badges.".into(),
         "Disagreement is preserved per reviewer; scores are never silently averaged.".into(),
         "This report is a projection over stored records. It does not execute strategies or create judgments.".into(),
-        "Public-SDK mock and replay runs join comparisons from the same stored run records as imported strategies; live provider execution remains outside this report projection.".into(),
+        "Public-SDK mock, replay, and live same-snapshot runs join comparisons from the same stored run records as imported strategies; this report only projects persisted records and never executes a strategy.".into(),
     ];
 
     let report = BacktestReport {
@@ -327,11 +366,147 @@ pub fn render_report_json(report: &BacktestReport) -> BenchResult<String> {
     Ok(text)
 }
 
+/// Recover model attribution from the adapter's canonical owner-only envelope.
+///
+/// The report crate deliberately treats the envelope as an opaque JSON
+/// boundary: malformed or unrelated raw output simply has no attribution.
+/// Only bounded provider/model values that carry no markup are admitted into
+/// a rendered report.
+///
+/// Attribution is recovered **only** from a record that is recognisably the
+/// adapter's owner-only envelope (`sdk_run_id` plus a replay or exact model
+/// slots). Arbitrary imported raw output that merely happens to contain a
+/// `slots` array is not a proof of anything, so it yields no attribution
+/// rather than an invented model identity.
+pub fn extract_owner_model_attribution(raw_output: &[u8]) -> Option<RunAttribution> {
+    let value: serde_json::Value = serde_json::from_slice(raw_output).ok()?;
+    if !is_adapter_owner_only_envelope(&value) {
+        return None;
+    }
+    let slots = value.get("slots")?.as_array()?;
+    let mut identities = BTreeSet::new();
+    for slot in slots {
+        let Some(model) = slot.get("model").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        let Some(profile_id) = model.get("profile_id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(model_id) = model.get("model_id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if safe_report_identity(profile_id) && safe_report_identity(model_id) {
+            identities.insert(format!("{profile_id}::{model_id}"));
+        }
+    }
+
+    let fingerprints = value
+        .get("fingerprints")
+        .and_then(|fingerprints| fingerprints.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|fingerprint| safe_model_fingerprint(fingerprint))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+
+    if identities.is_empty() && fingerprints.is_empty() {
+        None
+    } else {
+        Some(RunAttribution {
+            model_identities: identities.into_iter().collect(),
+            model_fingerprints: fingerprints.into_iter().collect(),
+        })
+    }
+}
+
+/// Recognise the adapter's canonical owner-only run envelope.
+///
+/// This mirrors the blinding check in [`crate::review`]: a record that names
+/// an SDK run and carries either the authoritative replay or exact model
+/// slots is the adapter's own output, not a third-party import.
+pub(crate) fn is_adapter_owner_only_envelope(value: &serde_json::Value) -> bool {
+    let Some(record) = value.as_object() else {
+        return false;
+    };
+    let has_sdk_run_identity = record
+        .get("sdk_run_id")
+        .is_some_and(serde_json::Value::is_string);
+    let carries_full_replay = record
+        .get("replay")
+        .is_some_and(serde_json::Value::is_object);
+    let carries_exact_models = record
+        .get("slots")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|slots| {
+            slots
+                .iter()
+                .any(|slot| slot.get("model").is_some_and(serde_json::Value::is_object))
+        });
+    has_sdk_run_identity && (carries_full_replay || carries_exact_models)
+}
+
+/// Admit only bounded, markup-free identity text into a rendered report.
+///
+/// The renderer escapes every value it emits, so this is the second of two
+/// independent defences: a value carrying table, code-span, or HTML syntax is
+/// refused outright rather than rendered as escaped markup.
+pub(crate) fn safe_report_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .chars()
+            .all(|c| !c.is_control() && !matches!(c, '|' | '`' | '<' | '>' | '&' | '"' | '\\'))
+}
+
+fn safe_model_fingerprint(value: &str) -> bool {
+    let Some(digest) = value.strip_prefix("mdf-") else {
+        return false;
+    };
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Escape one dynamic value before it is placed in the markdown report.
+///
+/// The report is rendered as HTML in some surfaces and deliberately emits raw
+/// `<br>` separators, so every value that came from a record must be escaped
+/// here. Backticks and pipes become HTML entities too: a value can neither
+/// close the code span it sits in nor split a table cell. Control characters
+/// — including newlines — collapse to a space.
+///
+/// The tradeoff is deliberate: a value containing markup renders as visible
+/// escaped text rather than as markup. Nothing is dropped or redacted, and a
+/// well-formed identity is returned unchanged.
+///
+/// A backslash is deliberately **not** escaped. With `<`, `>`, backtick and
+/// pipe already neutralised a backslash cannot reconstruct markup, and
+/// rewriting it would hide the literal `c:\users` substring that
+/// [`crate::privacy`] scans rendered share-safe text for.
+pub(crate) fn escape_report_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            '`' => out.push_str("&#96;"),
+            '|' => out.push_str("&#124;"),
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
+    let esc = escape_report_value;
     let mut out = String::new();
     out.push_str("# Triage bench comparison report\n\n");
-    out.push_str(&format!("Schema: `{}`\n\n", report.schema_id));
-    out.push_str(&format!("Privacy: `{}`\n\n", report.privacy.as_str()));
+    out.push_str(&format!("Schema: `{}`\n\n", esc(&report.schema_id)));
+    out.push_str(&format!("Privacy: `{}`\n\n", esc(report.privacy.as_str())));
     out.push_str(&format!(
         "Rubric versions: {}\n\n",
         if report.rubric_versions.is_empty() {
@@ -340,7 +515,7 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
             report
                 .rubric_versions
                 .iter()
-                .map(|v| format!("`{v}`"))
+                .map(|v| format!("`{}`", esc(v)))
                 .collect::<Vec<_>>()
                 .join(", ")
         }
@@ -368,40 +543,65 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
         for case in &report.cases {
             match &case.title {
                 Some(title) => out.push_str(&format!(
-                    "- `{}` ({}) — {title}\n",
-                    case.case_id, case.lifecycle
+                    "- `{}` ({}) — {}\n",
+                    esc(&case.case_id),
+                    esc(&case.lifecycle),
+                    esc(title)
                 )),
-                None => out.push_str(&format!("- `{}` ({})\n", case.case_id, case.lifecycle)),
+                None => out.push_str(&format!(
+                    "- `{}` ({})\n",
+                    esc(&case.case_id),
+                    esc(&case.lifecycle)
+                )),
             }
         }
         out.push('\n');
     }
     out.push_str("## Honesty notes\n\n");
     for note in &report.notes {
-        out.push_str(&format!("- {note}\n"));
+        out.push_str(&format!("- {}\n", esc(note)));
     }
     out.push_str("\n## Groups (same task + snapshot)\n\n");
     for group in &report.groups {
         out.push_str(&format!(
             "### task `{}` snapshot `{}`\n\n",
-            group.task_id, group.snapshot_id
+            esc(&group.task_id),
+            esc(&group.snapshot_id)
         ));
-        out.push_str("| run | strategy | version | source | status | fairness | scored |\n");
-        out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
+        out.push_str(
+            "| run | strategy | model(s) | version | source | status | fairness | scored |\n",
+        );
+        out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
         for run in &group.runs {
             let version = match &run.strategy_version {
                 Observed::Unknown => "unknown".to_string(),
                 Observed::Known(v) => v.clone(),
             };
+            let models = if !run.model_identities.is_empty() {
+                run.model_identities
+                    .iter()
+                    .map(|model| format!("`{}`", esc(model)))
+                    .collect::<Vec<_>>()
+                    .join("<br>")
+            } else if !run.model_fingerprints.is_empty() {
+                run.model_fingerprints
+                    .iter()
+                    .map(|fingerprint| format!("`{}`", esc(fingerprint)))
+                    .collect::<Vec<_>>()
+                    .join("<br>")
+            } else {
+                "unknown".into()
+            };
             out.push_str(&format!(
-                "| `{}` | {} | {} | {} | {} | {} | {} |\n",
-                run.run_id,
-                run.strategy_name,
-                version,
-                run.source_kind.as_str(),
-                run.status.as_str(),
-                run.fairness,
-                run.score_visibility.as_str()
+                "| `{}` | {} | {} | {} | {} | {} | {} | {} |\n",
+                esc(&run.run_id),
+                esc(&run.strategy_name),
+                models,
+                esc(&version),
+                esc(run.source_kind.as_str()),
+                esc(run.status.as_str()),
+                esc(&run.fairness),
+                esc(run.score_visibility.as_str())
             ));
         }
         out.push('\n');
@@ -411,7 +611,10 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
         for pair in &report.incomparable {
             out.push_str(&format!(
                 "- `{}` vs `{}`: {} — {}\n",
-                pair.left_run_id, pair.right_run_id, pair.reason, pair.detail
+                esc(&pair.left_run_id),
+                esc(&pair.right_run_id),
+                esc(&pair.reason),
+                esc(&pair.detail)
             ));
         }
         out.push('\n');
@@ -420,24 +623,36 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
         out.push_str("## Strategy version pairs\n\n");
         for pair in &report.version_pairs {
             out.push_str(&format!(
-                "- {} source `{}` build `{:?}` `{}` → `{}` (case `{}`, task `{}`)\n",
-                pair.strategy_name,
-                pair.source_kind.as_str(),
-                pair.strategy_build,
-                pair.older_version,
-                pair.newer_version,
-                pair.case_id,
-                pair.task_id
+                "- {} source `{}` build `{}` `{}` → `{}` (case `{}`, task `{}`)\n",
+                esc(&pair.strategy_name),
+                esc(pair.source_kind.as_str()),
+                esc(&format!("{:?}", pair.strategy_build)),
+                esc(&pair.older_version),
+                esc(&pair.newer_version),
+                esc(&pair.case_id),
+                esc(&pair.task_id)
             ));
             out.push_str(&format!(
                 "  - drill-down: older run `{}` adjudications {}; newer run `{}` adjudications {}\n",
-                pair.older_run_id,
-                pair.older_adjudication_ids.join(", "),
-                pair.newer_run_id,
-                pair.newer_adjudication_ids.join(", ")
+                esc(&pair.older_run_id),
+                pair.older_adjudication_ids
+                    .iter()
+                    .map(|id| esc(id))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                esc(&pair.newer_run_id),
+                pair.newer_adjudication_ids
+                    .iter()
+                    .map(|id| esc(id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
             for dim in &pair.dimensions {
-                out.push_str(&format!("  - {}: {}\n", dim.dimension.as_str(), dim.change));
+                out.push_str(&format!(
+                    "  - {}: {}\n",
+                    esc(dim.dimension.as_str()),
+                    esc(&dim.change)
+                ));
             }
         }
         out.push('\n');
@@ -582,6 +797,7 @@ fn run_summary(
     run: &TriageRun,
     visible: &[Adjudication],
     all: &[Adjudication],
+    attribution: Option<&RunAttribution>,
     privacy: PrivacyClass,
 ) -> RunSummary {
     let related: Vec<&Adjudication> = visible.iter().filter(|a| a.run_id == run.run_id).collect();
@@ -610,6 +826,20 @@ fn run_summary(
         run_id: run.run_id.clone(),
         strategy_name: run.strategy.name.clone(),
         strategy_version: run.strategy.version.clone(),
+        model_identities: if privacy == PrivacyClass::OwnerOnly {
+            attribution
+                .map(|attribution| attribution.model_identities.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        model_fingerprints: if privacy == PrivacyClass::ShareSafe {
+            attribution
+                .map(|attribution| attribution.model_fingerprints.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
         source_kind: run.source_kind,
         status: run.status,
         fairness: run.fairness.as_str().to_string(),
@@ -919,6 +1149,176 @@ mod tests {
         let right = dummy_run("run-b", "task-1", "snap-2");
         assert!(reject_cross_snapshot_rank(&left, &right).is_err());
         assert!(reject_cross_snapshot_rank(&left, &left).is_ok());
+    }
+
+    #[test]
+    fn share_safe_attribution_accepts_only_opaque_model_fingerprints() {
+        let raw = serde_json::json!({
+            "sdk_run_id": "cdrun-fixture",
+            "replay": {},
+            "slots": [],
+            "fingerprints": {
+                "models": [
+                    "profile:provider::model:exact",
+                    "mdf-not-a-digest",
+                    format!("mdf-{}", "a".repeat(64))
+                ]
+            }
+        });
+        let attribution = extract_owner_model_attribution(raw.to_string().as_bytes())
+            .expect("valid opaque fingerprint should be retained");
+        assert_eq!(
+            attribution.model_fingerprints,
+            vec![format!("mdf-{}", "a".repeat(64))]
+        );
+        assert!(attribution.model_identities.is_empty());
+    }
+
+    #[test]
+    fn attribution_is_refused_for_raw_output_that_is_not_an_adapter_envelope() {
+        // An imported human/web/other-product artifact can be shaped like the
+        // adapter envelope without being one. Without the SDK run identity it
+        // proves nothing, so it must contribute no model attribution at all.
+        let forged = serde_json::json!({
+            "slots": [{"model": {"profile_id": "profile:forged", "model_id": "model:forged"}}],
+            "fingerprints": {"models": [format!("mdf-{}", "b".repeat(64))]}
+        });
+        assert!(extract_owner_model_attribution(forged.to_string().as_bytes()).is_none());
+    }
+
+    #[test]
+    fn attribution_refuses_identities_carrying_report_markup() {
+        let hostile = serde_json::json!({
+            "sdk_run_id": "cdrun-fixture",
+            "slots": [
+                {"model": {"profile_id": "profile:`<img src=x onerror=alert(1)>`",
+                           "model_id": "model:ok"}},
+                {"model": {"profile_id": "profile:clean", "model_id": "model:clean"}}
+            ]
+        });
+        let attribution = extract_owner_model_attribution(hostile.to_string().as_bytes())
+            .expect("the clean slot still yields attribution");
+        assert_eq!(
+            attribution.model_identities,
+            vec!["profile:clean::model:clean".to_string()]
+        );
+    }
+
+    #[test]
+    fn report_values_cannot_break_out_of_a_code_span_or_table_cell() {
+        let hostile = "a`b|c<script>d&e\ng";
+        let escaped = escape_report_value(hostile);
+        for forbidden in ['`', '|', '<', '>', '\n'] {
+            assert!(
+                !escaped.contains(forbidden),
+                "{forbidden:?} survived escaping in {escaped}"
+            );
+        }
+        assert!(escaped.contains("&#96;"));
+        assert!(escaped.contains("&#124;"));
+        assert!(escaped.contains("&lt;script&gt;"));
+        assert_eq!(
+            escape_report_value("profile:live::model:live"),
+            "profile:live::model:live"
+        );
+    }
+
+    #[test]
+    fn escaping_does_not_hide_a_private_path_from_the_share_safe_scan() {
+        // Escaping must never launder a value past the privacy gate. The
+        // scanner looks for a literal `c:\users`, so the backslash survives.
+        let escaped = escape_report_value("C:\\Users\\alex\\notes.md");
+        assert!(escaped.contains("C:\\Users"), "{escaped}");
+        assert!(crate::privacy::gate_share_safe_text(&escaped).is_err());
+        assert!(
+            crate::privacy::gate_share_safe_text(&escape_report_value("/home/alex/notes.md"))
+                .is_err()
+        );
+        assert!(crate::privacy::gate_share_safe_text(&escape_report_value(
+            "task-abcdef0123456789"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn share_safe_rows_carry_fingerprints_and_never_exact_identities() {
+        // The share-safe projection of a comparison row must stay useful:
+        // the opaque model fingerprint survives so two rows can be told
+        // apart, while the exact provider/model identity never appears.
+        let fingerprint = format!("mdf-{}", "d".repeat(64));
+        let mut run = dummy_run("run-share", "task-1", "snap-1");
+        run.privacy = PrivacyClass::ShareSafe;
+        run.source_kind = SourceKind::ContextdeskSdk;
+        let attribution = BTreeMap::from([(
+            run.run_id.clone(),
+            RunAttribution {
+                model_identities: vec!["profile:secret::model:secret".into()],
+                model_fingerprints: vec![fingerprint.clone()],
+            },
+        )]);
+
+        let share_safe = build_report_with_attribution(
+            std::slice::from_ref(&run),
+            &[],
+            &[],
+            &[],
+            &attribution,
+            PrivacyClass::ShareSafe,
+        )
+        .expect("share-safe report builds");
+        let row = &share_safe.groups[0].runs[0];
+        assert_eq!(row.model_fingerprints, vec![fingerprint.clone()]);
+        assert!(row.model_identities.is_empty());
+        let markdown = render_report_markdown(&share_safe).expect("share-safe markdown");
+        assert!(markdown.contains(&fingerprint));
+        assert!(!markdown.contains("profile:secret::model:secret"));
+        let json = render_report_json(&share_safe).expect("share-safe json");
+        assert!(!json.contains("profile:secret"));
+
+        let owner_only = build_report_with_attribution(
+            std::slice::from_ref(&run),
+            &[],
+            &[],
+            &[],
+            &attribution,
+            PrivacyClass::OwnerOnly,
+        )
+        .expect("owner-only report builds");
+        let row = &owner_only.groups[0].runs[0];
+        assert_eq!(
+            row.model_identities,
+            vec!["profile:secret::model:secret".to_string()]
+        );
+        assert!(row.model_fingerprints.is_empty());
+    }
+
+    #[test]
+    fn a_crafted_strategy_name_cannot_inject_markup_into_the_report() {
+        let mut run = dummy_run("run-hostile", "task-1", "snap-1");
+        run.strategy.name = "evil`|<img src=x onerror=alert(1)>".into();
+        let report = build_report(
+            std::slice::from_ref(&run),
+            &[],
+            &[],
+            &[],
+            PrivacyClass::OwnerOnly,
+        )
+        .expect("report builds");
+        let markdown = render_report_markdown(&report).expect("markdown renders");
+        assert!(!markdown.contains("<img"));
+        assert!(!markdown.contains("evil`"));
+        assert!(markdown.contains("&lt;img src=x onerror=alert(1)&gt;"));
+        // The row must still be one table row: the crafted pipe cannot add a
+        // column, so the header and the row keep the same cell count.
+        let header = markdown
+            .lines()
+            .find(|line| line.starts_with("| run |"))
+            .expect("table header");
+        let row = markdown
+            .lines()
+            .find(|line| line.contains("run-hostile"))
+            .expect("table row");
+        assert_eq!(header.matches('|').count(), row.matches('|').count());
     }
 
     fn dummy_run(run_id: &str, task_id: &str, snapshot_id: &str) -> TriageRun {
