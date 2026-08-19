@@ -39,8 +39,22 @@ pub const QUALIFICATION_SCHEMA_VERSION: &str = "contextdesk.capability_qualifica
 /// Exact token required in inert tool probe arguments.
 pub const QUALIFY_TOOL_TOKEN: &str = "QUALIFY_TOOL_V1";
 
-/// Continuation after tool result must include this marker (fail-closed).
+/// Preferred synthetic marker in a tool-result continuation.
+///
+/// The continuation prompt asks the model to emit this token. NativeToolLoop
+/// still **passes** on a non-empty content-channel turn or a native next tool
+/// call so production auto-tool triage is not marked limited solely because
+/// the marker is missing. Empty continuation or a transport error remains
+/// fail-closed.
 pub const QUALIFY_CONTINUE_MARKER: &str = "QUALIFY_OK_V1";
+
+/// Continuation user prompt (asks for [`QUALIFY_CONTINUE_MARKER`]).
+pub const SYNTH_CONTINUATION_PROMPT: &str =
+    "ContextDesk synthetic continuation probe. After the tool result, reply with exactly: QUALIFY_OK_V1";
+
+/// Forced-tool continuation user prompt (asks for [`QUALIFY_CONTINUE_MARKER`]).
+pub const SYNTH_FORCED_CONTINUATION_PROMPT: &str =
+    "ContextDesk synthetic forced-tool continuation. After the tool result, reply with exactly: QUALIFY_OK_V1";
 
 /// On-disk wrapper schema for the secret-free qualification evidence store.
 pub const QUALIFICATION_STORE_SCHEMA_VERSION: u32 = 1;
@@ -1241,21 +1255,64 @@ fn project_chat_readiness(report: &QualificationReport) -> (ModelReadinessState,
             (CapabilityKind::Streaming, Some(MODE_PLAIN)),
             (CapabilityKind::Cancellation, Some(MODE_PLAIN)),
         ];
-        let detail = if supporting.iter().all(|(kind, mode)| {
+        let mut detail = if supporting.iter().all(|(kind, mode)| {
             status_of_exact_mode(report, *kind, *mode) == CapabilityStatus::Pass
         }) {
             "Verified for ContextDesk triage generation, tools, structured output, streaming, and cancellation."
+                .to_string()
         } else {
             "Verified for core ContextDesk triage and investigation contracts; review streaming and cancellation details."
+                .to_string()
         };
-        return (ModelReadinessState::Verified, detail.into());
+        let optional_fails = measured_optional_native_failures(report);
+        if !optional_fails.is_empty() {
+            detail.push(' ');
+            detail.push_str(&optional_fails.join(" and "));
+            detail.push_str(
+                " remain unqualified and are not required for the production auto-tool triage path.",
+            );
+        }
+        return (ModelReadinessState::Verified, detail);
     }
 
+    let failed_core: Vec<&str> = core
+        .iter()
+        .filter(|(kind, mode)| status_of_exact_mode(report, *kind, *mode) != CapabilityStatus::Pass)
+        .map(|(kind, _)| kind.as_str())
+        .collect();
     (
         ModelReadinessState::Limited,
-        "Basic generation works, but one or more triage tool-use or structured-output contracts did not pass."
-            .into(),
+        format!(
+            "Basic generation works, but one or more triage tool-use or structured-output contracts did not pass ({}).",
+            failed_core.join(", ")
+        ),
     )
+}
+
+/// Optional OpenAI-native contracts that were measured and failed.
+///
+/// These must not flip a production-valid auto-tool model to Limited: production
+/// chat uses plain/`tool_choice=auto` and prompted JSON, not `json_object` or
+/// forced `tool_choice`.
+fn measured_optional_native_failures(report: &QualificationReport) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if status_of_exact_mode(
+        report,
+        CapabilityKind::StructuredJsonObject,
+        Some(MODE_JSON_OBJECT),
+    ) == CapabilityStatus::Fail
+    {
+        out.push("Native json_object");
+    }
+    if status_of_exact_mode(
+        report,
+        CapabilityKind::ForcedToolCall,
+        Some(MODE_FORCED_TOOL),
+    ) == CapabilityStatus::Fail
+    {
+        out.push("forced tool_choice");
+    }
+    out
 }
 
 fn project_single_contract(status: CapabilityStatus, role: &str) -> (ModelReadinessState, String) {
@@ -1557,9 +1614,20 @@ impl CheckEvidenceMeta {
 
     /// Mode metadata plus dialect recovered from a transport error reason
     /// (`unsupported_request_mode:dialect=…`) so refuse paths stay dialect-honest
-    /// on the typed field, not only in free-text reasons.
-    fn from_mode_and_error(mode: &OpenAiChatRequestMode, reason: &str) -> Self {
-        Self::from_mode(mode).with_dialect(dialect_from_transport_reason(reason))
+    /// on the typed field, not only in free-text reasons. HTTP 400-style provider
+    /// errors fall back to the report key's transport protocol so a measured Fail
+    /// remains Unqualified instead of Inconclusive.
+    fn from_mode_and_error(
+        mode: &OpenAiChatRequestMode,
+        reason: &str,
+        key: &QualificationKey,
+    ) -> Self {
+        let from_reason = dialect_from_transport_reason(reason);
+        let fallback = match key.transport_protocol.as_str() {
+            "openai_compatible" | "ollama" | "anthropic" => Some(key.transport_protocol.as_str()),
+            _ => None,
+        };
+        Self::from_mode(mode).with_dialect(from_reason.or(fallback))
     }
 
     fn with_dialect(mut self, dialect: Option<&str>) -> Self {
@@ -1895,6 +1963,73 @@ fn probe_native_tool_call(
     }
 }
 
+/// Score a tool-result continuation the way production NativeToolLoop uses it.
+///
+/// Fail-closed on transport errors and empty assistant turns with no native
+/// tool calls. The synthetic marker is the preferred proof when present; a
+/// non-empty content channel or a native next tool call still passes because
+/// that is the production auto-tool path.
+fn eval_tool_loop_continuation(
+    kind: CapabilityKind,
+    start: std::time::Instant,
+    cancel: &AtomicBool,
+    meta: CheckEvidenceMeta,
+    result: Result<SyntheticChatResponse, TransportError>,
+    reason_prefix: Option<&str>,
+) -> CapabilityCheckResult {
+    let reason = |text: String| match reason_prefix {
+        Some(prefix) => format!("{prefix}: {text}"),
+        None => text,
+    };
+    match result {
+        Ok(resp) if resp.cancelled || cancel.load(Ordering::SeqCst) => check_with_evidence(
+            kind,
+            CapabilityStatus::Untested,
+            start,
+            reason("cancelled".into()),
+            meta.with_dialect(resp.dialect.as_deref()),
+        ),
+        Ok(resp) if resp.raw_error.is_some() => check_with_evidence(
+            kind,
+            CapabilityStatus::Fail,
+            start,
+            reason(resp.raw_error.clone().unwrap_or_default()),
+            meta.with_dialect(resp.dialect.as_deref()),
+        ),
+        Ok(resp) if resp.content.contains(QUALIFY_CONTINUE_MARKER) => check_with_evidence(
+            kind,
+            CapabilityStatus::Pass,
+            start,
+            reason("continuation marker after inert tool result".into()),
+            meta.with_dialect(resp.dialect.as_deref()),
+        ),
+        Ok(resp) if !resp.tool_calls.is_empty() => check_with_evidence(
+            kind,
+            CapabilityStatus::Pass,
+            start,
+            reason("native tool_call continuation after inert tool result".into()),
+            meta.with_dialect(resp.dialect.as_deref()),
+        ),
+        Ok(resp) if !resp.content.trim().is_empty() => check_with_evidence(
+            kind,
+            CapabilityStatus::Pass,
+            start,
+            reason(
+                "non-empty continuation after inert tool result (production auto-tool path)".into(),
+            ),
+            meta.with_dialect(resp.dialect.as_deref()),
+        ),
+        Ok(resp) => check_with_evidence(
+            kind,
+            CapabilityStatus::Fail,
+            start,
+            reason("empty continuation".into()),
+            meta.with_dialect(resp.dialect.as_deref()),
+        ),
+        Err(e) => check_with_evidence(kind, CapabilityStatus::Fail, start, reason(e.reason), meta),
+    }
+}
+
 fn probe_tool_result_continuation(
     transport: &mut dyn QualificationTransport,
     key: &QualificationKey,
@@ -1904,7 +2039,8 @@ fn probe_tool_result_continuation(
     let meta = CheckEvidenceMeta {
         request_mode: Some(MODE_AUTO_TOOLS),
         ..Default::default()
-    };
+    }
+    .with_dialect(Some(key.transport_protocol.as_str()));
     let tool_result =
         match execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"QUALIFY_TOOL_V1"}"#) {
             Ok(s) => s,
@@ -1923,7 +2059,7 @@ fn probe_tool_result_continuation(
         messages: vec![
             SyntheticMessage {
                 role: "user".into(),
-                content: "ContextDesk synthetic continuation probe.".into(),
+                content: SYNTH_CONTINUATION_PROMPT.into(),
                 tool_call_id: None,
                 tool_calls: vec![],
             },
@@ -1948,50 +2084,14 @@ fn probe_tool_result_continuation(
         stream: false,
         chat_mode: OpenAiChatRequestMode::Plain,
     };
-    match transport.chat_complete(&req, cancel) {
-        Ok(resp) if resp.cancelled || cancel.load(Ordering::SeqCst) => check_with_evidence(
-            CapabilityKind::ToolResultContinuation,
-            CapabilityStatus::Untested,
-            start,
-            "cancelled",
-            meta.with_dialect(resp.dialect.as_deref()),
-        ),
-        Ok(resp) if resp.raw_error.is_some() => check_with_evidence(
-            CapabilityKind::ToolResultContinuation,
-            CapabilityStatus::Fail,
-            start,
-            resp.raw_error.unwrap_or_default(),
-            meta.with_dialect(resp.dialect.as_deref()),
-        ),
-        Ok(resp) if resp.content.contains(QUALIFY_CONTINUE_MARKER) => check_with_evidence(
-            CapabilityKind::ToolResultContinuation,
-            CapabilityStatus::Pass,
-            start,
-            "continuation marker after inert tool result",
-            meta.with_dialect(resp.dialect.as_deref()),
-        ),
-        Ok(resp) if !resp.content.trim().is_empty() => check_with_evidence(
-            CapabilityKind::ToolResultContinuation,
-            CapabilityStatus::Fail,
-            start,
-            "continuation missing QUALIFY_OK_V1 marker",
-            meta.with_dialect(resp.dialect.as_deref()),
-        ),
-        Ok(resp) => check_with_evidence(
-            CapabilityKind::ToolResultContinuation,
-            CapabilityStatus::Fail,
-            start,
-            "empty continuation",
-            meta.with_dialect(resp.dialect.as_deref()),
-        ),
-        Err(e) => check_with_evidence(
-            CapabilityKind::ToolResultContinuation,
-            CapabilityStatus::Fail,
-            start,
-            e.reason,
-            meta,
-        ),
-    }
+    eval_tool_loop_continuation(
+        CapabilityKind::ToolResultContinuation,
+        start,
+        cancel,
+        meta,
+        transport.chat_complete(&req, cancel),
+        None,
+    )
 }
 
 fn eval_structured_content(
@@ -2106,7 +2206,7 @@ fn probe_structured_prompted_json(
             CapabilityStatus::Fail,
             start,
             format!("mode={mode_id}: {}", e.reason),
-            CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason),
+            CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason, key),
         ),
     }
 }
@@ -2147,7 +2247,7 @@ fn probe_structured_json_object(
                 CapabilityStatus::Fail,
                 start,
                 format!("mode={mode_id}: {}", e.reason),
-                CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason),
+                CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason, key),
             )
         }
     }
@@ -2190,7 +2290,7 @@ fn probe_structured_json_schema(
             CapabilityStatus::Fail,
             start,
             format!("mode={mode_id}: {}", e.reason),
-            CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason),
+            CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason, key),
         ),
     }
 }
@@ -2206,7 +2306,8 @@ fn probe_forced_tool_call(
         name: INERT_PROBE_TOOL_NAME.into(),
     };
     let mode_id = mode.evidence_id();
-    let meta = CheckEvidenceMeta::from_mode(&mode);
+    let meta =
+        CheckEvidenceMeta::from_mode(&mode).with_dialect(Some(key.transport_protocol.as_str()));
     let req = SyntheticChatRequest {
         model_id: key.model_id.clone(),
         messages: vec![SyntheticMessage {
@@ -2238,7 +2339,7 @@ fn probe_forced_tool_call(
                 CapabilityStatus::Fail,
                 start,
                 format!("mode={mode_id}: {}", e.reason),
-                CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason),
+                CheckEvidenceMeta::from_mode_and_error(&mode, &e.reason, key),
             );
         }
     };
@@ -2282,14 +2383,14 @@ fn probe_forced_tool_call(
             );
         }
     };
-    // Continuation after forced tool (plain+tools for auto path; still
-    // records forced_tool contract success only when continuation is non-empty).
+    // Continuation after a successful forced call uses the production auto-tool
+    // path (plain + tools). Fail closed only when the model produces no next turn.
     let cont = SyntheticChatRequest {
         model_id: key.model_id.clone(),
         messages: vec![
             SyntheticMessage {
                 role: "user".into(),
-                content: "ContextDesk synthetic forced-tool continuation.".into(),
+                content: SYNTH_FORCED_CONTINUATION_PROMPT.into(),
                 tool_call_id: None,
                 tool_calls: vec![],
             },
@@ -2310,43 +2411,15 @@ fn probe_forced_tool_call(
         stream: false,
         chat_mode: OpenAiChatRequestMode::Plain,
     };
-    match transport.chat_complete(&cont, cancel) {
-        Ok(resp) if resp.cancelled || cancel.load(Ordering::SeqCst) => check_with_evidence(
-            CapabilityKind::ForcedToolCall,
-            CapabilityStatus::Untested,
-            start,
-            "cancelled during continuation",
-            meta.with_dialect(resp.dialect.as_deref()),
-        ),
-        Ok(resp) if resp.content.contains(QUALIFY_CONTINUE_MARKER) => check_with_evidence(
-            CapabilityKind::ForcedToolCall,
-            CapabilityStatus::Pass,
-            start,
-            format!("mode={mode_id}: forced inert tool + continuation marker"),
-            meta.with_dialect(first.dialect.as_deref()),
-        ),
-        Ok(resp) if !resp.content.trim().is_empty() => check_with_evidence(
-            CapabilityKind::ForcedToolCall,
-            CapabilityStatus::Fail,
-            start,
-            format!("mode={mode_id}: continuation missing QUALIFY_OK_V1 marker"),
-            meta.with_dialect(resp.dialect.as_deref()),
-        ),
-        Ok(resp) => check_with_evidence(
-            CapabilityKind::ForcedToolCall,
-            CapabilityStatus::Fail,
-            start,
-            format!("mode={mode_id}: empty continuation after forced tool"),
-            meta.with_dialect(resp.dialect.as_deref()),
-        ),
-        Err(e) => check_with_evidence(
-            CapabilityKind::ForcedToolCall,
-            CapabilityStatus::Fail,
-            start,
-            format!("mode={mode_id}: continuation: {}", e.reason),
-            meta.with_dialect(first.dialect.as_deref()),
-        ),
-    }
+    let prefix = format!("mode={mode_id}");
+    eval_tool_loop_continuation(
+        CapabilityKind::ForcedToolCall,
+        start,
+        cancel,
+        meta.with_dialect(first.dialect.as_deref()),
+        transport.chat_complete(&cont, cancel),
+        Some(prefix.as_str()),
+    )
 }
 
 /// Plain-chat probe metadata (streaming / cancellation) with dialect honesty.
@@ -4856,5 +4929,358 @@ mod tests {
             row.model_id == "qwen3-reranker-0.6b"
                 && row.readiness.role == ModelReadinessRole::Reranker
         }));
+    }
+
+    #[derive(Clone, Copy)]
+    enum ContinuationReply {
+        Marker,
+        ProseWithoutMarker,
+        NextToolCall,
+        Empty,
+    }
+
+    /// Vercel-shaped OpenAI-compatible ladder: auto tools work, continuation is
+    /// production-valid prose without QUALIFY_OK_V1, json_schema works,
+    /// json_object and forced tool_choice return HTTP 400.
+    struct ProductionPathTransport {
+        continuation: ContinuationReply,
+        json_object_ok: bool,
+        forced_ok: bool,
+        continuation_prompts: Vec<String>,
+    }
+
+    impl ProductionPathTransport {
+        fn vercel_shaped() -> Self {
+            Self {
+                continuation: ContinuationReply::ProseWithoutMarker,
+                json_object_ok: false,
+                forced_ok: false,
+                continuation_prompts: Vec::new(),
+            }
+        }
+
+        fn openai(
+            content: impl Into<String>,
+            tools: Vec<SyntheticToolCall>,
+        ) -> SyntheticChatResponse {
+            SyntheticChatResponse {
+                content: content.into(),
+                tool_calls: tools,
+                dialect: Some("openai_compatible".into()),
+                mode_transmitted: true,
+                ..Default::default()
+            }
+        }
+    }
+
+    impl QualificationTransport for ProductionPathTransport {
+        fn chat_complete(
+            &mut self,
+            req: &SyntheticChatRequest,
+            cancel: &AtomicBool,
+        ) -> Result<SyntheticChatResponse, TransportError> {
+            if cancel.load(Ordering::SeqCst) {
+                return Ok(SyntheticChatResponse {
+                    cancelled: true,
+                    dialect: Some("openai_compatible".into()),
+                    mode_transmitted: true,
+                    ..Default::default()
+                });
+            }
+            if matches!(req.chat_mode, OpenAiChatRequestMode::ForcedTool { .. }) {
+                if self.forced_ok {
+                    return Ok(Self::openai(
+                        "",
+                        vec![SyntheticToolCall {
+                            id: "c1".into(),
+                            name: INERT_PROBE_TOOL_NAME.into(),
+                            arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+                        }],
+                    ));
+                }
+                return Err(TransportError {
+                    reason: "HTTP 400: tool_choice is not supported in thinking mode".into(),
+                });
+            }
+            if matches!(req.chat_mode, OpenAiChatRequestMode::JsonObject) {
+                if self.json_object_ok {
+                    return Ok(Self::openai(r#"{"qualify":"ok","v":1}"#, vec![]));
+                }
+                return Err(TransportError {
+                    reason: "HTTP 400: response_format type json_object is not supported".into(),
+                });
+            }
+            if matches!(
+                req.chat_mode,
+                OpenAiChatRequestMode::PromptedJson | OpenAiChatRequestMode::JsonSchema { .. }
+            ) {
+                return Ok(Self::openai(r#"{"qualify":"ok","v":1}"#, vec![]));
+            }
+            let has_tool_result = req.messages.iter().any(|m| m.role == "tool");
+            if has_tool_result {
+                if let Some(user) = req.messages.iter().find(|m| m.role == "user") {
+                    self.continuation_prompts.push(user.content.clone());
+                }
+                return match self.continuation {
+                    ContinuationReply::Marker => Ok(Self::openai(QUALIFY_CONTINUE_MARKER, vec![])),
+                    ContinuationReply::ProseWithoutMarker => Ok(Self::openai(
+                        "Acknowledged the echo token and ready for the next step.",
+                        vec![],
+                    )),
+                    ContinuationReply::NextToolCall => Ok(Self::openai(
+                        "",
+                        vec![SyntheticToolCall {
+                            id: "c2".into(),
+                            name: INERT_PROBE_TOOL_NAME.into(),
+                            arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+                        }],
+                    )),
+                    ContinuationReply::Empty => Ok(Self::openai("", vec![])),
+                };
+            }
+            if !req.tools.is_empty() {
+                return Ok(Self::openai(
+                    "",
+                    vec![SyntheticToolCall {
+                        id: "c1".into(),
+                        name: INERT_PROBE_TOOL_NAME.into(),
+                        arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+                    }],
+                ));
+            }
+            let mut resp = Self::openai(SYNTH_GENERATION_MARKER, vec![]);
+            resp.streamed = req.stream;
+            Ok(resp)
+        }
+
+        fn embed(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &AtomicBool,
+        ) -> Result<SyntheticEmbeddingResponse, TransportError> {
+            Err(TransportError {
+                reason: "n/a".into(),
+            })
+        }
+
+        fn rerank(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &[&str],
+            _: &AtomicBool,
+        ) -> Result<SyntheticRerankResponse, TransportError> {
+            Err(TransportError {
+                reason: "n/a".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn vercel_shaped_auto_tool_path_is_verified_when_json_object_and_forced_fail() {
+        let mut t = ProductionPathTransport::vercel_shaped();
+        let report = run_qualification(
+            key("alibaba/qwen3.6-27b"),
+            gate_full(),
+            &mut t,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        assert!(
+            t.continuation_prompts
+                .iter()
+                .any(|p| p.contains(QUALIFY_CONTINUE_MARKER)),
+            "continuation probe must actually request QUALIFY_OK_V1: {:?}",
+            t.continuation_prompts
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::NativeToolCall),
+            CapabilityStatus::Pass
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::ToolResultContinuation),
+            CapabilityStatus::Pass
+        );
+        let cont = report
+            .checks
+            .iter()
+            .find(|c| c.kind == CapabilityKind::ToolResultContinuation)
+            .expect("continuation row");
+        assert!(
+            cont.reason.contains("production auto-tool path"),
+            "missing-marker prose must pass as production continuation: {}",
+            cont.reason
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::StructuredOutput),
+            CapabilityStatus::Pass
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::StructuredJsonSchema),
+            CapabilityStatus::Pass
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::StructuredJsonObject),
+            CapabilityStatus::Fail
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .find(|c| c.kind == CapabilityKind::StructuredJsonObject)
+                .expect("json_object row")
+                .reason
+                .contains("400"),
+            "json_object fail must retain HTTP 400"
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::ForcedToolCall),
+            CapabilityStatus::Fail
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .find(|c| c.kind == CapabilityKind::ForcedToolCall)
+                .expect("forced row")
+                .reason
+                .contains("thinking"),
+            "forced-tool fail must retain thinking-mode refusal"
+        );
+
+        let readiness = model_readiness_for_report(&report);
+        assert_eq!(readiness.state, ModelReadinessState::Verified);
+        assert!(
+            readiness.detail.contains("Native json_object")
+                && readiness.detail.contains("forced tool_choice")
+                && readiness
+                    .detail
+                    .contains("not required for the production auto-tool"),
+            "verified detail must classify optional native failures: {}",
+            readiness.detail
+        );
+        assert_eq!(
+            capability_contract_verdict(Some(&report), CapabilityContract::NativeToolLoop),
+            ContractVerdict::Qualified
+        );
+        assert_eq!(
+            capability_contract_verdict(Some(&report), CapabilityContract::JsonProposal),
+            ContractVerdict::Qualified
+        );
+        assert_eq!(
+            capability_contract_verdict(Some(&report), CapabilityContract::NativeJsonObject),
+            ContractVerdict::Unqualified
+        );
+        assert_eq!(
+            capability_contract_verdict(Some(&report), CapabilityContract::ForcedToolLoop),
+            ContractVerdict::Unqualified
+        );
+        assert_eq!(
+            capability_contract_verdict(Some(&report), CapabilityContract::NativeJsonSchema),
+            ContractVerdict::Qualified
+        );
+    }
+
+    #[test]
+    fn continuation_marker_still_passes_when_present() {
+        let mut t = ProductionPathTransport {
+            continuation: ContinuationReply::Marker,
+            json_object_ok: true,
+            forced_ok: true,
+            continuation_prompts: Vec::new(),
+        };
+        let report = run_qualification(
+            key("openai/gpt-oss-120b"),
+            gate_full(),
+            &mut t,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        let cont = report
+            .checks
+            .iter()
+            .find(|c| c.kind == CapabilityKind::ToolResultContinuation)
+            .expect("continuation row");
+        assert_eq!(cont.status, CapabilityStatus::Pass);
+        assert!(
+            cont.reason.contains("continuation marker"),
+            "{}",
+            cont.reason
+        );
+    }
+
+    #[test]
+    fn next_native_tool_call_continuation_passes_native_tool_loop() {
+        let mut t = ProductionPathTransport {
+            continuation: ContinuationReply::NextToolCall,
+            json_object_ok: true,
+            forced_ok: true,
+            continuation_prompts: Vec::new(),
+        };
+        let report = run_qualification(
+            key("openai/gpt-oss-120b"),
+            gate_full(),
+            &mut t,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        let cont = report
+            .checks
+            .iter()
+            .find(|c| c.kind == CapabilityKind::ToolResultContinuation)
+            .expect("continuation row");
+        assert_eq!(cont.status, CapabilityStatus::Pass);
+        assert!(
+            cont.reason.contains("native tool_call continuation"),
+            "{}",
+            cont.reason
+        );
+        assert_eq!(
+            capability_contract_verdict(Some(&report), CapabilityContract::NativeToolLoop),
+            ContractVerdict::Qualified
+        );
+        assert_eq!(
+            model_readiness_for_report(&report).state,
+            ModelReadinessState::Verified
+        );
+    }
+
+    #[test]
+    fn empty_tool_continuation_is_fail_closed_and_limited() {
+        let mut t = ProductionPathTransport {
+            continuation: ContinuationReply::Empty,
+            json_object_ok: true,
+            forced_ok: false,
+            continuation_prompts: Vec::new(),
+        };
+        let report = run_qualification(
+            key("mistral/ministral-14b"),
+            gate_full(),
+            &mut t,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::ToolResultContinuation),
+            CapabilityStatus::Fail
+        );
+        let cont = report
+            .checks
+            .iter()
+            .find(|c| c.kind == CapabilityKind::ToolResultContinuation)
+            .expect("continuation row");
+        assert!(
+            cont.reason.contains("empty continuation"),
+            "{}",
+            cont.reason
+        );
+        assert_eq!(
+            capability_contract_verdict(Some(&report), CapabilityContract::NativeToolLoop),
+            ContractVerdict::Unqualified
+        );
+        let readiness = model_readiness_for_report(&report);
+        assert_eq!(readiness.state, ModelReadinessState::Limited);
+        assert!(
+            readiness.detail.contains("tool_result_continuation"),
+            "limited detail must name the failed production contract: {}",
+            readiness.detail
+        );
     }
 }
