@@ -45,7 +45,23 @@ strict schema did not reject extra properties.
 | `native_tool_loop` | auto tools + continuation |
 | `forced_tool_loop` | forced tool + continuation |
 
-**Never:** JsonObject evidence authorize prompted JSON (or vice versa).
+**Never:** JsonObject evidence authorize prompted JSON (or vice versa). Native
+json_object / forced-tool HTTP 400 is a genuine limitation of those exact
+contracts and must not silently retry as plain; it also must not mark a model
+**limited** when the production auto-tool + prompted-JSON path passed.
+
+### Tool-result continuation
+
+The continuation prompt asks for `QUALIFY_OK_V1`. Pass when:
+
+- the content channel contains that marker, or
+- the content channel is non-empty (production auto-tool next turn), or
+- the model emits a native next `tool_calls` array.
+
+Fail closed when the continuation is empty with no native tool calls, or the
+gateway returns a transport error (including HTTP 400 on tool-result messages).
+Do not fail a production-valid continuation solely because the synthetic marker
+is missing. Reasoning-channel-only text is not success.
 
 ### Migration
 

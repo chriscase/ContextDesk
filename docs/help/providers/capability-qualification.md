@@ -48,8 +48,16 @@ secret-free reason. Profile-level disabled tools or streaming remain
 
 Model pickers summarize those checks as **verified**, **limited**, **failed**,
 **stale**, or **unverified** for the measured role. A triage model is verified
-only when basic generation, native tool calls, tool-result continuation, and
-structured output pass. Basic generation with a failed investigation contract is
+only when basic generation, native **auto** tool calls, tool-result
+continuation, and **prompted** structured output pass. Those are the production
+triage contracts. Native `json_object` (`response_format`) and forced
+`tool_choice` are measured separately: an HTTP 400 for those modes is a real
+provider limitation of that exact contract, but it does not by itself make a
+production-valid auto-tool model **limited**. Tool-result continuation passes
+when the model produces a next assistant turn after a host-validated tool
+result (the synthetic `QUALIFY_OK_V1` marker when present, otherwise non-empty
+content or a native next tool call). Empty continuation or a transport error
+stays fail-closed. Basic generation with a failed investigation contract is
 limited, not verified. Embedding and reranking results stay role-specific and
 are never promoted as preferred chat models.
 

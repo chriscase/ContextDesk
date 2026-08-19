@@ -62,7 +62,7 @@ Out of scope:
 | Ordinary chat isolation | **Shipped** | [`agent.rs`](../../../crates/cd-core/src/agent.rs) and [context assembly method](DETERMINISTIC_CONTEXT_ASSEMBLY.md) | Repeat native proof per supported host |
 | Tools-disabled linked-chat refusal | **Shipped** | [`research.rs`](../../../crates/cd-core/src/research.rs) | Cannot pass a grounded linked-log evaluation |
 | Tools-enabled provider/model evaluation | **Partial** | Bounded tool loop and evidence validation ship in [`agent.rs`](../../../crates/cd-core/src/agent.rs) | Requires a real tools-enabled profile; provider quality is environment-dependent |
-| Role-specific provider/model compatibility qualification | **Local integration** | Shared evidence projection in [`capability_qualification.rs`](../../../crates/cd-core/src/capability_qualification.rs), live adapters in [`capability_qualification.rs`](../../../crates/cd-workflow/src/capability_qualification.rs), dialect-honest multi-mode ladder, transport-protocol identity, exact-mode+dialect authorization and readiness (schema v4; [chat contract](../../testing/OPENAI_CHAT_CONTRACT_V2.md)), and GUI/CLI `Discover → Verify → Choose` surfaces | Hermetic protocol/kind isolation, mode honesty, and fail-closed probes are proven; live gateway support and ordinary chat/attachment/multimodal quality require distinct evidence |
+| Role-specific provider/model compatibility qualification | **Local integration** | Shared evidence projection in [`capability_qualification.rs`](../../../crates/cd-core/src/capability_qualification.rs), live adapters in [`capability_qualification.rs`](../../../crates/cd-workflow/src/capability_qualification.rs), dialect-honest multi-mode ladder, transport-protocol identity, exact-mode+dialect authorization and readiness, production auto-tool continuation (schema v4; [chat contract](../../testing/OPENAI_CHAT_CONTRACT_V2.md)), and GUI/CLI `Discover → Verify → Choose` surfaces | Hermetic protocol/kind isolation, mode honesty, and fail-closed probes are proven; native `json_object` / forced `tool_choice` remain exact-contract measurements; live gateway support and ordinary chat/attachment/multimodal quality require distinct evidence |
 | Quick in-app demo guide | **Local integration** | [demo Help page](../../help/log-analysis/demo-datasets.md), explicit fenced-command copy, and #732 optional first-run 25k install | Other fixtures and optional metrics remain source-checkout inputs |
 | Deep in-app handbook chapter/export | **Shipped** | This chapter, [`handbook.rs`](../../../desktop/src-tauri/src/handbook.rs), current-main proof on #719 | Live provider evaluation remains environment-dependent |
 
@@ -310,10 +310,14 @@ Compatibility qualification and quality evaluation are separate lanes. A
 qualification record belongs to one exact provider profile, endpoint
 fingerprint, model id, role contract, and probe schema. Name-based role hints
 may help a person choose probes, but cannot produce measured evidence. A
-triage-compatible result establishes only synthetic generation, native tool
-call, tool-result continuation, and structured-output contracts; it does not
-establish answer usefulness, ordinary chat, attachments, multimodal input,
-context length, or value for money.
+triage-compatible result establishes only synthetic generation, native **auto**
+tool call, tool-result continuation (next assistant turn after a host-validated
+tool result), and **prompted** structured-output contracts; it does not
+establish native `json_object`, forced `tool_choice`, answer usefulness,
+ordinary chat, attachments, multimodal input, context length, or value for
+money. HTTP 400 on those optional native modes is recorded as an exact-contract
+limitation and must not by itself mark a production-valid auto-tool path
+limited.
 
 The local integration flow is `Discover → Verify → Choose`. Discovery records a
 secret-free catalog snapshot. Verification is an explicit token-spending

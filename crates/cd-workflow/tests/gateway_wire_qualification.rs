@@ -387,3 +387,246 @@ fn qualification_anthropic_refuses_openai_native_modes() {
         ContractVerdict::Unqualified
     );
 }
+
+fn chat_ok(content: &str) -> serde_json::Value {
+    json!({
+        "id": "chatcmpl-ok",
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": content}
+        }]
+    })
+}
+
+fn http_400(message: &str) -> Response {
+    Response::json(
+        400,
+        &json!({
+            "error": {"message": message, "type": "invalid_request_error"}
+        }),
+    )
+}
+
+/// Observed Vercel-shaped OpenAI-compatible ladder for qwen / gpt-oss / ministral:
+/// auto tools and json_schema work; continuation is production-valid prose
+/// without QUALIFY_OK_V1; json_object and forced tool_choice return HTTP 400.
+#[test]
+fn qualification_vercel_shaped_auto_tool_path_is_not_limited_by_optional_native_modes() {
+    let rt = tokio::runtime::Runtime::new().expect("gateway runtime");
+    let gateway = rt.block_on(MockGateway::start_routed(|req| {
+        let body = req.json_body().unwrap_or_else(|| json!({}));
+        let messages = body["messages"].as_array().cloned().unwrap_or_default();
+        let has_tool_result = messages.iter().any(|m| m["role"] == "tool");
+        let rf_type = body["response_format"]["type"].as_str();
+        let forced = body.get("tool_choice").is_some_and(|v| v.is_object());
+        let tools = body.get("tools").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty());
+
+        if forced {
+            return Step::respond(http_400("tool_choice is not supported in thinking mode"));
+        }
+        if rf_type == Some("json_object") {
+            return Step::respond(http_400("response_format type json_object is not supported"));
+        }
+        if rf_type == Some("json_schema") {
+            return Step::respond(Response::json_ok(&chat_ok(r#"{"qualify":"ok","v":1}"#)));
+        }
+        if has_tool_result {
+            return Step::respond(Response::json_ok(&chat_ok(
+                "Acknowledged the echo token and ready for the next step.",
+            )));
+        }
+        if tools {
+            return Step::respond(Response::json_ok(&completion_with_tool_calls(json!([{
+                "id": "call_probe",
+                "type": "function",
+                "function": {"name": "cd_qualify_echo", "arguments": "{\"token\":\"QUALIFY_TOOL_V1\"}"}
+            }]))));
+        }
+        let prompted = messages.iter().any(|m| {
+            m["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("JSON only"))
+        });
+        if prompted {
+            return Step::respond(Response::json_ok(&chat_ok(r#"{"qualify":"ok","v":1}"#)));
+        }
+        Step::respond(Response::json_ok(&chat_ok("QUALIFY_OK_V1")))
+    }));
+
+    let mut transport = LiveQualificationTransport::new(
+        LiveBackendKind::OpenAiCompatible,
+        format!("{}/v1", gateway.base_url()),
+        None,
+        true,
+    );
+    let gate = ProfileCapabilityGate {
+        tools_enabled: true,
+        stream_enabled: true,
+        embeddings_enabled: false,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let report = run_qualification(
+        QualificationKey::new("qual-profile", gateway.base_url(), "alibaba/qwen3.6-27b"),
+        gate,
+        &mut transport,
+        &cancel,
+    );
+
+    use cd_core::capability_qualification::{
+        capability_contract_verdict, model_readiness_for_report, CapabilityContract,
+        ContractVerdict, ModelReadinessState,
+    };
+
+    assert_eq!(
+        report.status_of(CapabilityKind::NativeToolCall),
+        CapabilityStatus::Pass
+    );
+    assert_eq!(
+        report.status_of(CapabilityKind::ToolResultContinuation),
+        CapabilityStatus::Pass,
+        "production-valid continuation must not fail on a missing QUALIFY_OK_V1 marker: {:?}",
+        report.checks
+    );
+    assert_eq!(
+        report.status_of(CapabilityKind::StructuredOutput),
+        CapabilityStatus::Pass
+    );
+    assert_eq!(
+        report.status_of(CapabilityKind::StructuredJsonSchema),
+        CapabilityStatus::Pass
+    );
+    assert_eq!(
+        report.status_of(CapabilityKind::StructuredJsonObject),
+        CapabilityStatus::Fail
+    );
+    assert_eq!(
+        report.status_of(CapabilityKind::ForcedToolCall),
+        CapabilityStatus::Fail
+    );
+
+    let json_object = report
+        .checks
+        .iter()
+        .find(|c| c.kind == CapabilityKind::StructuredJsonObject)
+        .expect("json_object row");
+    assert!(
+        json_object.reason.contains("400"),
+        "json_object limitation must stay explicit: {}",
+        json_object.reason
+    );
+    let forced = report
+        .checks
+        .iter()
+        .find(|c| c.kind == CapabilityKind::ForcedToolCall)
+        .expect("forced row");
+    assert!(
+        forced.reason.contains("thinking") || forced.reason.contains("400"),
+        "forced-tool thinking-mode refusal must stay explicit: {}",
+        forced.reason
+    );
+
+    let readiness = model_readiness_for_report(&report);
+    assert_eq!(
+        readiness.state,
+        ModelReadinessState::Verified,
+        "optional native-mode failures must not mark a valid auto-tool path limited: {}",
+        readiness.detail
+    );
+    assert_eq!(
+        capability_contract_verdict(Some(&report), CapabilityContract::NativeToolLoop),
+        ContractVerdict::Qualified
+    );
+    assert_eq!(
+        capability_contract_verdict(Some(&report), CapabilityContract::NativeJsonObject),
+        ContractVerdict::Unqualified
+    );
+    assert_eq!(
+        capability_contract_verdict(Some(&report), CapabilityContract::ForcedToolLoop),
+        ContractVerdict::Unqualified
+    );
+
+    let bodies: Vec<serde_json::Value> = gateway
+        .requests()
+        .iter()
+        .filter_map(|r| r.json_body())
+        .collect();
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b["response_format"]["type"] == "json_object"),
+        "must still emit json_object on the wire so HTTP 400 is a real provider limitation"
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b["response_format"]["type"] == "json_schema"),
+        "json_schema probe must remain on the wire"
+    );
+    assert!(
+        bodies.iter().any(|b| b["tool_choice"].is_object()),
+        "forced tool_choice must remain on the wire"
+    );
+    assert!(
+        bodies.iter().any(|b| b["messages"]
+            .as_array()
+            .is_some_and(|m| m.iter().any(|msg| msg["role"] == "tool"))),
+        "continuation must send the OpenAI tool-result message shape"
+    );
+}
+
+#[test]
+fn qualification_empty_tool_continuation_stays_fail_closed() {
+    let rt = tokio::runtime::Runtime::new().expect("gateway runtime");
+    let gateway = rt.block_on(MockGateway::start_routed(|req| {
+        let body = req.json_body().unwrap_or_else(|| json!({}));
+        let messages = body["messages"].as_array().cloned().unwrap_or_default();
+        let has_tool_result = messages.iter().any(|m| m["role"] == "tool");
+        let tools = body.get("tools").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty());
+        if has_tool_result {
+            return Step::respond(Response::json_ok(&chat_ok("")));
+        }
+        if tools {
+            return Step::respond(Response::json_ok(&completion_with_tool_calls(json!([{
+                "id": "call_probe",
+                "type": "function",
+                "function": {"name": "cd_qualify_echo", "arguments": "{\"token\":\"QUALIFY_TOOL_V1\"}"}
+            }]))));
+        }
+        Step::respond(Response::json_ok(&chat_ok("QUALIFY_OK_V1")))
+    }));
+
+    let mut transport = LiveQualificationTransport::new(
+        LiveBackendKind::OpenAiCompatible,
+        format!("{}/v1", gateway.base_url()),
+        None,
+        true,
+    );
+    let gate = ProfileCapabilityGate {
+        tools_enabled: true,
+        stream_enabled: false,
+        embeddings_enabled: false,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let report = run_qualification(
+        QualificationKey::new("qual-profile", gateway.base_url(), "mistral/ministral-14b"),
+        gate,
+        &mut transport,
+        &cancel,
+    );
+    assert_eq!(
+        report.status_of(CapabilityKind::ToolResultContinuation),
+        CapabilityStatus::Fail
+    );
+    use cd_core::capability_qualification::{
+        capability_contract_verdict, model_readiness_for_report, CapabilityContract,
+        ContractVerdict, ModelReadinessState,
+    };
+    assert_eq!(
+        capability_contract_verdict(Some(&report), CapabilityContract::NativeToolLoop),
+        ContractVerdict::Unqualified
+    );
+    assert_eq!(
+        model_readiness_for_report(&report).state,
+        ModelReadinessState::Limited
+    );
+}
