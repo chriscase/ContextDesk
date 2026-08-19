@@ -1,0 +1,99 @@
+{
+  "schemaId": "cd-collab.interaction_trace.v1",
+  "traceId": "trace-programmatic-agent-v1",
+  "candidateId": "cand-programmatic-agent",
+  "sourceKind": "programmatic",
+  "completeness": "exact",
+  "privacyClass": "share_safe",
+  "rawHash": null,
+  "events": [
+    {
+      "eventId": "evt-cand-programmatic-agent-1",
+      "sequence": 1,
+      "kind": "question",
+      "actor": "human",
+      "role": null,
+      "parentEventId": null,
+      "evidenceRefs": [],
+      "observedAt": { "status": "unknown" },
+      "excerpt": "Which inventory call is blocking checkout?",
+      "excerptHash": "b2f4197b0fa43827dc7355ed5026216c5f47cfd4c5c305d2eb179a9dd7cb138c",
+      "unknowns": ["timestamp"]
+    },
+    {
+      "eventId": "evt-cand-programmatic-agent-2",
+      "sequence": 2,
+      "kind": "tool_call",
+      "actor": "tool",
+      "role": null,
+      "parentEventId": "evt-cand-programmatic-agent-1",
+      "evidenceRefs": [],
+      "observedAt": { "status": "unknown" },
+      "excerpt": "read_logs",
+      "excerptHash": "91bb01a5fbcfa32382763fadcf1016a9518667dcc1a3ae221a575d15c6c6431b",
+      "unknowns": ["timestamp", "toolName"]
+    },
+    {
+      "eventId": "evt-cand-programmatic-agent-3",
+      "sequence": 3,
+      "kind": "tool_result",
+      "actor": "tool",
+      "role": null,
+      "parentEventId": "evt-cand-programmatic-agent-2",
+      "evidenceRefs": ["ev-demo-checkout-log"],
+      "observedAt": { "status": "unknown" },
+      "excerpt": "checkout log shows inventory timeout",
+      "excerptHash": "2384e2277b70b71ea89b0248a7d47e1421c8cb53eae4fa1a24b7d2e3c6ebfcd5",
+      "unknowns": ["timestamp"]
+    },
+    {
+      "eventId": "evt-cand-programmatic-agent-4",
+      "sequence": 4,
+      "kind": "evidence_anchor",
+      "actor": "assistant",
+      "role": "symptom",
+      "parentEventId": "evt-cand-programmatic-agent-3",
+      "evidenceRefs": ["ev-demo-checkout-log"],
+      "observedAt": { "status": "unknown" },
+      "excerpt": "checkout log shows inventory timeout",
+      "excerptHash": "2384e2277b70b71ea89b0248a7d47e1421c8cb53eae4fa1a24b7d2e3c6ebfcd5",
+      "unknowns": ["timestamp"]
+    },
+    {
+      "eventId": "evt-cand-programmatic-agent-5",
+      "sequence": 5,
+      "kind": "hypothesis",
+      "actor": "assistant",
+      "role": "cause",
+      "parentEventId": "evt-cand-programmatic-agent-4",
+      "evidenceRefs": ["ev-demo-inventory-timeout"],
+      "observedAt": { "status": "unknown" },
+      "excerpt": "Inventory timeout is the leading cause.",
+      "excerptHash": "b10a31d509ace0ed53ea3af57e8dd01ade5d428d857674784a3756e757da7eaf",
+      "unknowns": ["timestamp"]
+    },
+    {
+      "eventId": "evt-cand-programmatic-agent-6",
+      "sequence": 6,
+      "kind": "recommendation",
+      "actor": "assistant",
+      "role": null,
+      "parentEventId": "evt-cand-programmatic-agent-5",
+      "evidenceRefs": ["ev-demo-inventory-timeout"],
+      "observedAt": { "status": "unknown" },
+      "excerpt": "Raise the inventory client timeout.",
+      "excerptHash": "d1eec483f9ed4011a0b49d357d9cbdeac229439eedf874e6d249c27137db9b55",
+      "unknowns": ["timestamp"]
+    }
+  ],
+  "efficiency": {
+    "turnCount": { "status": "observed", "count": 4 },
+    "evidenceAcquisitionSteps": { "status": "observed", "count": 3 },
+    "latency": { "status": "observed", "milliseconds": 1800 },
+    "cost": { "status": "unknown" },
+    "providerCalls": { "status": "observed", "count": 2 }
+  },
+  "unknowns": [],
+  "notes": ["Ambiguous transcript structure stays unknown."],
+  "createdAt": "2026-08-19T00:00:00Z"
+}

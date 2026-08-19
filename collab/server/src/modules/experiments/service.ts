@@ -7,10 +7,20 @@ import {
   HELPFULNESS_DIMENSIONS,
   HELPFULNESS_OBSERVATION_SCHEMA_ID,
   goldPromotionFingerprint,
-  parseExperimentImport,
   parseExperimentDecision,
   parseGoldReference,
   parseHelpfulnessObservation,
+  parseInteractionTrace,
+  parseLabExport,
+  parseLabImport,
+  parsePlainTranscript,
+  PLAIN_TRANSCRIPT_SCHEMA_ID,
+  INTERACTION_TRACE_SCHEMA_ID,
+  LAB_EXPORT_SCHEMA_ID,
+  buildStrategyComparison,
+  extractPlainTranscript,
+  projectShareSafeTrace,
+  traceFingerprint,
   type CandidateGoldAlignmentV1,
   type ExpectedRelationshipV1,
   type ExperimentAgreementV1,
@@ -21,6 +31,8 @@ import {
   type GoldReferenceV1,
   type HelpfulnessDimension,
   type HelpfulnessObservationV1,
+  type InteractionTraceV1,
+  type StrategyComparisonV1,
 } from "@cd-collab/contracts";
 import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
@@ -33,7 +45,8 @@ export class ExperimentConflictError extends Error {
     | "revision_conflict"
     | "already_accepted"
     | "stale_revision"
-    | "stale_gold";
+    | "stale_gold"
+    | "trace_conflict";
 
   constructor(code: ExperimentConflictError["code"], message: string) {
     super(message);
@@ -65,6 +78,8 @@ export interface ExperimentView {
   golds: GoldReferenceV1[];
   gold: GoldReferenceV1 | null;
   alignments: CandidateGoldAlignmentV1[];
+  traces: InteractionTraceV1[];
+  comparison: StrategyComparisonV1;
 }
 
 export interface PromoteGoldInput {
@@ -116,7 +131,8 @@ export class ExperimentService {
     if (!(await this.deps.cases.getCase(caseId, actor, isAdmin))) {
       throw new ExperimentNotFoundError("case not found");
     }
-    const envelope = parseExperimentImport(raw);
+    const parsed = parseLabImport(raw);
+    const envelope = parsed.kind === "strategy" ? parsed.package.experiment : parsed.envelope;
     const existing = await this.store.findByPackage(caseId, envelope.packageId);
     if (existing) {
       await this.deps.audit.append({
@@ -126,6 +142,11 @@ export class ExperimentService {
         origin,
         outcome: "success",
       });
+      if (parsed.kind === "strategy") {
+        for (const trace of parsed.package.traces) {
+          await this.attachParsedTrace(existing, actor, trace, origin);
+        }
+      }
       return this.toView(existing);
     }
 
@@ -175,6 +196,11 @@ export class ExperimentService {
       origin,
       outcome: "success",
     });
+    if (parsed.kind === "strategy") {
+      for (const trace of parsed.package.traces) {
+        await this.attachParsedTrace(row, actor, trace, origin);
+      }
+    }
     return this.toView(row);
   }
 
@@ -364,10 +390,148 @@ export class ExperimentService {
     experimentId: string,
     actor: Actor,
     isAdmin: boolean,
-  ): Promise<ReturnType<typeof projectReviewExport>> {
+  ): Promise<ReturnType<typeof parseLabExport>> {
     const view = await this.get(caseId, experimentId, actor, isAdmin);
     if (!view) throw new ExperimentNotFoundError();
-    return projectReviewExport(view);
+    return parseLabExport({
+      schemaId: LAB_EXPORT_SCHEMA_ID,
+      privacyClass: "share_safe",
+      review: projectReviewExport(view),
+      traces: view.traces.map(projectShareSafeTrace),
+      comparison: view.comparison,
+    });
+  }
+
+  async importTrace(
+    caseId: string,
+    experimentId: string,
+    actor: Actor,
+    raw: unknown,
+    origin: string,
+    isAdmin: boolean,
+  ): Promise<InteractionTraceV1> {
+    const row = await this.requireExperiment(caseId, experimentId, actor, isAdmin);
+    if (
+      raw &&
+      typeof raw === "object" &&
+      "schemaId" in raw &&
+      (raw as { schemaId: unknown }).schemaId === PLAIN_TRANSCRIPT_SCHEMA_ID
+    ) {
+      const plain = parsePlainTranscript(raw);
+      if (!row.candidates.some((c) => c.candidateId === plain.candidateId)) {
+        throw new Error("unknown candidateId");
+      }
+      const extracted = extractPlainTranscript(plain.text, plain.candidateId, new Date().toISOString());
+      return this.attachParsedTrace(row, actor, extracted, origin);
+    }
+    if (
+      raw &&
+      typeof raw === "object" &&
+      "schemaId" in raw &&
+      (raw as { schemaId: unknown }).schemaId === INTERACTION_TRACE_SCHEMA_ID
+    ) {
+      const trace = parseInteractionTrace(raw);
+      if (!row.candidates.some((c) => c.candidateId === trace.candidateId)) {
+        throw new Error("unknown candidateId");
+      }
+      return this.attachParsedTrace(row, actor, trace, origin);
+    }
+    throw new Error("expected interaction trace or plain transcript");
+  }
+
+  async annotateTrace(
+    caseId: string,
+    experimentId: string,
+    actor: Actor,
+    input: { candidateId: string; text: string; evidenceRefs?: string[]; parentEventId?: string | null },
+    origin: string,
+    isAdmin: boolean,
+  ): Promise<InteractionTraceV1> {
+    const row = await this.requireExperiment(caseId, experimentId, actor, isAdmin);
+    if (!row.candidates.some((c) => c.candidateId === input.candidateId)) {
+      throw new Error("unknown candidateId");
+    }
+    if (!input.text.trim()) throw new Error("annotation text is required");
+    const traces = await this.store.listTraces(row.id);
+    const current = traces.find((trace) => trace.candidateId === input.candidateId);
+    if (!current) throw new Error("import a trace before annotating");
+    const nextSeq = (current.events.at(-1)?.sequence ?? 0) + 1;
+    const annotationId = randomUUID();
+    await this.store.insertAnnotation({
+      id: annotationId,
+      experimentId: row.id,
+      candidateId: input.candidateId,
+      event: {
+        eventId: `ann-${annotationId}`,
+        sequence: nextSeq,
+        kind: "human_annotation",
+        actor: "human",
+        role: null,
+        parentEventId: input.parentEventId ?? current?.events.at(-1)?.eventId ?? null,
+        evidenceRefs: input.evidenceRefs ?? [],
+        observedAt: { status: "unknown" },
+        excerpt: input.text.trim().slice(0, 240),
+        excerptHash: null,
+        unknowns: ["timestamp"],
+      },
+      authorId: actor.id,
+      authorUsername: actor.username,
+      createdAt: new Date().toISOString(),
+    });
+    await this.deps.audit.append({
+      identity: actor.id,
+      action: "experiment_trace_annotate",
+      target: `${row.id}:${input.candidateId}`,
+      origin,
+      outcome: "success",
+    });
+    const view = await this.toView(row);
+    const trace = view.traces.find((item) => item.candidateId === input.candidateId);
+    if (!trace) throw new Error("trace not found after annotation");
+    return trace;
+  }
+
+  private async attachParsedTrace(
+    row: ExperimentRow,
+    actor: Actor,
+    incoming: InteractionTraceV1,
+    origin: string,
+  ): Promise<InteractionTraceV1> {
+    const safe = projectShareSafeTrace(incoming);
+    const fingerprint = traceFingerprint(safe);
+    const existing = await this.store.findTrace(row.id, safe.candidateId);
+    if (existing) {
+      if (traceFingerprint(existing) === fingerprint) {
+        await this.deps.audit.append({
+          identity: actor.id,
+          action: "experiment_trace_import_idempotent",
+          target: existing.traceId,
+          origin,
+          outcome: "success",
+        });
+        return existing;
+      }
+      throw new ExperimentConflictError(
+        "trace_conflict",
+        "candidate already has a different interaction trace",
+      );
+    }
+    await this.store.insertTrace(row.id, safe, fingerprint);
+    await this.deps.cases.appendDomainTimeline(row.caseId, {
+      kind: "experiment_trace_imported",
+      actor,
+      targetId: row.id,
+      clientTime: null,
+      payload: { traceId: safe.traceId, candidateId: safe.candidateId, sourceKind: safe.sourceKind },
+    });
+    await this.deps.audit.append({
+      identity: actor.id,
+      action: "experiment_trace_import",
+      target: safe.traceId,
+      origin,
+      outcome: "success",
+    });
+    return safe;
   }
 
   async promoteGold(
@@ -558,6 +722,16 @@ export class ExperimentService {
       usage: { status: "unknown" },
     }));
     const alignments = alignExperimentCandidates(candidates, row.agreement, gold);
+    const storedTraces = await this.store.listTraces(row.id);
+    const annotations = await this.store.listAnnotations(row.id);
+    const traces = storedTraces.map((trace) => mergeAnnotations(trace, annotations));
+    const comparison = buildStrategyComparison({
+      packageId: row.packageId,
+      candidates,
+      traces,
+      agreement: row.agreement,
+      gold,
+    });
     return {
       id: row.id,
       caseId: row.caseId,
@@ -574,6 +748,27 @@ export class ExperimentService {
       golds,
       gold,
       alignments,
+      traces,
+      comparison,
     };
   }
+}
+
+function mergeAnnotations(
+  trace: InteractionTraceV1,
+  annotations: { candidateId: string; event: InteractionTraceV1["events"][number] }[],
+): InteractionTraceV1 {
+  const extra = annotations.filter((row) => row.candidateId === trace.candidateId);
+  if (extra.length === 0) return trace;
+  let sequence = trace.events.at(-1)?.sequence ?? 0;
+  const events = [...trace.events];
+  for (const row of extra) {
+    sequence += 1;
+    events.push({
+      ...row.event,
+      sequence,
+      parentEventId: row.event.parentEventId ?? events.at(-1)?.eventId ?? null,
+    });
+  }
+  return { ...trace, events };
 }

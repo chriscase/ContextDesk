@@ -8,6 +8,7 @@ use crate::review::{
     materialize_review_packet, merge_citation_assists, run_has_support_adjudication, ReviewPacket,
     ReviewPhase,
 };
+use crate::trace::InteractionTrace;
 use crate::types::citation_assist_flags;
 use crate::types::{
     sha256_hex, Adjudication, Case, ContentDigest, EvaluationTask, EvidenceSnapshot, HeldContent,
@@ -57,6 +58,7 @@ impl BenchStore {
             "adjudications",
             "scores",
             "golds",
+            "traces",
             "packets",
             "review-packets",
             "blobs/sha256",
@@ -937,6 +939,32 @@ impl BenchStore {
             items.push(self.get_gold(&id)?);
         }
         items.sort_by(|a, b| a.version.cmp(&b.version).then(a.gold_id.cmp(&b.gold_id)));
+        Ok(items)
+    }
+
+    pub fn put_trace(&self, trace: &InteractionTrace) -> BenchResult<()> {
+        trace.validate()?;
+        atomic_write_json(&self.entity_path("traces", &trace.trace_id), trace)
+    }
+
+    pub fn get_trace(&self, trace_id: &str) -> BenchResult<InteractionTrace> {
+        InteractionTrace::parse_json(&self.read_entity("traces", trace_id)?)
+    }
+
+    pub fn list_traces(&self) -> BenchResult<Vec<String>> {
+        list_ids(&self.root.join("traces"))
+    }
+
+    pub fn load_traces(&self) -> BenchResult<Vec<InteractionTrace>> {
+        let mut items = Vec::new();
+        for id in self.list_traces()? {
+            items.push(self.get_trace(&id)?);
+        }
+        items.sort_by(|a, b| {
+            a.candidate_id
+                .cmp(&b.candidate_id)
+                .then(a.trace_id.cmp(&b.trace_id))
+        });
         Ok(items)
     }
 

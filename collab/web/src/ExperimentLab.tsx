@@ -61,6 +61,38 @@ interface ExperimentView {
     extraAnchors: string[];
     notes: string[];
   }[];
+  traces: {
+    candidateId: string;
+    sourceKind: string;
+    completeness: string;
+    unknowns: string[];
+    events: {
+      eventId: string;
+      sequence: number;
+      kind: string;
+      actor: string;
+      excerpt: string | null;
+      evidenceRefs: string[];
+      unknowns: string[];
+    }[];
+    efficiency: {
+      turnCount: { status: string; count?: number };
+      evidenceAcquisitionSteps: { status: string; count?: number };
+      latency: { status: string; milliseconds?: number };
+      cost: { status: string };
+      providerCalls: { status: string; count?: number };
+    };
+  }[];
+  comparison: {
+    questionPaths: { pathId: string; excerpt: string | null; candidateIds: string[] }[];
+    sharedEvidence: { evidenceRef: string; candidateIds: string[] }[];
+    uniqueEvidence: { candidateId: string; evidenceRefs: string[] }[];
+    divergence: { kind: string; summary: string }[];
+    convergence: { evidenceRef: string; inGold: boolean; candidateIds: string[] }[];
+    efficiency: { candidateId: string; efficiency: { turnCount: { status: string; count?: number } } }[];
+    gold: { status: string; version: number | null; acceptedDecisionId: string | null };
+    notes: string[];
+  };
 }
 
 function latencyLabel(value: CandidateRow["observedLatency"]): string {
@@ -230,6 +262,56 @@ export function ExperimentLab(props: {
     await refresh();
   }
 
+  async function importTrace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!current) return;
+    const data = new FormData(event.currentTarget);
+    const raw = String(data.get("trace") ?? "");
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      setError("Trace JSON is invalid");
+      return;
+    }
+    const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/traces`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const json = (await res.json()) as { error?: string };
+      setError(json.error ?? "trace import failed");
+      return;
+    }
+    event.currentTarget.reset();
+    await refresh();
+  }
+
+  async function annotateTrace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!current) return;
+    const data = new FormData(event.currentTarget);
+    const candidateId = String(data.get("candidateId") ?? "");
+    const res = await fetch(
+      `/api/cases/${props.caseId}/experiments/${current.id}/traces/${candidateId}/annotations`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          text: String(data.get("text") ?? ""),
+          evidenceRefs: String(data.get("evidenceRefs") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+        }),
+      },
+    );
+    if (!res.ok) return;
+    event.currentTarget.reset();
+    await refresh();
+  }
+
   return (
     <section className="experiment-lab">
       <h3 className="case-view__title">Experiment lab</h3>
@@ -245,7 +327,7 @@ export function ExperimentLab(props: {
             rows={6}
             value={payload}
             onChange={(event) => setPayload(event.target.value)}
-            placeholder="Paste share-safe experiment package or summary JSON"
+            placeholder="Paste share-safe experiment, strategy package, or summary JSON"
             required
           />
           <button className="login__submit" type="submit">
@@ -341,6 +423,111 @@ export function ExperimentLab(props: {
               </li>
             ))}
           </ul>
+          <section className="experiment-lab__gold" aria-label="Strategy comparison">
+            <h4 className="experiment-lab__heading">Strategy comparison</h4>
+            <p className="experiment-lab__disclaimer">
+              Textual similarity is not a winner. Ambiguous transcript structure stays unknown.
+              Gold alignment and helpfulness stay independent of this projection.
+            </p>
+            <p className="timeline__meta">
+              Gold {current.comparison?.gold.status ?? "unknown"}
+              {current.comparison?.gold.acceptedDecisionId
+                ? ` · accepted decision ${current.comparison.gold.acceptedDecisionId}`
+                : " · no accepted gold decision"}
+              {" · "}
+              Helpfulness {current.candidates.map((row) => `${row.modelLabel}:${row.helpfulnessState}`).join(", ")}
+            </p>
+            <ul className="timeline">
+              {(current.comparison?.questionPaths ?? []).map((path) => (
+                <li key={path.pathId} className="timeline__item">
+                  Question path: {path.excerpt ?? "unknown"} ({path.candidateIds.join(", ")})
+                </li>
+              ))}
+              {(current.comparison?.sharedEvidence ?? []).map((row) => (
+                <li key={`shared-${row.evidenceRef}`} className="timeline__item">
+                  Shared evidence {row.evidenceRef} ({row.candidateIds.join(", ")})
+                </li>
+              ))}
+              {(current.comparison?.uniqueEvidence ?? []).map((row) =>
+                row.evidenceRefs.length ? (
+                  <li key={`unique-${row.candidateId}`} className="timeline__item">
+                    Unique to {row.candidateId}: {row.evidenceRefs.join(", ")}
+                  </li>
+                ) : null,
+              )}
+              {(current.comparison?.divergence ?? []).map((row) => (
+                <li key={`${row.kind}:${row.summary}`} className="timeline__item">
+                  Divergence ({row.kind}): {row.summary}
+                </li>
+              ))}
+              {(current.comparison?.convergence ?? [])
+                .filter((row) => row.inGold)
+                .map((row) => (
+                  <li key={`gold-${row.evidenceRef}`} className="timeline__item">
+                    Converges on gold {row.evidenceRef}
+                  </li>
+                ))}
+            </ul>
+            <div className="experiment-lab__paths">
+              {(current.traces ?? []).map((trace) => (
+                <div key={trace.candidateId} className="experiment-lab__path">
+                  <h5 className="experiment-lab__heading">
+                    {trace.candidateId} · {trace.sourceKind} · {trace.completeness}
+                  </h5>
+                  <p className="timeline__meta">
+                    turns {trace.efficiency.turnCount.status === "observed" ? trace.efficiency.turnCount.count : "unknown"}
+                    {" · "}
+                    evidence steps{" "}
+                    {trace.efficiency.evidenceAcquisitionSteps.status === "observed"
+                      ? trace.efficiency.evidenceAcquisitionSteps.count
+                      : "unknown"}
+                    {" · "}
+                    cost {trace.efficiency.cost.status}
+                    {trace.unknowns.length ? ` · unknown: ${trace.unknowns.join(", ")}` : ""}
+                  </p>
+                  <ol className="timeline">
+                    {trace.events.map((event) => (
+                      <li key={event.eventId} className="timeline__item">
+                        {event.sequence}. {event.kind}/{event.actor}
+                        {event.excerpt ? `: ${event.excerpt}` : " (unknown text)"}
+                        {event.evidenceRefs.length ? ` [${event.evidenceRefs.join(", ")}]` : ""}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              ))}
+            </div>
+          </section>
+          {props.canWrite ? (
+            <form className="composer" onSubmit={(event) => void importTrace(event)}>
+              <textarea
+                className="login__input"
+                name="trace"
+                rows={4}
+                placeholder="Paste interaction trace or plain transcript JSON"
+                required
+              />
+              <button className="login__submit" type="submit">
+                Import trace
+              </button>
+            </form>
+          ) : null}
+          {props.canWrite && (current.traces ?? []).length > 0 ? (
+            <form className="composer" onSubmit={(event) => void annotateTrace(event)}>
+              <select className="login__input" name="candidateId" defaultValue={current.traces[0]?.candidateId}>
+                {current.traces.map((trace) => (
+                  <option key={trace.candidateId} value={trace.candidateId}>
+                    {trace.candidateId}
+                  </option>
+                ))}
+              </select>
+              <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
+              <textarea className="login__input" name="text" rows={2} required placeholder="Human annotation" />
+              <button className="login__submit" type="submit">
+                Annotate trace
+              </button>
+            </form>
+          ) : null}
           {props.canWrite ? (
             <form className="composer" onSubmit={(event) => void recordHelpfulness(event)}>
               <select className="login__input" name="candidateId" defaultValue={current.candidates[0]?.candidateId}>

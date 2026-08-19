@@ -20,6 +20,7 @@ pub mod privacy;
 pub mod report;
 pub mod review;
 pub mod store;
+pub mod trace;
 pub mod types;
 
 pub use agreement::{
@@ -44,4 +45,8 @@ pub use report::{
 };
 pub use review::{materialize_review_packet, merge_citation_assists, ReviewPacket, ReviewPhase};
 pub use store::{BenchStore, VerifiedBlobCopy};
+pub use trace::{
+    compare_traces, extract_plain_transcript, InteractionTrace, StrategyComparison,
+    INTERACTION_TRACE_SCHEMA_V1, TEXTUAL_SIMILARITY_NOT_WINNER, TRACE_UNKNOWN_STAYS_UNKNOWN,
+};
 pub use types::*;

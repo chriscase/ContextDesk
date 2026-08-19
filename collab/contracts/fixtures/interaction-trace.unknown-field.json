@@ -1,0 +1,21 @@
+{
+  "schemaId": "cd-collab.interaction_trace.v1",
+  "traceId": "trace-programmatic-agent-v1",
+  "candidateId": "cand-programmatic-agent",
+  "sourceKind": "programmatic",
+  "completeness": "exact",
+  "privacyClass": "share_safe",
+  "rawHash": null,
+  "events": [],
+  "efficiency": {
+    "turnCount": { "status": "unknown" },
+    "evidenceAcquisitionSteps": { "status": "unknown" },
+    "latency": { "status": "unknown" },
+    "cost": { "status": "unknown" },
+    "providerCalls": { "status": "unknown" }
+  },
+  "unknowns": [],
+  "notes": ["Ambiguous transcript structure stays unknown."],
+  "createdAt": "2026-08-19T00:00:00Z",
+  "endpoint": "https://ai-gateway.vercel.sh/v1"
+}
