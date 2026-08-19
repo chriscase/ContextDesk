@@ -5,8 +5,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AGREEMENT_NOT_CORRECTNESS,
+  GOLD_ALIGNMENT_NOT_CORRECTNESS,
+  GOLD_IS_HUMAN_BENCHMARK,
   parseExperimentPackage,
   parseExperimentReviewExport,
+  parseGoldReference,
   parseHelpfulnessObservation,
 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
@@ -299,7 +302,10 @@ describe("experiment lab review loop", () => {
       expect(exported.decision?.status).toBe("accepted");
       expect(exported.observations).toHaveLength(1);
       expect(exported.observations[0]?.reviewerId).toBe("participant");
+      expect(exported.gold).toBeNull();
+      expect(exported.alignments.every((row) => row.status === "unknown")).toBe(true);
       expect(exported.notes).toContain(AGREEMENT_NOT_CORRECTNESS);
+      expect(exported.notes).toContain(GOLD_IS_HUMAN_BENCHMARK);
       const raw = exportRes.body as string;
       for (const token of [
         "rawModelCapture",
@@ -332,5 +338,247 @@ describe("experiment lab review loop", () => {
       });
       expect(res.statusCode).toBe(400);
     });
+  });
+});
+
+describe("accepted decision to versioned gold", () => {
+  async function acceptedExperiment(
+    app: Awaited<ReturnType<typeof buildApp>>,
+    alice: string,
+    dave: string,
+  ) {
+    const created = await createCase(app, alice);
+    const imported = await app.inject({
+      method: "POST",
+      url: `/api/cases/${created.id}/experiments`,
+      headers: { cookie: alice },
+      payload: PACKAGE,
+    });
+    const experimentId = JSON.parse(imported.body).id as string;
+    const proposed = await app.inject({
+      method: "POST",
+      url: `/api/cases/${created.id}/experiments/${experimentId}/decisions`,
+      headers: { cookie: alice },
+      payload: {
+        text: "Treat inventory timeout as the benchmark cause.",
+        rationale: "Human decision over the synthetic checkout comparison.",
+        evidenceRefs: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+      },
+    });
+    const proposal = JSON.parse(proposed.body) as { id: string; revision: number };
+    const accepted = await app.inject({
+      method: "POST",
+      url: `/api/cases/${created.id}/experiments/${experimentId}/decisions/${proposal.id}/accept`,
+      headers: { cookie: dave },
+      payload: { expectedRevision: proposal.revision },
+    });
+    const decision = JSON.parse(accepted.body) as { id: string; revision: number };
+    return { caseId: created.id, experimentId, decision };
+  }
+
+  it("rejects unauthenticated, contributor, and proposed-only promotion", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", DAVE);
+      const created = await createCase(app, alice);
+      const imported = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments`,
+        headers: { cookie: alice },
+        payload: PACKAGE,
+      });
+      const experimentId = JSON.parse(imported.body).id as string;
+      const proposed = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/decisions`,
+        headers: { cookie: alice },
+        payload: {
+          text: "Proposed only.",
+          rationale: "Not accepted yet.",
+          evidenceRefs: ["ev-demo-checkout-log"],
+        },
+      });
+      const proposal = JSON.parse(proposed.body) as { id: string; revision: number };
+      const unauthenticated = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/gold`,
+        payload: {
+          decisionId: proposal.id,
+          expectedRevision: proposal.revision,
+          evidenceAnchors: ["ev-demo-checkout-log"],
+        },
+      });
+      expect(unauthenticated.statusCode).toBe(401);
+      const contributor = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/gold`,
+        headers: { cookie: alice },
+        payload: {
+          decisionId: proposal.id,
+          expectedRevision: proposal.revision,
+          evidenceAnchors: ["ev-demo-checkout-log"],
+        },
+      });
+      expect(contributor.statusCode).toBe(403);
+      const proposedOnly = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/gold`,
+        headers: { cookie: dave },
+        payload: {
+          decisionId: proposal.id,
+          expectedRevision: proposal.revision,
+          evidenceAnchors: ["ev-demo-checkout-log"],
+        },
+      });
+      expect(proposedOnly.statusCode).toBe(400);
+      expect(JSON.parse(proposedOnly.body).error).toMatch(/proposed/);
+    });
+  });
+
+  it("promotes idempotently, versions on change, and refuses stale gold revisions", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", DAVE);
+      const { caseId, experimentId, decision } = await acceptedExperiment(app, alice, dave);
+      const payload = {
+        decisionId: decision.id,
+        expectedRevision: decision.revision,
+        evidenceAnchors: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+        expectedRelationships: [
+          { evidenceRef: "ev-demo-checkout-log", role: "symptom" },
+          { evidenceRef: "ev-demo-inventory-timeout", role: "cause" },
+        ],
+        helpfulnessDimensions: ["evidence_support"],
+      };
+      const first = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/experiments/${experimentId}/gold`,
+        headers: { cookie: dave },
+        payload,
+      });
+      expect(first.statusCode).toBe(200);
+      const gold = parseGoldReference(JSON.parse(first.body));
+      expect(gold.version).toBe(1);
+      expect(gold.acceptedDecisionId).toBe(decision.id);
+      expect(gold.notes).toContain(GOLD_IS_HUMAN_BENCHMARK);
+
+      const again = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/experiments/${experimentId}/gold`,
+        headers: { cookie: dave },
+        payload,
+      });
+      expect(again.statusCode).toBe(200);
+      expect(JSON.parse(again.body).goldId).toBe(gold.goldId);
+      expect(JSON.parse(again.body).version).toBe(1);
+
+      const stale = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/experiments/${experimentId}/gold`,
+        headers: { cookie: dave },
+        payload: {
+          ...payload,
+          evidenceAnchors: ["ev-demo-checkout-log"],
+          expectedRelationships: [{ evidenceRef: "ev-demo-checkout-log", role: "symptom" }],
+        },
+      });
+      expect(stale.statusCode).toBe(409);
+      expect(JSON.parse(stale.body).code).toBe("stale_gold");
+
+      const next = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/experiments/${experimentId}/gold`,
+        headers: { cookie: dave },
+        payload: {
+          ...payload,
+          expectedGoldVersion: 1,
+          evidenceAnchors: ["ev-demo-checkout-log"],
+          expectedRelationships: [{ evidenceRef: "ev-demo-checkout-log", role: "symptom" }],
+        },
+      });
+      expect(next.statusCode).toBe(200);
+      const v2 = parseGoldReference(JSON.parse(next.body));
+      expect(v2.version).toBe(2);
+      expect(v2.predecessorGoldId).toBe(gold.goldId);
+      expect(v2.goldId).not.toBe(gold.goldId);
+
+      const view = await app.inject({
+        method: "GET",
+        url: `/api/cases/${caseId}/experiments/${experimentId}`,
+        headers: { cookie: dave },
+      });
+      const body = JSON.parse(view.body) as {
+        golds: { goldId: string; version: number; evidenceAnchors: string[] }[];
+        gold: { version: number };
+        candidates: { goldState: string }[];
+        alignments: { candidateId: string; status: string }[];
+      };
+      expect(body.golds).toHaveLength(2);
+      expect(body.golds[0]?.goldId).toBe(gold.goldId);
+      expect(body.golds[0]?.evidenceAnchors).toEqual([
+        "ev-demo-checkout-log",
+        "ev-demo-inventory-timeout",
+      ]);
+      expect(body.gold.version).toBe(2);
+      expect(body.candidates.every((c) => c.goldState === "present")).toBe(true);
+      expect(body.alignments.map((row) => row.candidateId)).toEqual([
+        "cand-qwen-3.6-27b",
+        "cand-gpt-oss-120b",
+        "cand-ministral-14b",
+      ]);
+
+      const exportRes = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/experiments/${experimentId}/export`,
+        headers: { cookie: dave },
+      });
+      expect(exportRes.statusCode).toBe(200);
+      const exported = parseExperimentReviewExport(JSON.parse(exportRes.body));
+      expect(exported.gold?.version).toBe(2);
+      expect(exported.gold?.promotedById).toBe("participant");
+      expect(exported.notes).toContain(GOLD_ALIGNMENT_NOT_CORRECTNESS);
+      const raw = exportRes.body as string;
+      for (const token of [
+        "rawModelCapture",
+        '"prompt"',
+        '"apiKey"',
+        '"endpoint"',
+        '"requestId"',
+        "Bearer ",
+        "ai-gateway.vercel.sh",
+      ]) {
+        expect(raw).not.toContain(token);
+      }
+    });
+  });
+
+  it("does not mutate a prior gold version in the memory store", async () => {
+    const store = new MemoryExperimentStore();
+    const gold = parseGoldReference(
+      JSON.parse(
+        readFileSync(
+          join(here, "../../../../contracts/fixtures/gold-reference.valid.json"),
+          "utf8",
+        ),
+      ),
+    );
+    await store.insert({
+      id: gold.experimentId,
+      caseId: gold.caseId,
+      packageId: gold.packageId,
+      sourceSchemaId: "cd-collab.experiment_package.v1",
+      taskFingerprint: gold.taskFingerprint,
+      snapshotFingerprint: gold.snapshotFingerprint,
+      candidates: parseExperimentPackage(PACKAGE).candidates,
+      agreement: parseExperimentPackage(PACKAGE).agreement,
+      createdAt: gold.createdAt,
+      importerId: "importer",
+      importerUsername: "importer",
+    });
+    await store.insertGold(gold);
+    await expect(store.insertGold(gold)).rejects.toThrow(/insert-only/);
+    const listed = await store.listGolds(gold.experimentId);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.evidenceAnchors).toEqual(gold.evidenceAnchors);
   });
 });

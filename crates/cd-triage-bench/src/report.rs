@@ -2,6 +2,10 @@
 
 use crate::canonical::{to_canonical_json, to_pretty_json};
 use crate::error::{BenchError, BenchResult};
+use crate::gold::{
+    align_run, latest_gold_for, GoldAlignment, GoldReference, GOLD_ALIGNMENT_NOT_CORRECTNESS,
+    GOLD_IS_HUMAN_BENCHMARK,
+};
 use crate::privacy::gate_share_safe_text;
 use crate::types::{
     Adjudication, Case, DimensionVerdict, FairnessClass, Observed, PrivacyClass, ReviewPhase,
@@ -77,6 +81,30 @@ pub struct ComparisonGroup {
     pub snapshot_id: String,
     pub case_id: String,
     pub runs: Vec<RunSummary>,
+    /// Present only when a gold reference matches this task and snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gold: Option<GroupGold>,
+}
+
+/// Scenario-level gold provenance. Alignment stays per-run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupGold {
+    pub gold_id: String,
+    pub version: u64,
+    pub package_id: String,
+    pub accepted_decision_id: String,
+    pub accepted_decision_revision: u64,
+    pub evidence_anchors: Vec<String>,
+    pub human_acceptance: HumanAcceptance,
+    pub notes: Vec<String>,
+}
+
+/// Human acceptance of the decision that produced the gold reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanAcceptance {
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +127,9 @@ pub struct RunSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator: Option<String>,
     pub scores: Vec<ReportedDimension>,
+    /// Independent of helpfulness/`scores`. Omitted when no gold exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gold_alignment: Option<GoldAlignment>,
 }
 
 /// Distinguishes “nobody scored this” from “a score exists but is redacted.”
@@ -208,6 +239,31 @@ pub fn build_report_with_attribution(
     attribution: &BTreeMap<String, RunAttribution>,
     privacy: PrivacyClass,
 ) -> BenchResult<BacktestReport> {
+    build_report_with_gold(
+        runs,
+        adjudications,
+        scores,
+        cases,
+        attribution,
+        privacy,
+        &[],
+    )
+}
+
+/// Build a report, optionally aligning runs against versioned gold references.
+///
+/// Gold alignment is independent of helpfulness scores and never treats
+/// agreement as correctness. When `golds` is empty the serialized report keeps
+/// the historical v2 shape (no gold keys).
+pub fn build_report_with_gold(
+    runs: &[TriageRun],
+    adjudications: &[Adjudication],
+    scores: &[ScoreReview],
+    cases: &[Case],
+    attribution: &BTreeMap<String, RunAttribution>,
+    privacy: PrivacyClass,
+    golds: &[GoldReference],
+) -> BenchResult<BacktestReport> {
     let mut runs: Vec<TriageRun> = runs.to_vec();
     runs.sort_by(|a, b| a.run_id.cmp(&b.run_id));
     let mut all_adjudications: Vec<Adjudication> = adjudications.to_vec();
@@ -247,7 +303,10 @@ pub fn build_report_with_attribution(
 
     let mut groups = Vec::new();
     let mut incomparable = Vec::new();
+    let mut gold_used = false;
     for ((task_id, snapshot_id, case_id), group_runs) in &groups_map {
+        let gold = latest_gold_for(golds, task_id, snapshot_id);
+        gold_used |= gold.is_some();
         let mut summaries = Vec::new();
         for run in group_runs {
             let eligible = matches!(run.fairness, FairnessClass::SameSnapshot);
@@ -260,6 +319,7 @@ pub fn build_report_with_attribution(
                 &all_adjudications,
                 attribution.get(&run.run_id),
                 privacy,
+                gold,
             ));
         }
         summaries.sort_by(|a, b| a.run_id.cmp(&b.run_id));
@@ -271,6 +331,7 @@ pub fn build_report_with_attribution(
             snapshot_id: snapshot_id.clone(),
             case_id: case_id.clone(),
             runs: summaries,
+            gold: gold.map(group_gold),
         });
     }
 
@@ -327,7 +388,7 @@ pub fn build_report_with_attribution(
         withheld_adjudications,
     );
 
-    let notes = vec![
+    let mut notes = vec![
         "Comparisons are valid only for the same evaluation task and evidence snapshot.".into(),
         "Unscored means no stored score exists. Withheld means a score exists but this privacy class cannot show it.".into(),
         "Failed and partial runs are listed; they are not treated as zero.".into(),
@@ -338,6 +399,12 @@ pub fn build_report_with_attribution(
         "This report is a projection over stored records. It does not execute strategies or create judgments.".into(),
         "Public-SDK mock, replay, and live same-snapshot runs join comparisons from the same stored run records as imported strategies; this report only projects persisted records and never executes a strategy.".into(),
     ];
+    if gold_used {
+        notes.push(GOLD_IS_HUMAN_BENCHMARK.into());
+        notes.push(GOLD_ALIGNMENT_NOT_CORRECTNESS.into());
+        notes.push("Helpfulness scores and gold alignment are independent observations.".into());
+        notes.push("Human acceptance names the decision that produced the gold; it is not a model correctness claim.".into());
+    }
 
     let report = BacktestReport {
         schema_id: REPORT_SCHEMA_V2.into(),
@@ -605,6 +672,30 @@ pub fn render_report_markdown(report: &BacktestReport) -> BenchResult<String> {
             ));
         }
         out.push('\n');
+        if let Some(gold) = &group.gold {
+            out.push_str(&format!(
+                "Gold reference `{}` v{} (human acceptance: {}; decision `{}`). Alignment is not a correctness verdict.\n\n",
+                esc(&gold.gold_id),
+                gold.version,
+                esc(&gold.human_acceptance.status),
+                esc(&gold.accepted_decision_id)
+            ));
+            out.push_str("| run | gold alignment | helpfulness |\n| --- | --- | --- |\n");
+            for run in &group.runs {
+                let alignment = run
+                    .gold_alignment
+                    .as_ref()
+                    .map(|row| row.status.as_str())
+                    .unwrap_or("unknown");
+                out.push_str(&format!(
+                    "| `{}` | {} | {} |\n",
+                    esc(&run.run_id),
+                    esc(alignment),
+                    esc(run.score_visibility.as_str())
+                ));
+            }
+            out.push('\n');
+        }
     }
     if !report.incomparable.is_empty() {
         out.push_str("## Incomparable pairs\n\n");
@@ -793,12 +884,28 @@ fn unique(iter: impl Iterator<Item = String>) -> Vec<String> {
     set.into_iter().collect()
 }
 
+fn group_gold(gold: &GoldReference) -> GroupGold {
+    GroupGold {
+        gold_id: gold.gold_id.clone(),
+        version: gold.version,
+        package_id: gold.package_id.clone(),
+        accepted_decision_id: gold.accepted_decision_id.clone(),
+        accepted_decision_revision: gold.accepted_decision_revision,
+        evidence_anchors: gold.evidence_anchors.clone(),
+        human_acceptance: HumanAcceptance {
+            status: "accepted".into(),
+        },
+        notes: gold.notes.clone(),
+    }
+}
+
 fn run_summary(
     run: &TriageRun,
     visible: &[Adjudication],
     all: &[Adjudication],
     attribution: Option<&RunAttribution>,
     privacy: PrivacyClass,
+    gold: Option<&GoldReference>,
 ) -> RunSummary {
     let related: Vec<&Adjudication> = visible.iter().filter(|a| a.run_id == run.run_id).collect();
     let mut scores = Vec::new();
@@ -847,6 +954,7 @@ fn run_summary(
         score_visibility: score_visibility(run, visible, all),
         operator: (privacy == PrivacyClass::OwnerOnly).then(|| run.operator.clone()),
         scores,
+        gold_alignment: gold.map(|gold| align_run(run, Some(gold))),
     }
 }
 

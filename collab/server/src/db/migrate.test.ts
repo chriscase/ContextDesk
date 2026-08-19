@@ -12,10 +12,12 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("004_catalog_import");
       expect(up.applied).toContain("005_authz_bootstrap");
       expect(up.applied).toContain("006_experiments");
+      expect(up.applied).toContain("007_gold_references");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
       expect(tables.rows).toHaveLength(1);
+      expect((await migrateDown(client)).rolledBack).toBe("007_gold_references");
       expect((await migrateDown(client)).rolledBack).toBe("006_experiments");
       expect((await migrateDown(client)).rolledBack).toBe("005_authz_bootstrap");
       expect((await migrateDown(client)).rolledBack).toBe("004_catalog_import");
@@ -39,6 +41,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("004_catalog_import");
       expect(dry.pending).toContain("005_authz_bootstrap");
       expect(dry.pending).toContain("006_experiments");
+      expect(dry.pending).toContain("007_gold_references");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

@@ -3,6 +3,7 @@ import type {
   ExperimentAgreementV1,
   ExperimentCandidateV1,
   ExperimentDecisionV1,
+  GoldReferenceV1,
   HelpfulnessObservationV1,
 } from "@cd-collab/contracts";
 
@@ -29,6 +30,8 @@ export interface ExperimentStore {
   insertObservation(row: HelpfulnessObservationV1): Promise<void>;
   listDecisions(experimentId: string): Promise<ExperimentDecisionV1[]>;
   insertDecision(row: ExperimentDecisionV1): Promise<void>;
+  listGolds(experimentId: string): Promise<GoldReferenceV1[]>;
+  insertGold(row: GoldReferenceV1): Promise<void>;
 }
 
 function cloneCandidates(candidates: ExperimentCandidateV1[]): ExperimentCandidateV1[] {
@@ -58,10 +61,24 @@ function cloneAgreement(agreement: ExperimentAgreementV1): ExperimentAgreementV1
   };
 }
 
+function cloneGold(row: GoldReferenceV1): GoldReferenceV1 {
+  return {
+    ...row,
+    auditRefs: [...row.auditRefs],
+    evidenceAnchors: [...row.evidenceAnchors],
+    ...(row.expectedRelationships
+      ? { expectedRelationships: row.expectedRelationships.map((rel) => ({ ...rel })) }
+      : {}),
+    ...(row.helpfulnessDimensions ? { helpfulnessDimensions: [...row.helpfulnessDimensions] } : {}),
+    notes: [...row.notes],
+  };
+}
+
 export class MemoryExperimentStore implements ExperimentStore {
   private readonly experiments = new Map<string, ExperimentRow>();
   private readonly observations = new Map<string, HelpfulnessObservationV1[]>();
   private readonly decisions = new Map<string, ExperimentDecisionV1[]>();
+  private readonly golds = new Map<string, GoldReferenceV1[]>();
 
   async insert(row: ExperimentRow): Promise<void> {
     this.experiments.set(row.id, {
@@ -71,6 +88,7 @@ export class MemoryExperimentStore implements ExperimentStore {
     });
     this.observations.set(row.id, []);
     this.decisions.set(row.id, []);
+    this.golds.set(row.id, []);
   }
 
   async get(id: string): Promise<ExperimentRow | null> {
@@ -124,6 +142,22 @@ export class MemoryExperimentStore implements ExperimentStore {
     }
     list.push({ ...row, evidenceRefs: [...row.evidenceRefs] });
     this.decisions.set(row.experimentId, list);
+  }
+
+  async listGolds(experimentId: string): Promise<GoldReferenceV1[]> {
+    return [...(this.golds.get(experimentId) ?? [])]
+      .map(cloneGold)
+      .sort((a, b) => a.version - b.version || a.goldId.localeCompare(b.goldId));
+  }
+
+  async insertGold(row: GoldReferenceV1): Promise<void> {
+    const list = this.golds.get(row.experimentId) ?? [];
+    const existing = list.find((gold) => gold.goldId === row.goldId || gold.version === row.version);
+    if (existing) {
+      throw new Error("gold_references is insert-only");
+    }
+    list.push(cloneGold(row));
+    this.golds.set(row.experimentId, list);
   }
 }
 
@@ -206,6 +240,22 @@ export class PgExperimentStore implements ExperimentStore {
       `INSERT INTO experiment_decisions (id, experiment_id, revision, created_at, payload)
        VALUES ($1,$2,$3,$4,$5::jsonb)`,
       [row.id, row.experimentId, row.revision, row.createdAt, JSON.stringify(row)],
+    );
+  }
+
+  async listGolds(experimentId: string): Promise<GoldReferenceV1[]> {
+    const res = await this.db.query(
+      `SELECT payload FROM gold_references WHERE experiment_id = $1 ORDER BY version, gold_id`,
+      [experimentId],
+    );
+    return res.rows.map((row: { payload: GoldReferenceV1 }) => row.payload);
+  }
+
+  async insertGold(row: GoldReferenceV1): Promise<void> {
+    await this.db.query(
+      `INSERT INTO gold_references (gold_id, experiment_id, version, created_at, payload)
+       VALUES ($1,$2,$3,$4,$5::jsonb)`,
+      [row.goldId, row.experimentId, row.version, row.createdAt, JSON.stringify(row)],
     );
   }
 }
