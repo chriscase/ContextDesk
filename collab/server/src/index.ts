@@ -21,6 +21,7 @@ import { CatalogService, PgCatalogStore } from "./modules/catalog/index.js";
 import { CaseService, PgCaseStore } from "./modules/cases/index.js";
 import { ExportService, loadExportPrivacyConfig } from "./modules/export/index.js";
 import { ImportService, PgRunStore } from "./modules/import/index.js";
+import { ExperimentService, PgExperimentStore } from "./modules/experiments/index.js";
 
 async function main(): Promise<void> {
   const config = loadRuntimeConfig();
@@ -48,6 +49,11 @@ async function main(): Promise<void> {
     catalog,
     runs: new PgRunStore(pool),
   });
+  const experiments = new ExperimentService({
+    cases: domain,
+    audit,
+    experiments: new PgExperimentStore(pool),
+  });
   const exporter = new ExportService({
     cases: domain,
     catalog,
@@ -62,6 +68,7 @@ async function main(): Promise<void> {
     domain,
     catalog,
     imports,
+    experiments,
     exporter,
     security: {
       auth: {

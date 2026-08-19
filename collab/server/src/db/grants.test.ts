@@ -78,6 +78,26 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
           ["cn=temporary,ou=groups,dc=example,dc=test"],
         );
         expect(deleted.rowCount).toBe(1);
+        await app.query(
+          `INSERT INTO experiment_packages (
+            id, case_id, package_id, source_schema_id, task_fingerprint, snapshot_fingerprint,
+            candidates, agreement, importer_id, importer_username
+          ) VALUES (
+            '33333333-3333-3333-3333-333333333333',
+            '11111111-1111-1111-1111-111111111111',
+            'pkg-fixture',
+            'cd-collab.experiment_summary.v1',
+            'task-f',
+            'snap-f',
+            '[]'::jsonb,
+            '{"sharedAnchors":[],"candidateSpecific":[],"roleConflicts":[],"notes":["Agreement is not proof of correctness."]}'::jsonb,
+            'uid=alice,ou=people,dc=example,dc=test',
+            'alice'
+          )`,
+        );
+        await expect(
+          app.query(`UPDATE experiment_packages SET package_id = 'tamper'`),
+        ).rejects.toThrow(/insert-only|permission denied/);
         await expect(app.query(`CREATE TABLE collab_app_should_not (id int)`)).rejects.toThrow(
           /permission denied/,
         );

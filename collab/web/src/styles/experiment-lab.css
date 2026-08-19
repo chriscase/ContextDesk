@@ -1,0 +1,34 @@
+.experiment-lab {
+  margin-top: 1.25rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.85rem;
+}
+
+.experiment-lab__heading {
+  margin: 0.85rem 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.experiment-lab__error {
+  color: #f7768e;
+  font-size: 0.85rem;
+}
+
+.experiment-lab__matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  margin: 0.6rem 0;
+}
+
+.experiment-lab__matrix th,
+.experiment-lab__matrix td {
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  padding: 0.3rem 0.4rem;
+}
+
+.experiment-lab__matrix th {
+  color: var(--muted);
+  font-weight: 600;
+}
