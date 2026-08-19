@@ -587,14 +587,27 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         }
     })
     .await;
+    let third_gateway = MockGateway::start_routed(|request| {
+        if request.path.ends_with("/chat/completions") {
+            Step::respond(Response::json_ok(&answer_from_live_request(request)))
+        } else {
+            Step::respond(Response::status_only(404))
+        }
+    })
+    .await;
     let (_library, cache, store, case, snapshot, task) = fixture();
     let profile = openai_profile(gateway.base_url());
     let mut alternate_profile = openai_profile(alternate_gateway.base_url());
     alternate_profile.id = "profile:live-fixture-beta".into();
     alternate_profile.label = "live fixture beta".into();
     alternate_profile.chat_model = "model:live-fixture-beta".into();
+    let mut third_profile = openai_profile(third_gateway.base_url());
+    third_profile.id = "profile:live-fixture-gamma".into();
+    third_profile.label = "live fixture gamma".into();
+    third_profile.chat_model = "model:live-fixture-gamma".into();
     let qualifications = qualified_finalizer(&profile);
     let alternate_qualifications = qualified_finalizer(&alternate_profile);
+    let third_qualifications = qualified_finalizer(&third_profile);
     let model = ModelRef {
         profile_id: profile.id.clone(),
         model_id: profile.chat_model.clone(),
@@ -602,6 +615,10 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
     let alternate_model = ModelRef {
         profile_id: alternate_profile.id.clone(),
         model_id: alternate_profile.chat_model.clone(),
+    };
+    let third_model = ModelRef {
+        profile_id: third_profile.id.clone(),
+        model_id: third_profile.chat_model.clone(),
     };
     let config = cd_core::config::AppConfig {
         providers: ProviderConfig {
@@ -614,6 +631,13 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         providers: ProviderConfig {
             active_id: Some(alternate_profile.id.clone()),
             profiles: vec![alternate_profile],
+        },
+        ..Default::default()
+    };
+    let third_config = cd_core::config::AppConfig {
+        providers: ProviderConfig {
+            active_id: Some(third_profile.id.clone()),
+            profiles: vec![third_profile],
         },
         ..Default::default()
     };
@@ -671,16 +695,25 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
                 alternate_qualifications,
                 alternate_model,
             ),
+            candidate(
+                "ContextDesk live gamma",
+                "cancel:comparison-gamma",
+                third_config,
+                third_qualifications,
+                third_model,
+            ),
         ],
     )
     .await
     .unwrap();
 
-    assert_eq!(result.runs.len(), 2);
+    assert_eq!(result.runs.len(), 3);
     assert_eq!(gateway.request_count(), 1);
     assert_eq!(alternate_gateway.request_count(), 1);
+    assert_eq!(third_gateway.request_count(), 1);
     let mut requests = gateway.requests();
     requests.extend(alternate_gateway.requests());
+    requests.extend(third_gateway.requests());
     let models = requests
         .iter()
         .map(|request| {
@@ -692,7 +725,11 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         .collect::<Vec<_>>();
     assert_eq!(
         models,
-        vec!["model:live-fixture", "model:live-fixture-beta"]
+        vec![
+            "model:live-fixture",
+            "model:live-fixture-beta",
+            "model:live-fixture-gamma"
+        ]
     );
     assert_ne!(
         result.runs[0].recorded.bench_run.run_id,
@@ -716,6 +753,18 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         result.runs[0].recorded.owner_only.fingerprints.packet,
         result.runs[1].recorded.owner_only.fingerprints.packet
     );
+    let third_proof = result.runs[2]
+        .recorded
+        .owner_only
+        .host_execution
+        .as_ref()
+        .expect("third host proof");
+    assert_eq!(first_proof.corpus_id, third_proof.corpus_id);
+    assert_eq!(first_proof.corpus_revision, third_proof.corpus_revision);
+    assert_eq!(
+        result.runs[0].recorded.owner_only.fingerprints.packet,
+        result.runs[2].recorded.owner_only.fingerprints.packet
+    );
     assert!(result.is_complete());
     assert!(result.stopped.is_none());
     // Fairness: the allowance does not depend on list position or on how long
@@ -736,10 +785,18 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         .overrides
         .deadline_ms
         .expect("second candidate carries an explicit deadline");
+    let third_deadline = result.runs[2]
+        .recorded
+        .owner_only
+        .request
+        .overrides
+        .deadline_ms
+        .expect("third candidate carries an explicit deadline");
     assert_eq!(
         first_deadline, second_deadline,
         "candidate order must not change the wall-clock allowance"
     );
+    assert_eq!(first_deadline, third_deadline);
     assert_eq!(
         first_deadline,
         cd_triage_bench_live::DEFAULT_LIVE_COMPARISON_DEADLINE_MS,
@@ -765,9 +822,9 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         PrivacyClass::OwnerOnly,
     )
     .unwrap();
-    assert_eq!(report.counts.runs, 2);
+    assert_eq!(report.counts.runs, 3);
     assert_eq!(report.groups.len(), 1);
-    assert_eq!(report.groups[0].runs.len(), 2);
+    assert_eq!(report.groups[0].runs.len(), 3);
     assert!(report.groups[0].runs.iter().any(|run| {
         run.model_identities == vec!["profile:live-fixture::model:live-fixture".to_string()]
     }));
@@ -775,13 +832,19 @@ async fn comparison_reuses_one_proven_snapshot_and_feeds_the_honest_report() {
         run.model_identities
             == vec!["profile:live-fixture-beta::model:live-fixture-beta".to_string()]
     }));
+    assert!(report.groups[0].runs.iter().any(|run| {
+        run.model_identities
+            == vec!["profile:live-fixture-gamma::model:live-fixture-gamma".to_string()]
+    }));
     assert!(report.incomparable.is_empty());
     let markdown = render_report_markdown(&report).unwrap();
     assert!(markdown.contains("# Triage bench comparison report"));
     assert!(markdown.contains("ContextDesk live alpha"));
     assert!(markdown.contains("ContextDesk live beta"));
+    assert!(markdown.contains("ContextDesk live gamma"));
     assert!(markdown.contains("profile:live-fixture::model:live-fixture"));
     assert!(markdown.contains("profile:live-fixture-beta::model:live-fixture-beta"));
+    assert!(markdown.contains("profile:live-fixture-gamma::model:live-fixture-gamma"));
     assert!(markdown.contains("same task + snapshot"));
     assert!(markdown.contains("does not assign readiness, qualification, or routing badges"));
 }

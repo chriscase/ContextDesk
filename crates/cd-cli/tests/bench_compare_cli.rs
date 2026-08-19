@@ -159,3 +159,47 @@ fn byte_limits_may_be_lowered() {
             "benchmark library could not be opened",
         ));
 }
+
+#[test]
+fn three_candidates_pass_count_validation_before_library_access() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let candidates = tempfile::tempdir().expect("candidate dir");
+    let first = candidates.path().join("first.json");
+    let second = candidates.path().join("second.json");
+    let third = candidates.path().join("third.json");
+    for (path, cancellation) in [
+        (&first, "cancel:one"),
+        (&second, "cancel:two"),
+        (&third, "cancel:three"),
+    ] {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&candidate(cancellation)).expect("candidate JSON"),
+        )
+        .expect("candidate");
+    }
+
+    let mut command = Command::cargo_bin("contextdesk").expect("contextdesk binary");
+    command
+        .args([
+            "--data-dir",
+            data_dir.path().to_str().expect("data path"),
+            "bench-compare",
+            "--library",
+            "/path/that/need-not-exist",
+            "--task",
+            "task:missing",
+            "--candidate",
+            first.to_str().expect("first path"),
+            "--candidate",
+            second.to_str().expect("second path"),
+            "--candidate",
+            third.to_str().expect("third path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "benchmark library could not be opened",
+        ))
+        .stderr(predicate::str::contains("requires at least two").not());
+}

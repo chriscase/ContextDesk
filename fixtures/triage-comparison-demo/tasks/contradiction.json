@@ -1,0 +1,18 @@
+{
+  "schema_id": "contextdesk.triage_bench.evaluation_task.v1",
+  "task_id": "task-fb25638d4a48bf43144167d4448a3811452946acb5f7e4fd0e9087c87f3985fe",
+  "privacy": "share_safe",
+  "case_id": "case-demo-checkout-timeout",
+  "snapshot_id": "snap-5a75de4d710765b3fbb87afdc85beb25fd96f23b46ef4c59d416aa7ae61bbceb",
+  "question": "A teammate claims the checkout 500s were triggered by a successful inventory response. Does the visible evidence support or contradict that claim? Identify any remaining uncertainty and cite the visible lines.",
+  "protocol": "Answer only from the visible snapshot evidence. Separate the claim, observed evidence, and unresolved uncertainty. Do not invent hosts, credentials, customers, costs, or timings.",
+  "protocol_version": "v1",
+  "visibility": {
+    "visible_item_ids": [
+      "ev-demo-checkout-log"
+    ],
+    "include_summaries": false,
+    "include_raw_bytes": true
+  },
+  "created_at": "2026-01-15T07:20:00Z"
+}
