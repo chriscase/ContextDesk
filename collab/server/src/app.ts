@@ -24,6 +24,10 @@ import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/in
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
 import { registerImportRoutes, type ImportService } from "./modules/import/index.js";
+import {
+  registerExperimentRoutes,
+  type ExperimentService,
+} from "./modules/experiments/index.js";
 
 export interface SecurityDeps {
   auth: AuthRouteDeps;
@@ -40,6 +44,7 @@ export interface AppDeps {
   domain?: CaseService;
   catalog?: CatalogService;
   imports?: ImportService;
+  experiments?: ExperimentService;
   exporter?: ExportService;
 }
 
@@ -120,6 +125,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         roles: security.roles,
         audit: security.audit,
         imports: deps.imports,
+      });
+    }
+    if (deps.experiments) {
+      await registerExperimentRoutes(app, {
+        auth: security.auth,
+        roles: security.roles,
+        audit: security.audit,
+        experiments: deps.experiments,
       });
     }
     if (deps.exporter) {

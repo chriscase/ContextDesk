@@ -12,3 +12,4 @@ export {
 } from "./config.js";
 export type { ExportPrivacyConfig } from "./config.js";
 export { canonicalJson, sha256Text } from "./canonical.js";
+export { assertShareSafeClean } from "./scan.js";

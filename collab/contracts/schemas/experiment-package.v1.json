@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/experiment-package.v1.json",
+  "title": "cd-collab Experiment Package v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "packageId",
+    "privacyClass",
+    "taskFingerprint",
+    "snapshotFingerprint",
+    "candidates",
+    "agreement"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.experiment_package.v1" },
+    "packageId": { "type": "string" },
+    "privacyClass": { "type": "string", "const": "share_safe" },
+    "taskFingerprint": { "type": "string" },
+    "snapshotFingerprint": { "type": "string" },
+    "candidates": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/candidate" }
+    },
+    "agreement": { "$ref": "#/$defs/agreement" }
+  },
+  "$defs": {
+    "unknownMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": { "status": { "const": "unknown" } }
+    },
+    "observedLatency": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": { "status": { "const": "unknown" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "milliseconds"],
+          "properties": {
+            "status": { "const": "observed" },
+            "milliseconds": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidateId",
+        "modelLabel",
+        "role",
+        "runStatus",
+        "observedLatency",
+        "cost",
+        "usage",
+        "helpfulnessState",
+        "goldState"
+      ],
+      "properties": {
+        "candidateId": { "type": "string" },
+        "modelLabel": { "type": "string" },
+        "role": {
+          "type": "string",
+          "enum": ["contributor", "finalizer", "reviewer", "single"]
+        },
+        "runStatus": {
+          "type": "string",
+          "enum": ["completed", "failed", "partial", "timeout"]
+        },
+        "observedLatency": { "$ref": "#/$defs/observedLatency" },
+        "cost": { "$ref": "#/$defs/unknownMeasurement" },
+        "usage": { "$ref": "#/$defs/unknownMeasurement" },
+        "helpfulnessState": { "type": "string", "enum": ["unreviewed", "observed"] },
+        "goldState": { "type": "string", "enum": ["unknown", "absent"] }
+      }
+    },
+    "agreement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sharedAnchors", "candidateSpecific", "roleConflicts", "notes"],
+      "properties": {
+        "sharedAnchors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["evidenceRef", "role", "candidateIds"],
+            "properties": {
+              "evidenceRef": { "type": "string" },
+              "role": { "type": "string" },
+              "candidateIds": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "candidateSpecific": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["candidateId", "evidenceRefs"],
+            "properties": {
+              "candidateId": { "type": "string" },
+              "evidenceRefs": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "roleConflicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["evidenceRef", "assignments"],
+            "properties": {
+              "evidenceRef": { "type": "string" },
+              "assignments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["candidateId", "role"],
+                  "properties": {
+                    "candidateId": { "type": "string" },
+                    "role": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

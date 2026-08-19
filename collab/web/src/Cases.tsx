@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { ImportedRun } from "./ImportedRun.js";
 
@@ -259,6 +260,7 @@ export function Cases(props: { roles?: string[] }) {
                 Import external run
               </button>
             </form>
+            <ExperimentLab caseId={current.id} canWrite={canWrite} canLead={canLead} />
             <ExportPanel caseId={current.id} canWrite={canWrite} canLead={canLead} />
             <form className="composer" onSubmit={(e) => void addNote(e)}>
               <select className="login__input" name="kind" defaultValue="note">

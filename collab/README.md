@@ -8,7 +8,11 @@ or crate internals. Published `packages/contracts` artifacts may be consumed
 read-only later; v1 does not.
 
 Parent epic: #883. Skeleton is #884. Auth/authz/audit is #885. Cases/timeline
-is #886. Source catalog and manual import is #887. Export is #888.
+is #886. Source catalog and manual import is #887. Export is #888. Experiment
+Lab human adjudication v1 imports a share-safe experiment package/summary into
+a case, shows the candidate matrix and evidence agreement, records helpfulness,
+and accepts a revision-safe decision. It does not duplicate bench scoring
+schemas. Demo: [`docs/benchmarks/EXPERIMENT_LAB_HUMAN_ADJUDICATION_V1.md`](../docs/benchmarks/EXPERIMENT_LAB_HUMAN_ADJUDICATION_V1.md).
 
 ## Layout
 
