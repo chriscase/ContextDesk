@@ -162,14 +162,25 @@ fn answer_from_live_request(request: &RecordedRequest) -> Value {
         .and_then(|messages| messages.last())
         .and_then(|message| message["content"].as_str())
         .expect("final user message");
-    let manifest = content
-        .strip_prefix("PACKET MANIFEST (host scaffolding):\n")
+    let (manifest, scaffold_and_evidence) = content
+        .strip_prefix(
+            "HOST-AUTHORED IDENTIFIER MANIFEST (the complete permitted candidate/evidence id boundary; JSON):\n",
+        )
         .and_then(|content| {
             content
-                .split_once("\n\nPACKET EVIDENCE:")
-                .map(|part| part.0)
+                .split_once(
+                    "\n\nHOST-AUTHORED OUTPUT SCAFFOLD (copy this exact outer shape; replace empty arrays with grounded claim objects using only permitted evidence ids):\n",
+                )
         })
         .expect("packet manifest boundary");
+    assert!(
+        scaffold_and_evidence.contains("\n\nPACKET EVIDENCE:\n"),
+        "packet evidence boundary"
+    );
+    assert!(
+        scaffold_and_evidence.ends_with("\nReturn only the completed JSON object."),
+        "packet output boundary"
+    );
     let manifest: Value = serde_json::from_str(manifest).expect("packet manifest JSON");
     let candidates = manifest["candidates"]
         .as_array()
