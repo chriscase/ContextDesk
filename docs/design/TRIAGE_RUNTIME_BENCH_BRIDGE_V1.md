@@ -1,8 +1,9 @@
 # Triage runtime and evaluation-bench bridge v1
 
-**Status:** Standard/Saved/Inline production host integration is implemented
-locally on top of the validated #918/#920 baseline. Live same-snapshot bench
-execution remains open; this is not a live-bench or release-readiness claim.
+**Status:** Standard/Saved/Inline production host integration and the bounded
+live same-snapshot bench bridge are implemented locally on top of the
+validated #918/#920 baseline. Broader live visibility shapes and user-facing
+orchestration remain open; this is not a release-readiness claim.
 
 ## Goal
 
@@ -30,8 +31,9 @@ This integration adds the public runtime facade, decouples validated replay
 ingestion from the mock, and connects Standard/Saved/Inline execution to one
 `cd-workflow` engine with canonical request identity, exact cancellation,
 validated provisional events, and an authoritative returned replay. The
-remaining piece is a provable live bridge from a bench evidence snapshot to a
-ContextDesk corpus and packet.
+bounded live bridge from a bench evidence snapshot to a ContextDesk corpus,
+packet, replay, and persisted run is now implemented separately from the
+dependency-light adapter.
 
 ## Dependency direction
 
@@ -245,8 +247,25 @@ timeout, and cancellation replays, Standard's exact six-event graph and model
 binding, workflow host cleanup after failed corpus binding, CLI/Tauri
 configured-policy selection, authoritative desktop replay return, Rust and
 TypeScript replay validation parity, and the existing default dependency
-direction. Live materialization items above remain required before a
-same-snapshot live-bench capability claim.
+direction. The bounded live-bench slice now covers materialization refusal
+cases, replay ingestion independent of the deterministic mock, one
+same-snapshot packet/corpus reused across bounded candidates, manifest-bounded
+and streaming snapshot verification, a position-independent per-candidate
+wall-clock allowance, durable-run preservation when a comparison stops early,
+bounded
+non-fatal recovery of leaked isolated corpora, and comparison-report
+attribution. Broader visibility shapes, citation mapping, user-facing
+orchestration, and release integration remain required before a
+release-readiness claim.
+
+Share-safe projection is explicit, not a relabelling. Adapter-recorded
+benchmark rows are owner-only, so `report --privacy share-safe` projects none
+of them; the share-safe artifact for a live comparison is the adapter's
+hand-written `project_share_safe` output, surfaced by `contextdesk
+bench-compare` as its `share_safe` field and gated by the real share-safe
+scanner. Model attribution in a report is bound to that same provenance: only
+a `contextdesk_sdk` row whose raw output is recognisably the adapter envelope
+is credited with an exact model identity.
 
 Focused fast lanes should cover the leaf SDK, runtime facade, bench, and
 adapter. Production-path workflow tests belong in the existing Rust shards.

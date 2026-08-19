@@ -1,3 +1,4 @@
+pub mod bench_compare;
 pub mod capabilities;
 pub mod chat;
 pub mod config_cmd;

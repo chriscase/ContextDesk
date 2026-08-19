@@ -253,6 +253,10 @@ async fn dispatch(
             };
             emit_triage_run(format, resolved.color.value, result)
         }
+        Command::BenchCompare(args) => {
+            let result = commands::bench_compare::run(args, paths, app_cfg).await;
+            emit(format, resolved.color.value, "bench_compare", result)
+        }
         Command::Corpus { action } => {
             let result = commands::corpus::run(action, &paths.cache_root);
             if matches!(action, cli::CorpusAction::Use { .. }) {

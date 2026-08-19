@@ -14,6 +14,10 @@ path = "src/main.rs"
 cd-core = { path = "../cd-core" }
 cd-workflow = { path = "../cd-workflow" }
 cd-triage-runtime = { path = "../cd-triage-runtime" }
+cd-triage-bench = { path = "../cd-triage-bench" }
+cd-triage-bench-live = { path = "../cd-triage-bench-live" }
+cd-triage-bench-adapter = { path = "../cd-triage-bench-adapter" }
+cd-triage-sdk = { path = "../cd-triage-sdk" }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

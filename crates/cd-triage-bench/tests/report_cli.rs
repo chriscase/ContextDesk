@@ -102,6 +102,42 @@ fn issue_881_report_only_acceptance() {
     let snapshot = snapshot_for(&store, "case-checkout-cascade");
     let task = task_for(&store, &snapshot);
 
+    // A real adapter owner-only envelope: SDK run identity, exact model
+    // slots, and the opaque model fingerprint the share-safe surface uses.
+    let live_model_fingerprint = format!("mdf-{}", "c".repeat(64));
+    let live_owner_record = format!(
+        r#"{{"sdk_run_id":"cdrun-cli","replay":{{}},"fingerprints":{{"models":["{live_model_fingerprint}"]}},"slots":[{{"model":{{"profile_id":"profile:cli","model_id":"model:cli"}}}}]}}"#
+    );
+    let live_cli = import_named_with_privacy(
+        &store,
+        &task.task_id,
+        SourceKind::ContextdeskSdk,
+        "ContextDesk live cli",
+        Observed::Known("comparison-v1".into()),
+        &live_owner_record,
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        PrivacyClass::OwnerOnly,
+        "2026-01-15T08:01:00Z",
+    );
+
+    // The same shape imported by a third party as a human artifact. It is not
+    // proof of a model identity, so it must never reach the report.
+    let forged_attribution_record =
+        r#"{"slots":[{"model":{"profile_id":"profile:forged","model_id":"model:forged"}}]}"#;
+    let _forged = import_named_with_privacy(
+        &store,
+        &task.task_id,
+        SourceKind::Human,
+        "forged attribution",
+        Observed::Unknown,
+        forged_attribution_record,
+        FairnessClass::SameSnapshot,
+        RunStatus::Completed,
+        PrivacyClass::OwnerOnly,
+        "2026-01-15T08:02:00Z",
+    );
+
     let human = import_named(
         &store,
         &task.task_id,
@@ -423,9 +459,40 @@ fn issue_881_report_only_acceptance() {
     assert!(md.contains("partial"));
     assert!(md.contains("drill-down"));
     assert!(md.contains("incomparable") || md.contains("Incomparable"));
+    assert!(md.contains("profile:cli::model:cli"));
+    // A forged human import may not borrow the adapter's attribution.
+    assert!(!md.contains("profile:forged::model:forged"));
     assert!(md.contains("/Users/alex/incidents/ticket.md"));
     assert!(!md.to_ascii_lowercase().contains("ready"));
     assert!(!md.contains("leaderboard"));
+
+    let share_md = bench()
+        .args([
+            "--library",
+            library,
+            "report",
+            "--format",
+            "markdown",
+            "--privacy",
+            "share-safe",
+        ])
+        .output()
+        .unwrap();
+    assert!(share_md.status.success());
+    let share_md = String::from_utf8(share_md.stdout).unwrap();
+    // Non-vacuous: the owner-only live row is present in the owner report and
+    // is dropped wholesale from the share-safe report, so neither its exact
+    // identity nor its run identity can appear here.
+    assert!(
+        md.contains(&live_cli),
+        "owner report must carry the live run"
+    );
+    assert!(
+        !share_md.contains(&live_cli),
+        "an owner-only run must not appear in a share-safe report"
+    );
+    assert!(!share_md.contains("profile:cli::model:cli"));
+    assert!(!share_md.contains(&live_model_fingerprint));
 
     let owner: serde_json::Value = serde_json::from_slice(&json1.stdout).unwrap();
     assert_eq!(

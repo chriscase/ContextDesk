@@ -381,6 +381,79 @@ pub fn authoritative_json(envelope: &AnswerEnvelopeV1) -> String {
     serde_json::to_string(&envelope.answer).unwrap_or_else(|_| "{}".into())
 }
 
+/// Host-authored JSON shape contract for [`SCHEMA_V1`].
+///
+/// Shared by the Standard finalizer's initial prompt and its single bounded
+/// correction so a retry cannot silently become a looser schema path. The
+/// model may supply only claim text and host-minted ids; citations, roles,
+/// bindings, and root-cause authority remain host-derived.
+pub fn investigation_answer_v1_system_contract() -> String {
+    concat!(
+        "You are completing one bounded ContextDesk finalizer stage. ",
+        "Return exactly one JSON object with schema `contextdesk.investigation_answer.v1`. ",
+        "The first output character must be `{` and the last must be `}`; emit no Markdown fence, ",
+        "preamble, commentary, reasoning, or trailing text. Any private reasoning must stay in ",
+        "your reasoning channel and must never appear in the answer. ",
+        "The object has only `schema` and `candidates`. Each candidate has only `candidate_id` and optional ",
+        "`observations`, `symptoms`, `causal_candidates`, `initiating_causes`, ",
+        "`competing_explanations`, or `missing_evidence`. Each claim has only `claim_id`, `text`, and ",
+        "`evidence_ids`. Copy the host output scaffold's outer shape and fill empty arrays with claim objects. ",
+        "Use only the literal host-minted candidate_id and evidence_id values from the host identifier manifest; ",
+        "do not invent, abbreviate, reformat, or derive ids. Include a candidate object for every manifest ",
+        "candidate_id. Cite each evidence id only inside the candidate that permits it. ",
+        "The model supplies only claim text and ids. The host derives canonical citations, evidence roles, ",
+        "bindings, status, and root-cause authority; do not assert those. ",
+        "Do not include host-owned canonical_citations, status, confidence, corpus, revision, session, ",
+        "binding, digest, packet identity, root_cause_established, or any unknown field. Unknown fields, ",
+        "unknown ids, wrong candidate scope, and malformed JSON are rejected."
+    )
+    .into()
+}
+
+/// Fixed, content-free repair guidance for the single bounded finalizer correction.
+///
+/// The rejected proposal is never replayed; only the stable validator category
+/// selects one host-authored instruction.
+pub fn investigation_answer_v1_correction_instruction(category: &str) -> &'static str {
+    match category {
+        "parse" => {
+            "The previous response was not parseable as exactly one JSON object. Copy the host \
+             scaffold: first character `{`, last character `}`, with no fence, preamble, \
+             commentary, trailing text, extra closing delimiter, or unknown field."
+        }
+        "schema" => {
+            "Use schema `contextdesk.investigation_answer.v1` and only the model-owned candidate \
+             and claim fields shown in the host scaffold."
+        }
+        "duplicate_id" => {
+            "Regenerate every claim_id so it is nonempty and globally unique across the entire \
+             object; include every candidate_id exactly once and do not repeat an evidence id \
+             within one claim."
+        }
+        "unknown_evidence" | "wrong_scope" | "wrong_revision" => {
+            "Use only evidence ids in the host identifier manifest and only inside the candidate \
+             that permits each id; do not invent ids or move evidence between candidates."
+        }
+        "empty_evidence" => {
+            "Every claim outside missing_evidence must cite at least one permitted evidence id \
+             belonging to its candidate."
+        }
+        "root_role" => {
+            "Do not present an initiating cause as established unless the candidate's permitted \
+             evidence directly supports that role; use causal_candidates or missing_evidence \
+             otherwise."
+        }
+        "role_mismatch" => {
+            "A permitted evidence id is host-labeled as downstream symptom evidence. Do not cite \
+             it in causal_candidates or initiating_causes; place it in the candidate's symptoms \
+             section."
+        }
+        _ => {
+            "Rebuild the proposal from the unchanged host identifier manifest and output scaffold."
+        }
+    }
+}
+
 /// Unicode formatting controls that can reorder or re-anchor a rendered line
 /// without being visible: the bidi overrides, embeddings, isolates, and the
 /// directional marks. Their only effect on a log excerpt or an identifier is
@@ -818,6 +891,27 @@ mod tests {
             r#"{{"schema":"{SCHEMA_V1}","candidates":[],"canonical_citations":[]}}"#
         ))
         .is_err());
+    }
+
+    #[test]
+    fn finalizer_prompt_contract_describes_required_shape_and_host_authority() {
+        let contract = investigation_answer_v1_system_contract();
+        assert!(contract.contains(SCHEMA_V1));
+        assert!(contract.contains("`candidates`"));
+        assert!(contract.contains("`candidate_id`"));
+        assert!(contract.contains("`claim_id`"));
+        assert!(contract.contains("`evidence_ids`"));
+        assert!(contract.contains("first output character must be `{`"));
+        assert!(contract.contains("canonical_citations"));
+        assert!(contract.contains("host derives canonical citations"));
+        assert!(contract.contains("unknown field"));
+        let parse = investigation_answer_v1_correction_instruction("parse");
+        assert!(parse.contains("Copy the host scaffold"));
+        assert!(parse.contains("first character `{`"));
+        assert_eq!(
+            investigation_answer_v1_correction_instruction("unknown_evidence"),
+            investigation_answer_v1_correction_instruction("wrong_scope")
+        );
     }
     #[test]
     fn forged_scope_revision_and_duplicates_fail() {

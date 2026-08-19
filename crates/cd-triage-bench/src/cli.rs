@@ -1,16 +1,27 @@
 //! Offline CLI for the triage evaluation bench.
 
+use crate::agreement::{
+    build_agreement_views, project_all_share_safe, render_agreement_json,
+    render_agreement_markdown, render_agreement_share_safe_json,
+    render_agreement_share_safe_markdown,
+};
 use crate::canonical::to_pretty_json;
 use crate::error::{BenchError, BenchResult};
 use crate::import::{import_run, parse_import_json, parse_import_markdown, ImportOutcome};
 use crate::report::{
-    build_report, render_report_json, render_report_jsonl, render_report_markdown,
+    build_report_with_attribution, extract_owner_model_attribution, render_report_json,
+    render_report_jsonl, render_report_markdown,
 };
 use crate::review::{blinded_run_view_from_raw, ReviewPhase};
 use crate::store::BenchStore;
-use crate::types::{Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass};
+use crate::types::{
+    Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass, SourceKind,
+    MAX_RAW_INLINE_BYTES,
+};
 use clap::{Parser, Subcommand, ValueEnum};
+use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -81,6 +92,27 @@ pub enum Command {
         #[arg(long)]
         task: Option<String>,
     },
+    /// Deterministic evidence-agreement projection over stored runs.
+    ///
+    /// Reports which strategies anchored a claim to the same snapshot evidence
+    /// under the same causal role. Never compares claim text, never scores,
+    /// ranks, or names a winner.
+    Agreement {
+        #[arg(long, value_enum, default_value = "json")]
+        format: AgreementFormat,
+        #[arg(long, value_enum, default_value = "owner-only")]
+        privacy: ReportPrivacy,
+        #[arg(long)]
+        task: Option<String>,
+    },
+}
+
+/// Output shapes for `agreement`. There is no JSONL form: the projection has
+/// no per-record streaming semantics to define one against.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum AgreementFormat {
+    Json,
+    Markdown,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -186,7 +218,7 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                 parse_import_json(&text)?
             };
             let raw_bytes = if let Some(path) = raw {
-                fs::read(&path).map_err(|e| BenchError::io(&path, e))?
+                read_bounded_regular_file(&path, MAX_RAW_INLINE_BYTES as u64)?
             } else if let Some(inline) = &import.raw_output_utf8 {
                 inline.as_bytes().to_vec()
             } else {
@@ -245,7 +277,8 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
         Command::BlindedRun { run_id } => {
             let store = open_store(cli.library)?;
             let run = store.get_run(&run_id)?;
-            let raw = store.get_blob(&run.raw_output.digest.hex)?;
+            let raw =
+                store.get_blob_bounded(&run.raw_output.digest.hex, MAX_RAW_INLINE_BYTES as u64)?;
             to_pretty_json(&blinded_run_view_from_raw(&run, Some(raw.as_slice())))
         }
         Command::ReviewPacket { run_id, phase } => {
@@ -262,11 +295,26 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
             if let Some(task_id) = task {
                 runs.retain(|r| r.task_id == task_id);
             }
-            let report = build_report(
+            // Attribution is a proof-bound fact, not a rendering convenience:
+            // only a ContextDesk SDK row can carry the adapter's owner-only
+            // envelope, so an imported human/web/other-product row never
+            // contributes a model identity to the report.
+            let attribution = runs
+                .iter()
+                .filter(|run| run.source_kind == SourceKind::ContextdeskSdk)
+                .filter_map(|run| {
+                    let raw = store
+                        .get_blob_bounded(&run.raw_output.digest.hex, MAX_RAW_INLINE_BYTES as u64)
+                        .ok()?;
+                    Some((run.run_id.clone(), extract_owner_model_attribution(&raw)?))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let report = build_report_with_attribution(
                 &runs,
                 &store.load_adjudications()?,
                 &store.load_scores()?,
                 &store.load_cases()?,
+                &attribution,
                 privacy.class(),
             )?;
             match format {
@@ -275,7 +323,81 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                 ReportFormat::Markdown => render_report_markdown(&report),
             }
         }
+        Command::Agreement {
+            format,
+            privacy,
+            task,
+        } => {
+            let store = open_store(cli.library)?;
+            let mut runs = store.load_runs()?;
+            if let Some(task_id) = &task {
+                runs.retain(|run| &run.task_id == task_id);
+            }
+            let tasks = store
+                .list_tasks()?
+                .iter()
+                .map(|task_id| store.get_task(task_id))
+                .collect::<BenchResult<Vec<_>>>()?;
+            // Only ContextDesk SDK rows carry the owner-only replay envelope.
+            // A blob that cannot be read is deliberately left absent: the
+            // projection then names that row excluded rather than crediting it
+            // with an empty claim set.
+            let mut raw_outputs = BTreeMap::new();
+            for run in &runs {
+                if run.source_kind != SourceKind::ContextdeskSdk {
+                    continue;
+                }
+                if let Ok(bytes) =
+                    store.get_blob_bounded(&run.raw_output.digest.hex, MAX_RAW_INLINE_BYTES as u64)
+                {
+                    raw_outputs.insert(run.run_id.clone(), bytes);
+                }
+            }
+            let views = build_agreement_views(&runs, &tasks, &raw_outputs)?;
+            match (format, privacy) {
+                (AgreementFormat::Json, ReportPrivacy::OwnerOnly) => render_agreement_json(&views),
+                (AgreementFormat::Markdown, ReportPrivacy::OwnerOnly) => {
+                    render_agreement_markdown(&views)
+                }
+                (AgreementFormat::Json, ReportPrivacy::ShareSafe) => {
+                    render_agreement_share_safe_json(&project_all_share_safe(&views)?)
+                }
+                (AgreementFormat::Markdown, ReportPrivacy::ShareSafe) => {
+                    render_agreement_share_safe_markdown(&project_all_share_safe(&views)?)
+                }
+            }
+        }
     }
+}
+
+fn read_bounded_regular_file(path: &PathBuf, max_bytes: u64) -> BenchResult<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| BenchError::io(path, e))?;
+    if !metadata.file_type().is_file() {
+        return Err(BenchError::Schema(
+            "raw output must be a regular file".into(),
+        ));
+    }
+    if metadata.len() > max_bytes {
+        return Err(BenchError::BlobTooLarge {
+            digest: "raw-output".into(),
+            declared_bytes: metadata.len(),
+            max_bytes,
+        });
+    }
+    let mut file = fs::File::open(path).map_err(|e| BenchError::io(path, e))?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| BenchError::io(path, e))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(BenchError::BlobTooLarge {
+            digest: "raw-output".into(),
+            declared_bytes: bytes.len() as u64,
+            max_bytes,
+        });
+    }
+    Ok(bytes)
 }
 
 fn require_library(library: Option<PathBuf>) -> BenchResult<PathBuf> {

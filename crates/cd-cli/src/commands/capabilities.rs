@@ -121,6 +121,7 @@ const COMMANDS: &[&str] = &[
     "session list",
     "session show",
     "chat",
+    "bench-compare",
     "config init",
     "config validate",
     "config show",

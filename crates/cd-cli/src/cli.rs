@@ -197,6 +197,13 @@ pub enum Command {
         #[command(subcommand)]
         action: TriageAction,
     },
+    /// Run bounded live candidates against one exact benchmark snapshot.
+    ///
+    /// This is a host-only command. It loads the explicit benchmark library,
+    /// the shared policy and qualification stores, and the desktop-shared
+    /// credential adapter before calling the live comparison bridge. It does
+    /// not rank candidates or expose the offline bench crate to providers.
+    BenchCompare(BenchCompareArgs),
     /// Provider-neutral gateway/model diagnostics for one explicitly selected model.
     Gateway {
         #[command(subcommand)]
@@ -381,6 +388,35 @@ pub struct TriageRunArgs {
     /// state-free malformed-input boundary.
     #[arg(skip)]
     pub(crate) parsed_request: Option<cd_core::triage_sdk::TriageRequestV2>,
+}
+
+/// Explicit inputs for `contextdesk bench-compare`.
+#[derive(Debug, Clone, clap::Args)]
+pub struct BenchCompareArgs {
+    /// Existing benchmark library directory containing the task, case,
+    /// snapshot, and verified content-addressed blobs.
+    #[arg(long, value_name = "DIR", required = true)]
+    pub library: PathBuf,
+    /// Exact evaluation task identity stored in `--library`.
+    #[arg(long, value_name = "TASK", required = true)]
+    pub task: String,
+    /// Bounded JSON candidate specification. Repeat for each candidate; two
+    /// or more are required for a comparison.
+    #[arg(long = "candidate", value_name = "FILE", required = true)]
+    pub candidates: Vec<PathBuf>,
+    /// Isolated cache root for the run-exclusive ContextDesk corpus. Defaults
+    /// to the normal CLI cache root.
+    #[arg(long, value_name = "DIR")]
+    pub cache_root: Option<PathBuf>,
+    /// Maximum bytes copied from one visible benchmark blob.
+    #[arg(long, default_value_t = cd_triage_bench_live::DEFAULT_LIVE_MAX_BLOB_BYTES)]
+    pub max_blob_bytes: u64,
+    /// Maximum aggregate visible bytes copied for this comparison.
+    #[arg(
+        long,
+        default_value_t = cd_triage_bench_live::DEFAULT_LIVE_MAX_AGGREGATE_BYTES
+    )]
+    pub max_aggregate_bytes: u64,
 }
 
 /// Explicit-file operations for the revisioned Triage Policy V2 store.
@@ -973,6 +1009,7 @@ pub const KNOWN_SUBCOMMANDS: &[&str] = &[
     "eval",
     "triage-policy",
     "triage",
+    "bench-compare",
     "gateway",
 ];
 
