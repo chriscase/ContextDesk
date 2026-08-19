@@ -163,6 +163,7 @@ export {
   HELPFULNESS_DIMENSIONS,
   HELPFULNESS_OBSERVATION_SCHEMA_ID,
   HELPFULNESS_STATES,
+  PACKAGE_GOLD_STATES,
   RUN_STATUSES,
   UNKNOWN_MEASUREMENT,
   parseExperimentDecision,
@@ -189,7 +190,30 @@ export type {
   HelpfulnessObservationV1,
   HelpfulnessState,
   ObservedLatencyV1,
+  PackageGoldState,
   RoleConflictAssignmentV1,
   RoleConflictV1,
   UnknownMeasurement,
 } from "./experiment.js";
+
+export {
+  GOLD_ALIGNMENT_NOT_CORRECTNESS,
+  GOLD_ALIGNMENT_SCHEMA_ID,
+  GOLD_ALIGNMENT_STATUSES,
+  GOLD_IS_HUMAN_BENCHMARK,
+  GOLD_REFERENCE_SCHEMA_ID,
+  HUMAN_ACCEPTANCE_STATUSES,
+  alignCitedEvidence,
+  goldAlignmentShape,
+  goldPromotionFingerprint,
+  goldReferenceShape,
+  parseGoldAlignment,
+  parseGoldReference,
+} from "./gold.js";
+export type {
+  CandidateGoldAlignmentV1,
+  ExpectedRelationshipV1,
+  GoldAlignmentStatus,
+  GoldReferenceV1,
+  HumanAcceptanceStatus,
+} from "./gold.js";

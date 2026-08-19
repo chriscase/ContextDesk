@@ -1,5 +1,15 @@
 import { checkObject, f, type ObjectShape, ContractViolation } from "./parse.js";
 import { PRIVACY_CLASSES, type PrivacyClass } from "./case.js";
+import {
+  GOLD_ALIGNMENT_NOT_CORRECTNESS,
+  GOLD_IS_HUMAN_BENCHMARK,
+  goldAlignmentShape,
+  goldReferenceShape,
+  parseGoldAlignment,
+  parseGoldReference,
+  type CandidateGoldAlignmentV1,
+  type GoldReferenceV1,
+} from "./gold.js";
 
 export const EXPERIMENT_PACKAGE_SCHEMA_ID = "cd-collab.experiment_package.v1" as const;
 export const EXPERIMENT_SUMMARY_SCHEMA_ID = "cd-collab.experiment_summary.v1" as const;
@@ -26,7 +36,9 @@ export type ExperimentRunStatus = (typeof RUN_STATUSES)[number];
 export const HELPFULNESS_STATES = ["unreviewed", "observed"] as const;
 export type HelpfulnessState = (typeof HELPFULNESS_STATES)[number];
 
-export const GOLD_STATES = ["unknown", "absent"] as const;
+export const PACKAGE_GOLD_STATES = ["unknown", "absent"] as const;
+export const GOLD_STATES = ["unknown", "absent", "present"] as const;
+export type PackageGoldState = (typeof PACKAGE_GOLD_STATES)[number];
 export type GoldState = (typeof GOLD_STATES)[number];
 
 export const HELPFULNESS_DIMENSIONS = [
@@ -198,6 +210,8 @@ export interface ExperimentReviewExportV1 {
   agreement: ExperimentAgreementV1;
   observations: HelpfulnessObservationV1[];
   decision: ExperimentDecisionV1 | null;
+  gold: GoldReferenceV1 | null;
+  alignments: CandidateGoldAlignmentV1[];
   notes: string[];
 }
 
@@ -229,6 +243,17 @@ function assertCandidates(path: string, candidates: ExperimentCandidateV1[]): vo
     }
     if (c.usage.status !== "unknown") {
       throw new ContractViolation(`${path}[${i}].usage`, "usage must remain unknown");
+    }
+  }
+}
+
+function assertImportedGoldState(path: string, candidates: ExperimentCandidateV1[]): void {
+  for (const [i, c] of candidates.entries()) {
+    if (c.goldState === "present") {
+      throw new ContractViolation(
+        `${path}[${i}].goldState`,
+        "imported packages cannot claim a gold reference",
+      );
     }
   }
 }
@@ -299,6 +324,8 @@ const reviewExportShape: ObjectShape = {
   agreement: f.req(f.obj(agreementShape)),
   observations: f.req(f.arr(f.obj(observationShape))),
   decision: f.nul(f.obj(decisionShape)),
+  gold: f.nul(f.obj(goldReferenceShape)),
+  alignments: f.req(f.arr(f.obj(goldAlignmentShape))),
   notes: f.req(f.arr(f.str)),
 };
 
@@ -313,6 +340,7 @@ export function parseExperimentPackage(raw: unknown): ExperimentPackageV1 {
   const pkg = raw as ExperimentPackageV1;
   assertShareSafe("$.privacyClass", pkg.privacyClass);
   assertCandidates("$.candidates", pkg.candidates);
+  assertImportedGoldState("$.candidates", pkg.candidates);
   assertAgreementNotes("$.agreement.notes", pkg.agreement.notes);
   return pkg;
 }
@@ -322,6 +350,7 @@ export function parseExperimentSummary(raw: unknown): ExperimentSummaryV1 {
   const summary = raw as ExperimentSummaryV1;
   assertShareSafe("$.privacyClass", summary.privacyClass);
   assertCandidates("$.candidates", summary.candidates);
+  assertImportedGoldState("$.candidates", summary.candidates);
   if (summary.agreement) {
     assertAgreementNotes("$.agreement.notes", summary.agreement.notes);
   }
@@ -359,6 +388,18 @@ export function parseExperimentReviewExport(raw: unknown): ExperimentReviewExpor
   assertAgreementNotes("$.agreement.notes", row.agreement.notes);
   if (!row.notes.includes(AGREEMENT_NOT_CORRECTNESS)) {
     throw new ContractViolation("$.notes", "must include the agreement-is-not-correctness caveat");
+  }
+  if (!row.notes.includes(GOLD_IS_HUMAN_BENCHMARK)) {
+    throw new ContractViolation("$.notes", "must include the human-benchmark caveat");
+  }
+  if (!row.notes.includes(GOLD_ALIGNMENT_NOT_CORRECTNESS)) {
+    throw new ContractViolation("$.notes", "must include the alignment-is-not-correctness caveat");
+  }
+  if (row.gold) {
+    parseGoldReference(row.gold);
+  }
+  for (const alignment of row.alignments) {
+    parseGoldAlignment(alignment);
   }
   for (const [i, obs] of row.observations.entries()) {
     if (obs.score > 3) {

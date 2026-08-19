@@ -2,6 +2,7 @@
 
 use crate::canonical::to_pretty_json;
 use crate::error::{BenchError, BenchResult};
+use crate::gold::GoldReference;
 use crate::packet::{materialize_task_packet, TaskPacket};
 use crate::review::{
     materialize_review_packet, merge_citation_assists, run_has_support_adjudication, ReviewPacket,
@@ -55,6 +56,7 @@ impl BenchStore {
             "runs",
             "adjudications",
             "scores",
+            "golds",
             "packets",
             "review-packets",
             "blobs/sha256",
@@ -913,6 +915,28 @@ impl BenchStore {
         for id in self.list_scores()? {
             items.push(self.get_score(&id)?);
         }
+        Ok(items)
+    }
+
+    pub fn put_gold(&self, gold: &GoldReference) -> BenchResult<()> {
+        gold.validate()?;
+        atomic_write_json(&self.entity_path("golds", &gold.gold_id), gold)
+    }
+
+    pub fn get_gold(&self, gold_id: &str) -> BenchResult<GoldReference> {
+        GoldReference::parse_json(&self.read_entity("golds", gold_id)?)
+    }
+
+    pub fn list_golds(&self) -> BenchResult<Vec<String>> {
+        list_ids(&self.root.join("golds"))
+    }
+
+    pub fn load_golds(&self) -> BenchResult<Vec<GoldReference>> {
+        let mut items = Vec::new();
+        for id in self.list_golds()? {
+            items.push(self.get_gold(&id)?);
+        }
+        items.sort_by(|a, b| a.version.cmp(&b.version).then(a.gold_id.cmp(&b.gold_id)));
         Ok(items)
     }
 

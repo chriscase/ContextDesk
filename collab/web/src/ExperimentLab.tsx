@@ -42,6 +42,25 @@ interface ExperimentView {
     text: string;
     rationale: string;
   }[];
+  gold: {
+    goldId: string;
+    version: number;
+    predecessorGoldId: string | null;
+    packageId: string;
+    acceptedDecisionId: string;
+    acceptedDecisionRevision: number;
+    evidenceAnchors: string[];
+    promotedByUsername: string;
+    notes: string[];
+  } | null;
+  alignments: {
+    candidateId: string;
+    status: string;
+    matchedAnchors: string[];
+    missingAnchors: string[];
+    extraAnchors: string[];
+    notes: string[];
+  }[];
 }
 
 function latencyLabel(value: CandidateRow["observedLatency"]): string {
@@ -169,13 +188,55 @@ export function ExperimentLab(props: {
     setExported(JSON.stringify(await res.json(), null, 2));
   }
 
+  async function promoteGold(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!current) return;
+    const accepted = [...current.decisions].reverse().find((row) => row.status === "accepted");
+    if (!accepted) return;
+    const data = new FormData(event.currentTarget);
+    const expectedGold = String(data.get("expectedGoldVersion") ?? "").trim();
+    const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/gold`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        decisionId: accepted.id,
+        expectedRevision: accepted.revision,
+        expectedGoldVersion: expectedGold ? Number(expectedGold) : current.gold?.version ?? 0,
+        evidenceAnchors: String(data.get("evidenceAnchors") ?? "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
+        expectedRelationships: String(data.get("expectedRelationships") ?? "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean)
+          .map((item) => {
+            const [evidenceRef, role] = item.split("=").map((part) => part.trim());
+            return { evidenceRef, role };
+          })
+          .filter((row) => row.evidenceRef && row.role),
+        helpfulnessDimensions: String(data.get("helpfulnessDimensions") ?? "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
+      }),
+    });
+    if (!res.ok) {
+      const body = (await res.json()) as { error?: string };
+      setError(body.error ?? "gold promotion failed");
+      return;
+    }
+    event.currentTarget.reset();
+    await refresh();
+  }
+
   return (
     <section className="experiment-lab">
       <h3 className="case-view__title">Experiment lab</h3>
       <p className="timeline__meta">
         Import a share-safe experiment package or summary. Agreement is not proof of
-        correctness. Gold, cost, and usage stay unknown unless already recorded as unknown or
-        absent.
+        correctness. A gold reference is a human benchmark decision, not an infallible truth
+        claim. Gold alignment is scored separately from helpfulness.
       </p>
       {props.canWrite ? (
         <form className="composer" onSubmit={(event) => void importPackage(event)}>
@@ -210,6 +271,28 @@ export function ExperimentLab(props: {
             package {current.packageId} · task {current.taskFingerprint.slice(0, 12)} · snapshot{" "}
             {current.snapshotFingerprint.slice(0, 12)}
           </p>
+          <section className="experiment-lab__gold" aria-label="Gold reference">
+            {current.gold ? (
+              <>
+                <h4 className="experiment-lab__heading">Gold reference v{current.gold.version}</h4>
+                <p className="timeline__meta">
+                  Human benchmark from accepted decision {current.gold.acceptedDecisionId} r
+                  {current.gold.acceptedDecisionRevision}, promoted by{" "}
+                  {current.gold.promotedByUsername}. Evidence:{" "}
+                  {current.gold.evidenceAnchors.join(", ")}.
+                </p>
+                <p className="experiment-lab__disclaimer">
+                  A gold reference is a human benchmark decision, not an infallible truth claim.
+                  Gold alignment is not a correctness verdict.
+                </p>
+              </>
+            ) : (
+              <p className="timeline__meta">
+                No gold reference. Gold state stays unknown or absent until a case-lead promotes
+                an accepted decision.
+              </p>
+            )}
+          </section>
           <table className="experiment-lab__matrix">
             <thead>
               <tr>
@@ -284,7 +367,21 @@ export function ExperimentLab(props: {
           <ul className="timeline">
             {current.observations.map((row) => (
               <li key={row.id} className="timeline__item">
-                {row.reviewerUsername} scored {row.candidateId} {row.dimension} {row.score}: {row.rationale}
+                Helpfulness: {row.reviewerUsername} scored {row.candidateId} {row.dimension}{" "}
+                {row.score}: {row.rationale}
+              </li>
+            ))}
+          </ul>
+          <h4 className="experiment-lab__heading">Gold alignment</h4>
+          <p className="timeline__meta">
+            Separate from helpfulness scores. Gold alignment is not a correctness verdict.
+          </p>
+          <ul className="timeline">
+            {(current.alignments ?? []).map((row) => (
+              <li key={row.candidateId} className="timeline__item">
+                {row.candidateId}: {row.status}
+                {row.matchedAnchors.length ? ` · matched ${row.matchedAnchors.join(", ")}` : ""}
+                {row.missingAnchors.length ? ` · missing ${row.missingAnchors.join(", ")}` : ""}
               </li>
             ))}
           </ul>
@@ -308,6 +405,40 @@ export function ExperimentLab(props: {
             <button className="login__submit" type="button" onClick={() => void acceptDecision()}>
               Accept decision
             </button>
+          ) : null}
+          {props.canLead && current.decisions.some((row) => row.status === "accepted") ? (
+            <form className="composer" onSubmit={(event) => void promoteGold(event)}>
+              <input
+                className="login__input"
+                name="evidenceAnchors"
+                defaultValue="ev-demo-checkout-log, ev-demo-inventory-timeout"
+                placeholder="gold evidence anchors, comma separated"
+                required
+              />
+              <input
+                className="login__input"
+                name="expectedRelationships"
+                placeholder="optional evidence=role pairs, comma separated"
+              />
+              <input
+                className="login__input"
+                name="helpfulnessDimensions"
+                placeholder="optional helpfulness dimensions, comma separated"
+              />
+              {current.gold ? (
+                <input
+                  className="login__input"
+                  name="expectedGoldVersion"
+                  type="number"
+                  min={1}
+                  defaultValue={current.gold.version}
+                  aria-label="expected gold version"
+                />
+              ) : null}
+              <button className="login__submit" type="submit">
+                Promote accepted decision to gold
+              </button>
+            </form>
           ) : null}
           {props.canLead ? (
             <button className="login__submit" type="button" onClick={() => void exportReview()}>

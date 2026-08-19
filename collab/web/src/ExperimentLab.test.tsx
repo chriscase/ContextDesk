@@ -39,6 +39,64 @@ const view = {
   },
   observations: [],
   decisions: [],
+  gold: null,
+  alignments: [
+    {
+      candidateId: "cand-qwen-3.6-27b",
+      status: "unknown",
+      matchedAnchors: [],
+      missingAnchors: [],
+      extraAnchors: [],
+      notes: ["Gold alignment is not a correctness verdict."],
+    },
+  ],
+};
+
+const goldView = {
+  ...view,
+  candidates: [
+    {
+      candidateId: "cand-qwen-3.6-27b",
+      modelLabel: "qwen-3.6-27b",
+      role: "single",
+      runStatus: "completed",
+      observedLatency: { status: "observed", milliseconds: 4120 },
+      cost: { status: "unknown" },
+      usage: { status: "unknown" },
+      helpfulnessState: "unreviewed",
+      goldState: "present",
+    },
+  ],
+  decisions: [
+    {
+      id: "dec-1",
+      status: "accepted",
+      revision: 2,
+      text: "Treat inventory timeout as the benchmark cause.",
+      rationale: "Human benchmark, not a truth claim.",
+    },
+  ],
+  gold: {
+    goldId: "gold-synth-three-model-checkout-v1",
+    version: 1,
+    predecessorGoldId: null,
+    packageId: "pkg-synth-three-model-checkout-v1",
+    acceptedDecisionId: "dec-1",
+    acceptedDecisionRevision: 2,
+    evidenceAnchors: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+    promotedByUsername: "dave",
+    notes: ["A gold reference is a human benchmark decision, not an infallible truth claim."],
+  },
+  alignments: [
+    {
+      candidateId: "cand-qwen-3.6-27b",
+      status: "aligned",
+      matchedAnchors: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+      missingAnchors: [],
+      extraAnchors: [],
+      notes: ["Gold alignment is not a correctness verdict."],
+    },
+  ],
 };
 
 describe("experiment lab", () => {
@@ -58,6 +116,32 @@ describe("experiment lab", () => {
     expect(screen.getAllByText(/Agreement is not proof of correctness/).length).toBeGreaterThan(0);
     expect(screen.getByRole("columnheader", { name: "Gold" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import experiment" })).toBeTruthy();
+    expect(screen.getByText(/No gold reference/)).toBeTruthy();
+    expect(
+      screen.getAllByText(/A gold reference is a human benchmark decision/).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("renders gold provenance separately from helpfulness and alignment", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/experiments")) {
+          return { ok: true, json: async () => ({ experiments: [goldView] }) };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    expect(await screen.findByText(/Gold reference v1/)).toBeTruthy();
+    expect(screen.getByText(/accepted decision dec-1 r2/)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Gold alignment" })).toBeTruthy();
+    expect(screen.getByText(/cand-qwen-3.6-27b: aligned/)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Promote accepted decision to gold" }),
+    ).toBeTruthy();
+    expect(screen.queryByText("Helpfulness: dave scored")).toBeNull();
   });
 
   it("posts a pasted package JSON", async () => {

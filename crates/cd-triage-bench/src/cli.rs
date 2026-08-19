@@ -7,9 +7,10 @@ use crate::agreement::{
 };
 use crate::canonical::to_pretty_json;
 use crate::error::{BenchError, BenchResult};
+use crate::gold::GoldReference;
 use crate::import::{import_run, parse_import_json, parse_import_markdown, ImportOutcome};
 use crate::report::{
-    build_report_with_attribution, extract_owner_model_attribution, render_report_json,
+    build_report_with_gold, extract_owner_model_attribution, render_report_json,
     render_report_jsonl, render_report_markdown,
 };
 use crate::review::{blinded_run_view_from_raw, ReviewPhase};
@@ -62,6 +63,8 @@ pub enum Command {
     },
     /// Import an expert adjudication JSON record and derive score/review.
     ImportAdjudication { file: PathBuf },
+    /// Import a versioned gold reference promoted from an accepted human decision.
+    ImportGold { file: PathBuf },
     /// List stored record ids.
     List {
         #[arg(value_enum)]
@@ -123,6 +126,7 @@ pub enum ListKind {
     Runs,
     Adjudications,
     Scores,
+    Golds,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -247,6 +251,14 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
             let score = store.import_adjudication(adj)?;
             Ok(format!("{} {}\n", score.adjudication_id, score.score_id))
         }
+        Command::ImportGold { file } => {
+            let store = open_store(cli.library)?;
+            let gold = GoldReference::parse_json(
+                &fs::read_to_string(&file).map_err(|e| BenchError::io(&file, e))?,
+            )?;
+            store.put_gold(&gold)?;
+            Ok(format!("{} v{}\n", gold.gold_id, gold.version))
+        }
         Command::List { kind } => {
             let store = open_store(cli.library)?;
             let ids = match kind {
@@ -256,6 +268,7 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                 ListKind::Runs => store.list_runs()?,
                 ListKind::Adjudications => store.list_adjudications()?,
                 ListKind::Scores => store.list_scores()?,
+                ListKind::Golds => store.list_golds()?,
             };
             Ok(ids.join("\n") + if ids.is_empty() { "" } else { "\n" })
         }
@@ -268,6 +281,7 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                 ListKind::Runs => to_pretty_json(&store.get_run(&id)?),
                 ListKind::Adjudications => to_pretty_json(&store.get_adjudication(&id)?),
                 ListKind::Scores => to_pretty_json(&store.get_score(&id)?),
+                ListKind::Golds => to_pretty_json(&store.get_gold(&id)?),
             }
         }
         Command::Packet { task_id } => {
@@ -309,13 +323,14 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                     Some((run.run_id.clone(), extract_owner_model_attribution(&raw)?))
                 })
                 .collect::<BTreeMap<_, _>>();
-            let report = build_report_with_attribution(
+            let report = build_report_with_gold(
                 &runs,
                 &store.load_adjudications()?,
                 &store.load_scores()?,
                 &store.load_cases()?,
                 &attribution,
                 privacy.class(),
+                &store.load_golds()?,
             )?;
             match format {
                 ReportFormat::Json => render_report_json(&report),

@@ -32,3 +32,16 @@
   color: var(--muted);
   font-weight: 600;
 }
+
+.experiment-lab__gold {
+  margin: 0.6rem 0 0.85rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.experiment-lab__disclaimer {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}

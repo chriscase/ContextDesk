@@ -2,6 +2,7 @@ import {
   AUTH_ERROR_SCHEMA_ID,
   HELPFULNESS_DIMENSIONS,
   type AuthErrorV1,
+  type ExpectedRelationshipV1,
   type HelpfulnessDimension,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -240,6 +241,68 @@ export async function registerExperimentRoutes(
         params.eid,
         ctx.actor,
         body.expectedRevision,
+        request.ip,
+        ctx.isAdmin,
+      );
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  app.post("/api/cases/:id/experiments/:eid/gold", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    if (!ctx.canLead) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const params = request.params as { id: string; eid: string };
+    const body = asRecord(request.body);
+    const decisionId = str(body.decisionId);
+    if (!decisionId || typeof body.expectedRevision !== "number") {
+      void reply.code(400);
+      return { error: "decisionId and expectedRevision are required" };
+    }
+    const evidenceAnchors = Array.isArray(body.evidenceAnchors)
+      ? body.evidenceAnchors.filter((item): item is string => typeof item === "string")
+      : [];
+    const expectedRelationships = Array.isArray(body.expectedRelationships)
+      ? body.expectedRelationships.flatMap((item): ExpectedRelationshipV1[] => {
+          if (!item || typeof item !== "object") return [];
+          const row = item as Record<string, unknown>;
+          return typeof row.evidenceRef === "string" && typeof row.role === "string"
+            ? [{ evidenceRef: row.evidenceRef, role: row.role }]
+            : [];
+        })
+      : undefined;
+    const helpfulnessDimensions = Array.isArray(body.helpfulnessDimensions)
+      ? body.helpfulnessDimensions.filter(
+          (item): item is HelpfulnessDimension =>
+            typeof item === "string" && isDimension(item),
+        )
+      : undefined;
+    const notes = Array.isArray(body.notes)
+      ? body.notes.filter((item): item is string => typeof item === "string")
+      : undefined;
+    const expectedGoldVersion =
+      typeof body.expectedGoldVersion === "number" ? body.expectedGoldVersion : null;
+    try {
+      return await deps.experiments.promoteGold(
+        params.id,
+        params.eid,
+        ctx.actor,
+        {
+          decisionId,
+          expectedRevision: body.expectedRevision,
+          expectedGoldVersion,
+          evidenceAnchors,
+          ...(expectedRelationships ? { expectedRelationships } : {}),
+          ...(helpfulnessDimensions ? { helpfulnessDimensions } : {}),
+          ...(notes ? { notes } : {}),
+        },
         request.ip,
         ctx.isAdmin,
       );
