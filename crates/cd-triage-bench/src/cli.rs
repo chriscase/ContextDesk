@@ -15,6 +15,7 @@ use crate::report::{
 };
 use crate::review::{blinded_run_view_from_raw, ReviewPhase};
 use crate::store::BenchStore;
+use crate::trace::InteractionTrace;
 use crate::types::{
     Adjudication, Case, EvaluationTask, EvidenceSnapshot, PrivacyClass, SourceKind,
     MAX_RAW_INLINE_BYTES,
@@ -65,6 +66,8 @@ pub enum Command {
     ImportAdjudication { file: PathBuf },
     /// Import a versioned gold reference promoted from an accepted human decision.
     ImportGold { file: PathBuf },
+    /// Import a share-safe interaction trace.
+    ImportTrace { file: PathBuf },
     /// List stored record ids.
     List {
         #[arg(value_enum)]
@@ -127,6 +130,7 @@ pub enum ListKind {
     Adjudications,
     Scores,
     Golds,
+    Traces,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -259,6 +263,14 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
             store.put_gold(&gold)?;
             Ok(format!("{} v{}\n", gold.gold_id, gold.version))
         }
+        Command::ImportTrace { file } => {
+            let store = open_store(cli.library)?;
+            let trace = InteractionTrace::parse_json(
+                &fs::read_to_string(&file).map_err(|e| BenchError::io(&file, e))?,
+            )?;
+            store.put_trace(&trace)?;
+            Ok(format!("{}\n", trace.trace_id))
+        }
         Command::List { kind } => {
             let store = open_store(cli.library)?;
             let ids = match kind {
@@ -269,6 +281,7 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                 ListKind::Adjudications => store.list_adjudications()?,
                 ListKind::Scores => store.list_scores()?,
                 ListKind::Golds => store.list_golds()?,
+                ListKind::Traces => store.list_traces()?,
             };
             Ok(ids.join("\n") + if ids.is_empty() { "" } else { "\n" })
         }
@@ -282,6 +295,7 @@ fn dispatch(cli: Cli) -> BenchResult<String> {
                 ListKind::Adjudications => to_pretty_json(&store.get_adjudication(&id)?),
                 ListKind::Scores => to_pretty_json(&store.get_score(&id)?),
                 ListKind::Golds => to_pretty_json(&store.get_gold(&id)?),
+                ListKind::Traces => to_pretty_json(&store.get_trace(&id)?),
             }
         }
         Command::Packet { task_id } => {

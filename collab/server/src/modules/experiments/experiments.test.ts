@@ -8,9 +8,9 @@ import {
   GOLD_ALIGNMENT_NOT_CORRECTNESS,
   GOLD_IS_HUMAN_BENCHMARK,
   parseExperimentPackage,
-  parseExperimentReviewExport,
   parseGoldReference,
   parseHelpfulnessObservation,
+  parseLabExport,
 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
@@ -297,15 +297,16 @@ describe("experiment lab review loop", () => {
         headers: { cookie: dave },
       });
       expect(exportRes.statusCode).toBe(200);
-      const exported = parseExperimentReviewExport(JSON.parse(exportRes.body));
+      const exported = parseLabExport(JSON.parse(exportRes.body));
       expect(exported.privacyClass).toBe("share_safe");
-      expect(exported.decision?.status).toBe("accepted");
-      expect(exported.observations).toHaveLength(1);
-      expect(exported.observations[0]?.reviewerId).toBe("participant");
-      expect(exported.gold).toBeNull();
-      expect(exported.alignments.every((row) => row.status === "unknown")).toBe(true);
-      expect(exported.notes).toContain(AGREEMENT_NOT_CORRECTNESS);
-      expect(exported.notes).toContain(GOLD_IS_HUMAN_BENCHMARK);
+      expect(exported.review.decision?.status).toBe("accepted");
+      expect(exported.review.observations).toHaveLength(1);
+      expect(exported.review.observations[0]?.reviewerId).toBe("participant");
+      expect(exported.review.gold).toBeNull();
+      expect(exported.review.alignments.every((row) => row.status === "unknown")).toBe(true);
+      expect(exported.review.notes).toContain(AGREEMENT_NOT_CORRECTNESS);
+      expect(exported.review.notes).toContain(GOLD_IS_HUMAN_BENCHMARK);
+      expect(exported.comparison.notes).toContain(AGREEMENT_NOT_CORRECTNESS);
       const raw = exportRes.body as string;
       for (const token of [
         "rawModelCapture",
@@ -533,10 +534,11 @@ describe("accepted decision to versioned gold", () => {
         headers: { cookie: dave },
       });
       expect(exportRes.statusCode).toBe(200);
-      const exported = parseExperimentReviewExport(JSON.parse(exportRes.body));
-      expect(exported.gold?.version).toBe(2);
-      expect(exported.gold?.promotedById).toBe("participant");
-      expect(exported.notes).toContain(GOLD_ALIGNMENT_NOT_CORRECTNESS);
+      const exported = parseLabExport(JSON.parse(exportRes.body));
+      expect(exported.review.gold?.version).toBe(2);
+      expect(exported.review.gold?.promotedById).toBe("participant");
+      expect(exported.review.notes).toContain(GOLD_ALIGNMENT_NOT_CORRECTNESS);
+      expect(exported.comparison.gold.status).toBe("present");
       const raw = exportRes.body as string;
       for (const token of [
         "rawModelCapture",
@@ -580,5 +582,153 @@ describe("accepted decision to versioned gold", () => {
     const listed = await store.listGolds(gold.experimentId);
     expect(listed).toHaveLength(1);
     expect(listed[0]?.evidenceAnchors).toEqual(gold.evidenceAnchors);
+  });
+});
+
+const STRATEGY = JSON.parse(
+  readFileSync(join(here, "../../../../contracts/fixtures/strategy-package.converge.json"), "utf8"),
+) as unknown;
+const PLAIN = JSON.parse(
+  readFileSync(join(here, "../../../../contracts/fixtures/plain-transcript.incomplete.json"), "utf8"),
+) as unknown;
+const TRACE = JSON.parse(
+  readFileSync(
+    join(here, "../../../../contracts/fixtures/interaction-trace.programmatic.json"),
+    "utf8",
+  ),
+) as unknown;
+
+describe("interaction traces and strategy comparison", () => {
+  it("imports a strategy package idempotently and projects question paths", async () => {
+    await withApp(async ({ app }) => {
+      const token = await login(app, "alice", ALICE);
+      const created = await createCase(app, token);
+      const first = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments`,
+        headers: { cookie: token },
+        payload: STRATEGY,
+      });
+      expect(first.statusCode).toBe(200);
+      const view = JSON.parse(first.body) as {
+        id: string;
+        traces: { candidateId: string; sourceKind: string }[];
+        comparison: {
+          questionPaths: { candidateIds: string[] }[];
+          sharedEvidence: { evidenceRef: string }[];
+          notes: string[];
+        };
+      };
+      expect(view.traces).toHaveLength(2);
+      expect(view.comparison.questionPaths.length).toBeGreaterThan(1);
+      expect(view.comparison.sharedEvidence.map((row) => row.evidenceRef).sort()).toEqual([
+        "ev-demo-checkout-log",
+        "ev-demo-inventory-timeout",
+      ]);
+      expect(view.comparison.notes).toContain("Textual similarity is not a winner.");
+
+      const second = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments`,
+        headers: { cookie: token },
+        payload: STRATEGY,
+      });
+      expect(second.statusCode).toBe(200);
+      expect(JSON.parse(second.body).id).toBe(view.id);
+      expect(JSON.parse(second.body).traces).toHaveLength(2);
+    });
+  });
+
+  it("imports a plain transcript as unknown structure and accepts a human annotation", async () => {
+    await withApp(async ({ app }) => {
+      const token = await login(app, "alice", ALICE);
+      const created = await createCase(app, token);
+      const imported = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments`,
+        headers: { cookie: token },
+        payload: STRATEGY,
+      });
+      const experimentId = JSON.parse(imported.body).id as string;
+      const plain = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/traces`,
+        headers: { cookie: token },
+        payload: PLAIN,
+      });
+      expect(plain.statusCode).toBe(409);
+      const incomplete = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments`,
+        headers: { cookie: token },
+        payload: JSON.parse(
+          readFileSync(
+            join(here, "../../../../contracts/fixtures/experiment-package.valid.json"),
+            "utf8",
+          ),
+        ),
+      });
+      const otherId = JSON.parse(incomplete.body).id as string;
+      const attached = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${otherId}/traces`,
+        headers: { cookie: token },
+        payload: { schemaId: "cd-collab.plain_transcript.v1", candidateId: "cand-qwen-3.6-27b", text: (PLAIN as { text: string }).text },
+      });
+      expect(attached.statusCode).toBe(200);
+      const trace = JSON.parse(attached.body) as {
+        completeness: string;
+        unknowns: string[];
+        events: { actor: string }[];
+      };
+      expect(trace.completeness).toBe("unknown");
+      expect(trace.unknowns).toEqual(expect.arrayContaining(["turns", "tools"]));
+      expect(trace.events[0]?.actor).toBe("unknown");
+
+      const annotated = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${otherId}/traces/cand-qwen-3.6-27b/annotations`,
+        headers: { cookie: token },
+        payload: { text: "Human: inventory timeout is the useful lead.", evidenceRefs: ["ev-demo-inventory-timeout"] },
+      });
+      expect(annotated.statusCode).toBe(200);
+      expect(JSON.parse(annotated.body).events.at(-1).kind).toBe("human_annotation");
+    });
+  });
+
+  it("rejects a conflicting trace and exports share-safe comparison", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", DAVE);
+      const created = await createCase(app, alice);
+      const imported = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments`,
+        headers: { cookie: alice },
+        payload: STRATEGY,
+      });
+      const experimentId = JSON.parse(imported.body).id as string;
+      const conflict = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/traces`,
+        headers: { cookie: alice },
+        payload: { ...(TRACE as object), events: [] },
+      });
+      expect(conflict.statusCode).toBe(409);
+
+      const exportRes = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/export`,
+        headers: { cookie: dave },
+      });
+      expect(exportRes.statusCode).toBe(200);
+      const exported = parseLabExport(JSON.parse(exportRes.body));
+      expect(exported.traces).toHaveLength(2);
+      expect(exported.comparison.questionPaths.length).toBeGreaterThan(1);
+      const raw = exportRes.body as string;
+      expect(raw).not.toContain("ai-gateway.vercel.sh");
+      expect(raw).not.toContain("rawModelCapture");
+      expect(raw).not.toContain('"prompt"');
+    });
   });
 });

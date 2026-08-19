@@ -116,6 +116,7 @@ describe("experiment lab", () => {
     expect(screen.getAllByText(/Agreement is not proof of correctness/).length).toBeGreaterThan(0);
     expect(screen.getByRole("columnheader", { name: "Gold" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import experiment" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Strategy comparison" })).toBeTruthy();
     expect(screen.getByText(/No gold reference/)).toBeTruthy();
     expect(
       screen.getAllByText(/A gold reference is a human benchmark decision/).length,
@@ -142,6 +143,71 @@ describe("experiment lab", () => {
       screen.getByRole("button", { name: "Promote accepted decision to gold" }),
     ).toBeTruthy();
     expect(screen.queryByText("Helpfulness: dave scored")).toBeNull();
+  });
+
+  it("renders shared evidence and unknown question paths separately from gold", async () => {
+    const compared = {
+      ...goldView,
+      traces: [
+        {
+          candidateId: "cand-qwen-3.6-27b",
+          sourceKind: "plain_text",
+          completeness: "unknown",
+          unknowns: ["turns", "tools"],
+          events: [
+            {
+              eventId: "evt-1",
+              sequence: 1,
+              kind: "assistant_response",
+              actor: "unknown",
+              excerpt: "checkout timed out, not sure about the pool",
+              evidenceRefs: [],
+              unknowns: ["kind", "actor"],
+            },
+          ],
+          efficiency: {
+            turnCount: { status: "unknown" },
+            evidenceAcquisitionSteps: { status: "unknown" },
+            latency: { status: "unknown" },
+            cost: { status: "unknown" },
+            providerCalls: { status: "unknown" },
+          },
+        },
+      ],
+      comparison: {
+        questionPaths: [
+          {
+            pathId: "q1",
+            excerpt: "What timed out in checkout?",
+            candidateIds: ["cand-qwen-3.6-27b"],
+          },
+        ],
+        sharedEvidence: [{ evidenceRef: "ev-demo-checkout-log", candidateIds: ["cand-qwen-3.6-27b"] }],
+        uniqueEvidence: [],
+        divergence: [{ kind: "question", summary: "Approaches asked different questions" }],
+        convergence: [{ evidenceRef: "ev-demo-checkout-log", inGold: true, candidateIds: ["cand-qwen-3.6-27b"] }],
+        efficiency: [{ candidateId: "cand-qwen-3.6-27b", efficiency: { turnCount: { status: "unknown" } } }],
+        gold: { status: "present", version: 1, acceptedDecisionId: "dec-1" },
+        notes: ["Textual similarity is not a winner."],
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/experiments")) {
+          return { ok: true, json: async () => ({ experiments: [compared] }) };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    expect(await screen.findByText(/Question path: What timed out in checkout/)).toBeTruthy();
+    expect(screen.getByText(/Shared evidence ev-demo-checkout-log/)).toBeTruthy();
+    expect(screen.getByText(/Converges on gold ev-demo-checkout-log/)).toBeTruthy();
+    expect(screen.getByText(/unknown: turns, tools/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Import trace" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Annotate trace" })).toBeTruthy();
   });
 
   it("posts a pasted package JSON", async () => {

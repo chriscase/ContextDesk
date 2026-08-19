@@ -45,3 +45,16 @@
   color: var(--muted);
   font-size: 0.8rem;
 }
+
+.experiment-lab__paths {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.6rem;
+}
+
+.experiment-lab__path {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem;
+}

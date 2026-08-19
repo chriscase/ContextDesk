@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/interaction-trace.v1.json",
+  "title": "cd-collab Interaction Trace v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "traceId",
+    "candidateId",
+    "sourceKind",
+    "completeness",
+    "privacyClass",
+    "rawHash",
+    "events",
+    "efficiency",
+    "unknowns",
+    "notes",
+    "createdAt"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.interaction_trace.v1" },
+    "traceId": { "type": "string", "minLength": 1 },
+    "candidateId": { "type": "string", "minLength": 1 },
+    "sourceKind": { "type": "string", "enum": ["programmatic", "plain_text"] },
+    "completeness": { "type": "string", "enum": ["exact", "partial", "unknown"] },
+    "privacyClass": { "type": "string", "const": "share_safe" },
+    "rawHash": { "type": ["string", "null"] },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "eventId",
+          "sequence",
+          "kind",
+          "actor",
+          "role",
+          "parentEventId",
+          "evidenceRefs",
+          "observedAt",
+          "excerpt",
+          "excerptHash",
+          "unknowns"
+        ],
+        "properties": {
+          "eventId": { "type": "string", "minLength": 1 },
+          "sequence": { "type": "integer", "minimum": 1 },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "question",
+              "assistant_response",
+              "tool_call",
+              "tool_result",
+              "evidence_anchor",
+              "hypothesis",
+              "recommendation",
+              "human_annotation"
+            ]
+          },
+          "actor": {
+            "type": "string",
+            "enum": ["human", "assistant", "tool", "importer", "unknown"]
+          },
+          "role": { "type": ["string", "null"] },
+          "parentEventId": { "type": ["string", "null"] },
+          "evidenceRefs": { "type": "array", "items": { "type": "string" } },
+          "observedAt": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status"],
+            "properties": {
+              "status": { "enum": ["unknown", "observed"] },
+              "timestamp": { "type": "string" }
+            }
+          },
+          "excerpt": { "type": ["string", "null"] },
+          "excerptHash": { "type": ["string", "null"] },
+          "unknowns": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "efficiency": { "type": "object" },
+    "unknowns": { "type": "array", "items": { "type": "string" } },
+    "notes": { "type": "array", "items": { "type": "string" } },
+    "createdAt": { "type": "string", "minLength": 1 }
+  }
+}

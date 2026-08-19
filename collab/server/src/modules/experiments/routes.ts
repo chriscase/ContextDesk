@@ -311,6 +311,70 @@ export async function registerExperimentRoutes(
     }
   });
 
+  app.post("/api/cases/:id/experiments/:eid/traces", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    if (!ctx.canWrite) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const params = request.params as { id: string; eid: string };
+    try {
+      return await deps.experiments.importTrace(
+        params.id,
+        params.eid,
+        ctx.actor,
+        request.body,
+        request.ip,
+        ctx.isAdmin,
+      );
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  app.post("/api/cases/:id/experiments/:eid/traces/:cid/annotations", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    if (!ctx.canWrite) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const params = request.params as { id: string; eid: string; cid: string };
+    const body = asRecord(request.body);
+    const text = str(body.text);
+    if (!text) {
+      void reply.code(400);
+      return { error: "text is required" };
+    }
+    const evidenceRefs = Array.isArray(body.evidenceRefs)
+      ? body.evidenceRefs.filter((item): item is string => typeof item === "string")
+      : [];
+    try {
+      return await deps.experiments.annotateTrace(
+        params.id,
+        params.eid,
+        ctx.actor,
+        {
+          candidateId: params.cid,
+          text,
+          evidenceRefs,
+          parentEventId: str(body.parentEventId) ?? null,
+        },
+        request.ip,
+        ctx.isAdmin,
+      );
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
   app.post("/api/cases/:id/experiments/:eid/export", async (request, reply) => {
     const ctx = await sessionOf(request);
     if (!ctx) {

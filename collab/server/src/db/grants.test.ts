@@ -110,6 +110,19 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
         await expect(
           app.query(`UPDATE gold_references SET version = 2`),
         ).rejects.toThrow(/insert-only|permission denied/);
+        await app.query(
+          `INSERT INTO experiment_traces (id, experiment_id, candidate_id, fingerprint, payload)
+           VALUES (
+             '55555555-5555-5555-5555-555555555555',
+             '33333333-3333-3333-3333-333333333333',
+             'cand-fixture',
+             'fp',
+             '{"schemaId":"cd-collab.interaction_trace.v1"}'::jsonb
+           )`,
+        );
+        await expect(
+          app.query(`UPDATE experiment_traces SET fingerprint = 'tamper'`),
+        ).rejects.toThrow(/insert-only|permission denied/);
         await expect(app.query(`CREATE TABLE collab_app_should_not (id int)`)).rejects.toThrow(
           /permission denied/,
         );

@@ -5,7 +5,19 @@ import type {
   ExperimentDecisionV1,
   GoldReferenceV1,
   HelpfulnessObservationV1,
+  InteractionEventV1,
+  InteractionTraceV1,
 } from "@cd-collab/contracts";
+
+export interface TraceAnnotationRow {
+  id: string;
+  experimentId: string;
+  candidateId: string;
+  event: InteractionEventV1;
+  authorId: string;
+  authorUsername: string;
+  createdAt: string;
+}
 
 export interface ExperimentRow {
   id: string;
@@ -32,6 +44,11 @@ export interface ExperimentStore {
   insertDecision(row: ExperimentDecisionV1): Promise<void>;
   listGolds(experimentId: string): Promise<GoldReferenceV1[]>;
   insertGold(row: GoldReferenceV1): Promise<void>;
+  listTraces(experimentId: string): Promise<InteractionTraceV1[]>;
+  findTrace(experimentId: string, candidateId: string): Promise<InteractionTraceV1 | null>;
+  insertTrace(experimentId: string, row: InteractionTraceV1, fingerprint: string): Promise<void>;
+  listAnnotations(experimentId: string): Promise<TraceAnnotationRow[]>;
+  insertAnnotation(row: TraceAnnotationRow): Promise<void>;
 }
 
 function cloneCandidates(candidates: ExperimentCandidateV1[]): ExperimentCandidateV1[] {
@@ -61,6 +78,27 @@ function cloneAgreement(agreement: ExperimentAgreementV1): ExperimentAgreementV1
   };
 }
 
+function cloneTrace(row: InteractionTraceV1): InteractionTraceV1 {
+  return {
+    ...row,
+    events: row.events.map((event) => ({
+      ...event,
+      evidenceRefs: [...event.evidenceRefs],
+      unknowns: [...event.unknowns],
+      observedAt: { ...event.observedAt },
+    })),
+    efficiency: {
+      turnCount: { ...row.efficiency.turnCount },
+      evidenceAcquisitionSteps: { ...row.efficiency.evidenceAcquisitionSteps },
+      latency: { ...row.efficiency.latency },
+      cost: { ...row.efficiency.cost },
+      providerCalls: { ...row.efficiency.providerCalls },
+    },
+    unknowns: [...row.unknowns],
+    notes: [...row.notes],
+  };
+}
+
 function cloneGold(row: GoldReferenceV1): GoldReferenceV1 {
   return {
     ...row,
@@ -79,6 +117,8 @@ export class MemoryExperimentStore implements ExperimentStore {
   private readonly observations = new Map<string, HelpfulnessObservationV1[]>();
   private readonly decisions = new Map<string, ExperimentDecisionV1[]>();
   private readonly golds = new Map<string, GoldReferenceV1[]>();
+  private readonly traces = new Map<string, InteractionTraceV1[]>();
+  private readonly annotations = new Map<string, TraceAnnotationRow[]>();
 
   async insert(row: ExperimentRow): Promise<void> {
     this.experiments.set(row.id, {
@@ -89,6 +129,8 @@ export class MemoryExperimentStore implements ExperimentStore {
     this.observations.set(row.id, []);
     this.decisions.set(row.id, []);
     this.golds.set(row.id, []);
+    this.traces.set(row.id, []);
+    this.annotations.set(row.id, []);
   }
 
   async get(id: string): Promise<ExperimentRow | null> {
@@ -158,6 +200,56 @@ export class MemoryExperimentStore implements ExperimentStore {
     }
     list.push(cloneGold(row));
     this.golds.set(row.experimentId, list);
+  }
+
+  async listTraces(experimentId: string): Promise<InteractionTraceV1[]> {
+    return [...(this.traces.get(experimentId) ?? [])]
+      .map(cloneTrace)
+      .sort((a, b) => a.candidateId.localeCompare(b.candidateId));
+  }
+
+  async findTrace(experimentId: string, candidateId: string): Promise<InteractionTraceV1 | null> {
+    const found = (this.traces.get(experimentId) ?? []).find((row) => row.candidateId === candidateId);
+    return found ? cloneTrace(found) : null;
+  }
+
+  async insertTrace(
+    experimentId: string,
+    row: InteractionTraceV1,
+    _fingerprint: string,
+  ): Promise<void> {
+    const traces = this.traces.get(experimentId) ?? [];
+    if (traces.some((trace) => trace.candidateId === row.candidateId || trace.traceId === row.traceId)) {
+      throw new Error("experiment_traces is insert-only");
+    }
+    traces.push(cloneTrace(row));
+    this.traces.set(experimentId, traces);
+  }
+
+  async listAnnotations(experimentId: string): Promise<TraceAnnotationRow[]> {
+    return [...(this.annotations.get(experimentId) ?? [])].map((row) => ({
+      ...row,
+      event: {
+        ...row.event,
+        evidenceRefs: [...row.event.evidenceRefs],
+        unknowns: [...row.event.unknowns],
+        observedAt: { ...row.event.observedAt },
+      },
+    }));
+  }
+
+  async insertAnnotation(row: TraceAnnotationRow): Promise<void> {
+    const list = this.annotations.get(row.experimentId) ?? [];
+    list.push({
+      ...row,
+      event: {
+        ...row.event,
+        evidenceRefs: [...row.event.evidenceRefs],
+        unknowns: [...row.event.unknowns],
+        observedAt: { ...row.event.observedAt },
+      },
+    });
+    this.annotations.set(row.experimentId, list);
   }
 }
 
@@ -256,6 +348,50 @@ export class PgExperimentStore implements ExperimentStore {
       `INSERT INTO gold_references (gold_id, experiment_id, version, created_at, payload)
        VALUES ($1,$2,$3,$4,$5::jsonb)`,
       [row.goldId, row.experimentId, row.version, row.createdAt, JSON.stringify(row)],
+    );
+  }
+
+  async listTraces(experimentId: string): Promise<InteractionTraceV1[]> {
+    const res = await this.db.query(
+      `SELECT payload FROM experiment_traces WHERE experiment_id = $1 ORDER BY candidate_id`,
+      [experimentId],
+    );
+    return res.rows.map((row: { payload: InteractionTraceV1 }) => row.payload);
+  }
+
+  async findTrace(experimentId: string, candidateId: string): Promise<InteractionTraceV1 | null> {
+    const res = await this.db.query(
+      `SELECT payload FROM experiment_traces WHERE experiment_id = $1 AND candidate_id = $2`,
+      [experimentId, candidateId],
+    );
+    return (res.rows[0] as { payload: InteractionTraceV1 } | undefined)?.payload ?? null;
+  }
+
+  async insertTrace(
+    experimentId: string,
+    row: InteractionTraceV1,
+    fingerprint: string,
+  ): Promise<void> {
+    await this.db.query(
+      `INSERT INTO experiment_traces (id, experiment_id, candidate_id, fingerprint, created_at, payload)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
+      [row.traceId, experimentId, row.candidateId, fingerprint, row.createdAt, JSON.stringify(row)],
+    );
+  }
+
+  async listAnnotations(experimentId: string): Promise<TraceAnnotationRow[]> {
+    const res = await this.db.query(
+      `SELECT payload FROM experiment_trace_annotations WHERE experiment_id = $1 ORDER BY created_at, id`,
+      [experimentId],
+    );
+    return res.rows.map((row: { payload: TraceAnnotationRow }) => row.payload);
+  }
+
+  async insertAnnotation(row: TraceAnnotationRow): Promise<void> {
+    await this.db.query(
+      `INSERT INTO experiment_trace_annotations (id, experiment_id, candidate_id, created_at, payload)
+       VALUES ($1,$2,$3,$4,$5::jsonb)`,
+      [row.id, row.experimentId, row.candidateId, row.createdAt, JSON.stringify(row)],
     );
   }
 }
