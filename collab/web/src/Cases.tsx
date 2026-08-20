@@ -8,6 +8,12 @@ interface CaseRow {
   title: string;
   status: string;
   severity: string;
+  reportedProblem?: string | null;
+  problem?: string | null;
+  summary?: string | null;
+  createdBy?: string | null;
+  createdByUsername?: string | null;
+  creator?: string | null;
 }
 
 interface TimelineEvent {
@@ -41,6 +47,7 @@ export function Cases(props: {
   const canWrite = !readOnly && (canLead || roles.includes("contributor"));
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [active, setActive] = useState<string | null>(null);
+  const [caseSearch, setCaseSearch] = useState("");
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [title, setTitle] = useState("");
   const [sources, setSources] = useState<{ id: string; name: string; kind: string }[]>([]);
@@ -160,13 +167,39 @@ export function Cases(props: {
   }
 
   const current = cases.find((c) => c.id === active);
+  const normalizedSearch = caseSearch.trim().toLocaleLowerCase();
+  const visibleCases = normalizedSearch
+    ? cases.filter((c) =>
+        [
+          c.title,
+          c.reportedProblem,
+          c.problem,
+          c.summary,
+          c.id,
+          c.createdBy,
+          c.createdByUsername,
+          c.creator,
+        ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch)),
+      )
+    : cases;
 
   return (
     <section className="workbench">
       <aside className="case-list">
         <h2 className="case-list__title">Cases</h2>
+        <label className="case-list__search">
+          <span className="timeline__meta">Find a case</span>
+          <input
+            className="login__input"
+            type="search"
+            value={caseSearch}
+            onChange={(e) => setCaseSearch(e.target.value)}
+            placeholder="Title, problem, ID, or creator"
+            aria-label="Search cases by title, problem, ID, or creator"
+          />
+        </label>
         <ul className="case-list__items">
-          {cases.map((c) => (
+          {visibleCases.map((c) => (
             <li key={c.id}>
               <button type="button" onClick={() => setActive(c.id)}>
                 {c.title}
@@ -174,6 +207,9 @@ export function Cases(props: {
             </li>
           ))}
         </ul>
+        {cases.length > 0 && visibleCases.length === 0 ? (
+          <p className="timeline__meta">No cases match “{caseSearch}”.</p>
+        ) : null}
         {!readOnly ? (
           <form className="case-form" onSubmit={(e) => void createCase(e)}>
             <input

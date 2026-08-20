@@ -117,4 +117,71 @@ describe("case list and view", () => {
       expect(screen.queryByText(text)).toBeNull();
     }
   });
+
+  it("filters the loaded case list by title, problem, id, and creator", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url === "/api/cases") {
+          return {
+            ok: true,
+            json: async () => ({
+              cases: [
+                {
+                  id: "c-title",
+                  title: "Payment outage",
+                  summary: "Checkout requests are timing out",
+                  status: "open",
+                  severity: "high",
+                  createdByUsername: "alice",
+                },
+                {
+                  id: "c-problem",
+                  title: "Search indexing",
+                  reportedProblem: "New documents are missing from search",
+                  status: "monitoring",
+                  severity: "medium",
+                  createdBy: "identity-bob",
+                },
+              ],
+            }),
+          };
+        }
+        if (url === "/api/catalog/sources") {
+          return { ok: true, json: async () => ({ sources: [] }) };
+        }
+        if (url.endsWith("/timeline") || url.endsWith("/imports")) {
+          return { ok: true, json: async () => ({ events: [], runs: [] }) };
+        }
+        if (url.endsWith("/experiments") || url.endsWith("/export/inventory")) {
+          return { ok: true, json: async () => ({ experiments: [], items: [] }) };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+
+    render(<Cases />);
+    const search = await screen.findByRole("searchbox", {
+      name: "Search cases by title, problem, ID, or creator",
+    });
+    expect(screen.getByRole("button", { name: "Payment outage" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Search indexing" })).toBeTruthy();
+
+    fireEvent.change(search, { target: { value: "payment" } });
+    expect(screen.getByRole("button", { name: "Payment outage" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Search indexing" })).toBeNull();
+
+    fireEvent.change(search, { target: { value: "checkout requests" } });
+    expect(screen.getByRole("button", { name: "Payment outage" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Search indexing" })).toBeNull();
+
+    fireEvent.change(search, { target: { value: "C-PROBLEM" } });
+    expect(screen.getByRole("button", { name: "Search indexing" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Payment outage" })).toBeNull();
+
+    fireEvent.change(search, { target: { value: "ALICE" } });
+    expect(screen.getByRole("button", { name: "Payment outage" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Search indexing" })).toBeNull();
+  });
 });
