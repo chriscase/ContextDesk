@@ -23,6 +23,6 @@
     "start": "npm run start -w @cd-collab/server"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5.0"
   }
 }

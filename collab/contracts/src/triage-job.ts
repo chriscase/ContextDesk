@@ -89,6 +89,10 @@ export interface TriageJobV1 {
   finishedAt: string | null;
   cancelRequestedAt: string | null;
   stoppedReason: string | null;
+  /** Internal durable worker ownership; omitted by legacy records. */
+  workerId?: string | null;
+  /** Internal lease expiry; omitted by legacy records. */
+  leaseExpiresAt?: string | null;
 }
 
 export interface TriageJobShareSafeCandidateV1 {
@@ -193,6 +197,8 @@ const jobShape: ObjectShape = {
   finishedAt: f.nul(f.str),
   cancelRequestedAt: f.nul(f.str),
   stoppedReason: f.nul(f.str),
+  workerId: f.optNul(f.str),
+  leaseExpiresAt: f.optNul(f.str),
 };
 
 const jobListShape: ObjectShape = {

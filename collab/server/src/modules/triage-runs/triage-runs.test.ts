@@ -6,6 +6,7 @@ import {
   parseTriageJobShareSafe,
   projectTriageJobShareSafe,
   type TriageCandidateRunV1,
+  type TriageJobV1,
 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
@@ -88,6 +89,71 @@ function request(snapshotId: string) {
 }
 
 describe("snapshot-bound triage runs", () => {
+  it("uses an exclusive durable worker lease and only exposes expired work for recovery", async () => {
+    const store = new MemoryTriageJobStore();
+    const job: TriageJobV1 = {
+      schemaId: "cd-collab.triage_job.v1",
+      id: "job-lease",
+      caseId: "case-lease",
+      snapshotId: "snapshot-lease",
+      snapshotFingerprint: "snapshot-fingerprint",
+      requestFingerprint: "request-fingerprint",
+      cancellationId: "cancel-lease",
+      request: request("snapshot-lease"),
+      status: "queued",
+      candidates: [
+        {
+          ...request("snapshot-lease").candidates[0]!,
+          status: "queued",
+          benchmarkRunId: null,
+          outputHash: null,
+          summary: null,
+          evidenceRefs: [],
+          unknowns: [],
+          usageStatus: "unknown",
+          costStatus: "unknown",
+          errorCode: null,
+          startedAt: null,
+          finishedAt: null,
+          privacyClass: "owner_only",
+        },
+      ],
+      sameSnapshot: null,
+      agreementNotice: "Agreement is not proof of correctness.",
+      requestedBy: "lead",
+      requestedByUsername: "lead",
+      createdAt: "2026-08-20T00:00:00.000Z",
+      updatedAt: "2026-08-20T00:00:00.000Z",
+      startedAt: null,
+      finishedAt: null,
+      cancelRequestedAt: null,
+      stoppedReason: null,
+    };
+    await store.insert(job);
+    const liveUntil = new Date(Date.now() + 60_000).toISOString();
+    const claimed = await store.claimQueued(job.id, new Date().toISOString(), "worker-a", liveUntil);
+    expect(claimed?.workerId).toBe("worker-a");
+    expect(await store.claimQueued(job.id, new Date().toISOString(), "worker-b", liveUntil)).toBeNull();
+    expect(await store.renewLease(job.id, "worker-b", liveUntil)).toBe(false);
+    expect(await store.renewLease(job.id, "worker-a", new Date(Date.now() + 120_000).toISOString())).toBe(true);
+    expect(await store.listStaleRunning(new Date().toISOString())).toHaveLength(0);
+
+    const expired = (await store.get(job.id))!;
+    await store.update({
+      ...expired,
+      leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
+    });
+    expect(await store.listStaleRunning(new Date().toISOString())).toHaveLength(1);
+    const recovery = {
+      ...(await store.get(job.id))!,
+      status: "failed" as const,
+      stoppedReason: "worker_lease_expired",
+      leaseExpiresAt: null,
+    };
+    expect(await store.recoverStale(recovery, new Date().toISOString())).toBe(true);
+    expect(await store.recoverStale(recovery, new Date().toISOString())).toBe(false);
+  });
+
   it("runs a deterministic candidate and projects a share-safe lifecycle record", async () => {
     const fx = await fixture(new DeterministicMockTriageExecutor());
     try {

@@ -19,5 +19,26 @@ describe("runtime configuration", () => {
 
   it("keeps test defaults explicit", () => {
     expect(testConfig().authMode).toBe("ldap");
+    expect(testConfig().storage).toBe("postgres");
+  });
+
+  it("supports an explicit SQLite local/single-node runtime without database URLs", () => {
+    const config = loadRuntimeConfig({
+      COLLAB_STORAGE: "sqlite",
+      COLLAB_SQLITE_PATH: "/var/lib/cd-collab/collab.sqlite",
+    });
+    expect(config.storage).toBe("sqlite");
+    expect(config.sqlitePath).toBe("/var/lib/cd-collab/collab.sqlite");
+    expect(config.databaseUrl).toBeNull();
+    expect(config.migrateDatabaseUrl).toBeNull();
+  });
+
+  it("requires the SQLite path and rejects unknown storage modes", () => {
+    expect(() => loadRuntimeConfig({ COLLAB_STORAGE: "sqlite" })).toThrow(
+      /missing required environment variable: COLLAB_SQLITE_PATH/,
+    );
+    expect(() => loadRuntimeConfig({ ...database, COLLAB_STORAGE: "memory" })).toThrow(
+      /COLLAB_STORAGE must be postgres or sqlite/,
+    );
   });
 });

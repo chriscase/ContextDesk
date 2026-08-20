@@ -40,6 +40,21 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["npm", "run", "migrate"]
+    environment:
+      COLLAB_DATABASE_URL: ${COLLAB_DATABASE_URL}
+      COLLAB_MIGRATE_DATABASE_URL: ${COLLAB_MIGRATE_DATABASE_URL}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
 
 volumes:
   db_data:

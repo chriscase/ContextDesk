@@ -23,6 +23,8 @@ const DEFAULT_GATEWAY_CONCURRENCY = 2;
 const MAX_GATEWAY_CONCURRENCY = 4;
 const MAX_GATEWAY_EVIDENCE_ITEM_BYTES = 4 * 1024 * 1024;
 const MAX_GATEWAY_EVIDENCE_AGGREGATE_BYTES = 8 * 1024 * 1024;
+const DEFAULT_WORKER_LEASE_MS = 60_000;
+const WORKER_HEARTBEAT_MS = 20_000;
 const AGREEMENT_NOTICE = "Agreement is not proof of correctness." as const;
 
 export class TriageRunNotFoundError extends Error {
@@ -201,6 +203,8 @@ export class DeterministicMockTriageExecutor implements TriageRunExecutor {
 
 export class TriageRunService {
   private readonly controllers = new Map<string, AbortController>();
+  private readonly workerId: string;
+  private readonly workerLeaseMs: number;
 
   constructor(
     private readonly deps: {
@@ -210,8 +214,17 @@ export class TriageRunService {
       executor?: TriageRunExecutor;
       gatewayExecutor?: TriageBatchRunExecutor;
       profiles?: TriageProfileOption[];
+      workerId?: string;
+      workerLeaseMs?: number;
     },
-  ) {}
+  ) {
+    this.workerId = deps.workerId?.trim() || `triage-worker:${randomUUID()}`;
+    this.workerLeaseMs =
+      Number.isSafeInteger(deps.workerLeaseMs) &&
+      (deps.workerLeaseMs as number) >= WORKER_HEARTBEAT_MS * 2
+        ? (deps.workerLeaseMs as number)
+        : DEFAULT_WORKER_LEASE_MS;
+  }
 
   /** Safe profile metadata only; no endpoint, credential, or secret is returned. */
   listProfiles(): TriageProfileOption[] {
@@ -250,10 +263,20 @@ export class TriageRunService {
 
   /** Recover process-local work after a server restart without hiding its state. */
   async recoverPending(): Promise<void> {
-    const pending = await this.deps.jobs.listByStatuses(["queued", "running"]);
-    for (const job of pending) {
+    const queued = await this.deps.jobs.listByStatuses(["queued"]);
+    const staleRunning = await this.deps.jobs.listStaleRunning(now());
+    for (const job of queued) {
       const actor = { id: job.requestedBy, username: job.requestedByUsername };
-      if (job.status === "running") {
+      // This is an internal continuation of an already-authorized durable
+      // job. Reconstructing the original actor's current membership here
+      // would incorrectly strand jobs created by an administrator whose
+      // case access is not represented as a participant row.
+      queueMicrotask(() => {
+        void this.execute(job.id, actor, true);
+      });
+    }
+    for (const job of staleRunning) {
+      const actor = { id: job.requestedBy, username: job.requestedByUsername };
         const finishedAt = now();
         const recoveredCandidates = job.candidates.map((candidate) =>
           candidate.status === "queued" || candidate.status === "running"
@@ -263,8 +286,8 @@ export class TriageRunService {
                 outputHash: null,
                 summary: null,
                 evidenceRefs: [],
-                unknowns: ["worker restarted before completion"],
-                errorCode: "worker_restart",
+                unknowns: ["worker lease expired before completion"],
+                errorCode: "worker_lease_expired",
                 finishedAt,
               }
             : candidate,
@@ -275,25 +298,17 @@ export class TriageRunService {
           candidates: recoveredCandidates,
           finishedAt,
           updatedAt: finishedAt,
-          stoppedReason: "worker_restart",
-        };
-        await this.deps.jobs.update(recovered);
+          stoppedReason: "worker_lease_expired",
+        leaseExpiresAt: null,
+      };
+      if (!(await this.deps.jobs.recoverStale(recovered, finishedAt))) continue;
         await this.deps.audit.append({
           identity: actor.id,
           action: "triage_job_recovered",
-          target: `${job.id}:worker_restart`,
+          target: `${job.id}:worker_lease_expired`,
           origin: "triage-runner",
           outcome: "success",
         });
-        continue;
-      }
-      // This is an internal continuation of an already-authorized durable
-      // job. Reconstructing the original actor's current membership here
-      // would incorrectly strand jobs created by an administrator whose case
-      // access is not represented as a participant row.
-      queueMicrotask(() => {
-        void this.execute(job.id, actor, true);
-      });
     }
   }
 
@@ -444,6 +459,7 @@ export class TriageRunService {
       finishedAt: requestedAt,
       stoppedReason: "cancel_requested",
       updatedAt: requestedAt,
+      leaseExpiresAt: null,
     };
     await this.deps.jobs.update(cancelled);
     this.controllers.get(jobId)?.abort();
@@ -467,10 +483,35 @@ export class TriageRunService {
   private async execute(jobId: string, actor: Actor, isAdmin: boolean): Promise<void> {
     const controller = new AbortController();
     this.controllers.set(jobId, controller);
+    let leaseTimer: ReturnType<typeof setInterval> | undefined;
+    let leaseLost = false;
     try {
       const startedAt = now();
-      const job = await this.deps.jobs.claimQueued(jobId, startedAt);
+      const leaseExpiresAt = new Date(Date.now() + this.workerLeaseMs).toISOString();
+      const job = await this.deps.jobs.claimQueued(
+        jobId,
+        startedAt,
+        this.workerId,
+        leaseExpiresAt,
+      );
       if (!job) return;
+      let currentJob = job;
+      leaseTimer = setInterval(() => {
+        const nextLeaseExpiresAt = new Date(Date.now() + this.workerLeaseMs).toISOString();
+        void this.deps.jobs.renewLease(jobId, this.workerId, nextLeaseExpiresAt)
+          .then((renewed) => {
+            if (!renewed) {
+              leaseLost = true;
+              controller.abort();
+              return;
+            }
+            if (currentJob) currentJob = { ...currentJob, leaseExpiresAt: nextLeaseExpiresAt };
+          })
+          .catch(() => {
+            leaseLost = true;
+            controller.abort();
+          });
+      }, WORKER_HEARTBEAT_MS);
       await this.deps.cases.appendDomainTimeline(job.caseId, {
         kind: "triage_job_started",
         actor: { id: job.requestedBy, username: job.requestedByUsername },
@@ -501,6 +542,7 @@ export class TriageRunService {
           finishedAt,
           updatedAt: finishedAt,
           stoppedReason: "cancel_requested",
+          leaseExpiresAt: null,
         });
         return;
       }
@@ -513,15 +555,15 @@ export class TriageRunService {
       const evidence = job.request.mode === "gateway"
         ? await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, true)
         : await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, false);
-      let currentJob = job;
       const persistCandidate = async (result: TriageCandidateRunV1): Promise<void> => {
+        if (leaseLost) return;
         const latest = await this.deps.jobs.get(currentJob.id);
         if (latest) currentJob = latest;
         // Cancellation and terminal recovery are authoritative. A progress
         // callback may already be in flight when the operator cancels the
         // job; it must never resurrect a terminal job or overwrite a lane
         // that has already settled.
-        if (isTerminal(currentJob.status)) return;
+        if (isTerminal(currentJob.status) || currentJob.workerId !== this.workerId) return;
         const index = currentJob.request.candidates.findIndex((candidate) => candidate.candidateId === result.candidateId);
         if (index < 0) throw new Error("gateway returned an unknown candidate id");
         const existing = currentJob.candidates[index];
@@ -546,9 +588,10 @@ export class TriageRunService {
         });
       };
       const persistCandidateStarted = async (candidateId: string): Promise<void> => {
+        if (leaseLost) return;
         const latest = await this.deps.jobs.get(currentJob.id);
         if (latest) currentJob = latest;
-        if (isTerminal(currentJob.status)) return;
+        if (isTerminal(currentJob.status) || currentJob.workerId !== this.workerId) return;
         const index = currentJob.request.candidates.findIndex((candidate) => candidate.candidateId === candidateId);
         if (index < 0) throw new Error("gateway returned an unknown started candidate id");
         const existing = currentJob.candidates[index];
@@ -618,7 +661,8 @@ export class TriageRunService {
             if (!progressCandidates.has(result.candidateId)) await recordCandidate(result);
           }
         } catch (error) {
-          const cancelled = job.cancelRequestedAt !== null || controller.signal.aborted;
+          const cancelled = job.cancelRequestedAt !== null || (controller.signal.aborted && !leaseLost);
+          if (leaseLost) return;
           const status = cancelled ? "cancelled" : error instanceof Error && error.message === "deadline exceeded" ? "timed_out" : "failed";
           const errorCode = cancelled
             ? "cancel_requested"
@@ -647,6 +691,7 @@ export class TriageRunService {
         currentJob = { ...currentJob, sameSnapshot: true, updatedAt: now() };
         await this.deps.jobs.update(currentJob);
         for (let index = 0; index < job.candidates.length; index += 1) {
+          if (leaseLost) return;
           currentJob = (await this.deps.jobs.get(jobId)) ?? currentJob;
           if (currentJob.cancelRequestedAt !== null || controller.signal.aborted) {
             currentJob = {
@@ -687,7 +732,7 @@ export class TriageRunService {
               candidate: spec,
             }, controller.signal);
           } catch (error) {
-            const cancelled = currentJob.cancelRequestedAt !== null || controller.signal.aborted;
+            const cancelled = currentJob.cancelRequestedAt !== null || (controller.signal.aborted && !leaseLost);
             result = {
               ...spec,
               status: cancelled ? "cancelled" : "failed",
@@ -709,8 +754,10 @@ export class TriageRunService {
             }
           }
           await recordCandidate(result);
+          if (leaseLost) return;
         }
       }
+      if (leaseLost) return;
       currentJob = (await this.deps.jobs.get(jobId)) ?? currentJob;
       if (!isTerminal(currentJob.status)) {
         const finishedAt = now();
@@ -721,6 +768,7 @@ export class TriageRunService {
           finishedAt,
           updatedAt: finishedAt,
           stoppedReason: currentJob.cancelRequestedAt !== null ? "cancel_requested" : null,
+          leaseExpiresAt: null,
         };
         await this.deps.jobs.update(currentJob);
         await this.deps.cases.appendDomainTimeline(currentJob.caseId, {
@@ -763,9 +811,11 @@ export class TriageRunService {
           finishedAt,
           updatedAt: finishedAt,
           stoppedReason: "runner_error",
+          leaseExpiresAt: null,
         });
       }
     } finally {
+      if (leaseTimer) clearInterval(leaseTimer);
       this.controllers.delete(jobId);
     }
   }

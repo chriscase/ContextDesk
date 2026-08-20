@@ -67,6 +67,25 @@ is an explicit, recorded operation. A reference whose target was never hashed
 (`expectedHash: null`) is representable and stays `unverified` or
 `unreachable`; it is never silently treated as `verified`.
 
+### Storage modes
+
+PostgreSQL is the default and production mode. It provides the reviewed
+least-privilege migrator/app roles, durable presence, and expiring triage
+worker leases for multi-instance operation. Set a unique
+`COLLAB_TRIAGE_WORKER_ID` on each live worker.
+
+For a private workstation or small single-node deployment, set
+`COLLAB_STORAGE=sqlite` and `COLLAB_SQLITE_PATH=/path/to/collab.sqlite`.
+This mode uses Node 22.5+'s built-in SQLite support and persists case,
+auth-session, catalog, import, experiment, audit, authorization, and triage
+state in one file. Evidence bytes remain in `COLLAB_EVIDENCE_ROOT`.
+SQLite mode is intentionally single-node: it does not provide PostgreSQL role
+separation, multi-worker HA, or a PostgreSQL-to-SQLite migration tool. Its
+protection boundary is filesystem ownership, and its append-only guarantees
+are enforced by the same service contracts rather than PostgreSQL triggers.
+The default remains PostgreSQL so enabling local mode is an explicit operator
+decision.
+
 ### Auth: bind-through LDAP over encrypted transport only (#885)
 
 - `AuthAdapter.authenticate(username, password)` lives in `modules/auth`.
@@ -215,6 +234,28 @@ npm test
 ```
 
 Compose example: `deploy/README.md`.
+
+## Local SQLite
+
+For a private local War Room without PostgreSQL or LDAP, use local auth and a
+writable SQLite file:
+
+```bash
+cd collab
+export COLLAB_STORAGE=sqlite
+export COLLAB_SQLITE_PATH="$PWD/.data/collab.sqlite"
+export COLLAB_AUTH_MODE=local
+export COLLAB_LOCAL_USERS='[{"username":"lead","password":"replace-me","displayName":"Case Lead","groups":["local:case-lead"]}]'
+export COLLAB_GROUP_ROLE_MAP='local:case-lead=case-lead'
+export COLLAB_EVIDENCE_ROOT="$PWD/.data/evidence"
+npm run migrate
+npm run build
+npm start
+```
+
+The SQLite migration command initializes the current schema and is idempotent.
+There is no destructive rollback command; remove the explicitly configured
+SQLite file only when you intentionally want a fresh local workspace.
 
 ## Scripts
 

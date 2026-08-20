@@ -134,6 +134,9 @@ and cite only evidence in the authorized snapshot. Snapshot proof is unknown
 until that validation succeeds. Host output is bounded and its process group
 is interrupted on cancellation, timeout, or overflow. Recovery on restart
 turns in-flight work into an honest partial/failed result and records an audit
-event; the current worker is process-local and should be deployed as a single
-active worker until a distributed lease is added. Agreement is never converted
-into correctness.
+event. PostgreSQL deployments use a durable expiring worker lease so only the
+owner may update a running job; another worker may recover it only after the
+lease expires. Set `COLLAB_TRIAGE_WORKER_ID` to a unique stable value per live
+worker. The lease is a coordination boundary, not a promise that an external
+provider can be forcibly stopped after a crashed process. Agreement is never
+converted into correctness.

@@ -41,6 +41,7 @@ export interface SecurityDeps {
 export interface AppDeps {
   config: Config;
   pool: Pick<Pool, "query"> | null;
+  databaseProbe?: { ping(): void | Promise<void> };
   store: Pick<EvidenceStore, "ping">;
   security?: SecurityDeps;
   domain?: CaseService;
@@ -69,7 +70,16 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     let evidenceStore: "up" | "down" = "down";
     if (deps.pool) {
       try {
-        await deps.pool.query("SELECT 1");
+        await deps.pool.query(
+          "SELECT 1 FROM schema_migrations WHERE version = '011_triage_worker_leases'",
+        );
+        database = "up";
+      } catch {
+        database = "down";
+      }
+    } else if (deps.databaseProbe) {
+      try {
+        await deps.databaseProbe.ping();
         database = "up";
       } catch {
         database = "down";
