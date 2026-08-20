@@ -574,10 +574,11 @@ async fn probe_provider_catalog_openai_compatible_401_is_key_rejected() {
 #[tokio::test]
 async fn probe_provider_catalog_openai_compatible_429_is_unreachable_not_key_rejected() {
     // ai_probe's own classification: a 429 note contains neither "401" nor
-    // "403", so discovery::probe_provider_catalog buckets it as Unreachable,
-    // not KeyRejected — pinning that (slightly surprising) real behavior.
+    // an HTTP 403 status marker, so discovery::probe_provider_catalog buckets
+    // it as Unreachable, not KeyRejected. Keep 403 in the URL to prove that
+    // ports and path segments cannot be mistaken for an authentication status.
     let gateway = MockGateway::start_ordered(vec![Step::respond(Response::status_only(429))]).await;
-    let profile = openai_profile(&loopback_alias(&gateway));
+    let profile = openai_profile(&format!("{}/tenant-403", loopback_alias(&gateway)));
     let probe = probe_provider_catalog(&profile, Some("sk-fixture".into())).await;
     assert!(
         matches!(probe.outcome, ProbeOutcome::Unreachable { .. }),
