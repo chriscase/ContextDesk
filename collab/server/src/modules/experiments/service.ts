@@ -823,7 +823,11 @@ export class ExperimentService {
 
 function mergeAnnotations(
   trace: InteractionTraceV1,
-  annotations: { candidateId: string; event: InteractionTraceV1["events"][number] }[],
+  annotations: {
+    candidateId: string;
+    event: InteractionTraceV1["events"][number];
+    authorUsername: string;
+  }[],
 ): InteractionTraceV1 {
   const extra = annotations.filter((row) => row.candidateId === trace.candidateId);
   if (extra.length === 0) return trace;
@@ -831,11 +835,13 @@ function mergeAnnotations(
   const events = [...trace.events];
   for (const row of extra) {
     sequence += 1;
-    events.push({
+    const attributedEvent = {
       ...row.event,
+      authorUsername: row.authorUsername,
       sequence,
       parentEventId: row.event.parentEventId ?? events.at(-1)?.eventId ?? null,
-    });
+    } as InteractionTraceV1["events"][number] & { authorUsername: string };
+    events.push(attributedEvent);
   }
   return { ...trace, events };
 }

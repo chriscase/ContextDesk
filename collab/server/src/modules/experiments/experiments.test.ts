@@ -1061,7 +1061,7 @@ describe("interaction traces and strategy comparison", () => {
       const trace = JSON.parse(attached.body) as {
         completeness: string;
         unknowns: string[];
-        events: { actor: string }[];
+        events: { actor: string; authorUsername?: string }[];
       };
       expect(trace.completeness).toBe("unknown");
       expect(trace.unknowns).toEqual(expect.arrayContaining(["turns", "tools"]));
@@ -1075,6 +1075,7 @@ describe("interaction traces and strategy comparison", () => {
       });
       expect(annotated.statusCode).toBe(200);
       expect(JSON.parse(annotated.body).events.at(-1).kind).toBe("human_annotation");
+      expect(JSON.parse(annotated.body).events.at(-1).authorUsername).toBe("alice");
     });
   });
 

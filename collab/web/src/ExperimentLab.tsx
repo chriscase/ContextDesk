@@ -72,6 +72,7 @@ interface ExperimentView {
       sequence: number;
       kind: string;
       actor: string;
+      authorUsername?: string;
       excerpt: string | null;
       evidenceRefs: string[];
       unknowns: string[];
@@ -144,6 +145,24 @@ function latencyLabel(value: CandidateRow["observedLatency"]): string {
     : "unknown";
 }
 
+async function responseError(response: Response, fallback: string): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    if (
+      body &&
+      typeof body === "object" &&
+      "error" in body &&
+      typeof body.error === "string" &&
+      body.error.trim()
+    ) {
+      return body.error;
+    }
+  } catch {
+    // Preserve a useful fallback when the server returned no JSON body.
+  }
+  return fallback;
+}
+
 export function ExperimentLab(props: {
   caseId: string;
   canWrite: boolean;
@@ -167,17 +186,36 @@ export function ExperimentLab(props: {
   const [exported, setExported] = useState<ShareSafeExport | null>(null);
 
   const refresh = useCallback(async () => {
-    const res = await fetch(`/api/cases/${props.caseId}/experiments`);
-    if (!res.ok) return;
-    const body = (await res.json()) as { experiments?: ExperimentView[] };
-    setExperiments(body.experiments ?? []);
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments`);
+      if (!res.ok) {
+        setError(await responseError(res, "Experiment history could not be loaded"));
+        return;
+      }
+      const body = (await res.json()) as { experiments?: ExperimentView[] };
+      setExperiments(body.experiments ?? []);
+    } catch {
+      setError("Experiment history could not be loaded");
+    }
   }, [props.caseId]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    setActive(null);
+    setExported(null);
+    setError(null);
+  }, [props.caseId]);
+
   const current = experiments.find((row) => row.id === active) ?? experiments[0] ?? null;
+
+  function selectExperiment(id: string) {
+    setActive(id);
+    setExported(null);
+    setError(null);
+  }
 
   async function importPackage(event: FormEvent) {
     event.preventDefault();
@@ -189,42 +227,54 @@ export function ExperimentLab(props: {
       setError("Package JSON is invalid");
       return;
     }
-    const res = await fetch(`/api/cases/${props.caseId}/experiments`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const json = (await res.json()) as ExperimentView & { error?: string };
-    if (!res.ok) {
-      setError(json.error ?? "import failed");
-      return;
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        setError(await responseError(res, "Experiment import failed"));
+        return;
+      }
+      const json = (await res.json()) as ExperimentView;
+      setPayload("");
+      selectExperiment(json.id);
+      await refresh();
+    } catch {
+      setError("Experiment import failed");
     }
-    setPayload("");
-    setActive(json.id);
-    await refresh();
   }
 
   async function recordHelpfulness(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!current) return;
     const data = new FormData(event.currentTarget);
-    const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/helpfulness`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        candidateId: String(data.get("candidateId") ?? ""),
-        dimension: String(data.get("dimension") ?? ""),
-        score: Number(data.get("score")),
-        rationale: String(data.get("rationale") ?? ""),
-        evidenceRefs: String(data.get("evidenceRefs") ?? "")
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean),
-      }),
-    });
-    if (!res.ok) return;
-    event.currentTarget.reset();
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/helpfulness`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          candidateId: String(data.get("candidateId") ?? ""),
+          dimension: String(data.get("dimension") ?? ""),
+          score: Number(data.get("score")),
+          rationale: String(data.get("rationale") ?? ""),
+          evidenceRefs: String(data.get("evidenceRefs") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+        }),
+      });
+      if (!res.ok) {
+        setError(await responseError(res, "Helpfulness could not be recorded"));
+        return;
+      }
+      event.currentTarget.reset();
+      await refresh();
+    } catch {
+      setError("Helpfulness could not be recorded");
+    }
   }
 
   async function proposeDecision(event: FormEvent<HTMLFormElement>) {
@@ -232,37 +282,54 @@ export function ExperimentLab(props: {
     if (!current) return;
     const data = new FormData(event.currentTarget);
     const latest = current.decisions.at(-1);
-    const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/decisions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        text: String(data.get("text") ?? ""),
-        rationale: String(data.get("rationale") ?? ""),
-        evidenceRefs: String(data.get("evidenceRefs") ?? "")
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean),
-        expectedRevision: latest ? latest.revision : null,
-      }),
-    });
-    if (!res.ok) return;
-    event.currentTarget.reset();
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/decisions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          text: String(data.get("text") ?? ""),
+          rationale: String(data.get("rationale") ?? ""),
+          evidenceRefs: String(data.get("evidenceRefs") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+          expectedRevision: latest ? latest.revision : null,
+        }),
+      });
+      if (!res.ok) {
+        setError(await responseError(res, "Decision proposal could not be recorded"));
+        return;
+      }
+      event.currentTarget.reset();
+      await refresh();
+    } catch {
+      setError("Decision proposal could not be recorded");
+    }
   }
 
   async function acceptDecision() {
     if (!current) return;
     const latest = current.decisions.at(-1);
     if (!latest) return;
-    await fetch(
-      `/api/cases/${props.caseId}/experiments/${current.id}/decisions/${latest.id}/accept`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ expectedRevision: latest.revision }),
-      },
-    );
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/cases/${props.caseId}/experiments/${current.id}/decisions/${latest.id}/accept`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ expectedRevision: latest.revision }),
+        },
+      );
+      if (!res.ok) {
+        setError(await responseError(res, "Decision could not be accepted"));
+        return;
+      }
+      await refresh();
+    } catch {
+      setError("Decision could not be accepted");
+    }
   }
 
   async function exportReview() {
@@ -291,39 +358,43 @@ export function ExperimentLab(props: {
     if (!accepted) return;
     const data = new FormData(event.currentTarget);
     const expectedGold = String(data.get("expectedGoldVersion") ?? "").trim();
-    const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/gold`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        decisionId: accepted.id,
-        expectedRevision: accepted.revision,
-        expectedGoldVersion: expectedGold ? Number(expectedGold) : current.gold?.version ?? 0,
-        evidenceAnchors: String(data.get("evidenceAnchors") ?? "")
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean),
-        expectedRelationships: String(data.get("expectedRelationships") ?? "")
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean)
-          .map((item) => {
-            const [evidenceRef, role] = item.split("=").map((part) => part.trim());
-            return { evidenceRef, role };
-          })
-          .filter((row) => row.evidenceRef && row.role),
-        helpfulnessDimensions: String(data.get("helpfulnessDimensions") ?? "")
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean),
-      }),
-    });
-    if (!res.ok) {
-      const body = (await res.json()) as { error?: string };
-      setError(body.error ?? "gold promotion failed");
-      return;
+    setError(null);
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/gold`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          decisionId: accepted.id,
+          expectedRevision: accepted.revision,
+          expectedGoldVersion: expectedGold ? Number(expectedGold) : current.gold?.version ?? 0,
+          evidenceAnchors: String(data.get("evidenceAnchors") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+          expectedRelationships: String(data.get("expectedRelationships") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean)
+            .map((item) => {
+              const [evidenceRef, role] = item.split("=").map((part) => part.trim());
+              return { evidenceRef, role };
+            })
+            .filter((row) => row.evidenceRef && row.role),
+          helpfulnessDimensions: String(data.get("helpfulnessDimensions") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+        }),
+      });
+      if (!res.ok) {
+        setError(await responseError(res, "Gold promotion failed"));
+        return;
+      }
+      event.currentTarget.reset();
+      await refresh();
+    } catch {
+      setError("Gold promotion failed");
     }
-    event.currentTarget.reset();
-    await refresh();
   }
 
   async function importTrace(event: FormEvent<HTMLFormElement>) {
@@ -338,18 +409,21 @@ export function ExperimentLab(props: {
       setError("Trace JSON is invalid");
       return;
     }
-    const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/traces`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const json = (await res.json()) as { error?: string };
-      setError(json.error ?? "trace import failed");
-      return;
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        setError(await responseError(res, "Trace import failed"));
+        return;
+      }
+      event.currentTarget.reset();
+      await refresh();
+    } catch {
+      setError("Trace import failed");
     }
-    event.currentTarget.reset();
-    await refresh();
   }
 
   async function annotateTrace(event: FormEvent<HTMLFormElement>) {
@@ -357,23 +431,31 @@ export function ExperimentLab(props: {
     if (!current) return;
     const data = new FormData(event.currentTarget);
     const candidateId = String(data.get("candidateId") ?? "");
-    const res = await fetch(
-      `/api/cases/${props.caseId}/experiments/${current.id}/traces/${candidateId}/annotations`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          text: String(data.get("text") ?? ""),
-          evidenceRefs: String(data.get("evidenceRefs") ?? "")
-            .split(",")
-            .map((item) => item.trim())
-            .filter(Boolean),
-        }),
-      },
-    );
-    if (!res.ok) return;
-    event.currentTarget.reset();
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/cases/${props.caseId}/experiments/${current.id}/traces/${candidateId}/annotations`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            text: String(data.get("text") ?? ""),
+            evidenceRefs: String(data.get("evidenceRefs") ?? "")
+              .split(",")
+              .map((item) => item.trim())
+              .filter(Boolean),
+          }),
+        },
+      );
+      if (!res.ok) {
+        setError(await responseError(res, "Trace annotation could not be recorded"));
+        return;
+      }
+      event.currentTarget.reset();
+      await refresh();
+    } catch {
+      setError("Trace annotation could not be recorded");
+    }
   }
 
   return (
@@ -464,14 +546,23 @@ export function ExperimentLab(props: {
           </form>
         </details>
       ) : null}
-      {error ? <p className="experiment-lab__error">{error}</p> : null}
+      {error ? (
+        <p className="experiment-lab__error" role="alert" aria-live="assertive">
+          {error}
+        </p>
+      ) : null}
       {experiments.length > 1 ? (
         <nav className="experiment-lab__experiments" aria-label="Historical triage artifacts">
           <p className="experiment-lab__eyebrow">Historical artifacts</p>
           <ul className="case-list__items">
             {experiments.map((row) => (
               <li key={row.id}>
-                <button type="button" onClick={() => setActive(row.id)}>
+                <button
+                  type="button"
+                  aria-current={row.id === current?.id ? "page" : undefined}
+                  aria-pressed={row.id === current?.id}
+                  onClick={() => selectExperiment(row.id)}
+                >
                   {row.packageId}
                 </button>
               </li>
@@ -708,6 +799,7 @@ export function ExperimentLab(props: {
                       <li key={event.eventId}>
                         {event.sequence}. {event.kind}/{event.actor}
                         {event.excerpt ? `: ${event.excerpt}` : " (unknown text)"}
+                        {event.authorUsername ? ` · by ${event.authorUsername}` : ""}
                         {event.evidenceRefs.length ? ` [${event.evidenceRefs.join(", ")}]` : ""}
                       </li>
                     ))}
@@ -863,7 +955,6 @@ export function ExperimentLab(props: {
                 <input
                   className="login__input"
                   name="evidenceAnchors"
-                  defaultValue="ev-demo-checkout-log, ev-demo-inventory-timeout"
                   placeholder="gold evidence anchors, comma separated"
                   required
                 />

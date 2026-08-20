@@ -493,6 +493,79 @@ describe("experiment lab", () => {
     );
   });
 
+  it("clears an export when the presenter switches historical artifacts", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/experiments")) {
+          return {
+            ok: true,
+            json: async () => ({ experiments: [seededThreeModelView, seededStrategyView] }),
+          };
+        }
+        if (url.endsWith("/export")) {
+          return {
+            ok: true,
+            json: async () => ({
+              schemaId: "cd-collab.experiment_lab_export.v2",
+              privacyClass: "share_safe",
+              review: { candidates: [{}] },
+            }),
+          };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+    render(<ExperimentLab caseId="c1" canWrite={false} canLead />);
+
+    expect(await screen.findByRole("table")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Export share-safe review" }));
+    expect(await screen.findByRole("heading", { name: "Share-safe export ready" })).toBeTruthy();
+
+    const strategyButton = screen.getByRole("button", { name: "pkg-synth-strategy-paths-v1" });
+    fireEvent.click(strategyButton);
+    expect(screen.queryByRole("heading", { name: "Share-safe export ready" })).toBeNull();
+    expect(screen.getByText(/package pkg-synth-strategy-paths-v1/)).toBeTruthy();
+    expect(strategyButton.getAttribute("aria-current")).toBe("page");
+  });
+
+  it("surfaces a stale decision conflict instead of failing silently", async () => {
+    const proposed = {
+      ...view,
+      decisions: [
+        {
+          id: "dec-proposed",
+          status: "proposed",
+          revision: 3,
+          text: "Check the inventory client timeout.",
+          rationale: "Needs lead review.",
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/experiments") && !init?.method) {
+          return { ok: true, json: async () => ({ experiments: [proposed] }) };
+        }
+        if (url.endsWith("/accept")) {
+          return {
+            ok: false,
+            json: async () => ({ error: "revision_conflict: decision changed" }),
+          };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Accept decision" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("revision_conflict: decision changed");
+  });
+
   it("keeps seeded model and interaction-strategy packages selectable", async () => {
     vi.stubGlobal(
       "fetch",
