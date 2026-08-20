@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 
 export function LoginForm(props: {
   onSuccess: () => void;
+  defaults?: { username: string; password: string };
 }) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -35,7 +36,13 @@ export function LoginForm(props: {
     <form className="login" onSubmit={(e) => void onSubmit(e)}>
       <label className="login__label">
         Username
-        <input className="login__input" name="username" autoComplete="username" required />
+        <input
+          className="login__input"
+          name="username"
+          autoComplete="username"
+          defaultValue={props.defaults?.username}
+          required
+        />
       </label>
       <label className="login__label">
         Password
@@ -44,6 +51,7 @@ export function LoginForm(props: {
           name="password"
           type="password"
           autoComplete="current-password"
+          defaultValue={props.defaults?.password}
           required
         />
       </label>

@@ -46,6 +46,7 @@ export interface AppDeps {
   imports?: ImportService;
   experiments?: ExperimentService;
   exporter?: ExportService;
+  serveStatic?: boolean;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -148,7 +149,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const staticDir =
     deps.config.staticDir ??
     join(dirname(fileURLToPath(import.meta.url)), "..", "..", "web", "dist");
-  if (existsSync(staticDir)) {
+  if (deps.serveStatic !== false && existsSync(staticDir)) {
     await app.register(fastifyStatic, {
       root: staticDir,
       wildcard: false,

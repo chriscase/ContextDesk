@@ -1,18 +1,26 @@
 import { createHash } from "node:crypto";
 import { checkObject, f, type ObjectShape, ContractViolation } from "./parse.js";
+import {
+  assertShareSafeAlias,
+  assertShareSafePrivacy,
+} from "./privacy.js";
 
 import {
   AGREEMENT_NOT_CORRECTNESS,
+  EXPERIMENT_SHARE_SAFE_CAVEATS,
   parseExperimentImport,
   parseExperimentReviewExport,
+  parseExperimentReviewExportV2,
   type ExperimentAgreementV1,
   type ExperimentCandidateV1,
   type ExperimentPackageV1,
   type ExperimentReviewExportV1,
+  type ExperimentReviewExportV2,
   type ExperimentSummaryV1,
   type HelpfulnessState,
   type ObservedLatencyV1,
   type RoleConflictV1,
+  type ShareSafeRoleConflictV2,
 } from "./experiment.js";
 import {
   GOLD_ALIGNMENT_NOT_CORRECTNESS,
@@ -25,9 +33,54 @@ export const PLAIN_TRANSCRIPT_SCHEMA_ID = "cd-collab.plain_transcript.v1" as con
 export const STRATEGY_PACKAGE_SCHEMA_ID = "cd-collab.strategy_package.v1" as const;
 export const STRATEGY_COMPARISON_SCHEMA_ID = "cd-collab.strategy_comparison.v1" as const;
 export const LAB_EXPORT_SCHEMA_ID = "cd-collab.experiment_lab_export.v1" as const;
+export const SHARE_SAFE_INTERACTION_TRACE_V2_SCHEMA_ID =
+  "cd-collab.interaction_trace_share_safe.v2" as const;
+export const STRATEGY_COMPARISON_V2_SCHEMA_ID =
+  "cd-collab.strategy_comparison.v2" as const;
+export const LAB_EXPORT_V2_SCHEMA_ID = "cd-collab.experiment_lab_export.v2" as const;
 
 export const TRACE_UNKNOWN_STAYS_UNKNOWN = "Ambiguous transcript structure stays unknown." as const;
 export const TEXTUAL_SIMILARITY_NOT_WINNER = "Textual similarity is not a winner." as const;
+
+export const TRACE_SHARE_SAFE_CAVEATS = [
+  "trace_unknown_stays_unknown",
+  "textual_similarity_not_winner",
+] as const;
+export type TraceShareSafeCaveat = (typeof TRACE_SHARE_SAFE_CAVEATS)[number];
+export const LAB_SHARE_SAFE_CAVEATS = [
+  ...EXPERIMENT_SHARE_SAFE_CAVEATS,
+  ...TRACE_SHARE_SAFE_CAVEATS,
+] as const;
+
+function assertExactCaveats(
+  path: string,
+  actual: readonly string[],
+  expected: readonly string[],
+): void {
+  if (actual.length !== expected.length || new Set(actual).size !== actual.length) {
+    throw new ContractViolation(path, "expected each required caveat exactly once");
+  }
+  for (const caveat of expected) {
+    if (!actual.includes(caveat)) {
+      throw new ContractViolation(path, `must include ${caveat}`);
+    }
+  }
+}
+
+export const SHARE_SAFE_UNKNOWN_CODES = [
+  "turns",
+  "tools",
+  "evidence",
+  "preamble",
+  "kind",
+  "actor",
+  "role",
+  "timestamp",
+  "text",
+  "tool_name",
+  "unspecified",
+] as const;
+export type ShareSafeUnknownCode = (typeof SHARE_SAFE_UNKNOWN_CODES)[number];
 
 export const TRACE_SOURCE_KINDS = ["programmatic", "plain_text"] as const;
 export type TraceSourceKind = (typeof TRACE_SOURCE_KINDS)[number];
@@ -185,12 +238,76 @@ export interface StrategyComparisonV1 {
   notes: string[];
 }
 
+/** @deprecated Read-only legacy shape; it cannot honestly express share-safe omissions. */
 export interface ExperimentLabExportV1 {
   schemaId: typeof LAB_EXPORT_SCHEMA_ID;
   privacyClass: "share_safe";
   review: ExperimentReviewExportV1;
   traces: InteractionTraceV1[];
   comparison: StrategyComparisonV1;
+}
+
+export interface ShareSafeInteractionEventV2 {
+  eventAlias: string;
+  sequence: number;
+  kind: TraceEventKind;
+  actor: TraceActor;
+  roleAlias: string | null;
+  parentEventAlias: string | null;
+  evidenceAliases: string[];
+  unknowns: ShareSafeUnknownCode[];
+}
+
+export interface ShareSafeInteractionTraceV2 {
+  schemaId: typeof SHARE_SAFE_INTERACTION_TRACE_V2_SCHEMA_ID;
+  traceAlias: string;
+  candidateAlias: string;
+  sourceKind: TraceSourceKind;
+  completeness: TraceCompleteness;
+  privacyClass: "share_safe";
+  events: ShareSafeInteractionEventV2[];
+  efficiency: TraceEfficiencyV1;
+  unknowns: ShareSafeUnknownCode[];
+  excerptsIncluded: false;
+  caveats: TraceShareSafeCaveat[];
+}
+
+export interface ShareSafeQuestionPathV2 {
+  pathAlias: string;
+  candidateAliases: string[];
+  eventAliases: string[];
+}
+
+export interface ShareSafeStrategyComparisonV2 {
+  schemaId: typeof STRATEGY_COMPARISON_V2_SCHEMA_ID;
+  packageAlias: string;
+  questionPaths: ShareSafeQuestionPathV2[];
+  sharedEvidence: {
+    evidenceAlias: string;
+    candidateAliases: string[];
+    firstSequence: { candidateAlias: string; sequence: number }[];
+  }[];
+  uniqueEvidence: { candidateAlias: string; evidenceAliases: string[] }[];
+  discoveryOrder: { evidenceAlias: string; candidateAlias: string; sequence: number }[];
+  roleConflicts: ShareSafeRoleConflictV2[];
+  convergence: { evidenceAlias: string; candidateAliases: string[]; inGold: boolean }[];
+  divergence: { kind: DivergenceRowV1["kind"]; candidateAliases: string[] }[];
+  efficiency: { candidateAlias: string; efficiency: TraceEfficiencyV1 }[];
+  gold: {
+    status: "present" | "unknown" | "absent";
+    version: number | null;
+    acceptedDecisionAlias: string | null;
+  };
+  helpfulness: { candidateAlias: string; state: HelpfulnessState }[];
+  caveats: (ExperimentReviewExportV2["caveats"][number] | TraceShareSafeCaveat)[];
+}
+
+export interface ExperimentLabExportV2 {
+  schemaId: typeof LAB_EXPORT_V2_SCHEMA_ID;
+  privacyClass: "share_safe";
+  review: ExperimentReviewExportV2;
+  traces: ShareSafeInteractionTraceV2[];
+  comparison: ShareSafeStrategyComparisonV2;
 }
 
 const countShape: ObjectShape = {
@@ -322,6 +439,17 @@ export function containsForbiddenExcerpt(text: string): boolean {
     lower.includes("api_key") ||
     lower.includes("authorization")
   );
+}
+
+export function projectShareSafeUnknowns(values: readonly string[]): ShareSafeUnknownCode[] {
+  const projected = values.map((value): ShareSafeUnknownCode => {
+    const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    if (normalized === "toolname" || normalized === "tool_name") return "tool_name";
+    return (SHARE_SAFE_UNKNOWN_CODES as readonly string[]).includes(normalized)
+      ? (normalized as ShareSafeUnknownCode)
+      : "unspecified";
+  });
+  return [...new Set(projected)];
 }
 
 export function boundExcerpt(text: string): string | null {
@@ -859,6 +987,115 @@ const comparisonShape: ObjectShape = {
   notes: f.req(f.arr(f.str)),
 };
 
+const shareSafeEventV2Shape: ObjectShape = {
+  eventAlias: f.req(f.str),
+  sequence: f.req(f.u64),
+  kind: f.req(f.en(...TRACE_EVENT_KINDS)),
+  actor: f.req(f.en(...TRACE_ACTORS)),
+  roleAlias: f.nul(f.str),
+  parentEventAlias: f.nul(f.str),
+  evidenceAliases: f.req(f.arr(f.str)),
+  unknowns: f.req(f.arr(f.en(...SHARE_SAFE_UNKNOWN_CODES))),
+};
+
+const shareSafeTraceV2Shape: ObjectShape = {
+  schemaId: f.req(f.en(SHARE_SAFE_INTERACTION_TRACE_V2_SCHEMA_ID)),
+  traceAlias: f.req(f.str),
+  candidateAlias: f.req(f.str),
+  sourceKind: f.req(f.en(...TRACE_SOURCE_KINDS)),
+  completeness: f.req(f.en(...TRACE_COMPLETENESS)),
+  privacyClass: f.req(f.en("share_safe")),
+  events: f.req(f.arr(f.obj(shareSafeEventV2Shape))),
+  efficiency: f.req(f.obj(efficiencyShape)),
+  unknowns: f.req(f.arr(f.en(...SHARE_SAFE_UNKNOWN_CODES))),
+  excerptsIncluded: f.req(f.bool),
+  caveats: f.req(f.arr(f.en(...TRACE_SHARE_SAFE_CAVEATS))),
+};
+
+const shareSafeRoleAssignmentV2Shape: ObjectShape = {
+  candidateAlias: f.req(f.str),
+  roleAlias: f.req(f.str),
+};
+
+const shareSafeRoleConflictV2Shape: ObjectShape = {
+  evidenceAlias: f.req(f.str),
+  assignments: f.req(f.arr(f.obj(shareSafeRoleAssignmentV2Shape))),
+};
+
+const shareSafeComparisonV2Shape: ObjectShape = {
+  schemaId: f.req(f.en(STRATEGY_COMPARISON_V2_SCHEMA_ID)),
+  packageAlias: f.req(f.str),
+  questionPaths: f.req(
+    f.arr(
+      f.obj({
+        pathAlias: f.req(f.str),
+        candidateAliases: f.req(f.arr(f.str)),
+        eventAliases: f.req(f.arr(f.str)),
+      }),
+    ),
+  ),
+  sharedEvidence: f.req(
+    f.arr(
+      f.obj({
+        evidenceAlias: f.req(f.str),
+        candidateAliases: f.req(f.arr(f.str)),
+        firstSequence: f.req(
+          f.arr(f.obj({ candidateAlias: f.req(f.str), sequence: f.req(f.u64) })),
+        ),
+      }),
+    ),
+  ),
+  uniqueEvidence: f.req(
+    f.arr(f.obj({ candidateAlias: f.req(f.str), evidenceAliases: f.req(f.arr(f.str)) })),
+  ),
+  discoveryOrder: f.req(
+    f.arr(
+      f.obj({
+        evidenceAlias: f.req(f.str),
+        candidateAlias: f.req(f.str),
+        sequence: f.req(f.u64),
+      }),
+    ),
+  ),
+  roleConflicts: f.req(f.arr(f.obj(shareSafeRoleConflictV2Shape))),
+  convergence: f.req(
+    f.arr(
+      f.obj({
+        evidenceAlias: f.req(f.str),
+        candidateAliases: f.req(f.arr(f.str)),
+        inGold: f.req(f.bool),
+      }),
+    ),
+  ),
+  divergence: f.req(
+    f.arr(
+      f.obj({
+        kind: f.req(f.en("evidence", "role", "hypothesis", "question")),
+        candidateAliases: f.req(f.arr(f.str)),
+      }),
+    ),
+  ),
+  efficiency: f.req(
+    f.arr(f.obj({ candidateAlias: f.req(f.str), efficiency: f.req(f.obj(efficiencyShape)) })),
+  ),
+  gold: f.req(
+    f.obj({
+      status: f.req(f.en("present", "unknown", "absent")),
+      version: f.nul(f.u64),
+      acceptedDecisionAlias: f.nul(f.str),
+    }),
+  ),
+  helpfulness: f.req(
+    f.arr(
+      f.obj({
+        candidateAlias: f.req(f.str),
+        state: f.req(f.en("unreviewed", "observed")),
+      }),
+    ),
+  ),
+  caveats: f.req(f.arr(f.en(...LAB_SHARE_SAFE_CAVEATS))),
+};
+
 export function parseStrategyComparison(raw: unknown): StrategyComparisonV1 {
   checkObject("$", comparisonShape, raw);
   const row = raw as StrategyComparisonV1;
@@ -875,6 +1112,237 @@ export function parseStrategyComparison(raw: unknown): StrategyComparisonV1 {
   return row;
 }
 
+function assertV2AliasArray(path: string, values: string[], prefix: string): void {
+  values.forEach((value, index) => assertShareSafeAlias(`${path}[${index}]`, value, prefix));
+}
+
+function assertV2Efficiency(path: string, efficiency: TraceEfficiencyV1): void {
+  assertCount(`${path}.turnCount`, efficiency.turnCount);
+  assertCount(`${path}.evidenceAcquisitionSteps`, efficiency.evidenceAcquisitionSteps);
+  assertCount(`${path}.providerCalls`, efficiency.providerCalls);
+  if (efficiency.latency.status !== "unknown") {
+    throw new ContractViolation(`${path}.latency`, "share-safe latency must remain unknown");
+  }
+  if (efficiency.cost.status !== "unknown") {
+    throw new ContractViolation(`${path}.cost`, "share-safe cost must remain unknown");
+  }
+}
+
+export function parseShareSafeInteractionTraceV2(raw: unknown): ShareSafeInteractionTraceV2 {
+  assertShareSafePrivacy(raw);
+  checkObject("$", shareSafeTraceV2Shape, raw);
+  const row = raw as ShareSafeInteractionTraceV2;
+  assertShareSafeAlias("$.traceAlias", row.traceAlias, "trace");
+  assertShareSafeAlias("$.candidateAlias", row.candidateAlias, "approach");
+  assertV2Efficiency("$.efficiency", row.efficiency);
+  if (row.excerptsIncluded !== false) {
+    throw new ContractViolation("$.excerptsIncluded", "share-safe v2 must withhold excerpts");
+  }
+  assertExactCaveats("$.caveats", row.caveats, TRACE_SHARE_SAFE_CAVEATS);
+  const eventAliases = new Set<string>();
+  for (const [index, event] of row.events.entries()) {
+    const path = `$.events[${index}]`;
+    assertShareSafeAlias(`${path}.eventAlias`, event.eventAlias, "event");
+    if (eventAliases.has(event.eventAlias)) {
+      throw new ContractViolation(`${path}.eventAlias`, "duplicate event alias");
+    }
+    eventAliases.add(event.eventAlias);
+    if (event.sequence < 1) {
+      throw new ContractViolation(`${path}.sequence`, "must be >= 1");
+    }
+    if (event.roleAlias) assertShareSafeAlias(`${path}.roleAlias`, event.roleAlias, "role");
+    if (event.parentEventAlias) {
+      assertShareSafeAlias(`${path}.parentEventAlias`, event.parentEventAlias, "event");
+    }
+    assertV2AliasArray(`${path}.evidenceAliases`, event.evidenceAliases, "evidence");
+  }
+  for (const [index, event] of row.events.entries()) {
+    if (event.parentEventAlias && !eventAliases.has(event.parentEventAlias)) {
+      throw new ContractViolation(
+        `$.events[${index}].parentEventAlias`,
+        "unknown parent event alias",
+      );
+    }
+  }
+  return row;
+}
+
+function assertComparisonRoleConflicts(
+  path: string,
+  conflicts: ShareSafeRoleConflictV2[],
+): void {
+  for (const [index, conflict] of conflicts.entries()) {
+    const conflictPath = `${path}[${index}]`;
+    assertShareSafeAlias(`${conflictPath}.evidenceAlias`, conflict.evidenceAlias, "evidence");
+    for (const [assignmentIndex, assignment] of conflict.assignments.entries()) {
+      const assignmentPath = `${conflictPath}.assignments[${assignmentIndex}]`;
+      assertShareSafeAlias(`${assignmentPath}.candidateAlias`, assignment.candidateAlias, "approach");
+      assertShareSafeAlias(`${assignmentPath}.roleAlias`, assignment.roleAlias, "role");
+    }
+  }
+}
+
+export function parseShareSafeStrategyComparisonV2(
+  raw: unknown,
+): ShareSafeStrategyComparisonV2 {
+  assertShareSafePrivacy(raw);
+  checkObject("$", shareSafeComparisonV2Shape, raw);
+  const row = raw as ShareSafeStrategyComparisonV2;
+  assertShareSafeAlias("$.packageAlias", row.packageAlias, "package");
+  for (const [index, question] of row.questionPaths.entries()) {
+    const path = `$.questionPaths[${index}]`;
+    assertShareSafeAlias(`${path}.pathAlias`, question.pathAlias, "question");
+    assertV2AliasArray(`${path}.candidateAliases`, question.candidateAliases, "approach");
+    assertV2AliasArray(`${path}.eventAliases`, question.eventAliases, "event");
+  }
+  for (const [index, evidence] of row.sharedEvidence.entries()) {
+    const path = `$.sharedEvidence[${index}]`;
+    assertShareSafeAlias(`${path}.evidenceAlias`, evidence.evidenceAlias, "evidence");
+    assertV2AliasArray(`${path}.candidateAliases`, evidence.candidateAliases, "approach");
+    for (const [sequenceIndex, sequence] of evidence.firstSequence.entries()) {
+      assertShareSafeAlias(
+        `${path}.firstSequence[${sequenceIndex}].candidateAlias`,
+        sequence.candidateAlias,
+        "approach",
+      );
+    }
+  }
+  for (const [index, evidence] of row.uniqueEvidence.entries()) {
+    const path = `$.uniqueEvidence[${index}]`;
+    assertShareSafeAlias(`${path}.candidateAlias`, evidence.candidateAlias, "approach");
+    assertV2AliasArray(`${path}.evidenceAliases`, evidence.evidenceAliases, "evidence");
+  }
+  for (const [index, discovery] of row.discoveryOrder.entries()) {
+    const path = `$.discoveryOrder[${index}]`;
+    assertShareSafeAlias(`${path}.evidenceAlias`, discovery.evidenceAlias, "evidence");
+    assertShareSafeAlias(`${path}.candidateAlias`, discovery.candidateAlias, "approach");
+  }
+  assertComparisonRoleConflicts("$.roleConflicts", row.roleConflicts);
+  for (const [index, convergence] of row.convergence.entries()) {
+    const path = `$.convergence[${index}]`;
+    assertShareSafeAlias(`${path}.evidenceAlias`, convergence.evidenceAlias, "evidence");
+    assertV2AliasArray(`${path}.candidateAliases`, convergence.candidateAliases, "approach");
+  }
+  for (const [index, divergence] of row.divergence.entries()) {
+    assertV2AliasArray(
+      `$.divergence[${index}].candidateAliases`,
+      divergence.candidateAliases,
+      "approach",
+    );
+  }
+  for (const [index, efficiency] of row.efficiency.entries()) {
+    const path = `$.efficiency[${index}]`;
+    assertShareSafeAlias(`${path}.candidateAlias`, efficiency.candidateAlias, "approach");
+    assertV2Efficiency(`${path}.efficiency`, efficiency.efficiency);
+  }
+  if (row.gold.acceptedDecisionAlias) {
+    assertShareSafeAlias(
+      "$.gold.acceptedDecisionAlias",
+      row.gold.acceptedDecisionAlias,
+      "decision",
+    );
+  }
+  for (const [index, helpfulness] of row.helpfulness.entries()) {
+    assertShareSafeAlias(
+      `$.helpfulness[${index}].candidateAlias`,
+      helpfulness.candidateAlias,
+      "approach",
+    );
+  }
+  assertExactCaveats("$.caveats", row.caveats, LAB_SHARE_SAFE_CAVEATS);
+  return row;
+}
+
+export function parseLabExportV2(raw: unknown): ExperimentLabExportV2 {
+  // This scan deliberately runs before structural parsing, so unknown fields,
+  // keys, and every nested string are covered by the final fail-closed gate.
+  assertShareSafePrivacy(raw);
+  const record = requireKeys("$", raw, [
+    "schemaId",
+    "privacyClass",
+    "review",
+    "traces",
+    "comparison",
+  ]);
+  if (record.schemaId !== LAB_EXPORT_V2_SCHEMA_ID) {
+    throw new ContractViolation("$.schemaId", `expected ${LAB_EXPORT_V2_SCHEMA_ID}`);
+  }
+  if (record.privacyClass !== "share_safe") {
+    throw new ContractViolation("$.privacyClass", "must be share_safe");
+  }
+  if (!Array.isArray(record.traces)) {
+    throw new ContractViolation("$.traces", "expected array");
+  }
+  const review = parseExperimentReviewExportV2(record.review);
+  const traces = record.traces.map((item) => parseShareSafeInteractionTraceV2(item));
+  const comparison = parseShareSafeStrategyComparisonV2(record.comparison);
+  const candidates = new Set(review.candidates.map((candidate) => candidate.candidateAlias));
+  for (const [index, trace] of traces.entries()) {
+    if (!candidates.has(trace.candidateAlias)) {
+      throw new ContractViolation(`$.traces[${index}].candidateAlias`, "unknown candidate alias");
+    }
+  }
+  if (review.packageAlias !== comparison.packageAlias) {
+    throw new ContractViolation("$.comparison.packageAlias", "package alias mismatch");
+  }
+  assertKnownCandidateAliases(review, candidates, "$.review");
+  assertKnownCandidateAliases(comparison, candidates, "$.comparison");
+  if (review.gold) {
+    if (
+      !review.decision ||
+      review.decision.status !== "accepted" ||
+      review.decision.decisionAlias !== review.gold.acceptedDecisionAlias
+    ) {
+      throw new ContractViolation("$.review.gold", "gold must reference the exported accepted decision");
+    }
+    if (
+      comparison.gold.status !== "present" ||
+      comparison.gold.version !== review.gold.version ||
+      comparison.gold.acceptedDecisionAlias !== review.gold.acceptedDecisionAlias
+    ) {
+      throw new ContractViolation("$.comparison.gold", "gold summary mismatch");
+    }
+  } else if (comparison.gold.status === "present") {
+    throw new ContractViolation("$.comparison.gold.status", "cannot be present without exported gold");
+  }
+  return {
+    schemaId: LAB_EXPORT_V2_SCHEMA_ID,
+    privacyClass: "share_safe",
+    review,
+    traces,
+    comparison,
+  };
+}
+
+function assertKnownCandidateAliases(
+  value: unknown,
+  known: ReadonlySet<string>,
+  path: string,
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      assertKnownCandidateAliases(item, known, `${path}[${index}]`),
+    );
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const childPath = `${path}.${key}`;
+    if (key === "candidateAlias" && typeof child === "string" && !known.has(child)) {
+      throw new ContractViolation(childPath, "unknown candidate alias");
+    }
+    if (key === "candidateAliases" && Array.isArray(child)) {
+      for (const [index, alias] of child.entries()) {
+        if (typeof alias === "string" && !known.has(alias)) {
+          throw new ContractViolation(`${childPath}[${index}]`, "unknown candidate alias");
+        }
+      }
+    }
+    assertKnownCandidateAliases(child, known, childPath);
+  }
+}
+
+/** @deprecated Parse legacy records only. New Experiment Lab exports must use v2. */
 export function parseLabExport(raw: unknown): ExperimentLabExportV1 {
   const record = requireKeys("$", raw, [
     "schemaId",

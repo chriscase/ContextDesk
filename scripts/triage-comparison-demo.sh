@@ -14,6 +14,7 @@ ABSTENTION_TASK_ID="task-a234e534de674b597def0297299b0dfbd1a078d9d5cb976973e8abc
 CONTRADICTION_TASK_ID="task-fb25638d4a48bf43144167d4448a3811452946acb5f7e4fd0e9087c87f3985fe"
 SNAPSHOT_ID="snap-5a75de4d710765b3fbb87afdc85beb25fd96f23b46ef4c59d416aa7ae61bbceb"
 CASE_ID="case-demo-checkout-timeout"
+GOLD_ID="gold-synth-three-model-checkout-v1"
 DEFAULT_MODEL_A="qwen-3.6-27b"
 DEFAULT_MODEL_B="gpt-oss-120b"
 DEFAULT_MODEL_C="ministral-3-14b-instruct-2512"
@@ -575,14 +576,23 @@ case "$COMMAND" in
     trap 'rm -rf "$LIBRARY"' EXIT
     cmd_import "$BENCH_BIN"
     cmd_offline "$BENCH_BIN" "$ADAPTER_BIN"
+    gold_import="$("$BENCH_BIN" --library "$LIBRARY" import-gold "$ROOT/collab/contracts/fixtures/gold-reference.valid.json")"
+    gold_import="${gold_import//$'\n'/}"
+    if [[ "$gold_import" != "$GOLD_ID v1" ]]; then
+      echo "import-gold returned $gold_import, expected $GOLD_ID v1" >&2
+      exit 1
+    fi
     owner="$("$BENCH_BIN" --library "$LIBRARY" report --format markdown --privacy owner-only)"
     share="$("$BENCH_BIN" --library "$LIBRARY" report --format markdown --privacy share-safe)"
     owner_agreement="$("$BENCH_BIN" --library "$LIBRARY" agreement --format markdown --privacy owner-only)"
     share_agreement="$("$BENCH_BIN" --library "$LIBRARY" agreement --format markdown --privacy share-safe)"
     printf '%s\n' "$owner" | grep -q "$TASK_ID"
     printf '%s\n' "$owner" | grep -q "$SNAPSHOT_ID"
+    printf '%s\n' "$owner" | grep -q "Gold reference.*$GOLD_ID.*v1"
+    printf '%s\n' "$owner" | grep -q 'Human acceptance'
     printf '%s\n' "$share" | grep -q "$TASK_ID"
     printf '%s\n' "$share" | grep -q 'Privacy: `share_safe`'
+    printf '%s\n' "$share" | grep -q 'Gold alignment is not a correctness verdict'
    printf '%s\n' "$owner" | grep -q 'Privacy: `owner_only`'
     printf '%s\n' "$owner_agreement" | grep -q 'Triage bench evidence agreement'
     printf '%s\n' "$share_agreement" | grep -q 'Triage bench evidence agreement (share-safe)'

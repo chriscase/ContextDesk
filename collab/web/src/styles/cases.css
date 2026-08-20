@@ -57,6 +57,24 @@
   color: var(--muted);
 }
 
+.case-view__support {
+  margin-top: 1rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+
+.case-view__support > summary {
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.case-view__support > .timeline,
+.case-view__support > .composer {
+  margin-top: 0.75rem;
+}
+
 @media (max-width: 720px) {
   .workbench {
     grid-template-columns: 1fr;
