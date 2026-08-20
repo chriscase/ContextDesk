@@ -13,20 +13,24 @@ import { describe, expect, it } from "vitest";
 import {
   AGREEMENT_NOT_CORRECTNESS,
   BRIEF_SCHEMA_ID,
+  CASE_BOARD_SCHEMA_ID,
   CASE_SCHEMA_ID,
   EXPERIMENT_PACKAGE_SCHEMA_ID,
   EXPERIMENT_SUMMARY_SCHEMA_ID,
   FILE_SERVER_REF_SCHEMA_ID,
   PACKAGE_SCHEMA_ID,
+  SNAPSHOT_SCHEMA_ID,
   SOURCE_SCHEMA_ID,
   parseBrief,
   parseCase,
+  parseCaseBoard,
   parseExperimentImport,
   parseExperimentPackage,
   parseExperimentSummary,
   parseFileServerReference,
   parseHealthResponse,
   parsePromptPackage,
+  parseSnapshot,
   parseSource,
 } from "./index.js";
 
@@ -175,6 +179,28 @@ describe("contracts unknown-field rejection", () => {
     expect(ref.expectedHash).toBeNull();
     expect(ref.verificationStatus).toBe("unverified");
   });
+
+  it("accepts snapshot and case-board fixtures and rejects unknown fields", () => {
+    const snapshot = parseSnapshot(
+      JSON.parse(readFileSync(join(fixturesDir, "snapshot.valid.json"), "utf8")),
+    );
+    expect(snapshot.schemaId).toBe(SNAPSHOT_SCHEMA_ID);
+    expect(() =>
+      parseSnapshot(
+        JSON.parse(readFileSync(join(fixturesDir, "snapshot.unknown-field.json"), "utf8")),
+      ),
+    ).toThrow(/unknown key/);
+    const board = parseCaseBoard(
+      JSON.parse(readFileSync(join(fixturesDir, "case-board.valid.json"), "utf8")),
+    );
+    expect(board.schemaId).toBe(CASE_BOARD_SCHEMA_ID);
+    expect(board.gold.status).toBe("unknown");
+    expect(() =>
+      parseCaseBoard(
+        JSON.parse(readFileSync(join(fixturesDir, "case-board.unknown-field.json"), "utf8")),
+      ),
+    ).toThrow(/unknown key/);
+  });
 });
 
 describe("JSON Schema additionalProperties: false", () => {
@@ -267,6 +293,26 @@ describe("JSON Schema additionalProperties: false", () => {
         verificationStatus: "unverified",
         leak: true,
       }),
+    ).toBe(false);
+  });
+
+  it("snapshot schema rejects unknown fields", () => {
+    const validate = ajv.compile(loadSchema("snapshot.v1.json"));
+    expect(validate(JSON.parse(readFileSync(join(fixturesDir, "snapshot.valid.json"), "utf8")))).toBe(
+      true,
+    );
+    expect(
+      validate(JSON.parse(readFileSync(join(fixturesDir, "snapshot.unknown-field.json"), "utf8"))),
+    ).toBe(false);
+  });
+
+  it("case-board schema rejects unknown fields", () => {
+    const validate = ajv.compile(loadSchema("case-board.v1.json"));
+    expect(
+      validate(JSON.parse(readFileSync(join(fixturesDir, "case-board.valid.json"), "utf8"))),
+    ).toBe(true);
+    expect(
+      validate(JSON.parse(readFileSync(join(fixturesDir, "case-board.unknown-field.json"), "utf8"))),
     ).toBe(false);
   });
 });

@@ -1,0 +1,77 @@
+{
+  "schemaId": "cd-collab.case_board.v1",
+  "caseId": "case-synth-checkout-timeouts",
+  "snapshotId": "11111111-1111-4111-8111-111111111111",
+  "generatedAt": "2026-08-20T00:00:00Z",
+  "privacyClass": "owner_only",
+  "known": [
+    {
+      "findingId": "hyp-hyp-1",
+      "bucket": "known",
+      "summary": "Inventory timeout is the cause",
+      "evidenceRefs": ["ev-demo-inventory-timeout"],
+      "contributionRefs": [],
+      "confidence": "supported",
+      "unknowns": [],
+      "sourceKind": "hypothesis"
+    }
+  ],
+  "unknown": [
+    {
+      "findingId": "artifact-unknown-ev-ref",
+      "bucket": "unknown",
+      "summary": "Evidence identity is incomplete",
+      "evidenceRefs": ["ev-ref"],
+      "contributionRefs": [],
+      "confidence": "unknown",
+      "unknowns": ["content hash unknown"],
+      "sourceKind": "artifact"
+    }
+  ],
+  "agreed": [
+    {
+      "findingId": "agree-exp-1-ev-demo-checkout-log",
+      "bucket": "agreed",
+      "summary": "Shared agreement on ev-demo-checkout-log as symptom",
+      "evidenceRefs": ["ev-demo-checkout-log"],
+      "contributionRefs": [],
+      "confidence": "observed",
+      "unknowns": [],
+      "sourceKind": "agreement"
+    }
+  ],
+  "disputed": [
+    {
+      "findingId": "conflict-exp-1-ev-demo-inventory-timeout",
+      "bucket": "disputed",
+      "summary": "Role conflict on ev-demo-inventory-timeout",
+      "evidenceRefs": ["ev-demo-inventory-timeout"],
+      "contributionRefs": [],
+      "confidence": "observed",
+      "unknowns": [],
+      "sourceKind": "agreement"
+    }
+  ],
+  "newlyConcluded": [
+    {
+      "findingId": "decision-dec-new",
+      "bucket": "newly_concluded",
+      "summary": "Accept inventory timeout as the working cause",
+      "evidenceRefs": ["ev-demo-inventory-timeout"],
+      "contributionRefs": [],
+      "confidence": "observed",
+      "unknowns": [],
+      "sourceKind": "decision"
+    }
+  ],
+  "gold": {
+    "status": "unknown",
+    "version": null,
+    "goldId": null
+  },
+  "notes": [
+    "Agreement is not proof of correctness.",
+    "A gold reference is a human benchmark decision, not an infallible truth claim.",
+    "No gold reference was supplied; gold stays unknown."
+  ]
+}
