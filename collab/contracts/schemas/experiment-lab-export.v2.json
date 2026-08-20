@@ -1,0 +1,632 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/experiment-lab-export.v2.json",
+  "title": "cd-collab Experiment Lab share-safe export v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "privacyClass", "review", "traces", "comparison"],
+  "properties": {
+    "schemaId": { "const": "cd-collab.experiment_lab_export.v2" },
+    "privacyClass": { "const": "share_safe" },
+    "review": { "$ref": "#/$defs/review" },
+    "traces": { "type": "array", "items": { "$ref": "#/$defs/trace" } },
+    "comparison": { "$ref": "#/$defs/comparison" }
+  },
+  "$defs": {
+    "packageAlias": { "type": "string", "pattern": "^package-[1-9][0-9]*$" },
+    "candidateAlias": { "type": "string", "pattern": "^approach-[1-9][0-9]*$" },
+    "evidenceAlias": { "type": "string", "pattern": "^evidence-[1-9][0-9]*$" },
+    "roleAlias": { "type": "string", "pattern": "^role-[1-9][0-9]*$" },
+    "eventAlias": { "type": "string", "pattern": "^event-[1-9][0-9]*$" },
+    "taskAlias": { "type": "string", "pattern": "^task-[1-9][0-9]*$" },
+    "snapshotAlias": { "type": "string", "pattern": "^snapshot-[1-9][0-9]*$" },
+    "unknownMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": { "status": { "const": "unknown" } }
+    },
+    "observedCount": {
+      "oneOf": [
+        { "$ref": "#/$defs/unknownMeasurement" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "count"],
+          "properties": {
+            "status": { "const": "observed" },
+            "count": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "efficiency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "turnCount",
+        "evidenceAcquisitionSteps",
+        "latency",
+        "cost",
+        "providerCalls"
+      ],
+      "properties": {
+        "turnCount": { "$ref": "#/$defs/observedCount" },
+        "evidenceAcquisitionSteps": { "$ref": "#/$defs/observedCount" },
+        "latency": { "$ref": "#/$defs/unknownMeasurement" },
+        "cost": { "$ref": "#/$defs/unknownMeasurement" },
+        "providerCalls": { "$ref": "#/$defs/observedCount" }
+      }
+    },
+    "relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceAlias", "roleAlias"],
+      "properties": {
+        "evidenceAlias": { "$ref": "#/$defs/evidenceAlias" },
+        "roleAlias": { "$ref": "#/$defs/roleAlias" }
+      }
+    },
+    "roleConflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceAlias", "assignments"],
+      "properties": {
+        "evidenceAlias": { "$ref": "#/$defs/evidenceAlias" },
+        "assignments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["candidateAlias", "roleAlias"],
+            "properties": {
+              "candidateAlias": { "$ref": "#/$defs/candidateAlias" },
+              "roleAlias": { "$ref": "#/$defs/roleAlias" }
+            }
+          }
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidateAlias",
+        "role",
+        "runStatus",
+        "observedLatency",
+        "cost",
+        "usage",
+        "helpfulnessState",
+        "goldState"
+      ],
+      "properties": {
+        "candidateAlias": { "$ref": "#/$defs/candidateAlias" },
+        "role": { "enum": ["contributor", "finalizer", "reviewer", "single"] },
+        "runStatus": { "enum": ["completed", "failed", "partial", "timeout"] },
+        "observedLatency": { "$ref": "#/$defs/unknownMeasurement" },
+        "cost": { "$ref": "#/$defs/unknownMeasurement" },
+        "usage": { "$ref": "#/$defs/unknownMeasurement" },
+        "helpfulnessState": { "enum": ["unreviewed", "observed"] },
+        "goldState": { "enum": ["unknown", "absent", "present"] }
+      }
+    },
+    "agreement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sharedAnchors", "candidateSpecific", "roleConflicts"],
+      "properties": {
+        "sharedAnchors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["evidenceAlias", "roleAlias", "candidateAliases"],
+            "properties": {
+              "evidenceAlias": { "$ref": "#/$defs/evidenceAlias" },
+              "roleAlias": { "$ref": "#/$defs/roleAlias" },
+              "candidateAliases": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/candidateAlias" }
+              }
+            }
+          }
+        },
+        "candidateSpecific": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["candidateAlias", "evidenceAliases"],
+            "properties": {
+              "candidateAlias": { "$ref": "#/$defs/candidateAlias" },
+              "evidenceAliases": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/evidenceAlias" }
+              }
+            }
+          }
+        },
+        "roleConflicts": { "type": "array", "items": { "$ref": "#/$defs/roleConflict" } }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaId",
+        "privacyClass",
+        "packageAlias",
+        "taskAlias",
+        "snapshotAlias",
+        "candidates",
+        "agreement",
+        "observations",
+        "decision",
+        "gold",
+        "alignments",
+        "omissions",
+        "caveats"
+      ],
+      "properties": {
+        "schemaId": { "const": "cd-collab.experiment_review_export.v2" },
+        "privacyClass": { "const": "share_safe" },
+        "packageAlias": { "$ref": "#/$defs/packageAlias" },
+        "taskAlias": { "$ref": "#/$defs/taskAlias" },
+        "snapshotAlias": { "$ref": "#/$defs/snapshotAlias" },
+        "candidates": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/candidate" } },
+        "agreement": { "$ref": "#/$defs/agreement" },
+        "observations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "observationAlias",
+              "candidateAlias",
+              "dimension",
+              "score",
+              "evidenceAliases"
+            ],
+            "properties": {
+              "observationAlias": { "type": "string", "pattern": "^observation-[1-9][0-9]*$" },
+              "candidateAlias": { "$ref": "#/$defs/candidateAlias" },
+              "dimension": {
+                "enum": [
+                  "evidence_support",
+                  "actionability",
+                  "uncertainty_calibration",
+                  "unsafe_unsupported_claims"
+                ]
+              },
+              "score": { "type": "integer", "minimum": 0, "maximum": 3 },
+              "evidenceAliases": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/evidenceAlias" }
+              }
+            }
+          }
+        },
+        "decision": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "decisionAlias",
+                "status",
+                "revision",
+                "predecessorRevision",
+                "evidenceAliases"
+              ],
+              "properties": {
+                "decisionAlias": { "type": "string", "pattern": "^decision-[1-9][0-9]*$" },
+                "status": { "enum": ["proposed", "accepted"] },
+                "revision": { "type": "integer", "minimum": 1 },
+                "predecessorRevision": { "type": ["integer", "null"], "minimum": 0 },
+                "evidenceAliases": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/evidenceAlias" }
+                }
+              }
+            }
+          ]
+        },
+        "gold": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "goldAlias",
+                "version",
+                "predecessorGoldAlias",
+                "acceptedDecisionAlias",
+                "acceptedDecisionRevision",
+                "evidenceAliases",
+                "expectedRelationships",
+                "helpfulnessDimensions"
+              ],
+              "properties": {
+                "goldAlias": { "type": "string", "pattern": "^gold-[1-9][0-9]*$" },
+                "version": { "type": "integer", "minimum": 1 },
+                "predecessorGoldAlias": {
+                  "oneOf": [
+                    { "type": "null" },
+                    { "type": "string", "pattern": "^gold-[1-9][0-9]*$" }
+                  ]
+                },
+                "acceptedDecisionAlias": {
+                  "type": "string",
+                  "pattern": "^decision-[1-9][0-9]*$"
+                },
+                "acceptedDecisionRevision": { "type": "integer", "minimum": 1 },
+                "evidenceAliases": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/evidenceAlias" }
+                },
+                "expectedRelationships": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/relationship" }
+                },
+                "helpfulnessDimensions": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "evidence_support",
+                      "actionability",
+                      "uncertainty_calibration",
+                      "unsafe_unsupported_claims"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "alignments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "candidateAlias",
+              "status",
+              "matchedEvidenceAliases",
+              "missingEvidenceAliases",
+              "extraEvidenceAliases",
+              "roleMismatches"
+            ],
+            "properties": {
+              "candidateAlias": { "$ref": "#/$defs/candidateAlias" },
+              "status": {
+                "enum": ["aligned", "partial", "divergent", "unscored", "unknown", "absent"]
+              },
+              "matchedEvidenceAliases": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/evidenceAlias" }
+              },
+              "missingEvidenceAliases": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/evidenceAlias" }
+              },
+              "extraEvidenceAliases": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/evidenceAlias" }
+              },
+              "roleMismatches": { "type": "array", "items": { "$ref": "#/$defs/relationship" } }
+            }
+          }
+        },
+        "omissions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "modelLabelsIncluded",
+            "participantIdentitiesIncluded",
+            "freeTextIncluded",
+            "privateContentIncluded",
+            "correlatableMetadataIncluded"
+          ],
+          "properties": {
+            "modelLabelsIncluded": { "const": false },
+            "participantIdentitiesIncluded": { "const": false },
+            "freeTextIncluded": { "const": false },
+            "privateContentIncluded": { "const": false },
+            "correlatableMetadataIncluded": { "const": false }
+          }
+        },
+        "caveats": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "agreement_not_correctness",
+              "gold_is_human_benchmark",
+              "gold_alignment_not_correctness"
+            ]
+          }
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eventAlias",
+        "sequence",
+        "kind",
+        "actor",
+        "roleAlias",
+        "parentEventAlias",
+        "evidenceAliases",
+        "unknowns"
+      ],
+      "properties": {
+        "eventAlias": { "$ref": "#/$defs/eventAlias" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "kind": {
+          "enum": [
+            "question",
+            "assistant_response",
+            "tool_call",
+            "tool_result",
+            "evidence_anchor",
+            "hypothesis",
+            "recommendation",
+            "human_annotation"
+          ]
+        },
+        "actor": { "enum": ["human", "assistant", "tool", "importer", "unknown"] },
+        "roleAlias": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/roleAlias" }]
+        },
+        "parentEventAlias": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/eventAlias" }]
+        },
+        "evidenceAliases": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidenceAlias" }
+        },
+        "unknowns": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "turns",
+              "tools",
+              "evidence",
+              "preamble",
+              "kind",
+              "actor",
+              "role",
+              "timestamp",
+              "text",
+              "tool_name",
+              "unspecified"
+            ]
+          }
+        }
+      }
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaId",
+        "traceAlias",
+        "candidateAlias",
+        "sourceKind",
+        "completeness",
+        "privacyClass",
+        "events",
+        "efficiency",
+        "unknowns",
+        "excerptsIncluded",
+        "caveats"
+      ],
+      "properties": {
+        "schemaId": { "const": "cd-collab.interaction_trace_share_safe.v2" },
+        "traceAlias": { "type": "string", "pattern": "^trace-[1-9][0-9]*$" },
+        "candidateAlias": { "$ref": "#/$defs/candidateAlias" },
+        "sourceKind": { "enum": ["programmatic", "plain_text"] },
+        "completeness": { "enum": ["exact", "partial", "unknown"] },
+        "privacyClass": { "const": "share_safe" },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/event" } },
+        "efficiency": { "$ref": "#/$defs/efficiency" },
+        "unknowns": { "$ref": "#/$defs/event/properties/unknowns" },
+        "excerptsIncluded": { "const": false },
+        "caveats": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["trace_unknown_stays_unknown", "textual_similarity_not_winner"] }
+        }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaId",
+        "packageAlias",
+        "questionPaths",
+        "sharedEvidence",
+        "uniqueEvidence",
+        "discoveryOrder",
+        "roleConflicts",
+        "convergence",
+        "divergence",
+        "efficiency",
+        "gold",
+        "helpfulness",
+        "caveats"
+      ],
+      "properties": {
+        "schemaId": { "const": "cd-collab.strategy_comparison.v2" },
+        "packageAlias": { "$ref": "#/$defs/packageAlias" },
+        "questionPaths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pathAlias", "candidateAliases", "eventAliases"],
+            "properties": {
+              "pathAlias": { "type": "string", "pattern": "^question-[1-9][0-9]*$" },
+              "candidateAliases": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/candidateAlias" }
+              },
+              "eventAliases": { "type": "array", "items": { "$ref": "#/$defs/eventAlias" } }
+            }
+          }
+        },
+        "sharedEvidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["evidenceAlias", "candidateAliases", "firstSequence"],
+            "properties": {
+              "evidenceAlias": { "$ref": "#/$defs/evidenceAlias" },
+              "candidateAliases": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/candidateAlias" }
+              },
+              "firstSequence": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["candidateAlias", "sequence"],
+                  "properties": {
+                    "candidateAlias": { "$ref": "#/$defs/candidateAlias" },
+                    "sequence": { "type": "integer", "minimum": 0 }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "uniqueEvidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["candidateAlias", "evidenceAliases"],
+            "properties": {
+              "candidateAlias": { "$ref": "#/$defs/candidateAlias" },
+              "evidenceAliases": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/evidenceAlias" }
+              }
+            }
+          }
+        },
+        "discoveryOrder": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["evidenceAlias", "candidateAlias", "sequence"],
+            "properties": {
+              "evidenceAlias": { "$ref": "#/$defs/evidenceAlias" },
+              "candidateAlias": { "$ref": "#/$defs/candidateAlias" },
+              "sequence": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "roleConflicts": { "type": "array", "items": { "$ref": "#/$defs/roleConflict" } },
+        "convergence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["evidenceAlias", "candidateAliases", "inGold"],
+            "properties": {
+              "evidenceAlias": { "$ref": "#/$defs/evidenceAlias" },
+              "candidateAliases": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/candidateAlias" }
+              },
+              "inGold": { "type": "boolean" }
+            }
+          }
+        },
+        "divergence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "candidateAliases"],
+            "properties": {
+              "kind": { "enum": ["evidence", "role", "hypothesis", "question"] },
+              "candidateAliases": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/candidateAlias" }
+              }
+            }
+          }
+        },
+        "efficiency": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["candidateAlias", "efficiency"],
+            "properties": {
+              "candidateAlias": { "$ref": "#/$defs/candidateAlias" },
+              "efficiency": { "$ref": "#/$defs/efficiency" }
+            }
+          }
+        },
+        "gold": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "version", "acceptedDecisionAlias"],
+          "properties": {
+            "status": { "enum": ["present", "unknown", "absent"] },
+            "version": { "type": ["integer", "null"], "minimum": 1 },
+            "acceptedDecisionAlias": {
+              "oneOf": [
+                { "type": "null" },
+                { "type": "string", "pattern": "^decision-[1-9][0-9]*$" }
+              ]
+            }
+          }
+        },
+        "helpfulness": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["candidateAlias", "state"],
+            "properties": {
+              "candidateAlias": { "$ref": "#/$defs/candidateAlias" },
+              "state": { "enum": ["unreviewed", "observed"] }
+            }
+          }
+        },
+        "caveats": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "agreement_not_correctness",
+              "gold_is_human_benchmark",
+              "gold_alignment_not_correctness",
+              "trace_unknown_stays_unknown",
+              "textual_similarity_not_winner"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

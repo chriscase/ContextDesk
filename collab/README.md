@@ -178,6 +178,19 @@ are reserved. Other code may depend on a module only through that module's
 `index.ts`. Cross-module deep imports fail `eslint-plugin-boundaries`
 (`boundaries/entry-point`). See `server/src/modules/boundaries.test.ts`.
 
+## Synthetic demo
+
+For a hermetic synthetic Experiment Lab demonstration with no PostgreSQL,
+LDAP, provider calls, or persistent state, use `npm run demo`. It binds only to
+`127.0.0.1`, uses the public fixture credential `demo` / `demo`, and removes
+its temporary evidence when it stops. `COLLAB_DEMO_PORT` selects a different
+loopback port. The production entry point and readiness contract are unchanged.
+
+`npm run demo:static` generates a self-contained, read-only fallback at
+`collab/.demo/contextdesk-synthetic-demo.html`. The presenter sequence and the
+local-only external-chat intake workflow are documented in
+[`CONTEXTDESK_DEMO_RUNBOOK.md`](../docs/benchmarks/CONTEXTDESK_DEMO_RUNBOOK.md).
+
 ## Local PostgreSQL
 
 ```bash
@@ -206,4 +219,5 @@ Compose example: `deploy/README.md`.
 ## Scripts
 
 From `collab/`: `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`,
-`npm run migrate`, `npm run migrate:down`, `npm run migrate:dry-run`.
+`npm run demo`, `npm run demo:static`, `npm run demo:check`, `npm run migrate`,
+`npm run migrate:down`, `npm run migrate:dry-run`.

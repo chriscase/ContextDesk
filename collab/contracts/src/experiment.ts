@@ -1,7 +1,12 @@
 import { checkObject, f, type ObjectShape, ContractViolation } from "./parse.js";
 import { PRIVACY_CLASSES, type PrivacyClass } from "./case.js";
 import {
+  assertShareSafeAlias,
+  assertShareSafePrivacy,
+} from "./privacy.js";
+import {
   GOLD_ALIGNMENT_NOT_CORRECTNESS,
+  GOLD_ALIGNMENT_STATUSES,
   GOLD_IS_HUMAN_BENCHMARK,
   goldAlignmentShape,
   goldReferenceShape,
@@ -18,9 +23,33 @@ export const HELPFULNESS_OBSERVATION_SCHEMA_ID =
 export const EXPERIMENT_DECISION_SCHEMA_ID = "cd-collab.experiment_decision.v1" as const;
 export const EXPERIMENT_REVIEW_EXPORT_SCHEMA_ID =
   "cd-collab.experiment_review_export.v1" as const;
+export const EXPERIMENT_REVIEW_EXPORT_V2_SCHEMA_ID =
+  "cd-collab.experiment_review_export.v2" as const;
+
+export const EXPERIMENT_SHARE_SAFE_CAVEATS = [
+  "agreement_not_correctness",
+  "gold_is_human_benchmark",
+  "gold_alignment_not_correctness",
+] as const;
+export type ExperimentShareSafeCaveat = (typeof EXPERIMENT_SHARE_SAFE_CAVEATS)[number];
 
 export const AGREEMENT_NOT_CORRECTNESS =
   "Agreement is not proof of correctness." as const;
+
+function assertExactCaveats(
+  path: string,
+  actual: readonly string[],
+  expected: readonly string[],
+): void {
+  if (actual.length !== expected.length || new Set(actual).size !== actual.length) {
+    throw new ContractViolation(path, "expected each required caveat exactly once");
+  }
+  for (const caveat of expected) {
+    if (!actual.includes(caveat)) {
+      throw new ContractViolation(path, `must include ${caveat}`);
+    }
+  }
+}
 
 export const CANDIDATE_ROLES = [
   "contributor",
@@ -200,6 +229,7 @@ export interface ExperimentDecisionV1 {
   createdAt: string;
 }
 
+/** @deprecated Read-only legacy shape; it cannot honestly express share-safe omissions. */
 export interface ExperimentReviewExportV1 {
   schemaId: typeof EXPERIMENT_REVIEW_EXPORT_SCHEMA_ID;
   privacyClass: "share_safe";
@@ -213,6 +243,97 @@ export interface ExperimentReviewExportV1 {
   gold: GoldReferenceV1 | null;
   alignments: CandidateGoldAlignmentV1[];
   notes: string[];
+}
+
+export interface ShareSafeExperimentCandidateV2 {
+  candidateAlias: string;
+  role: CandidateRole;
+  runStatus: ExperimentRunStatus;
+  observedLatency: UnknownMeasurement;
+  cost: UnknownMeasurement;
+  usage: UnknownMeasurement;
+  helpfulnessState: HelpfulnessState;
+  goldState: GoldState;
+}
+
+export interface ShareSafeEvidenceAnchorV2 {
+  evidenceAlias: string;
+  roleAlias: string;
+  candidateAliases: string[];
+}
+
+export interface ShareSafeCandidateSpecificEvidenceV2 {
+  candidateAlias: string;
+  evidenceAliases: string[];
+}
+
+export interface ShareSafeRoleConflictV2 {
+  evidenceAlias: string;
+  assignments: { candidateAlias: string; roleAlias: string }[];
+}
+
+export interface ShareSafeExperimentAgreementV2 {
+  sharedAnchors: ShareSafeEvidenceAnchorV2[];
+  candidateSpecific: ShareSafeCandidateSpecificEvidenceV2[];
+  roleConflicts: ShareSafeRoleConflictV2[];
+}
+
+export interface ShareSafeHelpfulnessObservationV2 {
+  observationAlias: string;
+  candidateAlias: string;
+  dimension: HelpfulnessDimension;
+  score: number;
+  evidenceAliases: string[];
+}
+
+export interface ShareSafeExperimentDecisionV2 {
+  decisionAlias: string;
+  status: DecisionStatus;
+  revision: number;
+  predecessorRevision: number | null;
+  evidenceAliases: string[];
+}
+
+export interface ShareSafeGoldReferenceV2 {
+  goldAlias: string;
+  version: number;
+  predecessorGoldAlias: string | null;
+  acceptedDecisionAlias: string;
+  acceptedDecisionRevision: number;
+  evidenceAliases: string[];
+  expectedRelationships: { evidenceAlias: string; roleAlias: string }[];
+  helpfulnessDimensions: HelpfulnessDimension[];
+}
+
+export interface ShareSafeCandidateGoldAlignmentV2 {
+  candidateAlias: string;
+  status: CandidateGoldAlignmentV1["status"];
+  matchedEvidenceAliases: string[];
+  missingEvidenceAliases: string[];
+  extraEvidenceAliases: string[];
+  roleMismatches: { evidenceAlias: string; roleAlias: string }[];
+}
+
+export interface ExperimentReviewExportV2 {
+  schemaId: typeof EXPERIMENT_REVIEW_EXPORT_V2_SCHEMA_ID;
+  privacyClass: "share_safe";
+  packageAlias: string;
+  taskAlias: string;
+  snapshotAlias: string;
+  candidates: ShareSafeExperimentCandidateV2[];
+  agreement: ShareSafeExperimentAgreementV2;
+  observations: ShareSafeHelpfulnessObservationV2[];
+  decision: ShareSafeExperimentDecisionV2 | null;
+  gold: ShareSafeGoldReferenceV2 | null;
+  alignments: ShareSafeCandidateGoldAlignmentV2[];
+  omissions: {
+    modelLabelsIncluded: false;
+    participantIdentitiesIncluded: false;
+    freeTextIncluded: false;
+    privateContentIncluded: false;
+    correlatableMetadataIncluded: false;
+  };
+  caveats: ExperimentShareSafeCaveat[];
 }
 
 function assertLatency(path: string, value: ObservedLatencyV1): void {
@@ -329,6 +450,115 @@ const reviewExportShape: ObjectShape = {
   notes: f.req(f.arr(f.str)),
 };
 
+const shareSafeCandidateShape: ObjectShape = {
+  candidateAlias: f.req(f.str),
+  role: f.req(f.en(...CANDIDATE_ROLES)),
+  runStatus: f.req(f.en(...RUN_STATUSES)),
+  observedLatency: f.req(f.obj(unknownMeasurementShape)),
+  cost: f.req(f.obj(unknownMeasurementShape)),
+  usage: f.req(f.obj(unknownMeasurementShape)),
+  helpfulnessState: f.req(f.en(...HELPFULNESS_STATES)),
+  goldState: f.req(f.en(...GOLD_STATES)),
+};
+
+const shareSafeRoleAssignmentShape: ObjectShape = {
+  candidateAlias: f.req(f.str),
+  roleAlias: f.req(f.str),
+};
+
+const shareSafeAgreementShape: ObjectShape = {
+  sharedAnchors: f.req(
+    f.arr(
+      f.obj({
+        evidenceAlias: f.req(f.str),
+        roleAlias: f.req(f.str),
+        candidateAliases: f.req(f.arr(f.str)),
+      }),
+    ),
+  ),
+  candidateSpecific: f.req(
+    f.arr(
+      f.obj({
+        candidateAlias: f.req(f.str),
+        evidenceAliases: f.req(f.arr(f.str)),
+      }),
+    ),
+  ),
+  roleConflicts: f.req(
+    f.arr(
+      f.obj({
+        evidenceAlias: f.req(f.str),
+        assignments: f.req(f.arr(f.obj(shareSafeRoleAssignmentShape))),
+      }),
+    ),
+  ),
+};
+
+const shareSafeObservationShape: ObjectShape = {
+  observationAlias: f.req(f.str),
+  candidateAlias: f.req(f.str),
+  dimension: f.req(f.en(...HELPFULNESS_DIMENSIONS)),
+  score: f.req(f.u64),
+  evidenceAliases: f.req(f.arr(f.str)),
+};
+
+const shareSafeDecisionShape: ObjectShape = {
+  decisionAlias: f.req(f.str),
+  status: f.req(f.en(...DECISION_STATUSES)),
+  revision: f.req(f.u64),
+  predecessorRevision: f.nul(f.u64),
+  evidenceAliases: f.req(f.arr(f.str)),
+};
+
+const shareSafeRelationshipShape: ObjectShape = {
+  evidenceAlias: f.req(f.str),
+  roleAlias: f.req(f.str),
+};
+
+const shareSafeGoldShape: ObjectShape = {
+  goldAlias: f.req(f.str),
+  version: f.req(f.u64),
+  predecessorGoldAlias: f.nul(f.str),
+  acceptedDecisionAlias: f.req(f.str),
+  acceptedDecisionRevision: f.req(f.u64),
+  evidenceAliases: f.req(f.arr(f.str)),
+  expectedRelationships: f.req(f.arr(f.obj(shareSafeRelationshipShape))),
+  helpfulnessDimensions: f.req(f.arr(f.en(...HELPFULNESS_DIMENSIONS))),
+};
+
+const shareSafeAlignmentShape: ObjectShape = {
+  candidateAlias: f.req(f.str),
+  status: f.req(f.en(...GOLD_ALIGNMENT_STATUSES)),
+  matchedEvidenceAliases: f.req(f.arr(f.str)),
+  missingEvidenceAliases: f.req(f.arr(f.str)),
+  extraEvidenceAliases: f.req(f.arr(f.str)),
+  roleMismatches: f.req(f.arr(f.obj(shareSafeRelationshipShape))),
+};
+
+export const experimentReviewExportV2Shape: ObjectShape = {
+  schemaId: f.req(f.en(EXPERIMENT_REVIEW_EXPORT_V2_SCHEMA_ID)),
+  privacyClass: f.req(f.en("share_safe")),
+  packageAlias: f.req(f.str),
+  taskAlias: f.req(f.str),
+  snapshotAlias: f.req(f.str),
+  candidates: f.req(f.arr(f.obj(shareSafeCandidateShape))),
+  agreement: f.req(f.obj(shareSafeAgreementShape)),
+  observations: f.req(f.arr(f.obj(shareSafeObservationShape))),
+  decision: f.nul(f.obj(shareSafeDecisionShape)),
+  gold: f.nul(f.obj(shareSafeGoldShape)),
+  alignments: f.req(f.arr(f.obj(shareSafeAlignmentShape))),
+  omissions: f.req(
+    f.obj({
+      modelLabelsIncluded: f.req(f.bool),
+      participantIdentitiesIncluded: f.req(f.bool),
+      freeTextIncluded: f.req(f.bool),
+      privateContentIncluded: f.req(f.bool),
+      correlatableMetadataIncluded: f.req(f.bool),
+    }),
+  ),
+  caveats: f.req(f.arr(f.en(...EXPERIMENT_SHARE_SAFE_CAVEATS))),
+};
+
 function assertShareSafe(path: string, privacy: PrivacyClass): void {
   if (privacy !== "share_safe") {
     throw new ContractViolation(path, "experiment packages must be share_safe");
@@ -381,6 +611,7 @@ export function parseExperimentDecision(raw: unknown): ExperimentDecisionV1 {
   return row;
 }
 
+/** @deprecated Parse legacy records only. New exports must use v2. */
 export function parseExperimentReviewExport(raw: unknown): ExperimentReviewExportV1 {
   checkObject("$", reviewExportShape, raw);
   const row = raw as ExperimentReviewExportV1;
@@ -406,6 +637,114 @@ export function parseExperimentReviewExport(raw: unknown): ExperimentReviewExpor
       throw new ContractViolation(`$.observations[${i}].score`, "score must be 0..=3");
     }
   }
+  return row;
+}
+
+function assertAliasArray(path: string, values: string[], prefix: string): void {
+  values.forEach((value, index) => assertShareSafeAlias(`${path}[${index}]`, value, prefix));
+}
+
+function assertReviewV2Aliases(row: ExperimentReviewExportV2): void {
+  assertShareSafeAlias("$.packageAlias", row.packageAlias, "package");
+  assertShareSafeAlias("$.taskAlias", row.taskAlias, "task");
+  assertShareSafeAlias("$.snapshotAlias", row.snapshotAlias, "snapshot");
+  const candidateAliases = new Set<string>();
+  for (const [index, candidate] of row.candidates.entries()) {
+    const path = `$.candidates[${index}]`;
+    assertShareSafeAlias(`${path}.candidateAlias`, candidate.candidateAlias, "approach");
+    if (candidateAliases.has(candidate.candidateAlias)) {
+      throw new ContractViolation(`${path}.candidateAlias`, "duplicate candidate alias");
+    }
+    candidateAliases.add(candidate.candidateAlias);
+  }
+  if (candidateAliases.size === 0) {
+    throw new ContractViolation("$.candidates", "at least one candidate is required");
+  }
+  for (const [index, anchor] of row.agreement.sharedAnchors.entries()) {
+    const path = `$.agreement.sharedAnchors[${index}]`;
+    assertShareSafeAlias(`${path}.evidenceAlias`, anchor.evidenceAlias, "evidence");
+    assertShareSafeAlias(`${path}.roleAlias`, anchor.roleAlias, "role");
+    assertAliasArray(`${path}.candidateAliases`, anchor.candidateAliases, "approach");
+  }
+  for (const [index, candidate] of row.agreement.candidateSpecific.entries()) {
+    const path = `$.agreement.candidateSpecific[${index}]`;
+    assertShareSafeAlias(`${path}.candidateAlias`, candidate.candidateAlias, "approach");
+    assertAliasArray(`${path}.evidenceAliases`, candidate.evidenceAliases, "evidence");
+  }
+  for (const [index, conflict] of row.agreement.roleConflicts.entries()) {
+    const path = `$.agreement.roleConflicts[${index}]`;
+    assertShareSafeAlias(`${path}.evidenceAlias`, conflict.evidenceAlias, "evidence");
+    for (const [assignmentIndex, assignment] of conflict.assignments.entries()) {
+      const assignmentPath = `${path}.assignments[${assignmentIndex}]`;
+      assertShareSafeAlias(`${assignmentPath}.candidateAlias`, assignment.candidateAlias, "approach");
+      assertShareSafeAlias(`${assignmentPath}.roleAlias`, assignment.roleAlias, "role");
+    }
+  }
+  for (const [index, observation] of row.observations.entries()) {
+    const path = `$.observations[${index}]`;
+    assertShareSafeAlias(`${path}.observationAlias`, observation.observationAlias, "observation");
+    assertShareSafeAlias(`${path}.candidateAlias`, observation.candidateAlias, "approach");
+    assertAliasArray(`${path}.evidenceAliases`, observation.evidenceAliases, "evidence");
+    if (observation.score > 3) {
+      throw new ContractViolation(`${path}.score`, "score must be 0..=3");
+    }
+  }
+  if (row.decision) {
+    assertShareSafeAlias("$.decision.decisionAlias", row.decision.decisionAlias, "decision");
+    assertAliasArray("$.decision.evidenceAliases", row.decision.evidenceAliases, "evidence");
+    if (row.decision.revision < 1) {
+      throw new ContractViolation("$.decision.revision", "must be >= 1");
+    }
+  }
+  if (row.gold) {
+    assertShareSafeAlias("$.gold.goldAlias", row.gold.goldAlias, "gold");
+    if (row.gold.predecessorGoldAlias) {
+      assertShareSafeAlias(
+        "$.gold.predecessorGoldAlias",
+        row.gold.predecessorGoldAlias,
+        "gold",
+      );
+    }
+    assertShareSafeAlias(
+      "$.gold.acceptedDecisionAlias",
+      row.gold.acceptedDecisionAlias,
+      "decision",
+    );
+    assertAliasArray("$.gold.evidenceAliases", row.gold.evidenceAliases, "evidence");
+    for (const [index, relationship] of row.gold.expectedRelationships.entries()) {
+      const path = `$.gold.expectedRelationships[${index}]`;
+      assertShareSafeAlias(`${path}.evidenceAlias`, relationship.evidenceAlias, "evidence");
+      assertShareSafeAlias(`${path}.roleAlias`, relationship.roleAlias, "role");
+    }
+    if (row.gold.version < 1 || row.gold.acceptedDecisionRevision < 1) {
+      throw new ContractViolation("$.gold", "gold version and accepted revision must be >= 1");
+    }
+  }
+  for (const [index, alignment] of row.alignments.entries()) {
+    const path = `$.alignments[${index}]`;
+    assertShareSafeAlias(`${path}.candidateAlias`, alignment.candidateAlias, "approach");
+    assertAliasArray(`${path}.matchedEvidenceAliases`, alignment.matchedEvidenceAliases, "evidence");
+    assertAliasArray(`${path}.missingEvidenceAliases`, alignment.missingEvidenceAliases, "evidence");
+    assertAliasArray(`${path}.extraEvidenceAliases`, alignment.extraEvidenceAliases, "evidence");
+    for (const [mismatchIndex, mismatch] of alignment.roleMismatches.entries()) {
+      const mismatchPath = `${path}.roleMismatches[${mismatchIndex}]`;
+      assertShareSafeAlias(`${mismatchPath}.evidenceAlias`, mismatch.evidenceAlias, "evidence");
+      assertShareSafeAlias(`${mismatchPath}.roleAlias`, mismatch.roleAlias, "role");
+    }
+  }
+}
+
+export function parseExperimentReviewExportV2(raw: unknown): ExperimentReviewExportV2 {
+  assertShareSafePrivacy(raw);
+  checkObject("$", experimentReviewExportV2Shape, raw);
+  const row = raw as ExperimentReviewExportV2;
+  assertReviewV2Aliases(row);
+  for (const [key, included] of Object.entries(row.omissions)) {
+    if (included !== false) {
+      throw new ContractViolation(`$.omissions.${key}`, "share-safe v2 requires explicit omission");
+    }
+  }
+  assertExactCaveats("$.caveats", row.caveats, EXPERIMENT_SHARE_SAFE_CAVEATS);
   return row;
 }
 

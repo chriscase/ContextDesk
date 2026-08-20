@@ -1,0 +1,195 @@
+{
+  "schemaId": "cd-collab.experiment_lab_export.v2",
+  "privacyClass": "share_safe",
+  "review": {
+    "schemaId": "cd-collab.experiment_review_export.v2",
+    "privacyClass": "share_safe",
+    "packageAlias": "package-1",
+    "taskAlias": "task-1",
+    "snapshotAlias": "snapshot-1",
+    "candidates": [
+      {
+        "candidateAlias": "approach-1",
+        "role": "single",
+        "runStatus": "completed",
+        "observedLatency": { "status": "unknown" },
+        "cost": { "status": "unknown" },
+        "usage": { "status": "unknown" },
+        "helpfulnessState": "observed",
+        "goldState": "present"
+      }
+    ],
+    "agreement": {
+      "sharedAnchors": [
+        {
+          "evidenceAlias": "evidence-1",
+          "roleAlias": "role-1",
+          "candidateAliases": ["approach-1"]
+        }
+      ],
+      "candidateSpecific": [
+        { "candidateAlias": "approach-1", "evidenceAliases": ["evidence-2"] }
+      ],
+      "roleConflicts": [
+        {
+          "evidenceAlias": "evidence-2",
+          "assignments": [
+            { "candidateAlias": "approach-1", "roleAlias": "role-2" }
+          ]
+        }
+      ]
+    },
+    "observations": [
+      {
+        "observationAlias": "observation-1",
+        "candidateAlias": "approach-1",
+        "dimension": "evidence_support",
+        "score": 3,
+        "evidenceAliases": ["evidence-1"]
+      }
+    ],
+    "decision": {
+      "decisionAlias": "decision-1",
+      "status": "accepted",
+      "revision": 2,
+      "predecessorRevision": 1,
+      "evidenceAliases": ["evidence-1", "evidence-2"]
+    },
+    "gold": {
+      "goldAlias": "gold-1",
+      "version": 1,
+      "predecessorGoldAlias": null,
+      "acceptedDecisionAlias": "decision-1",
+      "acceptedDecisionRevision": 2,
+      "evidenceAliases": ["evidence-1", "evidence-2"],
+      "expectedRelationships": [
+        { "evidenceAlias": "evidence-2", "roleAlias": "role-2" }
+      ],
+      "helpfulnessDimensions": ["evidence_support"]
+    },
+    "alignments": [
+      {
+        "candidateAlias": "approach-1",
+        "status": "aligned",
+        "matchedEvidenceAliases": ["evidence-1", "evidence-2"],
+        "missingEvidenceAliases": [],
+        "extraEvidenceAliases": [],
+        "roleMismatches": []
+      }
+    ],
+    "omissions": {
+      "modelLabelsIncluded": false,
+      "participantIdentitiesIncluded": false,
+      "freeTextIncluded": false,
+      "privateContentIncluded": false,
+      "correlatableMetadataIncluded": false
+    },
+    "caveats": [
+      "agreement_not_correctness",
+      "gold_is_human_benchmark",
+      "gold_alignment_not_correctness"
+    ]
+  },
+  "traces": [
+    {
+      "schemaId": "cd-collab.interaction_trace_share_safe.v2",
+      "traceAlias": "trace-1",
+      "candidateAlias": "approach-1",
+      "sourceKind": "programmatic",
+      "completeness": "exact",
+      "privacyClass": "share_safe",
+      "events": [
+        {
+          "eventAlias": "event-1",
+          "sequence": 1,
+          "kind": "evidence_anchor",
+          "actor": "assistant",
+          "roleAlias": "role-1",
+          "parentEventAlias": null,
+          "evidenceAliases": ["evidence-1"],
+          "unknowns": ["timestamp", "tool_name"]
+        }
+      ],
+      "efficiency": {
+        "turnCount": { "status": "observed", "count": 1 },
+        "evidenceAcquisitionSteps": { "status": "observed", "count": 1 },
+        "latency": { "status": "unknown" },
+        "cost": { "status": "unknown" },
+        "providerCalls": { "status": "observed", "count": 1 }
+      },
+      "unknowns": ["tools"],
+      "excerptsIncluded": false,
+      "caveats": [
+        "trace_unknown_stays_unknown",
+        "textual_similarity_not_winner"
+      ]
+    }
+  ],
+  "comparison": {
+    "schemaId": "cd-collab.strategy_comparison.v2",
+    "packageAlias": "package-1",
+    "questionPaths": [
+      {
+        "pathAlias": "question-1",
+        "candidateAliases": ["approach-1"],
+        "eventAliases": ["event-1"]
+      }
+    ],
+    "sharedEvidence": [
+      {
+        "evidenceAlias": "evidence-1",
+        "candidateAliases": ["approach-1"],
+        "firstSequence": [
+          { "candidateAlias": "approach-1", "sequence": 1 }
+        ]
+      }
+    ],
+    "uniqueEvidence": [
+      { "candidateAlias": "approach-1", "evidenceAliases": ["evidence-2"] }
+    ],
+    "discoveryOrder": [
+      { "evidenceAlias": "evidence-1", "candidateAlias": "approach-1", "sequence": 1 }
+    ],
+    "roleConflicts": [
+      {
+        "evidenceAlias": "evidence-2",
+        "assignments": [
+          { "candidateAlias": "approach-1", "roleAlias": "role-2" }
+        ]
+      }
+    ],
+    "convergence": [
+      { "evidenceAlias": "evidence-1", "candidateAliases": ["approach-1"], "inGold": true }
+    ],
+    "divergence": [
+      { "kind": "evidence", "candidateAliases": ["approach-1"] }
+    ],
+    "efficiency": [
+      {
+        "candidateAlias": "approach-1",
+        "efficiency": {
+          "turnCount": { "status": "observed", "count": 1 },
+          "evidenceAcquisitionSteps": { "status": "observed", "count": 1 },
+          "latency": { "status": "unknown" },
+          "cost": { "status": "unknown" },
+          "providerCalls": { "status": "observed", "count": 1 }
+        }
+      }
+    ],
+    "gold": {
+      "status": "present",
+      "version": 1,
+      "acceptedDecisionAlias": "decision-1"
+    },
+    "helpfulness": [
+      { "candidateAlias": "approach-1", "state": "observed" }
+    ],
+    "caveats": [
+      "agreement_not_correctness",
+      "gold_is_human_benchmark",
+      "gold_alignment_not_correctness",
+      "trace_unknown_stays_unknown",
+      "textual_similarity_not_winner"
+    ]
+  }
+}

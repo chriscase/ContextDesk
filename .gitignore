@@ -91,6 +91,8 @@ lcov.info
 tarpaulin-report.html
 **/profraw
 **/profdata
+collab/.demo/
+collab/web/dist-demo/
 
 # Logs
 *.log
