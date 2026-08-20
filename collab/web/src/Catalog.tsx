@@ -23,7 +23,8 @@ export function Catalog(props: { canLead: boolean }) {
 
   async function createSource(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = new FormData(form);
     await fetch("/api/catalog/sources", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -33,7 +34,7 @@ export function Catalog(props: { canLead: boolean }) {
         description: String(data.get("description") ?? ""),
       }),
     });
-    event.currentTarget.reset();
+    form.reset();
     await refresh();
   }
 

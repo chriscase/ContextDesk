@@ -116,7 +116,8 @@ export function Cases(props: {
   async function importRun(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!active) return;
-    const data = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = new FormData(form);
     const response = await fetch(`/api/cases/${active}/imports`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -133,7 +134,7 @@ export function Cases(props: {
       }),
     });
     if (response.ok) window.dispatchEvent(new Event("contextdesk:external-run-imported"));
-    event.currentTarget.reset();
+    form.reset();
     await loadTimeline(active);
   }
 
@@ -157,7 +158,8 @@ export function Cases(props: {
   async function addNote(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!active) return;
-    const data = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = new FormData(form);
     const body = String(data.get("body") ?? "");
     const kind = String(data.get("kind") ?? "note");
     await fetch(`/api/cases/${active}/contributions`, {
@@ -165,7 +167,7 @@ export function Cases(props: {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ kind, body }),
     });
-    event.currentTarget.reset();
+    form.reset();
     await loadTimeline(active);
   }
 
