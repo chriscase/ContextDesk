@@ -259,6 +259,9 @@ describe("case list and view", () => {
     render(<Cases roles={["contributor"]} />);
     fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
     expect(await screen.findByText(/#1 case_created/)).toBeTruthy();
+    expect(
+      await screen.findByRole("option", { name: "Fixture chat assistant (external-tool)" }),
+    ).toBeTruthy();
 
     fireEvent.change(screen.getByPlaceholderText("Output"), {
       target: { value: "queue depth is the root cause" },
