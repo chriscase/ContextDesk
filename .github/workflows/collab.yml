@@ -1,5 +1,7 @@
 # Own CI lane for the collab/ npm workspace (#884).
 # Does not modify or depend on rust / desktop / packages jobs in ci.yml.
+# collab-browser is a Playwright qualification of the shipped web shell; it
+# does not require Postgres or OpenLDAP.
 name: collab
 
 on:
@@ -113,3 +115,34 @@ jobs:
       - name: migration dry-run
         run: npm run migrate:dry-run
       - run: npm run build
+
+  collab-browser:
+    name: collab war-room browser qualification
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: collab
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: collab/package-lock.json
+      - run: npm ci
+      - run: npm run build -w @cd-collab/contracts
+      - run: npm run build -w @cd-collab/web
+      - name: install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+        working-directory: collab/e2e
+      - run: npm run typecheck -w @cd-collab/e2e
+      - run: npm run test -w @cd-collab/e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: collab-e2e-playwright
+          path: |
+            collab/e2e/playwright-report
+            collab/e2e/test-results
+          if-no-files-found: ignore
+

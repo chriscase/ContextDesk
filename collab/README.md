@@ -260,5 +260,9 @@ SQLite file only when you intentionally want a fresh local workspace.
 ## Scripts
 
 From `collab/`: `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`,
-`npm run demo`, `npm run demo:static`, `npm run demo:check`, `npm run migrate`,
-`npm run migrate:down`, `npm run migrate:dry-run`.
+`npm run demo`, `npm run demo:static`, `npm run demo:check`, `npm run e2e`,
+`npm run migrate`, `npm run migrate:down`, `npm run migrate:dry-run`.
+
+`npm run e2e` is the Playwright war-room qualification against a
+`MapAuthAdapter` fixture server (no LDAP, no Postgres). See
+[`docs/testing/COLLAB_WAR_ROOM_BROWSER_QUALIFICATION_V1.md`](../docs/testing/COLLAB_WAR_ROOM_BROWSER_QUALIFICATION_V1.md).

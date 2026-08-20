@@ -1,0 +1,5 @@
+External chat triage A (plain text paste)
+
+The mailer worker timed out after 30s. Shared evidence: timeout id=syn-1 is in the worker log.
+Unique claim: queue depth is the root cause.
+Question path: did the pool exhaust before the timeout?

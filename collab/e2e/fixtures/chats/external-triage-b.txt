@@ -1,0 +1,5 @@
+External chat triage B (plain text paste)
+
+Disagree with queue-depth as root cause. Shared evidence: timeout id=syn-1.
+Unique claim: DNS NXDOMAIN on the resolver path, not the queue.
+Question path: was the resolver the first failure?
