@@ -1,0 +1,387 @@
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { TriageRunPanel } from "./TriageRunPanel.js";
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+function response(body: unknown, ok = true) {
+  return { ok, json: async () => body };
+}
+
+describe("TriageRunPanel", () => {
+  it("presents a snapshot-bound comparison and keeps provider output claims explicit", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) {
+          return response({
+            snapshots: [
+              {
+                id: "snapshot-1",
+                fingerprint: "a".repeat(64),
+                evidence: [{ evidenceId: "artifact-1" }],
+                createdBy: "lead",
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/evidence")) {
+          return response({
+            artifacts: [
+              { id: "artifact-1", kind: "log", filename: "checkout.log", verificationStatus: "verified" },
+            ],
+          });
+        }
+        return response({
+          jobs: [
+            {
+              id: "job-1",
+              snapshotId: "snapshot-1",
+              snapshotFingerprint: "a".repeat(64),
+              requestFingerprint: "b".repeat(64),
+              request: { strategyId: "contextdesk.standard", question: "What happened?", taskFingerprint: "task-1", mode: "deterministic_mock" },
+              status: "completed",
+              candidates: [
+                {
+                  candidateId: "qwen-reviewer",
+                  role: "reviewer",
+                  provider: "synthetic",
+                  profileId: null,
+                  model: "qwen-3.6-27b",
+                  version: null,
+                  status: "completed",
+                  benchmarkRunId: null,
+                  outputHash: "c".repeat(64),
+                  summary: "Inspect the frozen evidence before changing the mitigation.",
+                  evidenceRefs: ["artifact-1"],
+                  unknowns: ["usage", "cost"],
+                  errorCode: null,
+                  privacyClass: "owner_only",
+                },
+              ],
+              sameSnapshot: true,
+              agreementNotice: "Agreement is not proof of correctness.",
+              createdAt: "2026-08-20T00:00:00.000Z",
+              startedAt: "2026-08-20T00:00:00.000Z",
+              finishedAt: "2026-08-20T00:00:00.010Z",
+              cancelRequestedAt: null,
+            },
+          ],
+        });
+      }),
+    );
+
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    expect(await screen.findByRole("heading", { name: "Run history" })).toBeTruthy();
+    expect(screen.getByText("Start a snapshot-bound comparison")).toBeTruthy();
+    expect(screen.getAllByText("qwen-3.6-27b", { exact: false }).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("reviewer · settled")).toBeTruthy();
+    expect(screen.getByText("Lanes settle independently; final same-snapshot proof waits for all lanes.")).toBeTruthy();
+    expect(screen.getByText(/Same frozen snapshot/)).toBeTruthy();
+    expect(screen.getByText("checkout.log")).toBeTruthy();
+    expect(screen.getByText(/Agreement is not proof of correctness/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Use this setup again" })).toBeTruthy();
+    expect(screen.queryByText(/schemaId/)).toBeNull();
+  });
+
+  it("keeps read-only history visible without launch or cancellation controls", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        if (String(input).endsWith("/snapshots")) return response({ snapshots: [] });
+        return response({ jobs: [] });
+      }),
+    );
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    expect(await screen.findByText(/No triage runs yet/)).toBeTruthy();
+    expect(screen.queryByText("Start a snapshot-bound comparison")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Run synthetic comparison/ })).toBeNull();
+  });
+
+  it("configures each gateway lane with its own host profile", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/snapshots")) {
+        return response({
+          snapshots: [{ id: "snapshot-1", fingerprint: "a".repeat(64), evidence: [], createdBy: "lead" }],
+        });
+      }
+      if (url.endsWith("/evidence")) return response({ artifacts: [] });
+      if (url.endsWith("/imports")) return response({ runs: [] });
+      if (url.endsWith("/api/triage-profiles")) {
+        return response({
+          profiles: [
+            { id: "profile:qwen", label: "Qwen gateway", provider: "openai-compatible" },
+            { id: "profile:gpt", label: "GPT gateway", provider: "openai-compatible" },
+          ],
+        });
+      }
+      if (init?.method === "POST") return response({ id: "job-1" });
+      return response({ jobs: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    await screen.findByRole("heading", { name: "Run history" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Execution mode" }), { target: { value: "gateway" } });
+    expect((screen.getByRole("combobox", { name: "Lane concurrency" }) as HTMLSelectElement).value).toBe("2");
+    fireEvent.change(screen.getByRole("combobox", { name: "Lane concurrency" }), { target: { value: "3" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "qwen-3.6-27b host connector profile" }), { target: { value: "profile:qwen" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "gpt-oss-120b host connector profile" }), { target: { value: "profile:gpt" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "ministral-3-14b-instruct-2512 host connector profile" }), { target: { value: "profile:qwen" } });
+    fireEvent.click(screen.getByRole("button", { name: "Run gateway comparison" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/cases/case-1/triage-runs",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"profileId":"profile:qwen"'),
+      }),
+    ));
+    const request = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")?.[1];
+    expect(request?.body).toContain('"profileId":"profile:gpt"');
+    expect(request?.body).toContain('"concurrency":3');
+  });
+
+  it("restores gateway lane concurrency when reusing a run setup", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) {
+          return response({ snapshots: [{ id: "snapshot-1", fingerprint: "a".repeat(64), evidence: [], createdBy: "lead" }] });
+        }
+        if (url.endsWith("/evidence")) return response({ artifacts: [] });
+        if (url.endsWith("/imports")) return response({ runs: [] });
+        if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+        if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: true });
+        return response({
+          jobs: [{
+            id: "job-1",
+            snapshotId: "snapshot-1",
+            snapshotFingerprint: "a".repeat(64),
+            requestFingerprint: "b".repeat(64),
+            request: {
+              strategyId: "contextdesk.standard",
+              question: "What happened?",
+              taskFingerprint: "task-1",
+              mode: "gateway",
+              concurrency: 4,
+              candidates: [
+                { candidateId: "qwen-reviewer", role: "reviewer", provider: "openai-compatible", profileId: "profile:qwen", model: "qwen-3.6-27b", version: null },
+                { candidateId: "gpt-oss-contributor", role: "contributor", provider: "openai-compatible", profileId: "profile:gpt", model: "gpt-oss-120b", version: null },
+              ],
+            },
+            status: "completed",
+            candidates: [],
+            sameSnapshot: true,
+            agreementNotice: "Agreement is not proof of correctness.",
+            createdAt: "2026-08-20T00:00:00.000Z",
+            startedAt: "2026-08-20T00:00:00.000Z",
+            finishedAt: "2026-08-20T00:00:00.010Z",
+            cancelRequestedAt: null,
+          }],
+        });
+      }),
+    );
+
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    vi.stubGlobal("scrollTo", vi.fn());
+    fireEvent.click(await screen.findByRole("button", { name: "Use this setup again" }));
+
+    expect((await screen.findByRole("combobox", { name: "Lane concurrency" }) as HTMLSelectElement).value).toBe("4");
+  });
+
+  it("shows each candidate's independent queued, running, or settled lifecycle", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) return response({ snapshots: [] });
+        if (url.endsWith("/evidence")) return response({ artifacts: [] });
+        if (url.endsWith("/imports")) return response({ runs: [] });
+        if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: true });
+        if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+        return response({
+          jobs: [{
+            id: "job-running",
+            snapshotId: "snapshot-1",
+            snapshotFingerprint: "a".repeat(64),
+            requestFingerprint: "b".repeat(64),
+            request: {
+              strategyId: "contextdesk.standard",
+              question: "What happened?",
+              taskFingerprint: "task-1",
+              mode: "gateway",
+              candidates: [],
+            },
+            status: "running",
+            candidates: [
+              {
+                candidateId: "queued-lane",
+                role: "reviewer",
+                provider: "synthetic",
+                profileId: null,
+                model: "queued-model",
+                version: null,
+                status: "queued",
+                benchmarkRunId: null,
+                outputHash: null,
+                summary: null,
+                evidenceRefs: [],
+                unknowns: [],
+                errorCode: null,
+                privacyClass: "owner_only",
+              },
+              {
+                candidateId: "running-lane",
+                role: "contributor",
+                provider: "synthetic",
+                profileId: null,
+                model: "running-model",
+                version: null,
+                status: "running",
+                benchmarkRunId: null,
+                outputHash: null,
+                summary: null,
+                evidenceRefs: [],
+                unknowns: [],
+                errorCode: null,
+                privacyClass: "owner_only",
+              },
+              {
+                candidateId: "settled-lane",
+                role: "challenger",
+                provider: "synthetic",
+                profileId: null,
+                model: "settled-model",
+                version: null,
+                status: "completed",
+                benchmarkRunId: null,
+                outputHash: "c".repeat(64),
+                summary: "Settled result.",
+                evidenceRefs: [],
+                unknowns: [],
+                errorCode: null,
+                privacyClass: "owner_only",
+              },
+            ],
+            sameSnapshot: null,
+            agreementNotice: "Agreement is not proof of correctness.",
+            createdAt: "2026-08-20T00:00:00.000Z",
+            startedAt: "2026-08-20T00:00:00.000Z",
+            finishedAt: null,
+            cancelRequestedAt: null,
+          }],
+        });
+      }),
+    );
+
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    expect(await screen.findByText("reviewer · queued")).toBeTruthy();
+    expect(screen.getByText("contributor · running")).toBeTruthy();
+    expect(screen.getByText("challenger · settled")).toBeTruthy();
+  });
+
+  it("shows when gateway execution is unavailable instead of offering a doomed launch", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) return response({ snapshots: [{ id: "snapshot-1", fingerprint: "a".repeat(64), evidence: [], createdBy: "lead" }] });
+        if (url.endsWith("/evidence")) return response({ artifacts: [] });
+        if (url.endsWith("/imports")) return response({ runs: [] });
+        if (url.endsWith("/api/triage-capabilities")) {
+          return response({
+            schemaId: "cd-collab.triage_job_capabilities.v1",
+            syntheticAvailable: true,
+            gatewayAvailable: false,
+            gatewayMinCandidates: 2,
+            gatewayMaxCandidates: 16,
+            profileCatalogConfigured: false,
+            profileCount: 0,
+          });
+        }
+        if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+        return response({ jobs: [] });
+      }),
+    );
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    await screen.findByRole("heading", { name: "Run history" });
+    expect((screen.getByRole("option", { name: "Gateway unavailable on this host" }) as HTMLOptionElement).disabled).toBe(true);
+  });
+
+  it("hands a completed or partial connected run to Experiment Lab with an optional chat run", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/snapshots")) return response({ snapshots: [] });
+      if (url.endsWith("/evidence")) return response({ artifacts: [] });
+      if (url.endsWith("/imports")) {
+        return response({
+          runs: [
+            {
+              id: "external-chat-1",
+              promptText: null,
+              promptCompleteness: "unknown",
+              importerUsername: "reviewer",
+              operatorUsername: "operator",
+              snapshotBinding: null,
+              evidenceVisibility: "unknown",
+              corroborationState: "unverified",
+            },
+          ],
+        });
+      }
+      if (init?.method === "POST" && url.endsWith("/experiments/from-triage/job-partial")) {
+        return response({ id: "experiment-handoff-1" });
+      }
+      return response({
+        jobs: [
+          {
+            id: "job-partial",
+            snapshotId: "snapshot-1",
+            snapshotFingerprint: "a".repeat(64),
+            requestFingerprint: "b".repeat(64),
+            request: {
+              strategyId: "contextdesk.standard",
+              question: "What happened?",
+              taskFingerprint: "task-1",
+              mode: "gateway",
+              candidates: [],
+            },
+            status: "partial",
+            candidates: [],
+            sameSnapshot: true,
+            agreementNotice: "Agreement is not proof of correctness.",
+            createdAt: "2026-08-20T00:00:00.000Z",
+            startedAt: "2026-08-20T00:00:00.000Z",
+            finishedAt: "2026-08-20T00:00:00.010Z",
+            cancelRequestedAt: null,
+          },
+        ],
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    expect(await screen.findByRole("button", { name: "Review in Experiment Lab" })).toBeTruthy();
+    const selector = screen.getByRole("combobox", { name: "External chat run to compare" });
+    expect(screen.getByRole("option", { name: /operator · unknown prompt/ })).toBeTruthy();
+
+    fireEvent.change(selector, { target: { value: "external-chat-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review in Experiment Lab" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/cases/case-1/experiments/from-triage/job-partial",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ externalRunId: "external-chat-1" }),
+      }),
+    ));
+    expect((await screen.findByRole("status")).textContent).toMatch(/Experiment .* is ready in Experiment Lab/);
+  });
+});
