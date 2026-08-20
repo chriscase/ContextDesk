@@ -25,6 +25,32 @@ Present the seeded case in this order:
 
 The seeded model labels are synthetic fixtures: `qwen-3.6-27b`, `gpt-oss-120b`, and `ministral-14b`. There are no provider calls, credentials, private endpoints, or live employer outputs in this path.
 
+## Connected ContextDesk comparison rehearsal
+
+After the synthetic story is understood, the same War-Room can launch a real
+ContextDesk comparison from a frozen case snapshot. This is deliberately a
+separate rehearsal from the seeded demo:
+
+1. Upload or create the case evidence in the Evidence board, then freeze a snapshot. Browser uploads are limited to 1 MB and still pass through the server's media/privacy policy; contributors may upload, while a case lead freezes the selected evidence.
+2. In `Start a snapshot-bound comparison`, choose `Configured gateway`.
+3. Select at least two configured host profiles, one per model lane. The UI sends
+   only profile identifiers; endpoints and credentials remain on the host bridge.
+4. Choose lane concurrency. The default is two lanes, with a published ceiling of
+   four; use one for a rate-limited gateway.
+5. Watch the run history: lanes remain `queued` until admitted, become `running`
+   independently, and settle as each host result is durably accepted. The final
+   same-snapshot proof is shown only after the host returns its complete envelope.
+6. Choose `Review in Experiment Lab` and optionally select a previously imported
+   chat run. Different questions and missing transcript structure remain explicit
+   unknowns; the comparison does not pretend that chat and programmatic runs had
+   identical paths.
+
+The host bridge emits only bounded, identity-safe lifecycle progress. It never
+streams prompts, raw provider output, credentials, endpoints, request IDs, or
+unvalidated summaries to the web UI. If a gateway is not configured, use the
+synthetic path or the read-only fallback above; do not paste gateway secrets into
+the browser or repository.
+
 ## Fast, read-only fallback
 
 If a local port, database, or directory service is unavailable:

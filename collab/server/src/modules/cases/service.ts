@@ -3,6 +3,7 @@ import {
   ARTIFACT_SCHEMA_ID,
   CASE_SCHEMA_ID,
   CONTRIBUTION_SCHEMA_ID,
+  snapshotFingerprint,
   type ArtifactKind,
   type ArtifactV1,
   type CaseSeverity,
@@ -11,6 +12,7 @@ import {
   type ContributionV1,
   type HypothesisStatus,
   type PrivacyClass,
+  type SnapshotV1,
 } from "@cd-collab/contracts";
 import type { EvidenceStore } from "../../evidence/store.js";
 import type { AuditStore } from "../audit/index.js";
@@ -23,12 +25,14 @@ import {
 } from "../contributions/index.js";
 import { assertUploadAllowed } from "../evidence/index.js";
 import { LegalHoldError, assertCanTombstone, visibleBody } from "../provenance/index.js";
+import { deriveCaseBoard, type AcceptedDecisionBoardInput } from "./board.js";
 import {
   MemoryCaseStore,
   type Actor,
   type ArtifactRow,
   type CaseStore,
   type RevisionRow,
+  type SnapshotRow,
   type TimelineInsert,
   type TimelineRow,
 } from "./store.js";
@@ -194,6 +198,120 @@ export class CaseService {
   async listArtifacts(caseId: string, actor: Actor, isAdmin: boolean): Promise<ArtifactV1[]> {
     if (!(await this.getCase(caseId, actor, isAdmin))) return [];
     return (await this.store.listArtifactsByCase(caseId)).map((row) => this.toArtifact(row));
+  }
+
+  async listSnapshots(caseId: string, actor: Actor, isAdmin: boolean): Promise<SnapshotV1[]> {
+    if (!(await this.getCase(caseId, actor, isAdmin))) return [];
+    return this.store.listSnapshotsByCase(caseId);
+  }
+
+  async createSnapshot(
+    caseId: string,
+    actor: Actor,
+    input: {
+      evidenceIds: string[];
+      visibility?: PrivacyClass;
+      protocolVersion?: string;
+      clientTime?: string;
+    },
+    origin: string,
+  ): Promise<SnapshotV1> {
+    await this.requireCase(caseId);
+    const evidenceIds = input.evidenceIds;
+    if (new Set(evidenceIds).size !== evidenceIds.length) {
+      throw new Error("snapshot evidence ids must be unique");
+    }
+    const artifacts = await this.store.listArtifactsByCase(caseId);
+    const byId = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
+    const selected = evidenceIds.map((id, ordinal) => {
+      const artifact = byId.get(id);
+      if (!artifact) throw new Error("evidence not found");
+      return {
+        evidenceId: artifact.id,
+        ordinal,
+        contentHash: artifact.contentHash,
+        expectedHash: artifact.expectedHash,
+        verificationStatus: artifact.verificationStatus,
+        privacyClass: artifact.privacyClass,
+      };
+    });
+    const existing = await this.store.listSnapshotsByCase(caseId);
+    const parentSnapshotId = existing.at(-1)?.id ?? null;
+    const visibility = input.visibility ?? "owner_only";
+    if (visibility === "share_safe" && selected.some((item) => item.privacyClass !== "share_safe")) {
+      throw new Error("share-safe snapshot cannot include owner-only evidence");
+    }
+    const protocolVersion = input.protocolVersion ?? "cd-collab.snapshot.v1";
+    const fingerprint = snapshotFingerprint({
+      parentSnapshotId,
+      evidence: selected,
+      visibility,
+      protocolVersion,
+    });
+    const row: SnapshotRow = {
+      schemaId: "cd-collab.snapshot.v1",
+      id: randomUUID(),
+      caseId,
+      fingerprint,
+      parentSnapshotId,
+      evidence: selected,
+      visibility,
+      protocolVersion,
+      fairnessClass: "same_snapshot",
+      status: "frozen",
+      createdAt: new Date().toISOString(),
+      createdBy: actor.id,
+    };
+    await this.store.insertSnapshot(row);
+    await this.store.appendTimeline(caseId, {
+      kind: "snapshot_frozen",
+      actor,
+      targetId: row.id,
+      clientTime: input.clientTime ?? null,
+      payload: {
+        fingerprint,
+        parentSnapshotId,
+        evidenceCount: selected.length,
+        visibility,
+      },
+    });
+    await this.audit.append({
+      identity: actor.id,
+      action: "snapshot_freeze",
+      target: row.id,
+      origin,
+      outcome: "success",
+    });
+    return row;
+  }
+
+  async getCaseBoard(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    snapshotId?: string,
+    acceptedDecision?: AcceptedDecisionBoardInput | null,
+  ) {
+    if (!(await this.getCase(caseId, actor, isAdmin))) return null;
+    const snapshots = await this.store.listSnapshotsByCase(caseId);
+    const snapshot = snapshotId
+      ? await this.store.getSnapshot(snapshotId)
+      : snapshots.at(-1) ?? null;
+    if (snapshotId && !snapshot) throw new Error("snapshot not found");
+    if (snapshot && snapshot.caseId !== caseId) throw new Error("snapshot not found");
+    const selectedIds = snapshot ? new Set(snapshot.evidence.map((item) => item.evidenceId)) : null;
+    const artifacts = (await this.store.listArtifactsByCase(caseId))
+      .filter((artifact) => !selectedIds || selectedIds.has(artifact.id))
+      .map((row) => this.toArtifact(row));
+    const contributions = await this.listContributions(caseId, actor, isAdmin);
+    return deriveCaseBoard({
+      caseId,
+      snapshotId: snapshot?.id ?? null,
+      generatedAt: new Date().toISOString(),
+      artifacts,
+      contributions,
+      ...(acceptedDecision === undefined ? {} : { acceptedDecision }),
+    });
   }
 
   async addContribution(
@@ -439,6 +557,7 @@ export class CaseService {
       if (!(await this.evidence.verify(meta.hash))) {
         throw new Error("hash verification failed after storage");
       }
+      verificationStatus = "verified";
     }
 
     const summaryInput: {

@@ -15,6 +15,11 @@ export function briefMarkdown(brief: BriefV1): string {
   lines.push(`- status: ${brief.header.status}`);
   lines.push(`- legal hold: ${brief.header.legalHold ? "yes" : "no"}`);
   lines.push(`- retention: ${brief.header.retentionClass}`);
+  if (brief.memory) {
+    lines.push(`- latest snapshot: ${brief.memory.latestSnapshotLabel ?? "none"}`);
+    lines.push(`- snapshot lineage depth: ${brief.memory.lineageDepth}`);
+    lines.push(`- snapshot evidence: ${brief.memory.evidenceCount}`);
+  }
   lines.push("");
   lines.push("## Timeline digest");
   if (brief.timeline.length === 0) lines.push("- (none)");
@@ -22,6 +27,16 @@ export function briefMarkdown(brief: BriefV1): string {
     lines.push(
       `- #${ev.seq} ${ev.kind} · ${ev.actorLabel}${ev.targetId ? ` · ${ev.targetId}` : ""}`,
     );
+  }
+  if (brief.memory) {
+    lines.push("");
+    lines.push("## Case memory summary");
+    lines.push(`- known: ${brief.memory.boardCounts.known}`);
+    lines.push(`- unknown: ${brief.memory.boardCounts.unknown}`);
+    lines.push(`- agreed: ${brief.memory.boardCounts.agreed}`);
+    lines.push(`- disputed: ${brief.memory.boardCounts.disputed}`);
+    lines.push(`- newly concluded: ${brief.memory.boardCounts.newlyConcluded}`);
+    lines.push(`- ${brief.memory.agreementNotice}`);
   }
   lines.push("");
   lines.push("## Hypotheses");

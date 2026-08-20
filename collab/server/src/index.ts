@@ -22,6 +22,12 @@ import { CaseService, PgCaseStore } from "./modules/cases/index.js";
 import { ExportService, loadExportPrivacyConfig } from "./modules/export/index.js";
 import { ImportService, PgRunStore } from "./modules/import/index.js";
 import { ExperimentService, PgExperimentStore } from "./modules/experiments/index.js";
+import {
+  PgTriageJobStore,
+  parseTriageProfileCatalog,
+  RustBridgeTriageExecutor,
+  TriageRunService,
+} from "./modules/triage-runs/index.js";
 
 async function main(): Promise<void> {
   const config = loadRuntimeConfig();
@@ -54,6 +60,27 @@ async function main(): Promise<void> {
     audit,
     experiments: new PgExperimentStore(pool),
   });
+  const triageRuns = new TriageRunService({
+    cases: domain,
+    audit,
+    jobs: new PgTriageJobStore(pool),
+    ...(process.env.COLLAB_TRIAGE_RUNNER?.trim()
+      ? {
+          gatewayExecutor: new RustBridgeTriageExecutor({
+            command: process.env.COLLAB_TRIAGE_RUNNER.trim(),
+            ...(process.env.COLLAB_TRIAGE_LIBRARY?.trim()
+              ? { library: process.env.COLLAB_TRIAGE_LIBRARY.trim() }
+              : {}),
+            ...(process.env.COLLAB_TRIAGE_RUNNER_DATA_DIR?.trim()
+              ? { dataDir: process.env.COLLAB_TRIAGE_RUNNER_DATA_DIR.trim() }
+              : {}),
+            timeoutMs: Number.parseInt(process.env.COLLAB_TRIAGE_RUNNER_TIMEOUT_MS ?? "300000", 10),
+          }),
+        }
+      : {}),
+    profiles: parseTriageProfileCatalog(process.env.COLLAB_TRIAGE_PROFILE_CATALOG),
+  });
+  await triageRuns.recoverPending();
   const exporter = new ExportService({
     cases: domain,
     catalog,
@@ -68,6 +95,7 @@ async function main(): Promise<void> {
     domain,
     catalog,
     imports,
+    triageRuns,
     experiments,
     exporter,
     security: {

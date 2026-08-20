@@ -24,6 +24,7 @@ import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/in
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
 import { registerImportRoutes, type ImportService } from "./modules/import/index.js";
+import { registerTriageRunRoutes, type TriageRunService } from "./modules/triage-runs/index.js";
 import {
   registerExperimentRoutes,
   type ExperimentService,
@@ -44,6 +45,7 @@ export interface AppDeps {
   domain?: CaseService;
   catalog?: CatalogService;
   imports?: ImportService;
+  triageRuns?: TriageRunService;
   experiments?: ExperimentService;
   exporter?: ExportService;
   serveStatic?: boolean;
@@ -128,12 +130,22 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         imports: deps.imports,
       });
     }
+    if (deps.triageRuns) {
+      await registerTriageRunRoutes(app, {
+        auth: security.auth,
+        roles: security.roles,
+        audit: security.audit,
+        runs: deps.triageRuns,
+      });
+    }
     if (deps.experiments) {
       await registerExperimentRoutes(app, {
         auth: security.auth,
         roles: security.roles,
         audit: security.audit,
         experiments: deps.experiments,
+        ...(deps.imports ? { imports: deps.imports } : {}),
+        ...(deps.triageRuns ? { triageRuns: deps.triageRuns } : {}),
       });
     }
     if (deps.exporter) {

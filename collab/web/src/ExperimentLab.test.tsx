@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExperimentLab } from "./ExperimentLab.js";
 
@@ -357,6 +357,32 @@ describe("experiment lab", () => {
     );
   });
 
+  it("reloads and selects an experiment created by the connected-run handoff", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      if (String(input).endsWith("/experiments")) {
+        return {
+          ok: true,
+          json: async () => ({
+            experiments: fetchMock.mock.calls.length === 1 ? [view] : [view, seededStrategyView],
+          }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+
+    expect(await screen.findByText(/package pkg-synth-three-model-checkout-v1/)).toBeTruthy();
+    window.dispatchEvent(
+      new CustomEvent("contextdesk:experiment-created", {
+        detail: { experimentId: seededStrategyView.id },
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText(/package pkg-synth-strategy-paths-v1/)).toBeTruthy());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps only the share-safe export action in static read-only mode", async () => {
     vi.stubGlobal(
       "fetch",
@@ -589,8 +615,8 @@ describe("experiment lab", () => {
     expect(screen.getByRole("region", { name: "Candidate comparison" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Strategy comparison" })).toBeTruthy();
     expect(screen.getByRole("status").textContent).toMatch(/Static read-only mode/);
-    expect(screen.getByText(/Current artifact: seeded comparison/)).toBeTruthy();
-    expect(screen.getByText(/Future slots: presence · live updates · new evidence · provider runs/)).toBeTruthy();
+    expect(screen.getByText(/Sources: seeded · ContextDesk connector · pasted chat/)).toBeTruthy();
+    expect(screen.getByText(/Next extensions: presence · live updates · semantic search/)).toBeTruthy();
     expect(screen.getAllByText(/Synthetic three-model comparison fixture|Agreement is not proof of correctness/).length).toBeGreaterThan(0);
     expect(screen.getByText(/Not live provider output/)).toBeTruthy();
 

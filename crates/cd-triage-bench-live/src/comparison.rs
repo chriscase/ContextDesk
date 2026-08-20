@@ -221,6 +221,73 @@ pub async fn run_live_comparison_with_options(
     Ok(envelope.into_result())
 }
 
+/// Same as [`run_live_comparison_with_options`], with a bounded callback for
+/// each lane that has already persisted a durable run. The callback receives
+/// only the source-neutral persisted run; it never receives provider text,
+/// prompts, credentials, or raw replay bytes.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_live_comparison_with_options_and_progress<P>(
+    store: &BenchStore,
+    case: &Case,
+    snapshot: &EvidenceSnapshot,
+    task: &EvaluationTask,
+    secrets: Arc<dyn SecretStore>,
+    candidates: Vec<LiveComparisonCandidate>,
+    options: LiveComparisonOptions,
+    on_lane_persisted: P,
+) -> Result<LiveComparisonResult, LiveBridgeError>
+where
+    P: FnMut(usize, &LiveRunResult) + Send,
+{
+    run_live_comparison_with_options_and_lifecycle(
+        store,
+        case,
+        snapshot,
+        task,
+        secrets,
+        candidates,
+        options,
+        ignore_lane_started,
+        on_lane_persisted,
+    )
+    .await
+}
+
+/// Same as [`run_live_comparison_with_options_and_progress`], also reporting
+/// when the bounded scheduler admits a lane. Started events contain only the
+/// request-order index; the persisted callback remains the only path for
+/// durable, host-validated result data.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_live_comparison_with_options_and_lifecycle<S, P>(
+    store: &BenchStore,
+    case: &Case,
+    snapshot: &EvidenceSnapshot,
+    task: &EvaluationTask,
+    secrets: Arc<dyn SecretStore>,
+    candidates: Vec<LiveComparisonCandidate>,
+    options: LiveComparisonOptions,
+    on_lane_started: S,
+    on_lane_persisted: P,
+) -> Result<LiveComparisonResult, LiveBridgeError>
+where
+    S: FnMut(usize) + Send,
+    P: FnMut(usize, &LiveRunResult) + Send,
+{
+    let envelope = run_live_comparison_with_lane_fn_and_progress(
+        store,
+        case,
+        snapshot,
+        task,
+        candidates,
+        options,
+        production_lane_fn(store, case, snapshot, task, secrets),
+        on_lane_started,
+        on_lane_persisted,
+    )
+    .await?;
+    Ok(envelope.into_result())
+}
+
 fn production_lane_fn(
     store: &BenchStore,
     case: &Case,
@@ -293,12 +360,50 @@ pub(crate) async fn run_live_comparison_with_lane_fn<T, F, Fut>(
     task: &EvaluationTask,
     candidates: Vec<LiveComparisonCandidate>,
     options: LiveComparisonOptions,
-    mut lane_fn: F,
+    lane_fn: F,
 ) -> Result<LiveComparisonEnvelope<T>, LiveBridgeError>
 where
     T: Send + 'static,
     F: FnMut(usize, Arc<SharedPreparedSnapshot>, LiveComparisonCandidate) -> Fut,
     Fut: Future<Output = Result<T, LiveBridgeError>> + Send + 'static,
+{
+    let mut ignore_started = ignore_lane_started;
+    let mut ignore_progress = ignore_lane_progress::<T>;
+    run_live_comparison_with_lane_fn_and_progress(
+        store,
+        case,
+        snapshot,
+        task,
+        candidates,
+        options,
+        lane_fn,
+        &mut ignore_started,
+        &mut ignore_progress,
+    )
+    .await
+}
+
+fn ignore_lane_progress<T>(_index: usize, _value: &T) {}
+
+fn ignore_lane_started(_index: usize) {}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_live_comparison_with_lane_fn_and_progress<T, F, Fut, P>(
+    store: &BenchStore,
+    case: &Case,
+    snapshot: &EvidenceSnapshot,
+    task: &EvaluationTask,
+    candidates: Vec<LiveComparisonCandidate>,
+    options: LiveComparisonOptions,
+    mut lane_fn: F,
+    mut on_lane_started: impl FnMut(usize) + Send,
+    mut on_lane_persisted: P,
+) -> Result<LiveComparisonEnvelope<T>, LiveBridgeError>
+where
+    T: Send + 'static,
+    F: FnMut(usize, Arc<SharedPreparedSnapshot>, LiveComparisonCandidate) -> Fut,
+    Fut: Future<Output = Result<T, LiveBridgeError>> + Send + 'static,
+    P: FnMut(usize, &T) + Send,
 {
     if candidates.is_empty() {
         return Err(LiveBridgeError::EmptyComparison);
@@ -364,13 +469,15 @@ where
         }
     };
 
-    let scheduled = run_bounded_candidate_lanes(
+    let scheduled = run_bounded_candidate_lanes_with_lifecycle(
         candidate_count,
         options.max_concurrency,
         &cancel,
         started,
         comparison_deadline_ms,
         &mut start_lane,
+        &mut on_lane_started,
+        &mut on_lane_persisted,
     )
     .await;
 
@@ -412,6 +519,7 @@ pub(crate) struct BoundedLaneRun<T> {
     admission_stop: Option<LiveBridgeError>,
 }
 
+#[cfg(test)]
 pub(crate) async fn run_bounded_candidate_lanes<T, F, Fut>(
     count: usize,
     max_concurrency: usize,
@@ -424,6 +532,69 @@ where
     T: Send + 'static,
     F: FnMut(usize) -> Fut,
     Fut: Future<Output = Result<T, LiveBridgeError>> + Send + 'static,
+{
+    let mut ignore_started = ignore_lane_started;
+    let mut ignore_progress = ignore_lane_progress::<T>;
+    run_bounded_candidate_lanes_with_lifecycle(
+        count,
+        max_concurrency,
+        cancel,
+        started,
+        comparison_deadline_ms,
+        start_lane,
+        &mut ignore_started,
+        &mut ignore_progress,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn run_bounded_candidate_lanes_with_progress<T, F, Fut, P>(
+    count: usize,
+    max_concurrency: usize,
+    cancel: &CancelFlag,
+    started: Instant,
+    comparison_deadline_ms: u64,
+    start_lane: &mut F,
+    on_lane_persisted: &mut P,
+) -> BoundedLaneRun<T>
+where
+    T: Send + 'static,
+    F: FnMut(usize) -> Fut,
+    Fut: Future<Output = Result<T, LiveBridgeError>> + Send + 'static,
+    P: FnMut(usize, &T) + Send,
+{
+    let mut ignore_started = ignore_lane_started;
+    run_bounded_candidate_lanes_with_lifecycle(
+        count,
+        max_concurrency,
+        cancel,
+        started,
+        comparison_deadline_ms,
+        start_lane,
+        &mut ignore_started,
+        on_lane_persisted,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_bounded_candidate_lanes_with_lifecycle<T, F, Fut, P, S>(
+    count: usize,
+    max_concurrency: usize,
+    cancel: &CancelFlag,
+    started: Instant,
+    comparison_deadline_ms: u64,
+    start_lane: &mut F,
+    on_lane_started: &mut S,
+    on_lane_persisted: &mut P,
+) -> BoundedLaneRun<T>
+where
+    T: Send + 'static,
+    F: FnMut(usize) -> Fut,
+    Fut: Future<Output = Result<T, LiveBridgeError>> + Send + 'static,
+    P: FnMut(usize, &T) + Send,
+    S: FnMut(usize) + Send,
 {
     let limit = max_concurrency.min(count).max(1);
     let mut outcomes: Vec<Option<Result<T, LiveBridgeError>>> = (0..count).map(|_| None).collect();
@@ -454,6 +625,7 @@ where
             }
             let index = next;
             next += 1;
+            on_lane_started(index);
             let future = start_lane(index);
             in_flight.push(Box::pin(async move { (index, future.await) }));
         }
@@ -469,7 +641,10 @@ where
             biased;
             Some((index, result)) = in_flight.next() => {
                 match result {
-                    Ok(value) => outcomes[index] = Some(Ok(value)),
+                    Ok(value) => {
+                        on_lane_persisted(index, &value);
+                        outcomes[index] = Some(Ok(value));
+                    }
                     Err(error) => {
                         outcomes[index] = Some(Err(error));
                         admission_open = false;
@@ -882,6 +1057,44 @@ mod tests {
             .map(|outcome| outcome.unwrap().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(outcomes, vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn scheduler_reports_each_persisted_lane_before_projection() {
+        let mut next = 0;
+        let mut start_lane = |_index: usize| {
+            let index = next;
+            next += 1;
+            async move {
+                tokio::time::sleep(Duration::from_millis(if index == 0 { 30 } else { 5 })).await;
+                Ok(index)
+            }
+        };
+        let mut persisted = Vec::new();
+        let mut on_lane_persisted = |index: usize, value: &usize| {
+            persisted.push((index, *value));
+        };
+
+        let scheduled = run_bounded_candidate_lanes_with_progress(
+            2,
+            2,
+            &CancelFlag::new(),
+            Instant::now(),
+            5_000,
+            &mut start_lane,
+            &mut on_lane_persisted,
+        )
+        .await;
+
+        assert_eq!(persisted, vec![(1, 1), (0, 0)]);
+        assert_eq!(
+            scheduled.outcomes[0].as_ref().unwrap().as_ref().unwrap(),
+            &0
+        );
+        assert_eq!(
+            scheduled.outcomes[1].as_ref().unwrap().as_ref().unwrap(),
+            &1
+        );
     }
 
     #[tokio::test]

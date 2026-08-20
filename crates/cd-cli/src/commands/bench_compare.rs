@@ -32,7 +32,7 @@ use cd_triage_bench::{
 use cd_triage_bench_adapter::{project_share_safe, RecordingContext, ShareSafeAdapterRun};
 use cd_triage_bench_live::{
     LiveBridgeError, LiveComparisonCandidate, LiveComparisonOptions, LiveCorpusLimits,
-    LiveRunOptions, DEFAULT_LIVE_MAX_AGGREGATE_BYTES, DEFAULT_LIVE_MAX_BLOB_BYTES,
+    LiveRunOptions, LiveRunResult, DEFAULT_LIVE_MAX_AGGREGATE_BYTES, DEFAULT_LIVE_MAX_BLOB_BYTES,
 };
 use cd_triage_sdk::{TriagePolicySelectionV2, TriageRequestOverridesV1};
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,7 @@ pub const BENCH_COMPARE_CLI_SCHEMA_ID: &str = "contextdesk.cli.bench_compare.v1"
 /// Candidate documents contain policy and provenance metadata only. Provider
 /// credentials and endpoint configuration remain in the host-owned app
 /// configuration and credential adapter.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateSpec {
     /// Standard, saved, or inline policy selection.
@@ -67,7 +67,7 @@ pub struct CandidateSpec {
 }
 
 /// Explicit strategy/operator metadata for one comparison candidate.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategySpec {
     /// Human-readable strategy identity.
@@ -151,6 +151,11 @@ pub struct BenchComparisonOutput {
     /// check uses the validated benchmark fingerprint rather than that id.
     pub same_packet_fingerprint: bool,
     pub same_materialized_corpus: bool,
+    /// Content-free reason when the comparison stopped before every
+    /// requested candidate was durably recorded. A non-`None` value means
+    /// `runs` is an honest durable prefix, not a complete comparison.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped_reason: Option<String>,
     /// Per-candidate durable and provenance identities.
     pub runs: Vec<BenchComparisonRunOutput>,
     /// Existing honest comparison report over exactly these newly persisted
@@ -190,6 +195,12 @@ impl Render for BenchComparisonOutput {
             self.same_packet_fingerprint,
             self.same_materialized_corpus
         ));
+        if let Some(reason) = &self.stopped_reason {
+            output.push_str(&format!(
+                "- stopped before every candidate completed: {}\n\n",
+                reason
+            ));
+        }
         for run in &self.runs {
             output.push_str(&format!(
                 "- `{}`: {} — packet `{}`, corpus `{}`, deadline {}\n",
@@ -307,6 +318,37 @@ pub async fn run(
     paths: &Paths,
     cfg: &AppConfig,
 ) -> CliResult<BenchComparisonOutput> {
+    run_with_live_progress(args, paths, cfg, |_index, _run| {}).await
+}
+
+/// Execute a bounded live comparison and notify the caller after each lane
+/// has persisted. The callback is deliberately limited to source-neutral
+/// durable output; final report construction remains owned by this command.
+pub async fn run_with_live_progress<F>(
+    args: &BenchCompareArgs,
+    paths: &Paths,
+    cfg: &AppConfig,
+    on_lane_persisted: F,
+) -> CliResult<BenchComparisonOutput>
+where
+    F: FnMut(usize, &LiveRunResult) + Send,
+{
+    run_with_live_lifecycle(args, paths, cfg, |_index| {}, on_lane_persisted).await
+}
+
+/// Execute a bounded live comparison with safe admission and persistence
+/// notifications for a host-facing caller.
+pub async fn run_with_live_lifecycle<S, F>(
+    args: &BenchCompareArgs,
+    paths: &Paths,
+    cfg: &AppConfig,
+    on_lane_started: S,
+    mut on_lane_persisted: F,
+) -> CliResult<BenchComparisonOutput>
+where
+    S: FnMut(usize) + Send,
+    F: FnMut(usize, &LiveRunResult) + Send,
+{
     if args.candidates.len() < 2 {
         return Err(CliError::user(
             "bench-compare requires at least two --candidate files",
@@ -405,7 +447,7 @@ pub async fn run(
         .collect();
 
     let secrets: Arc<dyn SecretStore> = Arc::new(crate::adapters::secret_store());
-    let live = cd_triage_bench_live::run_live_comparison_with_options(
+    let live = cd_triage_bench_live::run_live_comparison_with_options_and_lifecycle(
         &store,
         &case,
         &snapshot,
@@ -413,13 +455,15 @@ pub async fn run(
         secrets,
         candidates,
         comparison_options,
+        on_lane_started,
+        |index, run| on_lane_persisted(index, run),
     )
     .await;
     drop(guard);
 
     let live = live.map_err(map_bridge_error)?;
     let pending_cleanup_markers = live.pending_cleanup.unresolved;
-    let stopped = live.stopped;
+    let stopped_reason = live.stopped.map(|error| error.to_string());
 
     // The bridge only returns runs it already persisted. Once rows exist, no
     // failure path below may drop their identities: they are the operator's
@@ -434,13 +478,6 @@ pub async fn run(
         requested_candidates,
         pending_cleanup_markers,
     };
-
-    if let Some(error) = stopped {
-        return Err(partial_failure_error(
-            error,
-            durable_rows.describe(&error.to_string()),
-        ));
-    }
 
     let mut attribution = BTreeMap::new();
     let mut runs = Vec::with_capacity(live.runs.len());
@@ -473,14 +510,11 @@ pub async fn run(
         .collect::<BTreeSet<_>>()
         .len()
         == 1;
-    // Unreachable unless the bridge broke its own contract; kept because the
-    // alternative to a loud refusal here is publishing a comparison whose
-    // same-snapshot claim is false.
-    if !same_packet_fingerprint || !same_materialized_corpus {
-        return Err(CliError::internal(durable_rows.describe(
-            "live comparison returned inconsistent same-snapshot provenance",
-        )));
-    }
+    let stopped_reason = if !same_packet_fingerprint || !same_materialized_corpus {
+        Some("live comparison returned inconsistent same-snapshot provenance".to_string())
+    } else {
+        stopped_reason
+    };
 
     let persisted_runs = runs
         .iter()
@@ -521,6 +555,7 @@ pub async fn run(
         candidate_count: runs.len(),
         same_packet_fingerprint,
         same_materialized_corpus,
+        stopped_reason,
         runs,
         report,
         report_markdown,
@@ -580,10 +615,6 @@ impl DurableRows {
 
 /// Keep the exit category of the underlying refusal while carrying the
 /// operator-facing detail about what is now durable.
-fn partial_failure_error(error: LiveBridgeError, message: String) -> CliError {
-    CliError::new(map_bridge_error(error).category, message)
-}
-
 fn read_candidate(path: &PathBuf) -> CliResult<CandidateSpec> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|_| CliError::user("candidate specification could not be read"))?;

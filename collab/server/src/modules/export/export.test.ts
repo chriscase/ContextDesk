@@ -256,6 +256,20 @@ async function seedFixture(app: Awaited<ReturnType<typeof buildApp>>) {
     payload: { status: "supported", links: [{ kind: "artifact", id: logUpload.artifact.id }] },
   });
 
+  const snapshot = JSON.parse(
+    (
+      await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/snapshots`,
+        headers: { cookie: dave },
+        payload: {
+          evidenceIds: [logUpload.artifact.id, emailUpload.artifact.id],
+          protocolVersion: "synthetic-export-fixture-v1",
+        },
+      })
+    ).body,
+  ) as { id: string; fingerprint: string; evidence: { evidenceId: string }[] };
+
   const tool = JSON.parse(
     (
       await app.inject({
@@ -309,6 +323,8 @@ async function seedFixture(app: Awaited<ReturnType<typeof buildApp>>) {
     logSourceId: logUpload.artifact.sourceId,
     emailId: emailUpload.artifact.id,
     emailHash: emailUpload.artifact.contentHash,
+    snapshotId: snapshot.id,
+    snapshotFingerprint: snapshot.fingerprint,
     importedId: imported.id,
     toolId: tool.id,
   };
@@ -634,6 +650,23 @@ describe("triage brief and prompt-package export", () => {
       expect(audits.some((a) => a.action === "export_brief" && a.outcome === "failure")).toBe(true);
 
       expect(briefPayloadA.header.caseId).toBe(fx.caseId);
+      expect(briefPayloadA.memory).toMatchObject({
+        latestSnapshotLabel: "S0",
+        latestSnapshotFingerprint: fx.snapshotFingerprint,
+        parentSnapshotLabel: null,
+        evidenceCount: 2,
+        lineageDepth: 1,
+        agreementNotice: "Agreement is not proof of correctness.",
+      });
+      expect(briefPayloadA.memory?.boardCounts.known).toBeGreaterThan(0);
+      expect(briefPayloadA.timeline.some((event) => event.kind === "snapshot_frozen")).toBe(true);
+      expect(briefPayloadA.attributions.some((attribution) => attribution.targetKind === "snapshot")).toBe(
+        true,
+      );
+      expect(sharePayload.memory?.latestSnapshotFingerprint).toBe(fx.snapshotFingerprint);
+      expect(sharePayload.memory?.evidenceCount).toBe(2);
+      expect(canonicalJson(sharePayload.memory)).not.toContain(fx.logId);
+      expect(canonicalJson(sharePayload.memory)).not.toContain(LOG);
       expect(sharePayload.attributions[0]?.actorLabel).toBeTruthy();
       expect(packageA.snapshotIdentity).toMatch(/^[0-9a-f]{64}$/);
     });

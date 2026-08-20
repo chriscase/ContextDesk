@@ -1,5 +1,12 @@
 import { existsSync } from "node:fs";
-import { LAB_EXPORT_V2_SCHEMA_ID, parseLabExportV2 } from "@cd-collab/contracts";
+import {
+  LAB_EXPORT_V2_SCHEMA_ID,
+  parseCaseBoard,
+  parseLabExportV2,
+  parseSnapshot,
+  parseSnapshotList,
+  parseTriageJobList,
+} from "@cd-collab/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildDemoApp,
@@ -40,6 +47,48 @@ describe("synthetic demo server", () => {
     expect(JSON.parse(health.body).service).toBe("contextdesk-synthetic-demo");
     const ready = await demo.app.inject({ method: "GET", url: "/ready" });
     expect(ready.statusCode).toBe(503);
+
+    const snapshotResponse = await demo.app.inject({
+      method: "POST",
+      url: `/api/cases/${demo.caseId}/snapshots`,
+      headers,
+      payload: { evidenceIds: [], visibility: "owner_only" },
+    });
+    expect(snapshotResponse.statusCode).toBe(200);
+    const snapshot = parseSnapshot(JSON.parse(snapshotResponse.body));
+    expect(snapshot.status).toBe("frozen");
+    const snapshotsResponse = await demo.app.inject({
+      method: "GET",
+      url: `/api/cases/${demo.caseId}/snapshots`,
+      headers,
+    });
+    expect(parseSnapshotList(JSON.parse(snapshotsResponse.body)).snapshots.length).toBeGreaterThanOrEqual(2);
+    const jobsResponse = await demo.app.inject({
+      method: "GET",
+      url: `/api/cases/${demo.caseId}/triage-runs`,
+      headers,
+    });
+    expect(jobsResponse.statusCode).toBe(200);
+    const jobs = parseTriageJobList(JSON.parse(jobsResponse.body)).jobs;
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.status).toBe("completed");
+    expect(jobs[0]?.sameSnapshot).toBe(true);
+    expect(jobs[0]?.candidates).toHaveLength(3);
+    const shareSafeJob = await demo.app.inject({
+      method: "GET",
+      url: `/api/cases/${demo.caseId}/triage-runs/${jobs[0]?.id}/share-safe`,
+      headers,
+    });
+    expect(shareSafeJob.statusCode).toBe(200);
+    expect(shareSafeJob.body).not.toContain("qwen-3.6-27b");
+    expect(shareSafeJob.body).not.toContain("ev-demo-checkout-log");
+    const boardResponse = await demo.app.inject({
+      method: "GET",
+      url: `/api/cases/${demo.caseId}/board?snapshotId=${snapshot.id}`,
+      headers,
+    });
+    expect(boardResponse.statusCode).toBe(200);
+    expect(parseCaseBoard(JSON.parse(boardResponse.body)).snapshotId).toBe(snapshot.id);
     const experiments = await demo.app.inject({
       method: "GET",
       url: `/api/cases/${demo.caseId}/experiments`,

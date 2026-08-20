@@ -185,7 +185,7 @@ export function ExperimentLab(props: {
   const [error, setError] = useState<string | null>(null);
   const [exported, setExported] = useState<ShareSafeExport | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (preferredId?: string) => {
     try {
       const res = await fetch(`/api/cases/${props.caseId}/experiments`);
       if (!res.ok) {
@@ -193,7 +193,11 @@ export function ExperimentLab(props: {
         return;
       }
       const body = (await res.json()) as { experiments?: ExperimentView[] };
-      setExperiments(body.experiments ?? []);
+      const nextExperiments = body.experiments ?? [];
+      setExperiments(nextExperiments);
+      if (preferredId && nextExperiments.some((row) => row.id === preferredId)) {
+        setActive(preferredId);
+      }
     } catch {
       setError("Experiment history could not be loaded");
     }
@@ -201,6 +205,19 @@ export function ExperimentLab(props: {
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    function handleExperimentCreated(event: Event) {
+      const detail = (event as CustomEvent<{ experimentId?: unknown }>).detail;
+      if (!detail || typeof detail.experimentId !== "string" || !detail.experimentId) return;
+      setError(null);
+      setExported(null);
+      void refresh(detail.experimentId);
+    }
+
+    window.addEventListener("contextdesk:experiment-created", handleExperimentCreated);
+    return () => window.removeEventListener("contextdesk:experiment-created", handleExperimentCreated);
   }, [refresh]);
 
   useEffect(() => {
@@ -484,13 +501,14 @@ export function ExperimentLab(props: {
         </div>
       </header>
       <p className="experiment-lab__intro">
-        Compare the current seeded triage artifact across model and strategy lanes. Agreement is
-        not proof of correctness. A gold reference is a human benchmark decision, not an
-        infallible truth claim. Gold alignment is scored separately from helpfulness.
+        Compare seeded, connected ContextDesk, and pasted-chat triage candidates across model and
+        strategy lanes. Agreement is not proof of correctness. A gold reference is a human
+        benchmark decision, not an infallible truth claim. Gold alignment is scored separately
+        from helpfulness.
       </p>
       <div className="experiment-lab__future-slots" aria-label="War room extension slots">
-        <span>Current artifact: seeded comparison</span>
-        <span>Future slots: presence · live updates · new evidence · provider runs</span>
+        <span>Sources: seeded · ContextDesk connector · pasted chat</span>
+        <span>Next extensions: presence · live updates · semantic search</span>
       </div>
       <div className="experiment-lab__extension-grid" aria-label="War room extension points">
         <div>
@@ -513,9 +531,13 @@ export function ExperimentLab(props: {
           <span>Decision / gold history</span>
           <small>Revisions and provenance</small>
         </div>
+        <div>
+          <span>Connected run handoff</span>
+          <small>ContextDesk host bridge to candidate path</small>
+        </div>
         <div className="experiment-lab__extension-slot--future">
           <span>Semantic search</span>
-          <small>Future slot · not connected</small>
+          <small>Future slot · case-wide retrieval</small>
         </div>
       </div>
       <p className="experiment-lab__authority">

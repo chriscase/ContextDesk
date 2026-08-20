@@ -1387,7 +1387,7 @@ mod tests {
     fn schema_version_present() {
         assert_eq!(
             QUALIFICATION_SCHEMA_VERSION,
-            "contextdesk.capability_qualification.v4"
+            "contextdesk.capability_qualification.v5"
         );
     }
 

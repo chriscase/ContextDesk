@@ -1,6 +1,7 @@
 pub mod bench_compare;
 pub mod capabilities;
 pub mod chat;
+pub mod collab_triage_run;
 pub mod config_cmd;
 pub mod confluence_cmd;
 pub mod context;

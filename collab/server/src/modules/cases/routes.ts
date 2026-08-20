@@ -7,6 +7,7 @@ import {
   HYPOTHESIS_STATUSES,
   PRIVACY_CLASSES,
   PROVENANCE_SCHEMA_ID,
+  SNAPSHOT_LIST_SCHEMA_ID,
   TIMELINE_SCHEMA_ID,
   type ArtifactKind,
   type AuthErrorV1,
@@ -47,7 +48,11 @@ function domainError(
     return { error: "legal_hold" };
   }
   const message = err instanceof Error ? err.message : "invalid";
-  if (message === "case not found" || message === "contribution not found") {
+  if (
+    message === "case not found" ||
+    message === "contribution not found" ||
+    message === "snapshot not found"
+  ) {
     void reply.code(404);
     return { error: "not_found" };
   }
@@ -263,6 +268,83 @@ export async function registerCaseRoutes(
       caseId: id,
       events: await deps.domain.listTimeline(id),
     };
+  });
+
+  app.get("/api/cases/:id/snapshots", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return { error: "not_found" };
+    }
+    return {
+      schemaId: SNAPSHOT_LIST_SCHEMA_ID,
+      caseId: id,
+      snapshots: await deps.domain.listSnapshots(id, ctx.actor, ctx.isAdmin),
+    };
+  });
+
+  app.post("/api/cases/:id/snapshots", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    if (!ctx.canLead) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return authError("forbidden");
+    }
+    const body = asRecord(request.body);
+    if (!Array.isArray(body.evidenceIds) || !body.evidenceIds.every((value) => typeof value === "string")) {
+      void reply.code(400);
+      return { error: "evidenceIds must be an array of strings" };
+    }
+    const visibility = str(body.visibility);
+    const protocolVersion = str(body.protocolVersion);
+    const clientTime = str(body.clientTime);
+    try {
+      return await deps.domain.createSnapshot(
+        id,
+        ctx.actor,
+        {
+          evidenceIds: body.evidenceIds,
+          ...(visibility && (PRIVACY_CLASSES as readonly string[]).includes(visibility)
+            ? { visibility: visibility as PrivacyClass }
+            : {}),
+          ...(protocolVersion ? { protocolVersion } : {}),
+          ...(clientTime ? { clientTime } : {}),
+        },
+        request.ip,
+      );
+    } catch (err) {
+      return domainError(reply, err);
+    }
+  });
+
+  app.get("/api/cases/:id/board", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return { error: "not_found" };
+    }
+    const query = request.query as { snapshotId?: string };
+    try {
+      const board = await deps.domain.getCaseBoard(id, ctx.actor, ctx.isAdmin, query.snapshotId);
+      return board ?? { error: "not_found" };
+    } catch (err) {
+      return domainError(reply, err);
+    }
   });
 
   app.post("/api/cases/:id/contributions", async (request, reply) => {
@@ -509,6 +591,19 @@ export async function registerCaseRoutes(
     } catch (err) {
       return domainError(reply, err);
     }
+  });
+
+  app.get("/api/cases/:id/evidence", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return { error: "not_found" };
+    }
+    return { caseId: id, artifacts: await deps.domain.listArtifacts(id, ctx.actor, ctx.isAdmin) };
   });
 
   app.get("/api/cases/:id/evidence/:eid", async (request, reply) => {

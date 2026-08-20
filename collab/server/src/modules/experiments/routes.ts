@@ -9,6 +9,8 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
 import { resolveActiveSession, type ActiveSessionDeps } from "../auth/index.js";
 import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
+import type { ImportService } from "../import/index.js";
+import type { TriageRunService } from "../triage-runs/index.js";
 import {
   ExperimentConflictError,
   ExperimentNotFoundError,
@@ -38,6 +40,8 @@ export interface ExperimentRouteDeps {
   roles: MutableGroupRoleMap;
   audit: AuditStore;
   experiments: ExperimentService;
+  imports?: ImportService;
+  triageRuns?: TriageRunService;
 }
 
 export async function registerExperimentRoutes(
@@ -113,6 +117,49 @@ export async function registerExperimentRoutes(
         id,
         ctx.actor,
         request.body,
+        request.ip,
+        ctx.isAdmin,
+      );
+    } catch (err) {
+      return fail(reply, err);
+    }
+  });
+
+  app.post("/api/cases/:id/experiments/from-triage/:jid", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    if (!ctx.canLead) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    if (!deps.triageRuns || !deps.imports) {
+      void reply.code(503);
+      return { error: "triage-to-experiment handoff is not configured" };
+    }
+    const params = request.params as { id: string; jid: string };
+    const body = asRecord(request.body);
+    const externalRunId = body.externalRunId === null ? null : str(body.externalRunId) ?? null;
+    try {
+      const job = await deps.triageRuns.get(params.id, params.jid, ctx.actor, ctx.isAdmin);
+      if (!job) {
+        void reply.code(404);
+        return { error: "not_found" };
+      }
+      const externalRun = externalRunId
+        ? await deps.imports.getRun(params.id, externalRunId, ctx.actor, ctx.isAdmin)
+        : null;
+      if (externalRunId && !externalRun) {
+        void reply.code(404);
+        return { error: "external_run_not_found" };
+      }
+      return await deps.experiments.importTriageJob(
+        params.id,
+        ctx.actor,
+        job,
+        externalRun,
         request.ip,
         ctx.isAdmin,
       );

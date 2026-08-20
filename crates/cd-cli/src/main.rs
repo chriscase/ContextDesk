@@ -255,7 +255,22 @@ async fn dispatch(
         }
         Command::BenchCompare(args) => {
             let result = commands::bench_compare::run(args, paths, app_cfg).await;
-            emit(format, resolved.color.value, "bench_compare", result)
+            let verdict = result
+                .as_ref()
+                .ok()
+                .and_then(|output| output.stopped_reason.as_ref())
+                .map(|_| ExitCategory::Partial);
+            emit_completed(
+                format,
+                resolved.color.value,
+                "bench_compare",
+                result,
+                verdict,
+            )
+        }
+        Command::CollabTriageRun(args) => {
+            let result = commands::collab_triage_run::run(args, paths, app_cfg).await;
+            emit(format, resolved.color.value, "collab_triage_run", result)
         }
         Command::Corpus { action } => {
             let result = commands::corpus::run(action, &paths.cache_root);

@@ -29,12 +29,14 @@ use std::sync::Arc;
 
 /// Probe / result schema version (bump when probe contracts change).
 ///
-/// v4: evidence identity includes typed transport protocol/dialect (from
+/// v5: evidence identity includes typed transport protocol/dialect (from
 /// configured provider kind, never model name or URL). Authorization and
 /// aggregate readiness require schema + exact mode + dialect match. Strict
-/// tool token/shape and strict schema validation. v1–v3 evidence is stale via
-/// key mismatch and never silently reinterpreted as current verification.
-pub const QUALIFICATION_SCHEMA_VERSION: &str = "contextdesk.capability_qualification.v4";
+/// tool token/shape, strict schema validation, and production-valid non-empty
+/// continuation semantics are part of the current probe contract. v1–v4
+/// evidence is stale via key mismatch and never silently reinterpreted as
+/// current verification.
+pub const QUALIFICATION_SCHEMA_VERSION: &str = "contextdesk.capability_qualification.v5";
 
 /// Exact token required in inert tool probe arguments.
 pub const QUALIFY_TOOL_TOKEN: &str = "QUALIFY_TOOL_V1";
@@ -4377,8 +4379,8 @@ mod tests {
     }
 
     #[test]
-    fn v1_through_v3_schema_evidence_is_inconclusive_under_v4() {
-        for prior in ["v1", "v2", "v3"] {
+    fn v1_through_v4_schema_evidence_is_inconclusive_under_v5() {
+        for prior in ["v1", "v2", "v3", "v4"] {
             let mut k = key("m");
             k.schema_version = format!("contextdesk.capability_qualification.{prior}");
             let report = readiness_report(
@@ -4400,9 +4402,9 @@ mod tests {
                 "{prior} must not display Verified"
             );
         }
-        let v4 = key("m");
-        assert_eq!(v4.schema_version, QUALIFICATION_SCHEMA_VERSION);
-        assert_eq!(v4.transport_protocol, "openai_compatible");
+        let v5 = key("m");
+        assert_eq!(v5.schema_version, QUALIFICATION_SCHEMA_VERSION);
+        assert_eq!(v5.transport_protocol, "openai_compatible");
     }
 
     #[test]

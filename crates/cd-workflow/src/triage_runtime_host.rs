@@ -398,6 +398,10 @@ impl TriageEngine for WorkflowTriageEngineV1<'_> {
                     &request.request().policy,
                     TriagePolicySelectionV2::Saved { .. }
                 );
+            let saved_policy_required = matches!(
+                &request.request().policy,
+                TriagePolicySelectionV2::Saved { .. }
+            );
             let policy_resolution = (!saved_policy_untrusted)
                 .then(|| self.policy_for_request(request))
                 .flatten();
@@ -426,10 +430,15 @@ impl TriageEngine for WorkflowTriageEngineV1<'_> {
                 Ok(compiled) => (compiled.slots, false),
                 Err(failure) => (failure.slots, true),
             };
+            // Standard mode has one host-defined finalizer and deliberately
+            // does not consult exact-role qualification evidence. A malformed
+            // enhanced/advanced qualification store must not brick the
+            // established Standard path; those policies still fail closed.
+            let qualifications_required = policy.mode != TriagePolicyMode::Standard;
             let failure_category = if request_rejected
                 || compilation_failed
-                || !policies_valid
-                || !qualifications_valid
+                || (saved_policy_required && !policies_valid)
+                || (qualifications_required && !qualifications_valid)
             {
                 Some("policy_preflight_rejected")
             } else {
@@ -1041,6 +1050,39 @@ mod tests {
             prepared.input.as_ref().unwrap().request_fingerprint,
             request.fingerprint()
         );
+        assert_eq!(registry.len(), 1);
+        registry.remove_if_owned(&prepared.cancellation, &prepared.cancel_owner);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn standard_preflight_does_not_require_a_valid_role_store() {
+        let mut fixture = fixture();
+        fixture.policies.schema_id = "stale-policy-store".into();
+        fixture.qualifications.schema_id = "stale-role-store".into();
+        let registry = TriageCancellationRegistryV1::default();
+        let engine = WorkflowTriageEngineV1::new(
+            &mut fixture.host,
+            fixture.cache.path(),
+            fixture.config,
+            Arc::new(fixture.secrets.clone()),
+            fixture.policies,
+            fixture.qualifications,
+            registry.clone(),
+        );
+        let request = ValidatedTriageRequest::new(request(TriagePolicySelectionV2::Standard {
+            model: ModelRef {
+                profile_id: "profile:test".into(),
+                model_id: "model:test".into(),
+            },
+        }))
+        .expect("request");
+
+        let prepared = engine.preflight(&request).await.expect("preflight");
+
+        assert!(prepared.failure_category.is_none());
+        assert!(prepared.input.is_some());
+        assert_eq!(prepared.preflight.as_ref().unwrap().roles.len(), 1);
         assert_eq!(registry.len(), 1);
         registry.remove_if_owned(&prepared.cancellation, &prepared.cancel_owner);
         assert_eq!(registry.len(), 0);

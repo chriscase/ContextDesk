@@ -45,9 +45,10 @@ use fs2::FileExt;
 
 mod comparison;
 pub use comparison::{
-    run_live_comparison, run_live_comparison_with_options, LiveComparisonCandidate,
-    LiveComparisonOptions, LiveComparisonResult, LiveLaneDisposition, LiveLaneOutcome,
-    DEFAULT_LIVE_COMPARISON_CONCURRENCY, MAX_LIVE_COMPARISON_CONCURRENCY,
+    run_live_comparison, run_live_comparison_with_options,
+    run_live_comparison_with_options_and_lifecycle, run_live_comparison_with_options_and_progress,
+    LiveComparisonCandidate, LiveComparisonOptions, LiveComparisonResult, LiveLaneDisposition,
+    LiveLaneOutcome, DEFAULT_LIVE_COMPARISON_CONCURRENCY, MAX_LIVE_COMPARISON_CONCURRENCY,
 };
 
 /// Default per-source limit. It matches the production raw-log import bound.
