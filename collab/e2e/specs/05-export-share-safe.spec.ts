@@ -28,7 +28,7 @@ test.describe("share-safe export", () => {
     await page.reload();
     await page.locator(".case-list").getByRole("button", { name: title, exact: true }).click();
     const panel = exportPanel(page);
-    await expect(panel.getByText(/shared-timeout\.log/)).toBeVisible();
+    await expect(panel.getByText("artifact · shared-timeout.log · share_safe")).toBeVisible();
     await panel.locator("select").first().selectOption("share_safe");
     await panel.getByRole("button", { name: "Export triage brief" }).click();
     await expect(panel.locator(".export__markdown")).toContainText("Triage brief");
@@ -65,7 +65,7 @@ test.describe("share-safe export", () => {
     const title = uniqueTitle("Contributor export");
     await loginAs(page, FIXTURE_USERS.alice);
     await createCase(page, title);
-    const option = exportPanel(page).locator("select").first().locator('option[value="share_safe"]');
-    await expect(option).toBeDisabled();
+    const option = exportPanel(page).getByRole("option", { name: "share_safe" });
+    await expect(option).toHaveAttribute("disabled", "");
   });
 });

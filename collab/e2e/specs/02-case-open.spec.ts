@@ -30,7 +30,10 @@ test.describe("create and open a case", () => {
     await statusForm.locator('select[name="status"]').selectOption("resolved");
     await statusForm.getByRole("button", { name: "Update status" }).click();
     await expect(page.locator(".case-view__title")).toContainText("resolved");
-    await screenshot(page, "02-case-status-resolved");
+    await statusForm.locator('select[name="status"]').selectOption("archived");
+    await statusForm.getByRole("button", { name: "Update status" }).click();
+    await expect(page.locator(".case-view__title")).toContainText("archived");
+    await screenshot(page, "02-case-status-archived");
   });
 
   test("viewer does not persist a created case (write is server-denied)", async ({ page }) => {

@@ -6,5 +6,6 @@
     "types": ["node"],
     "lib": ["ES2022", "DOM"]
   },
-  "include": ["src/**/*.ts", "specs/**/*.ts", "playwright.config.ts"]
+  "include": ["src/**/*.ts", "specs/**/*.ts", "playwright.config.ts"],
+  "exclude": ["src/serve-fixture.ts"]
 }

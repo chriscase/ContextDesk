@@ -84,19 +84,19 @@ export async function timeline(page: Page, caseId: string): Promise<TimelineEven
 }
 
 export function importForm(page: Page): Locator {
-  return page.locator("form.composer").filter({
-    has: page.getByRole("button", { name: "Import external run" }),
+  return page.locator("article.case-view form.composer").filter({
+    has: page.locator('button[type="submit"]', { hasText: "Import external run" }),
   });
 }
 
 export function noteForm(page: Page): Locator {
-  return page.locator("form.composer").filter({
-    has: page.getByRole("button", { name: "Add to timeline" }),
+  return page.locator("article.case-view form.composer").filter({
+    has: page.locator('button[type="submit"]', { hasText: "Add to timeline" }),
   });
 }
 
 export function exportPanel(page: Page): Locator {
-  return page.locator("section.export");
+  return page.locator("article.case-view section.export");
 }
 
 export async function addTimelineEntry(
@@ -105,14 +105,17 @@ export async function addTimelineEntry(
   body: string,
 ): Promise<void> {
   const form = noteForm(page);
-  const before = await page.locator(".timeline__item").count();
   await form.locator('select[name="kind"]').selectOption(kind);
   await form.locator('textarea[name="body"]').fill(body);
-  await form.getByRole("button", { name: "Add to timeline" }).click();
-  // The shipped timeline renders payload JSON (kind/hash), not contribution body.
-  await expect(page.locator(".timeline__item")).toHaveCount(before + 1);
+  const [posted] = await Promise.all([
+    page.waitForResponse(
+      (res) => res.url().includes("/contributions") && res.request().method() === "POST",
+    ),
+    form.getByRole("button", { name: "Add to timeline" }).click(),
+  ]);
+  expect(posted.ok(), await posted.text()).toBeTruthy();
   await expect(
-    page.locator(".timeline__item").filter({ hasText: "contribution_created" }).last(),
+    page.locator("article.case-view .timeline__item").filter({ hasText: "contribution_created" }).last(),
   ).toContainText(`"kind":"${kind}"`);
 }
 
@@ -139,7 +142,13 @@ export async function importChat(
   await form.getByPlaceholder("Operator identity").fill(opts.operatorId);
   await form.locator('select[name="evidenceVisibility"]').selectOption(opts.visibility ?? "unknown");
   await form.getByLabel(/I redacted secrets before save/).check();
-  await form.getByRole("button", { name: "Import external run" }).click();
+  const [posted] = await Promise.all([
+    page.waitForResponse(
+      (res) => res.url().includes("/imports") && res.request().method() === "POST",
+    ),
+    form.getByRole("button", { name: "Import external run" }).click(),
+  ]);
+  expect(posted.ok(), await posted.text()).toBeTruthy();
   await expect(page.getByText("Unverified imported run").first()).toBeVisible();
   await expect(page.locator(".imported-run").filter({ hasText: opts.output.slice(0, 40) })).toBeVisible();
 }
