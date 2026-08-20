@@ -246,6 +246,49 @@ export type {
 } from "./gold.js";
 
 export {
+  CASE_BOARD_BUCKETS,
+  CASE_BOARD_CONFIDENCE,
+  CASE_BOARD_SCHEMA_ID,
+  CASE_BOARD_SOURCE_KINDS,
+  caseBoardShape,
+  deriveCaseBoard,
+  parseCaseBoard,
+} from "./board.js";
+export type {
+  CaseBoardBucket,
+  CaseBoardConfidence,
+  CaseBoardExperimentSource,
+  CaseBoardFindingV1,
+  CaseBoardGoldV1,
+  CaseBoardSourceKind,
+  CaseBoardV1,
+  DeriveCaseBoardInput,
+} from "./board.js";
+
+export {
+  DEFAULT_SNAPSHOT_VISIBILITY_POLICY,
+  SNAPSHOT_FAIRNESS,
+  SNAPSHOT_ITEM_VISIBILITIES,
+  SNAPSHOT_SCHEMA_ID,
+  SNAPSHOT_STATUSES,
+  canonicalSnapshotItems,
+  parseSnapshot,
+  snapshotFairness,
+  snapshotFingerprint,
+  snapshotItemContentHash,
+  snapshotShape,
+} from "./snapshot.js";
+export type {
+  SnapshotFairness,
+  SnapshotFingerprintInput,
+  SnapshotItemV1,
+  SnapshotItemVisibility,
+  SnapshotStatus,
+  SnapshotV1,
+  SnapshotVisibilityPolicyV1,
+} from "./snapshot.js";
+
+export {
   INTERACTION_TRACE_SCHEMA_ID,
   LAB_EXPORT_SCHEMA_ID,
   LAB_EXPORT_V2_SCHEMA_ID,

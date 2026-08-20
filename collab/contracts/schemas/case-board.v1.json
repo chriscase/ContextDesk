@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/case-board.v1.json",
+  "title": "cd-collab Case Board v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "caseId",
+    "snapshotId",
+    "generatedAt",
+    "privacyClass",
+    "known",
+    "unknown",
+    "agreed",
+    "disputed",
+    "newlyConcluded",
+    "gold",
+    "notes"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.case_board.v1" },
+    "caseId": { "type": "string", "minLength": 1 },
+    "snapshotId": { "type": ["string", "null"], "minLength": 1 },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "privacyClass": { "type": "string", "const": "owner_only" },
+    "known": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "unknown": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "agreed": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "disputed": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "newlyConcluded": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "gold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "version", "goldId"],
+      "properties": {
+        "status": { "type": "string", "enum": ["unknown", "absent", "present"] },
+        "version": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "goldId": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] }
+      }
+    },
+    "notes": { "type": "array", "items": { "type": "string" }, "minItems": 2 }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "findingId",
+        "bucket",
+        "summary",
+        "evidenceRefs",
+        "contributionRefs",
+        "confidence",
+        "unknowns",
+        "sourceKind"
+      ],
+      "properties": {
+        "findingId": { "type": "string", "minLength": 1 },
+        "bucket": {
+          "type": "string",
+          "enum": ["known", "unknown", "agreed", "disputed", "newly_concluded"]
+        },
+        "summary": { "type": "string", "minLength": 1 },
+        "evidenceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "contributionRefs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "confidence": { "type": "string", "enum": ["supported", "observed", "unknown"] },
+        "unknowns": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "sourceKind": {
+          "type": "string",
+          "enum": [
+            "hypothesis",
+            "artifact",
+            "agreement",
+            "decision",
+            "gold",
+            "trace",
+            "import",
+            "unknown"
+          ]
+        }
+      }
+    }
+  }
+}

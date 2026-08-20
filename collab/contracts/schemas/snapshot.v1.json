@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/snapshot.v1.json",
+  "title": "cd-collab Snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "snapshotId",
+    "caseId",
+    "fingerprint",
+    "parentSnapshotId",
+    "items",
+    "visibilityPolicy",
+    "protocolId",
+    "protocolVersion",
+    "fairness",
+    "status",
+    "privacyClass",
+    "createdAt",
+    "createdBy",
+    "createdByUsername"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.snapshot.v1" },
+    "snapshotId": { "type": "string", "format": "uuid" },
+    "caseId": { "type": "string", "minLength": 1 },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^snap-[a-f0-9]{64}$"
+    },
+    "parentSnapshotId": {
+      "anyOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }]
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["evidenceId", "contentHash", "visibility", "privacyClass"],
+        "properties": {
+          "evidenceId": { "type": "string", "minLength": 1 },
+          "contentHash": {
+            "anyOf": [
+              { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              { "type": "null" }
+            ]
+          },
+          "visibility": { "type": "string", "enum": ["strategy_visible", "hidden"] },
+          "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] }
+        }
+      }
+    },
+    "visibilityPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["includeSummaries", "includeRawBytes"],
+      "properties": {
+        "includeSummaries": { "type": "boolean" },
+        "includeRawBytes": { "type": "boolean" }
+      }
+    },
+    "protocolId": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+    "protocolVersion": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+    "fairness": { "type": "string", "enum": ["same_snapshot", "unknown_visibility"] },
+    "status": { "type": "string", "enum": ["frozen"] },
+    "privacyClass": { "type": "string", "const": "owner_only" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "createdBy": { "type": "string", "minLength": 1 },
+    "createdByUsername": { "type": "string", "minLength": 1 }
+  }
+}

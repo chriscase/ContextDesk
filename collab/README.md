@@ -13,6 +13,7 @@ Lab human adjudication v1 imports a share-safe experiment package/summary into
 a case, shows the candidate matrix and evidence agreement, records helpfulness,
 and accepts a revision-safe decision. It does not duplicate bench scoring
 schemas. Demo: [`docs/benchmarks/EXPERIMENT_LAB_HUMAN_ADJUDICATION_V1.md`](../docs/benchmarks/EXPERIMENT_LAB_HUMAN_ADJUDICATION_V1.md).
+War-room snapshot freeze (in-memory, no HTTP): [`docs/benchmarks/WAR_ROOM_MEMORY_SNAPSHOT_V1.md`](../docs/benchmarks/WAR_ROOM_MEMORY_SNAPSHOT_V1.md).
 
 ## Layout
 
@@ -173,7 +174,7 @@ is an explicit, recorded operation. A reference whose target was never hashed
 
 ## Module boundaries
 
-`server/src/modules/{auth,authz,audit,cases,contributions,evidence,provenance,catalog,import,export}`
+`server/src/modules/{auth,authz,audit,cases,contributions,evidence,provenance,catalog,import,export,experiments,snapshots}`
 are reserved. Other code may depend on a module only through that module's
 `index.ts`. Cross-module deep imports fail `eslint-plugin-boundaries`
 (`boundaries/entry-point`). See `server/src/modules/boundaries.test.ts`.

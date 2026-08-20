@@ -1,0 +1,22 @@
+{
+  "schemaId": "cd-collab.case_board.v1",
+  "caseId": "case-synth-checkout-timeouts",
+  "snapshotId": null,
+  "generatedAt": "2026-08-20T00:00:00Z",
+  "privacyClass": "owner_only",
+  "known": [],
+  "unknown": [],
+  "agreed": [],
+  "disputed": [],
+  "newlyConcluded": [],
+  "gold": {
+    "status": "unknown",
+    "version": null,
+    "goldId": null
+  },
+  "notes": [
+    "Agreement is not proof of correctness.",
+    "A gold reference is a human benchmark decision, not an infallible truth claim."
+  ],
+  "leak": true
+}
