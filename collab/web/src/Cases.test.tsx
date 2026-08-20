@@ -1,8 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Cases } from "./Cases.js";
 
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
 });
 
@@ -130,6 +131,9 @@ describe("case list and view", () => {
     render(<Cases roles={["contributor"]} />);
     fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
     expect(await screen.findByText(/#1 case_created/)).toBeTruthy();
+    expect(
+      await screen.findByRole("option", { name: "Fixture chat assistant (external-tool)" }),
+    ).toBeTruthy();
 
     fireEvent.change(screen.getByPlaceholderText("Output"), {
       target: { value: "queue depth is the root cause" },
