@@ -3,6 +3,7 @@ import { Client } from "pg";
 
 export const COLLAB_APP_ROLE = "collab_app";
 export const COLLAB_APP_ROLE_PASSWORD = "fixture-app-role";
+const APP_ROLE_LOCK_KEY = 874_221_001;
 
 export function adminUrl(): string | undefined {
   return process.env.COLLAB_TEST_ADMIN_URL;
@@ -25,16 +26,23 @@ export function appRoleUrl(databaseUrl: string): string {
 }
 
 async function ensureAppRole(admin: Client): Promise<void> {
-  await admin.query(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'collab_app') THEN
-        CREATE ROLE collab_app LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
-      ELSE
-        ALTER ROLE collab_app WITH LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
-      END IF;
-    END $$;
-  `);
+  // Parallel vitest files share one Postgres. Concurrent ALTER ROLE on
+  // pg_authid raises "tuple concurrently updated" (seen in CI as a flake).
+  await admin.query("SELECT pg_advisory_lock($1)", [APP_ROLE_LOCK_KEY]);
+  try {
+    await admin.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'collab_app') THEN
+          CREATE ROLE collab_app LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
+        ELSE
+          ALTER ROLE collab_app WITH LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
+        END IF;
+      END $$;
+    `);
+  } finally {
+    await admin.query("SELECT pg_advisory_unlock($1)", [APP_ROLE_LOCK_KEY]);
+  }
 }
 
 export async function withDisposableDb(
