@@ -15,3 +15,20 @@ export function assertUploadAllowed(mediaType: string, byteLength: number): void
     throw new Error(`media type not allowlisted: ${mediaType}`);
   }
 }
+
+/** Reject path traversal and absolute names; bytes are content-addressed. */
+export function assertSafeFilename(filename: string | undefined): void {
+  if (filename === undefined) return;
+  if (!filename.trim() || filename !== filename.trim()) {
+    throw new Error("filename is empty or padded");
+  }
+  if (
+    filename.includes("\0") ||
+    filename.includes("/") ||
+    filename.includes("\\") ||
+    filename.includes("..") ||
+    /^[a-zA-Z]:/.test(filename)
+  ) {
+    throw new Error("filename must be a single path segment");
+  }
+}

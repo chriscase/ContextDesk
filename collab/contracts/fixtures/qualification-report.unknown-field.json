@@ -1,0 +1,28 @@
+{
+  "schemaId": "cd-collab.qualification_report.v1",
+  "privacyClass": "share_safe",
+  "backend": "memory",
+  "steps": [],
+  "comparison": {
+    "sharedEvidenceCount": 0,
+    "uniqueEvidenceCount": 0,
+    "disagreementCount": 0,
+    "questionPathCount": 0,
+    "helpfulnessRecorded": false,
+    "goldAligned": false,
+    "acceptedDecision": false
+  },
+  "lineage": {
+    "predecessorPackageAlias": "pkg-a",
+    "successorPackageAlias": "pkg-b",
+    "goldVersion": 1,
+    "predecessorGoldPresent": false
+  },
+  "liveProfiles": [],
+  "caveats": [
+    "agreement_not_correctness",
+    "gold_is_human_benchmark",
+    "live_results_are_not_fabricated"
+  ],
+  "prompt": "leak"
+}

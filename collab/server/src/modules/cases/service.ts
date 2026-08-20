@@ -21,7 +21,7 @@ import {
   hashContributionContent,
   isContributionKind,
 } from "../contributions/index.js";
-import { assertUploadAllowed } from "../evidence/index.js";
+import { assertSafeFilename, assertUploadAllowed } from "../evidence/index.js";
 import { LegalHoldError, assertCanTombstone, visibleBody } from "../provenance/index.js";
 import {
   MemoryCaseStore,
@@ -408,6 +408,7 @@ export class CaseService {
     origin: string,
   ): Promise<{ artifact: ArtifactV1; summary: ContributionV1 }> {
     await this.requireCase(caseId);
+    assertSafeFilename(input.filename);
     const privacy = defaultPrivacy(input.privacyClass);
     const sourceId = await this.resolveSourceId(actor, input.sourceId);
     const id = randomUUID();

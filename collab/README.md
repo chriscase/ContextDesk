@@ -13,6 +13,7 @@ Lab human adjudication v1 imports a share-safe experiment package/summary into
 a case, shows the candidate matrix and evidence agreement, records helpfulness,
 and accepts a revision-safe decision. It does not duplicate bench scoring
 schemas. Demo: [`docs/benchmarks/EXPERIMENT_LAB_HUMAN_ADJUDICATION_V1.md`](../docs/benchmarks/EXPERIMENT_LAB_HUMAN_ADJUDICATION_V1.md).
+Release qualification (hermetic eight-step workflow, SQLite job ledger, optional Postgres/LDAP, opt-in live matrix): `npm run qualify` — [`docs/testing/COLLAB_RELEASE_QUALIFICATION_V1.md`](../docs/testing/COLLAB_RELEASE_QUALIFICATION_V1.md).
 
 ## Layout
 

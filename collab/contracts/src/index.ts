@@ -307,3 +307,23 @@ export type {
   TraceSourceKind,
   TraceShareSafeCaveat,
 } from "./trace.js";
+
+export {
+  LIVE_PROFILE_ALIASES,
+  QUALIFICATION_BACKENDS,
+  QUALIFICATION_CAVEATS,
+  QUALIFICATION_REPORT_SCHEMA_ID,
+  QUALIFICATION_STEP_STATUSES,
+  parseQualificationReport,
+} from "./qualification.js";
+export type {
+  LiveProfileAlias,
+  QualificationBackend,
+  QualificationCaveat,
+  QualificationComparisonV1,
+  QualificationLineageV1,
+  QualificationLiveProfileV1,
+  QualificationReportV1,
+  QualificationStepStatus,
+  QualificationStepV1,
+} from "./qualification.js";

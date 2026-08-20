@@ -56,3 +56,13 @@ npm run migrate
 npm run build
 npm start
 ```
+
+## Release qualification
+
+From `collab/`, the hermetic suite is `npm run qualify`. It does not need
+Docker. PostgreSQL job-lease tests run when `COLLAB_TEST_ADMIN_URL` is set
+(as in `collab.yml`). LDAP transport tests remain skip-or-live as documented
+in the auth module. Live provider profiles are opt-in via `COLLAB_LIVE_PROFILES`
+and are never required. See
+[`docs/testing/COLLAB_RELEASE_QUALIFICATION_V1.md`](../../docs/testing/COLLAB_RELEASE_QUALIFICATION_V1.md).
+

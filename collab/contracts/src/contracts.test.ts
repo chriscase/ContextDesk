@@ -27,6 +27,7 @@ import {
   parseFileServerReference,
   parseHealthResponse,
   parsePromptPackage,
+  parseQualificationReport,
   parseSource,
 } from "./index.js";
 
@@ -268,5 +269,26 @@ describe("JSON Schema additionalProperties: false", () => {
         leak: true,
       }),
     ).toBe(false);
+  });
+
+  it("qualification report schema accepts the fixture and rejects prompt keys", () => {
+    const validate = ajv.compile(loadSchema("qualification-report.v1.json"));
+    expect(
+      validate(
+        JSON.parse(readFileSync(join(fixturesDir, "qualification-report.valid.json"), "utf8")),
+      ),
+    ).toBe(true);
+    expect(
+      validate(
+        JSON.parse(
+          readFileSync(join(fixturesDir, "qualification-report.unknown-field.json"), "utf8"),
+        ),
+      ),
+    ).toBe(false);
+    expect(() =>
+      parseQualificationReport(
+        JSON.parse(readFileSync(join(fixturesDir, "qualification-report.valid.json"), "utf8")),
+      ),
+    ).not.toThrow();
   });
 });
