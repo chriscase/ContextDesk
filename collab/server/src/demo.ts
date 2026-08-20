@@ -28,6 +28,7 @@ import {
   TriageRunService,
   type RustBridgeTriageExecutorOptions,
 } from "./modules/triage-runs/index.js";
+import { PresenceService } from "./modules/presence/index.js";
 
 export const DEMO_USERNAME = "demo";
 export const DEMO_PASSWORD = "demo";
@@ -389,6 +390,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       : {}),
     profiles: parseTriageProfileCatalog(process.env.COLLAB_TRIAGE_PROFILE_CATALOG),
   });
+  const presence = new PresenceService();
   const exporter = new ExportService({
     cases,
     catalog,
@@ -422,6 +424,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       catalog,
       imports,
       triageRuns,
+      presence,
       experiments,
       exporter,
       serveStatic: staticDir !== null,

@@ -116,6 +116,20 @@ interface ShareSafeExport {
   traces?: unknown[];
 }
 
+interface PresenceMemberView {
+  identityId: string;
+  username: string;
+  surface: string;
+  lastSeenAt: string;
+}
+
+interface PresenceView {
+  schemaId: string;
+  caseId: string;
+  ttlSeconds: number;
+  members: PresenceMemberView[];
+}
+
 const omissionLabels = [
   ["modelLabelsIncluded", "model labels"],
   ["participantIdentitiesIncluded", "participant identities"],
@@ -184,6 +198,7 @@ export function ExperimentLab(props: {
   const [payload, setPayload] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [exported, setExported] = useState<ShareSafeExport | null>(null);
+  const [presence, setPresence] = useState<PresenceView | null>(null);
 
   const refresh = useCallback(async (preferredId?: string) => {
     try {
@@ -224,7 +239,34 @@ export function ExperimentLab(props: {
     setActive(null);
     setExported(null);
     setError(null);
+    setPresence(null);
   }, [props.caseId]);
+
+  useEffect(() => {
+    // Unit/static consumers without an authenticated participant have no
+    // presence session to announce. The real app always supplies one.
+    if (!props.participant) return undefined;
+    let mounted = true;
+    const refreshPresence = async () => {
+      if (!readOnly) {
+        await fetch(`/api/cases/${props.caseId}/presence`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ surface: "experiment_lab" }),
+        }).catch(() => undefined);
+      }
+      const response = await fetch(`/api/cases/${props.caseId}/presence`).catch(() => null);
+      if (!mounted || !response?.ok) return;
+      const body = (await response.json().catch(() => null)) as PresenceView | null;
+      if (mounted && body && Array.isArray(body.members)) setPresence(body);
+    };
+    void refreshPresence();
+    const timer = window.setInterval(() => void refreshPresence(), 15_000);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, [props.caseId, props.participant?.username, readOnly]);
 
   const current = experiments.find((row) => row.id === active) ?? experiments[0] ?? null;
 
@@ -488,12 +530,19 @@ export function ExperimentLab(props: {
             <span>{props.caseSeverity ?? "severity unavailable"} severity</span>
           </p>
         </div>
-        <div className="experiment-lab__presence" aria-label="War room participant">
+        <div className="experiment-lab__presence" aria-label="War room presence">
           <span className="experiment-lab__presence-dot" aria-hidden="true" />
           <div>
             <span className="experiment-lab__eyebrow">Current participant</span>
             <strong>{participantName}</strong>
             <span>{participantRole}</span>
+            {presence ? (
+              <span aria-live="polite">
+                {presence.members.length} active now · {presence.members.map((member) => member.username).join(", ") || "no one else"}
+              </span>
+            ) : (
+              <span>Presence unavailable</span>
+            )}
           </div>
           {current ? (
             <span className="experiment-lab__status">{current.candidates.length} candidate lanes</span>
@@ -508,7 +557,8 @@ export function ExperimentLab(props: {
       </p>
       <div className="experiment-lab__future-slots" aria-label="War room extension slots">
         <span>Sources: seeded · ContextDesk connector · pasted chat</span>
-        <span>Next extensions: presence · live updates · semantic search</span>
+        <span>Presence: {presence ? `${presence.members.length} active` : "checking…"} · live refresh</span>
+        <span>Next extensions: semantic search · multi-worker leases</span>
       </div>
       <div className="experiment-lab__extension-grid" aria-label="War room extension points">
         <div>

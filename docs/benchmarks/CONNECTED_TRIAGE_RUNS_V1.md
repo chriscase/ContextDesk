@@ -88,6 +88,13 @@ durable updates, ignores late events after cancellation, and leaves the final
 stdout JSON schema unchanged. Older hosts that emit no progress events remain
 compatible because the final envelope is still authoritative.
 
+Authenticated War-Room users also receive ephemeral case presence through
+`GET/POST /api/cases/:id/presence`. It is a short-TTL collaboration hint, not a
+case fact or audit record: usernames, the current surface, and last-seen time
+are shown only to users who can already read the case. A restart clears it, and
+the UI falls back to the attributed current participant when presence is
+unavailable.
+
 Configure the bridge with `COLLAB_TRIAGE_RUNNER` and optionally
 `COLLAB_TRIAGE_RUNNER_DATA_DIR`, `COLLAB_TRIAGE_LIBRARY`, and
 `COLLAB_TRIAGE_RUNNER_TIMEOUT_MS`. If the runner is not configured, gateway

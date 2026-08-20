@@ -267,6 +267,10 @@
   font-size: 0.74rem;
 }
 
+.experiment-lab__presence > div > span[aria-live="polite"] {
+  color: var(--accent);
+}
+
 .experiment-lab__presence .experiment-lab__status {
   align-self: center;
   margin-left: auto;

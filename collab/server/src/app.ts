@@ -25,6 +25,7 @@ import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
 import { registerImportRoutes, type ImportService } from "./modules/import/index.js";
 import { registerTriageRunRoutes, type TriageRunService } from "./modules/triage-runs/index.js";
+import { registerPresenceRoutes, type PresenceService } from "./modules/presence/index.js";
 import {
   registerExperimentRoutes,
   type ExperimentService,
@@ -46,6 +47,7 @@ export interface AppDeps {
   catalog?: CatalogService;
   imports?: ImportService;
   triageRuns?: TriageRunService;
+  presence?: PresenceService;
   experiments?: ExperimentService;
   exporter?: ExportService;
   serveStatic?: boolean;
@@ -136,6 +138,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         roles: security.roles,
         audit: security.audit,
         runs: deps.triageRuns,
+      });
+    }
+    if (deps.domain && deps.presence) {
+      await registerPresenceRoutes(app, {
+        auth: security.auth,
+        roles: security.roles,
+        cases: deps.domain,
+        presence: deps.presence,
       });
     }
     if (deps.experiments) {

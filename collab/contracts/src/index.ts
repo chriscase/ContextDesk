@@ -64,6 +64,17 @@ export { TIMELINE_SCHEMA_ID, parseTimeline } from "./timeline.js";
 export type { TimelineEventV1, TimelineV1 } from "./timeline.js";
 
 export {
+  PRESENCE_SCHEMA_ID,
+  PRESENCE_SURFACES,
+  parseCasePresence,
+} from "./presence.js";
+export type {
+  CasePresenceV1,
+  PresenceMemberV1,
+  PresenceSurface,
+} from "./presence.js";
+
+export {
   CONTRIBUTION_KINDS,
   CONTRIBUTION_SCHEMA_ID,
   HYPOTHESIS_STATUSES,

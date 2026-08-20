@@ -3,6 +3,7 @@ import {
   LAB_EXPORT_V2_SCHEMA_ID,
   parseCaseBoard,
   parseLabExportV2,
+  parseCasePresence,
   parseSnapshot,
   parseSnapshotList,
   parseTriageJobList,
@@ -42,6 +43,20 @@ describe("synthetic demo server", () => {
     const session = await demo.app.inject({ method: "GET", url: "/api/auth/me", headers });
     expect(session.statusCode).toBe(200);
     expect(JSON.parse(session.body).roles).toEqual(["case-lead"]);
+    const unauthenticatedPresence = await demo.app.inject({
+      method: "GET",
+      url: `/api/cases/${demo.caseId}/presence`,
+    });
+    expect(unauthenticatedPresence.statusCode).toBe(401);
+    const presenceResponse = await demo.app.inject({
+      method: "POST",
+      url: `/api/cases/${demo.caseId}/presence`,
+      headers,
+      payload: { surface: "experiment_lab" },
+    });
+    expect(presenceResponse.statusCode).toBe(200);
+    const presence = parseCasePresence(JSON.parse(presenceResponse.body));
+    expect(presence.members.map((member) => member.username)).toContain(DEMO_USERNAME);
     const health = await demo.app.inject({ method: "GET", url: "/health" });
     expect(health.statusCode).toBe(200);
     expect(JSON.parse(health.body).service).toBe("contextdesk-synthetic-demo");

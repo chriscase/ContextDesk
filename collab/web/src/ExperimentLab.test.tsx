@@ -616,7 +616,7 @@ describe("experiment lab", () => {
     expect(screen.getByRole("region", { name: "Strategy comparison" })).toBeTruthy();
     expect(screen.getByRole("status").textContent).toMatch(/Static read-only mode/);
     expect(screen.getByText(/Sources: seeded · ContextDesk connector · pasted chat/)).toBeTruthy();
-    expect(screen.getByText(/Next extensions: presence · live updates · semantic search/)).toBeTruthy();
+    expect(screen.getByText(/Next extensions: semantic search · multi-worker leases/)).toBeTruthy();
     expect(screen.getAllByText(/Synthetic three-model comparison fixture|Agreement is not proof of correctness/).length).toBeGreaterThan(0);
     expect(screen.getByText(/Not live provider output/)).toBeTruthy();
 

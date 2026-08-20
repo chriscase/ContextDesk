@@ -10,6 +10,7 @@ import {
   createAuthLog,
   createRateLimiter,
   defaultSessionPolicy,
+  loadLocalAuthAdapter,
   loadLdapConfig,
 } from "./modules/auth/index.js";
 import {
@@ -28,15 +29,17 @@ import {
   RustBridgeTriageExecutor,
   TriageRunService,
 } from "./modules/triage-runs/index.js";
+import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
 
 async function main(): Promise<void> {
   const config = loadRuntimeConfig();
-  const ldap = loadLdapConfig();
   const pool = new Pool({ connectionString: config.databaseUrl });
   const store = new FilesystemEvidenceStore({ rootDir: config.evidenceRoot });
   await store.ping();
   const log = createAuthLog();
-  const adapter = new LdapAuthAdapter(ldap, log);
+  const adapter = config.authMode === "local"
+    ? loadLocalAuthAdapter()
+    : new LdapAuthAdapter(loadLdapConfig(), log);
   const sessions = process.env.COLLAB_SESSION_STORE === "memory"
     ? new MemorySessionStore()
     : new PgSessionStore(pool);
@@ -80,6 +83,7 @@ async function main(): Promise<void> {
       : {}),
     profiles: parseTriageProfileCatalog(process.env.COLLAB_TRIAGE_PROFILE_CATALOG),
   });
+  const presence = new PresenceService(new PgPresenceBackend(pool));
   await triageRuns.recoverPending();
   const exporter = new ExportService({
     cases: domain,
@@ -96,6 +100,7 @@ async function main(): Promise<void> {
     catalog,
     imports,
     triageRuns,
+    presence,
     experiments,
     exporter,
     security: {

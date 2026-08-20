@@ -14,6 +14,7 @@ export interface Config {
   evidenceRoot: string;
   /** Built UI assets; null skips static serving (API-only). */
   staticDir: string | null;
+  authMode: "ldap" | "local";
 }
 
 function parsePort(raw: string | undefined): number {
@@ -31,6 +32,14 @@ function must(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
+function authMode(env: NodeJS.ProcessEnv): "ldap" | "local" {
+  const mode = (env.COLLAB_AUTH_MODE ?? "ldap").trim().toLowerCase();
+  if (mode !== "ldap" && mode !== "local") {
+    throw new Error(`COLLAB_AUTH_MODE must be ldap or local, got ${mode}`);
+  }
+  return mode;
+}
+
 /** Load config, requiring database URLs (used by the process entrypoint). */
 export function loadRuntimeConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -44,6 +53,7 @@ export function loadRuntimeConfig(
       env.COLLAB_MIGRATE_DATABASE_URL ?? must(env, "COLLAB_DATABASE_URL"),
     evidenceRoot: env.COLLAB_EVIDENCE_ROOT ?? ".data/evidence",
     staticDir: env.COLLAB_STATIC_DIR?.trim() || null,
+    authMode: authMode(env),
   };
 }
 
@@ -57,6 +67,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     migrateDatabaseUrl: "postgres://collab_migrator@127.0.0.1:5432/collab",
     evidenceRoot: ".data/evidence",
     staticDir: null,
+    authMode: "ldap",
     ...overrides,
   };
 }
