@@ -38,8 +38,6 @@ async function ensureAppRole(admin: Client): Promise<void> {
       BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'collab_app') THEN
           CREATE ROLE collab_app LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
-        ELSE
-          ALTER ROLE collab_app WITH LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
         END IF;
       END $$;
     `);
