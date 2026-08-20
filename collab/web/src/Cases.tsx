@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { ImportedRun } from "./ImportedRun.js";
+import { CaseBoardPanel } from "./CaseBoardPanel.js";
+import { TriageRunPanel } from "./TriageRunPanel.js";
 
 interface CaseRow {
   id: string;
@@ -115,7 +117,7 @@ export function Cases(props: {
     event.preventDefault();
     if (!active) return;
     const data = new FormData(event.currentTarget);
-    await fetch(`/api/cases/${active}/imports`, {
+    const response = await fetch(`/api/cases/${active}/imports`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -130,6 +132,7 @@ export function Cases(props: {
         redacted: data.get("redacted") === "on",
       }),
     });
+    if (response.ok) window.dispatchEvent(new Event("contextdesk:external-run-imported"));
     event.currentTarget.reset();
     await loadTimeline(active);
   }
@@ -264,6 +267,8 @@ export function Cases(props: {
               caseSeverity={current.severity}
               {...(props.participant ? { participant: props.participant } : {})}
             />
+            <CaseBoardPanel caseId={current.id} canWrite={canWrite} canLead={canLead} readOnly={readOnly} />
+            <TriageRunPanel caseId={current.id} canLead={canLead} readOnly={readOnly} />
             <details className="case-view__support">
               <summary>Case timeline and external evidence</summary>
               <ol className="timeline">
