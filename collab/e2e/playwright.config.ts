@@ -7,6 +7,16 @@ const port = Number.parseInt(process.env.COLLAB_E2E_PORT ?? "8788", 10);
 const baseURL = process.env.COLLAB_E2E_BASE_URL ?? `http://127.0.0.1:${port}`;
 const startFixture = process.env.COLLAB_E2E_START_FIXTURE !== "0";
 
+const webServer = {
+  command: "npx tsx src/serve-fixture.ts",
+  cwd: here,
+  url: `${baseURL}/health`,
+  reuseExistingServer: !process.env.CI,
+  timeout: 120_000,
+  stdout: "pipe" as const,
+  stderr: "pipe" as const,
+};
+
 export default defineConfig({
   testDir: join(here, "specs"),
   timeout: 60_000,
@@ -30,19 +40,5 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
   ],
-  webServer: startFixture
-    ? {
-        command: "npx tsx src/serve-fixture.ts",
-        cwd: here,
-        url: `${baseURL}/health`,
-        reuseExistingServer: !process.env.CI,
-        timeout: 120_000,
-        stdout: "pipe",
-        stderr: "pipe",
-        env: {
-          ...process.env,
-          COLLAB_E2E_PORT: String(port),
-        },
-      }
-    : undefined,
+  ...(startFixture ? { webServer } : {}),
 });

@@ -55,8 +55,8 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
     await page.reload();
     await openCase(page, title);
     await expect(page.locator(".timeline__item").filter({ hasText: "evidence_registered" })).toHaveCount(3);
-    await expect(page.getByText(/shared-timeout\.log/)).toBeVisible();
-    await expect(page.getByText(/unique-worker\.log/)).toBeVisible();
+    await expect(page.getByText("artifact · shared-timeout.log · share_safe")).toHaveCount(2);
+    await expect(page.getByText("artifact · unique-worker.log · owner_only")).toHaveCount(1);
     await screenshot(page, "03-evidence-inventory");
   });
 

@@ -94,6 +94,11 @@ Source of truth: `collab/e2e/src/surface-map.ts`.
 5. **Corroboration IDs** — `targetId` is on the timeline API but omitted from
    the React row. Operators must learn IDs out of band.
 
+Composer `importRun` / `addNote` / catalog `createSource` capture
+`event.currentTarget` before `await fetch` (same pattern as `LoginForm`). React
+nulls `currentTarget` after the handler yields, which previously swallowed a
+successful POST and skipped `loadTimeline` / `reset`.
+
 ## Recommended UI fixes (out of scope here)
 
 - Add an evidence upload control (and show content hashes) instead of API-only.
@@ -105,7 +110,8 @@ Source of truth: `collab/e2e/src/surface-map.ts`.
 - Hide or disable Create case / Import / Add to timeline for viewers; surface
   `403` instead of silent no-ops.
 - Add a privacy-class control on contributions if share_safe scan fixtures are
-  meant to be UI-driven.
+  meant to be UI-driven. The share_safe scan fixture still POSTs
+  `privacyClass: "share_safe"` because the composer has no such control.
 - `:focus-visible` styles and labels on placeholder-only composer fields.
 - Do not ship comparison lanes, freeze snapshot, or helpfulness controls as if
   they already exist on this branch.
@@ -117,5 +123,6 @@ no secrets. Passwords stay in the environment. Do not commit filled profiles.
 
 ## Handbook impact
 
-none — browser tests, fixtures, and qualification docs for the existing collab
-shell; no engine, permission, or provider-lifecycle change.
+none — browser tests, fixtures, qualification docs, and a composer form-handle
+hold so React does not drop `currentTarget` after `await fetch`. No engine,
+permission, or provider-lifecycle change.
