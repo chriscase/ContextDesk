@@ -264,11 +264,7 @@ pub async fn probe_provider_catalog(
             let err_blob = result.errors.join("; ");
             let note_blob = result.notes.join(" ");
             let combined = format!("{err_blob} {note_blob}").to_lowercase();
-            if combined.contains("401")
-                || combined.contains("403")
-                || combined.contains("auth failed")
-                || combined.contains("no api key")
-            {
+            if ai_probe_reports_auth_failure(&combined) {
                 ProviderCatalogProbe {
                     outcome: ProbeOutcome::KeyRejected {
                         reason: if err_blob.is_empty() {
@@ -487,6 +483,14 @@ fn classify_list_err(msg: &str) -> ProbeOutcome {
     }
 }
 
+fn ai_probe_reports_auth_failure(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("auth failed")
+        || lower.contains("no api key")
+        || lower.contains("http 401")
+        || lower.contains("http 403")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,5 +523,12 @@ mod tests {
         assert!(matches!(r, ProbeOutcome::KeyRejected { .. }), "{r:?}");
         let r2 = classify_list_err("connection refused");
         assert!(matches!(r2, ProbeOutcome::Unreachable { .. }), "{r2:?}");
+
+        assert!(ai_probe_reports_auth_failure(
+            "https://gateway.example/v1/models: HTTP 403"
+        ));
+        assert!(!ai_probe_reports_auth_failure(
+            "http://127.1:64030/v1/models: HTTP 429 rate limited"
+        ));
     }
 }
