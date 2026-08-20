@@ -230,4 +230,61 @@ describe("experiment lab", () => {
       expect.objectContaining({ method: "POST" }),
     );
   });
+
+  it("keeps only the share-safe export action in static read-only mode", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/experiments")) {
+          return { ok: true, json: async () => ({ experiments: [goldView] }) };
+        }
+        if (url.endsWith("/export")) {
+          return {
+            ok: true,
+            json: async () => ({
+              schemaId: "cd-collab.experiment_lab_export.v2",
+              privacyClass: "share_safe",
+            }),
+          };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+    render(<ExperimentLab caseId="c1" canWrite canLead readOnly />);
+    expect(await screen.findByText(/Static read-only mode/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Export share-safe review" })).toBeTruthy();
+    for (const name of [
+      "Import experiment",
+      "Import trace",
+      "Record helpfulness",
+      "Propose decision",
+      "Promote accepted decision to gold",
+    ]) {
+      expect(screen.queryByRole("button", { name })).toBeNull();
+    }
+  });
+
+  it("surfaces share-safe export failures", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/experiments")) {
+          return { ok: true, json: async () => ({ experiments: [view] }) };
+        }
+        if (url.endsWith("/export")) {
+          return {
+            ok: false,
+            json: async () => ({ error: "Imported fingerprint is not export-compatible" }),
+          };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    await screen.findAllByText("qwen-3.6-27b");
+    fireEvent.click(screen.getByRole("button", { name: "Export share-safe review" }));
+    expect(await screen.findByText("Imported fingerprint is not export-compatible")).toBeTruthy();
+  });
 });

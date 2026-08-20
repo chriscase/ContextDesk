@@ -11,12 +11,11 @@ import {
   parseGoldReference,
   parseHelpfulnessObservation,
   parseInteractionTrace,
-  parseLabExport,
+  parseLabExportV2,
   parseLabImport,
   parsePlainTranscript,
   PLAIN_TRANSCRIPT_SCHEMA_ID,
   INTERACTION_TRACE_SCHEMA_ID,
-  LAB_EXPORT_SCHEMA_ID,
   buildStrategyComparison,
   extractPlainTranscript,
   projectShareSafeTrace,
@@ -37,7 +36,7 @@ import {
 import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
 import { alignExperimentCandidates, knownAgreementEvidence } from "./align.js";
-import { projectCandidateMatrix, projectReviewExport } from "./project.js";
+import { projectCandidateMatrix, projectExperimentLabExport } from "./project.js";
 import { MemoryExperimentStore, type ExperimentRow, type ExperimentStore } from "./store.js";
 
 export class ExperimentConflictError extends Error {
@@ -108,6 +107,72 @@ function withCaveat(agreement: ExperimentAgreementV1): ExperimentAgreementV1 {
   return { ...agreement, notes };
 }
 
+function canonicalFingerprint(value: string, prefix: "task" | "snap"): string {
+  const normalized = value.trim().toLowerCase();
+  const digest = normalized.startsWith(`${prefix}-`)
+    ? normalized.slice(prefix.length + 1)
+    : normalized;
+  if (!/^[a-f0-9]{64}$/.test(digest)) {
+    throw new Error(
+      `${prefix === "task" ? "taskFingerprint" : "snapshotFingerprint"} must contain a SHA-256 digest`,
+    );
+  }
+  return `${prefix}-${digest}`;
+}
+
+function canonicalTimestamp(value: string, path: string): string {
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) {
+    throw new Error(`${path} must be a valid timestamp`);
+  }
+  return new Date(milliseconds).toISOString();
+}
+
+function canonicalDigest(value: string | null, path: string): string | null {
+  if (value === null) return null;
+  const normalized = value.trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(normalized)) {
+    throw new Error(`${path} must be a SHA-256 digest`);
+  }
+  return normalized;
+}
+
+function canonicalEnvelope<T extends ExperimentPackageV1 | ExperimentSummaryV1>(
+  envelope: T,
+): T {
+  return {
+    ...envelope,
+    taskFingerprint: canonicalFingerprint(envelope.taskFingerprint, "task"),
+    snapshotFingerprint: canonicalFingerprint(envelope.snapshotFingerprint, "snap"),
+  };
+}
+
+function canonicalTrace(trace: InteractionTraceV1): InteractionTraceV1 {
+  return {
+    ...trace,
+    rawHash: canonicalDigest(trace.rawHash, "rawHash"),
+    createdAt: canonicalTimestamp(trace.createdAt, "createdAt"),
+    events: trace.events.map((event, index) => ({
+      ...event,
+      excerptHash: canonicalDigest(event.excerptHash, `events[${index}].excerptHash`),
+      observedAt:
+        event.observedAt.status === "observed"
+          ? {
+              status: "observed",
+              timestamp: canonicalTimestamp(
+                event.observedAt.timestamp,
+                `events[${index}].observedAt.timestamp`,
+              ),
+            }
+          : { status: "unknown" },
+    })),
+  };
+}
+
+function prepareTraceForStorage(trace: InteractionTraceV1): InteractionTraceV1 {
+  return projectShareSafeTrace(canonicalTrace(trace));
+}
+
 export class ExperimentService {
   private readonly store: ExperimentStore;
 
@@ -132,7 +197,15 @@ export class ExperimentService {
       throw new ExperimentNotFoundError("case not found");
     }
     const parsed = parseLabImport(raw);
-    const envelope = parsed.kind === "strategy" ? parsed.package.experiment : parsed.envelope;
+    const envelope = canonicalEnvelope(
+      parsed.kind === "strategy" ? parsed.package.experiment : parsed.envelope,
+    );
+    // Validate and privacy-project every trace before any experiment, timeline,
+    // audit, or trace row is written. Strategy-package import is fail-closed.
+    const preparedTraces =
+      parsed.kind === "strategy"
+        ? parsed.package.traces.map((trace) => prepareTraceForStorage(trace))
+        : [];
     const existing = await this.store.findByPackage(caseId, envelope.packageId);
     if (existing) {
       await this.deps.audit.append({
@@ -143,7 +216,7 @@ export class ExperimentService {
         outcome: "success",
       });
       if (parsed.kind === "strategy") {
-        for (const trace of parsed.package.traces) {
+        for (const trace of preparedTraces) {
           await this.attachParsedTrace(existing, actor, trace, origin);
         }
       }
@@ -197,7 +270,7 @@ export class ExperimentService {
       outcome: "success",
     });
     if (parsed.kind === "strategy") {
-      for (const trace of parsed.package.traces) {
+      for (const trace of preparedTraces) {
         await this.attachParsedTrace(row, actor, trace, origin);
       }
     }
@@ -390,16 +463,10 @@ export class ExperimentService {
     experimentId: string,
     actor: Actor,
     isAdmin: boolean,
-  ): Promise<ReturnType<typeof parseLabExport>> {
+  ): Promise<ReturnType<typeof parseLabExportV2>> {
     const view = await this.get(caseId, experimentId, actor, isAdmin);
     if (!view) throw new ExperimentNotFoundError();
-    return parseLabExport({
-      schemaId: LAB_EXPORT_SCHEMA_ID,
-      privacyClass: "share_safe",
-      review: projectReviewExport(view),
-      traces: view.traces.map(projectShareSafeTrace),
-      comparison: view.comparison,
-    });
+    return projectExperimentLabExport(view);
   }
 
   async importTrace(
@@ -497,7 +564,7 @@ export class ExperimentService {
     incoming: InteractionTraceV1,
     origin: string,
   ): Promise<InteractionTraceV1> {
-    const safe = projectShareSafeTrace(incoming);
+    const safe = prepareTraceForStorage(incoming);
     const fingerprint = traceFingerprint(safe);
     const existing = await this.store.findTrace(row.id, safe.candidateId);
     if (existing) {

@@ -105,7 +105,12 @@ export function ExperimentLab(props: {
   caseId: string;
   canWrite: boolean;
   canLead: boolean;
+  readOnly?: boolean;
 }) {
+  const readOnly = props.readOnly === true;
+  const canWrite = props.canWrite && !readOnly;
+  const canLead = props.canLead && !readOnly;
+  const canExport = props.canLead || readOnly;
   const [experiments, setExperiments] = useState<ExperimentView[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [payload, setPayload] = useState("");
@@ -213,11 +218,21 @@ export function ExperimentLab(props: {
 
   async function exportReview() {
     if (!current) return;
-    const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/export`, {
-      method: "POST",
-    });
-    if (!res.ok) return;
-    setExported(JSON.stringify(await res.json(), null, 2));
+    setError(null);
+    setExported("");
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/export`, {
+        method: "POST",
+      });
+      const body = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        setError(body.error ?? "Share-safe export failed");
+        return;
+      }
+      setExported(JSON.stringify(body, null, 2));
+    } catch {
+      setError("Share-safe export failed because the response could not be read");
+    }
   }
 
   async function promoteGold(event: FormEvent<HTMLFormElement>) {
@@ -320,20 +335,29 @@ export function ExperimentLab(props: {
         correctness. A gold reference is a human benchmark decision, not an infallible truth
         claim. Gold alignment is scored separately from helpfulness.
       </p>
-      {props.canWrite ? (
-        <form className="composer" onSubmit={(event) => void importPackage(event)}>
-          <textarea
-            className="login__input"
-            rows={6}
-            value={payload}
-            onChange={(event) => setPayload(event.target.value)}
-            placeholder="Paste share-safe experiment, strategy package, or summary JSON"
-            required
-          />
-          <button className="login__submit" type="submit">
-            Import experiment
-          </button>
-        </form>
+      {readOnly ? (
+        <p className="experiment-lab__disclaimer" role="status">
+          Static read-only mode: review the seeded comparison or export its share-safe
+          projection. Editing, importing, scoring, and benchmark changes are unavailable.
+        </p>
+      ) : null}
+      {canWrite ? (
+        <details className="experiment-lab__tools">
+          <summary>Import another experiment package</summary>
+          <form className="composer" onSubmit={(event) => void importPackage(event)}>
+            <textarea
+              className="login__input"
+              rows={6}
+              value={payload}
+              onChange={(event) => setPayload(event.target.value)}
+              placeholder="Paste share-safe experiment, strategy package, or summary JSON"
+              required
+            />
+            <button className="login__submit" type="submit">
+              Import experiment
+            </button>
+          </form>
+        </details>
       ) : null}
       {error ? <p className="experiment-lab__error">{error}</p> : null}
       {experiments.length > 1 ? (
@@ -353,6 +377,33 @@ export function ExperimentLab(props: {
             package {current.packageId} · task {current.taskFingerprint.slice(0, 12)} · snapshot{" "}
             {current.snapshotFingerprint.slice(0, 12)}
           </p>
+          <div className="experiment-lab__scorecards" aria-label="Experiment summary">
+            <article>
+              <span>Candidates</span>
+              <strong>{current.candidates.length}</strong>
+            </article>
+            <article>
+              <span>Shared evidence</span>
+              <strong>{current.agreement.sharedAnchors.length}</strong>
+            </article>
+            <article>
+              <span>Differences</span>
+              <strong>
+                {current.agreement.candidateSpecific.reduce(
+                  (count, row) => count + row.evidenceRefs.length,
+                  0,
+                ) + current.agreement.roleConflicts.length}
+              </strong>
+            </article>
+            <article>
+              <span>Human reviews</span>
+              <strong>{current.observations.length}</strong>
+            </article>
+            <article>
+              <span>Benchmark</span>
+              <strong>{current.gold ? `v${current.gold.version}` : "—"}</strong>
+            </article>
+          </div>
           <section className="experiment-lab__gold" aria-label="Gold reference">
             {current.gold ? (
               <>
@@ -375,34 +426,36 @@ export function ExperimentLab(props: {
               </p>
             )}
           </section>
-          <table className="experiment-lab__matrix">
-            <thead>
-              <tr>
-                <th>Candidate</th>
-                <th>Role</th>
-                <th>Status</th>
-                <th>Latency</th>
-                <th>Cost</th>
-                <th>Usage</th>
-                <th>Helpfulness</th>
-                <th>Gold</th>
-              </tr>
-            </thead>
-            <tbody>
-              {current.candidates.map((row) => (
-                <tr key={row.candidateId}>
-                  <td>{row.modelLabel}</td>
-                  <td>{row.role}</td>
-                  <td>{row.runStatus}</td>
-                  <td>{latencyLabel(row.observedLatency)}</td>
-                  <td>{row.cost.status}</td>
-                  <td>{row.usage.status}</td>
-                  <td>{row.helpfulnessState}</td>
-                  <td>{row.goldState}</td>
+          <div className="experiment-lab__matrix-wrap">
+            <table className="experiment-lab__matrix">
+              <thead>
+                <tr>
+                  <th>Candidate</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                  <th>Latency</th>
+                  <th>Cost</th>
+                  <th>Usage</th>
+                  <th>Helpfulness</th>
+                  <th>Gold</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {current.candidates.map((row) => (
+                  <tr key={row.candidateId}>
+                    <td>{row.modelLabel}</td>
+                    <td>{row.role}</td>
+                    <td>{row.runStatus}</td>
+                    <td>{latencyLabel(row.observedLatency)}</td>
+                    <td>{row.cost.status}</td>
+                    <td>{row.usage.status}</td>
+                    <td>{row.helpfulnessState}</td>
+                    <td>{row.goldState}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           <h4 className="experiment-lab__heading">Similarities and differences</h4>
           <p className="timeline__meta">{current.agreement.notes.join(" ")}</p>
           <ul className="timeline">
@@ -498,21 +551,24 @@ export function ExperimentLab(props: {
               ))}
             </div>
           </section>
-          {props.canWrite ? (
-            <form className="composer" onSubmit={(event) => void importTrace(event)}>
-              <textarea
-                className="login__input"
-                name="trace"
-                rows={4}
-                placeholder="Paste interaction trace or plain transcript JSON"
-                required
-              />
-              <button className="login__submit" type="submit">
-                Import trace
-              </button>
-            </form>
+          {canWrite ? (
+            <details className="experiment-lab__tools">
+              <summary>Add a chat transcript or interaction trace</summary>
+              <form className="composer" onSubmit={(event) => void importTrace(event)}>
+                <textarea
+                  className="login__input"
+                  name="trace"
+                  rows={4}
+                  placeholder="Paste interaction trace or plain transcript JSON"
+                  required
+                />
+                <button className="login__submit" type="submit">
+                  Import trace
+                </button>
+              </form>
+            </details>
           ) : null}
-          {props.canWrite && (current.traces ?? []).length > 0 ? (
+          {canWrite && (current.traces ?? []).length > 0 ? (
             <form className="composer" onSubmit={(event) => void annotateTrace(event)}>
               <select className="login__input" name="candidateId" defaultValue={current.traces[0]?.candidateId}>
                 {current.traces.map((trace) => (
@@ -528,28 +584,31 @@ export function ExperimentLab(props: {
               </button>
             </form>
           ) : null}
-          {props.canWrite ? (
-            <form className="composer" onSubmit={(event) => void recordHelpfulness(event)}>
-              <select className="login__input" name="candidateId" defaultValue={current.candidates[0]?.candidateId}>
-                {current.candidates.map((row) => (
-                  <option key={row.candidateId} value={row.candidateId}>
-                    {row.modelLabel}
-                  </option>
-                ))}
-              </select>
-              <select className="login__input" name="dimension" defaultValue="evidence_support">
-                <option value="evidence_support">evidence_support</option>
-                <option value="actionability">actionability</option>
-                <option value="uncertainty_calibration">uncertainty_calibration</option>
-                <option value="unsafe_unsupported_claims">unsafe_unsupported_claims</option>
-              </select>
-              <input className="login__input" name="score" type="number" min={0} max={3} defaultValue={2} required />
-              <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
-              <textarea className="login__input" name="rationale" rows={2} required placeholder="Helpfulness rationale" />
-              <button className="login__submit" type="submit">
-                Record helpfulness
-              </button>
-            </form>
+          {canWrite ? (
+            <details className="experiment-lab__tools">
+              <summary>Score candidate helpfulness</summary>
+              <form className="composer" onSubmit={(event) => void recordHelpfulness(event)}>
+                <select className="login__input" name="candidateId" defaultValue={current.candidates[0]?.candidateId}>
+                  {current.candidates.map((row) => (
+                    <option key={row.candidateId} value={row.candidateId}>
+                      {row.modelLabel}
+                    </option>
+                  ))}
+                </select>
+                <select className="login__input" name="dimension" defaultValue="evidence_support">
+                  <option value="evidence_support">evidence support</option>
+                  <option value="actionability">actionability</option>
+                  <option value="uncertainty_calibration">uncertainty calibration</option>
+                  <option value="unsafe_unsupported_claims">unsafe unsupported claims</option>
+                </select>
+                <input className="login__input" name="score" type="number" min={0} max={3} defaultValue={2} required />
+                <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
+                <textarea className="login__input" name="rationale" rows={2} required placeholder="Helpfulness rationale" />
+                <button className="login__submit" type="submit">
+                  Record helpfulness
+                </button>
+              </form>
+            </details>
           ) : null}
           <ul className="timeline">
             {current.observations.map((row) => (
@@ -572,15 +631,18 @@ export function ExperimentLab(props: {
               </li>
             ))}
           </ul>
-          {props.canWrite ? (
-            <form className="composer" onSubmit={(event) => void proposeDecision(event)}>
-              <textarea className="login__input" name="text" rows={2} required placeholder="Proposed decision" />
-              <textarea className="login__input" name="rationale" rows={2} required placeholder="Decision rationale" />
-              <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
-              <button className="login__submit" type="submit">
-                Propose decision
-              </button>
-            </form>
+          {canWrite ? (
+            <details className="experiment-lab__tools">
+              <summary>Propose a new human decision</summary>
+              <form className="composer" onSubmit={(event) => void proposeDecision(event)}>
+                <textarea className="login__input" name="text" rows={2} required placeholder="Proposed decision" />
+                <textarea className="login__input" name="rationale" rows={2} required placeholder="Decision rationale" />
+                <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
+                <button className="login__submit" type="submit">
+                  Propose decision
+                </button>
+              </form>
+            </details>
           ) : null}
           {current.decisions.length > 0 ? (
             <p className="timeline__meta">
@@ -588,46 +650,49 @@ export function ExperimentLab(props: {
               {current.decisions.at(-1)?.text}
             </p>
           ) : null}
-          {props.canLead && current.decisions.at(-1)?.status === "proposed" ? (
+          {canLead && current.decisions.at(-1)?.status === "proposed" ? (
             <button className="login__submit" type="button" onClick={() => void acceptDecision()}>
               Accept decision
             </button>
           ) : null}
-          {props.canLead && current.decisions.some((row) => row.status === "accepted") ? (
-            <form className="composer" onSubmit={(event) => void promoteGold(event)}>
-              <input
-                className="login__input"
-                name="evidenceAnchors"
-                defaultValue="ev-demo-checkout-log, ev-demo-inventory-timeout"
-                placeholder="gold evidence anchors, comma separated"
-                required
-              />
-              <input
-                className="login__input"
-                name="expectedRelationships"
-                placeholder="optional evidence=role pairs, comma separated"
-              />
-              <input
-                className="login__input"
-                name="helpfulnessDimensions"
-                placeholder="optional helpfulness dimensions, comma separated"
-              />
-              {current.gold ? (
+          {canLead && current.decisions.some((row) => row.status === "accepted") ? (
+            <details className="experiment-lab__tools">
+              <summary>Version the human benchmark</summary>
+              <form className="composer" onSubmit={(event) => void promoteGold(event)}>
                 <input
                   className="login__input"
-                  name="expectedGoldVersion"
-                  type="number"
-                  min={1}
-                  defaultValue={current.gold.version}
-                  aria-label="expected gold version"
+                  name="evidenceAnchors"
+                  defaultValue="ev-demo-checkout-log, ev-demo-inventory-timeout"
+                  placeholder="gold evidence anchors, comma separated"
+                  required
                 />
-              ) : null}
-              <button className="login__submit" type="submit">
-                Promote accepted decision to gold
-              </button>
-            </form>
+                <input
+                  className="login__input"
+                  name="expectedRelationships"
+                  placeholder="optional evidence=role pairs, comma separated"
+                />
+                <input
+                  className="login__input"
+                  name="helpfulnessDimensions"
+                  placeholder="optional helpfulness dimensions, comma separated"
+                />
+                {current.gold ? (
+                  <input
+                    className="login__input"
+                    name="expectedGoldVersion"
+                    type="number"
+                    min={1}
+                    defaultValue={current.gold.version}
+                    aria-label="expected gold version"
+                  />
+                ) : null}
+                <button className="login__submit" type="submit">
+                  Promote accepted decision to gold
+                </button>
+              </form>
+            </details>
           ) : null}
-          {props.canLead ? (
+          {canExport ? (
             <button className="login__submit" type="button" onClick={() => void exportReview()}>
               Export share-safe review
             </button>

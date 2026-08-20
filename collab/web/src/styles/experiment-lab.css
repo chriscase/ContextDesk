@@ -21,6 +21,56 @@
   margin: 0.6rem 0;
 }
 
+.experiment-lab__matrix-wrap {
+  overflow-x: auto;
+}
+
+.experiment-lab__scorecards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  gap: 0.55rem;
+  margin: 0.8rem 0;
+}
+
+.experiment-lab__scorecards article {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.experiment-lab__scorecards span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.experiment-lab__scorecards strong {
+  font-size: 1.35rem;
+  font-weight: 600;
+}
+
+.experiment-lab__tools {
+  margin: 0.65rem 0;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  padding: 0.5rem 0.65rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.experiment-lab__tools summary {
+  cursor: pointer;
+  color: var(--fg);
+}
+
+.experiment-lab__tools .composer {
+  margin-top: 0.65rem;
+}
+
 .experiment-lab__matrix th,
 .experiment-lab__matrix td {
   border-bottom: 1px solid var(--border);
