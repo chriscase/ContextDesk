@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface SnapshotView {
   id: string;
@@ -199,8 +199,10 @@ export function TriageRunPanel(props: {
   const [handoffExperimentId, setHandoffExperimentId] = useState<string | null>(null);
   const [handoffError, setHandoffError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const loadRequestToken = useRef(0);
 
   const load = useCallback(async () => {
+    const requestToken = ++loadRequestToken.current;
     setError(null);
     try {
       const [snapshotResponse, evidenceResponse, jobsResponse, importsResponse, profilesResponse, capabilitiesResponse] = await Promise.all([
@@ -211,6 +213,7 @@ export function TriageRunPanel(props: {
         fetch("/api/triage-profiles"),
         fetch("/api/triage-capabilities"),
       ]);
+      if (requestToken !== loadRequestToken.current) return;
       if (!snapshotResponse.ok) throw new Error(await errorText(snapshotResponse, "Snapshots could not be loaded."));
       if (!evidenceResponse.ok) throw new Error(await errorText(evidenceResponse, "Evidence could not be loaded."));
       if (!jobsResponse.ok) throw new Error(await errorText(jobsResponse, "Run history could not be loaded."));
@@ -229,6 +232,7 @@ export function TriageRunPanel(props: {
       const nextArtifacts = evidenceBody.artifacts ?? [];
       const nextJobs = jobBody.jobs ?? [];
       const nextExternalChatRuns = importsBody.runs ?? [];
+      if (requestToken !== loadRequestToken.current) return;
       setSnapshots(nextSnapshots);
       setArtifacts(nextArtifacts);
       setSelectedSnapshotId((current) => current || nextSnapshots.at(-1)?.id || "");
@@ -255,9 +259,11 @@ export function TriageRunPanel(props: {
         return next;
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Triage runs could not be loaded.");
+      if (requestToken === loadRequestToken.current) {
+        setError(cause instanceof Error ? cause.message : "Triage runs could not be loaded.");
+      }
     } finally {
-      setLoading(false);
+      if (requestToken === loadRequestToken.current) setLoading(false);
     }
   }, [props.caseId]);
 

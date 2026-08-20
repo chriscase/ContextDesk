@@ -1,9 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TriageRunPanel } from "./TriageRunPanel.js";
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -12,6 +13,114 @@ function response(body: unknown, ok = true) {
 }
 
 describe("TriageRunPanel", () => {
+  it("does not let a stale polling response roll back a newer lane state", async () => {
+    vi.useFakeTimers();
+    let requestIndex = 0;
+    const pendingLoads: Record<number, Array<{ url: string; resolve: (value: ReturnType<typeof response>) => void }>> = {};
+    const queuedJob = {
+      id: "job-1",
+      snapshotId: "snapshot-1",
+      snapshotFingerprint: "a".repeat(64),
+      requestFingerprint: "b".repeat(64),
+      request: {
+        strategyId: "contextdesk.standard",
+        question: "What happened?",
+        taskFingerprint: "task-1",
+        mode: "gateway" as const,
+        candidates: [],
+      },
+      status: "running",
+      candidates: [{
+        candidateId: "qwen-reviewer",
+        role: "reviewer",
+        provider: "synthetic",
+        profileId: null,
+        model: "qwen-3.6-27b",
+        version: null,
+        status: "queued",
+        benchmarkRunId: null,
+        outputHash: null,
+        summary: null,
+        evidenceRefs: [],
+        unknowns: [],
+        errorCode: null,
+        privacyClass: "owner_only",
+      }],
+      sameSnapshot: null,
+      agreementNotice: "Agreement is not proof of correctness.",
+      createdAt: "2026-08-20T00:00:00.000Z",
+      startedAt: "2026-08-20T00:00:00.000Z",
+      finishedAt: null,
+      cancelRequestedAt: null,
+    };
+    const completedJob = {
+      ...queuedJob,
+      status: "completed",
+      candidates: queuedJob.candidates.map((candidate) => ({
+        ...candidate,
+        status: "completed",
+        summary: "newer lane state",
+        outputHash: "c".repeat(64),
+      })),
+      sameSnapshot: true,
+      finishedAt: "2026-08-20T00:00:00.010Z",
+    };
+    const resolveLoad = (loadIndex: number, jobs: unknown[]) => {
+      for (const pending of pendingLoads[loadIndex] ?? []) {
+        const url = pending.url;
+        if (url.endsWith("/snapshots")) pending.resolve(response({ snapshots: [] }));
+        else if (url.endsWith("/evidence")) pending.resolve(response({ artifacts: [] }));
+        else if (url.endsWith("/imports")) pending.resolve(response({ runs: [] }));
+        else if (url.endsWith("/api/triage-profiles")) pending.resolve(response({ profiles: [] }));
+        else if (url.endsWith("/api/triage-capabilities")) pending.resolve(response({ gatewayAvailable: true }));
+        else pending.resolve(response({ jobs }));
+      }
+    };
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo) => {
+      const url = String(input);
+      const loadIndex = Math.floor(requestIndex / 6);
+      requestIndex += 1;
+      if (loadIndex === 0) {
+        if (url.endsWith("/snapshots")) return Promise.resolve(response({ snapshots: [] }));
+        if (url.endsWith("/evidence")) return Promise.resolve(response({ artifacts: [] }));
+        if (url.endsWith("/imports")) return Promise.resolve(response({ runs: [] }));
+        if (url.endsWith("/api/triage-profiles")) return Promise.resolve(response({ profiles: [] }));
+        if (url.endsWith("/api/triage-capabilities")) return Promise.resolve(response({ gatewayAvailable: true }));
+        return Promise.resolve(response({ jobs: [queuedJob] }));
+      }
+      return new Promise((resolve) => {
+        (pendingLoads[loadIndex] ??= []).push({ url, resolve });
+      });
+    }));
+    const flush = async () => {
+      await act(async () => {
+        for (let index = 0; index < 10; index += 1) await Promise.resolve();
+      });
+    };
+
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    await flush();
+    expect(screen.getByText("reviewer · queued")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+      window.dispatchEvent(new Event("contextdesk:external-run-imported"));
+    });
+    await act(async () => {
+      resolveLoad(2, [completedJob]);
+    });
+    await flush();
+    expect(screen.getByText("newer lane state")).toBeTruthy();
+    expect(screen.getByText("reviewer · settled")).toBeTruthy();
+
+    await act(async () => {
+      resolveLoad(1, [queuedJob]);
+    });
+    expect(screen.getByText("newer lane state")).toBeTruthy();
+    expect(screen.getByText("reviewer · settled")).toBeTruthy();
+    expect(screen.queryByText("reviewer · queued")).toBeNull();
+  });
+
   it("presents a snapshot-bound comparison and keeps provider output claims explicit", async () => {
     vi.stubGlobal(
       "fetch",
