@@ -113,6 +113,9 @@ logs/
 # Headless triage evaluation bench sample evidence (synthetic only).
 !crates/cd-triage-bench/fixtures/**
 !crates/cd-triage-bench/fixtures/**/*.log
+# Collab war-room browser qualification (synthetic only).
+!collab/e2e/fixtures/**
+!collab/e2e/fixtures/**/*.log
 
 # Python bytecode from the reference producer examples.
 __pycache__/
