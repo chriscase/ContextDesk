@@ -25,6 +25,7 @@ export const REQUIRED_FILES = Object.freeze([
   "blobs/checkout.log",
   "candidates/candidate-a.json",
   "candidates/candidate-b.json",
+  "candidates/candidate-c.json",
   "case.json",
   "identities.json",
   "recorded/human-run.json",
@@ -33,6 +34,8 @@ export const REQUIRED_FILES = Object.freeze([
   "replay/replay-failed.json",
   "snapshot.json",
   "task.json",
+  "tasks/abstention.json",
+  "tasks/contradiction.json",
 ]);
 
 export const ALLOWED_SCHEMA_IDS = Object.freeze([
@@ -802,6 +805,13 @@ export function validateDemoFixturePackage({ packageRoot, runbookPath }) {
   if (snapshot) expectKeys("snapshot.json", snapshot, TOP_LEVEL_KEYS["snapshot.json"], errors);
   if (caseDoc) expectKeys("case.json", caseDoc, TOP_LEVEL_KEYS["case.json"], errors);
   if (task) expectKeys("task.json", task, TOP_LEVEL_KEYS["task.json"], errors);
+  for (const relative of ["tasks/abstention.json", "tasks/contradiction.json"]) {
+    const value = jsonByRelative.get(relative);
+    if (value) expectKeys(relative, value, TOP_LEVEL_KEYS["task.json"], errors);
+    if (value && snapshot && value.snapshot_id !== snapshot.snapshot_id) {
+      addError(errors, "shape", relative, "task snapshot_id does not match snapshot.json");
+    }
+  }
   if (identities && snapshot) {
     validateBlob(packageRoot, snapshot, identities, errors);
   }
@@ -833,7 +843,11 @@ export function validateDemoFixturePackage({ packageRoot, runbookPath }) {
   }
 
   const cancellationIds = new Set();
-  for (const relative of ["candidates/candidate-a.json", "candidates/candidate-b.json"]) {
+  for (const relative of [
+    "candidates/candidate-a.json",
+    "candidates/candidate-b.json",
+    "candidates/candidate-c.json",
+  ]) {
     const value = jsonByRelative.get(relative);
     if (value) validateCandidate(relative, value, errors, cancellationIds);
   }

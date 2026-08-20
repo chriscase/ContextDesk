@@ -25,6 +25,8 @@ SCRIPT = ROOT / "scripts" / "triage-comparison-demo.sh"
 CASE_ID = "case-demo-checkout-timeout"
 SNAPSHOT_ID = "snap-5a75de4d710765b3fbb87afdc85beb25fd96f23b46ef4c59d416aa7ae61bbceb"
 TASK_ID = "task-162aec8ca84e72ecfc9164d4168d18b6e41367e7c10e9c23aef086bf83bfd007"
+ABSTENTION_TASK_ID = "task-a234e534de674b597def0297299b0dfbd1a078d9d5cb976973e8abc1c2157ecb"
+CONTRADICTION_TASK_ID = "task-fb25638d4a48bf43144167d4448a3811452946acb5f7e4fd0e9087c87f3985fe"
 BLOB_HEX = "959969b69cac6ba8280a8cb6836226d91a621122a16703109cb690d5e7a50f75"
 BLOB_BYTES = 487
 
@@ -65,10 +67,13 @@ class TriageComparisonDemoContractTests(unittest.TestCase):
             "case.json",
             "snapshot.json",
             "task.json",
+            "tasks/abstention.json",
+            "tasks/contradiction.json",
             "identities.json",
             "blobs/checkout.log",
             "candidates/candidate-a.json",
             "candidates/candidate-b.json",
+            "candidates/candidate-c.json",
             "recorded/human-run.json",
             "recorded/other-product-run.json",
             "replay/replay-completed.json",
@@ -119,6 +124,17 @@ class TriageComparisonDemoContractTests(unittest.TestCase):
         self.assertEqual(task["visibility"]["visible_item_ids"], ["ev-demo-checkout-log"])
         self.assertNotIn("time_constraint", task)
 
+        for relative, expected_id in (
+            ("tasks/abstention.json", ABSTENTION_TASK_ID),
+            ("tasks/contradiction.json", CONTRADICTION_TASK_ID),
+        ):
+            extra_task = load_json(DEMO / relative)
+            assert isinstance(extra_task, dict)
+            self.assertEqual(extra_task["schema_id"], "contextdesk.triage_bench.evaluation_task.v1")
+            self.assertEqual(extra_task["task_id"], expected_id)
+            self.assertEqual(extra_task["snapshot_id"], SNAPSHOT_ID)
+            self.assertEqual(extra_task["visibility"], task["visibility"])
+
         for name in ("human-run.json", "other-product-run.json"):
             document = load_json(DEMO / "recorded" / name)
             assert isinstance(document, dict)
@@ -138,16 +154,21 @@ class TriageComparisonDemoContractTests(unittest.TestCase):
     def test_candidates_match_live_bench_compare_contract(self) -> None:
         first = load_json(DEMO / "candidates" / "candidate-a.json")
         second = load_json(DEMO / "candidates" / "candidate-b.json")
+        third = load_json(DEMO / "candidates" / "candidate-c.json")
         assert isinstance(first, dict)
         assert isinstance(second, dict)
+        assert isinstance(third, dict)
         self.assertEqual(first["policy"]["kind"], "standard")
         self.assertEqual(second["policy"]["kind"], "standard")
-        self.assertNotEqual(first["cancellation_id"], second["cancellation_id"])
-        self.assertEqual(first["policy"]["model"]["profile_id"], "HOST_PROFILE_ID")
-        self.assertEqual(first["policy"]["model"]["model_id"], "HOST_MODEL_ID")
-        self.assertEqual(second["policy"]["model"]["profile_id"], "HOST_PROFILE_ID")
-        self.assertEqual(second["policy"]["model"]["model_id"], "HOST_MODEL_ID")
-        for candidate in (first, second):
+        self.assertEqual(third["policy"]["kind"], "standard")
+        candidates = (first, second, third)
+        self.assertEqual(
+            len({candidate["cancellation_id"] for candidate in candidates}),
+            3,
+        )
+        for candidate in candidates:
+            self.assertEqual(candidate["policy"]["model"]["profile_id"], "HOST_PROFILE_ID")
+            self.assertEqual(candidate["policy"]["model"]["model_id"], "HOST_MODEL_ID")
             self.assertIn("strategy", candidate)
             self.assertRegex(candidate["strategy"]["created_at"], r"Z$")
             self.assertNotIn("api_key", candidate)
@@ -205,12 +226,60 @@ class TriageComparisonDemoContractTests(unittest.TestCase):
         self.assertIn("Live same-snapshot comparison", runbook)
         self.assertIn("Offline recorded / replay fallback", runbook)
         self.assertIn("HOST_PROFILE_ID", runbook)
-        self.assertNotIn("contextdesk bench-compare --offline", script)
+        self.assertIn("run-live", script)
+        self.assertIn("matrix", script)
+        self.assertIn("qwen-3.6-27b", script)
+        self.assertIn("gpt-oss-120b", script)
+        self.assertIn("ministral-3-14b-instruct-2512", script)
         self.assertIn("print-live", script)
-        self.assertIn("This is not an offline bench-compare implementation.", script)
-        # The helper may print the live command but must not execute it.
-        self.assertNotRegex(script, r"^[^#\n]*\$CONTEXTDESK.*bench-compare", re.MULTILINE)
-        self.assertNotRegex(script, r"^[^#\n]*contextdesk.*bench-compare", re.MULTILINE)
+        self.assertNotIn("contextdesk bench-compare --offline", script)
+
+    def test_three_model_preflight_is_provider_free_by_default(self) -> None:
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "preflight",
+                "--profile-id",
+                "employer-profile",
+                "--model-a",
+                "qwen-3.6-27b",
+                "--model-b",
+                "gpt-oss-120b",
+                "--model-c",
+                "ministral-3-14b-instruct-2512",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("No provider call made", result.stdout)
+        self.assertIn("qwen-3.6-27b", result.stdout)
+        self.assertIn("gpt-oss-120b", result.stdout)
+        self.assertIn("ministral-3-14b-instruct-2512", result.stdout)
+
+    def test_three_model_preflight_rejects_duplicate_models(self) -> None:
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "preflight",
+                "--profile-id",
+                "employer-profile",
+                "--model-a",
+                "qwen-3.6-27b",
+                "--model-b",
+                "qwen-3.6-27b",
+                "--model-c",
+                "ministral-3-14b-instruct-2512",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must be distinct", result.stderr)
 
     def test_optional_cli_import_replay_and_report(self) -> None:
         bench = existing_bin("CD_TRIAGE_BENCH", "cd-triage-bench")

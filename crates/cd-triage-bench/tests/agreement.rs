@@ -252,6 +252,47 @@ fn two_distinct_models_concurring_on_one_anchor_are_independent() {
     assert_eq!(anchor.claim_ids, vec!["claim-a", "claim-b"]);
 }
 
+#[test]
+fn three_distinct_models_concurring_on_one_anchor_count_as_three_witnesses() {
+    let task = task(&["ev-1"]);
+    let runs = vec![
+        sdk_row("run-a", &task.task_id, RunStatus::Completed),
+        sdk_row("run-b", &task.task_id, RunStatus::Completed),
+        sdk_row("run-c", &task.task_id, RunStatus::Completed),
+    ];
+    let mut raw = BTreeMap::new();
+    for (run_id, profile, model, seed) in [
+        ("run-a", "profile:alpha", "model:alpha", 'a'),
+        ("run-b", "profile:beta", "model:beta", 'b'),
+        ("run-c", "profile:gamma", "model:gamma", 'c'),
+    ] {
+        raw.insert(
+            run_id.to_string(),
+            envelope(
+                profile,
+                model,
+                seed,
+                &["ev-1"],
+                PACKET,
+                completed_terminal(vec![claim(
+                    &format!("claim-{run_id}"),
+                    "initiating_cause",
+                    "supported",
+                    &["ev-1"],
+                )]),
+            ),
+        );
+    }
+
+    let views = build_agreement_views(&runs, std::slice::from_ref(&task), &raw).expect("views");
+    let anchor = &views[0].anchors[0];
+    assert_eq!(anchor.concurring_run_ids.len(), 3);
+    assert_eq!(anchor.distinct_source_count, 3);
+    assert_eq!(anchor.distinct_model_identity_count, 3);
+    assert!(anchor.independent);
+    assert!(!anchor.sole_support);
+}
+
 /// Two candidates resolved to the SAME exact model. They concur, but nothing
 /// about that is independent corroboration.
 #[test]

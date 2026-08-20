@@ -1,0 +1,18 @@
+{
+  "schema_id": "contextdesk.triage_bench.evaluation_task.v1",
+  "task_id": "task-a234e534de674b597def0297299b0dfbd1a078d9d5cb976973e8abc1c2157ecb",
+  "privacy": "share_safe",
+  "case_id": "case-demo-checkout-timeout",
+  "snapshot_id": "snap-5a75de4d710765b3fbb87afdc85beb25fd96f23b46ef4c59d416aa7ae61bbceb",
+  "question": "Is there enough visible evidence to determine whether the inventory timeout was caused by a deployment, a network partition, or an upstream inventory incident? State what cannot be determined and cite the relevant visible lines.",
+  "protocol": "Answer only from the visible snapshot evidence. Distinguish observed facts from hypotheses. Abstain from selecting an unobserved cause, and do not invent hosts, credentials, customers, costs, or timings.",
+  "protocol_version": "v1",
+  "visibility": {
+    "visible_item_ids": [
+      "ev-demo-checkout-log"
+    ],
+    "include_summaries": false,
+    "include_raw_bytes": true
+  },
+  "created_at": "2026-01-15T07:10:00Z"
+}
