@@ -13,26 +13,73 @@ every recorded citation back to a task-visible benchmark evidence item. The
 isolated corpus is discarded after every terminal or failure.
 
 For comparisons, `run_live_comparison` prepares that isolated corpus once and
-executes a bounded, sequential candidate list against the same proven
-`BoundedPacket` and corpus revision. Each candidate still gets a distinct
-request/cancellation identity and its own validated replay and persisted
-`TriageRun`. The strictest candidate deadline bounds the entire comparison;
-shared cache, source limits, and cancellation identity are required. Each
-candidate's request deadline is its own override capped by that comparison
-deadline, independent of list position and of how long earlier candidates
-took, so sequential execution does not hand earlier candidates more wall clock
-than later ones. The budget is not divided between candidates — a divided
-share can fall below the deadline a policy needs in order to run at all — so
-boundedness comes from refusing to start another candidate once the budget is
-spent. The resulting rows are immediately consumable by the existing honest
-bench report projection, which preserves failed/partial runs and does not rank
-candidates.
+executes a bounded candidate list against the same proven `BoundedPacket` and
+corpus revision. Each candidate still gets a distinct request/cancellation
+identity and its own validated replay and persisted `TriageRun`. The strictest
+candidate deadline bounds the entire comparison; shared cache, source limits,
+and cancellation identity are required. Each candidate's request deadline is
+its own override capped by that comparison deadline, independent of list
+position and of how long any sibling took, so admission order does not hand
+anyone extra wall clock. The budget is not divided between candidates — a
+divided share can fall below the deadline a policy needs in order to run at
+all — so boundedness comes from the concurrency ceiling and from refusing to
+start another candidate once the budget is spent. The resulting rows are
+immediately consumable by the existing honest bench report projection, which
+preserves failed/partial runs and does not rank candidates.
+
+## Bounded concurrency
+
+The default comparison path runs **two** candidate lanes at once
+(`DEFAULT_LIVE_COMPARISON_CONCURRENCY = 2`). Callers may pass
+`run_live_comparison_with_options` (or `bench-compare --concurrency`) to use
+`1` through `MAX_LIVE_COMPARISON_CONCURRENCY` (`4`). `1` restores sequential
+admission. The scheduler never spawns one task per candidate up front: it
+admits at most the configured number of in-flight lanes and starts the next
+queued candidate only when a slot frees.
+
+Exact-snapshot fairness is unchanged because every lane receives the same
+immutable prepared packet, corpus id, and corpus revision. Provider
+configuration, policy, role qualification, request fingerprint, cancellation
+identity, replay proof, and durable `TriageRun` remain per-candidate. Lanes
+do not share a `ToolHost`, workspace, cancellation registry, or other mutable
+workflow state. Evidence bytes are copied and the host corpus is imported
+exactly once.
+
+A lower concurrency is often preferable when the provider rate-limits
+concurrent requests. The host credential worker pool is already globally
+capped at four outstanding keychain reads; the comparison ceiling stays at or
+below that.
+
+## Cancellation, deadlines, partial results, and sibling failure
 
 A comparison that stops early — cancellation, deadline, request binding,
 recording, persistence, or cleanup — still returns every run it already
-persisted, with `LiveComparisonResult::stopped` naming the reason. Only a
-comparison that persisted nothing returns `Err`: durable rows must never be
-reported as an error with their identities discarded.
+persisted, with `LiveComparisonResult::stopped` naming the reason and
+`LiveComparisonResult::lanes` distinguishing persisted, failed, and
+not-started candidates in requested order. Only a comparison that persisted
+nothing returns `Err`: durable rows must never be reported as an error with
+their identities discarded.
+
+- **Cancellation** sets the shared cancel flag, stops admitting queued
+  candidates, and lets every in-flight lane observe the flag and persist
+  whatever durable result it already produced.
+- **Deadline** likewise stops admitting new work. In-flight lanes keep their
+  own request deadline (the position-independent allowance). The comparison
+  can overshoot by at most those in-flight allowances.
+- **One lane failing while siblings run** does not drop a completed durable
+  sibling. Admission closes so later queued candidates never start; already
+  running siblings finish and persist. `runs` is the requested-order
+  projection of persisted lanes, which is no longer necessarily a sequential
+  prefix.
+
+## Collab / UI progress
+
+The Collab and CLI hosts still consume **one bounded final JSON result**
+containing the candidate rows. This slice improves host-side wall-clock
+completion; it does not add per-lane live progress events. Incremental UI
+progress is a separate follow-up and must not be claimed by the web UI until
+the protocol itself grows a backward-compatible, credential-free progress
+shape.
 
 `LiveCorpusLimits::validate` refuses a limit above the published production
 import bound, so a caller may lower a bound and never raise one.

@@ -201,8 +201,10 @@ pub enum Command {
     ///
     /// This is a host-only command. It loads the explicit benchmark library,
     /// the shared policy and qualification stores, and the desktop-shared
-    /// credential adapter before calling the live comparison bridge. It does
-    /// not rank candidates or expose the offline bench crate to providers.
+    /// credential adapter before calling the live comparison bridge. Candidate
+    /// lanes default to two in flight; `--concurrency 1` is sequential. It
+    /// does not rank candidates or expose the offline bench crate to
+    /// providers.
     BenchCompare(BenchCompareArgs),
     /// Provider-neutral gateway/model diagnostics for one explicitly selected model.
     Gateway {
@@ -417,6 +419,16 @@ pub struct BenchCompareArgs {
         default_value_t = cd_triage_bench_live::DEFAULT_LIVE_MAX_AGGREGATE_BYTES
     )]
     pub max_aggregate_bytes: u64,
+    /// Maximum candidate lanes that may execute at once.
+    ///
+    /// Default is 2. `1` restores sequential admission. Values above the
+    /// published ceiling are refused before any library or provider access.
+    /// Lower this when a provider rate-limits concurrent requests.
+    #[arg(
+        long,
+        default_value_t = cd_triage_bench_live::DEFAULT_LIVE_COMPARISON_CONCURRENCY
+    )]
+    pub concurrency: usize,
 }
 
 /// Explicit-file operations for the revisioned Triage Policy V2 store.

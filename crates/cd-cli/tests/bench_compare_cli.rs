@@ -178,7 +178,6 @@ fn three_candidates_pass_count_validation_before_library_access() {
         )
         .expect("candidate");
     }
-
     let mut command = Command::cargo_bin("contextdesk").expect("contextdesk binary");
     command
         .args([
@@ -202,4 +201,70 @@ fn three_candidates_pass_count_validation_before_library_access() {
             "benchmark library could not be opened",
         ))
         .stderr(predicate::str::contains("requires at least two").not());
+}
+
+/// A host boundary bounds its callers. `--concurrency` may be lowered to 1
+/// and must never be raised above the published ceiling; the refusal lands
+/// before any library or provider access.
+#[test]
+fn concurrency_cannot_be_raised_above_the_published_ceiling() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let candidates = tempfile::tempdir().expect("candidate dir");
+    let (first, second) = write_two_candidates(candidates.path());
+
+    for value in ["0", "5", &(usize::MAX.to_string())] {
+        let mut command = Command::cargo_bin("contextdesk").expect("contextdesk binary");
+        command
+            .args([
+                "--data-dir",
+                data_dir.path().to_str().expect("data path"),
+                "bench-compare",
+                "--library",
+                "/path/that-need-not-exist",
+                "--task",
+                "task:missing",
+                "--candidate",
+                first.to_str().expect("first path"),
+                "--candidate",
+                second.to_str().expect("second path"),
+                "--concurrency",
+                value,
+            ])
+            .assert()
+            .failure()
+            .code(1)
+            .stderr(predicate::str::contains(
+                "bench-compare --concurrency must be between 1 and",
+            ));
+    }
+}
+
+#[test]
+fn concurrency_one_is_accepted_and_fails_on_the_missing_library() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let candidates = tempfile::tempdir().expect("candidate dir");
+    let (first, second) = write_two_candidates(candidates.path());
+
+    let mut command = Command::cargo_bin("contextdesk").expect("contextdesk binary");
+    command
+        .args([
+            "--data-dir",
+            data_dir.path().to_str().expect("data path"),
+            "bench-compare",
+            "--library",
+            "/path/that/need-not-exist",
+            "--task",
+            "task:missing",
+            "--candidate",
+            first.to_str().expect("first path"),
+            "--candidate",
+            second.to_str().expect("second path"),
+            "--concurrency",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "benchmark library could not be opened",
+        ));
 }

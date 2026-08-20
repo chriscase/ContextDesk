@@ -831,7 +831,8 @@ contextdesk models verify --all [--role chat|embedding|reranker|unknown] [--matc
 contextdesk logging-assessment [corpus-id] [--report-format json|markdown] [--output <file>]
 contextdesk exception-episodes [corpus-id]
 contextdesk bench-compare --library <dir> --task <task-id> \
-            --candidate <candidate-a.json> --candidate <candidate-b.json>
+            --candidate <candidate-a.json> --candidate <candidate-b.json> \
+            [--concurrency 2]
 # Friendly aliases: ask=chat, search=explore, assess=logging-assessment,
 #                   episodes=exception-episodes
 ```
@@ -849,29 +850,35 @@ in the existing host config
 and credential adapter.
 
 The command prepares and proves one isolated corpus before any candidate runs,
-reuses its packet/corpus identity sequentially, validates every replay before
-persistence, and preserves failed/partial/timed-out outcomes. It never emits
-rankings or readiness claims.
+reuses that packet/corpus identity across a bounded concurrent candidate list
+(default two in flight; `--concurrency 1` is sequential), validates every
+replay before persistence, and preserves failed/partial/timed-out outcomes. It
+never emits rankings or readiness claims. Incremental per-lane Collab UI
+progress is not part of this command: the host still returns one bounded final
+JSON result.
 
 **Bounds.** `--max-blob-bytes` and `--max-aggregate-bytes` may be *lowered*
 below the published production import bounds (512 MiB per blob, 2 GiB
 aggregate) and can never be raised above them: a host boundary exists to bound
 its callers. Both bounds are checked against the snapshot manifest before any
 blob is opened, and verification then streams rather than loading a blob into
-memory. Ctrl-C is armed before that work begins, so cancellation reaches
-snapshot verification and corpus preparation, not only the provider call.
+memory. `--concurrency` defaults to 2 and may be `1..=4`; `1` is sequential.
+Ctrl-C is armed before that work begins, so cancellation reaches snapshot
+verification and corpus preparation, not only the provider call.
 
-**Fairness.** Candidates run sequentially against the one prepared corpus.
-Each candidate's request deadline is its own override capped by the comparison
-deadline — a value that does not depend on list position or on how long an
-earlier candidate took, so ordering buys nobody extra wall clock. The budget
-is deliberately not divided between candidates: a divided share can fall below
-the deadline a policy needs in order to run at all (a Standard policy reserves
-time for its finalizer), which would turn a working comparison into a list of
-rejected budgets. Boundedness comes from refusing to *start* another candidate
-once the comparison budget is spent, so a comparison can overshoot by at most
-the final candidate's own allowance. Each row's effective allowance is
-reported as `request_deadline_ms`.
+**Fairness.** Candidates run against the one prepared corpus with a
+conservative concurrency ceiling (default 2, maximum 4). Lower `--concurrency`
+when a provider rate-limits parallel requests. Each candidate's request
+deadline is its own override capped by the comparison deadline — a value that
+does not depend on list position or on how long a sibling took, so ordering
+buys nobody extra wall clock. The budget is deliberately not divided between
+candidates: a divided share can fall below the deadline a policy needs in
+order to run at all (a Standard policy reserves time for its finalizer), which
+would turn a working comparison into a list of rejected budgets. Boundedness
+comes from the concurrency ceiling and from refusing to *start* another
+candidate once the comparison budget is spent, so a comparison can overshoot
+by at most the in-flight candidates' own allowances. Each row's effective
+allowance is reported as `request_deadline_ms`.
 
 **Privacy.** Output is owner-only because exact model identities and
 task-linked provenance are retained. Benchmark run rows are themselves

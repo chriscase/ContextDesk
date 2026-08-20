@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 fs2 = "0.4"
+futures-util = { workspace = true }
 
 [dev-dependencies]
 cd-test-gateway = { path = "../cd-test-gateway" }

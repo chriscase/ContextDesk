@@ -43,6 +43,13 @@ use cd_workflow::triage_host::{
 use cd_workflow::triage_runtime_host::{TriageCancellationRegistryV1, WorkflowTriageEngineV1};
 use fs2::FileExt;
 
+mod comparison;
+pub use comparison::{
+    run_live_comparison, run_live_comparison_with_options, LiveComparisonCandidate,
+    LiveComparisonOptions, LiveComparisonResult, LiveLaneDisposition, LiveLaneOutcome,
+    DEFAULT_LIVE_COMPARISON_CONCURRENCY, MAX_LIVE_COMPARISON_CONCURRENCY,
+};
+
 /// Default per-source limit. It matches the production raw-log import bound.
 pub const DEFAULT_LIVE_MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 /// Default aggregate source-byte limit for one isolated live run.
@@ -52,8 +59,8 @@ pub const DEFAULT_MAX_COMPARISON_CANDIDATES: usize = 16;
 /// Default whole-comparison deadline when candidates omit an override.
 ///
 /// This matches the host's Standard deadline and bounds source preparation as
-/// well as sequential candidate execution. An omitted override must never
-/// make the blocking preparation phase unbounded.
+/// well as candidate execution. An omitted override must never make the
+/// blocking preparation phase unbounded.
 pub const DEFAULT_LIVE_COMPARISON_DEADLINE_MS: u64 = 180_000;
 const PREPARATION_RUNNING: u8 = 0;
 const PREPARATION_COMPLETED: u8 = 1;
@@ -158,6 +165,9 @@ pub enum LiveBridgeError {
     /// Candidate options could not share one exact preparation safely.
     #[error("live triage comparison candidates are not safely shareable")]
     ComparisonInvariant,
+    /// A comparison concurrency limit was zero or above the published ceiling.
+    #[error("live triage comparison concurrency bound exceeded")]
+    ComparisonConcurrencyBound,
 }
 
 /// Host-owned execution configuration for one live benchmark run.
@@ -192,70 +202,27 @@ pub struct LiveRunResult {
     pub recorded: RecordedContextDeskRun,
 }
 
-/// One candidate in a same-snapshot live comparison.
-///
-/// Candidate options may select different policies, providers, or recording
-/// identities. The cache root, source bounds, and cancellation signal must be
-/// shared with every other candidate so preparation and cancellation remain a
-/// single bounded operation.
-#[derive(Debug)]
-pub struct LiveComparisonCandidate {
-    /// Host-owned options for this candidate execution.
-    pub options: LiveRunOptions,
-    /// Optional event sink for this candidate's validated public replay.
-    pub events: Option<TriageEventSink>,
-}
-
-/// Completed runs from a same-snapshot comparison.
-///
-/// Every run listed here is already durable in the benchmark store. A
-/// comparison that stopped early still returns the runs it persisted, so an
-/// operator is never told "it failed" without being told what now exists.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LiveComparisonResult {
-    /// Runs persisted by the bridge and ready for the honest bench report.
-    pub runs: Vec<LiveRunResult>,
-    /// Why the comparison stopped before every candidate ran, when it did.
-    ///
-    /// `None` means every candidate completed. `Some(_)` means the runs above
-    /// are a partial, durable prefix — never a complete comparison.
-    pub stopped: Option<LiveBridgeError>,
-    /// Cleanup debt this cache root carried into the comparison.
-    pub pending_cleanup: PendingCleanupOutcome,
-}
-
-impl LiveComparisonResult {
-    /// True only when every requested candidate ran and the corpus was cleaned.
-    pub fn is_complete(&self) -> bool {
-        self.stopped.is_none()
-    }
-
-    /// Durable benchmark run identities produced by this comparison.
-    pub fn persisted_run_ids(&self) -> Vec<String> {
-        self.runs
-            .iter()
-            .map(|run| run.recorded.bench_run.run_id.clone())
-            .collect()
-    }
-}
-
 /// The wall-clock allowance one candidate's request carries.
 ///
-/// Candidates run sequentially, so an allowance derived from *remaining*
-/// budget would hand the first candidate nearly the whole comparison and the
-/// last one whatever was left — an ordering bias in a tool whose entire
-/// purpose is a fair same-snapshot comparison. The allowance is therefore
-/// independent of position and of how long earlier candidates took: it is the
-/// candidate's own override, capped by the comparison deadline.
+/// An allowance derived from *remaining* budget would hand earlier-started
+/// lanes more wall clock than later ones — an ordering bias in a tool whose
+/// entire purpose is a fair same-snapshot comparison. The allowance is
+/// therefore independent of position, of how many lanes are in flight, and of
+/// how long any sibling took: it is the candidate's own override, capped by
+/// the comparison deadline.
 ///
 /// The budget is deliberately **not** divided between candidates. A request
 /// deadline is a bound the host itself must be able to honour — a Standard
 /// policy reserves time for its finalizer — so an evenly divided share can
 /// fall below what any candidate can actually run under and turn a working
 /// comparison into a list of rejected budgets. Boundedness is enforced
-/// separately, by refusing to *start* another candidate once the comparison
-/// budget is spent; see [`run_live_comparison`].
-fn candidate_allowance_ms(comparison_deadline_ms: u64, candidate_override_ms: Option<u64>) -> u64 {
+/// separately, by the comparison concurrency ceiling and by refusing to
+/// *start* another candidate once the comparison budget is spent; see
+/// [`run_live_comparison`].
+pub(crate) fn candidate_allowance_ms(
+    comparison_deadline_ms: u64,
+    candidate_override_ms: Option<u64>,
+) -> u64 {
     match candidate_override_ms {
         Some(requested) => requested.min(comparison_deadline_ms),
         None => comparison_deadline_ms,
@@ -543,7 +510,7 @@ pub fn prepare_same_snapshot_corpus(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn prepare_same_snapshot_with_deadline(
+pub(crate) async fn prepare_same_snapshot_with_deadline(
     store: &BenchStore,
     case: &Case,
     snapshot: &EvidenceSnapshot,
@@ -646,148 +613,8 @@ pub async fn run_live_same_snapshot(
     finish_with_cleanup(&mut prepared, result)
 }
 
-/// Execute multiple live candidates against one prepared task snapshot.
-///
-/// The source bytes are copied, imported, and proven exactly once. Every
-/// candidate then receives that same bounded benchmark packet and the same
-/// run-exclusive production corpus. Each candidate still gets its own public
-/// request, cancellation identity, replay proof, and immutable bench run.
-/// Runs are persisted as they complete, so the existing `cd-triage-bench
-/// report` command can project the comparison without inventing rankings.
-///
-/// The strictest candidate deadline bounds the entire comparison, including
-/// preparation. Candidate execution is sequential by design: this keeps the
-/// shared corpus and whole-comparison deadline auditable while still avoiding
-/// repeated source copying and ingest. A cancelled comparison stops before
-/// starting the next candidate and cleans the shared corpus.
-///
-/// Each candidate's request carries its own deadline capped by the comparison
-/// deadline — a value that does not depend on list position or on how long
-/// earlier candidates took, so ordering confers no advantage. The budget is
-/// not divided: a divided share can fall below the deadline a policy needs to
-/// run at all. Boundedness comes from refusing to start another candidate
-/// once the comparison budget is spent, so the comparison can overshoot by at
-/// most the final candidate's own allowance.
-///
-/// A comparison that stops early — cancellation, deadline, execution,
-/// recording, persistence, or cleanup — still returns every run it already
-/// persisted, with [`LiveComparisonResult::stopped`] naming the reason. Only
-/// a comparison that persisted nothing returns `Err`.
-pub async fn run_live_comparison(
-    store: &BenchStore,
-    case: &Case,
-    snapshot: &EvidenceSnapshot,
-    task: &EvaluationTask,
-    secrets: Arc<dyn SecretStore>,
-    candidates: Vec<LiveComparisonCandidate>,
-) -> Result<LiveComparisonResult, LiveBridgeError> {
-    if candidates.is_empty() {
-        return Err(LiveBridgeError::EmptyComparison);
-    }
-    if candidates.len() > DEFAULT_MAX_COMPARISON_CANDIDATES {
-        return Err(LiveBridgeError::ComparisonCandidateBound);
-    }
-
-    let first = &candidates[0].options;
-    let comparison_deadline_ms = candidates
-        .iter()
-        .filter_map(|candidate| candidate.options.overrides.deadline_ms)
-        .min()
-        .unwrap_or(DEFAULT_LIVE_COMPARISON_DEADLINE_MS);
-    let mut cancellation_ids = BTreeSet::new();
-    for candidate in &candidates {
-        let options = &candidate.options;
-        if options.cache_root != first.cache_root
-            || options.limits != first.limits
-            || !Arc::ptr_eq(&first.cancel.inner_arc(), &options.cancel.inner_arc())
-            || !cancellation_ids.insert(options.cancellation_id.as_str())
-        {
-            return Err(LiveBridgeError::ComparisonInvariant);
-        }
-    }
-
-    let started = Instant::now();
-    let candidate_count = candidates.len();
-    let mut prepared = prepare_same_snapshot_with_deadline(
-        store,
-        case,
-        snapshot,
-        task,
-        &first.cache_root,
-        first.limits,
-        &first.cancel,
-        Some(comparison_deadline_ms),
-    )
-    .await?;
-    let pending_cleanup = prepared.pending_cleanup();
-
-    let mut runs: Vec<LiveRunResult> = Vec::with_capacity(candidate_count);
-    let mut stopped: Option<LiveBridgeError> = None;
-    for candidate in candidates {
-        let LiveComparisonCandidate {
-            mut options,
-            events,
-        } = candidate;
-        if options.cancel.is_cancelled() {
-            stopped = Some(LiveBridgeError::Cancelled);
-            break;
-        }
-        // Boundedness lives here, in the decision to start another candidate,
-        // and never in the allowance handed to one. A candidate already
-        // running finishes under its own deadline.
-        let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        if elapsed_ms >= comparison_deadline_ms {
-            stopped = Some(LiveBridgeError::Deadline);
-            break;
-        }
-        options.overrides.deadline_ms = Some(candidate_allowance_ms(
-            comparison_deadline_ms,
-            options.overrides.deadline_ms,
-        ));
-
-        let result = execute_prepared_same_snapshot(
-            store,
-            case,
-            snapshot,
-            task,
-            &prepared,
-            Arc::clone(&secrets),
-            &options,
-            events,
-        )
-        .await;
-        match result {
-            Ok(result) => runs.push(result),
-            Err(error) => {
-                stopped = Some(error);
-                break;
-            }
-        }
-    }
-
-    let cleanup = prepared.discard();
-    if runs.is_empty() {
-        // Nothing durable was produced, so there is no partial result worth
-        // preserving: the caller gets the same plain refusal as before.
-        return Err(match (stopped, cleanup) {
-            (Some(_), Err(_)) => LiveBridgeError::FailureAndCleanup,
-            (Some(error), Ok(())) => error,
-            (None, Err(cleanup_error)) => cleanup_error,
-            (None, Ok(())) => LiveBridgeError::EmptyComparison,
-        });
-    }
-    // Every run above is already durable in the benchmark store. Report the
-    // identities together with whatever went wrong, rather than dropping the
-    // only handles an operator has for finding those rows.
-    Ok(LiveComparisonResult {
-        runs,
-        stopped: stopped.or_else(|| cleanup.err()),
-        pending_cleanup,
-    })
-}
-
 #[allow(clippy::too_many_arguments)]
-async fn execute_prepared_same_snapshot(
+pub(crate) async fn execute_prepared_same_snapshot(
     store: &BenchStore,
     case: &Case,
     snapshot: &EvidenceSnapshot,

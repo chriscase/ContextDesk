@@ -24,8 +24,9 @@ use cd_triage_bench::{
     VisibilityPolicy, CASE_SCHEMA_V1,
 };
 use cd_triage_bench_live::{
-    prepare_same_snapshot_corpus, run_live_comparison, run_live_same_snapshot, LiveBridgeError,
-    LiveComparisonCandidate, LiveCorpusLimits, LiveRunOptions,
+    prepare_same_snapshot_corpus, run_live_comparison, run_live_comparison_with_options,
+    run_live_same_snapshot, LiveBridgeError, LiveComparisonCandidate, LiveComparisonOptions,
+    LiveCorpusLimits, LiveRunOptions,
 };
 use cd_triage_sdk::{ModelRef, TriagePolicySelectionV2, TriageRequestOverridesV1};
 use serde_json::{json, Value};
@@ -155,6 +156,31 @@ fn qualified_finalizer(profile: &ProviderProfile) -> TriageRoleQualificationStor
     store
 }
 
+fn identifier_manifest_json(content: &str) -> &str {
+    const HOST_MANIFEST: &str = "HOST-AUTHORED IDENTIFIER MANIFEST (the complete permitted candidate/evidence id boundary; JSON):\n";
+    const PACKET_MANIFEST: &str = "PACKET MANIFEST (host scaffolding):\n";
+    if let Some(rest) = content
+        .split_once(HOST_MANIFEST)
+        .map(|part| part.1)
+        .or_else(|| content.strip_prefix(HOST_MANIFEST))
+    {
+        return rest.split_once("\n\n").map(|part| part.0).unwrap_or(rest);
+    }
+    content
+        .strip_prefix(PACKET_MANIFEST)
+        .and_then(|content| {
+            content
+                .split_once("\n\nPACKET EVIDENCE:")
+                .map(|part| part.0)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "packet manifest boundary; last message starts: {:?}",
+                content.chars().take(240).collect::<String>()
+            )
+        })
+}
+
 fn answer_from_live_request(request: &RecordedRequest) -> Value {
     let body = request.json_body().expect("OpenAI request JSON");
     let content = body["messages"]
@@ -162,7 +188,7 @@ fn answer_from_live_request(request: &RecordedRequest) -> Value {
         .and_then(|messages| messages.last())
         .and_then(|message| message["content"].as_str())
         .expect("final user message");
-    let (manifest, scaffold_and_evidence) = content
+    let (_manifest, scaffold_and_evidence) = content
         .strip_prefix(
             "HOST-AUTHORED IDENTIFIER MANIFEST (the complete permitted candidate/evidence id boundary; JSON):\n",
         )
@@ -181,7 +207,8 @@ fn answer_from_live_request(request: &RecordedRequest) -> Value {
         scaffold_and_evidence.ends_with("\nReturn only the completed JSON object."),
         "packet output boundary"
     );
-    let manifest: Value = serde_json::from_str(manifest).expect("packet manifest JSON");
+    let manifest: Value =
+        serde_json::from_str(identifier_manifest_json(content)).expect("packet manifest JSON");
     let candidates = manifest["candidates"]
         .as_array()
         .expect("manifest candidates")
@@ -953,7 +980,7 @@ async fn a_stopped_comparison_still_returns_the_runs_it_already_persisted() {
         events: None,
     };
 
-    let result = run_live_comparison(
+    let result = run_live_comparison_with_options(
         &store,
         &case,
         &snapshot,
@@ -975,6 +1002,7 @@ async fn a_stopped_comparison_still_returns_the_runs_it_already_persisted() {
                 "ContextDesk live second",
             ),
         ],
+        LiveComparisonOptions::sequential(),
     )
     .await
     .expect("a partially completed comparison is reported, not discarded");

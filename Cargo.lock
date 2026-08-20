@@ -690,6 +690,7 @@ dependencies = [
  "cd-triage-sdk",
  "cd-workflow",
  "fs2",
+ "futures-util",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",

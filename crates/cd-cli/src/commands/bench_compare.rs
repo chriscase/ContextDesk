@@ -31,8 +31,8 @@ use cd_triage_bench::{
 };
 use cd_triage_bench_adapter::{project_share_safe, RecordingContext, ShareSafeAdapterRun};
 use cd_triage_bench_live::{
-    LiveBridgeError, LiveComparisonCandidate, LiveCorpusLimits, LiveRunOptions,
-    DEFAULT_LIVE_MAX_AGGREGATE_BYTES, DEFAULT_LIVE_MAX_BLOB_BYTES,
+    LiveBridgeError, LiveComparisonCandidate, LiveComparisonOptions, LiveCorpusLimits,
+    LiveRunOptions, DEFAULT_LIVE_MAX_AGGREGATE_BYTES, DEFAULT_LIVE_MAX_BLOB_BYTES,
 };
 use cd_triage_sdk::{TriagePolicySelectionV2, TriageRequestOverridesV1};
 use serde::{Deserialize, Serialize};
@@ -173,6 +173,8 @@ pub struct BenchComparisonOutput {
     /// Non-zero means an earlier run leaked a corpus that a bounded recovery
     /// sweep could not discard yet. It never blocks this comparison.
     pub pending_cleanup_markers: usize,
+    /// Maximum candidate lanes that were allowed to run at once.
+    pub max_concurrency: usize,
 }
 
 impl Render for BenchComparisonOutput {
@@ -180,10 +182,11 @@ impl Render for BenchComparisonOutput {
         let mut output = self.report_markdown.clone();
         output.push_str("\n## Same-snapshot provenance\n\n");
         output.push_str(&format!(
-            "- task: `{}`\n- snapshot: `{}`\n- candidates: {}\n- same packet fingerprint: {}\n- same materialized corpus: {}\n\n",
+            "- task: `{}`\n- snapshot: `{}`\n- candidates: {}\n- max concurrency: {}\n- same packet fingerprint: {}\n- same materialized corpus: {}\n\n",
             self.task_id,
             self.snapshot_id,
             self.candidate_count,
+            self.max_concurrency,
             self.same_packet_fingerprint,
             self.same_materialized_corpus
         ));
@@ -327,6 +330,12 @@ pub async fn run(
             "bench-compare byte limits must be greater than zero and at most {DEFAULT_LIVE_MAX_BLOB_BYTES} per blob and {DEFAULT_LIVE_MAX_AGGREGATE_BYTES} aggregate"
         ))
     })?;
+    let comparison_options = LiveComparisonOptions::new(args.concurrency).map_err(|_| {
+        CliError::user(format!(
+            "bench-compare --concurrency must be between 1 and {}",
+            cd_triage_bench_live::MAX_LIVE_COMPARISON_CONCURRENCY
+        ))
+    })?;
 
     // Cancellation is armed before any blocking or provider work, so Ctrl-C
     // reaches snapshot verification and corpus preparation, not just the
@@ -396,8 +405,14 @@ pub async fn run(
         .collect();
 
     let secrets: Arc<dyn SecretStore> = Arc::new(crate::adapters::secret_store());
-    let live = cd_triage_bench_live::run_live_comparison(
-        &store, &case, &snapshot, &task, secrets, candidates,
+    let live = cd_triage_bench_live::run_live_comparison_with_options(
+        &store,
+        &case,
+        &snapshot,
+        &task,
+        secrets,
+        candidates,
+        comparison_options,
     )
     .await;
     drop(guard);
@@ -511,6 +526,7 @@ pub async fn run(
         report_markdown,
         share_safe,
         pending_cleanup_markers,
+        max_concurrency: comparison_options.max_concurrency,
     })
 }
 
@@ -702,7 +718,8 @@ fn map_bridge_error(error: LiveBridgeError) -> CliError {
         | LiveBridgeError::BoundExceeded
         | LiveBridgeError::EmptyComparison
         | LiveBridgeError::ComparisonCandidateBound
-        | LiveBridgeError::ComparisonInvariant => CliError::user(message),
+        | LiveBridgeError::ComparisonInvariant
+        | LiveBridgeError::ComparisonConcurrencyBound => CliError::user(message),
         LiveBridgeError::Staging
         | LiveBridgeError::Preview
         | LiveBridgeError::Import

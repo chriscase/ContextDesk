@@ -131,6 +131,11 @@ owner-only payload and its scanner-gated share_safe projection for automation.
 
 For live catalog discovery and exact compatibility verification, run:
 
+`bench-compare` prints an **owner-only** comparison. Candidate lanes default
+to two in flight (`--concurrency 1` is sequential; the published ceiling is
+4). Failed and partial rows are retained. It does not rank candidates or emit
+readiness badges.
+
 ```bash
 ./scripts/triage-comparison-demo.sh preflight \
   --profile-id HOST_PROFILE_ID \
