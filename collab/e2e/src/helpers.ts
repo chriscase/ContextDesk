@@ -155,16 +155,27 @@ export async function importChat(
 ): Promise<void> {
   await openCaseSupport(page);
   const form = importForm(page);
-  await form.getByPlaceholder("Output").fill(opts.output);
+  await form.getByRole("textbox", { name: "External run output" }).fill(opts.output);
   if (opts.prompt) {
-    await form.getByPlaceholder("Prompt (optional)").fill(opts.prompt);
+    await form.getByRole("textbox", { name: "External run prompt (optional)" }).fill(opts.prompt);
   }
   await form.locator('select[name="sourceId"]').selectOption({
     label: `${opts.sourceLabel} (external-tool)`,
   });
-  await form.getByPlaceholder("Operator username").fill(opts.operatorUsername);
-  await form.getByPlaceholder("Operator identity").fill(opts.operatorId);
-  await form.locator('select[name="evidenceVisibility"]').selectOption(opts.visibility ?? "unknown");
+  await form.getByRole("textbox", { name: "Operator username" }).fill(opts.operatorUsername);
+  await form.getByRole("textbox", { name: "Operator identity" }).fill(opts.operatorId);
+  if (opts.visibility) {
+    const provenance = form.locator("details").filter({
+      has: page.locator("summary", { hasText: "Provenance details (visibility, snapshot)" }),
+    });
+    if ((await provenance.getAttribute("open")) === null) {
+      await provenance.locator("summary").click();
+    }
+    await expect(provenance).toHaveAttribute("open", "");
+    await form
+      .getByRole("combobox", { name: "External run evidence visibility" })
+      .selectOption(opts.visibility);
+  }
   await form.getByLabel(/I redacted secrets before save/).check();
   const [posted] = await Promise.all([
     page.waitForResponse(
