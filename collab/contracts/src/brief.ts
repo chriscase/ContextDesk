@@ -75,6 +75,22 @@ export interface BriefImportedRunV1 {
   outputText: string | null;
 }
 
+export interface BriefMemorySummaryV1 {
+  latestSnapshotLabel: string | null;
+  latestSnapshotFingerprint: string | null;
+  parentSnapshotLabel: string | null;
+  evidenceCount: number;
+  lineageDepth: number;
+  boardCounts: {
+    known: number;
+    unknown: number;
+    agreed: number;
+    disputed: number;
+    newlyConcluded: number;
+  };
+  agreementNotice: "Agreement is not proof of correctness.";
+}
+
 export interface BriefV1 {
   schemaId: typeof BRIEF_SCHEMA_ID;
   privacyClass: (typeof PRIVACY_CLASSES)[number];
@@ -85,6 +101,7 @@ export interface BriefV1 {
   evidence: BriefEvidenceV1[];
   attributions: BriefAttributionV1[];
   importedRuns: BriefImportedRunV1[];
+  memory?: BriefMemorySummaryV1;
 }
 
 const linkShape: ObjectShape = {
@@ -156,6 +173,24 @@ const importedRunShape: ObjectShape = {
   outputText: f.nul(f.str),
 };
 
+const boardCountsShape: ObjectShape = {
+  known: f.req(f.u64),
+  unknown: f.req(f.u64),
+  agreed: f.req(f.u64),
+  disputed: f.req(f.u64),
+  newlyConcluded: f.req(f.u64),
+};
+
+const memoryShape: ObjectShape = {
+  latestSnapshotLabel: f.nul(f.str),
+  latestSnapshotFingerprint: f.nul(f.str),
+  parentSnapshotLabel: f.nul(f.str),
+  evidenceCount: f.req(f.u64),
+  lineageDepth: f.req(f.u64),
+  boardCounts: f.req(f.obj(boardCountsShape)),
+  agreementNotice: f.req(f.en("Agreement is not proof of correctness.")),
+};
+
 export const briefShape: ObjectShape = {
   schemaId: f.req(f.en(BRIEF_SCHEMA_ID)),
   privacyClass: f.req(f.en(...PRIVACY_CLASSES)),
@@ -166,6 +201,7 @@ export const briefShape: ObjectShape = {
   evidence: f.req(f.arr(f.obj(evidenceShape))),
   attributions: f.req(f.arr(f.obj(attributionShape))),
   importedRuns: f.req(f.arr(f.obj(importedRunShape))),
+  memory: f.opt(f.obj(memoryShape)),
 };
 
 export function parseBrief(raw: unknown): BriefV1 {

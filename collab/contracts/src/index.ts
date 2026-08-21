@@ -64,15 +64,51 @@ export { TIMELINE_SCHEMA_ID, parseTimeline } from "./timeline.js";
 export type { TimelineEventV1, TimelineV1 } from "./timeline.js";
 
 export {
+  LIVE_PROFILE_ALIASES,
+  QUALIFICATION_BACKENDS,
+  QUALIFICATION_CAVEATS,
+  QUALIFICATION_REPORT_SCHEMA_ID,
+  QUALIFICATION_STEP_STATUSES,
+  parseQualificationReport,
+  renderQualificationSummary,
+} from "./qualification.js";
+export type {
+  LiveProfileAlias,
+  QualificationBackend,
+  QualificationCaveat,
+  QualificationComparisonV1,
+  QualificationConcurrencyV1,
+  QualificationLineageV1,
+  QualificationLiveProfileV1,
+  QualificationReportV1,
+  QualificationStepStatus,
+  QualificationStepV1,
+} from "./qualification.js";
+
+export {
+  PRESENCE_SCHEMA_ID,
+  PRESENCE_SURFACES,
+  parseCasePresence,
+} from "./presence.js";
+export type {
+  CasePresenceV1,
+  PresenceMemberV1,
+  PresenceSurface,
+} from "./presence.js";
+
+export {
   CONTRIBUTION_KINDS,
+  CONTRIBUTION_LIST_SCHEMA_ID,
   CONTRIBUTION_SCHEMA_ID,
   HYPOTHESIS_STATUSES,
   PROVENANCE_SCHEMA_ID,
+  parseContributionList,
   parseContribution,
   parseProvenance,
 } from "./contribution.js";
 export type {
   ContributionKind,
+  ContributionListV1,
   ContributionV1,
   HypothesisStatus,
   ProvenanceV1,
@@ -80,6 +116,73 @@ export type {
 
 export { ARTIFACT_KINDS, ARTIFACT_SCHEMA_ID, parseArtifact } from "./artifact.js";
 export type { ArtifactKind, ArtifactV1 } from "./artifact.js";
+
+export {
+  SNAPSHOT_FAIRNESS_CLASSES,
+  SNAPSHOT_LIST_SCHEMA_ID,
+  SNAPSHOT_SCHEMA_ID,
+  SNAPSHOT_STATUSES,
+  parseSnapshot,
+  parseSnapshotList,
+  snapshotFingerprint,
+} from "./snapshot.js";
+export type {
+  SnapshotEvidenceV1,
+  SnapshotFairnessClass,
+  SnapshotFingerprintInput,
+  SnapshotListV1,
+  SnapshotStatus,
+  SnapshotV1,
+} from "./snapshot.js";
+
+export {
+  CASE_BOARD_AGREEMENT,
+  CASE_BOARD_BASES,
+  CASE_BOARD_BUCKETS,
+  CASE_BOARD_CONFIDENCE,
+  CASE_BOARD_GOLD_STATUS,
+  CASE_BOARD_SCHEMA_ID,
+  parseCaseBoard,
+} from "./case-board.js";
+export type {
+  CaseBoardAgreement,
+  CaseBoardBasis,
+  CaseBoardBucket,
+  CaseBoardConfidence,
+  CaseBoardFindingV1,
+  CaseBoardGoldStatus,
+  CaseBoardV1,
+} from "./case-board.js";
+
+export {
+  TRIAGE_CANDIDATE_STATUSES,
+  TRIAGE_JOB_CAPABILITIES_SCHEMA_ID,
+  TRIAGE_JOB_LIST_SCHEMA_ID,
+  TRIAGE_JOB_MODES,
+  TRIAGE_JOB_REQUEST_SCHEMA_ID,
+  TRIAGE_JOB_SCHEMA_ID,
+  TRIAGE_JOB_SHARE_SAFE_SCHEMA_ID,
+  TRIAGE_JOB_STATUSES,
+  parseTriageJob,
+  parseTriageJobCapabilities,
+  parseTriageJobList,
+  parseTriageJobRequest,
+  parseTriageJobShareSafe,
+  projectTriageJobShareSafe,
+} from "./triage-job.js";
+export type {
+  TriageCandidateRunV1,
+  TriageCandidateSpecV1,
+  TriageCandidateStatus,
+  TriageJobCapabilitiesV1,
+  TriageJobListV1,
+  TriageJobMode,
+  TriageJobRequestV1,
+  TriageJobShareSafeCandidateV1,
+  TriageJobShareSafeV1,
+  TriageJobStatus,
+  TriageJobV1,
+} from "./triage-job.js";
 
 export {
   PERMANENT_UNKNOWN_SOURCE_ID,
@@ -130,6 +233,7 @@ export type {
   BriefHypothesisV1,
   BriefImportedRunV1,
   BriefLinkV1,
+  BriefMemorySummaryV1,
   BriefTimelineEventV1,
   BriefV1,
 } from "./brief.js";
@@ -281,6 +385,27 @@ export {
   sha256Hex,
   traceFingerprint,
 } from "./trace.js";
+
+export {
+  DOCTOR_CAVEATS,
+  DOCTOR_CHECK_IDS,
+  DOCTOR_CHECK_STATUSES,
+  DOCTOR_REPORT_SCHEMA_ID,
+  PROFILE_CATALOG_SCHEMA_ID,
+  doctorExitCode,
+  parseDoctorReport,
+  parseProfileCatalog,
+  renderDoctorSummary,
+} from "./doctor.js";
+export type {
+  DoctorCaveat,
+  DoctorCheckId,
+  DoctorCheckStatus,
+  DoctorCheckV1,
+  DoctorReportV1,
+  ProfileCatalogEntryV1,
+  ProfileCatalogV1,
+} from "./doctor.js";
 export type {
   DiscoveryStepV1,
   ExperimentLabExportV1,
@@ -307,3 +432,28 @@ export type {
   TraceSourceKind,
   TraceShareSafeCaveat,
 } from "./trace.js";
+
+export {
+  LIVE_QUALIFICATION_CATALOG_SCHEMA_ID,
+  LIVE_QUALIFICATION_CAVEATS,
+  LIVE_QUALIFICATION_ERROR_CODES,
+  LIVE_QUALIFICATION_REPORT_SCHEMA_ID,
+  LIVE_QUALIFICATION_SKIP_REASONS,
+  LIVE_QUALIFICATION_STATUSES,
+  LIVE_QUALIFICATION_VERDICTS,
+  parseLiveQualificationCatalog,
+  parseLiveQualificationReport,
+  renderLiveQualificationSummary,
+} from "./live-qualification.js";
+export type {
+  LiveQualificationCaveat,
+  LiveQualificationCatalogV1,
+  LiveQualificationConcurrencyV1,
+  LiveQualificationErrorCode,
+  LiveQualificationLaneV1,
+  LiveQualificationProfileV1,
+  LiveQualificationReportV1,
+  LiveQualificationSkipReason,
+  LiveQualificationStatus,
+  LiveQualificationVerdict,
+} from "./live-qualification.js";

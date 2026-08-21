@@ -3,6 +3,7 @@ import { Client } from "pg";
 
 export const COLLAB_APP_ROLE = "collab_app";
 export const COLLAB_APP_ROLE_PASSWORD = "fixture-app-role";
+const APP_ROLE_LOCK_KEY = 874_221_001;
 
 export function adminUrl(): string | undefined {
   return process.env.COLLAB_TEST_ADMIN_URL;
@@ -30,9 +31,7 @@ async function ensureAppRole(admin: Client): Promise<void> {
     // Vitest runs database-backed files concurrently. Serialize only the
     // shared cluster role mutation; each test's disposable database remains
     // independent and can be created and exercised in parallel.
-    await admin.query(
-      "SELECT pg_advisory_xact_lock(hashtext('contextdesk'), hashtext('collab_app_test_role'))",
-    );
+    await admin.query("SELECT pg_advisory_xact_lock($1)", [APP_ROLE_LOCK_KEY]);
     await admin.query(`
       DO $$
       BEGIN

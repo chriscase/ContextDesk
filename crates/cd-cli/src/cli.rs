@@ -201,9 +201,15 @@ pub enum Command {
     ///
     /// This is a host-only command. It loads the explicit benchmark library,
     /// the shared policy and qualification stores, and the desktop-shared
-    /// credential adapter before calling the live comparison bridge. It does
-    /// not rank candidates or expose the offline bench crate to providers.
+    /// credential adapter before calling the live comparison bridge. Candidate
+    /// lanes default to two in flight; `--concurrency 1` is sequential. It
+    /// does not rank candidates or expose the offline bench crate to
+    /// providers.
     BenchCompare(BenchCompareArgs),
+    /// Execute a bounded Collab/War-Room triage job through the host-owned
+    /// live benchmark bridge. The request contains no credentials; provider
+    /// profiles and secrets come only from the shared host configuration.
+    CollabTriageRun(CollabTriageRunArgs),
     /// Provider-neutral gateway/model diagnostics for one explicitly selected model.
     Gateway {
         #[command(subcommand)]
@@ -416,6 +422,43 @@ pub struct BenchCompareArgs {
         long,
         default_value_t = cd_triage_bench_live::DEFAULT_LIVE_MAX_AGGREGATE_BYTES
     )]
+    pub max_aggregate_bytes: u64,
+    /// Maximum candidate lanes that may execute at once.
+    ///
+    /// Default is 2. `1` restores sequential admission. Values above the
+    /// published ceiling are refused before any library or provider access.
+    /// Lower this when a provider rate-limits concurrent requests.
+    #[arg(
+        long,
+        default_value_t = cd_triage_bench_live::DEFAULT_LIVE_COMPARISON_CONCURRENCY
+    )]
+    pub concurrency: usize,
+}
+
+/// Bounded JSON input for `contextdesk collab-triage-run`.
+#[derive(Debug, Clone, clap::Args)]
+pub struct CollabTriageRunArgs {
+    /// JSON request containing the Collab job, case, snapshot, base64 evidence,
+    /// question, and explicit candidate model/profile/role specifications.
+    /// Use `-` to read one bounded request from stdin.
+    #[arg(long, value_name = "FILE", required = true)]
+    pub request: PathBuf,
+    /// Emit safe per-lane completion events on stderr while the final JSON
+    /// result remains on stdout. Intended for the Collab host bridge.
+    #[arg(long)]
+    pub progress_events: bool,
+    /// Optional durable benchmark library. When omitted, a private temporary
+    /// library is used and removed when the command exits.
+    #[arg(long, value_name = "DIR")]
+    pub library: Option<PathBuf>,
+    /// Isolated cache root for the run-exclusive ContextDesk corpus.
+    #[arg(long, value_name = "DIR")]
+    pub cache_root: Option<PathBuf>,
+    /// Maximum bytes copied from one visible evidence item.
+    #[arg(long, default_value_t = 4 * 1024 * 1024)]
+    pub max_blob_bytes: u64,
+    /// Maximum aggregate bytes copied from all visible evidence items.
+    #[arg(long, default_value_t = 8 * 1024 * 1024)]
     pub max_aggregate_bytes: u64,
 }
 
@@ -1010,6 +1053,7 @@ pub const KNOWN_SUBCOMMANDS: &[&str] = &[
     "triage-policy",
     "triage",
     "bench-compare",
+    "collab-triage-run",
     "gateway",
 ];
 

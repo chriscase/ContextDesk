@@ -26,6 +26,8 @@ import {
   parseExperimentSummary,
   parseFileServerReference,
   parseHealthResponse,
+  parseLiveQualificationCatalog,
+  parseLiveQualificationReport,
   parsePromptPackage,
   parseSource,
 } from "./index.js";
@@ -177,6 +179,29 @@ describe("contracts unknown-field rejection", () => {
   });
 });
 
+describe("live qualification contracts", () => {
+  it("preserves opt-in and provenance boundaries", () => {
+    const catalog = JSON.parse(
+      readFileSync(join(fixturesDir, "live-qualification-catalog.valid.json"), "utf8"),
+    );
+    expect(parseLiveQualificationCatalog(catalog).profiles).toHaveLength(3);
+    expect(() => parseLiveQualificationCatalog({ ...catalog, unexpected: true })).toThrow(
+      /unknown key/,
+    );
+
+    const report = JSON.parse(
+      readFileSync(join(fixturesDir, "live-qualification-report.valid.json"), "utf8"),
+    );
+    expect(parseLiveQualificationReport(report).verdict).toBe("skipped");
+    expect(() =>
+      parseLiveQualificationReport({
+        ...report,
+        lanes: [{ ...report.lanes[0], ran: true, status: "completed" }],
+      }),
+    ).toThrow(/configured state|ran live lane/);
+  });
+});
+
 describe("JSON Schema additionalProperties: false", () => {
   const AjvCtor = Ajv2020 as new (opts: {
     allErrors: boolean;
@@ -267,6 +292,66 @@ describe("JSON Schema additionalProperties: false", () => {
         verificationStatus: "unverified",
         leak: true,
       }),
+    ).toBe(false);
+  });
+
+  it("doctor report and profile catalog schemas fail closed", () => {
+    const doctor = ajv.compile(loadSchema("doctor-report.v1.json"));
+    const catalog = ajv.compile(loadSchema("profile-catalog.v1.json"));
+    expect(
+      doctor(JSON.parse(readFileSync(join(fixturesDir, "doctor-report.valid.json"), "utf8"))),
+    ).toBe(true);
+    expect(
+      doctor(
+        JSON.parse(readFileSync(join(fixturesDir, "doctor-report.unknown-field.json"), "utf8")),
+      ),
+    ).toBe(false);
+    expect(
+      catalog(JSON.parse(readFileSync(join(fixturesDir, "profile-catalog.valid.json"), "utf8"))),
+    ).toBe(true);
+    expect(
+      catalog(
+        JSON.parse(readFileSync(join(fixturesDir, "profile-catalog.unknown-field.json"), "utf8")),
+      ),
+    ).toBe(false);
+  });
+
+  it("live qualification schemas reject unknown fields and accept fixtures", () => {
+    const catalog = ajv.compile(loadSchema("live-qualification-catalog.v1.json"));
+    const report = ajv.compile(loadSchema("live-qualification-report.v1.json"));
+    expect(
+      catalog(
+        JSON.parse(
+          readFileSync(join(fixturesDir, "live-qualification-catalog.valid.json"), "utf8"),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      catalog(
+        JSON.parse(
+          readFileSync(
+            join(fixturesDir, "live-qualification-catalog.unknown-field.json"),
+            "utf8",
+          ),
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      report(
+        JSON.parse(
+          readFileSync(join(fixturesDir, "live-qualification-report.valid.json"), "utf8"),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      report(
+        JSON.parse(
+          readFileSync(
+            join(fixturesDir, "live-qualification-report.unknown-field.json"),
+            "utf8",
+          ),
+        ),
+      ),
     ).toBe(false);
   });
 });

@@ -97,6 +97,27 @@ automatically.
   compatibility.
 - Probe tools cannot read files, corpora, memory, connectors, or arbitrary URLs.
 
+## Live mixed-provider sequence
+
+Qualify one profile at a time. `CONTEXTDESK_PROVIDER_API_KEY` may override a
+single selected Keychain-style `provider/<id>/api_key` reference for that
+process. It is never persisted or printed.
+
+If a live comparison will use more than one credentialed profile (for example
+an employer gateway and Vercel):
+
+1. Unset `CONTEXTDESK_PROVIDER_API_KEY`.
+2. Give each profile its own Keychain entry or owner-only mode-`600` `file:`
+   reference.
+3. Run `contextdesk --profile <id> models verify <model-id> ...` once per
+   profile.
+4. Only then run `contextdesk bench-compare` (or chat `--mode review` with a
+   distinct reviewer profile).
+
+A mixed run with the global override set fails closed before any provider
+call. Protected-file permission errors and missing credentials also fail
+without echoing secret bytes.
+
 ## Residuals
 
 Packaged proof against a real tools-enabled and tools-disabled profile depends

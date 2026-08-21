@@ -24,6 +24,8 @@ import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/in
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
 import { registerImportRoutes, type ImportService } from "./modules/import/index.js";
+import { registerTriageRunRoutes, type TriageRunService } from "./modules/triage-runs/index.js";
+import { registerPresenceRoutes, type PresenceService } from "./modules/presence/index.js";
 import {
   registerExperimentRoutes,
   type ExperimentService,
@@ -39,11 +41,14 @@ export interface SecurityDeps {
 export interface AppDeps {
   config: Config;
   pool: Pick<Pool, "query"> | null;
+  databaseProbe?: { ping(): void | Promise<void> };
   store: Pick<EvidenceStore, "ping">;
   security?: SecurityDeps;
   domain?: CaseService;
   catalog?: CatalogService;
   imports?: ImportService;
+  triageRuns?: TriageRunService;
+  presence?: PresenceService;
   experiments?: ExperimentService;
   exporter?: ExportService;
   serveStatic?: boolean;
@@ -65,7 +70,16 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     let evidenceStore: "up" | "down" = "down";
     if (deps.pool) {
       try {
-        await deps.pool.query("SELECT 1");
+        await deps.pool.query(
+          "SELECT 1 FROM schema_migrations WHERE version = '011_triage_worker_leases'",
+        );
+        database = "up";
+      } catch {
+        database = "down";
+      }
+    } else if (deps.databaseProbe) {
+      try {
+        await deps.databaseProbe.ping();
         database = "up";
       } catch {
         database = "down";
@@ -128,12 +142,30 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         imports: deps.imports,
       });
     }
+    if (deps.triageRuns) {
+      await registerTriageRunRoutes(app, {
+        auth: security.auth,
+        roles: security.roles,
+        audit: security.audit,
+        runs: deps.triageRuns,
+      });
+    }
+    if (deps.domain && deps.presence) {
+      await registerPresenceRoutes(app, {
+        auth: security.auth,
+        roles: security.roles,
+        cases: deps.domain,
+        presence: deps.presence,
+      });
+    }
     if (deps.experiments) {
       await registerExperimentRoutes(app, {
         auth: security.auth,
         roles: security.roles,
         audit: security.audit,
         experiments: deps.experiments,
+        ...(deps.imports ? { imports: deps.imports } : {}),
+        ...(deps.triageRuns ? { triageRuns: deps.triageRuns } : {}),
       });
     }
     if (deps.exporter) {

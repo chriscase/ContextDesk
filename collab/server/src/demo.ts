@@ -21,6 +21,14 @@ import { CaseService } from "./modules/cases/index.js";
 import { ExperimentService, MemoryExperimentStore } from "./modules/experiments/index.js";
 import { ExportService, testExportPrivacyConfig } from "./modules/export/index.js";
 import { ImportService, MemoryRunStore } from "./modules/import/index.js";
+import {
+  MemoryTriageJobStore,
+  loadConfiguredTriageProfileCatalog,
+  RustBridgeTriageExecutor,
+  TriageRunService,
+  type RustBridgeTriageExecutorOptions,
+} from "./modules/triage-runs/index.js";
+import { PresenceService } from "./modules/presence/index.js";
 
 export const DEMO_USERNAME = "demo";
 export const DEMO_PASSWORD = "demo";
@@ -37,6 +45,8 @@ interface DemoApp {
 
 interface DemoAppOptions {
   staticDir?: string | null;
+  /** Explicit opt-in host bridge for a local, memory-backed live rehearsal. */
+  gatewayRunner?: RustBridgeTriageExecutorOptions;
   /** Test seam for proving construction-failure cleanup; production uses buildApp. */
   appBuilder?: typeof buildApp;
   /** Test observer for the temporary root created before app construction. */
@@ -205,6 +215,86 @@ async function seed(app: FastifyInstance): Promise<string> {
     },
   });
 
+  const checkoutEvidence = await okJson<{ artifact: { id: string } }>(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/evidence`,
+    cookie,
+    payload: {
+      kind: "log",
+      filename: "checkout.log",
+      mediaType: "text/plain",
+      contentBase64: Buffer.from("checkout request timed out while waiting for inventory service\n").toString("base64"),
+      summary: "Synthetic checkout timeout evidence.",
+      sourceId: source.id,
+      privacyClass: "share_safe",
+    },
+  });
+  const inventoryEvidence = await okJson<{ artifact: { id: string } }>(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/evidence`,
+    cookie,
+    payload: {
+      kind: "log",
+      filename: "inventory-timeout.log",
+      mediaType: "text/plain",
+      contentBase64: Buffer.from("inventory client timeout after pool exhaustion\n").toString("base64"),
+      summary: "Synthetic inventory timeout evidence.",
+      sourceId: source.id,
+      privacyClass: "share_safe",
+    },
+  });
+  for (const body of [
+    "Inventory timeout is the leading cause to investigate.",
+    "Checkout and inventory pool pressure should be investigated together.",
+  ]) {
+    await okJson(app, {
+      method: "POST",
+      url: `/api/cases/${created.id}/contributions`,
+      cookie,
+      payload: {
+        kind: "hypothesis",
+        body,
+        privacyClass: "share_safe",
+        hypothesisStatus: "supported",
+        hypothesisLinks: [
+          { kind: "artifact", id: inventoryEvidence.artifact.id },
+          { kind: "artifact", id: checkoutEvidence.artifact.id },
+        ],
+        sourceId: source.id,
+      },
+    });
+  }
+  const demoSnapshot = await okJson<{ id: string }>(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/snapshots`,
+    cookie,
+    payload: {
+      evidenceIds: [checkoutEvidence.artifact.id, inventoryEvidence.artifact.id],
+      visibility: "owner_only",
+      protocolVersion: "synthetic-demo-v1",
+    },
+  });
+  await okJson(app, {
+    method: "POST",
+    url: `/api/cases/${created.id}/triage-runs`,
+    cookie,
+    payload: {
+      schemaId: "cd-collab.triage_job_request.v1",
+      snapshotId: demoSnapshot.id,
+      mode: "deterministic_mock",
+      strategyId: "contextdesk.standard.synthetic-demo",
+      question: "What caused the checkout timeout and what should we inspect next?",
+      policyFingerprint: null,
+      taskFingerprint: "demo-checkout-v1",
+      candidates: [
+        { candidateId: "qwen-reviewer", role: "reviewer", provider: "synthetic", profileId: null, model: "qwen-3.6-27b", version: null },
+        { candidateId: "gpt-oss-contributor", role: "contributor", provider: "synthetic", profileId: null, model: "gpt-oss-120b", version: null },
+        { candidateId: "ministral-challenger", role: "challenger", provider: "synthetic", profileId: null, model: "ministral-3-14b-instruct-2512", version: null },
+      ],
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+
   await seedReviewedExperiment(
     app,
     cookie,
@@ -291,6 +381,16 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
     audit,
     experiments: new MemoryExperimentStore(),
   });
+  const triageRuns = new TriageRunService({
+    cases,
+    audit,
+    jobs: new MemoryTriageJobStore(),
+    ...(options.gatewayRunner
+      ? { gatewayExecutor: new RustBridgeTriageExecutor(options.gatewayRunner) }
+      : {}),
+    profiles: loadConfiguredTriageProfileCatalog(),
+  });
+  const presence = new PresenceService();
   const exporter = new ExportService({
     cases,
     catalog,
@@ -323,6 +423,8 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       domain: cases,
       catalog,
       imports,
+      triageRuns,
+      presence,
       experiments,
       exporter,
       serveStatic: staticDir !== null,
@@ -367,8 +469,29 @@ function demoPort(raw: string | undefined): number {
   return port;
 }
 
+function demoGatewayRunner(): RustBridgeTriageExecutorOptions | undefined {
+  const command = (process.env.COLLAB_DEMO_TRIAGE_RUNNER ?? process.env.COLLAB_TRIAGE_RUNNER)?.trim();
+  if (!command) return undefined;
+  const rawTimeout = process.env.COLLAB_TRIAGE_RUNNER_TIMEOUT_MS ?? "300000";
+  const timeoutMs = Number.parseInt(rawTimeout, 10);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error(`COLLAB_TRIAGE_RUNNER_TIMEOUT_MS must be a positive integer, got ${rawTimeout}`);
+  }
+  return {
+    command,
+    timeoutMs,
+    ...(process.env.COLLAB_TRIAGE_RUNNER_DATA_DIR?.trim()
+      ? { dataDir: process.env.COLLAB_TRIAGE_RUNNER_DATA_DIR.trim() }
+      : {}),
+    ...(process.env.COLLAB_TRIAGE_LIBRARY?.trim()
+      ? { library: process.env.COLLAB_TRIAGE_LIBRARY.trim() }
+      : {}),
+  };
+}
+
 async function main(): Promise<void> {
-  const { app } = await buildDemoApp();
+  const gatewayRunner = demoGatewayRunner();
+  const { app } = await buildDemoApp(gatewayRunner ? { gatewayRunner } : {});
   const close = () => {
     void app.close().catch((error: unknown) => {
       process.stderr.write(
@@ -386,7 +509,9 @@ async function main(): Promise<void> {
         "ContextDesk synthetic demo is ready.",
         `Open: ${address}`,
         `Sign in: ${DEMO_USERNAME} / ${DEMO_PASSWORD}`,
-        "All state is synthetic, memory-backed, and removed when the server stops.",
+        gatewayRunner
+          ? "Case state is synthetic and memory-backed; gateway runs are explicitly enabled through the host bridge."
+          : "All state is synthetic, memory-backed, and removed when the server stops.",
         "Use /health for a smoke check; /ready intentionally reports no production database.",
       ].join("\n") + "\n",
     );

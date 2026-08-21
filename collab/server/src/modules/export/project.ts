@@ -5,6 +5,7 @@ import {
   PACKAGE_MANIFEST_SCHEMA_ID,
   PACKAGE_SCHEMA_ID,
   type ArtifactV1,
+  type BriefMemorySummaryV1,
   type BriefV1,
   type ContributionV1,
   type ExternalRunV1,
@@ -40,6 +41,7 @@ function includeContent(variant: PrivacyClass, privacyClass: PrivacyClass): bool
 
 function targetKind(eventKind: string): string {
   if (eventKind.startsWith("evidence")) return "artifact";
+  if (eventKind.startsWith("snapshot")) return "snapshot";
   if (eventKind.includes("contribution") || eventKind === "hypothesis_status") return "contribution";
   if (eventKind.startsWith("external_run") || eventKind === "run_corroboration") return "imported_run";
   if (eventKind.startsWith("case") || eventKind === "legal_hold" || eventKind === "membership") {
@@ -58,6 +60,7 @@ export function projectBrief(input: {
   sources: ReadonlyMap<string, SourceV1>;
   artifactContent: ReadonlyMap<string, string | null>;
   privacy: ExportPrivacyConfig;
+  memory?: BriefMemorySummaryV1;
 }): BriefV1 {
   const { variant } = input;
   const label = (raw: string) => shareSafeLabel(raw, input.privacy, variant, "identity");
@@ -159,6 +162,7 @@ export function projectBrief(input: {
     evidence,
     attributions,
     importedRuns,
+    ...(input.memory === undefined ? {} : { memory: input.memory }),
   };
 }
 

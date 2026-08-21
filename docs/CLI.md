@@ -1,10 +1,16 @@
 # ContextDesk CLI
 
-For ephemeral automation or CI, set `CONTEXTDESK_PROVIDER_API_KEY` for the
-current process. It overrides provider credential lookup only; ContextDesk does
+For ephemeral automation or CI against **one** selected provider profile, set
+`CONTEXTDESK_PROVIDER_API_KEY` for the current process. It overrides only that
+profile's Keychain-style `provider/<id>/api_key` reference. ContextDesk does
 not persist or print the value, and connector credentials remain isolated.
-Provider profiles may also select a protected `file:` reference. Keychain
-remains available for profiles that explicitly use a Keychain reference.
+Protected `file:` references are never replaced by the global override.
+
+Mixed-provider live work — including `bench-compare` across employer and Vercel
+profiles, chat `--mode review` with a different reviewer profile, or retrieval
+roles that use a second credential — **rejects** the global override. Unset
+`CONTEXTDESK_PROVIDER_API_KEY` and give each selected profile its own Keychain
+or owner-only `file:` reference. See [Same-snapshot comparison](#same-snapshot-comparison-contextdesk-bench-compare).
 
 `cd-cli` (binary: `contextdesk`) is a thin adapter over `cd_workflow`, which
 packages host-neutral operations around the production `cd_core` engine. The
@@ -831,7 +837,8 @@ contextdesk models verify --all [--role chat|embedding|reranker|unknown] [--matc
 contextdesk logging-assessment [corpus-id] [--report-format json|markdown] [--output <file>]
 contextdesk exception-episodes [corpus-id]
 contextdesk bench-compare --library <dir> --task <task-id> \
-            --candidate <candidate-a.json> --candidate <candidate-b.json>
+            --candidate <candidate-a.json> --candidate <candidate-b.json> \
+            [--concurrency 2]
 # Friendly aliases: ask=chat, search=explore, assess=logging-assessment,
 #                   episodes=exception-episodes
 ```
@@ -845,33 +852,56 @@ and explicit strategy metadata (`name`, `operator`, `created_at`, with optional
 `version`/`build`); `overrides` may set the public deadline and provider-call
 bound. When no deadline is supplied, the bridge applies the bounded Standard
 180-second whole-comparison deadline. Provider endpoints and credentials remain
-in the existing host config
-and credential adapter.
+in the existing host config and credential adapter.
+
+**Credentials.** `CONTEXTDESK_PROVIDER_API_KEY` is safe only when every
+candidate (and any retrieval role the run would read) resolves through **one**
+Keychain-style provider reference. A comparison that names two credentialed
+profiles — for example an employer gateway and Vercel — refuses the global
+override before opening the library or contacting a provider. Configure each
+profile with its own Keychain id (`provider/<id>/api_key`) or protected `file:`
+path; do not share one process-wide key. ContextDesk never prints, exports, or
+embeds secret bytes in comparison reports or errors.
+
+Safe operator sequence for a mixed live comparison:
+
+1. Unset `CONTEXTDESK_PROVIDER_API_KEY`.
+2. Put each gateway's credential in Keychain or an owner-only mode-`600` file.
+3. Point each AppConfig profile at **its** `api_key_ref` only.
+4. Qualify each profile separately (`contextdesk --profile <id> models verify …`).
+5. Run `bench-compare` with candidate documents that name those exact profile ids.
+6. Treat the owner-only report as operator-private; share only `share_safe`.
 
 The command prepares and proves one isolated corpus before any candidate runs,
-reuses its packet/corpus identity sequentially, validates every replay before
-persistence, and preserves failed/partial/timed-out outcomes. It never emits
-rankings or readiness claims.
+reuses that packet/corpus identity across a bounded concurrent candidate list
+(default two in flight; `--concurrency 1` is sequential), validates every
+replay before persistence, and preserves failed/partial/timed-out outcomes. It
+never emits rankings or readiness claims. Incremental per-lane Collab UI
+progress is not part of this command: the host still returns one bounded final
+JSON result.
 
 **Bounds.** `--max-blob-bytes` and `--max-aggregate-bytes` may be *lowered*
 below the published production import bounds (512 MiB per blob, 2 GiB
 aggregate) and can never be raised above them: a host boundary exists to bound
 its callers. Both bounds are checked against the snapshot manifest before any
 blob is opened, and verification then streams rather than loading a blob into
-memory. Ctrl-C is armed before that work begins, so cancellation reaches
-snapshot verification and corpus preparation, not only the provider call.
+memory. `--concurrency` defaults to 2 and may be `1..=4`; `1` is sequential.
+Ctrl-C is armed before that work begins, so cancellation reaches snapshot
+verification and corpus preparation, not only the provider call.
 
-**Fairness.** Candidates run sequentially against the one prepared corpus.
-Each candidate's request deadline is its own override capped by the comparison
-deadline — a value that does not depend on list position or on how long an
-earlier candidate took, so ordering buys nobody extra wall clock. The budget
-is deliberately not divided between candidates: a divided share can fall below
-the deadline a policy needs in order to run at all (a Standard policy reserves
-time for its finalizer), which would turn a working comparison into a list of
-rejected budgets. Boundedness comes from refusing to *start* another candidate
-once the comparison budget is spent, so a comparison can overshoot by at most
-the final candidate's own allowance. Each row's effective allowance is
-reported as `request_deadline_ms`.
+**Fairness.** Candidates run against the one prepared corpus with a
+conservative concurrency ceiling (default 2, maximum 4). Lower `--concurrency`
+when a provider rate-limits parallel requests. Each candidate's request
+deadline is its own override capped by the comparison deadline — a value that
+does not depend on list position or on how long a sibling took, so ordering
+buys nobody extra wall clock. The budget is deliberately not divided between
+candidates: a divided share can fall below the deadline a policy needs in
+order to run at all (a Standard policy reserves time for its finalizer), which
+would turn a working comparison into a list of rejected budgets. Boundedness
+comes from the concurrency ceiling and from refusing to *start* another
+candidate once the comparison budget is spent, so a comparison can overshoot
+by at most the in-flight candidates' own allowances. Each row's effective
+allowance is reported as `request_deadline_ms`.
 
 **Privacy.** Output is owner-only because exact model identities and
 task-linked provenance are retained. Benchmark run rows are themselves

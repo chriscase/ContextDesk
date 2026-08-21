@@ -56,6 +56,7 @@ describe("export panel", () => {
     fireEvent.change(screen.getByDisplayValue("owner_only"), { target: { value: "share_safe" } });
     fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
     expect(await screen.findByText(/privacy_scan_failed/)).toBeTruthy();
-    expect(screen.getByText(/credential · \$\.actions\[0\]\.body · aws_access_key: AKIA/)).toBeTruthy();
+    expect(screen.getByText(/credential · \$\.actions\[0\]\.body · \[redacted\]/)).toBeTruthy();
+    expect(screen.queryByText(/aws_access_key: AKIA/)).toBeNull();
   });
 });

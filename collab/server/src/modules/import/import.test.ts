@@ -55,6 +55,18 @@ function users() {
         groups: ["cn=admins,ou=groups,dc=example,dc=test"],
       },
     ],
+    [
+      "bob",
+      {
+        password: "fixture-bob-secret",
+        identity: {
+          id: "uid=bob,ou=people,dc=example,dc=test",
+          username: "bob",
+          displayName: "bob",
+        },
+        groups: ["cn=contributors,ou=groups,dc=example,dc=test"],
+      },
+    ],
   ]);
 }
 
@@ -129,6 +141,7 @@ describe("external-run import", () => {
     await withApp(async ({ app, audit, store }) => {
       const alice = await login(app, "alice", ALICE);
       const dave = await login(app, "dave", "fixture-dave-secret");
+      const bob = await login(app, "bob", "fixture-bob-secret");
       const tool = parseSource(
         JSON.parse(
           (
@@ -153,6 +166,16 @@ describe("external-run import", () => {
           ).body,
         ),
       );
+      const membership = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/participants`,
+        headers: { cookie: dave },
+        payload: {
+          identityId: "uid=bob,ou=people,dc=example,dc=test",
+          username: "bob",
+        },
+      });
+      expect(membership.statusCode).toBe(200);
 
       const imported = parseExternalRun(
         JSON.parse(
@@ -197,6 +220,19 @@ describe("external-run import", () => {
       expect(imported.corroborationState).toBe("unverified");
       expect(imported.corroborationState).toBe(initialCorroborationState());
       expect(imported.privacyClass).toBe("owner_only");
+      const bobList = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: bob },
+      });
+      expect(bobList.statusCode).toBe(200);
+      expect((JSON.parse(bobList.body) as { runs?: unknown[] }).runs).toHaveLength(0);
+      const bobDetail = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/imports/${imported.id}`,
+        headers: { cookie: bob },
+      });
+      expect(bobDetail.statusCode).toBe(404);
 
       const described = parseExternalRun(
         JSON.parse(

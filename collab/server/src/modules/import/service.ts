@@ -180,7 +180,7 @@ export class ImportService {
   ): Promise<ExternalRunV1 | null> {
     if (!(await this.deps.cases.getCase(caseId, actor, isAdmin))) return null;
     const row = await this.runs.get(runId);
-    if (!row || row.caseId !== caseId) return null;
+    if (!row || row.caseId !== caseId || !this.canView(row, actor, isAdmin)) return null;
     return this.toRun(row, await this.currentState(runId));
   }
 
@@ -189,6 +189,7 @@ export class ImportService {
     const rows = await this.runs.listByCase(caseId);
     const out: ExternalRunV1[] = [];
     for (const row of rows) {
+      if (!this.canView(row, actor, isAdmin)) continue;
       out.push(this.toRun(row, await this.currentState(row.id)));
     }
     return out;
@@ -209,7 +210,9 @@ export class ImportService {
       throw new Error("case not found");
     }
     const before = await this.runs.get(runId);
-    if (!before || before.caseId !== caseId) throw new Error("run not found");
+    if (!before || before.caseId !== caseId || !this.canView(before, actor, isAdmin)) {
+      throw new Error("run not found");
+    }
     if (input.links.length < 1) {
       throw new Error("corroboration must link at least one artifact or contribution");
     }
@@ -275,6 +278,10 @@ export class ImportService {
     const events = await this.runs.listCorroborations(runId);
     const latest = events[events.length - 1];
     return latest?.state ?? initialCorroborationState();
+  }
+
+  private canView(row: FrozenRunRow, actor: Actor, isAdmin: boolean): boolean {
+    return isAdmin || row.privacyClass === "share_safe" || row.importerId === actor.id;
   }
 
   private toRun(row: FrozenRunRow, corroborationState: CorroborationState): ExternalRunV1 {

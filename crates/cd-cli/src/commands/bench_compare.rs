@@ -31,13 +31,13 @@ use cd_triage_bench::{
 };
 use cd_triage_bench_adapter::{project_share_safe, RecordingContext, ShareSafeAdapterRun};
 use cd_triage_bench_live::{
-    LiveBridgeError, LiveComparisonCandidate, LiveCorpusLimits, LiveRunOptions,
-    DEFAULT_LIVE_MAX_AGGREGATE_BYTES, DEFAULT_LIVE_MAX_BLOB_BYTES,
+    LiveBridgeError, LiveComparisonCandidate, LiveComparisonOptions, LiveCorpusLimits,
+    LiveRunOptions, LiveRunResult, DEFAULT_LIVE_MAX_AGGREGATE_BYTES, DEFAULT_LIVE_MAX_BLOB_BYTES,
 };
 use cd_triage_sdk::{TriagePolicySelectionV2, TriageRequestOverridesV1};
 use serde::{Deserialize, Serialize};
 
-use crate::adapters::Paths;
+use crate::adapters::{self, Paths};
 use crate::cli::BenchCompareArgs;
 use crate::envelope::{CliError, CliResult, Render};
 
@@ -52,7 +52,7 @@ pub const BENCH_COMPARE_CLI_SCHEMA_ID: &str = "contextdesk.cli.bench_compare.v1"
 /// Candidate documents contain policy and provenance metadata only. Provider
 /// credentials and endpoint configuration remain in the host-owned app
 /// configuration and credential adapter.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateSpec {
     /// Standard, saved, or inline policy selection.
@@ -67,7 +67,7 @@ pub struct CandidateSpec {
 }
 
 /// Explicit strategy/operator metadata for one comparison candidate.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategySpec {
     /// Human-readable strategy identity.
@@ -151,6 +151,11 @@ pub struct BenchComparisonOutput {
     /// check uses the validated benchmark fingerprint rather than that id.
     pub same_packet_fingerprint: bool,
     pub same_materialized_corpus: bool,
+    /// Content-free reason when the comparison stopped before every
+    /// requested candidate was durably recorded. A non-`None` value means
+    /// `runs` is an honest durable prefix, not a complete comparison.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped_reason: Option<String>,
     /// Per-candidate durable and provenance identities.
     pub runs: Vec<BenchComparisonRunOutput>,
     /// Existing honest comparison report over exactly these newly persisted
@@ -173,6 +178,8 @@ pub struct BenchComparisonOutput {
     /// Non-zero means an earlier run leaked a corpus that a bounded recovery
     /// sweep could not discard yet. It never blocks this comparison.
     pub pending_cleanup_markers: usize,
+    /// Maximum candidate lanes that were allowed to run at once.
+    pub max_concurrency: usize,
 }
 
 impl Render for BenchComparisonOutput {
@@ -180,13 +187,20 @@ impl Render for BenchComparisonOutput {
         let mut output = self.report_markdown.clone();
         output.push_str("\n## Same-snapshot provenance\n\n");
         output.push_str(&format!(
-            "- task: `{}`\n- snapshot: `{}`\n- candidates: {}\n- same packet fingerprint: {}\n- same materialized corpus: {}\n\n",
+            "- task: `{}`\n- snapshot: `{}`\n- candidates: {}\n- max concurrency: {}\n- same packet fingerprint: {}\n- same materialized corpus: {}\n\n",
             self.task_id,
             self.snapshot_id,
             self.candidate_count,
+            self.max_concurrency,
             self.same_packet_fingerprint,
             self.same_materialized_corpus
         ));
+        if let Some(reason) = &self.stopped_reason {
+            output.push_str(&format!(
+                "- stopped before every candidate completed: {}\n\n",
+                reason
+            ));
+        }
         for run in &self.runs {
             output.push_str(&format!(
                 "- `{}`: {} — packet `{}`, corpus `{}`, deadline {}\n",
@@ -237,7 +251,7 @@ struct LoadedHostState {
 /// before a single blob byte is read, and verification then streams rather
 /// than allocating a blob in memory.
 fn load_host_state(
-    candidates: Vec<PathBuf>,
+    specs: Vec<CandidateSpec>,
     library: PathBuf,
     task_id: String,
     config_dir: PathBuf,
@@ -245,12 +259,6 @@ fn load_host_state(
     limits: LiveCorpusLimits,
     cancel: CancelFlag,
 ) -> CliResult<LoadedHostState> {
-    let specs = candidates
-        .iter()
-        .map(read_candidate)
-        .collect::<CliResult<Vec<_>>>()?;
-    validate_candidates(&specs)?;
-
     let store = BenchStore::open(&library)
         .map_err(|_| CliError::not_found("benchmark library could not be opened"))?;
     let task = store
@@ -304,6 +312,37 @@ pub async fn run(
     paths: &Paths,
     cfg: &AppConfig,
 ) -> CliResult<BenchComparisonOutput> {
+    run_with_live_progress(args, paths, cfg, |_index, _run| {}).await
+}
+
+/// Execute a bounded live comparison and notify the caller after each lane
+/// has persisted. The callback is deliberately limited to source-neutral
+/// durable output; final report construction remains owned by this command.
+pub async fn run_with_live_progress<F>(
+    args: &BenchCompareArgs,
+    paths: &Paths,
+    cfg: &AppConfig,
+    on_lane_persisted: F,
+) -> CliResult<BenchComparisonOutput>
+where
+    F: FnMut(usize, &LiveRunResult) + Send,
+{
+    run_with_live_lifecycle(args, paths, cfg, |_index| {}, on_lane_persisted).await
+}
+
+/// Execute a bounded live comparison with safe admission and persistence
+/// notifications for a host-facing caller.
+pub async fn run_with_live_lifecycle<S, F>(
+    args: &BenchCompareArgs,
+    paths: &Paths,
+    cfg: &AppConfig,
+    on_lane_started: S,
+    mut on_lane_persisted: F,
+) -> CliResult<BenchComparisonOutput>
+where
+    S: FnMut(usize) + Send,
+    F: FnMut(usize, &LiveRunResult) + Send,
+{
     if args.candidates.len() < 2 {
         return Err(CliError::user(
             "bench-compare requires at least two --candidate files",
@@ -327,6 +366,12 @@ pub async fn run(
             "bench-compare byte limits must be greater than zero and at most {DEFAULT_LIVE_MAX_BLOB_BYTES} per blob and {DEFAULT_LIVE_MAX_AGGREGATE_BYTES} aggregate"
         ))
     })?;
+    let comparison_options = LiveComparisonOptions::new(args.concurrency).map_err(|_| {
+        CliError::user(format!(
+            "bench-compare --concurrency must be between 1 and {}",
+            cd_triage_bench_live::MAX_LIVE_COMPARISON_CONCURRENCY
+        ))
+    })?;
 
     // Cancellation is armed before any blocking or provider work, so Ctrl-C
     // reaches snapshot verification and corpus preparation, not just the
@@ -346,8 +391,24 @@ pub async fn run(
         .cache_root
         .clone()
         .unwrap_or_else(|| paths.cache_root.clone());
+    let specs = args
+        .candidates
+        .iter()
+        .map(read_candidate)
+        .collect::<CliResult<Vec<_>>>()?;
+    validate_candidates(&specs)?;
+    // Bind or refuse CONTEXTDESK_PROVIDER_API_KEY before any library, corpus,
+    // or provider work. Mixed employer/Vercel comparisons must use per-profile
+    // Keychain or protected-file references.
+    let comparison_profile_ids = comparison_profile_ids(&specs, cfg);
+    let secrets: Arc<dyn SecretStore> = Arc::new(adapters::secret_store_for_live(
+        cfg,
+        None,
+        &comparison_profile_ids,
+        false,
+        false,
+    )?);
     let loaded = {
-        let candidates = args.candidates.clone();
         let library = args.library.clone();
         let task_id = args.task.clone();
         let config_dir = paths.config_dir.clone();
@@ -355,7 +416,7 @@ pub async fn run(
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
             load_host_state(
-                candidates, library, task_id, config_dir, cache_root, limits, cancel,
+                specs, library, task_id, config_dir, cache_root, limits, cancel,
             )
         })
         .await
@@ -395,16 +456,23 @@ pub async fn run(
         })
         .collect();
 
-    let secrets: Arc<dyn SecretStore> = Arc::new(crate::adapters::secret_store());
-    let live = cd_triage_bench_live::run_live_comparison(
-        &store, &case, &snapshot, &task, secrets, candidates,
+    let live = cd_triage_bench_live::run_live_comparison_with_options_and_lifecycle(
+        &store,
+        &case,
+        &snapshot,
+        &task,
+        secrets,
+        candidates,
+        comparison_options,
+        on_lane_started,
+        |index, run| on_lane_persisted(index, run),
     )
     .await;
     drop(guard);
 
     let live = live.map_err(map_bridge_error)?;
     let pending_cleanup_markers = live.pending_cleanup.unresolved;
-    let stopped = live.stopped;
+    let stopped_reason = live.stopped.map(|error| error.to_string());
 
     // The bridge only returns runs it already persisted. Once rows exist, no
     // failure path below may drop their identities: they are the operator's
@@ -419,13 +487,6 @@ pub async fn run(
         requested_candidates,
         pending_cleanup_markers,
     };
-
-    if let Some(error) = stopped {
-        return Err(partial_failure_error(
-            error,
-            durable_rows.describe(&error.to_string()),
-        ));
-    }
 
     let mut attribution = BTreeMap::new();
     let mut runs = Vec::with_capacity(live.runs.len());
@@ -458,14 +519,11 @@ pub async fn run(
         .collect::<BTreeSet<_>>()
         .len()
         == 1;
-    // Unreachable unless the bridge broke its own contract; kept because the
-    // alternative to a loud refusal here is publishing a comparison whose
-    // same-snapshot claim is false.
-    if !same_packet_fingerprint || !same_materialized_corpus {
-        return Err(CliError::internal(durable_rows.describe(
-            "live comparison returned inconsistent same-snapshot provenance",
-        )));
-    }
+    let stopped_reason = if !same_packet_fingerprint || !same_materialized_corpus {
+        Some("live comparison returned inconsistent same-snapshot provenance".to_string())
+    } else {
+        stopped_reason
+    };
 
     let persisted_runs = runs
         .iter()
@@ -506,11 +564,13 @@ pub async fn run(
         candidate_count: runs.len(),
         same_packet_fingerprint,
         same_materialized_corpus,
+        stopped_reason,
         runs,
         report,
         report_markdown,
         share_safe,
         pending_cleanup_markers,
+        max_concurrency: comparison_options.max_concurrency,
     })
 }
 
@@ -564,10 +624,6 @@ impl DurableRows {
 
 /// Keep the exit category of the underlying refusal while carrying the
 /// operator-facing detail about what is now durable.
-fn partial_failure_error(error: LiveBridgeError, message: String) -> CliError {
-    CliError::new(map_bridge_error(error).category, message)
-}
-
 fn read_candidate(path: &PathBuf) -> CliResult<CandidateSpec> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|_| CliError::user("candidate specification could not be read"))?;
@@ -590,6 +646,41 @@ fn read_candidate(path: &PathBuf) -> CliResult<CandidateSpec> {
     }
     serde_json::from_slice(&bytes)
         .map_err(|_| CliError::user("candidate specification is not valid JSON"))
+}
+
+fn comparison_profile_ids(specs: &[CandidateSpec], cfg: &AppConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut unresolved_policy = false;
+    for spec in specs {
+        match &spec.policy {
+            TriagePolicySelectionV2::Standard { model } => {
+                let id = model.profile_id.trim();
+                if !id.is_empty() {
+                    ids.push(id.to_string());
+                }
+            }
+            TriagePolicySelectionV2::Saved { .. } | TriagePolicySelectionV2::Inline { .. } => {
+                unresolved_policy = true;
+            }
+        }
+    }
+    if unresolved_policy {
+        ids.extend(
+            cfg.providers
+                .profiles
+                .iter()
+                .filter(|profile| {
+                    profile
+                        .api_key_ref
+                        .as_deref()
+                        .is_some_and(|reference| !reference.trim().is_empty())
+                })
+                .map(|profile| profile.id.clone()),
+        );
+    }
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 fn validate_candidates(specs: &[CandidateSpec]) -> CliResult<()> {
@@ -702,7 +793,8 @@ fn map_bridge_error(error: LiveBridgeError) -> CliError {
         | LiveBridgeError::BoundExceeded
         | LiveBridgeError::EmptyComparison
         | LiveBridgeError::ComparisonCandidateBound
-        | LiveBridgeError::ComparisonInvariant => CliError::user(message),
+        | LiveBridgeError::ComparisonInvariant
+        | LiveBridgeError::ComparisonConcurrencyBound => CliError::user(message),
         LiveBridgeError::Staging
         | LiveBridgeError::Preview
         | LiveBridgeError::Import
@@ -766,5 +858,25 @@ mod tests {
         assert_eq!(identity.name, "fixture");
         assert_eq!(identity.version, Observed::Known("v1".into()));
         assert_eq!(identity.build, Observed::Unknown);
+    }
+
+    #[test]
+    fn comparison_profile_ids_collect_distinct_standard_gateways() {
+        let mut employer = spec("cancel:one");
+        employer.policy = TriagePolicySelectionV2::Standard {
+            model: ModelRef {
+                profile_id: "employer".into(),
+                model_id: "deepseek-v4-flash".into(),
+            },
+        };
+        let mut vercel = spec("cancel:two");
+        vercel.policy = TriagePolicySelectionV2::Standard {
+            model: ModelRef {
+                profile_id: "vercel".into(),
+                model_id: "openai/gpt-oss-120b".into(),
+            },
+        };
+        let ids = comparison_profile_ids(&[employer, vercel], &AppConfig::default());
+        assert_eq!(ids, vec!["employer".to_string(), "vercel".to_string()]);
     }
 }

@@ -512,6 +512,11 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy (workspace, all targets)
+        # Warmup diagnostics must not prevent the cache writer from compiling
+        # the workspace. The Ubuntu aggregate is the suite gate; this check
+        # remains visible as an advisory annotation while the cache warmup
+        # continues to the no-run build.
+        continue-on-error: true
         run: |
           (
             waited=0
@@ -570,7 +575,10 @@ jobs:
   rust-ubuntu-shard:
     name: rust tests (ubuntu shard ${{ matrix.shard }})
     needs: [ci-path-filter, rust-ubuntu]
-    if: needs.ci-path-filter.outputs.run_ubuntu == 'true'
+    # The Ubuntu warmup is diagnostic/cache preparation, not the suite gate.
+    # Always admit the test matrix when routing succeeded so a warmup failure
+    # cannot suppress the required aggregate check.
+    if: always() && needs.ci-path-filter.result == 'success' && needs.ci-path-filter.outputs.run_ubuntu == 'true'
     runs-on: ubuntu-latest
     # Tests only, after the warmup job has compiled. 50 minutes is enough for
     # the known 525s integration target plus `cd-core/lib` splits, and is

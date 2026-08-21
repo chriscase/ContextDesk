@@ -1,0 +1,11 @@
+{
+  "baseUrl": "http://127.0.0.1:8787",
+  "username": "REPLACE_WITH_DIRECTORY_USERNAME",
+  "passwordEnv": "COLLAB_E2E_LIVE_PASSWORD",
+  "notes": [
+    "Opt-in only. Copy this file outside git and point COLLAB_E2E_LIVE_PROFILE at the copy.",
+    "Do not commit real usernames, hostnames with credentials, or passwords.",
+    "The password is read from the named environment variable and is never written to screenshots or logs by the suite.",
+    "Default CI does not set COLLAB_E2E_LIVE_PROFILE."
+  ]
+}

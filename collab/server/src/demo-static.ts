@@ -33,6 +33,12 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
   });
   if (login.statusCode !== 200) throw new Error("static demo login failed");
   const session = cookie(login.headers);
+  await app.inject({
+    method: "POST",
+    url: `/api/cases/${caseId}/presence`,
+    headers: { cookie: session },
+    payload: { surface: "experiment_lab" },
+  });
   const experiments = (await json(
     app,
     "GET",
@@ -61,6 +67,12 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
       session,
     ),
     [`GET /api/cases/${caseId}/experiments`]: experiments,
+    [`GET /api/cases/${caseId}/presence`]: await json(
+      app,
+      "GET",
+      `/api/cases/${caseId}/presence`,
+      session,
+    ),
     [`GET /api/cases/${caseId}/export/inventory`]: await json(
       app,
       "GET",

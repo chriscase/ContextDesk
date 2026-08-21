@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cd-collab.live_qualification_report.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "privacyClass", "liveOptIn", "confirmed", "snapshotFingerprint", "taskFingerprint", "concurrency", "lanes", "verdict", "caveats"],
+  "properties": {
+    "schemaId": { "const": "cd-collab.live_qualification_report.v1" },
+    "privacyClass": { "const": "share_safe" },
+    "liveOptIn": { "type": "boolean" },
+    "confirmed": { "type": "boolean" },
+    "snapshotFingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "taskFingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "concurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configuredLimit", "observedMaxActive", "sameSnapshot"],
+      "properties": {
+        "configuredLimit": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "observedMaxActive": { "type": ["integer", "null"], "minimum": 0, "maximum": 4 },
+        "sameSnapshot": { "type": ["boolean", "null"] }
+      }
+    },
+    "lanes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alias", "profileId", "modelId", "provider", "label", "configured", "ran", "status", "skippedReason", "errorCode", "evidenceCount", "unknownCount", "startedAt", "finishedAt"],
+        "properties": {
+          "alias": { "enum": ["gpt-oss-120b", "qwen-3.6-27b", "ministral-3-14b-instruct-2512", "vercel-compatible"] },
+          "profileId": { "type": ["string", "null"], "maxLength": 160 },
+          "modelId": { "type": ["string", "null"], "maxLength": 160 },
+          "provider": { "type": ["string", "null"], "maxLength": 160 },
+          "label": { "type": ["string", "null"], "maxLength": 160 },
+          "configured": { "type": "boolean" },
+          "ran": { "type": "boolean" },
+          "status": { "enum": ["completed", "partial", "failed", "timed_out", "cancelled", "skipped"] },
+          "skippedReason": { "enum": ["live_disabled", "confirmation_required", "catalog_missing", "profile_not_configured", "bridge_not_configured", "not_enough_profiles", null] },
+          "errorCode": { "enum": ["runner_error", "gateway_runner_error", "gateway_error", "deadline_exceeded", "cancel_requested", "output_overflow", "executor_error", "provider_error", "provider_unavailable", "provider_rate_limited", "provider_call_budget_exhausted", "malformed_output", null] },
+          "evidenceCount": { "type": "integer", "minimum": 0 },
+          "unknownCount": { "type": "integer", "minimum": 0 },
+          "startedAt": { "type": ["string", "null"] },
+          "finishedAt": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "verdict": { "enum": ["completed", "partial", "failed", "inconclusive", "skipped"] },
+    "caveats": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "enum": ["agreement_not_correctness", "usage_and_cost_unknown", "live_results_are_not_fabricated", "raw_output_not_in_report"] }
+    }
+  }
+}

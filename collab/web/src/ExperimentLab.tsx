@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 interface CandidateRow {
   candidateId: string;
@@ -41,6 +41,7 @@ interface ExperimentView {
     revision: number;
     text: string;
     rationale: string;
+    authorUsername?: string;
   }[];
   gold: {
     goldId: string;
@@ -71,6 +72,7 @@ interface ExperimentView {
       sequence: number;
       kind: string;
       actor: string;
+      authorUsername?: string;
       excerpt: string | null;
       evidenceRefs: string[];
       unknowns: string[];
@@ -95,10 +97,88 @@ interface ExperimentView {
   };
 }
 
+interface ShareSafeExport {
+  schemaId?: string;
+  privacyClass?: string;
+  review?: {
+    candidates?: unknown[];
+    observations?: unknown[];
+    decision?: { status?: string; revision?: number } | null;
+    gold?: { version?: number } | null;
+    omissions?: {
+      modelLabelsIncluded?: boolean;
+      participantIdentitiesIncluded?: boolean;
+      freeTextIncluded?: boolean;
+      privateContentIncluded?: boolean;
+      correlatableMetadataIncluded?: boolean;
+    };
+  };
+  traces?: unknown[];
+}
+
+interface PresenceMemberView {
+  identityId: string;
+  username: string;
+  surface: string;
+  lastSeenAt: string;
+}
+
+interface PresenceView {
+  schemaId: string;
+  caseId: string;
+  ttlSeconds: number;
+  members: PresenceMemberView[];
+}
+
+const omissionLabels = [
+  ["modelLabelsIncluded", "model labels"],
+  ["participantIdentitiesIncluded", "participant identities"],
+  ["freeTextIncluded", "free text"],
+  ["privateContentIncluded", "private content"],
+  ["correlatableMetadataIncluded", "correlatable metadata"],
+] as const;
+
+function exportOmissionSummary(exported: ShareSafeExport): string | null {
+  const omissions = exported.review?.omissions;
+  if (!omissions) return null;
+  const omitted = omissionLabels
+    .filter(([key]) => omissions[key] === false)
+    .map(([, label]) => label);
+  const included = omissionLabels
+    .filter(([key]) => omissions[key] === true)
+    .map(([, label]) => label);
+  const parts: string[] = [];
+  if (omitted.length) parts.push(`Omitted: ${omitted.join(", ")}.`);
+  if (included.length) parts.push(`Included: ${included.join(", ")}.`);
+  return parts.length ? parts.join(" ") : null;
+}
+
 function latencyLabel(value: CandidateRow["observedLatency"]): string {
   return value.status === "observed" && typeof value.milliseconds === "number"
     ? `${value.milliseconds} ms`
     : "unknown";
+}
+
+async function responseError(response: Response, fallback: string): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    if (
+      body &&
+      typeof body === "object" &&
+      "error" in body &&
+      typeof body.error === "string" &&
+      body.error.trim()
+    ) {
+      const message = body.error.trim();
+      if (/(authorization|bearer|api[_-]?key|credential|secret|token|https?:\/\/)/i.test(message)) {
+        return fallback;
+      }
+      return message.length > 240 ? `${message.slice(0, 237)}…` : message;
+    }
+  } catch {
+    // Preserve a useful fallback when the server returned no JSON body.
+  }
+  return fallback;
 }
 
 export function ExperimentLab(props: {
@@ -106,29 +186,103 @@ export function ExperimentLab(props: {
   canWrite: boolean;
   canLead: boolean;
   readOnly?: boolean;
+  caseTitle?: string;
+  caseStatus?: string;
+  caseSeverity?: string;
+  participant?: { username: string; roles: string[] };
 }) {
   const readOnly = props.readOnly === true;
   const canWrite = props.canWrite && !readOnly;
   const canLead = props.canLead && !readOnly;
   const canExport = props.canLead || readOnly;
+  const participantName = props.participant?.username || (readOnly ? "read-only viewer" : "authenticated participant");
+  const participantRole = props.participant?.roles.join(", ") || (canLead ? "case-lead access" : canWrite ? "contributor access" : "read-only access");
   const [experiments, setExperiments] = useState<ExperimentView[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [payload, setPayload] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [exported, setExported] = useState("");
+  const [exported, setExported] = useState<ShareSafeExport | null>(null);
+  const [presence, setPresence] = useState<PresenceView | null>(null);
+  const refreshGeneration = useRef(0);
 
-  const refresh = useCallback(async () => {
-    const res = await fetch(`/api/cases/${props.caseId}/experiments`);
-    if (!res.ok) return;
-    const body = (await res.json()) as { experiments?: ExperimentView[] };
-    setExperiments(body.experiments ?? []);
+  const refresh = useCallback(async (preferredId?: string) => {
+    const generation = ++refreshGeneration.current;
+    const isCurrent = () => generation === refreshGeneration.current;
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments`);
+      if (!res.ok) {
+        const message = await responseError(res, "Experiment history could not be loaded");
+        if (isCurrent()) setError(message);
+        return;
+      }
+      const body = (await res.json()) as { experiments?: ExperimentView[] };
+      if (!isCurrent()) return;
+      const nextExperiments = body.experiments ?? [];
+      setExperiments(nextExperiments);
+      if (preferredId && nextExperiments.some((row) => row.id === preferredId)) {
+        setActive(preferredId);
+      }
+    } catch {
+      if (isCurrent()) setError("Experiment history could not be loaded");
+    }
   }, [props.caseId]);
 
   useEffect(() => {
-    void refresh();
+    function handleExperimentCreated(event: Event) {
+      const detail = (event as CustomEvent<{ experimentId?: unknown }>).detail;
+      if (!detail || typeof detail.experimentId !== "string" || !detail.experimentId) return;
+      setError(null);
+      setExported(null);
+      void refresh(detail.experimentId);
+    }
+
+    window.addEventListener("contextdesk:experiment-created", handleExperimentCreated);
+    return () => window.removeEventListener("contextdesk:experiment-created", handleExperimentCreated);
   }, [refresh]);
 
+  useEffect(() => {
+    refreshGeneration.current += 1;
+    setExperiments([]);
+    setActive(null);
+    setExported(null);
+    setError(null);
+    setPresence(null);
+    void refresh();
+  }, [props.caseId]);
+
+  useEffect(() => {
+    // Unit/static consumers without an authenticated participant have no
+    // presence session to announce. The real app always supplies one.
+    if (!props.participant) return undefined;
+    let mounted = true;
+    const refreshPresence = async () => {
+      if (!readOnly) {
+        await fetch(`/api/cases/${props.caseId}/presence`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ surface: "experiment_lab" }),
+        }).catch(() => undefined);
+      }
+      const response = await fetch(`/api/cases/${props.caseId}/presence`).catch(() => null);
+      if (!mounted || !response?.ok) return;
+      const body = (await response.json().catch(() => null)) as PresenceView | null;
+      if (mounted && body && Array.isArray(body.members)) setPresence(body);
+    };
+    void refreshPresence();
+    const timer = window.setInterval(() => void refreshPresence(), 15_000);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, [props.caseId, props.participant?.username, readOnly]);
+
   const current = experiments.find((row) => row.id === active) ?? experiments[0] ?? null;
+
+  function selectExperiment(id: string) {
+    setActive(id);
+    setExported(null);
+    setError(null);
+  }
 
   async function importPackage(event: FormEvent) {
     event.preventDefault();
@@ -140,42 +294,54 @@ export function ExperimentLab(props: {
       setError("Package JSON is invalid");
       return;
     }
-    const res = await fetch(`/api/cases/${props.caseId}/experiments`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const json = (await res.json()) as ExperimentView & { error?: string };
-    if (!res.ok) {
-      setError(json.error ?? "import failed");
-      return;
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        setError(await responseError(res, "Experiment import failed"));
+        return;
+      }
+      const json = (await res.json()) as ExperimentView;
+      setPayload("");
+      selectExperiment(json.id);
+      await refresh();
+    } catch {
+      setError("Experiment import failed");
     }
-    setPayload("");
-    setActive(json.id);
-    await refresh();
   }
 
   async function recordHelpfulness(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!current) return;
     const data = new FormData(event.currentTarget);
-    const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/helpfulness`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        candidateId: String(data.get("candidateId") ?? ""),
-        dimension: String(data.get("dimension") ?? ""),
-        score: Number(data.get("score")),
-        rationale: String(data.get("rationale") ?? ""),
-        evidenceRefs: String(data.get("evidenceRefs") ?? "")
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean),
-      }),
-    });
-    if (!res.ok) return;
-    event.currentTarget.reset();
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/helpfulness`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          candidateId: String(data.get("candidateId") ?? ""),
+          dimension: String(data.get("dimension") ?? ""),
+          score: Number(data.get("score")),
+          rationale: String(data.get("rationale") ?? ""),
+          evidenceRefs: String(data.get("evidenceRefs") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+        }),
+      });
+      if (!res.ok) {
+        setError(await responseError(res, "Helpfulness could not be recorded"));
+        return;
+      }
+      event.currentTarget.reset();
+      await refresh();
+    } catch {
+      setError("Helpfulness could not be recorded");
+    }
   }
 
   async function proposeDecision(event: FormEvent<HTMLFormElement>) {
@@ -183,53 +349,70 @@ export function ExperimentLab(props: {
     if (!current) return;
     const data = new FormData(event.currentTarget);
     const latest = current.decisions.at(-1);
-    const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/decisions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        text: String(data.get("text") ?? ""),
-        rationale: String(data.get("rationale") ?? ""),
-        evidenceRefs: String(data.get("evidenceRefs") ?? "")
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean),
-        expectedRevision: latest ? latest.revision : null,
-      }),
-    });
-    if (!res.ok) return;
-    event.currentTarget.reset();
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/decisions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          text: String(data.get("text") ?? ""),
+          rationale: String(data.get("rationale") ?? ""),
+          evidenceRefs: String(data.get("evidenceRefs") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+          expectedRevision: latest ? latest.revision : null,
+        }),
+      });
+      if (!res.ok) {
+        setError(await responseError(res, "Decision proposal could not be recorded"));
+        return;
+      }
+      event.currentTarget.reset();
+      await refresh();
+    } catch {
+      setError("Decision proposal could not be recorded");
+    }
   }
 
   async function acceptDecision() {
     if (!current) return;
     const latest = current.decisions.at(-1);
     if (!latest) return;
-    await fetch(
-      `/api/cases/${props.caseId}/experiments/${current.id}/decisions/${latest.id}/accept`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ expectedRevision: latest.revision }),
-      },
-    );
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/cases/${props.caseId}/experiments/${current.id}/decisions/${latest.id}/accept`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ expectedRevision: latest.revision }),
+        },
+      );
+      if (!res.ok) {
+        setError(await responseError(res, "Decision could not be accepted"));
+        return;
+      }
+      await refresh();
+    } catch {
+      setError("Decision could not be accepted");
+    }
   }
 
   async function exportReview() {
     if (!current) return;
     setError(null);
-    setExported("");
+    setExported(null);
     try {
       const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/export`, {
         method: "POST",
       });
-      const body = (await res.json()) as { error?: string };
+      const body = (await res.json()) as ShareSafeExport & { error?: string };
       if (!res.ok) {
         setError(body.error ?? "Share-safe export failed");
         return;
       }
-      setExported(JSON.stringify(body, null, 2));
+      setExported(body);
     } catch {
       setError("Share-safe export failed because the response could not be read");
     }
@@ -242,39 +425,43 @@ export function ExperimentLab(props: {
     if (!accepted) return;
     const data = new FormData(event.currentTarget);
     const expectedGold = String(data.get("expectedGoldVersion") ?? "").trim();
-    const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/gold`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        decisionId: accepted.id,
-        expectedRevision: accepted.revision,
-        expectedGoldVersion: expectedGold ? Number(expectedGold) : current.gold?.version ?? 0,
-        evidenceAnchors: String(data.get("evidenceAnchors") ?? "")
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean),
-        expectedRelationships: String(data.get("expectedRelationships") ?? "")
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean)
-          .map((item) => {
-            const [evidenceRef, role] = item.split("=").map((part) => part.trim());
-            return { evidenceRef, role };
-          })
-          .filter((row) => row.evidenceRef && row.role),
-        helpfulnessDimensions: String(data.get("helpfulnessDimensions") ?? "")
-          .split(",")
-          .map((item) => item.trim())
-          .filter(Boolean),
-      }),
-    });
-    if (!res.ok) {
-      const body = (await res.json()) as { error?: string };
-      setError(body.error ?? "gold promotion failed");
-      return;
+    setError(null);
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/gold`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          decisionId: accepted.id,
+          expectedRevision: accepted.revision,
+          expectedGoldVersion: expectedGold ? Number(expectedGold) : current.gold?.version ?? 0,
+          evidenceAnchors: String(data.get("evidenceAnchors") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+          expectedRelationships: String(data.get("expectedRelationships") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean)
+            .map((item) => {
+              const [evidenceRef, role] = item.split("=").map((part) => part.trim());
+              return { evidenceRef, role };
+            })
+            .filter((row) => row.evidenceRef && row.role),
+          helpfulnessDimensions: String(data.get("helpfulnessDimensions") ?? "")
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+        }),
+      });
+      if (!res.ok) {
+        setError(await responseError(res, "Gold promotion failed"));
+        return;
+      }
+      event.currentTarget.reset();
+      await refresh();
+    } catch {
+      setError("Gold promotion failed");
     }
-    event.currentTarget.reset();
-    await refresh();
   }
 
   async function importTrace(event: FormEvent<HTMLFormElement>) {
@@ -289,18 +476,21 @@ export function ExperimentLab(props: {
       setError("Trace JSON is invalid");
       return;
     }
-    const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/traces`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const json = (await res.json()) as { error?: string };
-      setError(json.error ?? "trace import failed");
-      return;
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/traces`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        setError(await responseError(res, "Trace import failed"));
+        return;
+      }
+      event.currentTarget.reset();
+      await refresh();
+    } catch {
+      setError("Trace import failed");
     }
-    event.currentTarget.reset();
-    await refresh();
   }
 
   async function annotateTrace(event: FormEvent<HTMLFormElement>) {
@@ -308,32 +498,109 @@ export function ExperimentLab(props: {
     if (!current) return;
     const data = new FormData(event.currentTarget);
     const candidateId = String(data.get("candidateId") ?? "");
-    const res = await fetch(
-      `/api/cases/${props.caseId}/experiments/${current.id}/traces/${candidateId}/annotations`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          text: String(data.get("text") ?? ""),
-          evidenceRefs: String(data.get("evidenceRefs") ?? "")
-            .split(",")
-            .map((item) => item.trim())
-            .filter(Boolean),
-        }),
-      },
-    );
-    if (!res.ok) return;
-    event.currentTarget.reset();
-    await refresh();
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/cases/${props.caseId}/experiments/${current.id}/traces/${candidateId}/annotations`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            text: String(data.get("text") ?? ""),
+            evidenceRefs: String(data.get("evidenceRefs") ?? "")
+              .split(",")
+              .map((item) => item.trim())
+              .filter(Boolean),
+          }),
+        },
+      );
+      if (!res.ok) {
+        setError(await responseError(res, "Trace annotation could not be recorded"));
+        return;
+      }
+      event.currentTarget.reset();
+      await refresh();
+    } catch {
+      setError("Trace annotation could not be recorded");
+    }
   }
 
   return (
     <section className="experiment-lab">
-      <h3 className="case-view__title">Experiment lab</h3>
-      <p className="timeline__meta">
-        Import a share-safe experiment package or summary. Agreement is not proof of
-        correctness. A gold reference is a human benchmark decision, not an infallible truth
-        claim. Gold alignment is scored separately from helpfulness.
+      <header className="experiment-lab__header">
+        <div>
+          <p className="experiment-lab__eyebrow">
+            Case {props.caseTitle ?? props.caseId} · collaborative triage war room
+          </p>
+          <h3 className="case-view__title">Experiment lab</h3>
+          <p className="experiment-lab__case-state">
+            <span>{props.caseStatus ?? "status unavailable"}</span>
+            <span>{props.caseSeverity ?? "severity unavailable"} severity</span>
+          </p>
+        </div>
+        <div className="experiment-lab__presence" aria-label="War room presence">
+          <span className="experiment-lab__presence-dot" aria-hidden="true" />
+          <div>
+            <span className="experiment-lab__eyebrow">Current participant</span>
+            <strong>{participantName}</strong>
+            <span>{participantRole}</span>
+            {presence ? (
+              <span aria-live="polite">
+                {presence.members.length} active now · {presence.members.map((member) => member.username).join(", ") || "no one else"}
+              </span>
+            ) : (
+              <span>Presence unavailable</span>
+            )}
+          </div>
+          {current ? (
+            <span className="experiment-lab__status">{current.candidates.length} candidate lanes</span>
+          ) : null}
+        </div>
+      </header>
+      <p className="experiment-lab__intro">
+        Compare seeded, connected ContextDesk, and pasted-chat triage candidates across model and
+        strategy lanes. Agreement is not proof of correctness. A gold reference is a human
+        benchmark decision, not an infallible truth claim. Gold alignment is scored separately
+        from helpfulness.
+      </p>
+      <div className="experiment-lab__future-slots" aria-label="War room extension slots">
+        <span>Sources: seeded · ContextDesk connector · pasted chat</span>
+        <span>Presence: {presence ? `${presence.members.length} active` : "checking…"} · live refresh</span>
+        <span>Next extensions: semantic search · multi-worker leases</span>
+      </div>
+      <div className="experiment-lab__extension-grid" aria-label="War room extension points">
+        <div>
+          <span>Case comments</span>
+          <small>Case timeline and notes</small>
+        </div>
+        <div>
+          <span>Evidence notes</span>
+          <small>Anchored in the evidence map</small>
+        </div>
+        <div>
+          <span>Lane / run notes</span>
+          <small>Candidate and replay context</small>
+        </div>
+        <div>
+          <span>Trace event notes</span>
+          <small>Annotations stay with the path</small>
+        </div>
+        <div>
+          <span>Decision / gold history</span>
+          <small>Revisions and provenance</small>
+        </div>
+        <div>
+          <span>Connected run handoff</span>
+          <small>ContextDesk host bridge to candidate path</small>
+        </div>
+        <div className="experiment-lab__extension-slot--future">
+          <span>Semantic search</span>
+          <small>Future slot · case-wide retrieval</small>
+        </div>
+      </div>
+      <p className="experiment-lab__authority">
+        Actions in this room are attributed to <strong>{participantName}</strong> ({participantRole}).
+        The server remains authoritative for permissions, provenance, and accepted state.
       </p>
       {readOnly ? (
         <p className="experiment-lab__disclaimer" role="status">
@@ -359,21 +626,33 @@ export function ExperimentLab(props: {
           </form>
         </details>
       ) : null}
-      {error ? <p className="experiment-lab__error">{error}</p> : null}
+      {error ? (
+        <p className="experiment-lab__error" role="alert" aria-live="assertive">
+          {error}
+        </p>
+      ) : null}
       {experiments.length > 1 ? (
-        <ul className="case-list__items">
-          {experiments.map((row) => (
-            <li key={row.id}>
-              <button type="button" onClick={() => setActive(row.id)}>
-                {row.packageId}
-              </button>
-            </li>
-          ))}
-        </ul>
+        <nav className="experiment-lab__experiments" aria-label="Historical triage artifacts">
+          <p className="experiment-lab__eyebrow">Historical artifacts</p>
+          <ul className="case-list__items">
+            {experiments.map((row) => (
+              <li key={row.id}>
+                <button
+                  type="button"
+                  aria-current={row.id === current?.id ? "page" : undefined}
+                  aria-pressed={row.id === current?.id}
+                  onClick={() => selectExperiment(row.id)}
+                >
+                  {row.packageId}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </nav>
       ) : null}
       {current ? (
         <>
-          <p className="timeline__meta">
+          <p className="experiment-lab__identity">
             package {current.packageId} · task {current.taskFingerprint.slice(0, 12)} · snapshot{" "}
             {current.snapshotFingerprint.slice(0, 12)}
           </p>
@@ -426,24 +705,39 @@ export function ExperimentLab(props: {
               </p>
             )}
           </section>
+          <section className="experiment-lab__section" aria-labelledby="candidate-comparison-heading">
+            <div className="experiment-lab__section-heading">
+              <div>
+                <p className="experiment-lab__eyebrow">Model / method lanes</p>
+                <h4 id="candidate-comparison-heading" className="experiment-lab__heading">
+                  Candidate comparison
+                </h4>
+              </div>
+              <span className="experiment-lab__section-kicker">Observed + human signals</span>
+            </div>
+            <p className="experiment-lab__section-note">
+              Run facts are shown beside separate helpfulness and gold signals. Unknown values stay
+              unknown.
+            </p>
           <div className="experiment-lab__matrix-wrap">
             <table className="experiment-lab__matrix">
+              <caption>Candidate comparison — observed run facts and review signals</caption>
               <thead>
                 <tr>
-                  <th>Candidate</th>
-                  <th>Role</th>
-                  <th>Status</th>
-                  <th>Latency</th>
-                  <th>Cost</th>
-                  <th>Usage</th>
-                  <th>Helpfulness</th>
-                  <th>Gold</th>
+                  <th scope="col">Candidate</th>
+                  <th scope="col">Role</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Latency</th>
+                  <th scope="col">Cost</th>
+                  <th scope="col">Usage</th>
+                  <th scope="col">Helpfulness</th>
+                  <th scope="col">Gold</th>
                 </tr>
               </thead>
               <tbody>
                 {current.candidates.map((row) => (
                   <tr key={row.candidateId}>
-                    <td>{row.modelLabel}</td>
+                    <th scope="row">{row.modelLabel}</th>
                     <td>{row.role}</td>
                     <td>{row.runStatus}</td>
                     <td>{latencyLabel(row.observedLatency)}</td>
@@ -456,28 +750,63 @@ export function ExperimentLab(props: {
               </tbody>
             </table>
           </div>
-          <h4 className="experiment-lab__heading">Similarities and differences</h4>
-          <p className="timeline__meta">{current.agreement.notes.join(" ")}</p>
-          <ul className="timeline">
-            {current.agreement.sharedAnchors.map((anchor) => (
-              <li key={`${anchor.evidenceRef}:${anchor.role}`} className="timeline__item">
-                Shared {anchor.evidenceRef} as {anchor.role} ({anchor.candidateIds.join(", ")})
-              </li>
-            ))}
-            {current.agreement.candidateSpecific.map((row) => (
-              <li key={row.candidateId} className="timeline__item">
-                {row.candidateId} only: {row.evidenceRefs.join(", ") || "none"}
-              </li>
-            ))}
-            {current.agreement.roleConflicts.map((row) => (
-              <li key={row.evidenceRef} className="timeline__item">
-                Role conflict on {row.evidenceRef}:{" "}
-                {row.assignments.map((a) => `${a.candidateId}=${a.role}`).join("; ")}
-              </li>
-            ))}
-          </ul>
-          <section className="experiment-lab__gold" aria-label="Strategy comparison">
-            <h4 className="experiment-lab__heading">Strategy comparison</h4>
+          </section>
+          <section className="experiment-lab__section" aria-labelledby="evidence-heading">
+            <div className="experiment-lab__section-heading">
+              <div>
+                <p className="experiment-lab__eyebrow">Evidence map</p>
+                <h4 id="evidence-heading" className="experiment-lab__heading">
+                  Shared and different evidence
+                </h4>
+              </div>
+              <span className="experiment-lab__section-kicker">Agreement is not correctness</span>
+            </div>
+            <p className="experiment-lab__section-note">{current.agreement.notes.join(" ")}</p>
+            <div className="experiment-lab__evidence-grid">
+              <div className="experiment-lab__evidence-card">
+                <h5>Shared evidence</h5>
+                {current.agreement.sharedAnchors.length ? (
+                  <ul className="experiment-lab__detail-list">
+                    {current.agreement.sharedAnchors.map((anchor) => (
+                      <li key={`${anchor.evidenceRef}:${anchor.role}`}>
+                        Shared {anchor.evidenceRef} as {anchor.role} ({anchor.candidateIds.join(", ")})
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="experiment-lab__empty">No shared evidence recorded.</p>
+                )}
+              </div>
+              <div className="experiment-lab__evidence-card">
+                <h5>Different evidence</h5>
+                {current.agreement.candidateSpecific.length || current.agreement.roleConflicts.length ? (
+                  <ul className="experiment-lab__detail-list">
+                    {current.agreement.candidateSpecific.map((row) => (
+                      <li key={row.candidateId}>
+                        {row.candidateId} only: {row.evidenceRefs.join(", ") || "none"}
+                      </li>
+                    ))}
+                    {current.agreement.roleConflicts.map((row) => (
+                      <li key={row.evidenceRef}>
+                        Role conflict on {row.evidenceRef}:{" "}
+                        {row.assignments.map((a) => `${a.candidateId}=${a.role}`).join("; ")}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="experiment-lab__empty">No candidate-specific evidence recorded.</p>
+                )}
+              </div>
+            </div>
+          </section>
+          <section className="experiment-lab__section" aria-labelledby="strategy-heading">
+            <div className="experiment-lab__section-heading">
+              <div>
+                <p className="experiment-lab__eyebrow">Strategy lanes</p>
+                <h4 id="strategy-heading" className="experiment-lab__heading">Strategy comparison</h4>
+              </div>
+              <span className="experiment-lab__section-kicker">Path view</span>
+            </div>
             <p className="experiment-lab__disclaimer">
               Textual similarity is not a winner. Ambiguous transcript structure stays unknown.
               Gold alignment and helpfulness stay independent of this projection.
@@ -490,7 +819,7 @@ export function ExperimentLab(props: {
               {" · "}
               Helpfulness {current.candidates.map((row) => `${row.modelLabel}:${row.helpfulnessState}`).join(", ")}
             </p>
-            <ul className="timeline">
+            <ul className="experiment-lab__signal-list">
               {(current.comparison?.questionPaths ?? []).map((path) => (
                 <li key={path.pathId} className="timeline__item">
                   Question path: {path.excerpt ?? "unknown"} ({path.candidateIds.join(", ")})
@@ -521,13 +850,20 @@ export function ExperimentLab(props: {
                   </li>
                 ))}
             </ul>
+            <h5 className="experiment-lab__subheading">Strategy paths</h5>
             <div className="experiment-lab__paths">
               {(current.traces ?? []).map((trace) => (
-                <div key={trace.candidateId} className="experiment-lab__path">
-                  <h5 className="experiment-lab__heading">
-                    {trace.candidateId} · {trace.sourceKind} · {trace.completeness}
-                  </h5>
-                  <p className="timeline__meta">
+                <article key={trace.candidateId} className="experiment-lab__path">
+                  <header className="experiment-lab__path-header">
+                    <div>
+                      <p className="experiment-lab__eyebrow">Candidate path</p>
+                      <h5 className="experiment-lab__path-title">{trace.candidateId}</h5>
+                    </div>
+                    <span className="experiment-lab__path-kind">
+                      {trace.sourceKind} · {trace.completeness}
+                    </span>
+                  </header>
+                  <p className="experiment-lab__path-meta">
                     turns {trace.efficiency.turnCount.status === "observed" ? trace.efficiency.turnCount.count : "unknown"}
                     {" · "}
                     evidence steps{" "}
@@ -538,16 +874,17 @@ export function ExperimentLab(props: {
                     cost {trace.efficiency.cost.status}
                     {trace.unknowns.length ? ` · unknown: ${trace.unknowns.join(", ")}` : ""}
                   </p>
-                  <ol className="timeline">
+                  <ol className="experiment-lab__path-events">
                     {trace.events.map((event) => (
-                      <li key={event.eventId} className="timeline__item">
+                      <li key={event.eventId}>
                         {event.sequence}. {event.kind}/{event.actor}
                         {event.excerpt ? `: ${event.excerpt}` : " (unknown text)"}
+                        {event.authorUsername ? ` · by ${event.authorUsername}` : ""}
                         {event.evidenceRefs.length ? ` [${event.evidenceRefs.join(", ")}]` : ""}
                       </li>
                     ))}
                   </ol>
-                </div>
+                </article>
               ))}
             </div>
           </section>
@@ -584,33 +921,44 @@ export function ExperimentLab(props: {
               </button>
             </form>
           ) : null}
-          {canWrite ? (
-            <details className="experiment-lab__tools">
-              <summary>Score candidate helpfulness</summary>
-              <form className="composer" onSubmit={(event) => void recordHelpfulness(event)}>
-                <select className="login__input" name="candidateId" defaultValue={current.candidates[0]?.candidateId}>
-                  {current.candidates.map((row) => (
-                    <option key={row.candidateId} value={row.candidateId}>
-                      {row.modelLabel}
-                    </option>
-                  ))}
-                </select>
-                <select className="login__input" name="dimension" defaultValue="evidence_support">
-                  <option value="evidence_support">evidence support</option>
-                  <option value="actionability">actionability</option>
-                  <option value="uncertainty_calibration">uncertainty calibration</option>
-                  <option value="unsafe_unsupported_claims">unsafe unsupported claims</option>
-                </select>
-                <input className="login__input" name="score" type="number" min={0} max={3} defaultValue={2} required />
-                <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
-                <textarea className="login__input" name="rationale" rows={2} required placeholder="Helpfulness rationale" />
-                <button className="login__submit" type="submit">
-                  Record helpfulness
-                </button>
-              </form>
-            </details>
-          ) : null}
-          <ul className="timeline">
+          <section className="experiment-lab__section" aria-labelledby="helpfulness-heading">
+            <div className="experiment-lab__section-heading">
+              <div>
+                <p className="experiment-lab__eyebrow">Reviewer signals</p>
+                <h4 id="helpfulness-heading" className="experiment-lab__heading">Helpfulness</h4>
+              </div>
+              <span className="experiment-lab__section-kicker">Separate from gold</span>
+            </div>
+            <p className="experiment-lab__section-note">
+              Human helpfulness observations describe response usefulness and do not make live-provider claims.
+            </p>
+            {canWrite ? (
+              <details className="experiment-lab__tools">
+                <summary>Score candidate helpfulness</summary>
+                <form className="composer" onSubmit={(event) => void recordHelpfulness(event)}>
+                  <select className="login__input" name="candidateId" defaultValue={current.candidates[0]?.candidateId}>
+                    {current.candidates.map((row) => (
+                      <option key={row.candidateId} value={row.candidateId}>
+                        {row.modelLabel}
+                      </option>
+                    ))}
+                  </select>
+                  <select className="login__input" name="dimension" defaultValue="evidence_support">
+                    <option value="evidence_support">evidence support</option>
+                    <option value="actionability">actionability</option>
+                    <option value="uncertainty_calibration">uncertainty calibration</option>
+                    <option value="unsafe_unsupported_claims">unsafe unsupported claims</option>
+                  </select>
+                  <input className="login__input" name="score" type="number" min={0} max={3} defaultValue={2} required />
+                  <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
+                  <textarea className="login__input" name="rationale" rows={2} required placeholder="Helpfulness rationale" />
+                  <button className="login__submit" type="submit">
+                    Record helpfulness
+                  </button>
+                </form>
+              </details>
+            ) : null}
+          <ul className="experiment-lab__detail-list">
             {current.observations.map((row) => (
               <li key={row.id} className="timeline__item">
                 Helpfulness: {row.reviewerUsername} scored {row.candidateId} {row.dimension}{" "}
@@ -618,7 +966,15 @@ export function ExperimentLab(props: {
               </li>
             ))}
           </ul>
-          <h4 className="experiment-lab__heading">Gold alignment</h4>
+          </section>
+          <section className="experiment-lab__section" aria-labelledby="gold-alignment-heading">
+            <div className="experiment-lab__section-heading">
+              <div>
+                <p className="experiment-lab__eyebrow">Benchmark signal</p>
+                <h4 id="gold-alignment-heading" className="experiment-lab__heading">Gold alignment</h4>
+              </div>
+              <span className="experiment-lab__section-kicker">Independent signal</span>
+            </div>
           <p className="timeline__meta">
             Separate from helpfulness scores. Gold alignment is not a correctness verdict.
           </p>
@@ -631,6 +987,20 @@ export function ExperimentLab(props: {
               </li>
             ))}
           </ul>
+          </section>
+          <section className="experiment-lab__section" aria-labelledby="decision-heading">
+            <div className="experiment-lab__section-heading">
+              <div>
+                <p className="experiment-lab__eyebrow">Human adjudication</p>
+                <h4 id="decision-heading" className="experiment-lab__heading">Accepted decision</h4>
+              </div>
+              <span className="experiment-lab__section-kicker">
+                {current.decisions.at(-1)?.status ?? "awaiting proposal"}
+              </span>
+            </div>
+            <p className="experiment-lab__section-note">
+              Decision revisions and gold promotion remain server-recorded and attributable to the signed-in participant.
+            </p>
           {canWrite ? (
             <details className="experiment-lab__tools">
               <summary>Propose a new human decision</summary>
@@ -645,9 +1015,12 @@ export function ExperimentLab(props: {
             </details>
           ) : null}
           {current.decisions.length > 0 ? (
-            <p className="timeline__meta">
+            <p className="experiment-lab__decision-line">
               Latest decision r{current.decisions.at(-1)?.revision} ({current.decisions.at(-1)?.status}):{" "}
               {current.decisions.at(-1)?.text}
+              <span>
+                Recorded by {current.decisions.at(-1)?.authorUsername ?? "identity unavailable in this view"}
+              </span>
             </p>
           ) : null}
           {canLead && current.decisions.at(-1)?.status === "proposed" ? (
@@ -662,7 +1035,6 @@ export function ExperimentLab(props: {
                 <input
                   className="login__input"
                   name="evidenceAnchors"
-                  defaultValue="ev-demo-checkout-log, ev-demo-inventory-timeout"
                   placeholder="gold evidence anchors, comma separated"
                   required
                 />
@@ -692,12 +1064,77 @@ export function ExperimentLab(props: {
               </form>
             </details>
           ) : null}
+          </section>
           {canExport ? (
-            <button className="login__submit" type="button" onClick={() => void exportReview()}>
-              Export share-safe review
-            </button>
+            <section className="experiment-lab__export" aria-labelledby="export-heading">
+              <div className="experiment-lab__export-action">
+                <div>
+                  <p className="experiment-lab__eyebrow">Share boundary</p>
+                  <h4 id="export-heading" className="experiment-lab__heading">Export review</h4>
+                </div>
+                <button className="login__submit" type="button" onClick={() => void exportReview()}>
+                  Export share-safe review
+                </button>
+              </div>
+              {exported ? (
+                <div className="experiment-lab__export-result" aria-live="polite">
+                  <div className="experiment-lab__section-heading">
+                    <div>
+                      <p className="experiment-lab__eyebrow">Ready to share</p>
+                      <h5 className="experiment-lab__export-title">Share-safe export ready</h5>
+                    </div>
+                    <span className="experiment-lab__privacy-badge">{exported.privacyClass ?? "share_safe"}</span>
+                  </div>
+                  <p className="experiment-lab__section-note">
+                    A concise privacy-safe summary is shown by default. The raw export stays hidden until you choose to view it.
+                  </p>
+                  <dl className="experiment-lab__export-facts">
+                    <div>
+                      <dt>Coverage</dt>
+                      <dd>
+                        {typeof exported.review?.candidates?.length === "number"
+                          ? `${exported.review.candidates.length} candidate${exported.review.candidates.length === 1 ? "" : "s"}`
+                          : "Review projection"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Decision</dt>
+                      <dd>
+                        {exported.review?.decision
+                          ? `${exported.review.decision.status ?? "recorded"}${typeof exported.review.decision.revision === "number" ? ` · revision ${exported.review.decision.revision}` : ""}`
+                          : "None recorded"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Benchmark</dt>
+                      <dd>
+                        {exported.review?.gold
+                          ? typeof exported.review.gold.version === "number"
+                            ? `v${exported.review.gold.version}`
+                            : "Present"
+                          : "Not present"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Trace coverage</dt>
+                      <dd>
+                        {typeof exported.traces?.length === "number"
+                          ? `${exported.traces.length} trace${exported.traces.length === 1 ? "" : "s"}`
+                          : "Included in projection"}
+                      </dd>
+                    </div>
+                  </dl>
+                  {exportOmissionSummary(exported) ? (
+                    <p className="experiment-lab__privacy-note">{exportOmissionSummary(exported)}</p>
+                  ) : null}
+                  <details className="experiment-lab__raw-export">
+                    <summary>View raw export</summary>
+                    <pre className="imported-run__text">{JSON.stringify(exported, null, 2)}</pre>
+                  </details>
+                </div>
+              ) : null}
+            </section>
           ) : null}
-          {exported ? <pre className="imported-run__text">{exported}</pre> : null}
         </>
       ) : null}
     </section>

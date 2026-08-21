@@ -93,6 +93,7 @@ export class ExportService {
       sources: snapshot.sources,
       artifactContent: snapshot.artifactContent,
       privacy: this.deps.privacy,
+      ...(snapshot.memory === undefined ? {} : { memory: snapshot.memory }),
     });
     const markdown = briefMarkdown(payload);
     this.gateShareSafe(variant, payload, markdown);
@@ -172,16 +173,43 @@ export class ExportService {
   private async loadSnapshot(caseId: string, actor: Actor, isAdmin: boolean) {
     const caseRow = await this.deps.cases.getCase(caseId, actor, isAdmin);
     if (!caseRow) throw new Error("case not found");
-    const [timeline, contributions, artifacts, runs, sourceList] = await Promise.all([
+    const [timeline, contributions, artifacts, runs, sourceList, snapshots] = await Promise.all([
       this.deps.cases.listTimeline(caseId),
       this.deps.cases.listContributions(caseId, actor, isAdmin),
       this.deps.cases.listArtifacts(caseId, actor, isAdmin),
       this.deps.imports.listRuns(caseId, actor, isAdmin),
       this.deps.catalog.list(),
+      this.deps.cases.listSnapshots(caseId, actor, isAdmin),
     ]);
     const sources = new Map<string, SourceV1>(sourceList.map((s) => [s.id, s]));
     const artifactContent = await this.loadArtifactContent(caseId, actor, isAdmin, artifacts);
-    return { caseRow, timeline, contributions, artifacts, runs, sources, artifactContent };
+    const latest = snapshots.at(-1) ?? null;
+    const latestIndex = latest ? snapshots.length - 1 : -1;
+    const board = await this.deps.cases.getCaseBoard(caseId, actor, isAdmin);
+    const boardCounts = {
+      known: 0,
+      unknown: 0,
+      agreed: 0,
+      disputed: 0,
+      newlyConcluded: 0,
+    };
+    for (const finding of board?.findings ?? []) {
+      if (finding.bucket === "newly_concluded") boardCounts.newlyConcluded += 1;
+      else boardCounts[finding.bucket] += 1;
+    }
+    const memory =
+      latest === null
+        ? undefined
+        : {
+            latestSnapshotLabel: `S${latestIndex}`,
+            latestSnapshotFingerprint: latest.fingerprint,
+            parentSnapshotLabel: latest.parentSnapshotId ? `S${latestIndex - 1}` : null,
+            evidenceCount: latest.evidence.length,
+            lineageDepth: snapshots.length,
+            boardCounts,
+            agreementNotice: "Agreement is not proof of correctness." as const,
+          };
+    return { caseRow, timeline, contributions, artifacts, runs, sources, artifactContent, memory };
   }
 
   private async loadArtifactContent(

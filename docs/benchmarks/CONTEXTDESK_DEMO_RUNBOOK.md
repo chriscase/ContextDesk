@@ -12,6 +12,8 @@ npm run demo
 
 Open `http://127.0.0.1:8787` and sign in with `demo` / `demo`. Set `COLLAB_DEMO_PORT` to another local port if 8787 is occupied. The launcher is a separate entry point: it does not change the production PostgreSQL or LDAP startup path, it binds only to loopback, and its temporary evidence is removed when it stops.
 
+Use the Presenter controls skin selector if you want the web surface to match a ContextDesk desktop skin (`Dark`, `Slate`, `Light`, `Sand`, `Forest`, or `GrokPtah`). The selected skin is a local browser preference.
+
 Present the seeded case in this order:
 
 1. Start with `pkg-synth-three-model-checkout-v1`. Point out the three candidates, shared evidence, candidate-specific clues, and a role conflict. Agreement is useful, but is not treated as proof.
@@ -19,8 +21,35 @@ Present the seeded case in this order:
 3. Show the accepted human decision and gold v1. Explain that gold is a versioned human benchmark, not an infallible truth claim.
 4. Select `pkg-synth-strategy-paths-v1`. Compare the structured programmatic path with the pasted-chat path. They ask different questions but can still be compared by evidence discovery, unknowns, efficiency, helpfulness, and convergence on the benchmark.
 5. Export only the synthetic Experiment Lab review. The final privacy gate must stay enabled; never substitute an owner-only capture for a share-safe artifact.
+6. The export presents a readable share-safe summary first. Open `View raw export` only when demonstrating the optional technical JSON; it is deliberately hidden from the presenter surface by default.
 
 The seeded model labels are synthetic fixtures: `qwen-3.6-27b`, `gpt-oss-120b`, and `ministral-14b`. There are no provider calls, credentials, private endpoints, or live employer outputs in this path.
+
+## Connected ContextDesk comparison rehearsal
+
+After the synthetic story is understood, the same War-Room can launch a real
+ContextDesk comparison from a frozen case snapshot. This is deliberately a
+separate rehearsal from the seeded demo:
+
+1. Upload or create the case evidence in the Evidence board, then freeze a snapshot. Browser uploads are limited to 1 MB and still pass through the server's media/privacy policy; contributors may upload, while a case lead freezes the selected evidence.
+2. In `Start a snapshot-bound comparison`, choose `Configured gateway`.
+3. Select at least two configured host profiles, one per model lane. The UI sends
+   only profile identifiers; endpoints and credentials remain on the host bridge.
+4. Choose lane concurrency. The default is two lanes, with a published ceiling of
+   four; use one for a rate-limited gateway.
+5. Watch the run history: lanes remain `queued` until admitted, become `running`
+   independently, and settle as each host result is durably accepted. The final
+   same-snapshot proof is shown only after the host returns its complete envelope.
+6. Choose `Review in Experiment Lab` and optionally select a previously imported
+   chat run. Different questions and missing transcript structure remain explicit
+   unknowns; the comparison does not pretend that chat and programmatic runs had
+   identical paths.
+
+The host bridge emits only bounded, identity-safe lifecycle progress. It never
+streams prompts, raw provider output, credentials, endpoints, request IDs, or
+unvalidated summaries to the web UI. If a gateway is not configured, use the
+synthetic path or the read-only fallback above; do not paste gateway secrets into
+the browser or repository.
 
 ## Fast, read-only fallback
 

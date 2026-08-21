@@ -4,6 +4,10 @@
 //! so state created in one host is immediately visible from the other.
 
 use crate::envelope::{CliError, CliResult};
+use crate::provider_credentials::{
+    bind_global_provider_override, identities_from_profiles, participating_profiles,
+    retrieval_role_identities, CredentialedIdentity,
+};
 use cd_core::branding::Branding;
 use cd_core::config::{config_path, ensure_config_dir, load_config, save_config, AppConfig};
 use cd_core::error::CoreResult;
@@ -203,53 +207,146 @@ pub const PROVIDER_API_KEY_ENV: &str = "CONTEXTDESK_PROVIDER_API_KEY";
 /// CLI credential adapter.
 ///
 /// Normal interactive use shares the desktop application's OS keychain. For
-/// ephemeral automation and CI, `CONTEXTDESK_PROVIDER_API_KEY` supplies only
-/// provider credentials for the lifetime of this process. It is never
-/// persisted and never substitutes for connector secrets.
+/// ephemeral automation and CI, `CONTEXTDESK_PROVIDER_API_KEY` may supply a
+/// provider credential for **one** selected keychain-style reference for the
+/// lifetime of this process. It is never persisted, never printed, never
+/// applied to connector secrets, never applied to protected `file:` refs,
+/// and never reused across mixed-provider comparisons.
 pub struct CliSecretStore {
-    referenced: ReferencedSecretStore,
-    provider_override: Option<String>,
+    inner: Box<dyn SecretStore>,
+    env_override: Option<String>,
+    bound_reference: Option<String>,
+}
+
+impl std::fmt::Debug for CliSecretStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CliSecretStore")
+            .field("bound_reference", &self.bound_reference)
+            .field("env_override_set", &self.env_override.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl CliSecretStore {
-    fn new() -> Self {
-        let provider_override = std::env::var(PROVIDER_API_KEY_ENV)
+    fn read_env_override() -> Option<String> {
+        std::env::var(PROVIDER_API_KEY_ENV)
             .ok()
             .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.is_empty())
+    }
+
+    fn new() -> Self {
         Self {
-            referenced: ReferencedSecretStore::new(),
-            provider_override,
+            inner: Box::new(ReferencedSecretStore::new()),
+            env_override: Self::read_env_override(),
+            bound_reference: None,
         }
     }
 
-    fn provider_override(&self, reference: &str) -> Option<String> {
-        reference
-            .starts_with("provider/")
-            .then(|| self.provider_override.clone())
+    fn with_inner(
+        inner: Box<dyn SecretStore>,
+        identities: &[CredentialedIdentity],
+    ) -> CliResult<Self> {
+        let env_override = Self::read_env_override();
+        let bound_reference = bind_global_provider_override(env_override.as_deref(), identities)?;
+        Ok(Self {
+            inner,
+            env_override,
+            bound_reference,
+        })
+    }
+
+    fn bound_override_for(&self, reference: &str) -> Option<&str> {
+        let bound = self.bound_reference.as_deref()?;
+        (bound == reference)
+            .then_some(self.env_override.as_deref())
             .flatten()
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        inner: Box<dyn SecretStore>,
+        env_override: Option<String>,
+        identities: &[CredentialedIdentity],
+    ) -> CliResult<Self> {
+        let bound_reference = bind_global_provider_override(env_override.as_deref(), identities)?;
+        Ok(Self {
+            inner,
+            env_override,
+            bound_reference,
+        })
     }
 }
 
 impl SecretStore for CliSecretStore {
     fn get(&self, reference: &str) -> CoreResult<Option<String>> {
-        if let Some(value) = self.provider_override(reference) {
-            return Ok(Some(value));
+        if let Some(value) = self.bound_override_for(reference) {
+            return Ok(Some(value.to_string()));
         }
-        self.referenced.get(reference)
+        self.inner.get(reference)
     }
 
     fn set(&self, reference: &str, value: &str) -> CoreResult<()> {
-        self.referenced.set(reference, value)
+        self.inner.set(reference, value)
     }
 
     fn delete(&self, reference: &str) -> CoreResult<()> {
-        self.referenced.delete(reference)
+        self.inner.delete(reference)
     }
 }
 
+/// Unbound store: the global override is loaded but not applied to any
+/// reference. Safe for offline commands that never resolve provider secrets.
 pub fn secret_store() -> CliSecretStore {
     CliSecretStore::new()
+}
+
+/// Bind the process override to the selected live profile (and optional
+/// reviewer / extra comparison profiles / retrieval roles).
+pub fn secret_store_for_live(
+    cfg: &AppConfig,
+    selected_profile_id: Option<&str>,
+    extra_profile_ids: &[String],
+    include_reviewer: bool,
+    include_retrieval_roles: bool,
+) -> CliResult<CliSecretStore> {
+    secret_store_for_identities(&live_identities(
+        cfg,
+        selected_profile_id,
+        extra_profile_ids,
+        include_reviewer,
+        include_retrieval_roles,
+    ))
+}
+
+/// Bind the process override to an explicit set of comparison identities.
+pub fn secret_store_for_identities(
+    identities: &[CredentialedIdentity],
+) -> CliResult<CliSecretStore> {
+    CliSecretStore::with_inner(Box::new(ReferencedSecretStore::new()), identities)
+}
+
+/// Credential identities a live command will actually resolve.
+pub fn live_identities(
+    cfg: &AppConfig,
+    selected_profile_id: Option<&str>,
+    extra_profile_ids: &[String],
+    include_reviewer: bool,
+    include_retrieval_roles: bool,
+) -> Vec<CredentialedIdentity> {
+    let profiles = participating_profiles(
+        cfg,
+        selected_profile_id,
+        extra_profile_ids,
+        include_reviewer,
+    );
+    let mut identities = identities_from_profiles(&profiles);
+    if include_retrieval_roles {
+        identities.extend(retrieval_role_identities(cfg));
+        identities.sort_by(|a, b| a.id.cmp(&b.id));
+        identities.dedup_by(|a, b| a.id == b.id && a.api_key_ref == b.api_key_ref);
+    }
+    identities
 }
 
 /// Build a `ToolHost` for a headless process: an empty workspace (the CLI's
@@ -380,20 +477,198 @@ mod credential_tests {
     }
 
     #[test]
-    fn process_override_is_provider_only() {
-        let store = CliSecretStore {
-            referenced: ReferencedSecretStore::new(),
-            provider_override: Some("ephemeral-value".to_string()),
+    fn process_override_is_provider_only_and_bound_to_one_profile() {
+        use cd_core::keychain_store::MemorySecretStore;
+        use cd_core::providers::{
+            ProviderCapabilities, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
         };
 
+        let vercel = ProviderProfile {
+            id: "vercel".into(),
+            label: "Vercel".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://ai-gateway.vercel.sh/v1".into(),
+            api_key_ref: Some("provider/vercel/api_key".into()),
+            chat_model: "synthetic".into(),
+            embedding_model: None,
+            embedding_base_url: None,
+            capabilities: ProviderCapabilities {
+                tools: true,
+                stream: true,
+                embeddings: false,
+            },
+            local_only: false,
+            deadline_preference: ProviderDeadlinePreference::Auto,
+        };
+        let identities = identities_from_profiles([&vercel]);
+        let inner = MemorySecretStore::new();
+        inner
+            .set("provider/vercel/api_key", "keychain-vercel")
+            .unwrap();
+        inner
+            .set("connector/confluence/pat", "connector-secret")
+            .unwrap();
+        let store =
+            CliSecretStore::for_test(Box::new(inner), Some("ephemeral-value".into()), &identities)
+                .unwrap();
+
         assert_eq!(
-            store
-                .provider_override("provider/vercel/api_key")
-                .as_deref(),
+            store.get("provider/vercel/api_key").unwrap().as_deref(),
             Some("ephemeral-value")
         );
-        assert_eq!(store.provider_override("connector/confluence/pat"), None);
-        assert_eq!(store.provider_override("connector/postgres/password"), None);
+        assert_eq!(
+            store.get("connector/confluence/pat").unwrap().as_deref(),
+            Some("connector-secret")
+        );
+        assert_eq!(store.get("connector/postgres/password").unwrap(), None);
+    }
+
+    fn remote_profile(id: &str, api_key_ref: &str) -> cd_core::providers::ProviderProfile {
+        use cd_core::providers::{
+            ProviderCapabilities, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
+        };
+        ProviderProfile {
+            id: id.into(),
+            label: id.into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://gateway.example/v1".into(),
+            api_key_ref: Some(api_key_ref.into()),
+            chat_model: "synthetic".into(),
+            embedding_model: None,
+            embedding_base_url: None,
+            capabilities: ProviderCapabilities {
+                tools: true,
+                stream: true,
+                embeddings: false,
+            },
+            local_only: false,
+            deadline_preference: ProviderDeadlinePreference::Auto,
+        }
+    }
+
+    #[test]
+    fn mixed_employer_and_vercel_cannot_cross_use_the_global_override() {
+        use cd_core::keychain_store::MemorySecretStore;
+
+        let employer = remote_profile("employer", "provider/employer/api_key");
+        let vercel = remote_profile("vercel", "provider/vercel/api_key");
+        let identities = identities_from_profiles([&employer, &vercel]);
+        let inner = MemorySecretStore::new();
+        inner
+            .set("provider/employer/api_key", "employer-only-secret")
+            .unwrap();
+        inner
+            .set("provider/vercel/api_key", "vercel-only-secret")
+            .unwrap();
+        let error = CliSecretStore::for_test(
+            Box::new(inner),
+            Some("synthetic-shared-key-must-not-leak".into()),
+            &identities,
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("mixed-provider"));
+        assert!(!message.contains("synthetic-shared-key-must-not-leak"));
+        assert!(!message.contains("employer-only-secret"));
+        assert!(!message.contains("vercel-only-secret"));
+    }
+
+    #[test]
+    fn without_override_each_profile_keeps_its_own_credential() {
+        use cd_core::keychain_store::MemorySecretStore;
+
+        let employer = remote_profile("employer", "provider/employer/api_key");
+        let vercel = remote_profile("vercel", "provider/vercel/api_key");
+        let identities = identities_from_profiles([&employer, &vercel]);
+        let inner = MemorySecretStore::new();
+        inner
+            .set("provider/employer/api_key", "employer-only-secret")
+            .unwrap();
+        inner
+            .set("provider/vercel/api_key", "vercel-only-secret")
+            .unwrap();
+        let store = CliSecretStore::for_test(Box::new(inner), None, &identities).unwrap();
+        assert_eq!(
+            store.get("provider/employer/api_key").unwrap().as_deref(),
+            Some("employer-only-secret")
+        );
+        assert_eq!(
+            store.get("provider/vercel/api_key").unwrap().as_deref(),
+            Some("vercel-only-secret")
+        );
+        assert_ne!(
+            store.get("provider/employer/api_key").unwrap(),
+            store.get("provider/vercel/api_key").unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_profile_credential_does_not_borrow_another_profile() {
+        use cd_core::keychain_store::MemorySecretStore;
+
+        let employer = remote_profile("employer", "provider/employer/api_key");
+        let identities = identities_from_profiles([&employer]);
+        let inner = MemorySecretStore::new();
+        inner
+            .set("provider/vercel/api_key", "vercel-only-secret")
+            .unwrap();
+        let store = CliSecretStore::for_test(Box::new(inner), None, &identities).unwrap();
+        assert_eq!(store.get("provider/employer/api_key").unwrap(), None);
+        assert_eq!(
+            store.get("provider/vercel/api_key").unwrap().as_deref(),
+            Some("vercel-only-secret")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_file_permission_errors_do_not_echo_secret_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vercel.key");
+        std::fs::write(&path, "synthetic-file-secret\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let reference = format!("file:{}", path.display());
+        let vercel = remote_profile("vercel", &reference);
+        let identities = identities_from_profiles([&vercel]);
+        let store = secret_store_for_identities(&identities).unwrap();
+        let error = store.get(&reference).unwrap_err().to_string();
+        assert!(error.contains("permissions"), "{error}");
+        assert!(!error.contains("synthetic-file-secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_files_do_not_cross_use_and_missing_files_fail_closed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let employer_path = dir.path().join("employer.key");
+        let vercel_path = dir.path().join("vercel.key");
+        std::fs::write(&employer_path, "employer-file-secret\n").unwrap();
+        std::fs::write(&vercel_path, "vercel-file-secret\n").unwrap();
+        std::fs::set_permissions(&employer_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&vercel_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let employer_ref = format!("file:{}", employer_path.display());
+        let vercel_ref = format!("file:{}", vercel_path.display());
+        let employer = remote_profile("employer", &employer_ref);
+        let vercel = remote_profile("vercel", &vercel_ref);
+        let identities = identities_from_profiles([&employer, &vercel]);
+        let store = secret_store_for_identities(&identities).unwrap();
+        assert_eq!(
+            store.get(&employer_ref).unwrap().as_deref(),
+            Some("employer-file-secret")
+        );
+        assert_eq!(
+            store.get(&vercel_ref).unwrap().as_deref(),
+            Some("vercel-file-secret")
+        );
+
+        let missing = format!("file:{}/gone.key", dir.path().display());
+        let error = store.get(&missing).unwrap_err().to_string();
+        assert!(!error.contains("employer-file-secret"));
+        assert!(!error.contains("vercel-file-secret"));
     }
 
     #[test]

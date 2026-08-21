@@ -112,6 +112,23 @@ Prerequisites that remain outside this package:
    profile/model, if your host requires it before triage.
 5. Network reachability to the already-configured providers.
 
+**Mixed-provider credentials.** Do not set `CONTEXTDESK_PROVIDER_API_KEY` for a
+live comparison that uses more than one credentialed profile (employer gateway
+plus Vercel, or per-candidate `--profile-a/b/c`). The CLI rejects that
+ambiguous process-wide override before opening the library or calling a
+provider, and it never prints secret bytes. Qualify each profile on its own:
+
+```bash
+unset CONTEXTDESK_PROVIDER_API_KEY
+contextdesk --data-dir "$HOST_DATA_DIR" --profile PROFILE_A models verify MODEL_A --yes
+contextdesk --data-dir "$HOST_DATA_DIR" --profile PROFILE_B models verify MODEL_B --yes
+contextdesk --data-dir "$HOST_DATA_DIR" --profile PROFILE_C models verify MODEL_C --yes
+```
+
+A single-profile comparison may still use the global override for that one
+Keychain-style `provider/<id>/api_key` reference. Protected `file:` refs are
+never replaced by it.
+
 ```bash
 # The helper generates three temporary candidate files from these exact ids.
 ./scripts/triage-comparison-demo.sh run-live \
@@ -130,6 +147,11 @@ Add --format json to the run-live or matrix command when you need the complete
 owner-only payload and its scanner-gated share_safe projection for automation.
 
 For live catalog discovery and exact compatibility verification, run:
+
+`bench-compare` prints an **owner-only** comparison. Candidate lanes default
+to two in flight (`--concurrency 1` is sequential; the published ceiling is
+4). Failed and partial rows are retained. It does not rank candidates or emit
+readiness badges.
 
 ```bash
 ./scripts/triage-comparison-demo.sh preflight \

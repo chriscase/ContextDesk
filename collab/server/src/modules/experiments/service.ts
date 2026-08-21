@@ -1,11 +1,16 @@
 import { randomUUID } from "node:crypto";
 import {
   AGREEMENT_NOT_CORRECTNESS,
+  CANDIDATE_ROLES,
   EXPERIMENT_DECISION_SCHEMA_ID,
+  EXPERIMENT_PACKAGE_SCHEMA_ID,
   GOLD_IS_HUMAN_BENCHMARK,
   GOLD_REFERENCE_SCHEMA_ID,
   HELPFULNESS_DIMENSIONS,
   HELPFULNESS_OBSERVATION_SCHEMA_ID,
+  INTERACTION_TRACE_SCHEMA_ID,
+  STRATEGY_PACKAGE_SCHEMA_ID,
+  TRACE_UNKNOWN_STAYS_UNKNOWN,
   goldPromotionFingerprint,
   parseExperimentDecision,
   parseGoldReference,
@@ -15,23 +20,28 @@ import {
   parseLabImport,
   parsePlainTranscript,
   PLAIN_TRANSCRIPT_SCHEMA_ID,
-  INTERACTION_TRACE_SCHEMA_ID,
   buildStrategyComparison,
+  boundExcerpt,
   extractPlainTranscript,
   projectShareSafeTrace,
+  sha256Hex,
   traceFingerprint,
   type CandidateGoldAlignmentV1,
+  type CandidateRole,
   type ExpectedRelationshipV1,
   type ExperimentAgreementV1,
   type ExperimentCandidateV1,
   type ExperimentDecisionV1,
   type ExperimentPackageV1,
+  type ExperimentRunStatus,
   type ExperimentSummaryV1,
+  type ExternalRunV1,
   type GoldReferenceV1,
   type HelpfulnessDimension,
   type HelpfulnessObservationV1,
   type InteractionTraceV1,
   type StrategyComparisonV1,
+  type TriageJobV1,
 } from "@cd-collab/contracts";
 import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
@@ -45,7 +55,8 @@ export class ExperimentConflictError extends Error {
     | "already_accepted"
     | "stale_revision"
     | "stale_gold"
-    | "trace_conflict";
+    | "trace_conflict"
+    | "source_not_ready";
 
   constructor(code: ExperimentConflictError["code"], message: string) {
     super(message);
@@ -173,6 +184,173 @@ function prepareTraceForStorage(trace: InteractionTraceV1): InteractionTraceV1 {
   return projectShareSafeTrace(canonicalTrace(trace));
 }
 
+function packageFingerprint(value: string, prefix: "task" | "snap"): string {
+  const normalized = value.trim().toLowerCase();
+  const digest = normalized.startsWith(`${prefix}-`)
+    ? normalized.slice(prefix.length + 1)
+    : normalized;
+  return /^[a-f0-9]{64}$/.test(digest)
+    ? `${prefix}-${digest}`
+    : `${prefix}-${sha256Hex(value)}`;
+}
+
+function experimentRole(value: string): CandidateRole {
+  const normalized = value.trim().toLowerCase();
+  return (CANDIDATE_ROLES as readonly string[]).includes(normalized)
+    ? (normalized as CandidateRole)
+    : "contributor";
+}
+
+function experimentRunStatus(value: TriageJobV1["candidates"][number]["status"]): ExperimentRunStatus {
+  if (value === "completed") return "completed";
+  if (value === "partial") return "partial";
+  if (value === "timed_out") return "timeout";
+  return "failed";
+}
+
+function observedLatency(
+  startedAt: string | null,
+  finishedAt: string | null,
+): ExperimentCandidateV1["observedLatency"] {
+  if (!startedAt || !finishedAt) return { status: "unknown" };
+  const start = Date.parse(startedAt);
+  const finish = Date.parse(finishedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(finish) || finish < start) {
+    return { status: "unknown" };
+  }
+  return { status: "observed", milliseconds: finish - start };
+}
+
+function agreementFromTraces(
+  candidates: ExperimentCandidateV1[],
+  traces: InteractionTraceV1[],
+  notes: string[],
+): ExperimentAgreementV1 {
+  const refs = new Map<string, string[]>();
+  for (const trace of traces) {
+    for (const ref of new Set(trace.events.flatMap((event) => event.evidenceRefs))) {
+      const candidateIds = refs.get(ref) ?? [];
+      candidateIds.push(trace.candidateId);
+      refs.set(ref, candidateIds);
+    }
+  }
+  const sharedAnchors = [...refs.entries()]
+    .filter(([, candidateIds]) => candidateIds.length > 1)
+    .map(([evidenceRef, candidateIds]) => ({
+      evidenceRef,
+      role: "evidence",
+      candidateIds: [...candidateIds].sort(),
+    }));
+  const candidateSpecific = candidates.map((candidate) => ({
+    candidateId: candidate.candidateId,
+    evidenceRefs: [...refs.entries()]
+      .filter(([, candidateIds]) => candidateIds.length === 1 && candidateIds[0] === candidate.candidateId)
+      .map(([evidenceRef]) => evidenceRef)
+      .sort(),
+  }));
+  return {
+    sharedAnchors,
+    candidateSpecific,
+    roleConflicts: [],
+    notes: [AGREEMENT_NOT_CORRECTNESS, ...notes],
+  };
+}
+
+function connectedTrace(
+  job: TriageJobV1,
+  candidate: TriageJobV1["candidates"][number],
+  experimentCandidateId: string,
+): InteractionTraceV1 {
+  const questionExcerpt = boundExcerpt(job.request.question);
+  const responseExcerpt = boundExcerpt(candidate.summary ?? "");
+  return parseInteractionTrace({
+    schemaId: INTERACTION_TRACE_SCHEMA_ID,
+    traceId: `trace-${experimentCandidateId}-${sha256Hex(job.id).slice(0, 12)}`,
+    candidateId: experimentCandidateId,
+    sourceKind: "programmatic",
+    completeness: "partial",
+    privacyClass: "share_safe",
+    rawHash: candidate.outputHash,
+    events: [
+      {
+        eventId: `evt-${experimentCandidateId}-question`,
+        sequence: 1,
+        kind: "question",
+        actor: "human",
+        role: null,
+        parentEventId: null,
+        evidenceRefs: [],
+        observedAt: { status: "unknown" },
+        excerpt: questionExcerpt,
+        excerptHash: questionExcerpt ? sha256Hex(job.request.question) : null,
+        unknowns: [...(questionExcerpt ? [] : ["text"]), "timestamp"],
+      },
+      {
+        eventId: `evt-${experimentCandidateId}-answer`,
+        sequence: 2,
+        kind: "assistant_response",
+        actor: "assistant",
+        role: candidate.role,
+        parentEventId: `evt-${experimentCandidateId}-question`,
+        evidenceRefs: [...candidate.evidenceRefs],
+        observedAt: { status: "unknown" },
+        excerpt: responseExcerpt,
+        excerptHash: candidate.outputHash,
+        unknowns: ["timestamp", "raw answer", "tools"],
+      },
+    ],
+    efficiency: {
+      turnCount: { status: "unknown" },
+      evidenceAcquisitionSteps: { status: "unknown" },
+      latency: observedLatency(candidate.startedAt, candidate.finishedAt),
+      cost: { status: "unknown" },
+      providerCalls: { status: "unknown" },
+    },
+    unknowns: ["question path", "raw answer", "tools", "usage", "cost"],
+    notes: [
+      TRACE_UNKNOWN_STAYS_UNKNOWN,
+      "Connected ContextDesk run exposes only bounded evidence-linked claims; the raw answer remains host-owned.",
+    ],
+    createdAt: candidate.finishedAt ?? job.createdAt,
+  });
+}
+
+function pastedChatTrace(
+  externalRun: ExternalRunV1,
+  candidateId: string,
+): InteractionTraceV1 {
+  const extracted = extractPlainTranscript(externalRun.outputText, candidateId, externalRun.createdAt);
+  if (!externalRun.promptText) return extracted;
+  const questionId = `evt-${candidateId}-supplied-question`;
+  const question = {
+    eventId: questionId,
+    sequence: 1,
+    kind: "question" as const,
+    actor: "human" as const,
+    role: null,
+    parentEventId: null,
+    evidenceRefs: [],
+    observedAt: { status: "unknown" as const },
+    excerpt: boundExcerpt(externalRun.promptText),
+    excerptHash: sha256Hex(externalRun.promptText),
+    unknowns: ["timestamp"],
+  };
+  const events = extracted.events.map((event, index) => ({
+    ...event,
+    sequence: event.sequence + 1,
+    parentEventId: index === 0 ? questionId : event.parentEventId,
+  }));
+  return parseInteractionTrace({
+    ...extracted,
+    completeness: "partial",
+    events: [question, ...events],
+    notes: [
+      ...extracted.notes,
+      "The prompt was supplied separately from the pasted transcript; the response path remains only as complete as the pasted output proves.",
+    ],
+  });
+}
+
 export class ExperimentService {
   private readonly store: ExperimentStore;
 
@@ -283,6 +461,116 @@ export class ExperimentService {
     const out: ExperimentView[] = [];
     for (const row of rows) out.push(await this.toView(row));
     return out;
+  }
+
+  /**
+   * Join a completed ContextDesk-owned job with an optional pasted chat run
+   * in one reviewable Experiment Lab artifact. This is intentionally an
+   * import/projection step: it never invents helpfulness, gold, agreement, or
+   * a definitive answer from either source.
+   */
+  async importTriageJob(
+    caseId: string,
+    actor: Actor,
+    job: TriageJobV1,
+    externalRun: ExternalRunV1 | null,
+    origin: string,
+    isAdmin: boolean,
+  ): Promise<ExperimentView> {
+    if (job.caseId !== caseId) throw new ExperimentNotFoundError("triage job not found");
+    if (job.status !== "completed" && job.status !== "partial") {
+      throw new ExperimentConflictError(
+        "source_not_ready",
+        "only completed or partial triage jobs can enter Experiment Lab",
+      );
+    }
+    const successfulCandidates = job.candidates.filter(
+      (candidate) => candidate.status === "completed" || candidate.status === "partial",
+    );
+    if (successfulCandidates.length === 0) {
+      throw new ExperimentConflictError(
+        "source_not_ready",
+        "triage job has no completed or partial candidate to compare",
+      );
+    }
+    if (externalRun && externalRun.caseId !== caseId) {
+      throw new ExperimentNotFoundError("external run not found");
+    }
+    if (
+      externalRun?.snapshotBinding &&
+      externalRun.snapshotBinding !== job.snapshotFingerprint
+    ) {
+      throw new Error("pasted chat is bound to a different snapshot");
+    }
+
+    const connectedCandidates = job.candidates.map((candidate) => ({
+      candidateId: candidate.candidateId,
+      modelLabel: candidate.model,
+      role: experimentRole(candidate.role),
+      runStatus: experimentRunStatus(candidate.status),
+      observedLatency: observedLatency(candidate.startedAt, candidate.finishedAt),
+      cost: { status: "unknown" } as const,
+      usage: { status: "unknown" } as const,
+      helpfulnessState: "unreviewed" as const,
+      goldState: "unknown" as const,
+    }));
+    const connectedTraces = successfulCandidates.map((candidate) =>
+      connectedTrace(job, candidate, candidate.candidateId),
+    );
+    const candidates = [...connectedCandidates];
+    const traces = [...connectedTraces];
+    const notes = [
+      "Connected ContextDesk lanes and pasted chat are compared as candidates, not as proof of correctness.",
+    ];
+    if (job.candidates.some((candidate) => candidate.status !== "completed" && candidate.status !== "partial")) {
+      notes.push("Failed, timed-out, or cancelled lanes remain visible without an invented trace or answer.");
+    }
+    if (externalRun) {
+      const chatCandidateId = `chat-${externalRun.id}`;
+      const chatTrace = pastedChatTrace(externalRun, chatCandidateId);
+      candidates.push({
+        candidateId: chatCandidateId,
+        modelLabel: externalRun.model ?? "Pasted chat session",
+        role: "single",
+        runStatus: "completed",
+        observedLatency: { status: "unknown" },
+        cost: { status: "unknown" },
+        usage: { status: "unknown" },
+        helpfulnessState: "unreviewed",
+        goldState: "unknown",
+      });
+      traces.push(chatTrace);
+      notes.push(
+        externalRun.promptText
+          ? "The pasted chat includes a supplied prompt; its question path and tool history remain only as complete as the transcript proves."
+          : "The pasted chat has no supplied prompt; question path and workflow context remain unknown.",
+      );
+      if (!externalRun.snapshotBinding) {
+        notes.push("The pasted chat has no exact snapshot binding; treat snapshot fairness as unknown for that candidate.");
+      }
+    }
+
+    const envelope: ExperimentPackageV1 = {
+      schemaId: EXPERIMENT_PACKAGE_SCHEMA_ID,
+      packageId: `pkg-triage-${job.id}${externalRun ? `-${externalRun.id}` : ""}`,
+      privacyClass: "share_safe",
+      taskFingerprint: packageFingerprint(job.request.taskFingerprint, "task"),
+      snapshotFingerprint: packageFingerprint(job.snapshotFingerprint, "snap"),
+      candidates,
+      agreement: agreementFromTraces(candidates, traces, notes),
+    };
+    return this.importEnvelope(
+      caseId,
+      actor,
+      {
+        schemaId: STRATEGY_PACKAGE_SCHEMA_ID,
+        privacyClass: "share_safe",
+        experiment: envelope,
+        traces,
+      },
+      origin,
+      isAdmin,
+    );
   }
 
   async get(
@@ -823,7 +1111,11 @@ export class ExperimentService {
 
 function mergeAnnotations(
   trace: InteractionTraceV1,
-  annotations: { candidateId: string; event: InteractionTraceV1["events"][number] }[],
+  annotations: {
+    candidateId: string;
+    event: InteractionTraceV1["events"][number];
+    authorUsername: string;
+  }[],
 ): InteractionTraceV1 {
   const extra = annotations.filter((row) => row.candidateId === trace.candidateId);
   if (extra.length === 0) return trace;
@@ -831,11 +1123,13 @@ function mergeAnnotations(
   const events = [...trace.events];
   for (const row of extra) {
     sequence += 1;
-    events.push({
+    const attributedEvent = {
       ...row.event,
+      authorUsername: row.authorUsername,
       sequence,
       parentEventId: row.event.parentEventId ?? events.at(-1)?.eventId ?? null,
-    });
+    } as InteractionTraceV1["events"][number] & { authorUsername: string };
+    events.push(attributedEvent);
   }
   return { ...trace, events };
 }

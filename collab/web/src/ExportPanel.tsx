@@ -15,6 +15,16 @@ interface ScanFinding {
   excerpt: string;
 }
 
+function safeFinding(finding: ScanFinding): ScanFinding {
+  if (/(credential|secret|token|authorization|request[_-]?id|endpoint|url)/i.test(finding.rule)) {
+    return { ...finding, excerpt: "[redacted]" };
+  }
+  return {
+    ...finding,
+    excerpt: finding.excerpt.length > 160 ? `${finding.excerpt.slice(0, 157)}…` : finding.excerpt,
+  };
+}
+
 export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead: boolean }) {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [variant, setVariant] = useState<"owner_only" | "share_safe">("owner_only");
@@ -53,7 +63,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
     };
     if (!res.ok) {
       setError(json.error ?? "export failed");
-      setFindings(json.findings ?? []);
+      setFindings((json.findings ?? []).map(safeFinding));
       setMarkdown("");
       setSnapshot(null);
       return;

@@ -6,23 +6,29 @@
   "workspaces": [
     "contracts",
     "server",
-    "web"
+    "web",
+    "e2e"
   ],
   "scripts": {
     "build": "npm run build -w @cd-collab/contracts && npm run build -w @cd-collab/web && npm run build -w @cd-collab/server",
     "typecheck": "npm run build -w @cd-collab/contracts && npm run typecheck -w @cd-collab/contracts && npm run typecheck -w @cd-collab/server && npm run typecheck -w @cd-collab/web",
     "lint": "npm run lint -w @cd-collab/contracts && npm run lint -w @cd-collab/server && npm run lint -w @cd-collab/web",
     "test": "npm run build -w @cd-collab/contracts && npm run test -w @cd-collab/contracts && npm run test -w @cd-collab/server && npm run test -w @cd-collab/web",
+    "e2e": "npm run build -w @cd-collab/contracts && npm run build -w @cd-collab/web && npm run typecheck -w @cd-collab/e2e && npm run test -w @cd-collab/e2e",
     "migrate": "npm run migrate -w @cd-collab/server",
     "migrate:down": "npm run migrate:down -w @cd-collab/server",
     "migrate:dry-run": "npm run migrate:dry-run -w @cd-collab/server",
     "demo": "npm run build -w @cd-collab/contracts && npm run build:demo -w @cd-collab/web && npm run demo -w @cd-collab/server",
     "demo:static": "npm run build -w @cd-collab/contracts && npm run build:demo -w @cd-collab/web && npm run demo:static -w @cd-collab/server",
+    "qualify": "npm run build -w @cd-collab/contracts && npm run qualify -w @cd-collab/server -- --all",
+    "qualify:live": "npm run build -w @cd-collab/contracts && npm run build -w @cd-collab/server && node server/dist/live-qualification-cli.js",
+    "doctor": "npm run build && node server/dist/doctor-cli.js",
+    "config:init": "npm run build && node server/dist/config-init-cli.js",
     "demo:check": "npm run typecheck && npm run lint && npm test && npm run demo:static",
     "dev": "npm run dev -w @cd-collab/server",
     "start": "npm run start -w @cd-collab/server"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5.0"
   }
 }

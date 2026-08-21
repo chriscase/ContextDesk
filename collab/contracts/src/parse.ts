@@ -13,7 +13,7 @@ export class ContractViolation extends Error {
   }
 }
 
-export type FieldMode = "required" | "nullable" | "optional";
+export type FieldMode = "required" | "nullable" | "optional" | "optional_nullable";
 
 export type FieldType =
   | { kind: "string" }
@@ -89,11 +89,11 @@ export function checkObject(
     const value = v[key];
     const fieldPath = `${path}.${key}`;
     if (!present) {
-      if (spec.mode === "optional") continue;
+      if (spec.mode === "optional" || spec.mode === "optional_nullable") continue;
       throw new ContractViolation(fieldPath, "missing required key");
     }
     if (value === null) {
-      if (spec.mode === "nullable") continue;
+      if (spec.mode === "nullable" || spec.mode === "optional_nullable") continue;
       throw new ContractViolation(
         fieldPath,
         spec.mode === "optional"
@@ -109,6 +109,7 @@ export const f = {
   req: (type: FieldType) => ({ mode: "required" as const, type }),
   nul: (type: FieldType) => ({ mode: "nullable" as const, type }),
   opt: (type: FieldType) => ({ mode: "optional" as const, type }),
+  optNul: (type: FieldType) => ({ mode: "optional_nullable" as const, type }),
   str: { kind: "string" } as FieldType,
   bool: { kind: "bool" } as FieldType,
   u64: { kind: "u64" } as FieldType,

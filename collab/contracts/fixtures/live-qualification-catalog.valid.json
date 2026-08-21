@@ -1,0 +1,9 @@
+{
+  "schemaId": "cd-collab.live_qualification_catalog.v1",
+  "privacyClass": "share_safe",
+  "profiles": [
+    { "alias": "gpt-oss-120b", "profileId": "employer-gpt-oss-120b", "modelId": "gpt-oss-120b", "provider": "employer-gateway", "label": "Employer GPT OSS" },
+    { "alias": "qwen-3.6-27b", "profileId": "employer-qwen-3.6-27b", "modelId": "qwen-3.6-27b", "provider": "employer-gateway", "label": "Employer Qwen" },
+    { "alias": "ministral-3-14b-instruct-2512", "profileId": "employer-ministral-3-14b-instruct-2512", "modelId": "ministral-3-14b-instruct-2512", "provider": "employer-gateway", "label": "Employer Ministral" }
+  ]
+}

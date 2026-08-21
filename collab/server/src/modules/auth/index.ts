@@ -6,6 +6,7 @@ export const MODULE_ID = "auth" as const;
 
 export type { AuthAdapter, AuthIdentity, AuthSuccess } from "./adapter.js";
 export { MapAuthAdapter } from "./adapter.js";
+export { loadLocalAuthAdapter } from "./local-adapter.js";
 export { LdapAuthAdapter, ldapClientOptions, ldapTlsOptions } from "./ldap-adapter.js";
 export { loadLdapConfig } from "./ldap-config.js";
 export type { LdapConfig } from "./ldap-config.js";

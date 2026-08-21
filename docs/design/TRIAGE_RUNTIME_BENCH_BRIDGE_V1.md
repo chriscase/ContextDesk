@@ -249,9 +249,11 @@ configured-policy selection, authoritative desktop replay return, Rust and
 TypeScript replay validation parity, and the existing default dependency
 direction. The bounded live-bench slice now covers materialization refusal
 cases, replay ingestion independent of the deterministic mock, one
-same-snapshot packet/corpus reused across bounded candidates, manifest-bounded
+same-snapshot packet/corpus reused across bounded concurrent candidates
+(default two in flight; sequential when concurrency is 1), manifest-bounded
 and streaming snapshot verification, a position-independent per-candidate
-wall-clock allowance, durable-run preservation when a comparison stops early,
+wall-clock allowance, durable-run preservation when a comparison stops early
+including a sibling lane failure while others are in flight,
 bounded
 non-fatal recovery of leaked isolated corpora, and comparison-report
 attribution. Broader visibility shapes, citation mapping, user-facing

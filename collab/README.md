@@ -67,6 +67,25 @@ is an explicit, recorded operation. A reference whose target was never hashed
 (`expectedHash: null`) is representable and stays `unverified` or
 `unreachable`; it is never silently treated as `verified`.
 
+### Storage modes
+
+PostgreSQL is the default and production mode. It provides the reviewed
+least-privilege migrator/app roles, durable presence, and expiring triage
+worker leases for multi-instance operation. Set a unique
+`COLLAB_TRIAGE_WORKER_ID` on each live worker.
+
+For a private workstation or small single-node deployment, set
+`COLLAB_STORAGE=sqlite` and `COLLAB_SQLITE_PATH=/path/to/collab.sqlite`.
+This mode uses Node 22.5+'s built-in SQLite support and persists case,
+auth-session, catalog, import, experiment, audit, authorization, and triage
+state in one file. Evidence bytes remain in `COLLAB_EVIDENCE_ROOT`.
+SQLite mode is intentionally single-node: it does not provide PostgreSQL role
+separation, multi-worker HA, or a PostgreSQL-to-SQLite migration tool. Its
+protection boundary is filesystem ownership, and its append-only guarantees
+are enforced by the same service contracts rather than PostgreSQL triggers.
+The default remains PostgreSQL so enabling local mode is an explicit operator
+decision.
+
 ### Auth: bind-through LDAP over encrypted transport only (#885)
 
 - `AuthAdapter.authenticate(username, password)` lives in `modules/auth`.
@@ -191,6 +210,46 @@ loopback port. The production entry point and readiness contract are unchanged.
 local-only external-chat intake workflow are documented in
 [`CONTEXTDESK_DEMO_RUNBOOK.md`](../docs/benchmarks/CONTEXTDESK_DEMO_RUNBOOK.md).
 
+## Operator readiness
+
+For a compile-first configuration check and safe setup template:
+
+```bash
+cd collab
+npm run config:init -- --profile demo --output .env.local --yes
+npm run doctor
+npm run doctor -- --json
+```
+
+`doctor` checks runtime/artifacts, storage shape, evidence and static paths,
+auth/LDAP transport, cookie security, the optional host bridge, live-profile
+syntax, and the listen port. It does not contact PostgreSQL, LDAP, Vercel, or
+any model provider. Its versioned output is
+`cd-collab.doctor_report.v1`; see
+[`COLLAB_OPERATOR_READINESS_V1.md`](../docs/testing/COLLAB_OPERATOR_READINESS_V1.md).
+
+## Opt-in live qualification
+
+The live qualification runner is a separate, explicit operator action. Its
+default preflight creates synthetic frozen evidence and emits a skipped,
+share-safe `cd-collab.live_qualification_report.v1`; it never invokes a
+provider. A live run requires both `--live` and `--yes`, a
+`cd-collab.live_qualification_catalog.v1` file, and the configured Rust host
+bridge. The bridge owns credentials and provider endpoints.
+
+```bash
+npm run qualify:live -- --catalog ./live-qualification-catalog.json \
+  --profiles gpt-oss-120b,qwen-3.6-27b,ministral-3-14b-instruct-2512 \
+  --live --yes --concurrency 2 --json
+```
+
+The report preserves model/provider provenance, the exact same-snapshot
+fingerprint, bounded concurrency evidence, lane statuses, evidence counts,
+unknown counts, and safe error codes. It excludes raw output, prompts,
+credentials, endpoints, request IDs, and durable host run IDs. Agreement is
+never treated as correctness; usage and cost remain unknown. Do not run the
+live command in ordinary CI.
+
 ## Local PostgreSQL
 
 ```bash
@@ -216,8 +275,42 @@ npm test
 
 Compose example: `deploy/README.md`.
 
+## Local SQLite
+
+For a private local War Room without PostgreSQL or LDAP, use local auth and a
+writable SQLite file:
+
+```bash
+cd collab
+export COLLAB_STORAGE=sqlite
+export COLLAB_SQLITE_PATH="$PWD/.data/collab.sqlite"
+export COLLAB_AUTH_MODE=local
+export COLLAB_LOCAL_USERS='[{"username":"lead","password":"replace-me","displayName":"Case Lead","groups":["local:case-lead"]}]'
+export COLLAB_GROUP_ROLE_MAP='local:case-lead=case-lead'
+export COLLAB_EVIDENCE_ROOT="$PWD/.data/evidence"
+npm run migrate
+npm run build
+npm start
+```
+
+The SQLite migration command initializes the current schema and is idempotent.
+There is no destructive rollback command; remove the explicitly configured
+SQLite file only when you intentionally want a fresh local workspace.
+
 ## Scripts
 
 From `collab/`: `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`,
-`npm run demo`, `npm run demo:static`, `npm run demo:check`, `npm run migrate`,
-`npm run migrate:down`, `npm run migrate:dry-run`.
+`npm run demo`, `npm run demo:static`, `npm run demo:check`, `npm run e2e`,
+`npm run migrate`, `npm run migrate:down`, `npm run migrate:dry-run`.
+
+For a non-networking deployment preflight, run `npm run doctor` (or
+`npm run doctor -- --json` for machine-readable output). It checks runtime,
+storage, authentication/TLS, paths, session-cookie safety, and host-owned
+triage profile configuration without contacting PostgreSQL, LDAP, Vercel, or a
+model provider. To create a private local-demo template, run
+`npm run config:init -- --output .env.local`; it refuses to overwrite an
+existing file unless `--force` is supplied.
+
+`npm run e2e` is the Playwright war-room qualification against a
+`MapAuthAdapter` fixture server (no LDAP, no Postgres). See
+[`docs/testing/COLLAB_WAR_ROOM_BROWSER_QUALIFICATION_V1.md`](../docs/testing/COLLAB_WAR_ROOM_BROWSER_QUALIFICATION_V1.md).

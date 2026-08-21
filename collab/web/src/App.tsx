@@ -8,6 +8,29 @@ interface SessionView {
   roles: string[];
 }
 
+const themes = [
+  ["dark", "Dark"],
+  ["slate", "Slate"],
+  ["light", "Light"],
+  ["sand", "Sand"],
+  ["forest", "Forest"],
+  ["grokptah", "GrokPtah"],
+] as const;
+
+type ThemeName = (typeof themes)[number][0];
+
+function savedTheme(): ThemeName {
+  try {
+    const candidate =
+      typeof window.localStorage?.getItem === "function"
+        ? window.localStorage.getItem("cd-theme")
+        : null;
+    return themes.some(([name]) => name === candidate) ? (candidate as ThemeName) : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
 declare global {
   interface Window {
     __CONTEXTDESK_STATIC_READ_ONLY__?: boolean;
@@ -19,6 +42,18 @@ export function App() {
   const staticReadOnly = window.__CONTEXTDESK_STATIC_READ_ONLY__ === true;
   const [session, setSession] = useState<SessionView | null>(null);
   const [ready, setReady] = useState(false);
+  const [theme, setTheme] = useState<ThemeName>(savedTheme);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      if (typeof window.localStorage?.setItem === "function") {
+        window.localStorage.setItem("cd-theme", theme);
+      }
+    } catch {
+      // A blocked or unavailable browser store should not disable the demo.
+    }
+  }, [theme]);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/auth/me");
@@ -57,6 +92,23 @@ export function App() {
         Compare model outputs and investigation strategies by evidence, usefulness,
         and convergence on a human-accepted benchmark—not wording alone.
       </p>
+      <section className="shell__toolbar" aria-label="Presentation controls">
+        <span className="shell__toolbar-label">Presenter controls</span>
+        <label className="shell__theme">
+          Skin
+          <select
+            aria-label="Interface theme"
+            value={theme}
+            onChange={(event) => setTheme(event.target.value as ThemeName)}
+          >
+            {themes.map(([name, label]) => (
+              <option key={name} value={name}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
       {syntheticDemo || staticReadOnly ? (
         <section className="shell__demo" aria-label="Synthetic demo notice">
           <strong>
@@ -92,7 +144,11 @@ export function App() {
               </button>
             ) : null}
           </section>
-          <Cases roles={session.roles} readOnly={staticReadOnly} />
+          <Cases
+            roles={session.roles}
+            readOnly={staticReadOnly}
+            participant={{ username: session.username, roles: session.roles }}
+          />
           <Catalog
             canLead={
               !staticReadOnly &&

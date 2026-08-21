@@ -5,6 +5,7 @@ import {
   parseArtifact,
   parseCase,
   parseCaseList,
+  parseContributionList,
   parseContribution,
   parseProvenance,
   parseSourceList,
@@ -385,6 +386,21 @@ describe("cases timeline evidence provenance", () => {
         ),
       );
       expect(noteV2.revision).toBe(2);
+      const contributionList = parseContributionList(
+        JSON.parse(
+          (
+            await app.inject({
+              method: "GET",
+              url: `/api/cases/${caseId}/contributions`,
+              headers: { cookie: alice },
+            })
+          ).body,
+        ),
+      );
+      expect(contributionList.caseId).toBe(caseId);
+      expect(contributionList.contributions.find((item) => item.id === note.id)?.body).toBe(
+        "Revised observation after the log upload.",
+      );
       const chain = parseProvenance(
         JSON.parse(
           (

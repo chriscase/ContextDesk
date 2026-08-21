@@ -13,12 +13,20 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("005_authz_bootstrap");
       expect(up.applied).toContain("006_experiments");
       expect(up.applied).toContain("007_gold_references");
+      expect(up.applied).toContain("007_snapshots");
       expect(up.applied).toContain("008_interaction_traces");
+      expect(up.applied).toContain("009_triage_jobs");
+      expect(up.applied).toContain("010_presence");
+      expect(up.applied).toContain("011_triage_worker_leases");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
       expect(tables.rows).toHaveLength(1);
+      expect((await migrateDown(client)).rolledBack).toBe("011_triage_worker_leases");
+      expect((await migrateDown(client)).rolledBack).toBe("010_presence");
+      expect((await migrateDown(client)).rolledBack).toBe("009_triage_jobs");
       expect((await migrateDown(client)).rolledBack).toBe("008_interaction_traces");
+      expect((await migrateDown(client)).rolledBack).toBe("007_snapshots");
       expect((await migrateDown(client)).rolledBack).toBe("007_gold_references");
       expect((await migrateDown(client)).rolledBack).toBe("006_experiments");
       expect((await migrateDown(client)).rolledBack).toBe("005_authz_bootstrap");
@@ -44,7 +52,11 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("005_authz_bootstrap");
       expect(dry.pending).toContain("006_experiments");
       expect(dry.pending).toContain("007_gold_references");
+      expect(dry.pending).toContain("007_snapshots");
       expect(dry.pending).toContain("008_interaction_traces");
+      expect(dry.pending).toContain("009_triage_jobs");
+      expect(dry.pending).toContain("010_presence");
+      expect(dry.pending).toContain("011_triage_worker_leases");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

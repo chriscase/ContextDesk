@@ -7,8 +7,10 @@ only — no employer-specific hosts (`docs/NON_GOALS.md` item 4).
 ## Shape
 
 One container/service serves the API and the built React shell. PostgreSQL is
-the system of record. Evidence bytes live on a filesystem volume beside the
-database (see `collab/README.md` for the backend decision).
+the default system of record. A private single-node deployment may use the
+explicit SQLite mode documented in `collab/README.md`; it does not provide
+PostgreSQL role separation or multi-worker HA. Evidence bytes live on a
+filesystem volume beside the database.
 
 ## Roles
 
@@ -39,12 +41,15 @@ cd collab
 cp deploy/.env.example deploy/.env
 # fill secret-store values in deploy/.env
 docker compose -f deploy/docker-compose.example.yml --env-file deploy/.env up --build
-# in another shell, still from collab/:
-set -a && . deploy/.env && set +a
-npm run migrate
 curl -sS http://127.0.0.1:8787/health
 curl -sS http://127.0.0.1:8787/ready
 ```
+
+The Compose `migrate` one-shot service applies migrations inside the Compose
+network before `app` starts. To apply a later migration manually, use
+`docker compose -f deploy/docker-compose.example.yml --env-file deploy/.env run
+--rm migrate` rather than running the host shell command against the Compose
+hostname.
 
 Without Docker, install PostgreSQL 16 locally, create the two roles and a
 `collab` database (see `init-db.sql`), export the same environment variables,

@@ -6,6 +6,7 @@ import {
   type ContributionKind,
   type HypothesisStatus,
   type PrivacyClass,
+  type SnapshotV1,
 } from "@cd-collab/contracts";
 export interface Actor {
   id: string;
@@ -73,6 +74,8 @@ export interface ArtifactRow {
   sourceId: string;
 }
 
+export type SnapshotRow = SnapshotV1;
+
 export interface TimelineInsert {
   kind: string;
   actor: Actor;
@@ -99,6 +102,9 @@ export interface CaseStore {
   getArtifact(artifactId: string): Promise<ArtifactRow | null>;
   listArtifactsByCase(caseId: string): Promise<ArtifactRow[]>;
   insertArtifact(row: ArtifactRow): Promise<void>;
+  listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]>;
+  getSnapshot(snapshotId: string): Promise<SnapshotRow | null>;
+  insertSnapshot(row: SnapshotRow): Promise<void>;
 }
 
 export type Queryable = Pick<Pool, "query">;
@@ -108,6 +114,7 @@ export class MemoryCaseStore implements CaseStore {
   private readonly timeline = new Map<string, TimelineRow[]>();
   private readonly revisions = new Map<string, RevisionRow[]>();
   private readonly artifacts = new Map<string, ArtifactRow>();
+  private readonly snapshots = new Map<string, SnapshotRow>();
 
   async listCases(): Promise<CaseRow[]> {
     return [...this.cases.values()].map((row) => cloneCase(row));
@@ -207,6 +214,30 @@ export class MemoryCaseStore implements CaseStore {
 
   async insertArtifact(row: ArtifactRow): Promise<void> {
     this.artifacts.set(row.id, { ...row });
+  }
+
+  async listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]> {
+    return [...this.snapshots.values()]
+      .filter((row) => row.caseId === caseId)
+      .map((row) => cloneSnapshot(row))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  }
+
+  async getSnapshot(snapshotId: string): Promise<SnapshotRow | null> {
+    const row = this.snapshots.get(snapshotId);
+    return row ? cloneSnapshot(row) : null;
+  }
+
+  async insertSnapshot(row: SnapshotRow): Promise<void> {
+    if (this.snapshots.has(row.id)) throw new Error("snapshot already exists");
+    if (
+      [...this.snapshots.values()].some(
+        (existing) => existing.caseId === row.caseId && existing.fingerprint === row.fingerprint,
+      )
+    ) {
+      throw new Error("snapshot fingerprint already exists");
+    }
+    this.snapshots.set(row.id, cloneSnapshot(row));
   }
 }
 
@@ -429,6 +460,49 @@ export class PgCaseStore implements CaseStore {
       ],
     );
   }
+
+  async listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]> {
+    const result = await this.db.query(
+      `SELECT id, case_id, fingerprint, parent_snapshot_id, evidence, visibility,
+              protocol_version, fairness_class, status, created_at, created_by
+       FROM snapshots WHERE case_id = $1 ORDER BY created_at ASC, id ASC`,
+      [caseId],
+    );
+    return result.rows.map((row) => asSnapshot(row as Record<string, unknown>));
+  }
+
+  async getSnapshot(snapshotId: string): Promise<SnapshotRow | null> {
+    const result = await this.db.query(
+      `SELECT id, case_id, fingerprint, parent_snapshot_id, evidence, visibility,
+              protocol_version, fairness_class, status, created_at, created_by
+       FROM snapshots WHERE id = $1`,
+      [snapshotId],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asSnapshot(row) : null;
+  }
+
+  async insertSnapshot(row: SnapshotRow): Promise<void> {
+    await this.db.query(
+      `INSERT INTO snapshots (
+         id, case_id, fingerprint, parent_snapshot_id, evidence, visibility,
+         protocol_version, fairness_class, status, created_at, created_by
+       ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11)`,
+      [
+        row.id,
+        row.caseId,
+        row.fingerprint,
+        row.parentSnapshotId,
+        JSON.stringify(row.evidence),
+        row.visibility,
+        row.protocolVersion,
+        row.fairnessClass,
+        row.status,
+        row.createdAt,
+        row.createdBy,
+      ],
+    );
+  }
 }
 
 const CASE_SELECT = `
@@ -559,5 +633,46 @@ function asArtifact(row: Record<string, unknown>): ArtifactRow {
     uploaderId: String(row.uploader_id),
     uploaderUsername: String(row.uploader_username),
     sourceId: row.source_id === null || row.source_id === undefined ? "" : String(row.source_id),
+  };
+}
+
+function cloneSnapshot(row: SnapshotRow): SnapshotRow {
+  return {
+    ...row,
+    evidence: row.evidence.map((item) => ({ ...item })),
+  };
+}
+
+function asSnapshot(row: Record<string, unknown>): SnapshotRow {
+  const evidence = Array.isArray(row.evidence)
+    ? row.evidence.map((item) => {
+        const value = item as Record<string, unknown>;
+        return {
+          evidenceId: String(value.evidenceId),
+          ordinal: Number(value.ordinal),
+          contentHash: value.contentHash === null ? null : String(value.contentHash),
+          expectedHash: value.expectedHash === null ? null : String(value.expectedHash),
+          verificationStatus:
+            value.verificationStatus === null ? null : String(value.verificationStatus),
+          privacyClass: value.privacyClass as SnapshotRow["visibility"],
+        };
+      })
+    : [];
+  return {
+    schemaId: "cd-collab.snapshot.v1",
+    id: String(row.id),
+    caseId: String(row.case_id),
+    fingerprint: String(row.fingerprint),
+    parentSnapshotId:
+      row.parent_snapshot_id === null || row.parent_snapshot_id === undefined
+        ? null
+        : String(row.parent_snapshot_id),
+    evidence,
+    visibility: row.visibility as SnapshotRow["visibility"],
+    protocolVersion: String(row.protocol_version),
+    fairnessClass: row.fairness_class as SnapshotRow["fairnessClass"],
+    status: row.status as SnapshotRow["status"],
+    createdAt: asIso(row.created_at),
+    createdBy: String(row.created_by),
   };
 }

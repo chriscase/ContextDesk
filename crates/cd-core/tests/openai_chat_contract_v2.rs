@@ -39,10 +39,10 @@ fn inert_tool() -> ToolSpec {
 }
 
 #[test]
-fn schema_version_is_v4() {
+fn schema_version_is_v5() {
     assert_eq!(
         QUALIFICATION_SCHEMA_VERSION,
-        "contextdesk.capability_qualification.v4"
+        "contextdesk.capability_qualification.v5"
     );
 }
 
@@ -372,14 +372,14 @@ fn name_hint_never_alone_passes_structured() {
 }
 
 #[test]
-fn v1_through_v3_schema_keys_are_stale_vs_v4() {
-    let v4 = QualificationKey::new("p", "https://gw.example/v1", "m");
-    assert_eq!(v4.schema_version, "contextdesk.capability_qualification.v4");
-    for prior in ["v1", "v2", "v3"] {
-        let mut old = v4.clone();
+fn v1_through_v4_schema_keys_are_stale_vs_v5() {
+    let v5 = QualificationKey::new("p", "https://gw.example/v1", "m");
+    assert_eq!(v5.schema_version, "contextdesk.capability_qualification.v5");
+    for prior in ["v1", "v2", "v3", "v4"] {
+        let mut old = v5.clone();
         old.schema_version = format!("contextdesk.capability_qualification.{prior}");
-        assert_ne!(old.storage_id(), v4.storage_id());
-        assert_ne!(old, v4);
+        assert_ne!(old.storage_id(), v5.storage_id());
+        assert_ne!(old, v5);
     }
     // Same profile/base/model under different protocol is a different key.
     let ollama = QualificationKey::with_protocol(
@@ -388,7 +388,7 @@ fn v1_through_v3_schema_keys_are_stale_vs_v4() {
         "m",
         cd_core::openai_chat_contract::ChatBackendDialect::Ollama,
     );
-    assert_ne!(ollama.storage_id(), v4.storage_id());
+    assert_ne!(ollama.storage_id(), v5.storage_id());
 }
 
 #[test]

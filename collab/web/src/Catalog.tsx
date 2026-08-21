@@ -9,6 +9,7 @@ interface SourceRow {
 
 export function Catalog(props: { canLead: boolean }) {
   const [sources, setSources] = useState<SourceRow[]>([]);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/catalog/sources");
@@ -23,8 +24,10 @@ export function Catalog(props: { canLead: boolean }) {
 
   async function createSource(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    await fetch("/api/catalog/sources", {
+    setActionError(null);
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const response = await fetch("/api/catalog/sources", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -33,18 +36,30 @@ export function Catalog(props: { canLead: boolean }) {
         description: String(data.get("description") ?? ""),
       }),
     });
-    event.currentTarget.reset();
+    if (!response.ok) {
+      setActionError("Source could not be added. You may not have permission to manage the catalog.");
+      return;
+    }
+    form.reset();
     await refresh();
+    window.dispatchEvent(new Event("contextdesk:source-catalog-changed"));
   }
 
   async function retire(id: string) {
-    await fetch(`/api/catalog/sources/${id}/retire`, { method: "POST" });
+    setActionError(null);
+    const response = await fetch(`/api/catalog/sources/${id}/retire`, { method: "POST" });
+    if (!response.ok) {
+      setActionError("Source could not be retired. You may not have permission to manage the catalog.");
+      return;
+    }
     await refresh();
+    window.dispatchEvent(new Event("contextdesk:source-catalog-changed"));
   }
 
   return (
     <section className="catalog">
       <h2 className="case-list__title">Source catalog</h2>
+      {actionError ? <p className="case-memory__error" role="alert">{actionError}</p> : null}
       <ul className="case-list__items">
         {sources.map((s) => (
           <li key={s.id} className="catalog__row">
@@ -64,15 +79,15 @@ export function Catalog(props: { canLead: boolean }) {
       </ul>
       {props.canLead ? (
         <form className="composer" onSubmit={(e) => void createSource(e)}>
-          <input className="login__input" name="name" placeholder="Source name" required />
-          <select className="login__input" name="kind" defaultValue="unknown">
+          <input className="login__input" name="name" aria-label="Source name" placeholder="Source name" required />
+          <select className="login__input" name="kind" aria-label="Source kind" defaultValue="unknown">
             <option value="human">human</option>
             <option value="external-tool">external-tool</option>
             <option value="internal-system">internal-system</option>
             <option value="contextdesk">contextdesk</option>
             <option value="unknown">unknown</option>
           </select>
-          <input className="login__input" name="description" placeholder="Description" />
+          <input className="login__input" name="description" aria-label="Source description" placeholder="Description" />
           <button className="login__submit" type="submit">
             Add source
           </button>

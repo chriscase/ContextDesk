@@ -519,6 +519,13 @@ private model inventory in publishable media, or evaluator truth.
 - Provider credential resolution follows the profile's explicit reference.
   No reference means no credential; the host must not synthesize a conventional
   Keychain id or fall back from an invalid `file:` reference to Keychain.
+- A process-wide provider API key override is valid only for one selected
+  Keychain-style `provider/<id>/api_key` reference. Mixed-provider live
+  comparisons (distinct employer and Vercel profiles, a reviewer on a second
+  profile, or a second retrieval-role credential) refuse that override rather
+  than sending one gateway credential to another profile. Protected `file:`
+  references are never replaced by the override. Errors and reports never
+  include secret bytes.
 - The **Local integration** provider path dereferences credentials through a
   provider-only cache scoped to one admitted turn. Primary and reviewer roles
   sharing the exact `api_key_ref` reuse that in-memory value; distinct refs are

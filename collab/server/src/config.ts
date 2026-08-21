@@ -8,12 +8,16 @@ export interface Config {
   port: number;
   serviceName: string;
   /** Least-privilege application role. */
-  databaseUrl: string;
+  storage: "postgres" | "sqlite";
+  databaseUrl: string | null;
   /** Separate migrator role (DDL). */
-  migrateDatabaseUrl: string;
+  migrateDatabaseUrl: string | null;
+  /** Required only for SQLite local/single-node mode. */
+  sqlitePath: string | null;
   evidenceRoot: string;
   /** Built UI assets; null skips static serving (API-only). */
   staticDir: string | null;
+  authMode: "ldap" | "local";
 }
 
 function parsePort(raw: string | undefined): number {
@@ -31,19 +35,43 @@ function must(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
-/** Load config, requiring database URLs (used by the process entrypoint). */
+function authMode(env: NodeJS.ProcessEnv): "ldap" | "local" {
+  const mode = (env.COLLAB_AUTH_MODE ?? "ldap").trim().toLowerCase();
+  if (mode !== "ldap" && mode !== "local") {
+    throw new Error(`COLLAB_AUTH_MODE must be ldap or local, got ${mode}`);
+  }
+  return mode;
+}
+
+function storageMode(env: NodeJS.ProcessEnv): "postgres" | "sqlite" {
+  const mode = (env.COLLAB_STORAGE ?? "postgres").trim().toLowerCase();
+  if (mode !== "postgres" && mode !== "sqlite") {
+    throw new Error(`COLLAB_STORAGE must be postgres or sqlite, got ${mode}`);
+  }
+  return mode;
+}
+
+/** Load config for the process entrypoint; storage-specific fields are validated here. */
 export function loadRuntimeConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): Config {
+  const storage = storageMode(env);
+  const databaseUrl = storage === "postgres" ? must(env, "COLLAB_DATABASE_URL") : null;
+  const migrateDatabaseUrl = storage === "postgres"
+    ? env.COLLAB_MIGRATE_DATABASE_URL ?? databaseUrl
+    : null;
+  const sqlitePath = storage === "sqlite" ? must(env, "COLLAB_SQLITE_PATH") : null;
   return {
     host: env.COLLAB_HOST ?? "127.0.0.1",
     port: parsePort(env.COLLAB_PORT),
     serviceName: env.COLLAB_SERVICE_NAME ?? "cd-collab",
-    databaseUrl: must(env, "COLLAB_DATABASE_URL"),
-    migrateDatabaseUrl:
-      env.COLLAB_MIGRATE_DATABASE_URL ?? must(env, "COLLAB_DATABASE_URL"),
+    storage,
+    databaseUrl,
+    migrateDatabaseUrl,
+    sqlitePath,
     evidenceRoot: env.COLLAB_EVIDENCE_ROOT ?? ".data/evidence",
     staticDir: env.COLLAB_STATIC_DIR?.trim() || null,
+    authMode: authMode(env),
   };
 }
 
@@ -53,10 +81,13 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     host: "127.0.0.1",
     port: 8787,
     serviceName: "cd-collab",
+    storage: "postgres",
     databaseUrl: "postgres://collab_app@127.0.0.1:5432/collab",
     migrateDatabaseUrl: "postgres://collab_migrator@127.0.0.1:5432/collab",
+    sqlitePath: null,
     evidenceRoot: ".data/evidence",
     staticDir: null,
+    authMode: "ldap",
     ...overrides,
   };
 }

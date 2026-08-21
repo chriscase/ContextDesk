@@ -81,10 +81,12 @@ snapshot -> bounded packet -> TriageRequestV2
 
 The separate `cd-triage-bench-live` bridge now supplies bounded live execution
 against the exact same task snapshot. It prepares and proves one isolated
-corpus once, runs a sequential candidate list under one position-independent
-wall-clock allowance, and persists one proof-bound immutable run per
-candidate. The existing report command then groups those runs with imported
-and replayed strategies without force-ranking them.
+corpus once, runs a bounded concurrent candidate list (default two in flight)
+under one position-independent wall-clock allowance, and persists one
+proof-bound immutable run per candidate. Exact-snapshot fairness is unchanged:
+every lane receives the same immutable packet and corpus revision, and no
+lane shares mutable workflow state. The existing report command then groups
+those runs with imported and replayed strategies without force-ranking them.
 
 Those rows are owner-only, so a share-safe report deliberately contains none
 of them. The share-safe artifact for a live comparison is the adapter's

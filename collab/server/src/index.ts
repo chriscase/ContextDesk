@@ -1,8 +1,9 @@
 import { Pool } from "pg";
 import { buildApp } from "./app.js";
+import { createSqliteRuntime } from "./db/sqlite.js";
 import { loadRuntimeConfig } from "./config.js";
 import { FilesystemEvidenceStore } from "./evidence/store.js";
-import { PgAuditStore } from "./modules/audit/index.js";
+import { PgAuditStore, type AuditStore } from "./modules/audit/index.js";
 import {
   LdapAuthAdapter,
   MemorySessionStore,
@@ -10,50 +11,122 @@ import {
   createAuthLog,
   createRateLimiter,
   defaultSessionPolicy,
+  loadLocalAuthAdapter,
   loadLdapConfig,
+  type SessionStore,
 } from "./modules/auth/index.js";
 import {
   MutableGroupRoleMap,
   parseGroupRoleMap,
   PgGroupRoleStore,
+  type GroupRoleStore,
 } from "./modules/authz/index.js";
-import { CatalogService, PgCatalogStore } from "./modules/catalog/index.js";
-import { CaseService, PgCaseStore } from "./modules/cases/index.js";
+import { CatalogService, PgCatalogStore, type CatalogStore } from "./modules/catalog/index.js";
+import { CaseService, PgCaseStore, type CaseStore } from "./modules/cases/index.js";
 import { ExportService, loadExportPrivacyConfig } from "./modules/export/index.js";
-import { ImportService, PgRunStore } from "./modules/import/index.js";
-import { ExperimentService, PgExperimentStore } from "./modules/experiments/index.js";
+import { ImportService, PgRunStore, type RunStore } from "./modules/import/index.js";
+import { ExperimentService, PgExperimentStore, type ExperimentStore } from "./modules/experiments/index.js";
+import {
+  PgTriageJobStore,
+  loadConfiguredTriageProfileCatalog,
+  RustBridgeTriageExecutor,
+  triageBridgeOptions,
+  TriageRunService,
+  type TriageJobStore,
+} from "./modules/triage-runs/index.js";
+import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
+
+interface StorageRuntime {
+  pool: Pool | null;
+  databaseProbe?: { ping(): void | Promise<void> };
+  audit: AuditStore;
+  sessions: SessionStore;
+  roleStore: GroupRoleStore;
+  catalog: CatalogStore;
+  cases: CaseStore;
+  runs: RunStore;
+  experiments: ExperimentStore;
+  jobs: TriageJobStore;
+  presence: PresenceService;
+}
+
+function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRuntime {
+  const bootstrapRoles = parseGroupRoleMap(process.env.COLLAB_GROUP_ROLE_MAP);
+  if (config.storage === "sqlite") {
+    const runtime = createSqliteRuntime(config.sqlitePath as string, bootstrapRoles);
+    return {
+      pool: null,
+      databaseProbe: runtime.databaseProbe,
+      audit: runtime.audit,
+      sessions: runtime.sessions,
+      roleStore: runtime.roleStore,
+      catalog: runtime.catalog,
+      cases: runtime.cases,
+      runs: runtime.runs,
+      experiments: runtime.experiments,
+      jobs: runtime.jobs,
+      presence: new PresenceService(),
+    };
+  }
+
+  const pool = new Pool({ connectionString: config.databaseUrl as string });
+  return {
+    pool,
+    audit: new PgAuditStore(pool),
+    sessions: process.env.COLLAB_SESSION_STORE === "memory"
+      ? new MemorySessionStore()
+      : new PgSessionStore(pool),
+    roleStore: new PgGroupRoleStore(pool, bootstrapRoles),
+    catalog: new PgCatalogStore(pool),
+    cases: new PgCaseStore(pool),
+    runs: new PgRunStore(pool),
+    experiments: new PgExperimentStore(pool),
+    jobs: new PgTriageJobStore(pool),
+    presence: new PresenceService(new PgPresenceBackend(pool)),
+  };
+}
 
 async function main(): Promise<void> {
   const config = loadRuntimeConfig();
-  const ldap = loadLdapConfig();
-  const pool = new Pool({ connectionString: config.databaseUrl });
+  const storage = createStorage(config);
   const store = new FilesystemEvidenceStore({ rootDir: config.evidenceRoot });
   await store.ping();
   const log = createAuthLog();
-  const adapter = new LdapAuthAdapter(ldap, log);
-  const sessions = process.env.COLLAB_SESSION_STORE === "memory"
-    ? new MemorySessionStore()
-    : new PgSessionStore(pool);
-  const roleStore = new PgGroupRoleStore(
-    pool,
-    parseGroupRoleMap(process.env.COLLAB_GROUP_ROLE_MAP),
-  );
-  const roles = new MutableGroupRoleMap(await roleStore.load());
-  const audit = new PgAuditStore(pool);
-  const catalog = new CatalogService(new PgCatalogStore(pool), audit);
-  const domain = new CaseService(store, audit, new PgCaseStore(pool), catalog);
+  const adapter = config.authMode === "local"
+    ? loadLocalAuthAdapter()
+    : new LdapAuthAdapter(loadLdapConfig(), log);
+  const roles = new MutableGroupRoleMap(await storage.roleStore.load());
+  const audit = storage.audit;
+  const catalog = new CatalogService(storage.catalog, audit);
+  const domain = new CaseService(store, audit, storage.cases, catalog);
   const imports = new ImportService({
     evidence: store,
     audit,
     cases: domain,
     catalog,
-    runs: new PgRunStore(pool),
+    runs: storage.runs,
   });
   const experiments = new ExperimentService({
     cases: domain,
     audit,
-    experiments: new PgExperimentStore(pool),
+    experiments: storage.experiments,
   });
+  const bridge = triageBridgeOptions();
+  const triageRuns = new TriageRunService({
+    cases: domain,
+    audit,
+    jobs: storage.jobs,
+    ...(process.env.COLLAB_TRIAGE_WORKER_ID?.trim()
+      ? { workerId: process.env.COLLAB_TRIAGE_WORKER_ID.trim() }
+      : {}),
+    ...(bridge
+      ? {
+          gatewayExecutor: new RustBridgeTriageExecutor(bridge),
+        }
+      : {}),
+    profiles: loadConfiguredTriageProfileCatalog(),
+  });
+  await triageRuns.recoverPending();
   const exporter = new ExportService({
     cases: domain,
     catalog,
@@ -63,17 +136,20 @@ async function main(): Promise<void> {
   });
   const app = await buildApp({
     config,
-    pool,
+    pool: storage.pool,
+    ...(storage.databaseProbe ? { databaseProbe: storage.databaseProbe } : {}),
     store,
     domain,
     catalog,
     imports,
+    triageRuns,
+    presence: storage.presence,
     experiments,
     exporter,
     security: {
       auth: {
         adapter,
-        sessions,
+        sessions: storage.sessions,
         policy: defaultSessionPolicy,
         roles,
         audit,
@@ -82,7 +158,7 @@ async function main(): Promise<void> {
         cookieSecure: process.env.COLLAB_COOKIE_SECURE !== "0",
       },
       roles,
-      roleStore,
+      roleStore: storage.roleStore,
       audit,
     },
   });
