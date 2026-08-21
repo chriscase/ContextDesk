@@ -13,12 +13,12 @@ needs an environment-dependent rehearsal.
 The local branch is:
 
 ```text
-codex/merge-consolidation-demo @ 0d5d2178
+codex/merge-consolidation-demo (unpublished local branch; current HEAD)
 ```
 
 The local qualification additions are in `e3e40a2e`; the portable compiled
 qualification launcher is in `8854b26e`; the latest qualification evidence and
-handoff corrections are in `0d5d2178`, and the provider-free browser bridge
+handoff corrections are in this document, and the provider-free browser bridge
 vertical is in `61f97868`. The branch is not published because
 the workstation could not resolve `github.com` during the last push attempt.
 
@@ -177,7 +177,7 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
    PostgreSQL path.
 5. **The local merge branch is unpublished.** A future push or PR publication
    requires restored DNS/network access; this handoff does not imply that
-   remote state contains `0d5d2178`.
+   remote state contains the latest local handoff updates.
 6. **Provider quality is not certified.** The harness proves lifecycle,
    provenance, privacy, and comparison mechanics; it does not establish that
    any model reached the correct diagnosis.
