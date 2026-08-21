@@ -13,7 +13,8 @@ needs an environment-dependent rehearsal.
 The published branch is:
 
 ```text
-codex/merge-consolidation-demo @ 74cf30104e6076f4738ae6c987a6ec3c8001da6b
+codex/merge-consolidation-demo (release-qualified implementation @
+224ac8c4fcd0b8003000b45ae7665a595f182399)
 ```
 
 The branch contains the qualification harness, portable launcher, provider-free
@@ -110,8 +111,8 @@ against the current branch and selectively integrated locally in commit
 
 The local memory qualification and artifact round-trip passed. The exact
 published branch was then qualified remotely on commit
-`74cf30104e6076f4738ae6c987a6ec3c8001da6b` by
-[collab-qualify run 32451824096](https://github.com/chriscase/ContextDesk/actions/runs/32451824096).
+`224ac8c4fcd0b8003000b45ae7665a595f182399` by
+[collab-qualify run 32452248915](https://github.com/chriscase/ContextDesk/actions/runs/32452248915).
 Its hosted release qualification passed typecheck, lint, tests, build, memory
 qualification, PostgreSQL qualification, configuration initialization, doctor,
 sanitization, and share-safe artifact upload.
@@ -146,6 +147,11 @@ HEAD: 49 contract tests, 145 server tests with 10 environment-gated skips, 41
 web tests, typecheck, lint, and static synthetic demo build. A local
 qualification/doctor/sanitizer round-trip also passed with the required
 `qualify-memory.json` and `doctor.json` outputs.
+
+The final hosted run exposed one asynchronous web-test teardown race: a case
+load could continue into the next test after the component had unmounted. The
+case loader now aborts on unmount or case change and treats cancellation as
+normal. Focused and full local web/Collab tests pass after this fix.
 
 The opt-in live qualification runner is now local and validated:
 
@@ -203,7 +209,7 @@ refreshes the run panel, the bridge request checks the actual `modelId` field,
 and deterministic output hashes are valid SHA-256 digests. The fixture now uses
 Node's ESM loader rather than the `tsx` CLI, so hosted runs do not depend on the
 CLI's IPC pipe. The exact-branch hosted browser jobs are now authoritative:
-[collab run 32451824126](https://github.com/chriscase/ContextDesk/actions/runs/32451824126)
+[collab run 32452248880](https://github.com/chriscase/ContextDesk/actions/runs/32452248880)
 passed the standard browser qualification, the provider-free Rust bridge
 comparison browser qualification, and the full Collab typecheck/lint/test/
 migration/build job. All jobs used the exact published commit above.
@@ -247,10 +253,10 @@ browser surface.
 ### Exact published merge-branch evidence
 
 The isolated merge branch is published, and both workflows passed on the exact
-same SHA `74cf30104e6076f4738ae6c987a6ec3c8001da6b`:
+same SHA `224ac8c4fcd0b8003000b45ae7665a595f182399`:
 
-- [collab-qualify run 32451824096](https://github.com/chriscase/ContextDesk/actions/runs/32451824096): hosted release qualification, including PostgreSQL and sanitized artifact upload;
-- [collab run 32451824126](https://github.com/chriscase/ContextDesk/actions/runs/32451824126): full Collab checks, standard Playwright browser qualification, and the real provider-free Rust bridge browser qualification.
+- [collab-qualify run 32452248915](https://github.com/chriscase/ContextDesk/actions/runs/32452248915): hosted release qualification, including PostgreSQL and sanitized artifact upload;
+- [collab run 32452248880](https://github.com/chriscase/ContextDesk/actions/runs/32452248880): full Collab checks, standard Playwright browser qualification, and the real provider-free Rust bridge browser qualification.
 
 These runs validate the published isolated branch. They do not merge it and do
 not change any source PR.
@@ -276,7 +282,7 @@ These remain draft and open:
   PostgreSQL qualification, doctor, sanitization, and artifact upload. The
   sanitized artifact was retained by GitHub as artifact `9432232253`. This is
   hosted evidence for the workflow on its older base; the selectively ported
-  workflow also passed on the exact published branch in run `32451824096`.
+  workflow also passed on the exact published branch in run `32452248915`.
 - [PR #940](https://github.com/chriscase/ContextDesk/pull/940), Grok mixed-
   provider credential isolation, remains draft/open at head `8202f248`. Its
   security slice was selectively integrated and revalidated on this local
