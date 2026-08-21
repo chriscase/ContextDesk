@@ -94,8 +94,10 @@ The new provider-free browser bridge vertical is also prepared:
   same-snapshot completion, and pasted-chat handoff to Experiment Lab.
 
 The full browser flow is not claimed locally because this workstation blocks
-the fixture's `tsx` IPC pipe before Playwright can start. It is intended for
-the hosted browser job once this branch can be published.
+the fixture's loopback listener before Playwright can start. The fixture now
+uses Node's ESM loader rather than the `tsx` CLI, so hosted runs do not depend
+on the CLI's IPC pipe. It is intended for the hosted browser job once this
+branch can be published.
 
 The standalone headless comparison package also passed:
 
@@ -189,9 +191,8 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
    followed by explicitly enabled employer/Vercel runs when credentials and
    host profile ids are supplied.
 3. **Local browser execution is sandbox-limited.** The hosted Cursor browser
-   job is green; this workstation blocks both the `tsx` fixture IPC pipe and a
-   compiled demo listener on `127.0.0.1`, so local Playwright/browser execution
-   is not claimed.
+   job is green; this workstation blocks the fixture listener on `127.0.0.1`,
+   so local Playwright/browser execution is not claimed.
 4. **PostgreSQL is hosted-proven, not locally configured.** The local report
    uses memory plus filesystem evidence; hosted qualification covers the
    PostgreSQL path.

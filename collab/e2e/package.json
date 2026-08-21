@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Browser smoke and regression suite for the collab case-memory shell (war-room qualification).",
   "scripts": {
-    "serve:fixture": "tsx src/serve-fixture.ts",
+    "serve:fixture": "node --import tsx/esm src/serve-fixture.ts",
     "test": "playwright test",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

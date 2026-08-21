@@ -8,7 +8,7 @@ const baseURL = process.env.COLLAB_E2E_BASE_URL ?? `http://127.0.0.1:${port}`;
 const startFixture = process.env.COLLAB_E2E_START_FIXTURE !== "0";
 
 const webServer = {
-  command: "npx tsx src/serve-fixture.ts",
+  command: "node --import tsx/esm src/serve-fixture.ts",
   cwd: here,
   url: `${baseURL}/health`,
   reuseExistingServer: !process.env.CI,
