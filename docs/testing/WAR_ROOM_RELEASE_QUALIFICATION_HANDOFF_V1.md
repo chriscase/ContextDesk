@@ -13,7 +13,7 @@ needs an environment-dependent rehearsal.
 The local branch is:
 
 ```text
-codex/merge-consolidation-demo @ 7a53bbbb (unpublished local branch)
+codex/merge-consolidation-demo (unpublished local branch; see the branch tip for the latest validated commit)
 ```
 
 The branch contains the qualification harness, portable launcher, provider-free
