@@ -59,6 +59,19 @@ The direct bridge and server integration checks passed:
 - Rust bridge executor tests: result ordering, bounded progress, timeout, and
   output overflow covered.
 
+The standalone headless comparison package also passed:
+
+```text
+scripts/triage-comparison-demo.sh self-check
+initialized a temporary library
+imported the synthetic checkout case, snapshot, and three tasks
+created four deterministic recorded/replay runs
+self-check passed (4 runs; no provider calls)
+```
+
+This validates the offline fallback and report inputs separately from the
+browser surface.
+
 ## Hosted delegated evidence
 
 These remain draft and open:
