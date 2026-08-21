@@ -460,6 +460,25 @@
   font-size: 0.8rem;
 }
 
+.experiment-lab__signal-groups {
+  display: grid;
+  gap: 0.6rem;
+  margin-top: 0.55rem;
+}
+
+.experiment-lab__signal-group h6 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__path-kind--incomplete {
+  color: var(--warning);
+}
+
 .experiment-lab__paths {
   grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
   margin-top: 0.65rem;

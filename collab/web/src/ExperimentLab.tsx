@@ -60,6 +60,7 @@ interface ExperimentView {
     matchedAnchors: string[];
     missingAnchors: string[];
     extraAnchors: string[];
+    roleMismatches?: { evidenceRef: string; role: string }[];
     notes: string[];
   }[];
   traces: {
@@ -157,6 +158,32 @@ function latencyLabel(value: CandidateRow["observedLatency"]): string {
   return value.status === "observed" && typeof value.milliseconds === "number"
     ? `${value.milliseconds} ms`
     : "unknown";
+}
+
+// The alignment status alone ("partial", "unscored") reads like a verdict with a
+// hidden rationale; spell out what each status actually measures.
+const ALIGNMENT_STATUS_LABELS: Record<string, string> = {
+  aligned: "aligned — cites every benchmark anchor",
+  partial: "partially aligned",
+  divergent: "divergent — cites no benchmark anchor",
+  unscored: "unscored — no cited evidence to compare",
+  unknown: "unknown — not compared against a benchmark",
+  absent: "no benchmark recorded",
+};
+
+const TRACE_SOURCE_LABELS: Record<string, string> = {
+  plain_text: "pasted chat",
+  programmatic: "structured run",
+};
+
+const TRACE_COMPLETENESS_LABELS: Record<string, string> = {
+  exact: "complete trace",
+  partial: "partial trace — unproven steps stay unknown",
+  unknown: "trace coverage unknown",
+};
+
+function truncateText(value: string, max = 96): string {
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
 async function responseError(response: Response, fallback: string): Promise<string> {
@@ -278,6 +305,28 @@ export function ExperimentLab(props: {
   }, [props.caseId, props.participant?.username, readOnly]);
 
   const current = experiments.find((row) => row.id === active) ?? experiments[0] ?? null;
+  const candidateLabel = (candidateId: string): string =>
+    current?.candidates.find((row) => row.candidateId === candidateId)?.modelLabel ?? candidateId;
+  const readableSummary = (summary: string): string =>
+    (current?.candidates ?? []).reduce(
+      (text, row) => text.split(row.candidateId).join(row.modelLabel),
+      summary,
+    );
+  const latestDecision = current?.decisions.at(-1) ?? null;
+  const acceptedDecision = current
+    ? [...current.decisions].reverse().find((row) => row.status === "accepted") ?? null
+    : null;
+  // Count the divergences the strategy comparison actually lists; the
+  // agreement-derived count misses question/hypothesis divergences and would
+  // show a measured-looking zero next to a non-empty divergence list.
+  const divergenceCount = current
+    ? current.comparison?.divergence
+      ? current.comparison.divergence.length
+      : current.agreement.candidateSpecific.reduce(
+          (count, row) => count + row.evidenceRefs.length,
+          0,
+        ) + current.agreement.roleConflicts.length
+    : 0;
 
   function selectExperiment(id: string) {
     setActive(id);
@@ -720,21 +769,22 @@ export function ExperimentLab(props: {
               <strong>{current.agreement.sharedAnchors.length}</strong>
             </article>
             <article>
-              <span>Differences</span>
-              <strong>
-                {current.agreement.candidateSpecific.reduce(
-                  (count, row) => count + row.evidenceRefs.length,
-                  0,
-                ) + current.agreement.roleConflicts.length}
-              </strong>
+              <span>Divergences</span>
+              <strong>{divergenceCount}</strong>
             </article>
             <article>
               <span>Human reviews</span>
               <strong>{current.observations.length}</strong>
             </article>
             <article>
+              <span>Decision</span>
+              <strong>
+                {latestDecision ? `${latestDecision.status} r${latestDecision.revision}` : "none yet"}
+              </strong>
+            </article>
+            <article>
               <span>Benchmark</span>
-              <strong>{current.gold ? `v${current.gold.version}` : "—"}</strong>
+              <strong>{current.gold ? `v${current.gold.version}` : "none yet"}</strong>
             </article>
           </div>
           <section className="experiment-lab__gold" aria-label="Gold reference">
@@ -742,9 +792,11 @@ export function ExperimentLab(props: {
               <>
                 <h4 className="experiment-lab__heading">Gold reference v{current.gold.version}</h4>
                 <p className="timeline__meta">
-                  Human benchmark from accepted decision {current.gold.acceptedDecisionId} r
-                  {current.gold.acceptedDecisionRevision}, promoted by{" "}
-                  {current.gold.promotedByUsername}. Evidence:{" "}
+                  Human benchmark from accepted decision{" "}
+                  {acceptedDecision && acceptedDecision.id === current.gold.acceptedDecisionId
+                    ? `“${truncateText(acceptedDecision.text)}” (r${current.gold.acceptedDecisionRevision})`
+                    : `${current.gold.acceptedDecisionId} r${current.gold.acceptedDecisionRevision}`}
+                  , promoted by {current.gold.promotedByUsername}. Evidence:{" "}
                   {current.gold.evidenceAnchors.join(", ")}.
                 </p>
                 <p className="experiment-lab__disclaimer">
@@ -823,7 +875,8 @@ export function ExperimentLab(props: {
                   <ul className="experiment-lab__detail-list">
                     {current.agreement.sharedAnchors.map((anchor) => (
                       <li key={`${anchor.evidenceRef}:${anchor.role}`}>
-                        Shared {anchor.evidenceRef} as {anchor.role} ({anchor.candidateIds.join(", ")})
+                        Shared {anchor.evidenceRef} as {anchor.role} (
+                        {anchor.candidateIds.map(candidateLabel).join(", ")})
                       </li>
                     ))}
                   </ul>
@@ -837,13 +890,13 @@ export function ExperimentLab(props: {
                   <ul className="experiment-lab__detail-list">
                     {current.agreement.candidateSpecific.map((row) => (
                       <li key={row.candidateId}>
-                        {row.candidateId} only: {row.evidenceRefs.join(", ") || "none"}
+                        {candidateLabel(row.candidateId)} only: {row.evidenceRefs.join(", ") || "none"}
                       </li>
                     ))}
                     {current.agreement.roleConflicts.map((row) => (
                       <li key={row.evidenceRef}>
                         Role conflict on {row.evidenceRef}:{" "}
-                        {row.assignments.map((a) => `${a.candidateId}=${a.role}`).join("; ")}
+                        {row.assignments.map((a) => `${candidateLabel(a.candidateId)} treats it as ${a.role}`).join("; ")}
                       </li>
                     ))}
                   </ul>
@@ -868,42 +921,75 @@ export function ExperimentLab(props: {
             <p className="timeline__meta">
               Gold {current.comparison?.gold.status ?? "unknown"}
               {current.comparison?.gold.acceptedDecisionId
-                ? ` · accepted decision ${current.comparison.gold.acceptedDecisionId}`
+                ? acceptedDecision && acceptedDecision.id === current.comparison.gold.acceptedDecisionId
+                  ? ` · accepted decision (r${acceptedDecision.revision}): “${truncateText(acceptedDecision.text)}”`
+                  : ` · accepted decision ${current.comparison.gold.acceptedDecisionId}`
                 : " · no accepted gold decision"}
               {" · "}
               Helpfulness {current.candidates.map((row) => `${row.modelLabel}:${row.helpfulnessState}`).join(", ")}
             </p>
-            <ul className="experiment-lab__signal-list">
-              {(current.comparison?.questionPaths ?? []).map((path) => (
-                <li key={path.pathId} className="timeline__item">
-                  Question path: {path.excerpt ?? "unknown"} ({path.candidateIds.join(", ")})
-                </li>
-              ))}
-              {(current.comparison?.sharedEvidence ?? []).map((row) => (
-                <li key={`shared-${row.evidenceRef}`} className="timeline__item">
-                  Shared evidence {row.evidenceRef} ({row.candidateIds.join(", ")})
-                </li>
-              ))}
-              {(current.comparison?.uniqueEvidence ?? []).map((row) =>
-                row.evidenceRefs.length ? (
-                  <li key={`unique-${row.candidateId}`} className="timeline__item">
-                    Unique to {row.candidateId}: {row.evidenceRefs.join(", ")}
-                  </li>
-                ) : null,
-              )}
-              {(current.comparison?.divergence ?? []).map((row) => (
-                <li key={`${row.kind}:${row.summary}`} className="timeline__item">
-                  Divergence ({row.kind}): {row.summary}
-                </li>
-              ))}
-              {(current.comparison?.convergence ?? [])
-                .filter((row) => row.inGold)
-                .map((row) => (
-                  <li key={`gold-${row.evidenceRef}`} className="timeline__item">
-                    Converges on gold {row.evidenceRef}
-                  </li>
-                ))}
-            </ul>
+            <div className="experiment-lab__signal-groups">
+              {(current.comparison?.questionPaths ?? []).length ? (
+                <div className="experiment-lab__signal-group">
+                  <h6>Questions asked</h6>
+                  <ul className="experiment-lab__signal-list">
+                    {(current.comparison?.questionPaths ?? []).map((path) => (
+                      <li key={path.pathId} className="timeline__item">
+                        Question path: {path.excerpt ?? "unknown"} (
+                        {path.candidateIds.map(candidateLabel).join(", ")})
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {(current.comparison?.sharedEvidence ?? []).length ||
+              (current.comparison?.uniqueEvidence ?? []).some((row) => row.evidenceRefs.length) ? (
+                <div className="experiment-lab__signal-group">
+                  <h6>Evidence overlap</h6>
+                  <ul className="experiment-lab__signal-list">
+                    {(current.comparison?.sharedEvidence ?? []).map((row) => (
+                      <li key={`shared-${row.evidenceRef}`} className="timeline__item">
+                        Shared evidence {row.evidenceRef} (
+                        {row.candidateIds.map(candidateLabel).join(", ")})
+                      </li>
+                    ))}
+                    {(current.comparison?.uniqueEvidence ?? []).map((row) =>
+                      row.evidenceRefs.length ? (
+                        <li key={`unique-${row.candidateId}`} className="timeline__item">
+                          Unique to {candidateLabel(row.candidateId)}: {row.evidenceRefs.join(", ")}
+                        </li>
+                      ) : null,
+                    )}
+                  </ul>
+                </div>
+              ) : null}
+              {(current.comparison?.divergence ?? []).length ? (
+                <div className="experiment-lab__signal-group">
+                  <h6>Where the strategies disagree</h6>
+                  <ul className="experiment-lab__signal-list">
+                    {(current.comparison?.divergence ?? []).map((row) => (
+                      <li key={`${row.kind}:${row.summary}`} className="timeline__item">
+                        Divergence ({row.kind}): {readableSummary(row.summary)}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {(current.comparison?.convergence ?? []).some((row) => row.inGold) ? (
+                <div className="experiment-lab__signal-group">
+                  <h6>Convergence on the human benchmark</h6>
+                  <ul className="experiment-lab__signal-list">
+                    {(current.comparison?.convergence ?? [])
+                      .filter((row) => row.inGold)
+                      .map((row) => (
+                        <li key={`gold-${row.evidenceRef}`} className="timeline__item">
+                          Converges on gold {row.evidenceRef}
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
             <h5 className="experiment-lab__subheading">Strategy paths</h5>
             <div className="experiment-lab__paths">
               {(current.traces ?? []).map((trace) => (
@@ -911,10 +997,17 @@ export function ExperimentLab(props: {
                   <header className="experiment-lab__path-header">
                     <div>
                       <p className="experiment-lab__eyebrow">Candidate path</p>
-                      <h5 className="experiment-lab__path-title">{trace.candidateId}</h5>
+                      <h5 className="experiment-lab__path-title">{candidateLabel(trace.candidateId)}</h5>
                     </div>
-                    <span className="experiment-lab__path-kind">
-                      {trace.sourceKind} · {trace.completeness}
+                    <span
+                      className={
+                        trace.completeness === "exact"
+                          ? "experiment-lab__path-kind"
+                          : "experiment-lab__path-kind experiment-lab__path-kind--incomplete"
+                      }
+                    >
+                      {TRACE_SOURCE_LABELS[trace.sourceKind] ?? trace.sourceKind} ·{" "}
+                      {TRACE_COMPLETENESS_LABELS[trace.completeness] ?? trace.completeness}
                     </span>
                   </header>
                   <p className="experiment-lab__path-meta">
@@ -1015,8 +1108,8 @@ export function ExperimentLab(props: {
           <ul className="experiment-lab__detail-list">
             {current.observations.map((row) => (
               <li key={row.id} className="timeline__item">
-                Helpfulness: {row.reviewerUsername} scored {row.candidateId} {row.dimension}{" "}
-                {row.score}: {row.rationale}
+                Helpfulness: {row.reviewerUsername} scored {candidateLabel(row.candidateId)}{" "}
+                {row.dimension.replaceAll("_", " ")} {row.score}/3: {row.rationale}
               </li>
             ))}
           </ul>
@@ -1035,9 +1128,17 @@ export function ExperimentLab(props: {
           <ul className="timeline">
             {(current.alignments ?? []).map((row) => (
               <li key={row.candidateId} className="timeline__item">
-                {row.candidateId}: {row.status}
+                {candidateLabel(row.candidateId)}: {ALIGNMENT_STATUS_LABELS[row.status] ?? row.status}
                 {row.matchedAnchors.length ? ` · matched ${row.matchedAnchors.join(", ")}` : ""}
                 {row.missingAnchors.length ? ` · missing ${row.missingAnchors.join(", ")}` : ""}
+                {row.extraAnchors.length
+                  ? ` · beyond the benchmark: ${row.extraAnchors.join(", ")}`
+                  : ""}
+                {(row.roleMismatches ?? []).length
+                  ? ` · role differs on ${(row.roleMismatches ?? [])
+                      .map((mismatch) => `${mismatch.evidenceRef} (treated as ${mismatch.role})`)
+                      .join(", ")}`
+                  : ""}
               </li>
             ))}
           </ul>
@@ -1148,7 +1249,7 @@ export function ExperimentLab(props: {
                       <dd>
                         {typeof exported.review?.candidates?.length === "number"
                           ? `${exported.review.candidates.length} candidate${exported.review.candidates.length === 1 ? "" : "s"}`
-                          : "Review projection"}
+                          : "Not listed in this export"}
                       </dd>
                     </div>
                     <div>
@@ -1174,7 +1275,7 @@ export function ExperimentLab(props: {
                       <dd>
                         {typeof exported.traces?.length === "number"
                           ? `${exported.traces.length} trace${exported.traces.length === 1 ? "" : "s"}`
-                          : "Included in projection"}
+                          : "Not listed in this export"}
                       </dd>
                     </div>
                   </dl>

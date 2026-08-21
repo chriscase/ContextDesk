@@ -19,7 +19,7 @@ export interface CaseBoardInput {
   generatedAt: string;
   artifacts: ArtifactV1[];
   contributions: ContributionV1[];
-  acceptedDecision?: AcceptedDecisionBoardInput | null;
+  acceptedDecisions?: AcceptedDecisionBoardInput[];
   goldStatus?: CaseBoardGoldStatus;
 }
 
@@ -126,13 +126,13 @@ export function deriveCaseBoard(input: CaseBoardInput): CaseBoardV1 {
     });
   }
 
-  if (input.acceptedDecision) {
+  for (const decision of input.acceptedDecisions ?? []) {
     findings.push({
-      id: findingId("concluded", input.acceptedDecision.id),
+      id: findingId("concluded", decision.id),
       bucket: "newly_concluded",
-      statement: input.acceptedDecision.statement,
-      evidenceRefs: [...input.acceptedDecision.evidenceRefs].sort(),
-      contributionRefs: [...(input.acceptedDecision.contributionRefs ?? [])].sort(),
+      statement: decision.statement,
+      evidenceRefs: [...decision.evidenceRefs].sort(),
+      contributionRefs: [...(decision.contributionRefs ?? [])].sort(),
       agreement: "unknown",
       confidence: "unknown",
       basis: "accepted_decision",
