@@ -55,6 +55,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod collab_export;
 pub mod engine;
 pub mod error;
 pub mod fingerprint;
@@ -64,6 +65,10 @@ pub mod replay;
 pub mod request;
 pub mod share_safe;
 
+pub use collab_export::{
+    project_strategy_package, StrategyLaneSpec, StrategyPackageOptions,
+    BENCH_RUN_ARTIFACT_SCHEMA_V1, INTERACTION_TRACE_SCHEMA_V1, STRATEGY_PACKAGE_SCHEMA_V1,
+};
 pub use engine::{
     run_deterministic_mock, MockCorrection, MockEnginePlan, MockRunOutcome, MockSlotOutcome,
     MockSlotPlan, MockTerminalPlan, MockValidation, DETERMINISTIC_MOCK_REASON_CODE,

@@ -267,7 +267,12 @@ hand-written `project_share_safe` output, surfaced by `contextdesk
 bench-compare` as its `share_safe` field and gated by the real share-safe
 scanner. Model attribution in a report is bound to that same provenance: only
 a `contextdesk_sdk` row whose raw output is recognisably the adapter envelope
-is credited with an exact model identity.
+is credited with an exact model identity. A hermetic collab converter
+(`project_strategy_package` in this adapter; `cd-collab.bench_run_artifact.v1`
+in collab contracts) can land labeled share-safe lanes on an Experiment Lab
+case as `interaction_trace.v1` / `strategy_package.v1` without inventing gold,
+cost, usage, prompts, or provider calls. GUI live execution remains out of
+scope for that seam.
 
 Focused fast lanes should cover the leaf SDK, runtime facade, bench, and
 adapter. Production-path workflow tests belong in the existing Rust shards.

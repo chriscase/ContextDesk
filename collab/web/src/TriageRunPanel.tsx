@@ -215,6 +215,9 @@ export function TriageRunPanel(props: {
   const [handoffJobId, setHandoffJobId] = useState<string | null>(null);
   const [handoffExperimentId, setHandoffExperimentId] = useState<string | null>(null);
   const [handoffError, setHandoffError] = useState<string | null>(null);
+  const [benchArtifactText, setBenchArtifactText] = useState("");
+  const [benchImportBusy, setBenchImportBusy] = useState(false);
+  const [benchImportExperimentId, setBenchImportExperimentId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loadRequestToken = useRef(0);
 
@@ -424,6 +427,62 @@ export function TriageRunPanel(props: {
     }
   }
 
+  async function importBenchArtifact() {
+    if (benchImportBusy) return;
+    setBenchImportBusy(true);
+    setBenchImportExperimentId(null);
+    setError(null);
+    let body: unknown;
+    try {
+      body = JSON.parse(benchArtifactText);
+    } catch {
+      setError("Bench artifact JSON is invalid.");
+      setBenchImportBusy(false);
+      return;
+    }
+    try {
+      const response = await fetch(`/api/cases/${props.caseId}/experiments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        setError(await errorText(response, "Bench artifact could not be imported."));
+        return;
+      }
+      const experiment = (await response.json()) as { id?: unknown };
+      if (typeof experiment.id !== "string" || !experiment.id) {
+        setError("Bench artifact import returned no experiment id.");
+        return;
+      }
+      setBenchArtifactText("");
+      setBenchImportExperimentId(experiment.id);
+      window.dispatchEvent(
+        new CustomEvent("contextdesk:experiment-created", {
+          detail: { experimentId: experiment.id },
+        }),
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? boundedError(cause.message, "Bench artifact could not be imported.")
+          : "Bench artifact could not be imported.",
+      );
+    } finally {
+      setBenchImportBusy(false);
+    }
+  }
+
+  function onBenchArtifactFile(file: File | null) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") setBenchArtifactText(reader.result);
+    };
+    reader.onerror = () => setError("Bench artifact file could not be read.");
+    reader.readAsText(file);
+  }
+
   function reuse(job: JobView) {
     setSelectedSnapshotId(job.snapshotId);
     setMode(job.request.mode);
@@ -597,6 +656,49 @@ export function TriageRunPanel(props: {
                 </>
               )}
             </div>
+          ) : null}
+          {!props.readOnly && props.canLead ? (
+            <section className="triage-runs__handoff" aria-labelledby="triage-runs-bench-import-heading">
+              <div>
+                <p className="case-memory__eyebrow">Recorded / bench-compare import</p>
+                <h4 id="triage-runs-bench-import-heading">Land a hermetic multi-strategy artifact on this case</h4>
+                <p className="case-memory__note">
+                  Convert share-safe bench-compare or recorded-replay lanes into Experiment Lab
+                  candidates and traces. The primary review stays the readable candidate table;
+                  raw JSON is only the import input.
+                </p>
+              </div>
+              <label className="triage-runs__field">
+                Artifact file
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={(event) => onBenchArtifactFile(event.target.files?.[0] ?? null)}
+                />
+              </label>
+              <label className="triage-runs__field">
+                Artifact JSON
+                <textarea
+                  rows={5}
+                  value={benchArtifactText}
+                  onChange={(event) => setBenchArtifactText(event.target.value)}
+                  placeholder="cd-collab.bench_run_artifact.v1 with synthetic lane labels"
+                />
+              </label>
+              <button
+                className="case-memory__secondary-button"
+                type="button"
+                disabled={benchImportBusy || !benchArtifactText.trim()}
+                onClick={() => void importBenchArtifact()}
+              >
+                {benchImportBusy ? "Importing…" : "Import into Experiment Lab"}
+              </button>
+              {benchImportExperimentId ? (
+                <p className="triage-runs__handoff-success" role="status">
+                  Experiment {shortHash(benchImportExperimentId)} imported from the bench artifact.
+                </p>
+              ) : null}
+            </section>
           ) : null}
           {jobs.length === 0 ? (
             <p className="case-memory__empty">No triage runs yet. The first run will be bound to the selected snapshot and ready for later comparison.</p>

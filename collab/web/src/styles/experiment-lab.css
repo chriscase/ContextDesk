@@ -71,6 +71,14 @@
   margin-top: 0.65rem;
 }
 
+.experiment-lab__file {
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 0.65rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .experiment-lab__matrix th,
 .experiment-lab__matrix td {
   border-bottom: 1px solid var(--border);
