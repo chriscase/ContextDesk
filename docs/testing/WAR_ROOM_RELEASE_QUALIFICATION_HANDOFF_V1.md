@@ -311,6 +311,11 @@ the collaborative surface for reviewing and adjudicating the resulting runs.
    adversarial tests cover the War-Room surfaces and the delegated audit
    findings were addressed locally, but no separate Claude Code patch/review
    has been obtained because that session was unavailable.
+8. **Delegated-agent transport is unavailable in this environment.** Claude
+   and Cursor Computer Use are not approved, while the direct Grok Build CLI
+   could not create a session after DNS failure to its proxy and a local
+   filesystem permission error. No delegated-agent result is claimed for the
+   current branch.
 
 The exact local bridge-browser scenario was attempted at this HEAD and failed
 before Playwright startup with `listen EPERM 127.0.0.1:8788`; this is an
