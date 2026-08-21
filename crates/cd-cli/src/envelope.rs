@@ -110,6 +110,14 @@ pub type CliResult<T> = Result<T, CliError>;
 pub struct CliError {
     pub category: ExitCategory,
     pub message: String,
+    /// Structured, machine-readable detail for failures that have a typed
+    /// contract of their own (currently the import outcome).
+    ///
+    /// A script gets the same facts it would have got on success, instead of
+    /// having to parse prose out of `message`. Additive and optional: the
+    /// envelope omits the field entirely when absent, so the shape is
+    /// unchanged for every existing error.
+    pub details: Option<serde_json::Value>,
 }
 
 impl CliError {
@@ -117,7 +125,14 @@ impl CliError {
         Self {
             category,
             message: message.into(),
+            details: None,
         }
+    }
+
+    /// Attach a typed detail document to this failure.
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 
     pub fn user(message: impl Into<String>) -> Self {
@@ -195,6 +210,10 @@ pub struct Envelope<T: Serialize> {
 pub struct ErrorEnvelope {
     pub kind: &'static str,
     pub message: String,
+    /// Typed detail document when the failing command has one. Omitted
+    /// entirely otherwise — a new optional field, not an envelope change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 impl<T: Serialize> Envelope<T> {
@@ -219,6 +238,7 @@ impl Envelope<()> {
             error: Some(ErrorEnvelope {
                 kind: error.category.kind(),
                 message: error.message.clone(),
+                details: error.details.clone(),
             }),
         }
     }

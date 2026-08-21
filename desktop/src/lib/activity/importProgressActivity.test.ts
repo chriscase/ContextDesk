@@ -168,6 +168,56 @@ describe("live import Activity projection", () => {
     expect(events.every((event) => event.corpusId === "corpus-a")).toBe(true);
   });
 
+  it("does not settle a classified partial run as a complete publish", () => {
+    let attempt = beginImportActivityAttempt("import:partial", "file");
+    attempt = recordImportProgress(
+      attempt,
+      progress("completed", {
+        correlation_id: "import:partial",
+        elapsed_ms: 40,
+      }),
+    );
+    const settled = settleImportActivityAttempt(attempt, {
+      ...completedRun(),
+      outcome: "partial",
+      report: {
+        ...completedRun().report!,
+        partial: false,
+        outcome: { class: "partial" },
+      },
+    });
+    const last = settled.events.at(-1);
+    expect(last?.label).toBe("Corpus published with defects (PARTIAL)");
+    expect(last?.label).not.toContain("Explorer can refresh");
+    expect(last?.status).toBe("ok");
+    expect(last?.detail).toContain("event");
+  });
+
+  it("settles an uncertified run as UNKNOWN, not as a complete publish or an invented PARTIAL", () => {
+    let attempt = beginImportActivityAttempt("import:unknown", "file");
+    attempt = recordImportProgress(
+      attempt,
+      progress("completed", {
+        correlation_id: "import:unknown",
+        elapsed_ms: 40,
+      }),
+    );
+    const settled = settleImportActivityAttempt(attempt, {
+      ...completedRun(),
+      outcome: "unknown",
+      report: {
+        ...completedRun().report!,
+        partial: false,
+      },
+    });
+    const last = settled.events.at(-1);
+    expect(last?.label).toBe("Corpus published — outcome unverified (UNKNOWN)");
+    expect(last?.label).not.toContain("Explorer can refresh");
+    expect(last?.label).not.toContain("PARTIAL");
+    expect(last?.status).toBe("ok");
+    expect(last?.detail).toContain("event");
+  });
+
   it("uses causal sequence when measured elapsed time is absent or regresses", () => {
     let attempt = beginImportActivityAttempt("import:sequence", "directory");
     attempt = recordImportProgress(

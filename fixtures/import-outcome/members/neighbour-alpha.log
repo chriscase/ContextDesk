@@ -1,0 +1,3 @@
+2026-03-01 09:00:00,000 INFO  [alpha.worker] neighbour alpha started
+2026-03-01 09:00:01,000 WARN  [alpha.worker] neighbour alpha retrying
+2026-03-01 09:00:02,000 INFO  [alpha.worker] neighbour alpha recovered

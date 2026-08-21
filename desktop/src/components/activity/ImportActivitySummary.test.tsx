@@ -117,6 +117,30 @@ describe("the import summary is quiet by default and honest when opened", () => 
     );
   });
 
+  it("does not record a classified partial import as completed", () => {
+    render(
+      <ImportActivitySummary
+        run={run({
+          outcome: "partial",
+          report: {
+            ...run().report!,
+            partial: false,
+            outcome: { class: "partial" },
+          },
+        })}
+      />,
+    );
+    const summary = screen.getByTestId("activity-import-summary");
+    expect(summary.getAttribute("data-outcome")).toBe("partial");
+    expect(summary.getAttribute("data-outcome")).not.toBe("completed");
+    fireEvent.click(screen.getByTestId("activity-import-details-toggle"));
+    const ledger = screen.getByTestId("activity-import-ledger");
+    expect(ledger.textContent).toMatch(/Coverage/);
+    expect(ledger.textContent).toMatch(
+      /Partial — the import finished with defects/,
+    );
+  });
+
   it("reports a failed import as publishing nothing", () => {
     render(
       <ImportActivitySummary

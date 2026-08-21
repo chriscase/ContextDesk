@@ -1152,6 +1152,7 @@ fn print_json_failure(error: &CliError, activity: Option<&cd_core::activity::Tur
         error: crate::envelope::ErrorEnvelope {
             kind: error.category.kind(),
             message: error.message.clone(),
+            details: error.details.clone(),
         },
     };
     println!(
