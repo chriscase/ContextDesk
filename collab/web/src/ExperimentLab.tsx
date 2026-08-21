@@ -343,16 +343,6 @@ export function ExperimentLab(props: {
     }
   }
 
-  function onBenchFileSelected(file: File | null) {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === "string") setBenchPayload(reader.result);
-    };
-    reader.onerror = () => setError("Bench artifact file could not be read");
-    reader.readAsText(file);
-  }
-
   async function recordHelpfulness(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!current) return;
@@ -670,20 +660,12 @@ export function ExperimentLab(props: {
         <details className="experiment-lab__tools">
           <summary>Import bench-compare / recorded artifact</summary>
           <p className="experiment-lab__section-note">
-            Choose a hermetic multi-strategy bench artifact (or paste share-safe lanes with
-            synthetic model labels). The converter lands candidates and traces on this case without
-            inventing gold, cost, usage, or provider calls. Raw JSON stays here; the primary view
-            remains the candidate table, evidence, and accepted decision.
+            Paste a hermetic multi-strategy bench artifact (share-safe lanes with synthetic model
+            labels). The converter lands candidates and traces on this case without inventing gold,
+            cost, usage, or provider calls. Raw JSON stays here; the primary view remains the
+            candidate table, evidence, and accepted decision.
           </p>
           <form className="composer" onSubmit={(event) => void importBenchArtifact(event)}>
-            <label className="experiment-lab__file">
-              <span>Artifact file</span>
-              <input
-                type="file"
-                accept="application/json,.json"
-                onChange={(event) => onBenchFileSelected(event.target.files?.[0] ?? null)}
-              />
-            </label>
             <textarea
               className="login__input"
               rows={6}
