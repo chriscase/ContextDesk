@@ -1,0 +1,25 @@
+{
+  "schemaId": "cd-collab.doctor_report.v1",
+  "privacyClass": "share_safe",
+  "ok": true,
+  "errorCount": 0,
+  "warnCount": 1,
+  "checks": [
+    { "id": "node_runtime", "status": "ok", "summary": "Node runtime meets the workspace floor" },
+    { "id": "built_artifacts", "status": "ok", "summary": "compiled server and contracts artifacts are present" },
+    { "id": "storage", "status": "ok", "summary": "local demo storage does not require postgres" },
+    { "id": "evidence_root", "status": "ok", "summary": "evidence root is a writable directory" },
+    { "id": "static_dir", "status": "warn", "summary": "static directory is unset; API-only" },
+    { "id": "auth_mode", "status": "ok", "summary": "auth mode is local demo" },
+    { "id": "ldap_tls", "status": "ok", "summary": "directory is not required in local demo mode" },
+    { "id": "cookie_security", "status": "ok", "summary": "insecure cookies are allowed only for local demo" },
+    { "id": "rust_bridge", "status": "ok", "summary": "host bridge is unset; hermetic collab will not invoke it" },
+    { "id": "profile_catalog", "status": "ok", "summary": "live profile catalog is unset; live lanes stay skipped" },
+    { "id": "port", "status": "ok", "summary": "listen port is an integer in range" }
+  ],
+  "caveats": [
+    "doctor_checks_configuration_shape_only",
+    "not_provider_compatibility",
+    "live_results_are_not_fabricated"
+  ]
+}

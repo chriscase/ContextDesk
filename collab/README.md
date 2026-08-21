@@ -210,6 +210,24 @@ loopback port. The production entry point and readiness contract are unchanged.
 local-only external-chat intake workflow are documented in
 [`CONTEXTDESK_DEMO_RUNBOOK.md`](../docs/benchmarks/CONTEXTDESK_DEMO_RUNBOOK.md).
 
+## Operator readiness
+
+For a compile-first configuration check and safe setup template:
+
+```bash
+cd collab
+npm run config:init -- --profile demo --output .env.local --yes
+npm run doctor
+npm run doctor -- --json
+```
+
+`doctor` checks runtime/artifacts, storage shape, evidence and static paths,
+auth/LDAP transport, cookie security, the optional host bridge, live-profile
+syntax, and the listen port. It does not contact PostgreSQL, LDAP, Vercel, or
+any model provider. Its versioned output is
+`cd-collab.doctor_report.v1`; see
+[`COLLAB_OPERATOR_READINESS_V1.md`](../docs/testing/COLLAB_OPERATOR_READINESS_V1.md).
+
 ## Local PostgreSQL
 
 ```bash

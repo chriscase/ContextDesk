@@ -269,4 +269,25 @@ describe("JSON Schema additionalProperties: false", () => {
       }),
     ).toBe(false);
   });
+
+  it("doctor report and profile catalog schemas fail closed", () => {
+    const doctor = ajv.compile(loadSchema("doctor-report.v1.json"));
+    const catalog = ajv.compile(loadSchema("profile-catalog.v1.json"));
+    expect(
+      doctor(JSON.parse(readFileSync(join(fixturesDir, "doctor-report.valid.json"), "utf8"))),
+    ).toBe(true);
+    expect(
+      doctor(
+        JSON.parse(readFileSync(join(fixturesDir, "doctor-report.unknown-field.json"), "utf8")),
+      ),
+    ).toBe(false);
+    expect(
+      catalog(JSON.parse(readFileSync(join(fixturesDir, "profile-catalog.valid.json"), "utf8"))),
+    ).toBe(true);
+    expect(
+      catalog(
+        JSON.parse(readFileSync(join(fixturesDir, "profile-catalog.unknown-field.json"), "utf8")),
+      ),
+    ).toBe(false);
+  });
 });

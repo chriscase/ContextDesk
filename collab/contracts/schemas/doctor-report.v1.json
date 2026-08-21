@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cd-collab.doctor_report.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "privacyClass",
+    "ok",
+    "errorCount",
+    "warnCount",
+    "checks",
+    "caveats"
+  ],
+  "properties": {
+    "schemaId": { "const": "cd-collab.doctor_report.v1" },
+    "privacyClass": { "const": "share_safe" },
+    "ok": { "type": "boolean" },
+    "errorCount": { "type": "integer", "minimum": 0 },
+    "warnCount": { "type": "integer", "minimum": 0 },
+    "checks": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "summary"],
+        "properties": {
+          "id": {
+            "enum": [
+              "node_runtime",
+              "built_artifacts",
+              "storage",
+              "evidence_root",
+              "static_dir",
+              "auth_mode",
+              "ldap_tls",
+              "cookie_security",
+              "rust_bridge",
+              "profile_catalog",
+              "port"
+            ]
+          },
+          "status": { "enum": ["ok", "warn", "error"] },
+          "summary": { "type": "string" }
+        }
+      }
+    },
+    "caveats": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "enum": [
+          "doctor_checks_configuration_shape_only",
+          "not_provider_compatibility",
+          "live_results_are_not_fabricated"
+        ]
+      }
+    }
+  }
+}

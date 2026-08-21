@@ -16,11 +16,10 @@ The local branch is:
 codex/merge-consolidation-demo (unpublished local branch; current HEAD)
 ```
 
-The local qualification additions are in `e3e40a2e`; the portable compiled
-qualification launcher is in `8854b26e`; the latest qualification evidence and
-handoff corrections are in this document, and the provider-free browser bridge
-vertical is in `61f97868`. The branch is not published because
-the workstation could not resolve `github.com` during the last push attempt.
+The branch contains the qualification harness, portable launcher, provider-free
+browser bridge vertical, and the selectively ported operator-readiness
+contracts/configuration tools described below. It is not published because the
+workstation could not resolve `github.com` during the last push attempt.
 
 No merge, close, retarget, or rewrite was performed on any external PR.
 
@@ -48,22 +47,25 @@ The current report proves:
 
 The full local demo gate also passed:
 
-- contracts: 41 tests;
-- server: 109 passed, 10 environment-gated skips;
+- contracts: 47 tests;
+- server: 125 passed, 10 environment-gated skips;
 - web: 36 tests;
 - typecheck, lint, and static synthetic demo build.
 
 The operator-readiness slice is now local and validated as well:
 
-- `npm run doctor` reports a versioned, machine-readable status without
-  contacting PostgreSQL, LDAP, Vercel, or a model provider;
-- `npm run config:init -- --output PATH` creates a mode-600 private-demo
-  template and required `.data/evidence` directory, and refuses accidental
-  overwrite;
-- doctor/config tests: 8 passed, including plaintext-LDAP rejection,
-  external insecure-cookie rejection, malformed profile detection, secret-safe
-  output, and initializer overwrite protection;
-- the full server gate is now 109 passed / 10 environment-gated skips.
+- `npm run doctor` reports the versioned share-safe
+  `cd-collab.doctor_report.v1` contract without contacting PostgreSQL, LDAP,
+  Vercel, or a model provider;
+- `npm run config:init -- --profile demo|postgres|ldap --output PATH` creates
+  a mode-600 profile-specific template and required `.data/evidence` directory,
+  and refuses accidental overwrite;
+- the versioned profile catalog contract rejects unknown fields, endpoints,
+  and duplicate aliases; the operator suite has 19 passing tests, including
+  plaintext-LDAP rejection, external insecure-cookie rejection, artifact and
+  port checks, safe catalog parsing, secret-safe output, and initializer
+  overwrite protection;
+- the full server gate is now 125 passed / 10 environment-gated skips.
 
 The direct bridge and server integration checks passed:
 
@@ -114,6 +116,10 @@ These remain draft and open:
   architecture qualification, head `bddc5afb`: hosted typecheck, lint, test,
   migration dry-run, PostgreSQL, and OpenLDAP-backed Collab job passed after
   the UUID storage-boundary regression fix.
+- [PR #938](https://github.com/chriscase/ContextDesk/pull/938), Grok operator
+  readiness, remains draft/open at head `eed1ffb5`. Its operator contract and
+  configuration-shape improvements were selectively ported and revalidated on
+  this local branch; the PR itself was not modified.
 
 Neither PR is merged, closed, or retargeted.
 
@@ -192,11 +198,12 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
 
 ## Next delegated milestone
 
-The operator-ready initializer and `npm run doctor` slice is implemented and
-locally validated at `cac7ead6`; the current-architecture demo/install prompt
-has been handed to Grok Build as the next isolated slice. The next delegated
-validation remains a hosted Cursor browser run against this exact branch,
-followed by explicitly opt-in live rehearsals for the employer profiles and
-Vercel after network access is restored. Those runs must retain the existing
-redaction boundary: no credentials, prompts, endpoints, request ids, or raw
-captures in Collab.
+The next Grok Build slice is an opt-in live-qualification runner layered on
+the existing `RustBridgeTriageExecutor` and triage-job service. It should
+exercise explicitly selected employer/Vercel profiles, preserve exact model
+and snapshot provenance, and emit a versioned share-safe report without
+credentials, prompts, endpoints, request ids, or raw captures. Its default
+path must remain provider-free and hermetic. A hosted Cursor browser run
+against the exact current branch and real provider rehearsals remain pending
+until the branch can be published and the relevant network/profile access is
+available.
