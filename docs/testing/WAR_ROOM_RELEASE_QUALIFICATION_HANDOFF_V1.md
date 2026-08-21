@@ -51,7 +51,7 @@ The current full local demo gate passes:
 
 - contracts: 49 tests;
 - server: 145 passed, 10 environment-gated skips;
-- web: 37 tests;
+- web: 38 tests;
 - typecheck, lint, and static synthetic demo build.
 
 The exact-branch browser attempt was also checked:
@@ -118,7 +118,7 @@ The local follow-up hardening after reviewing Grok Build PR #939 is also green:
   paths where appropriate.
 
 The post-hardening qualification and demo gates remain green at the current
-HEAD: 49 contract tests, 145 server tests with 10 environment-gated skips, 37
+HEAD: 49 contract tests, 145 server tests with 10 environment-gated skips, 38
 web tests, typecheck, lint, and static synthetic demo build. A local
 qualification/doctor/sanitizer round-trip also passed with the required
 `qualify-memory.json` and `doctor.json` outputs.
