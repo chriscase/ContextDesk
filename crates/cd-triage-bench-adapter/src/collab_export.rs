@@ -23,7 +23,6 @@ const AGREEMENT_NOT_CORRECTNESS: &str = "Agreement is not proof of correctness."
 const NO_GOLD: &str = "Hermetic bench-artifact import never invents a gold reference.";
 const NO_PROVIDER: &str = "Hermetic bench-artifact import performs no provider calls.";
 const UNKNOWN_COST_USAGE: &str = "Cost and usage stay unknown unless the share-safe projection already proved them; this converter never invents either.";
-const MAX_EXCERPT: usize = 240;
 
 /// One labeled share-safe lane for Experiment Lab import.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,18 +54,6 @@ pub struct StrategyPackageOptions {
     /// Optional operator notes preserved on the agreement.
     #[serde(default)]
     pub notes: Vec<String>,
-}
-
-fn bound_excerpt(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.chars().count() <= MAX_EXCERPT {
-        Some(trimmed.to_string())
-    } else {
-        Some(trimmed.chars().take(MAX_EXCERPT).collect())
-    }
 }
 
 fn reject_deepseek(label: &str) -> AdapterResult<()> {
@@ -112,91 +99,65 @@ fn project_trace(lane: &StrategyLaneSpec, created_at: &str) -> AdapterResult<Val
         ));
     }
 
-    let evidence = accepted_evidence(&lane.share_safe);
-    let question_id = format!("evt-{}-question", lane.candidate_id);
-    let mut events = vec![json!({
-        "eventId": question_id,
+    let mut evidence = accepted_evidence(&lane.share_safe);
+    evidence.sort();
+    let unknowns = vec![
+        "question",
+        "raw answer",
+        "tools",
+        "usage",
+        "cost",
+        "timestamp",
+        "discovery_order",
+        "provider_calls",
+        "evidence_acquisition_steps",
+        "root_cause_transcript",
+    ];
+
+    // One claims event carries every accepted evidence id. Do not invent a
+    // sequenced discovery timeline, null-excerpt question path, or cause
+    // hypothesis from root_cause_established.
+    let events = vec![json!({
+        "eventId": format!("evt-{}-claims", lane.candidate_id),
         "sequence": 1,
-        "kind": "question",
-        "actor": "human",
+        "kind": "assistant_response",
+        "actor": "assistant",
         "role": null,
         "parentEventId": null,
-        "evidenceRefs": [],
+        "evidenceRefs": evidence,
         "observedAt": { "status": "unknown" },
         "excerpt": null,
         "excerptHash": null,
-        "unknowns": ["text", "timestamp"]
+        "unknowns": ["text", "timestamp", "raw answer", "tools"]
     })];
 
-    let mut parent = question_id;
-    let mut sequence = 2u64;
-    for (index, evidence_ref) in evidence.iter().enumerate() {
-        let event_id = format!("evt-{}-evidence-{}", lane.candidate_id, index + 1);
-        let excerpt = bound_excerpt(&format!("Accepted evidence {evidence_ref}"));
-        let excerpt_hash = excerpt.as_ref().map(|text| sha256_hex(text.as_bytes()));
-        events.push(json!({
-            "eventId": event_id.clone(),
-            "sequence": sequence,
-            "kind": "evidence_anchor",
-            "actor": "assistant",
-            "role": "evidence",
-            "parentEventId": parent,
-            "evidenceRefs": [evidence_ref],
-            "observedAt": { "status": "unknown" },
-            "excerpt": excerpt,
-            "excerptHash": excerpt_hash,
-            "unknowns": ["timestamp"]
-        }));
-        parent = event_id;
-        sequence += 1;
-    }
-
+    let mut notes = vec![
+        TRACE_UNKNOWN_STAYS_UNKNOWN.to_string(),
+        NO_PROVIDER.to_string(),
+        UNKNOWN_COST_USAGE.to_string(),
+        "Projected from a share-safe bench run; task text and raw answers remain host-owned."
+            .to_string(),
+        "Accepted evidence ids are listed without a proved discovery order or question path."
+            .to_string(),
+    ];
     if lane.share_safe.root_cause_established {
-        let excerpt = bound_excerpt("Share-safe projection reported root_cause_established=true.");
-        let excerpt_hash = excerpt.as_ref().map(|text| sha256_hex(text.as_bytes()));
-        let event_id = format!("evt-{}-hypothesis", lane.candidate_id);
-        events.push(json!({
-            "eventId": event_id.clone(),
-            "sequence": sequence,
-            "kind": "hypothesis",
-            "actor": "assistant",
-            "role": "cause",
-            "parentEventId": parent,
-            "evidenceRefs": evidence,
-            "observedAt": { "status": "unknown" },
-            "excerpt": excerpt,
-            "excerptHash": excerpt_hash,
-            "unknowns": ["timestamp", "raw answer"]
-        }));
-        parent = event_id;
-        sequence += 1;
+        notes.push(
+            "root_cause_established=true is share-safe metadata only; it is not a transcript cause hypothesis."
+                .to_string(),
+        );
+    } else {
+        notes.push(
+            "root_cause_established=false is share-safe metadata only; no cause hypothesis is invented."
+                .to_string(),
+        );
+    }
+    if !lane.share_safe.reason_codes.is_empty() {
+        notes.push(format!(
+            "Share-safe reason codes (metadata only): {}.",
+            lane.share_safe.reason_codes.join(", ")
+        ));
     }
 
-    let reason = if lane.share_safe.reason_codes.is_empty() {
-        format!("Terminal status: {}", lane.share_safe.status)
-    } else {
-        format!("Reason codes: {}", lane.share_safe.reason_codes.join(", "))
-    };
-    let excerpt = bound_excerpt(&reason);
-    let excerpt_hash = excerpt
-        .as_ref()
-        .map(|text| sha256_hex(text.as_bytes()))
-        .unwrap_or_else(|| sha256_hex(lane.share_safe.status.as_bytes()));
-    events.push(json!({
-        "eventId": format!("evt-{}-status", lane.candidate_id),
-        "sequence": sequence,
-        "kind": "recommendation",
-        "actor": "assistant",
-        "role": null,
-        "parentEventId": parent,
-        "evidenceRefs": evidence,
-        "observedAt": { "status": "unknown" },
-        "excerpt": excerpt,
-        "excerptHash": excerpt_hash,
-        "unknowns": ["timestamp", "raw answer"]
-    }));
-
-    let evidence_steps = evidence.len() as u64;
     Ok(json!({
         "schemaId": INTERACTION_TRACE_SCHEMA_V1,
         "traceId": format!(
@@ -212,25 +173,13 @@ fn project_trace(lane: &StrategyLaneSpec, created_at: &str) -> AdapterResult<Val
         "events": events,
         "efficiency": {
             "turnCount": { "status": "unknown" },
-            "evidenceAcquisitionSteps": if evidence_steps > 0 {
-                json!({ "status": "observed", "count": evidence_steps })
-            } else {
-                json!({ "status": "unknown" })
-            },
+            "evidenceAcquisitionSteps": { "status": "unknown" },
             "latency": { "status": "unknown" },
             "cost": { "status": "unknown" },
-            "providerCalls": {
-                "status": "observed",
-                "count": lane.share_safe.completed_role_slots
-            }
+            "providerCalls": { "status": "unknown" }
         },
-        "unknowns": ["question", "raw answer", "tools", "usage", "cost", "timestamp"],
-        "notes": [
-            TRACE_UNKNOWN_STAYS_UNKNOWN,
-            NO_PROVIDER,
-            UNKNOWN_COST_USAGE,
-            "Projected from a share-safe bench run; task text and raw answers remain host-owned."
-        ],
+        "unknowns": unknowns,
+        "notes": notes,
         "createdAt": created_at
     }))
 }
@@ -413,11 +362,21 @@ mod tests {
             .unwrap()
             .iter()
             .any(|note| note == NO_GOLD));
-        assert!(package["traces"][0]["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|event| event["kind"] == "evidence_anchor"));
+        let events = package["traces"][0]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["kind"], "assistant_response");
+        assert!(events.iter().all(|event| event["kind"] != "question"));
+        assert!(events.iter().all(|event| event["kind"] != "hypothesis"));
+        assert_eq!(
+            package["traces"][0]["efficiency"]["providerCalls"]["status"],
+            "unknown"
+        );
+        assert_eq!(
+            package["traces"][0]["efficiency"]["evidenceAcquisitionSteps"]["status"],
+            "unknown"
+        );
+        assert_eq!(package["traces"][0]["efficiency"]["turnCount"]["status"], "unknown");
+        assert_eq!(package["traces"][0]["efficiency"]["latency"]["status"], "unknown");
     }
 
     #[test]
