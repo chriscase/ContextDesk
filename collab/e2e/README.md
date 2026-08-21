@@ -8,3 +8,14 @@ cd collab
 npx playwright install --with-deps chromium
 npm run e2e
 ```
+
+The provider-free bridge vertical can be exercised separately with:
+
+```bash
+COLLAB_E2E_BRIDGE=1 npm run e2e
+```
+
+That mode invokes the real `RustBridgeTriageExecutor` against a checked-in
+fixture command. It proves request construction, bounded progress, result
+identity, snapshot binding, and the browser handoff to Experiment Lab; it does
+not contact a provider or use credentials.

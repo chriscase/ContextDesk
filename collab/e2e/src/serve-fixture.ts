@@ -30,6 +30,7 @@ import { PresenceService } from "../../server/src/modules/presence/index.js";
 import {
   DeterministicMockTriageExecutor,
   MemoryTriageJobStore,
+  RustBridgeTriageExecutor,
   TriageRunService,
 } from "../../server/src/modules/triage-runs/index.js";
 import { adapterUsers, FIXTURE_ROLE_MAP, SEEDED_SOURCES } from "./users.js";
@@ -37,6 +38,7 @@ import { adapterUsers, FIXTURE_ROLE_MAP, SEEDED_SOURCES } from "./users.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const webDistEnv = process.env.COLLAB_E2E_STATIC_DIR?.trim();
 const webDist = webDistEnv ? webDistEnv : join(here, "..", "..", "web", "dist");
+const bridgeFixture = join(here, "..", "fixtures", "triage-bridge-runner.mjs");
 
 function parsePort(raw: string | undefined): number {
   const port = Number.parseInt(raw ?? "8788", 10);
@@ -65,11 +67,28 @@ async function main(): Promise<void> {
     catalog,
     runs: new MemoryRunStore(),
   });
+  const bridgeMode = process.env.COLLAB_E2E_BRIDGE === "1";
   const triageRuns = new TriageRunService({
     cases: domain,
     audit,
     jobs: new MemoryTriageJobStore(),
-    executor: new DeterministicMockTriageExecutor(),
+    ...(bridgeMode
+      ? {
+          gatewayExecutor: new RustBridgeTriageExecutor({
+            command: bridgeFixture,
+            timeoutMs: 30_000,
+          }),
+        }
+      : { executor: new DeterministicMockTriageExecutor() }),
+    ...(bridgeMode
+      ? {
+          profiles: [
+            { id: "profile:fixture-qwen", label: "Fixture Qwen", provider: "openai-compatible" },
+            { id: "profile:fixture-gpt", label: "Fixture GPT-OSS", provider: "openai-compatible" },
+            { id: "profile:fixture-ministral", label: "Fixture Ministral", provider: "openai-compatible" },
+          ],
+        }
+      : {}),
   });
   const experiments = new ExperimentService({
     cases: domain,
@@ -150,7 +169,7 @@ async function main(): Promise<void> {
 
   const address = await app.listen({ host: "127.0.0.1", port });
   process.stdout.write(
-    `cd-collab fixture server listening ${address} (MapAuthAdapter test-only; LDAP unused; /ready expects Postgres)\n`,
+    `cd-collab fixture server listening ${address} (MapAuthAdapter test-only; LDAP unused; /ready expects Postgres; bridge=${bridgeMode ? "fixture" : "synthetic"})\n`,
   );
 }
 
