@@ -37,7 +37,7 @@ use cd_triage_bench_live::{
 use cd_triage_sdk::{TriagePolicySelectionV2, TriageRequestOverridesV1};
 use serde::{Deserialize, Serialize};
 
-use crate::adapters::Paths;
+use crate::adapters::{self, Paths};
 use crate::cli::BenchCompareArgs;
 use crate::envelope::{CliError, CliResult, Render};
 
@@ -237,7 +237,7 @@ struct LoadedHostState {
 /// before a single blob byte is read, and verification then streams rather
 /// than allocating a blob in memory.
 fn load_host_state(
-    candidates: Vec<PathBuf>,
+    specs: Vec<CandidateSpec>,
     library: PathBuf,
     task_id: String,
     config_dir: PathBuf,
@@ -245,12 +245,6 @@ fn load_host_state(
     limits: LiveCorpusLimits,
     cancel: CancelFlag,
 ) -> CliResult<LoadedHostState> {
-    let specs = candidates
-        .iter()
-        .map(read_candidate)
-        .collect::<CliResult<Vec<_>>>()?;
-    validate_candidates(&specs)?;
-
     let store = BenchStore::open(&library)
         .map_err(|_| CliError::not_found("benchmark library could not be opened"))?;
     let task = store
@@ -346,8 +340,24 @@ pub async fn run(
         .cache_root
         .clone()
         .unwrap_or_else(|| paths.cache_root.clone());
+    let specs = args
+        .candidates
+        .iter()
+        .map(read_candidate)
+        .collect::<CliResult<Vec<_>>>()?;
+    validate_candidates(&specs)?;
+    // Bind or refuse CONTEXTDESK_PROVIDER_API_KEY before any library, corpus,
+    // or provider work. Mixed employer/Vercel comparisons must use per-profile
+    // Keychain or protected-file references.
+    let comparison_profile_ids = comparison_profile_ids(&specs, cfg);
+    let secrets: Arc<dyn SecretStore> = Arc::new(adapters::secret_store_for_live(
+        cfg,
+        None,
+        &comparison_profile_ids,
+        false,
+        false,
+    )?);
     let loaded = {
-        let candidates = args.candidates.clone();
         let library = args.library.clone();
         let task_id = args.task.clone();
         let config_dir = paths.config_dir.clone();
@@ -355,7 +365,7 @@ pub async fn run(
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
             load_host_state(
-                candidates, library, task_id, config_dir, cache_root, limits, cancel,
+                specs, library, task_id, config_dir, cache_root, limits, cancel,
             )
         })
         .await
@@ -395,7 +405,6 @@ pub async fn run(
         })
         .collect();
 
-    let secrets: Arc<dyn SecretStore> = Arc::new(crate::adapters::secret_store());
     let live = cd_triage_bench_live::run_live_comparison(
         &store, &case, &snapshot, &task, secrets, candidates,
     )
@@ -592,6 +601,41 @@ fn read_candidate(path: &PathBuf) -> CliResult<CandidateSpec> {
         .map_err(|_| CliError::user("candidate specification is not valid JSON"))
 }
 
+fn comparison_profile_ids(specs: &[CandidateSpec], cfg: &AppConfig) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut unresolved_policy = false;
+    for spec in specs {
+        match &spec.policy {
+            TriagePolicySelectionV2::Standard { model } => {
+                let id = model.profile_id.trim();
+                if !id.is_empty() {
+                    ids.push(id.to_string());
+                }
+            }
+            TriagePolicySelectionV2::Saved { .. } | TriagePolicySelectionV2::Inline { .. } => {
+                unresolved_policy = true;
+            }
+        }
+    }
+    if unresolved_policy {
+        ids.extend(
+            cfg.providers
+                .profiles
+                .iter()
+                .filter(|profile| {
+                    profile
+                        .api_key_ref
+                        .as_deref()
+                        .is_some_and(|reference| !reference.trim().is_empty())
+                })
+                .map(|profile| profile.id.clone()),
+        );
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 fn validate_candidates(specs: &[CandidateSpec]) -> CliResult<()> {
     let mut cancellation_ids = BTreeSet::new();
     for spec in specs {
@@ -766,5 +810,25 @@ mod tests {
         assert_eq!(identity.name, "fixture");
         assert_eq!(identity.version, Observed::Known("v1".into()));
         assert_eq!(identity.build, Observed::Unknown);
+    }
+
+    #[test]
+    fn comparison_profile_ids_collect_distinct_standard_gateways() {
+        let mut employer = spec("cancel:one");
+        employer.policy = TriagePolicySelectionV2::Standard {
+            model: ModelRef {
+                profile_id: "employer".into(),
+                model_id: "deepseek-v4-flash".into(),
+            },
+        };
+        let mut vercel = spec("cancel:two");
+        vercel.policy = TriagePolicySelectionV2::Standard {
+            model: ModelRef {
+                profile_id: "vercel".into(),
+                model_id: "openai/gpt-oss-120b".into(),
+            },
+        };
+        let ids = comparison_profile_ids(&[employer, vercel], &AppConfig::default());
+        assert_eq!(ids, vec!["employer".to_string(), "vercel".to_string()]);
     }
 }
