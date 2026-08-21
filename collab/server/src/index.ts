@@ -30,10 +30,10 @@ import {
   PgTriageJobStore,
   parseTriageProfileCatalog,
   RustBridgeTriageExecutor,
+  triageBridgeOptions,
   TriageRunService,
   type TriageJobStore,
 } from "./modules/triage-runs/index.js";
-import { triageBridgeOptions } from "./modules/triage-runs/runtime-config.js";
 import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
 
 interface StorageRuntime {

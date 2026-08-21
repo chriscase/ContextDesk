@@ -48,7 +48,7 @@ The current report proves:
 The full local demo gate also passed:
 
 - contracts: 47 tests;
-- server: 125 passed, 10 environment-gated skips;
+- server: 129 passed, 10 environment-gated skips;
 - web: 36 tests;
 - typecheck, lint, and static synthetic demo build.
 
@@ -64,10 +64,11 @@ The operator-readiness slice is now local and validated as well:
   and duplicate aliases; the operator suite has 19 passing tests, including
   plaintext-LDAP rejection, external insecure-cookie rejection, artifact and
   port checks, safe catalog parsing, secret-safe output, and initializer
-  overwrite protection;
+  overwrite protection; the bridge runtime configuration has 4 additional
+  focused tests;
 - the generated `COLLAB_BRIDGE_BIN` name is wired through the production
   entrypoint, while legacy `COLLAB_TRIAGE_RUNNER` deployments remain supported;
-- the full server gate is now 125 passed / 10 environment-gated skips.
+- the full server gate is now 129 passed / 10 environment-gated skips.
 
 The direct bridge and server integration checks passed:
 
