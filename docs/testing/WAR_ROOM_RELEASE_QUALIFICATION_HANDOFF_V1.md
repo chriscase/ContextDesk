@@ -13,11 +13,12 @@ needs an environment-dependent rehearsal.
 The local branch is:
 
 ```text
-codex/merge-consolidation-demo @ 8854b26e
+codex/merge-consolidation-demo @ c6cd9782
 ```
 
 The local qualification additions are in `e3e40a2e`; the portable compiled
-qualification launcher is in `8854b26e`. The branch is not published because
+qualification launcher is in `8854b26e`; the latest qualification evidence and
+handoff corrections are in `c6cd9782`. The branch is not published because
 the workstation could not resolve `github.com` during the last push attempt.
 
 No merge, close, retarget, or rewrite was performed on any external PR.
@@ -126,15 +127,18 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
    PostgreSQL path.
 5. **The local merge branch is unpublished.** A future push or PR publication
    requires restored DNS/network access; this handoff does not imply that
-   remote state contains `8854b26e`.
+   remote state contains `c6cd9782`.
 6. **Provider quality is not certified.** The harness proves lifecycle,
    provenance, privacy, and comparison mechanics; it does not establish that
    any model reached the correct diagnosis.
 
 ## Next delegated milestone
 
-Use the prepared Grok Build prompt for an end-to-end live rehearsal. It should
-add a hermetic fixture for the real bridge, browser coverage for launch → run →
-comparison-with-pasted-chat, and explicit opt-in instructions for employer and
-Vercel profiles without placing credentials, prompts, endpoints, request ids,
-or raw captures in Collab.
+The next independent Grok Build slice is an operator-ready configuration
+initializer and `npm run doctor` command. It should make the private demo and
+deployment prerequisites visible without printing secrets or contacting live
+providers. After the local branch is publishable, the follow-on vertical
+rehearsal should add a hermetic fixture for the real Rust bridge, browser
+coverage for launch → run → comparison-with-pasted-chat, and explicit opt-in
+instructions for employer and Vercel profiles without placing credentials,
+prompts, endpoints, request ids, or raw captures in Collab.
