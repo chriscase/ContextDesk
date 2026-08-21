@@ -33,6 +33,7 @@ import {
   TriageRunService,
   type TriageJobStore,
 } from "./modules/triage-runs/index.js";
+import { triageBridgeOptions } from "./modules/triage-runs/runtime-config.js";
 import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
 
 interface StorageRuntime {
@@ -110,6 +111,7 @@ async function main(): Promise<void> {
     audit,
     experiments: storage.experiments,
   });
+  const bridge = triageBridgeOptions();
   const triageRuns = new TriageRunService({
     cases: domain,
     audit,
@@ -117,18 +119,9 @@ async function main(): Promise<void> {
     ...(process.env.COLLAB_TRIAGE_WORKER_ID?.trim()
       ? { workerId: process.env.COLLAB_TRIAGE_WORKER_ID.trim() }
       : {}),
-    ...(process.env.COLLAB_TRIAGE_RUNNER?.trim()
+    ...(bridge
       ? {
-          gatewayExecutor: new RustBridgeTriageExecutor({
-            command: process.env.COLLAB_TRIAGE_RUNNER.trim(),
-            ...(process.env.COLLAB_TRIAGE_LIBRARY?.trim()
-              ? { library: process.env.COLLAB_TRIAGE_LIBRARY.trim() }
-              : {}),
-            ...(process.env.COLLAB_TRIAGE_RUNNER_DATA_DIR?.trim()
-              ? { dataDir: process.env.COLLAB_TRIAGE_RUNNER_DATA_DIR.trim() }
-              : {}),
-            timeoutMs: Number.parseInt(process.env.COLLAB_TRIAGE_RUNNER_TIMEOUT_MS ?? "300000", 10),
-          }),
+          gatewayExecutor: new RustBridgeTriageExecutor(bridge),
         }
       : {}),
     profiles: parseTriageProfileCatalog(process.env.COLLAB_TRIAGE_PROFILE_CATALOG),

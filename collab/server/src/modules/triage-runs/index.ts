@@ -20,5 +20,6 @@ export { parseTriageProfileCatalog } from "./profiles.js";
 export type { TriageProfileOption } from "./profiles.js";
 export { RustBridgeTriageExecutor } from "./runner.js";
 export type { RustBridgeTriageExecutorOptions } from "./runner.js";
+export { triageBridgeOptions } from "./runtime-config.js";
 export { registerTriageRunRoutes } from "./routes.js";
 export type { TriageRunRouteDeps } from "./routes.js";

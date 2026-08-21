@@ -65,6 +65,8 @@ The operator-readiness slice is now local and validated as well:
   plaintext-LDAP rejection, external insecure-cookie rejection, artifact and
   port checks, safe catalog parsing, secret-safe output, and initializer
   overwrite protection;
+- the generated `COLLAB_BRIDGE_BIN` name is wired through the production
+  entrypoint, while legacy `COLLAB_TRIAGE_RUNNER` deployments remain supported;
 - the full server gate is now 125 passed / 10 environment-gated skips.
 
 The direct bridge and server integration checks passed:
