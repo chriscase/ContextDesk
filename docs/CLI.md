@@ -1,10 +1,13 @@
 # ContextDesk CLI
 
 For ephemeral automation or CI, set `CONTEXTDESK_PROVIDER_API_KEY` for the
-current process. It overrides provider credential lookup only; ContextDesk does
-not persist or print the value, and connector credentials remain isolated.
-Provider profiles may also select a protected `file:` reference. Keychain
-remains available for profiles that explicitly use a Keychain reference.
+current process only when one selected provider profile will use it. It
+overrides provider credential lookup only; ContextDesk does not persist or
+print the value, and connector credentials remain isolated. `bench-compare`
+rejects this global override when the selected policies use more than one
+provider profile, preventing an employer credential from being applied to a
+Vercel lane (or vice versa). For mixed-provider comparisons, configure each
+profile with its own Keychain reference or protected `file:` reference.
 
 `cd-cli` (binary: `contextdesk`) is a thin adapter over `cd_workflow`, which
 packages host-neutral operations around the production `cd_core` engine. The

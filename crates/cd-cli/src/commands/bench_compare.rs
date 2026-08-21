@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use cd_core::config::AppConfig;
 use cd_core::keychain_store::SecretStore;
+use cd_core::multi_model::triage_policy::TriagePolicyV2;
 use cd_core::process_progress::CancelFlag;
 use cd_core::triage_policy_store::TriagePolicyStoreV1;
 use cd_core::triage_role_qualification::{
@@ -37,7 +38,7 @@ use cd_triage_bench_live::{
 use cd_triage_sdk::{TriagePolicySelectionV2, TriageRequestOverridesV1};
 use serde::{Deserialize, Serialize};
 
-use crate::adapters::Paths;
+use crate::adapters::{Paths, PROVIDER_API_KEY_ENV};
 use crate::cli::BenchCompareArgs;
 use crate::envelope::{CliError, CliResult, Render};
 
@@ -423,6 +424,11 @@ where
         cache_root,
     } = loaded;
 
+    let has_global_provider_override = std::env::var(PROVIDER_API_KEY_ENV)
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    reject_ambiguous_provider_override(&specs, &policies, has_global_provider_override)?;
+
     let candidates = specs
         .into_iter()
         .map(|spec| LiveComparisonCandidate {
@@ -686,6 +692,70 @@ fn validate_candidates(specs: &[CandidateSpec]) -> CliResult<()> {
     Ok(())
 }
 
+/// A process-wide provider key is only safe when every selected policy uses
+/// the same provider profile. A comparison may deliberately mix employer and
+/// Vercel gateways, so silently applying one environment value to all profile
+/// references would be a credential-routing bug.
+fn reject_ambiguous_provider_override(
+    specs: &[CandidateSpec],
+    policies: &TriagePolicyStoreV1,
+    has_global_override: bool,
+) -> CliResult<()> {
+    if !has_global_override {
+        return Ok(());
+    }
+    let mut profile_ids = BTreeSet::new();
+    for spec in specs {
+        match &spec.policy {
+            TriagePolicySelectionV2::Standard { model } => {
+                profile_ids.insert(model.profile_id.clone());
+            }
+            TriagePolicySelectionV2::Saved {
+                policy_id,
+                policy_revision,
+            } => {
+                let saved = policies
+                    .policies
+                    .iter()
+                    .find(|candidate| {
+                        candidate.policy_id == *policy_id && candidate.revision == *policy_revision
+                    })
+                    .ok_or_else(|| {
+                        CliError::user(
+                            "candidate references a saved triage policy that is unavailable",
+                        )
+                    })?;
+                add_policy_profile_ids(&saved.policy, &mut profile_ids);
+            }
+            TriagePolicySelectionV2::Inline { document, .. } => {
+                let policy: TriagePolicyV2 =
+                    serde_json::from_value(document.clone()).map_err(|_| {
+                        CliError::user("candidate inline triage policy could not be resolved")
+                    })?;
+                add_policy_profile_ids(&policy, &mut profile_ids);
+            }
+        }
+    }
+    if profile_ids.len() > 1 {
+        return Err(CliError::user(
+            "CONTEXTDESK_PROVIDER_API_KEY is ambiguous for a comparison using multiple provider profiles; configure each profile with its own keychain or protected file reference",
+        ));
+    }
+    Ok(())
+}
+
+fn add_policy_profile_ids(policy: &TriagePolicyV2, profile_ids: &mut BTreeSet<String>) {
+    for slot in &policy.contributors {
+        profile_ids.insert(slot.model.profile_id.clone());
+    }
+    if let Some(slot) = &policy.finalizer {
+        profile_ids.insert(slot.model.profile_id.clone());
+    }
+    if let Some(slot) = &policy.reviewer {
+        profile_ids.insert(slot.model.profile_id.clone());
+    }
+}
+
 fn bounded_text(field: &str, value: &str) -> CliResult<()> {
     if value.trim().is_empty()
         || value.len() > MAX_METADATA_BYTES
@@ -814,5 +884,33 @@ mod tests {
         assert_eq!(identity.name, "fixture");
         assert_eq!(identity.version, Observed::Known("v1".into()));
         assert_eq!(identity.build, Observed::Unknown);
+    }
+
+    #[test]
+    fn global_provider_override_is_allowed_for_one_profile() {
+        let specs = vec![spec("cancel:one"), spec("cancel:two")];
+        assert!(
+            reject_ambiguous_provider_override(&specs, &TriagePolicyStoreV1::default(), true,)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn global_provider_override_is_rejected_for_mixed_profiles() {
+        let mut second = spec("cancel:two");
+        second.policy = TriagePolicySelectionV2::Standard {
+            model: ModelRef {
+                profile_id: "profile:other-gateway".into(),
+                model_id: "model:test".into(),
+            },
+        };
+        let error = reject_ambiguous_provider_override(
+            &[spec("cancel:one"), second],
+            &TriagePolicyStoreV1::default(),
+            true,
+        )
+        .expect_err("one global key must not serve mixed profiles");
+        assert!(error.to_string().contains("ambiguous"));
+        assert!(!error.to_string().contains("profile:other-gateway"));
     }
 }
