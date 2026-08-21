@@ -254,7 +254,7 @@ export function Cases(props: {
         {cases.length > 0 && visibleCases.length === 0 ? (
           <p className="timeline__meta">No cases match “{caseSearch}”.</p>
         ) : null}
-        {!readOnly ? (
+        {canWrite ? (
           <form className="case-form" onSubmit={(e) => void createCase(e)}>
             <input
               className="login__input"

@@ -118,6 +118,38 @@ describe("case list and view", () => {
     }
   });
 
+  it("does not offer case creation to a viewer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url === "/api/cases") {
+          return {
+            ok: true,
+            json: async () => ({
+              cases: [{ id: "c1", title: "Fixture incident", status: "open", severity: "high" }],
+            }),
+          };
+        }
+        if (url === "/api/catalog/sources") {
+          return { ok: true, json: async () => ({ sources: [] }) };
+        }
+        if (url.endsWith("/timeline") || url.endsWith("/imports")) {
+          return { ok: true, json: async () => ({ events: [], runs: [] }) };
+        }
+        if (url.endsWith("/experiments") || url.endsWith("/export/inventory")) {
+          return { ok: true, json: async () => ({ experiments: [], items: [] }) };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+
+    render(<Cases roles={["viewer"]} />);
+    await screen.findByRole("button", { name: "Fixture incident" });
+    expect(screen.queryByPlaceholderText("New case title")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create case" })).toBeNull();
+  });
+
   it("filters the loaded case list by title, problem, id, and creator", async () => {
     vi.stubGlobal(
       "fetch",

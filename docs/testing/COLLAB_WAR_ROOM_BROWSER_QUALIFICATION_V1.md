@@ -55,7 +55,7 @@ values already used by collab HTTP tests.
 | Identity | Role | Notes |
 | --- | --- | --- |
 | `alice` | contributor | Create case, owner_only export |
-| `carol` | viewer | Read; create is shown but server-denied |
+| `carol` | viewer | Read; mutation controls are hidden |
 | `dave` | admin | Catalog, share_safe export, status |
 | `erin` | case-lead | Mapped; unused by the default specs |
 | `bob` | unmapped | Login denied |
@@ -111,8 +111,8 @@ successful POST and skipped `loadTimeline` / `reset`.
 - Refresh `/api/catalog/sources` after writes; contributors currently see a
   stale empty import dropdown until reload (the fixture server pre-seeds
   sources to make import testable).
-- Hide or disable Create case / Import / Add to timeline for viewers; surface
-  `403` instead of silent no-ops.
+- Create case / Import / Add to timeline are now hidden for viewers. A future
+  pass can still surface a clear `403` when a stale client attempts a write.
 - Add a privacy-class control on contributions if share_safe scan fixtures are
   meant to be UI-driven. The share_safe scan fixture still POSTs
   `privacyClass: "share_safe"` because the composer has no such control.
