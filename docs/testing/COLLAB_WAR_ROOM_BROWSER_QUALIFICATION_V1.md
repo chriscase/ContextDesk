@@ -1,25 +1,27 @@
 # Collab war-room browser qualification v1
 
-Status: **adapted to the shipped collab web shell on
-`codex/merge-consolidation-v2`**. This is a Playwright smoke/regression suite,
-not a new product surface.
+Status: **qualification of the current local integration branch**
+`codex/merge-consolidation-demo`. This is a Playwright
+smoke/regression suite for the shipped collab web shell and its test bridge,
+not a provider-quality claim.
 
 ## What was actually on the branch
 
-The collaborative “war-room demo” on this integration branch is the separately
-deployable `collab/` case-memory shell (`cd-collab`): LDAP (production) or
-`MapAuthAdapter` (tests), cases/timeline, catalog, manual external-run import,
-and share-safe export. Probed at HEAD `b63eb515` before this suite was added.
+The current branch includes the case board, content-addressed evidence and
+snapshot freeze, bounded synthetic/configured-gateway comparison lanes,
+progress and terminal states, external chat import, Experiment Lab comparison,
+helpfulness/gold/accepted-decision flow, and share-safe export. Production boot
+uses LDAP; the fixture uses the test-only `MapAuthAdapter` and in-memory stores.
 
-The following were **not** present and are **not** assumed:
+The browser suite has two intentionally separate paths:
 
-- Commit `37a1579b` (not on GitHub; called out as local-only). No local-auth
-  HTTP route was added to production boot.
-- Open PR #935 war-room snapshot / case-board contracts (`cd-collab.snapshot.v1`,
-  `cd-collab.case_board.v1`). Those files are not on this branch; freeze/board
-  HTTP and UI are residual.
-- Comparison lanes, SDK attempt states (running / partial / failed / cancelled /
-  completed), helpfulness, accepted decision, and question-path controls.
+- the default job runs the provider-free synthetic fixture;
+- the bridge job sets `COLLAB_E2E_BRIDGE=1` and runs
+  `specs/10-bridge-comparison.spec.ts`, which verifies the UI-selected profiles,
+  concurrency bound, same-snapshot result, progress, and Experiment Lab handoff
+  through the bridge process.
+
+Neither path contacts a real model provider or requires credentials.
 
 Wait on **`GET /health`**, not `/ready`. The fixture server uses in-memory
 stores and `pool: null`, so `/ready` stays `503` (`database: down`). That is
@@ -62,16 +64,16 @@ values already used by collab HTTP tests.
 
 | Requested | Suite behavior |
 | --- | --- |
-| Local-auth demo login | Adapted: fixture `MapAuthAdapter` through the real login form. Invented `/api/auth/local` returns 404. |
+| Local-auth demo login | Adapted: fixture `MapAuthAdapter` through the real login form. Production remains LDAP-backed; invented `/api/auth/local` returns 404. |
 | Create/open a case | Automated. |
-| Upload and freeze evidence | Adapted: `POST /api/cases/:id/evidence` (no upload widget). Content-addressed hash is the freeze analog. `/api/snapshots` 404. |
-| Two or more comparison lanes | Absent: 404 on `/api/lanes` / `/api/comparisons`; no launcher. Two imported chats are the closest analog. |
-| running / partial / failed / cancelled / completed | Adapted: case statuses + imported-run corroboration + failed login. No SDK lane badges. |
+| Upload and freeze evidence | Automated through the Case Board panel; content-addressed evidence is frozen into a same-snapshot run input. |
+| Two or more comparison lanes | Automated in the bridge job with three selected fixture profiles and concurrency 2. The default job covers synthetic/offline mode. |
+| running / partial / failed / cancelled / completed | Automated through run history and lane cards; the fixture proves completed progress and the server tests cover partial/failure/cancellation/deadline retention. |
 | Import plain-text chat | Automated with `fixtures/chats/*.txt`. |
-| Shared/unique, similarities, disagreements, question paths | Absent as a board. Two logs + corroborate/contradict cover the analog. |
-| Helpfulness / accepted decision | Absent. Analog: Record human judgment. |
+| Shared/unique, similarities, disagreements, question paths | Automated through Experiment Lab and the case board, including the explicit agreement-is-not-proof caveat. |
+| Helpfulness / accepted decision | Automated through Experiment Lab component coverage and server/contract tests. |
 | Share-safe export | Automated, including planted-credential fail-closed. |
-| Reload / restart persistence | Reload automated. Process restart skipped unless `COLLAB_E2E_RESTART_BASE_URL` points at a Postgres-backed `/ready` server. |
+| Reload / restart persistence | Reload automated. Process restart remains opt-in and requires a Postgres-backed deployment. |
 | Responsive / basic a11y | Automated at 375px and labeled login controls. |
 
 Source of truth: `collab/e2e/src/surface-map.ts`.
@@ -87,19 +89,21 @@ Source of truth: `collab/e2e/src/surface-map.ts`.
    then `COLLAB_E2E_START_FIXTURE=0 COLLAB_E2E_BASE_URL=… npm run test -w @cd-collab/e2e -- specs/09-live-profile.spec.ts`.
    Review screenshots before sharing; the suite redacts password/username from
    captured console text only.
-3. **Evidence upload UX** — there is no file input. Confirm operators still
-   cannot attach logs without an API client until a UI exists.
-4. **Timeline bodies** — contribution text is not rendered; only payload JSON
-   (kind/hash). Confirm whether that is acceptable for a demo.
-5. **Corroboration IDs** — `targetId` is on the timeline API but omitted from
-   the React row. Operators must learn IDs out of band.
+3. **Live provider matrix** — create a private share-safe catalog containing
+   every requested alias, including Vercel only after fresh model discovery.
+   Use per-profile protected-file or keychain references; never use one global
+   provider key for a mixed employer/Vercel run. Run the live qualification CLI
+   only with explicit `--live --yes` authorization.
+4. **PostgreSQL + LDAP browser run** — the fixture proves the UI/bridge seam;
+   the hosted collab job proves database/auth integration separately. A durable
+   restart requires a real deployment rather than the fixture.
 
 Composer `importRun` / `addNote` / catalog `createSource` capture
 `event.currentTarget` before `await fetch` (same pattern as `LoginForm`). React
 nulls `currentTarget` after the handler yields, which previously swallowed a
 successful POST and skipped `loadTimeline` / `reset`.
 
-## Recommended UI fixes (out of scope here)
+## Remaining product work
 
 - Add an evidence upload control (and show content hashes) instead of API-only.
 - Show contribution body and `targetId` on timeline rows so corroboration works
@@ -113,8 +117,11 @@ successful POST and skipped `loadTimeline` / `reset`.
   meant to be UI-driven. The share_safe scan fixture still POSTs
   `privacyClass: "share_safe"` because the composer has no such control.
 - `:focus-visible` styles and labels on placeholder-only composer fields.
-- Do not ship comparison lanes, freeze snapshot, or helpfulness controls as if
-  they already exist on this branch.
+- Add incremental per-lane progress to the durable Postgres-backed UI path.
+- Add a first-class live profile/catalog setup flow so operators do not need to
+  prepare a private file by hand.
+- Add live-provider result review with explicit cost/usage fields when a host
+  can observe them; unknown must remain the default.
 
 ## Opt-in live profile
 
@@ -123,6 +130,7 @@ no secrets. Passwords stay in the environment. Do not commit filled profiles.
 
 ## Handbook impact
 
-none — browser tests, fixtures, qualification docs, and a composer form-handle
-hold so React does not drop `currentTarget` after `await fetch`. No engine,
-permission, or provider-lifecycle change.
+The bridge browser job and strict request-shape fixture are provider-free. The
+live qualification completion gate now fails when a requested alias is skipped
+or same-snapshot proof is absent. No engine, permission, credential, or
+provider-lifecycle change is made by the browser harness.

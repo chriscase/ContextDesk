@@ -5,6 +5,7 @@
 name: collab
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - "collab/**"
@@ -146,3 +147,39 @@ jobs:
             collab/e2e/test-results
           if-no-files-found: ignore
 
+  # The default browser job intentionally stays provider-free. This distinct
+  # lane exercises the same UI through the test bridge so a hosted run proves
+  # the selected profiles, bounded concurrency, progress events, and
+  # Experiment Lab handoff all cross the browser/API/bridge boundary.
+  collab-browser-bridge:
+    name: collab war-room browser bridge qualification
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: collab
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: collab/package-lock.json
+      - run: npm ci
+      - run: npm run build -w @cd-collab/contracts
+      - run: npm run build -w @cd-collab/web
+      - name: install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+        working-directory: collab/e2e
+      - run: npm run typecheck -w @cd-collab/e2e
+      - name: run bridge comparison browser qualification
+        env:
+          COLLAB_E2E_BRIDGE: "1"
+        run: npm run test -w @cd-collab/e2e -- specs/10-bridge-comparison.spec.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: collab-e2e-bridge-playwright
+          path: |
+            collab/e2e/playwright-report
+            collab/e2e/test-results
+          if-no-files-found: ignore

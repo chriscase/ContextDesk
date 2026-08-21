@@ -10,12 +10,14 @@ export function triageBridgeOptions(
 ): RustBridgeTriageExecutorOptions | null {
   const command = (env.COLLAB_BRIDGE_BIN ?? env.COLLAB_TRIAGE_RUNNER)?.trim();
   if (!command) return null;
+  const rawTimeout = env.COLLAB_BRIDGE_TIMEOUT_MS ?? env.COLLAB_TRIAGE_RUNNER_TIMEOUT_MS ?? "300000";
+  const timeoutMs = Number(rawTimeout);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 900_000) {
+    throw new Error("COLLAB_BRIDGE_TIMEOUT_MS must be an integer between 1000 and 900000");
+  }
   const options: RustBridgeTriageExecutorOptions = {
     command,
-    timeoutMs: Number.parseInt(
-      env.COLLAB_BRIDGE_TIMEOUT_MS ?? env.COLLAB_TRIAGE_RUNNER_TIMEOUT_MS ?? "300000",
-      10,
-    ),
+    timeoutMs,
   };
   const library = (env.COLLAB_BRIDGE_LIBRARY ?? env.COLLAB_TRIAGE_LIBRARY)?.trim();
   if (library) options.library = library;

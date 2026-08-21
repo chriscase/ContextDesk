@@ -40,4 +40,12 @@ describe("triage bridge runtime configuration", () => {
   it("leaves the gateway disabled when no bridge is configured", () => {
     expect(triageBridgeOptions({})).toBeNull();
   });
+
+  it.each(["0", "999", "900001", "not-a-number", "45000.5"]) (
+    "rejects an unsafe bridge timeout (%s)",
+    (timeout) => {
+      expect(() => triageBridgeOptions({ COLLAB_BRIDGE_BIN: "/opt/contextdesk", COLLAB_BRIDGE_TIMEOUT_MS: timeout }))
+        .toThrow("COLLAB_BRIDGE_TIMEOUT_MS must be an integer between 1000 and 900000");
+    },
+  );
 });

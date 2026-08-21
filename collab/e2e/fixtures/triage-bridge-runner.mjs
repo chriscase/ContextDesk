@@ -14,6 +14,24 @@ if (!requestPath || commandIndex < 0 || progressIndex < commandIndex || args.ind
 } else {
   const request = JSON.parse(await readFile(requestPath, "utf8"));
   const candidates = Array.isArray(request.candidates) ? request.candidates : [];
+  const expected = [
+    { candidateId: "qwen-reviewer", profileId: "profile:fixture-qwen", model: "qwen-3.6-27b" },
+    { candidateId: "gpt-oss-contributor", profileId: "profile:fixture-gpt", model: "gpt-oss-120b" },
+    { candidateId: "ministral-challenger", profileId: "profile:fixture-ministral", model: "ministral-3-14b-instruct-2512" },
+  ];
+  const requestShapeIsExpected = request.mode === "gateway"
+    && request.concurrency === 2
+    && candidates.length === expected.length
+    && candidates.every((candidate, index) => {
+      const wanted = expected[index];
+      return candidate.candidateId === wanted.candidateId
+        && candidate.profileId === wanted.profileId
+        && candidate.model === wanted.model;
+    });
+  if (!requestShapeIsExpected) {
+    process.exitCode = 1;
+    process.stderr.write("bridge fixture rejected unexpected gateway request shape\n");
+  } else {
   const evidenceId = request.snapshot?.evidence?.[0]?.evidenceId ?? null;
   const prefix = "contextdesk.collab_triage_progress ";
 
@@ -63,4 +81,5 @@ if (!requestPath || commandIndex < 0 || progressIndex < commandIndex || args.ind
       candidates: results,
     },
   }));
+  }
 }

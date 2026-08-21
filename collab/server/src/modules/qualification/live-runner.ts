@@ -99,9 +99,17 @@ function safeErrorCode(value: string | null): LiveQualificationLaneV1["errorCode
   return "gateway_error";
 }
 
-function reportVerdict(lanes: readonly LiveQualificationLaneV1[]): LiveQualificationReportV1["verdict"] {
+function reportVerdict(
+  lanes: readonly LiveQualificationLaneV1[],
+  sameSnapshot: boolean | null,
+): LiveQualificationReportV1["verdict"] {
   const ran = lanes.filter((lane) => lane.ran);
   if (ran.length === 0) return "skipped";
+  // A live qualification is a requested matrix, not a best-effort sample.
+  // Never call a matrix complete when an alias was skipped or the bridge did
+  // not prove the shared snapshot.
+  if (lanes.some((lane) => !lane.ran)) return "failed";
+  if (sameSnapshot !== true) return "failed";
   if (ran.every((lane) => lane.status === "completed")) return "completed";
   if (ran.some((lane) => lane.status === "completed" || lane.status === "partial")) return "partial";
   if (ran.every((lane) => lane.status === "cancelled")) return "inconclusive";
@@ -372,7 +380,10 @@ export async function runLiveQualification(
       sameSnapshot,
     },
     lanes: lanes.map((lane, index) => lane ?? skipLane(aliases[index]!, "not_enough_profiles")),
-    verdict: reportVerdict(lanes.map((lane, index) => lane ?? skipLane(aliases[index]!, "not_enough_profiles"))),
+    verdict: reportVerdict(
+      lanes.map((lane, index) => lane ?? skipLane(aliases[index]!, "not_enough_profiles")),
+      sameSnapshot,
+    ),
     caveats: [...LIVE_QUALIFICATION_CAVEATS],
   };
   return parseLiveQualificationReport(report);

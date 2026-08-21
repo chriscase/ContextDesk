@@ -164,4 +164,44 @@ describe("live qualification runner", () => {
       await rm(fx.root, { recursive: true, force: true });
     }
   });
+
+  it("fails a requested matrix when one alias is not configured", async () => {
+    const fx = await fixture({
+      executeBatch: async (context: TriageBatchExecutionContext): Promise<TriageCandidateRunV1[]> =>
+        context.request.candidates.map((candidate) => ({
+          ...candidate,
+          status: "completed",
+          benchmarkRunId: `durable-${candidate.candidateId}`,
+          outputHash: "b".repeat(64),
+          summary: "synthetic result",
+          evidenceRefs: context.evidence.map((item) => item.evidenceId),
+          unknowns: ["usage", "cost"],
+          usageStatus: "unknown",
+          costStatus: "unknown",
+          errorCode: null,
+          startedAt: "2026-08-20T00:00:00.000Z",
+          finishedAt: "2026-08-20T00:00:01.000Z",
+          privacyClass: "owner_only",
+        })),
+    });
+    try {
+      const report = await runLiveQualification({
+        ...fx,
+        catalog,
+        aliases: ["gpt-oss-120b", "qwen-3.6-27b", "vercel-compatible"],
+        liveOptIn: true,
+        confirmed: true,
+        concurrency: 2,
+      });
+      expect(report.verdict).toBe("failed");
+      expect(report.lanes.find((lane) => lane.alias === "vercel-compatible")).toMatchObject({
+        configured: false,
+        ran: false,
+        skippedReason: "profile_not_configured",
+      });
+      expect(report.lanes.filter((lane) => lane.ran)).toHaveLength(2);
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
 });
