@@ -58,6 +58,22 @@ export async function openCase(page: Page, title: string): Promise<void> {
   await expect(page.locator("h2.case-view__title").filter({ hasText: title })).toBeVisible();
 }
 
+export async function openCaseSupport(page: Page): Promise<void> {
+  const support = page.locator("details.case-view__support").first();
+  if ((await support.getAttribute("open")) === null) {
+    await support.locator("summary").click();
+  }
+  await expect(support).toHaveAttribute("open", "");
+}
+
+export async function openExportSupport(page: Page): Promise<void> {
+  const support = page.locator("details.case-view__support").last();
+  if ((await support.getAttribute("open")) === null) {
+    await support.locator("summary").click();
+  }
+  await expect(support).toHaveAttribute("open", "");
+}
+
 interface CaseRow {
   id: string;
   title: string;
@@ -110,6 +126,7 @@ export async function addTimelineEntry(
   kind: "message" | "note" | "hypothesis" | "action",
   body: string,
 ): Promise<void> {
+  await openCaseSupport(page);
   const form = noteForm(page);
   await form.locator('select[name="kind"]').selectOption(kind);
   await form.locator('textarea[name="body"]').fill(body);
@@ -122,7 +139,7 @@ export async function addTimelineEntry(
   expect(posted.ok(), await posted.text()).toBeTruthy();
   await expect(
     page.locator("article.case-view .timeline__item").filter({ hasText: "contribution_created" }).last(),
-  ).toContainText(`"kind":"${kind}"`);
+  ).toContainText(`Current ${kind}`);
 }
 
 export async function importChat(
@@ -136,6 +153,7 @@ export async function importChat(
     visibility?: "unknown" | "importer_described";
   },
 ): Promise<void> {
+  await openCaseSupport(page);
   const form = importForm(page);
   await form.getByPlaceholder("Output").fill(opts.output);
   if (opts.prompt) {

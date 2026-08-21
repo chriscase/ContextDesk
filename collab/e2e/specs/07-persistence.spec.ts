@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createCase, loginAs, openCase, uniqueTitle } from "../src/helpers.js";
+import { createCase, loginAs, openCase, openCaseSupport, uniqueTitle } from "../src/helpers.js";
 import { FIXTURE_USERS } from "../src/users.js";
 
 test.describe("reload and restart persistence", () => {
@@ -10,6 +10,7 @@ test.describe("reload and restart persistence", () => {
     await page.reload();
     await expect(page.getByText(`Signed in as ${FIXTURE_USERS.alice.username}`)).toBeVisible();
     await openCase(page, title);
+    await openCaseSupport(page);
     await expect(page.locator(".timeline__item").filter({ hasText: "case_created" })).toBeVisible();
   });
 

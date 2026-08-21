@@ -35,6 +35,7 @@ test.describe("provider-free Rust bridge comparison", () => {
     await include.check();
     await page.getByRole("button", { name: "Freeze selected evidence (1)" }).click();
     await expect(page.getByText(/Runs bound to a snapshot never silently widen/)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Start a snapshot-bound comparison" })).toBeVisible();
 
     await page.getByRole("combobox", { name: "Execution mode" }).selectOption("gateway");
     await expect(page.getByRole("combobox", { name: "qwen-3.6-27b host connector profile" })).toBeVisible();

@@ -296,6 +296,15 @@ export function TriageRunPanel(props: {
     return () => window.removeEventListener("contextdesk:external-run-imported", refreshExternalRuns);
   }, [load]);
 
+  useEffect(() => {
+    const refreshSnapshots = (event: Event) => {
+      const detail = (event as CustomEvent<{ caseId?: string }>).detail;
+      if (detail?.caseId === props.caseId) void load();
+    };
+    window.addEventListener("contextdesk:snapshot-frozen", refreshSnapshots);
+    return () => window.removeEventListener("contextdesk:snapshot-frozen", refreshSnapshots);
+  }, [load, props.caseId]);
+
   const hasActiveJob = useMemo(
     () => jobs.some((job) => job.status === "queued" || job.status === "running"),
     [jobs],

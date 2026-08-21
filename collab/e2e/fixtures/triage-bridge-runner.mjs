@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 const args = process.argv.slice(2);
@@ -19,14 +20,16 @@ if (!requestPath || commandIndex < 0 || progressIndex < commandIndex || args.ind
     { candidateId: "gpt-oss-contributor", profileId: "profile:fixture-gpt", model: "gpt-oss-120b" },
     { candidateId: "ministral-challenger", profileId: "profile:fixture-ministral", model: "ministral-3-14b-instruct-2512" },
   ];
-  const requestShapeIsExpected = request.mode === "gateway"
-    && request.concurrency === 2
+  // The Collab host bridge is gateway-only, so the narrow bridge request does
+  // not repeat a mode discriminator. Validate the bounded gateway shape that
+  // the production executor actually sends.
+  const requestShapeIsExpected = request.concurrency === 2
     && candidates.length === expected.length
     && candidates.every((candidate, index) => {
       const wanted = expected[index];
       return candidate.candidateId === wanted.candidateId
         && candidate.profileId === wanted.profileId
-        && candidate.model === wanted.model;
+        && candidate.modelId === wanted.model;
     });
   if (!requestShapeIsExpected) {
     process.exitCode = 1;
@@ -47,14 +50,20 @@ if (!requestPath || commandIndex < 0 || progressIndex < commandIndex || args.ind
     })}\n`);
   }
 
-  const results = candidates.map((candidate) => ({
-    candidate_id: candidate.candidateId,
-    status: "completed",
-    run_id: `fixture-${candidate.candidateId}`,
-    output_hash: `output-${candidate.candidateId}`,
-    summary: `Fixture bridge result for ${candidate.modelId}; inspect the frozen evidence before changing the mitigation.`,
-    evidence_refs: evidenceId ? [evidenceId] : [],
-  }));
+  const results = candidates.map((candidate) => {
+    const summary = `Fixture bridge result for ${candidate.modelId}; inspect the frozen evidence before changing the mitigation.`;
+    return {
+      candidate_id: candidate.candidateId,
+      status: "completed",
+      run_id: `fixture-${candidate.candidateId}`,
+      // The host contract carries a content-addressed SHA-256 output hash,
+      // even for a deterministic fixture. Keep the browser rehearsal on the
+      // same wire contract as a real provider-backed run.
+      output_hash: createHash("sha256").update(summary).digest("hex"),
+      summary,
+      evidence_refs: evidenceId ? [evidenceId] : [],
+    };
+  });
 
   for (const candidate of results) {
     process.stderr.write(`${prefix}${JSON.stringify({

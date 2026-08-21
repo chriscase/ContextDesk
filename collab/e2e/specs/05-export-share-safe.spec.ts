@@ -5,6 +5,7 @@ import {
   exportPanel,
   fixtureBytes,
   loginAs,
+  openExportSupport,
   screenshot,
   uniqueTitle,
   uploadEvidence,
@@ -27,6 +28,7 @@ test.describe("share-safe export", () => {
     });
     await page.reload();
     await page.locator(".case-list").getByRole("button", { name: title, exact: true }).click();
+    await openExportSupport(page);
     const panel = exportPanel(page);
     await expect(panel.getByText("artifact · shared-timeout.log · share_safe")).toBeVisible();
     await panel.locator("select").first().selectOption("share_safe");
@@ -53,6 +55,7 @@ test.describe("share-safe export", () => {
     expect(planted.ok(), await planted.text()).toBeTruthy();
     await page.reload();
     await page.locator(".case-list").getByRole("button", { name: title, exact: true }).click();
+    await openExportSupport(page);
     const panel = exportPanel(page);
     await panel.locator("select").first().selectOption("share_safe");
     await panel.getByRole("button", { name: "Export triage brief" }).click();

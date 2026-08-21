@@ -5,6 +5,7 @@ import {
   fixtureBytes,
   loginAs,
   openCase,
+  openCaseSupport,
   screenshot,
   timeline,
   uniqueTitle,
@@ -54,6 +55,7 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
 
     await page.reload();
     await openCase(page, title);
+    await openCaseSupport(page);
     await expect(page.locator(".timeline__item").filter({ hasText: "evidence_registered" })).toHaveCount(3);
     await expect(page.getByText("artifact · shared-timeout.log · share_safe")).toHaveCount(2);
     await expect(page.getByText("artifact · unique-worker.log · owner_only")).toHaveCount(1);
@@ -103,7 +105,7 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
   test("uploads evidence through the war-room form and renders its privacy class", async ({ page }) => {
     await loginAs(page, FIXTURE_USERS.dave);
     await createCase(page, uniqueTitle("UI evidence upload"));
-    const file = page.getByLabel("File");
+    const file = page.locator("#case-evidence-file");
     await file.setInputFiles({
       name: "ui-upload.log",
       mimeType: "text/plain",
@@ -119,7 +121,7 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
       page.getByRole("button", { name: "Upload evidence" }).click(),
     ]);
     expect(posted.ok(), await posted.text()).toBeTruthy();
-    await expect(page.getByText("ui-upload.log")).toBeVisible();
+    await expect(page.getByText("ui-upload.log", { exact: true })).toBeVisible();
     await expect(page.getByText(/hash [0-9a-f]{12}… · share_safe/)).toBeVisible();
   });
 });

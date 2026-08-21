@@ -149,6 +149,11 @@ export function CaseBoardPanel(props: {
     const snapshot = (await response.json()) as SnapshotView;
     setSelectedEvidence([]);
     await load(snapshot.id);
+    window.dispatchEvent(
+      new CustomEvent("contextdesk:snapshot-frozen", {
+        detail: { caseId: props.caseId, snapshotId: snapshot.id },
+      }),
+    );
   }
 
   async function uploadEvidence(event: FormEvent<HTMLFormElement>) {

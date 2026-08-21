@@ -2,7 +2,7 @@
 
 **Status:** isolated local integration; `main` and all source PRs remain untouched.
 
-**As-of:** 2026-08-20
+**As-of:** 2026-08-21
 
 This is the current handoff for the collaborative War-Room demo and its
 comparison path. It records what is proven, what is only opt-in, and what still
@@ -19,9 +19,9 @@ codex/merge-consolidation-demo (unpublished local branch; see the branch tip for
 The branch contains the qualification harness, portable launcher, provider-free
 browser bridge vertical, selectively ported operator-readiness
 contracts/configuration tools, and the opt-in live qualification runner
-described below. It is not published because the
-workstation could not resolve `github.com` during the last push attempt. A later
-read-only fetch of PR #939 succeeded, but this branch remains unpublished.
+described below. It remains unpublished because no external branch publication
+was authorized in this run. GitHub DNS/network access is currently restored,
+but no push or PR write has been performed.
 
 No merge, close, retarget, or rewrite was performed on any external PR.
 
@@ -66,12 +66,14 @@ honestly:
   `npm run doctor -- --json` reported `ok: true`, zero errors, and two
   configuration warnings.
 
-The exact-branch browser attempt was also checked:
+The exact-branch browser qualification now passes locally on a clean port:
 
-- `npm run typecheck -w @cd-collab/e2e` passed;
-- `npm run test -w @cd-collab/e2e` could not start its fixture because this
-  environment denies the loopback listener (`listen EPERM 127.0.0.1:8788`).
-  No browser result is claimed from that failed start.
+- `COLLAB_E2E_BRIDGE=1 COLLAB_E2E_PORT=8900 npm run e2e` passed;
+- 23 browser tests passed and 2 were intentionally skipped: process-restart
+  persistence requires a durable server, and live-provider execution requires
+  explicit credentials;
+- the bridge scenario exercised three configured lanes, bounded concurrency,
+  same-snapshot completion, and pasted-chat handoff to Experiment Lab.
 
 The operator-readiness slice is now local and validated as well:
 
@@ -180,20 +182,23 @@ The new provider-free browser bridge vertical is also prepared:
 - e2e and server typechecks passed, and the focused triage-run suite remained
   green at 19 tests;
 - the browser flow covers gateway-mode profile selection, bounded concurrency,
-  same-snapshot completion, and pasted-chat handoff to Experiment Lab.
+  same-snapshot completion, and pasted-chat handoff to Experiment Lab;
+- the provider-free bridge fixture emits valid SHA-256 output identities,
+  matching the production host contract used by the Experiment Lab handoff.
 - `.github/workflows/collab.yml` now has a separate `collab-browser-bridge` job,
   enables the bridge explicitly, uploads a distinct Playwright artifact, and
   supports `workflow_dispatch`; the default browser job remains provider-free.
 - `.github/workflows/collab-qualify.yml` also supports `workflow_dispatch` for
   the memory/PostgreSQL/doctor qualification without any provider calls.
 
-The full browser flow is not claimed locally. An earlier attempt was blocked
-before Playwright by the workstation's loopback policy; after that environment
-recovered, Playwright launched but the first fixture checks could not find the
-expected Experiment Lab heading/login controls, so the run was stopped without
-claiming a browser pass. The fixture now uses Node's ESM loader rather than the
-`tsx` CLI, so hosted runs do not depend on the CLI's IPC pipe. The exact-branch
-hosted browser job remains authoritative once this branch is published.
+An earlier attempt was blocked by the workstation's loopback policy and then
+exposed stale assertions and two fixture-contract defects. Those were corrected
+locally: support panels are opened before their assertions, snapshot freezing
+refreshes the run panel, the bridge request checks the actual `modelId` field,
+and deterministic output hashes are valid SHA-256 digests. The fixture now uses
+Node's ESM loader rather than the `tsx` CLI, so hosted runs do not depend on the
+CLI's IPC pipe. The exact-branch hosted browser job remains authoritative once
+this branch is published.
 
 The final local CLI safety pass adds two fail-closed protections:
 
@@ -323,38 +328,31 @@ the collaborative surface for reviewing and adjudicating the resulting runs.
    contains the same browser lane. It still needs a hosted browser run on this
    exact branch, followed by explicitly enabled employer/Vercel runs when
    credentials and host profile ids are supplied.
-3. **Local browser execution is sandbox-limited.** The hosted Cursor browser
-   job is green; this workstation blocks the fixture listener on `127.0.0.1`,
-   so local Playwright/browser execution is not claimed.
-4. **PostgreSQL is hosted-proven, not locally configured.** The local report
+3. **PostgreSQL is hosted-proven, not locally configured.** The local report
    uses memory plus filesystem evidence; hosted qualification covers the
    PostgreSQL path.
-5. **The local merge branch is unpublished.** A future push or PR publication
-   requires restored DNS/network access; the last DNS-only check for
-   `github.com` failed, and this handoff does not imply that remote state
-   contains the latest local handoff updates.
-6. **Provider quality is not certified.** The harness proves lifecycle,
+4. **The local merge branch is unpublished.** GitHub DNS/network access now
+   resolves, but publication still needs explicit authorization; this handoff
+   does not imply that remote state contains the latest local changes.
+5. **Provider quality is not certified.** The harness proves lifecycle,
    provenance, privacy, and comparison mechanics; it does not establish that
    any model reached the correct diagnosis.
-7. **Claude-authored review remains unavailable.** The local component and
+6. **Claude-authored review remains unavailable.** The local component and
    adversarial tests cover the War-Room surfaces and the delegated audit
    findings were addressed locally, but no separate Claude Code patch/review
    has been obtained because that session was unavailable.
-8. **Delegated-agent transport is unavailable in this environment.** Claude
+7. **Delegated-agent transport is unavailable in this environment.** Claude
    and Cursor Computer Use are not approved, while the direct Grok Build CLI
    could not create a session after DNS failure to its proxy and a local
    filesystem permission error. No delegated-agent result is claimed for the
    current branch.
 
-The exact local bridge-browser scenario was attempted at this HEAD and failed
-before Playwright startup with `listen EPERM 127.0.0.1:8788`; this is an
-environment limitation, not a browser test result.
-
 ## Next delegated milestone
 
 The hosted release-qualification slice and local hardening are implemented. The
-next milestone is to publish this exact local branch and run the distinct
-hosted bridge browser job, followed by explicit employer/Vercel rehearsals
-using a private four-profile catalog and per-profile credentials. Real provider
-quality validation remains pending; neither it nor a Claude-authored review is
-implied by a green hosted qualification run.
+next milestone is to publish this exact local branch as a draft branch/PR when
+authorized, run the distinct hosted bridge browser job and PostgreSQL
+qualification on that exact SHA, then perform explicit employer/Vercel
+rehearsals using a private four-profile catalog and per-profile credentials.
+Real provider quality validation remains pending; neither it nor a
+Claude-authored review is implied by a green hosted qualification run.

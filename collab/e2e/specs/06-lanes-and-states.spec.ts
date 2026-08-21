@@ -15,7 +15,7 @@ test.describe("comparison lanes and requested war-room states", () => {
     await loginAs(page, FIXTURE_USERS.dave);
     await createCase(page, uniqueTitle("War-room surfaces"));
     await expect(page.getByRole("heading", { name: "Evidence and snapshots" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Experiment lab" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Experiment lab", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Run history" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Start a snapshot-bound comparison" })).toBeVisible();
     await expect(page.getByText("Freeze evidence above before launching a run.")).toBeVisible();
@@ -34,9 +34,9 @@ test.describe("comparison lanes and requested war-room states", () => {
       "evidence-freeze",
       "comparison-lanes",
       "run-states",
+      "import-chat",
       "agreement-board",
       "helpfulness",
-      "import-chat",
       "share-safe-export",
       "responsive-a11y",
     ]);
