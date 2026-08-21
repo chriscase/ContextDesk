@@ -106,22 +106,23 @@ export function Cases(props: {
     setSources(body.sources ?? []);
   }, []);
 
-  const loadTimeline = useCallback(async (id: string) => {
+  const loadTimeline = useCallback(async (id: string, signal?: AbortSignal) => {
     const generation = ++loadGeneration.current;
     const isCurrent = () => generation === loadGeneration.current && activeCaseRef.current === id;
-    const res = await fetch(`/api/cases/${id}/timeline`);
+    const requestInit = signal ? { signal } : undefined;
+    const res = await fetch(`/api/cases/${id}/timeline`, requestInit);
     if (!res.ok || !isCurrent()) return;
     const body = (await res.json()) as { events?: TimelineEvent[] };
     if (!isCurrent()) return;
     setEvents(body.events ?? []);
-    const contributionResponse = await fetch(`/api/cases/${id}/contributions`);
+    const contributionResponse = await fetch(`/api/cases/${id}/contributions`, requestInit);
     if (contributionResponse.ok && isCurrent()) {
       const contributionBody = (await contributionResponse.json()) as {
         contributions?: ContributionView[];
       };
       setContributions(contributionBody.contributions ?? []);
     }
-    const imported = await fetch(`/api/cases/${id}/imports`);
+    const imported = await fetch(`/api/cases/${id}/imports`, requestInit);
     if (imported.ok && isCurrent()) {
       const list = (await imported.json()) as { runs?: RunRow[] };
       if (isCurrent()) setRuns(list.runs ?? []);
@@ -137,13 +138,15 @@ export function Cases(props: {
   }, [refresh, refreshSources]);
 
   useEffect(() => {
+    const controller = new AbortController();
     activeCaseRef.current = active;
     loadGeneration.current += 1;
     setEvents([]);
     setContributions([]);
     setRuns([]);
     setActionError(null);
-    if (active) void loadTimeline(active);
+    if (active) void loadTimeline(active, controller.signal).catch(() => undefined);
+    return () => controller.abort();
   }, [active, loadTimeline]);
 
   async function createCase(event: FormEvent) {
