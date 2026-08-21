@@ -297,6 +297,7 @@ describe("case list and view", () => {
       },
     ];
     let runs: Array<Record<string, unknown>> = [];
+    let postedPrivacy: unknown = null;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo, init?: RequestInit) => {
@@ -345,6 +346,7 @@ describe("case list and view", () => {
           return { ok: true, json: async () => ({ id: "r1" }) };
         }
         if (url === "/api/cases/c1/contributions" && method === "POST") {
+          postedPrivacy = JSON.parse(String(init?.body ?? "{}")).privacyClass;
           await new Promise((resolve) => setTimeout(resolve, 30));
           events.push({
             seq: events.length + 1,
@@ -383,8 +385,12 @@ describe("case list and view", () => {
 
     const noteBody = document.querySelector('textarea[name="body"]') as HTMLTextAreaElement;
     fireEvent.change(noteBody, { target: { value: "On-call observation" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Timeline entry visibility" }), {
+      target: { value: "share_safe" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Add to timeline" }));
     expect(await screen.findByText(/#2 contribution_created/)).toBeTruthy();
+    expect(postedPrivacy).toBe("share_safe");
   });
 
 });

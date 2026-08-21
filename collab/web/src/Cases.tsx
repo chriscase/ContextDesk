@@ -224,10 +224,11 @@ export function Cases(props: {
     const data = new FormData(form);
     const body = String(data.get("body") ?? "");
     const kind = String(data.get("kind") ?? "note");
+    const privacyClass = String(data.get("privacyClass") ?? "owner_only");
     const response = await fetch(`/api/cases/${active}/contributions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ kind, body }),
+      body: JSON.stringify({ kind, body, privacyClass }),
     });
     if (!response.ok) {
       setActionError("Timeline entry could not be added. You may not have permission to write to this case.");
@@ -406,6 +407,18 @@ export function Cases(props: {
                   <option value="hypothesis">hypothesis</option>
                   <option value="action">action</option>
                 </select>
+                <label className="timeline__meta">
+                  Timeline entry visibility
+                  <select
+                    className="login__input"
+                    name="privacyClass"
+                    aria-label="Timeline entry visibility"
+                    defaultValue="owner_only"
+                  >
+                    <option value="owner_only">private to the case</option>
+                    <option value="share_safe">eligible for share-safe export</option>
+                  </select>
+                </label>
                 <textarea className="login__input" name="body" required rows={3} />
                 <button className="login__submit" type="submit">
                   Add to timeline

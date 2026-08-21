@@ -72,7 +72,7 @@ values already used by collab HTTP tests.
 | Import plain-text chat | Automated with `fixtures/chats/*.txt`. |
 | Shared/unique, similarities, disagreements, question paths | Automated through Experiment Lab and the case board, including the explicit agreement-is-not-proof caveat. |
 | Helpfulness / accepted decision | Automated through Experiment Lab component coverage and server/contract tests. |
-| Share-safe export | Automated, including planted-credential fail-closed. |
+| Share-safe export | Automated, including planted-credential fail-closed; timeline composer exposes private/share-safe contribution visibility with a private default. |
 | Reload / restart persistence | Reload automated. Process restart remains opt-in and requires a Postgres-backed deployment. |
 | Responsive / basic a11y | Automated at 375px and labeled login controls. |
 
@@ -113,9 +113,6 @@ successful POST and skipped `loadTimeline` / `reset`.
 - Create case / Import / Add to timeline are now hidden for viewers. If a stale
   client still attempts a case write, the UI now surfaces a bounded generic
   permission alert rather than silently ignoring the response.
-- Add a privacy-class control on contributions if share_safe scan fixtures are
-  meant to be UI-driven. The share_safe scan fixture still POSTs
-  `privacyClass: "share_safe"` because the composer has no such control.
 - `:focus-visible` styles and labels on placeholder-only composer fields.
 - Add incremental per-lane progress to the durable Postgres-backed UI path.
 - Add a first-class live profile/catalog setup flow so operators do not need to
