@@ -13,12 +13,12 @@ needs an environment-dependent rehearsal.
 The local branch is:
 
 ```text
-codex/merge-consolidation-demo @ cac7ead6
+codex/merge-consolidation-demo @ 58afcd79
 ```
 
 The local qualification additions are in `e3e40a2e`; the portable compiled
 qualification launcher is in `8854b26e`; the latest qualification evidence and
-handoff corrections are in `84880bc1`, and the provider-free browser bridge
+handoff corrections are in `58afcd79`, and the provider-free browser bridge
 vertical is in `61f97868`. The branch is not published because
 the workstation could not resolve `github.com` during the last push attempt.
 
@@ -117,6 +117,27 @@ These remain draft and open:
 
 Neither PR is merged, closed, or retargeted.
 
+## Current Vercel live attempt
+
+An owner-authorized, isolated `gateway diagnose --level basic` attempt was made
+from this branch on 2026-08-20 using the protected-file credential reference
+and the exact Vercel catalog model `openai/gpt-oss-120b`. The command used the
+share-safe default (no private capture), attempted 15 of 23 bounded diagnostic
+requests, removed 2 temporary corpora and 3 temporary sessions, and reported
+no cleanup failures.
+
+This is **not** a Vercel/model result. An independent catalog-discovery call
+failed before HTTP with:
+
+```text
+DNS resolve failed for `ai-gateway.vercel.sh`
+```
+
+The diagnostic’s transport/response-contract failures are therefore treated as
+local network-environment failures, not as evidence about GPT-OSS or Vercel.
+The share-safe report contained no credential, endpoint, provider body, or
+private capture. A rerun is appropriate after DNS/network access is restored.
+
 ## What the current GUI can demonstrate
 
 The current War-Room surface can:
@@ -137,10 +158,11 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
 
 ## Exact remaining risks
 
-1. **Real provider execution is not yet evidenced in this environment.** The
-   employer aliases (`gpt-oss-120b`, `qwen-3.6-27b`, and
-   `ministral-3-14b-instruct-2512`) and the Vercel-compatible alias are not
-   configured here, so no live result is claimed.
+1. **Real employer-provider execution is not yet evidenced in this
+   environment.** The employer aliases (`gpt-oss-120b`, `qwen-3.6-27b`, and
+   `ministral-3-14b-instruct-2512`) are not configured here. Vercel credentials
+   were available through the protected-file reference, but DNS blocked the
+   current attempt before a provider result was obtained.
 2. **The next required rehearsal is hosted and vertical.** The provider-free
    fixture now drives the real `RustBridgeTriageExecutor` through the current
    GUI/server path. It still needs a hosted browser run on this exact branch,
@@ -163,9 +185,10 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
 ## Next delegated milestone
 
 The operator-ready initializer and `npm run doctor` slice is implemented and
-locally validated at `cac7ead6`; Grok Build can review it when a remote branch
-is available. The next delegated action is a hosted Cursor browser run against
-this exact branch, followed by an explicitly opt-in live rehearsal for the
-employer profiles and Vercel where configured. Those runs must retain the
-existing redaction boundary: no credentials, prompts, endpoints, request ids,
-or raw captures in Collab.
+locally validated at `cac7ead6`; the current-architecture demo/install prompt
+has been handed to Grok Build as the next isolated slice. The next delegated
+validation remains a hosted Cursor browser run against this exact branch,
+followed by explicitly opt-in live rehearsals for the employer profiles and
+Vercel after network access is restored. Those runs must retain the existing
+redaction boundary: no credentials, prompts, endpoints, request ids, or raw
+captures in Collab.
