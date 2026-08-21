@@ -20,7 +20,6 @@ import {
   INTERACTION_TRACE_SCHEMA_ID,
   STRATEGY_PACKAGE_SCHEMA_ID,
   TRACE_UNKNOWN_STAYS_UNKNOWN,
-  boundExcerpt,
   parseInteractionTrace,
   parseStrategyPackage,
   sha256Hex,
@@ -238,99 +237,69 @@ export function parseShareSafeRunProjection(
   };
 }
 
-function evidenceEvents(
-  candidateId: string,
-  evidenceIds: string[],
-  parentEventId: string,
-  startSequence: number,
-): InteractionEventV1[] {
-  return evidenceIds.map((evidenceRef, index) => {
-    const sequence = startSequence + index;
-    const excerpt = boundExcerpt(`Accepted evidence ${evidenceRef}`);
-    return {
-      eventId: `evt-${candidateId}-evidence-${index + 1}`,
-      sequence,
-      kind: "evidence_anchor" as const,
-      actor: "assistant" as const,
-      role: "evidence",
-      parentEventId: index === 0 ? parentEventId : `evt-${candidateId}-evidence-${index}`,
-      evidenceRefs: [evidenceRef],
-      observedAt: { status: "unknown" as const },
-      excerpt,
-      excerptHash: excerpt ? sha256Hex(excerpt) : null,
-      unknowns: ["timestamp"],
-    };
-  });
-}
-
 /** Project one share-safe run into a programmatic interaction_trace.v1. */
 export function shareSafeRunToInteractionTrace(
   lane: BenchArtifactLaneV1,
   createdAt: string,
 ): InteractionTraceV1 {
   const { candidateId, shareSafe } = lane;
-  const unknowns = ["question", "raw answer", "tools", "usage", "cost", "timestamp"];
-  const questionId = `evt-${candidateId}-question`;
+  const unknowns = [
+    "question",
+    "raw answer",
+    "tools",
+    "usage",
+    "cost",
+    "timestamp",
+    "discovery_order",
+    "provider_calls",
+    "evidence_acquisition_steps",
+  ];
+  if (shareSafe.rootCauseEstablished === null) {
+    unknowns.push("root_cause");
+  } else {
+    // Boolean metadata only — never projected as a transcript hypothesis.
+    unknowns.push("root_cause_transcript");
+  }
+
+  // One claims event carries every accepted evidence id. Do not invent a
+  // sequenced discovery timeline or a null-excerpt question path.
+  const evidenceRefs = [...shareSafe.acceptedEvidenceIds].sort();
   const events: InteractionEventV1[] = [
     {
-      eventId: questionId,
+      eventId: `evt-${candidateId}-claims`,
       sequence: 1,
-      kind: "question",
-      actor: "human",
+      kind: "assistant_response",
+      actor: "assistant",
       role: null,
       parentEventId: null,
-      evidenceRefs: [],
+      evidenceRefs,
       observedAt: { status: "unknown" },
       excerpt: null,
       excerptHash: null,
-      unknowns: ["text", "timestamp"],
+      unknowns: ["text", "timestamp", "raw answer", "tools"],
     },
   ];
 
-  const evidence = evidenceEvents(candidateId, shareSafe.acceptedEvidenceIds, questionId, 2);
-  events.push(...evidence);
-
-  let nextSequence = events.length + 1;
-  let parentId = events[events.length - 1]?.eventId ?? questionId;
+  const notes = [
+    TRACE_UNKNOWN_STAYS_UNKNOWN,
+    BENCH_ARTIFACT_NO_PROVIDER,
+    BENCH_ARTIFACT_UNKNOWN_COST_USAGE,
+    "Projected from a share-safe bench run; task text and raw answers remain host-owned.",
+    "Accepted evidence ids are listed without a proved discovery order or question path.",
+  ];
   if (shareSafe.rootCauseEstablished === true) {
-    const excerpt = boundExcerpt("Share-safe projection reported root_cause_established=true.");
-    events.push({
-      eventId: `evt-${candidateId}-hypothesis`,
-      sequence: nextSequence,
-      kind: "hypothesis",
-      actor: "assistant",
-      role: "cause",
-      parentEventId: parentId,
-      evidenceRefs: [...shareSafe.acceptedEvidenceIds],
-      observedAt: { status: "unknown" },
-      excerpt,
-      excerptHash: excerpt ? sha256Hex(excerpt) : null,
-      unknowns: ["timestamp", "raw answer"],
-    });
-    parentId = `evt-${candidateId}-hypothesis`;
-    nextSequence += 1;
-  } else if (shareSafe.rootCauseEstablished === null) {
-    unknowns.push("root_cause");
+    notes.push(
+      "root_cause_established=true is share-safe metadata only; it is not a transcript cause hypothesis.",
+    );
+  } else if (shareSafe.rootCauseEstablished === false) {
+    notes.push(
+      "root_cause_established=false is share-safe metadata only; no cause hypothesis is invented.",
+    );
+  }
+  if (shareSafe.reasonCodes.length > 0) {
+    notes.push(`Share-safe reason codes (metadata only): ${shareSafe.reasonCodes.join(", ")}.`);
   }
 
-  const reasonExcerpt = shareSafe.reasonCodes.length
-    ? boundExcerpt(`Reason codes: ${shareSafe.reasonCodes.join(", ")}`)
-    : null;
-  events.push({
-    eventId: `evt-${candidateId}-status`,
-    sequence: nextSequence,
-    kind: "recommendation",
-    actor: "assistant",
-    role: null,
-    parentEventId: parentId,
-    evidenceRefs: [...shareSafe.acceptedEvidenceIds],
-    observedAt: { status: "unknown" },
-    excerpt: reasonExcerpt ?? boundExcerpt(`Terminal status: ${shareSafe.status}`),
-    excerptHash: sha256Hex(reasonExcerpt ?? shareSafe.status),
-    unknowns: ["timestamp", "raw answer"],
-  });
-
-  const evidenceSteps = shareSafe.acceptedEvidenceIds.length;
   return parseInteractionTrace({
     schemaId: INTERACTION_TRACE_SCHEMA_ID,
     traceId: `trace-${candidateId}-${sha256Hex(shareSafe.benchRunId).slice(0, 12)}`,
@@ -341,25 +310,15 @@ export function shareSafeRunToInteractionTrace(
     rawHash: sha256Hex(shareSafe.sdkRunId),
     events,
     efficiency: {
+      // Share-safe counts are not proved acquisition steps or provider calls.
       turnCount: { status: "unknown" },
-      evidenceAcquisitionSteps:
-        evidenceSteps > 0
-          ? { status: "observed", count: evidenceSteps }
-          : { status: "unknown" },
+      evidenceAcquisitionSteps: { status: "unknown" },
       latency: { status: "unknown" },
       cost: { status: "unknown" },
-      providerCalls:
-        shareSafe.completedRoleSlots != null
-          ? { status: "observed", count: shareSafe.completedRoleSlots }
-          : { status: "unknown" },
+      providerCalls: { status: "unknown" },
     },
     unknowns,
-    notes: [
-      TRACE_UNKNOWN_STAYS_UNKNOWN,
-      BENCH_ARTIFACT_NO_PROVIDER,
-      BENCH_ARTIFACT_UNKNOWN_COST_USAGE,
-      "Projected from a share-safe bench run; task text and raw answers remain host-owned.",
-    ],
+    notes,
     createdAt,
   });
 }

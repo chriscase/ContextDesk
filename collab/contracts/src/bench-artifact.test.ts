@@ -10,7 +10,11 @@ import {
   parseBenchRunArtifact,
 } from "./bench-artifact.js";
 import { parseLabImport } from "./lab-import.js";
-import { STRATEGY_PACKAGE_SCHEMA_ID, TRACE_UNKNOWN_STAYS_UNKNOWN } from "./trace.js";
+import {
+  STRATEGY_PACKAGE_SCHEMA_ID,
+  TRACE_UNKNOWN_STAYS_UNKNOWN,
+  buildStrategyComparison,
+} from "./trace.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = join(here, "..", "fixtures");
@@ -52,6 +56,45 @@ describe("bench-run artifact converter", () => {
     expect(strategy.traces[0]?.unknowns).toEqual(
       expect.arrayContaining(["question", "raw answer", "tools", "usage", "cost"]),
     );
+  });
+
+  it("keeps unobserved efficiency unknown and does not invent question or cause events", () => {
+    const strategy = convertBenchArtifactImport(load("bench-run-artifact.multi-strategy.json"));
+    for (const trace of strategy.traces) {
+      expect(trace.efficiency.providerCalls).toEqual({ status: "unknown" });
+      expect(trace.efficiency.evidenceAcquisitionSteps).toEqual({ status: "unknown" });
+      expect(trace.efficiency.turnCount).toEqual({ status: "unknown" });
+      expect(trace.efficiency.latency).toEqual({ status: "unknown" });
+      expect(trace.efficiency.cost).toEqual({ status: "unknown" });
+      expect(trace.events.every((event) => event.kind !== "question")).toBe(true);
+      expect(trace.events.every((event) => event.kind !== "hypothesis")).toBe(true);
+      expect(trace.events).toHaveLength(1);
+      expect(trace.events[0]?.kind).toBe("assistant_response");
+      expect(trace.events[0]?.excerpt).toBeNull();
+      // All accepted evidence shares one event sequence — no invented discovery order.
+      expect(new Set(trace.events.map((event) => event.sequence)).size).toBe(1);
+      expect(trace.notes.some((note) => note.includes("root_cause_established"))).toBe(true);
+    }
+
+    const comparison = buildStrategyComparison({
+      packageId: strategy.experiment.packageId,
+      candidates: strategy.experiment.candidates,
+      traces: strategy.traces,
+      agreement: strategy.experiment.agreement,
+      gold: null,
+    });
+    expect(comparison.questionPaths).toHaveLength(0);
+    expect(
+      comparison.divergence.every((row) => row.summary !== "Approaches asked different questions"),
+    ).toBe(true);
+    expect(comparison.efficiency.every((row) => row.efficiency.providerCalls.status === "unknown")).toBe(
+      true,
+    );
+    expect(
+      comparison.efficiency.every(
+        (row) => row.efficiency.evidenceAcquisitionSteps.status === "unknown",
+      ),
+    ).toBe(true);
   });
 
   it("is reachable through the Experiment Lab import entrypoint", () => {

@@ -271,8 +271,10 @@ is credited with an exact model identity. A hermetic collab converter
 (`project_strategy_package` in this adapter; `cd-collab.bench_run_artifact.v1`
 in collab contracts) can land labeled share-safe lanes on an Experiment Lab
 case as `interaction_trace.v1` / `strategy_package.v1` without inventing gold,
-cost, usage, prompts, or provider calls. GUI live execution remains out of
-scope for that seam.
+cost, usage, prompts, provider calls, evidence-acquisition steps, discovery
+order, null-excerpt question paths, or cause hypotheses from
+`root_cause_established`. Unobserved efficiency fields stay `unknown`. GUI
+live execution remains out of scope for that seam.
 
 Focused fast lanes should cover the leaf SDK, runtime facade, bench, and
 adapter. Production-path workflow tests belong in the existing Rust shards.

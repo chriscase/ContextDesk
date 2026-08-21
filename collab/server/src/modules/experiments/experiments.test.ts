@@ -1149,8 +1149,29 @@ describe("interaction traces and strategy comparison", () => {
         packageId: string;
         candidates: { modelLabel: string; goldState: string; cost: { status: string }; usage: { status: string } }[];
         agreement: { sharedAnchors: { evidenceRef: string }[]; notes: string[] };
-        traces: { completeness: string; unknowns: string[] }[];
-        comparison: { sharedEvidence: unknown[] };
+        traces: {
+          completeness: string;
+          unknowns: string[];
+          events: { kind: string; sequence: number; excerpt: string | null }[];
+          efficiency: {
+            providerCalls: { status: string };
+            evidenceAcquisitionSteps: { status: string };
+            turnCount: { status: string };
+            latency: { status: string };
+            cost: { status: string };
+          };
+        }[];
+        comparison: {
+          sharedEvidence: unknown[];
+          questionPaths: unknown[];
+          divergence: { summary: string }[];
+          efficiency: {
+            efficiency: {
+              providerCalls: { status: string };
+              evidenceAcquisitionSteps: { status: string };
+            };
+          }[];
+        };
       };
       expect(view.packageId).toBe("pkg-synth-bench-multi-strategy-v1");
       expect(view.candidates.map((c) => c.modelLabel)).toEqual([
@@ -1163,6 +1184,39 @@ describe("interaction traces and strategy comparison", () => {
       expect(view.candidates.every((c) => c.usage.status === "unknown")).toBe(true);
       expect(view.traces).toHaveLength(3);
       expect(view.traces.every((trace) => trace.completeness === "partial")).toBe(true);
+      // Unobserved efficiency stays unknown — never invent from role slots / evidence counts.
+      expect(
+        view.traces.every(
+          (trace) =>
+            trace.efficiency.providerCalls.status === "unknown"
+            && trace.efficiency.evidenceAcquisitionSteps.status === "unknown"
+            && trace.efficiency.turnCount.status === "unknown"
+            && trace.efficiency.latency.status === "unknown"
+            && trace.efficiency.cost.status === "unknown",
+        ),
+      ).toBe(true);
+      expect(
+        view.traces.every(
+          (trace) =>
+            trace.events.length === 1
+            && trace.events[0]?.kind === "assistant_response"
+            && trace.events.every((event) => event.kind !== "question" && event.kind !== "hypothesis")
+            && trace.events[0]?.excerpt === null,
+        ),
+      ).toBe(true);
+      expect(view.comparison.questionPaths).toHaveLength(0);
+      expect(
+        view.comparison.divergence.every(
+          (row) => row.summary !== "Approaches asked different questions",
+        ),
+      ).toBe(true);
+      expect(
+        view.comparison.efficiency.every(
+          (row) =>
+            row.efficiency.providerCalls.status === "unknown"
+            && row.efficiency.evidenceAcquisitionSteps.status === "unknown",
+        ),
+      ).toBe(true);
       expect(
         view.agreement.sharedAnchors.some((row) => row.evidenceRef === "ev-demo-checkout-log"),
       ).toBe(true);
@@ -1198,12 +1252,22 @@ describe("interaction traces and strategy comparison", () => {
       expect(exported.privacyClass).toBe("share_safe");
       expect(exported.traces).toHaveLength(3);
       expect(exported.review.candidates).toHaveLength(3);
+      expect(
+        exported.traces.every(
+          (trace) =>
+            trace.efficiency.providerCalls.status === "unknown"
+            && trace.efficiency.evidenceAcquisitionSteps.status === "unknown",
+        ),
+      ).toBe(true);
+      expect(exported.comparison.questionPaths).toHaveLength(0);
       const raw = exportRes.body as string;
       expect(raw).not.toContain("DeepSeek");
       expect(raw).not.toContain("ai-gateway.vercel.sh");
       expect(raw).not.toContain("qwen-3.6-27b");
       expect(raw).not.toContain('"prompt"');
       expect(raw).not.toContain("bearer ");
+      expect(raw).not.toContain("root_cause_established=true");
+      expect(raw).not.toContain("Approaches asked different questions");
     });
   });
 });
