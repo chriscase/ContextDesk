@@ -326,6 +326,79 @@ export function ExperimentLab(props: {
           0,
         ) + current.agreement.roleConflicts.length
     : 0;
+  // Scan-strip projections: every line restates a fact already present in the
+  // response. Nothing here ranks, scores, or infers a winner.
+  const runStatusCounts = new Map<string, number>();
+  for (const row of current?.candidates ?? []) {
+    runStatusCounts.set(row.runStatus, (runStatusCounts.get(row.runStatus) ?? 0) + 1);
+  }
+  const runFactsSummary = [...runStatusCounts.entries()]
+    .map(([status, count]) => `${count} ${status}`)
+    .join(" · ");
+  const scanAgreements = (current?.agreement.sharedAnchors ?? []).map(
+    (anchor) =>
+      `${anchor.evidenceRef} — ${anchor.role}, cited by ${anchor.candidateIds
+        .map(candidateLabel)
+        .join(", ")}`,
+  );
+  const goldConvergenceCount = (current?.comparison?.convergence ?? []).filter(
+    (row) => row.inGold,
+  ).length;
+  const scanDifferences = current
+    ? [
+        ...current.agreement.candidateSpecific
+          .filter((row) => row.evidenceRefs.length)
+          .map(
+            (row) =>
+              `${candidateLabel(row.candidateId)} alone cites ${row.evidenceRefs.join(", ")}`,
+          ),
+        ...current.agreement.roleConflicts.map(
+          (row) =>
+            `${row.evidenceRef} is read differently: ${row.assignments
+              .map((assignment) => `${candidateLabel(assignment.candidateId)} as ${assignment.role}`)
+              .join("; ")}`,
+        ),
+        ...(current.comparison?.divergence ?? []).map(
+          (row) => `${row.kind} divergence — ${readableSummary(row.summary)}`,
+        ),
+      ]
+    : [];
+  const scanUnknowns: string[] = [];
+  for (const row of current?.candidates ?? []) {
+    const unknownFacts = [
+      row.observedLatency.status === "unknown" ? "latency" : null,
+      row.cost.status === "unknown" ? "cost" : null,
+      row.usage.status === "unknown" ? "usage" : null,
+    ].filter((item): item is string => item !== null);
+    if (unknownFacts.length) {
+      scanUnknowns.push(`${row.modelLabel} — ${unknownFacts.join(", ")} unknown`);
+    }
+    const trace = (current?.traces ?? []).find((item) => item.candidateId === row.candidateId);
+    if (!trace) {
+      scanUnknowns.push(`${row.modelLabel} — no interaction trace recorded`);
+    } else {
+      if (trace.completeness !== "exact") {
+        scanUnknowns.push(
+          `${row.modelLabel} — ${TRACE_COMPLETENESS_LABELS[trace.completeness] ?? trace.completeness}`,
+        );
+      }
+      if (trace.unknowns.length) {
+        scanUnknowns.push(`${row.modelLabel} — trace cannot establish ${trace.unknowns.join(", ")}`);
+      }
+    }
+  }
+  for (const row of current?.alignments ?? []) {
+    if (row.status === "unknown") {
+      scanUnknowns.push(`${candidateLabel(row.candidateId)} — not compared against a gold benchmark`);
+    } else if (row.status === "unscored") {
+      scanUnknowns.push(
+        `${candidateLabel(row.candidateId)} — cited no evidence to compare against the gold benchmark`,
+      );
+    }
+  }
+  if (current && !current.gold) {
+    scanUnknowns.push("Gold benchmark — none recorded for this experiment");
+  }
 
   function selectExperiment(id: string) {
     setActive(id);
@@ -365,7 +438,11 @@ export function ExperimentLab(props: {
   async function recordHelpfulness(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!current) return;
-    const data = new FormData(event.currentTarget);
+    // React nulls event.currentTarget once the handler yields; capture the form
+    // before the first await or the post-success reset throws and the UI would
+    // falsely report a recorded observation as failed.
+    const form = event.currentTarget;
+    const data = new FormData(form);
     setError(null);
     try {
       const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/helpfulness`, {
@@ -386,7 +463,7 @@ export function ExperimentLab(props: {
         setError(await responseError(res, "Helpfulness could not be recorded"));
         return;
       }
-      event.currentTarget.reset();
+      form.reset();
       await refresh();
     } catch {
       setError("Helpfulness could not be recorded");
@@ -396,7 +473,8 @@ export function ExperimentLab(props: {
   async function proposeDecision(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!current) return;
-    const data = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = new FormData(form);
     const latest = current.decisions.at(-1);
     setError(null);
     try {
@@ -417,7 +495,7 @@ export function ExperimentLab(props: {
         setError(await responseError(res, "Decision proposal could not be recorded"));
         return;
       }
-      event.currentTarget.reset();
+      form.reset();
       await refresh();
     } catch {
       setError("Decision proposal could not be recorded");
@@ -472,7 +550,8 @@ export function ExperimentLab(props: {
     if (!current) return;
     const accepted = [...current.decisions].reverse().find((row) => row.status === "accepted");
     if (!accepted) return;
-    const data = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = new FormData(form);
     const expectedGold = String(data.get("expectedGoldVersion") ?? "").trim();
     setError(null);
     try {
@@ -506,7 +585,7 @@ export function ExperimentLab(props: {
         setError(await responseError(res, "Gold promotion failed"));
         return;
       }
-      event.currentTarget.reset();
+      form.reset();
       await refresh();
     } catch {
       setError("Gold promotion failed");
@@ -516,7 +595,8 @@ export function ExperimentLab(props: {
   async function importTrace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!current) return;
-    const data = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = new FormData(form);
     const raw = String(data.get("trace") ?? "");
     let body: unknown;
     try {
@@ -535,7 +615,7 @@ export function ExperimentLab(props: {
         setError(await responseError(res, "Trace import failed"));
         return;
       }
-      event.currentTarget.reset();
+      form.reset();
       await refresh();
     } catch {
       setError("Trace import failed");
@@ -545,7 +625,8 @@ export function ExperimentLab(props: {
   async function annotateTrace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!current) return;
-    const data = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = new FormData(form);
     const candidateId = String(data.get("candidateId") ?? "");
     setError(null);
     try {
@@ -567,7 +648,7 @@ export function ExperimentLab(props: {
         setError(await responseError(res, "Trace annotation could not be recorded"));
         return;
       }
-      event.currentTarget.reset();
+      form.reset();
       await refresh();
     } catch {
       setError("Trace annotation could not be recorded");
@@ -617,36 +698,39 @@ export function ExperimentLab(props: {
         <span>Presence: {presence ? `${presence.members.length} active` : "checking…"} · live refresh</span>
         <span>Next extensions: semantic search · multi-worker leases</span>
       </div>
-      <div className="experiment-lab__extension-grid" aria-label="War room extension points">
-        <div>
-          <span>Case comments</span>
-          <small>Case timeline and notes</small>
+      <details className="experiment-lab__tools experiment-lab__extensions">
+        <summary>War room extension points</summary>
+        <div className="experiment-lab__extension-grid" aria-label="War room extension points">
+          <div>
+            <span>Case comments</span>
+            <small>Case timeline and notes</small>
+          </div>
+          <div>
+            <span>Evidence notes</span>
+            <small>Anchored in the evidence map</small>
+          </div>
+          <div>
+            <span>Lane / run notes</span>
+            <small>Candidate and replay context</small>
+          </div>
+          <div>
+            <span>Trace event notes</span>
+            <small>Annotations stay with the path</small>
+          </div>
+          <div>
+            <span>Decision / gold history</span>
+            <small>Revisions and provenance</small>
+          </div>
+          <div>
+            <span>Connected run handoff</span>
+            <small>ContextDesk host bridge to candidate path</small>
+          </div>
+          <div className="experiment-lab__extension-slot--future">
+            <span>Semantic search</span>
+            <small>Future slot · case-wide retrieval</small>
+          </div>
         </div>
-        <div>
-          <span>Evidence notes</span>
-          <small>Anchored in the evidence map</small>
-        </div>
-        <div>
-          <span>Lane / run notes</span>
-          <small>Candidate and replay context</small>
-        </div>
-        <div>
-          <span>Trace event notes</span>
-          <small>Annotations stay with the path</small>
-        </div>
-        <div>
-          <span>Decision / gold history</span>
-          <small>Revisions and provenance</small>
-        </div>
-        <div>
-          <span>Connected run handoff</span>
-          <small>ContextDesk host bridge to candidate path</small>
-        </div>
-        <div className="experiment-lab__extension-slot--future">
-          <span>Semantic search</span>
-          <small>Future slot · case-wide retrieval</small>
-        </div>
-      </div>
+      </details>
       <p className="experiment-lab__authority">
         Actions in this room are attributed to <strong>{participantName}</strong> ({participantRole}).
         The server remains authoritative for permissions, provenance, and accepted state.
@@ -705,34 +789,155 @@ export function ExperimentLab(props: {
             package {current.packageId} · task {current.taskFingerprint.slice(0, 12)} · snapshot{" "}
             {current.snapshotFingerprint.slice(0, 12)}
           </p>
-          <div className="experiment-lab__scorecards" aria-label="Experiment summary">
-            <article>
-              <span>Candidates</span>
-              <strong>{current.candidates.length}</strong>
-            </article>
-            <article>
-              <span>Shared evidence</span>
-              <strong>{current.agreement.sharedAnchors.length}</strong>
-            </article>
-            <article>
-              <span>Divergences</span>
-              <strong>{divergenceCount}</strong>
-            </article>
-            <article>
-              <span>Human reviews</span>
-              <strong>{current.observations.length}</strong>
-            </article>
-            <article>
-              <span>Decision</span>
-              <strong>
-                {latestDecision ? `${latestDecision.status} r${latestDecision.revision}` : "none yet"}
-              </strong>
-            </article>
-            <article>
-              <span>Benchmark</span>
-              <strong>{current.gold ? `v${current.gold.version}` : "none yet"}</strong>
-            </article>
-          </div>
+          <section className="experiment-lab__scan" aria-labelledby="scan-heading">
+            <div className="experiment-lab__section-heading">
+              <div>
+                <p className="experiment-lab__eyebrow">Compare → Decide</p>
+                <h4 id="scan-heading" className="experiment-lab__heading">At a glance</h4>
+              </div>
+              <span className="experiment-lab__section-kicker">Facts only · no winner implied</span>
+            </div>
+            <p className="experiment-lab__section-note">
+              {current.candidates.length} candidate lane{current.candidates.length === 1 ? "" : "s"}
+              {" · runs: "}
+              {runFactsSummary || "none recorded"}. Read what agrees, what differs, and what stays
+              unknown before the human decision. The sections below expand each signal in the same
+              order.
+            </p>
+            <div className="experiment-lab__scorecards" aria-label="Experiment summary">
+              <article>
+                <span>Candidates</span>
+                <strong>{current.candidates.length}</strong>
+              </article>
+              <article>
+                <span>Shared evidence</span>
+                <strong>{current.agreement.sharedAnchors.length}</strong>
+              </article>
+              <article>
+                <span>Divergences</span>
+                <strong>{divergenceCount}</strong>
+              </article>
+              <article>
+                <span>Explicit unknowns</span>
+                <strong>{scanUnknowns.length}</strong>
+              </article>
+              <article>
+                <span>Human reviews</span>
+                <strong>{current.observations.length}</strong>
+              </article>
+              <article>
+                <span>Decision</span>
+                <strong>
+                  {latestDecision ? `${latestDecision.status} r${latestDecision.revision}` : "none yet"}
+                </strong>
+              </article>
+              <article>
+                <span>Benchmark</span>
+                <strong>{current.gold ? `v${current.gold.version}` : "none yet"}</strong>
+              </article>
+            </div>
+            <div className="experiment-lab__scan-grid">
+              <article className="experiment-lab__scan-card" aria-labelledby="scan-agrees-heading">
+                <h5 id="scan-agrees-heading" className="experiment-lab__scan-title">What agrees</h5>
+                {scanAgreements.length ? (
+                  <ul className="experiment-lab__scan-list">
+                    {scanAgreements.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="experiment-lab__empty">No shared evidence recorded.</p>
+                )}
+                {goldConvergenceCount ? (
+                  <p className="experiment-lab__scan-note">
+                    {goldConvergenceCount} shared citation{goldConvergenceCount === 1 ? "" : "s"} also
+                    appear{goldConvergenceCount === 1 ? "s" : ""} in the gold benchmark.
+                  </p>
+                ) : null}
+                <p className="experiment-lab__scan-caveat">Agreement is not proof of correctness.</p>
+              </article>
+              <article className="experiment-lab__scan-card" aria-labelledby="scan-differs-heading">
+                <h5 id="scan-differs-heading" className="experiment-lab__scan-title">What differs</h5>
+                {scanDifferences.length ? (
+                  <ul className="experiment-lab__scan-list">
+                    {scanDifferences.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="experiment-lab__empty">
+                    No differences recorded between candidate evidence sets.
+                  </p>
+                )}
+                <p className="experiment-lab__scan-caveat">
+                  Differences are leads to investigate, not a ranking.
+                </p>
+              </article>
+              <article className="experiment-lab__scan-card" aria-labelledby="scan-unknown-heading">
+                <h5 id="scan-unknown-heading" className="experiment-lab__scan-title">
+                  What stays unknown
+                </h5>
+                {scanUnknowns.length ? (
+                  <ul className="experiment-lab__scan-list">
+                    {scanUnknowns.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="experiment-lab__empty">
+                    No explicit unknowns are recorded in this view.
+                  </p>
+                )}
+                <p className="experiment-lab__scan-caveat">
+                  Unknown stays unknown until evidence resolves it.
+                </p>
+              </article>
+              <article className="experiment-lab__scan-card" aria-labelledby="scan-decided-heading">
+                <h5 id="scan-decided-heading" className="experiment-lab__scan-title">
+                  What a human decided
+                </h5>
+                {latestDecision ? (
+                  <div className="experiment-lab__scan-decision">
+                    <p className="experiment-lab__scan-decision-meta">
+                      <span
+                        className={`experiment-lab__badge experiment-lab__badge--${latestDecision.status}`}
+                      >
+                        {latestDecision.status}
+                      </span>
+                      <span>r{latestDecision.revision}</span>
+                    </p>
+                    <p className="experiment-lab__scan-decision-text">“{latestDecision.text}”</p>
+                    <p className="experiment-lab__scan-decision-rationale">
+                      Why: {latestDecision.rationale}
+                    </p>
+                    <p className="experiment-lab__scan-decision-author">
+                      Decided by {latestDecision.authorUsername ?? "identity unavailable in this view"}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="experiment-lab__empty">No human decision has been proposed yet.</p>
+                )}
+                <p className="experiment-lab__scan-note">
+                  {current.gold
+                    ? `Gold benchmark v${current.gold.version} exists — a human benchmark, not a truth claim.`
+                    : "No gold benchmark recorded."}
+                </p>
+                <p className="experiment-lab__scan-caveat">
+                  Sharing beyond this room goes through the share-safe export only.
+                </p>
+              </article>
+            </div>
+            <nav className="experiment-lab__shortcuts" aria-label="Section shortcuts">
+              <span>Jump to:</span>
+              <a href="#candidate-comparison-heading">Run facts</a>
+              <a href="#evidence-heading">Evidence</a>
+              <a href="#strategy-heading">Strategy paths</a>
+              <a href="#helpfulness-heading">Helpfulness</a>
+              <a href="#gold-alignment-heading">Gold alignment</a>
+              <a href="#decision-heading">Decision</a>
+              {canExport ? <a href="#export-heading">Export</a> : null}
+            </nav>
+          </section>
           <section className="experiment-lab__gold" aria-label="Gold reference">
             {current.gold ? (
               <>
@@ -760,7 +965,7 @@ export function ExperimentLab(props: {
           <section className="experiment-lab__section" aria-labelledby="candidate-comparison-heading">
             <div className="experiment-lab__section-heading">
               <div>
-                <p className="experiment-lab__eyebrow">Model / method lanes</p>
+                <p className="experiment-lab__eyebrow">Step 1 · Model / method lanes</p>
                 <h4 id="candidate-comparison-heading" className="experiment-lab__heading">
                   Candidate comparison
                 </h4>
@@ -789,7 +994,12 @@ export function ExperimentLab(props: {
               <tbody>
                 {current.candidates.map((row) => (
                   <tr key={row.candidateId}>
-                    <th scope="row">{row.modelLabel}</th>
+                    <th scope="row">
+                      {row.modelLabel}
+                      {row.candidateId !== row.modelLabel ? (
+                        <span className="experiment-lab__candidate-id">{row.candidateId}</span>
+                      ) : null}
+                    </th>
                     <td>{row.role}</td>
                     <td>{row.runStatus}</td>
                     <td>{latencyLabel(row.observedLatency)}</td>
@@ -806,7 +1016,7 @@ export function ExperimentLab(props: {
           <section className="experiment-lab__section" aria-labelledby="evidence-heading">
             <div className="experiment-lab__section-heading">
               <div>
-                <p className="experiment-lab__eyebrow">Evidence map</p>
+                <p className="experiment-lab__eyebrow">Step 2 · Evidence map</p>
                 <h4 id="evidence-heading" className="experiment-lab__heading">
                   Shared and different evidence
                 </h4>
@@ -855,7 +1065,7 @@ export function ExperimentLab(props: {
           <section className="experiment-lab__section" aria-labelledby="strategy-heading">
             <div className="experiment-lab__section-heading">
               <div>
-                <p className="experiment-lab__eyebrow">Strategy lanes</p>
+                <p className="experiment-lab__eyebrow">Step 3 · Strategy lanes</p>
                 <h4 id="strategy-heading" className="experiment-lab__heading">Strategy comparison</h4>
               </div>
               <span className="experiment-lab__section-kicker">Path view</span>
@@ -944,6 +1154,9 @@ export function ExperimentLab(props: {
                     <div>
                       <p className="experiment-lab__eyebrow">Candidate path</p>
                       <h5 className="experiment-lab__path-title">{candidateLabel(trace.candidateId)}</h5>
+                      {candidateLabel(trace.candidateId) !== trace.candidateId ? (
+                        <p className="experiment-lab__path-id">{trace.candidateId}</p>
+                      ) : null}
                     </div>
                     <span
                       className={
@@ -999,25 +1212,33 @@ export function ExperimentLab(props: {
             </details>
           ) : null}
           {canWrite && (current.traces ?? []).length > 0 ? (
-            <form className="composer" onSubmit={(event) => void annotateTrace(event)}>
-              <select className="login__input" name="candidateId" defaultValue={current.traces[0]?.candidateId}>
-                {current.traces.map((trace) => (
-                  <option key={trace.candidateId} value={trace.candidateId}>
-                    {trace.candidateId}
-                  </option>
-                ))}
-              </select>
-              <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
-              <textarea className="login__input" name="text" rows={2} required placeholder="Human annotation" />
-              <button className="login__submit" type="submit">
-                Annotate trace
-              </button>
-            </form>
+            <details className="experiment-lab__tools">
+              <summary>Annotate a strategy path</summary>
+              <form className="composer" onSubmit={(event) => void annotateTrace(event)}>
+                <select
+                  className="login__input"
+                  name="candidateId"
+                  aria-label="Strategy path to annotate"
+                  defaultValue={current.traces[0]?.candidateId}
+                >
+                  {current.traces.map((trace) => (
+                    <option key={trace.candidateId} value={trace.candidateId}>
+                      {candidateLabel(trace.candidateId)}
+                    </option>
+                  ))}
+                </select>
+                <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
+                <textarea className="login__input" name="text" rows={2} required placeholder="Human annotation" />
+                <button className="login__submit" type="submit">
+                  Annotate trace
+                </button>
+              </form>
+            </details>
           ) : null}
           <section className="experiment-lab__section" aria-labelledby="helpfulness-heading">
             <div className="experiment-lab__section-heading">
               <div>
-                <p className="experiment-lab__eyebrow">Reviewer signals</p>
+                <p className="experiment-lab__eyebrow">Step 4 · Reviewer signals</p>
                 <h4 id="helpfulness-heading" className="experiment-lab__heading">Helpfulness</h4>
               </div>
               <span className="experiment-lab__section-kicker">Separate from gold</span>
@@ -1029,20 +1250,39 @@ export function ExperimentLab(props: {
               <details className="experiment-lab__tools">
                 <summary>Score candidate helpfulness</summary>
                 <form className="composer" onSubmit={(event) => void recordHelpfulness(event)}>
-                  <select className="login__input" name="candidateId" defaultValue={current.candidates[0]?.candidateId}>
+                  <select
+                    className="login__input"
+                    name="candidateId"
+                    aria-label="Candidate to score"
+                    defaultValue={current.candidates[0]?.candidateId}
+                  >
                     {current.candidates.map((row) => (
                       <option key={row.candidateId} value={row.candidateId}>
                         {row.modelLabel}
                       </option>
                     ))}
                   </select>
-                  <select className="login__input" name="dimension" defaultValue="evidence_support">
+                  <select
+                    className="login__input"
+                    name="dimension"
+                    aria-label="Helpfulness dimension"
+                    defaultValue="evidence_support"
+                  >
                     <option value="evidence_support">evidence support</option>
                     <option value="actionability">actionability</option>
                     <option value="uncertainty_calibration">uncertainty calibration</option>
                     <option value="unsafe_unsupported_claims">unsafe unsupported claims</option>
                   </select>
-                  <input className="login__input" name="score" type="number" min={0} max={3} defaultValue={2} required />
+                  <input
+                    className="login__input"
+                    name="score"
+                    type="number"
+                    min={0}
+                    max={3}
+                    defaultValue={2}
+                    required
+                    aria-label="Helpfulness score from 0 to 3"
+                  />
                   <input className="login__input" name="evidenceRefs" placeholder="evidence refs, comma separated" />
                   <textarea className="login__input" name="rationale" rows={2} required placeholder="Helpfulness rationale" />
                   <button className="login__submit" type="submit">
@@ -1063,7 +1303,7 @@ export function ExperimentLab(props: {
           <section className="experiment-lab__section" aria-labelledby="gold-alignment-heading">
             <div className="experiment-lab__section-heading">
               <div>
-                <p className="experiment-lab__eyebrow">Benchmark signal</p>
+                <p className="experiment-lab__eyebrow">Step 5 · Benchmark signal</p>
                 <h4 id="gold-alignment-heading" className="experiment-lab__heading">Gold alignment</h4>
               </div>
               <span className="experiment-lab__section-kicker">Independent signal</span>
@@ -1092,7 +1332,7 @@ export function ExperimentLab(props: {
           <section className="experiment-lab__section" aria-labelledby="decision-heading">
             <div className="experiment-lab__section-heading">
               <div>
-                <p className="experiment-lab__eyebrow">Human adjudication</p>
+                <p className="experiment-lab__eyebrow">Step 6 · Human adjudication</p>
                 <h4 id="decision-heading" className="experiment-lab__heading">Accepted decision</h4>
               </div>
               <span className="experiment-lab__section-kicker">
@@ -1116,18 +1356,48 @@ export function ExperimentLab(props: {
             </details>
           ) : null}
           {current.decisions.length > 0 ? (
-            <p className="experiment-lab__decision-line">
-              Latest decision r{current.decisions.at(-1)?.revision} ({current.decisions.at(-1)?.status}):{" "}
-              {current.decisions.at(-1)?.text}
-              <span>
+            <div className="experiment-lab__decision-card">
+              <p className="experiment-lab__decision-line">
+                Latest decision r{current.decisions.at(-1)?.revision} ({current.decisions.at(-1)?.status}):{" "}
+                {current.decisions.at(-1)?.text}
+              </p>
+              <p className="experiment-lab__decision-rationale">
+                Rationale: {current.decisions.at(-1)?.rationale}
+              </p>
+              <p className="experiment-lab__decision-author">
                 Recorded by {current.decisions.at(-1)?.authorUsername ?? "identity unavailable in this view"}
-              </span>
+              </p>
+            </div>
+          ) : (
+            <p className="experiment-lab__empty">
+              No decision has been proposed for this experiment yet.
             </p>
+          )}
+          {current.decisions.length > 1 ? (
+            <details className="experiment-lab__tools">
+              <summary>Decision history ({current.decisions.length} revisions)</summary>
+              <ol className="experiment-lab__decision-history">
+                {current.decisions.map((row) => (
+                  <li key={row.id}>
+                    r{row.revision} · {row.status} — “{row.text}” · why: {row.rationale} · by{" "}
+                    {row.authorUsername ?? "identity unavailable in this view"}
+                  </li>
+                ))}
+              </ol>
+            </details>
           ) : null}
           {canLead && current.decisions.at(-1)?.status === "proposed" ? (
-            <button className="login__submit" type="button" onClick={() => void acceptDecision()}>
-              Accept decision
-            </button>
+            <details className="experiment-lab__tools">
+              <summary>Accept the proposed decision</summary>
+              <p className="experiment-lab__section-note">
+                Accepting records revision {current.decisions.at(-1)?.revision} as the human
+                decision for this experiment. The server enforces the revision guard; a stale
+                acceptance is rejected, not merged.
+              </p>
+              <button className="login__submit" type="button" onClick={() => void acceptDecision()}>
+                Accept decision
+              </button>
+            </details>
           ) : null}
           {canLead && current.decisions.some((row) => row.status === "accepted") ? (
             <details className="experiment-lab__tools">
@@ -1170,7 +1440,7 @@ export function ExperimentLab(props: {
             <section className="experiment-lab__export" aria-labelledby="export-heading">
               <div className="experiment-lab__export-action">
                 <div>
-                  <p className="experiment-lab__eyebrow">Share boundary</p>
+                  <p className="experiment-lab__eyebrow">Step 7 · Share boundary</p>
                   <h4 id="export-heading" className="experiment-lab__heading">Export review</h4>
                 </div>
                 <button className="login__submit" type="button" onClick={() => void exportReview()}>

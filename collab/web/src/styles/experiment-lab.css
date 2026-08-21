@@ -627,6 +627,239 @@
   overflow: auto;
 }
 
+/* Compare → Decide scan strip: the first thing an operator reads. It restates
+   facts from the response; the styling must group, never rank. */
+.experiment-lab__scan {
+  min-width: 0;
+  margin: 0.85rem 0;
+  padding: 0.85rem;
+  border: 1px solid var(--lab-border-strong);
+  border-radius: var(--lab-radius);
+  background: var(--lab-surface-raised);
+}
+
+.experiment-lab__scan .experiment-lab__scorecards {
+  margin: 0.75rem 0 0;
+}
+
+.experiment-lab__scan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+}
+
+.experiment-lab__scan-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--bg);
+}
+
+.experiment-lab__scan-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: 0.86rem;
+}
+
+.experiment-lab__scan-list {
+  margin: 0;
+  padding-left: 1.05rem;
+}
+
+.experiment-lab__scan-list li {
+  margin: 0.3rem 0;
+  color: var(--fg);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__scan-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__scan-caveat {
+  margin: auto 0 0;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.experiment-lab__scan-decision {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.experiment-lab__scan-decision p {
+  margin: 0;
+}
+
+.experiment-lab__scan-decision-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.experiment-lab__scan-decision-text {
+  color: var(--fg);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__scan-decision-rationale {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__scan-decision-author {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.experiment-lab__badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--lab-border-strong);
+  border-radius: 999px;
+  background: var(--lab-surface-raised);
+  color: var(--accent);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__badge--accepted {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  color: var(--success);
+}
+
+.experiment-lab__badge--proposed {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--warning);
+}
+
+.experiment-lab__shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.8rem;
+  margin-top: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.76rem;
+}
+
+.experiment-lab__shortcuts span {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__shortcuts a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.experiment-lab__shortcuts a:hover {
+  text-decoration: underline;
+}
+
+.experiment-lab__shortcuts a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Anchor targets need breathing room so a jump never hides the heading. */
+.experiment-lab__heading {
+  scroll-margin-top: 1rem;
+}
+
+/* Exact candidate ids stay visible for provenance under the operator label. */
+.experiment-lab__candidate-id,
+.experiment-lab__path-id {
+  display: block;
+  max-width: 14rem;
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__decision-card {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.65rem 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--bg);
+}
+
+.experiment-lab__decision-card .experiment-lab__decision-line {
+  margin: 0;
+}
+
+.experiment-lab__decision-rationale {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__decision-author {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.experiment-lab__decision-history {
+  margin: 0.55rem 0 0;
+  padding-left: 1.15rem;
+}
+
+.experiment-lab__decision-history li {
+  margin: 0.35rem 0;
+  color: var(--fg);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__extensions {
+  color: var(--muted);
+}
+
+.experiment-lab__extensions .experiment-lab__extension-grid {
+  margin-bottom: 0.1rem;
+}
+
 .experiment-lab__tools:focus-within,
 .experiment-lab__raw-export:focus-within,
 .experiment-lab__experiments:focus-within {
@@ -646,6 +879,15 @@
   .experiment-lab__export-action,
   .experiment-lab__path-header {
     flex-wrap: wrap;
+  }
+
+  .experiment-lab__scan-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .experiment-lab__candidate-id,
+  .experiment-lab__path-id {
+    max-width: 100%;
   }
 
   .experiment-lab__presence {
@@ -691,5 +933,9 @@
   .experiment-lab__matrix {
     min-width: 38rem;
     font-size: 0.74rem;
+  }
+
+  .experiment-lab__scan {
+    padding: 0.7rem;
   }
 }
