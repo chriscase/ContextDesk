@@ -47,7 +47,7 @@ The current report proves:
   a newer profile package;
 - all live aliases were reported as not run rather than being fabricated.
 
-The full local demo gate also passed:
+The full local demo gate also passed before the final CLI safety additions:
 
 - contracts: 49 tests;
 - server: 137 passed, 10 environment-gated skips;
@@ -117,7 +117,7 @@ The local follow-up hardening after reviewing Grok Build PR #939 is also green:
   block. Raw JSON remains available through the existing export/projection
   paths where appropriate.
 
-The full post-hardening demo gate passed: 49 contract tests, 138 server tests
+The full post-hardening demo gate passed: 49 contract tests, 144 server tests
 with 10 environment-gated skips, 37 web tests, typecheck, lint, and static
 synthetic demo build. A local qualification/doctor/sanitizer round-trip also
 passed with the required `qualify-memory.json` and `doctor.json` outputs.
@@ -160,12 +160,25 @@ The new provider-free browser bridge vertical is also prepared:
   green at 19 tests;
 - the browser flow covers gateway-mode profile selection, bounded concurrency,
   same-snapshot completion, and pasted-chat handoff to Experiment Lab.
+- `.github/workflows/collab.yml` now has a separate `collab-browser-bridge` job,
+  enables the bridge explicitly, uploads a distinct Playwright artifact, and
+  supports `workflow_dispatch`; the default browser job remains provider-free.
 
 The full browser flow is not claimed locally because this workstation blocks
 the fixture's loopback listener before Playwright can start. The fixture now
 uses Node's ESM loader rather than the `tsx` CLI, so hosted runs do not depend
 on the CLI's IPC pipe. It is intended for the hosted browser job once this
 branch can be published.
+
+The final local CLI safety pass adds two fail-closed protections:
+
+- a process-wide `CONTEXTDESK_PROVIDER_API_KEY` override is rejected when the
+  selected comparison policies resolve to more than one provider profile;
+  mixed employer/Vercel runs must use each profile's own Keychain or protected
+  file reference; and
+- progress claim text is rejected when it contains URLs, absolute/private
+  paths, request/trace identifiers, or credential-shaped material. The
+  owner-only benchmark record remains the source for full details.
 
 The standalone headless comparison package also passed:
 
@@ -282,16 +295,16 @@ the collaborative surface for reviewing and adjudicating the resulting runs.
 6. **Provider quality is not certified.** The harness proves lifecycle,
    provenance, privacy, and comparison mechanics; it does not establish that
    any model reached the correct diagnosis.
-7. **Claude hardening remains unverified.** The current local component tests
-   cover the War-Room surfaces. The delegated audit findings were addressed
-   locally, but a separate Claude-authored patch/review has not been obtained
-   because the Claude session was unavailable.
+7. **Claude-authored review remains unavailable.** The local component and
+   adversarial tests cover the War-Room surfaces and the delegated audit
+   findings were addressed locally, but no separate Claude Code patch/review
+   has been obtained because that session was unavailable.
 
 ## Next delegated milestone
 
-The hosted release-qualification slice and its local hardening are now
-implemented. The next delegated milestone is a hosted browser qualification
-run against this exact branch, followed by explicit employer/Vercel rehearsals
-when credentials and host profile ids are supplied. Real provider quality
-validation remains pending; neither it nor a Claude-authored review is implied
-by a green hosted qualification run.
+The hosted release-qualification slice and local hardening are implemented. The
+next milestone is to publish this exact local branch and run the distinct
+hosted bridge browser job, followed by explicit employer/Vercel rehearsals
+using a private four-profile catalog and per-profile credentials. Real provider
+quality validation remains pending; neither it nor a Claude-authored review is
+implied by a green hosted qualification run.

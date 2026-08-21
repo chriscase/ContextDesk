@@ -111,9 +111,18 @@ the bridge remains the credential owner.
 # It contains no credentials, endpoints, prompts, or raw outputs.
 # COLLAB_LIVE_PROFILE_CATALOG=./live-qualification-catalog.json
 # COLLAB_BRIDGE_BIN=/absolute/path/to/contextdesk
-# COLLAB_LIVE_PROFILES=gpt-oss-120b,qwen-3.6-27b,ministral-3-14b-instruct-2512
+# COLLAB_LIVE_PROFILES=gpt-oss-120b,qwen-3.6-27b,ministral-3-14b-instruct-2512,vercel-compatible
 npm run doctor -- --json
 ```
+
+The checked-in catalog fixture intentionally omits Vercel because model
+availability is dynamic. For a four-lane rehearsal, create a private catalog
+copy and add `vercel-compatible` only after fresh discovery returns the exact
+Vercel profile id and model id. Do not assume the historical
+`openai/gpt-oss-120b` observation is current. Each selected provider profile
+must resolve its own Keychain or protected `file:` credential reference; a
+single `CONTEXTDESK_PROVIDER_API_KEY` override is rejected for multi-profile
+comparisons.
 
 Unknown aliases, a missing bridge path, malformed catalog data, or unknown JSON
 fields fail closed. The report is `cd-collab.live_qualification_report.v1` and
@@ -134,7 +143,7 @@ Explicit live run; both flags are required, and the host bridge owns secrets:
 
 ```bash
 npm run qualify:live -- --catalog ./live-qualification-catalog.json \
-  --profiles gpt-oss-120b,qwen-3.6-27b,ministral-3-14b-instruct-2512 \
+  --profiles gpt-oss-120b,qwen-3.6-27b,ministral-3-14b-instruct-2512,vercel-compatible \
   --live --yes --concurrency 2 --json
 ```
 
