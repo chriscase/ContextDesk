@@ -78,7 +78,9 @@ These remain draft and open:
 
 - [PR #936](https://github.com/chriscase/ContextDesk/pull/936), Cursor browser
   qualification, head `760dae2a`: hosted Collab unit and Playwright browser
-  jobs passed.
+  jobs passed. Its base is the older remote `codex/merge-consolidation-v2`,
+  so this is evidence for the earlier shipped collab shell, not for every
+  launcher surface currently present only on the local merge branch.
 - [PR #937](https://github.com/chriscase/ContextDesk/pull/937), Grok current-
   architecture qualification, head `bddc5afb`: hosted typecheck, lint, test,
   migration dry-run, PostgreSQL, and OpenLDAP-backed Collab job passed after
@@ -111,9 +113,10 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
    `ministral-3-14b-instruct-2512`) and the Vercel-compatible alias are not
    configured here, so no live result is claimed.
 2. **The next required rehearsal is vertical.** A hermetic fixture must drive
-   the real `RustBridgeTriageExecutor` through the GUI/server path, followed by
+   the real `RustBridgeTriageExecutor` through the current GUI/server path, followed by
    an explicitly enabled employer/Vercel run when credentials and host profile
-   ids are supplied.
+   ids are supplied. The current launcher is covered by component tests, but
+   not yet by a hosted browser run on this exact local merge state.
 3. **Local browser execution is sandbox-limited.** The hosted Cursor browser
    job is green; this workstation's `tsx` fixture launcher cannot open its IPC
    pipe under the current sandbox, so local Playwright execution is not claimed.
