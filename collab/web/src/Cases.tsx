@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
-import { ImportedRun } from "./ImportedRun.js";
 import { CaseBoardPanel } from "./CaseBoardPanel.js";
 import { TriageRunPanel } from "./TriageRunPanel.js";
+import {
+  TriageAnchor,
+  TriageStepSection,
+  TriageWorkspace,
+  type ContributionView,
+  type RunRow,
+  type SourceOption,
+  type TimelineEvent,
+} from "./TriageWorkspace.js";
 
 interface CaseRow {
   id: string;
@@ -16,56 +24,6 @@ interface CaseRow {
   createdBy?: string | null;
   createdByUsername?: string | null;
   creator?: string | null;
-}
-
-interface TimelineEvent {
-  seq: number;
-  kind: string;
-  actorUsername: string;
-  targetId?: string | null;
-  clientTime?: string | null;
-  serverTime: string;
-  payload: string;
-}
-
-interface ContributionView {
-  id: string;
-  kind: string;
-  body: string | null;
-  privacyClass: string;
-  tombstoned: boolean;
-}
-
-interface RunRow {
-  id: string;
-  outputText: string;
-  corroborationState: string;
-  evidenceVisibility: string;
-  snapshotBinding: string | null;
-  importerUsername: string;
-  operatorUsername: string;
-  promptText: string | null;
-  promptCompleteness: string;
-}
-
-function timelinePayload(payload: string): string {
-  try {
-    const value: unknown = JSON.parse(payload);
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return String(value);
-    return Object.entries(value as Record<string, unknown>)
-      .map(([key, item]) => {
-        const label = key.replaceAll(/([a-z])([A-Z])/g, "$1 $2");
-        const rendered = Array.isArray(item)
-          ? item.join(", ")
-          : typeof item === "object" && item !== null
-            ? JSON.stringify(item)
-            : String(item);
-        return `${label}: ${rendered}`;
-      })
-      .join(" · ");
-  } catch {
-    return payload;
-  }
 }
 
 export function Cases(props: {
@@ -83,7 +41,7 @@ export function Cases(props: {
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [contributions, setContributions] = useState<ContributionView[]>([]);
   const [title, setTitle] = useState("");
-  const [sources, setSources] = useState<{ id: string; name: string; kind: string }[]>([]);
+  const [sources, setSources] = useState<SourceOption[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [importError, setImportError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -102,7 +60,7 @@ export function Cases(props: {
   const refreshSources = useCallback(async () => {
     const res = await fetch("/api/catalog/sources");
     if (!res.ok) return;
-    const body = (await res.json()) as { sources?: { id: string; name: string; kind: string }[] };
+    const body = (await res.json()) as { sources?: SourceOption[] };
     setSources(body.sources ?? []);
   }, []);
 
@@ -145,6 +103,7 @@ export function Cases(props: {
     setContributions([]);
     setRuns([]);
     setActionError(null);
+    setImportError(null);
     if (active) void loadTimeline(active, controller.signal).catch(() => undefined);
     return () => controller.abort();
   }, [active, loadTimeline]);
@@ -329,204 +288,104 @@ export function Cases(props: {
                 {current.status} / {current.severity}
               </span>
             </h2>
-            {canLead ? (
-              <form
-                className="composer"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const next = String(new FormData(e.currentTarget).get("status") ?? "");
-                  void setStatus(next);
-                }}
-              >
-                <select
-                  className="login__input"
-                  name="status"
-                  aria-label="Case status"
-                  defaultValue={current.status}
-                >
-                  <option value="open">open</option>
-                  <option value="monitoring">monitoring</option>
-                  <option value="resolved">resolved</option>
-                  <option value="archived">archived</option>
-                </select>
-                <button className="login__submit" type="submit">
-                  Update status
-                </button>
-              </form>
-            ) : null}
-            <ExperimentLab
-              caseId={current.id}
+            <TriageWorkspace
+              key={current.id}
               canWrite={canWrite}
-              canLead={canLead}
               readOnly={readOnly}
-              caseTitle={current.title}
-              caseStatus={current.status}
-              caseSeverity={current.severity}
-              {...(props.participant ? { participant: props.participant } : {})}
+              sources={sources}
+              events={events}
+              contributions={contributions}
+              runs={runs}
+              importError={importError}
+              onAddNote={(event) => void addNote(event)}
+              onImportRun={(event) => void importRun(event)}
+              onCorroborate={(id, state, linkId) => void corroborate(id, state, linkId)}
             />
-            <CaseBoardPanel caseId={current.id} canWrite={canWrite} canLead={canLead} readOnly={readOnly} />
-            <TriageRunPanel caseId={current.id} canLead={canLead} readOnly={readOnly} />
-            <details className="case-view__support">
-              <summary>Case timeline and external evidence</summary>
-                <ol className="timeline">
-                {events.map((ev) => {
-                  const contribution = ev.targetId
-                    ? contributions.find((item) => item.id === ev.targetId)
-                    : undefined;
-                  return (
-                    <li key={ev.seq} className="timeline__item">
-                      <div className="timeline__meta">
-                        #{ev.seq} {ev.kind} · {ev.actorUsername}
-                        {ev.targetId ? ` · target ${ev.targetId}` : ""}
-                      </div>
-                      {contribution?.body && !contribution.tombstoned ? (
-                        <div>
-                          <span className="timeline__meta">
-                            Current {contribution.kind} · {contribution.privacyClass}
-                          </span>
-                          <div>{contribution.body}</div>
-                        </div>
-                      ) : (
-                        <div>{timelinePayload(ev.payload)}</div>
-                      )}
-                    </li>
-                  );
-                })}
-              </ol>
-              {runs.map((run) => (
-                <ImportedRun
-                  key={run.id}
-                  run={run}
-                  canCorroborate={canWrite}
-                  onCorroborate={corroborate}
+            <TriageStepSection
+              id="triage-analyze"
+              step={2}
+              title="Analyze"
+              lede="Curate the evidence the case may rely on, freeze a snapshot, then run ContextDesk model lanes against exactly that snapshot."
+            >
+              <TriageAnchor id="triage-evidence-board" label="Evidence board and snapshots">
+                <CaseBoardPanel caseId={current.id} canWrite={canWrite} canLead={canLead} readOnly={readOnly} />
+              </TriageAnchor>
+              <TriageAnchor id="triage-lane-runner" label="AI lane runner">
+                <TriageRunPanel caseId={current.id} canLead={canLead} readOnly={readOnly} />
+              </TriageAnchor>
+            </TriageStepSection>
+            <TriageStepSection
+              id="triage-compare"
+              step={3}
+              title="Compare"
+              lede="Review model and strategy lanes side by side against the human benchmark. Agreement is not proof of correctness."
+            >
+              <TriageAnchor id="triage-comparison-lab" label="Comparison lab">
+                <ExperimentLab
+                  caseId={current.id}
+                  canWrite={canWrite}
+                  canLead={canLead}
+                  readOnly={readOnly}
+                  caseTitle={current.title}
+                  caseStatus={current.status}
+                  caseSeverity={current.severity}
+                  {...(props.participant ? { participant: props.participant } : {})}
                 />
-              ))}
-              {canWrite ? (
-                <form className="composer" onSubmit={(e) => void importRun(e)}>
-                {importError ? <p className="import-warn" role="alert">{importError}</p> : null}
-                <p className="import-warn">
-                  Pasted prompts may contain secrets. Mask them before save. Imported
-                  output stays unverified until a human corroborates it. Without a
-                  #888 package, visibility is importer-described or unknown.
+              </TriageAnchor>
+            </TriageStepSection>
+            <TriageStepSection
+              id="triage-decide"
+              step={4}
+              title="Decide"
+              lede="Decisions are human calls. Analysis and agreement inform them; they never make them."
+            >
+              <div className="triage-decide">
+                <p className="triage-step__note">
+                  The accepted decision and its history live in the{" "}
+                  <a href="#triage-comparison-lab">comparison lab&rsquo;s decision journal</a>.
+                  When the team has decided, update the case status and export a share-safe
+                  record.
                 </p>
-                <textarea
-                  className="login__input"
-                  name="outputText"
-                  aria-label="External run output"
-                  required
-                  rows={3}
-                  placeholder="Output"
-                />
-                <textarea
-                  className="login__input"
-                  name="promptText"
-                  aria-label="External run prompt (optional)"
-                  rows={2}
-                  placeholder="Prompt (optional)"
-                />
-                <select
-                  className="login__input"
-                  name="sourceId"
-                  aria-label="External run source"
-                  required
-                  defaultValue=""
-                >
-                  <option value="" disabled>
-                    Source
-                  </option>
-                  {sources.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} ({s.kind})
-                    </option>
-                  ))}
-                </select>
-                <input
-                  className="login__input"
-                  name="operatorUsername"
-                  aria-label="Operator username"
-                  placeholder="Operator username"
-                  required
-                />
-                <input
-                  className="login__input"
-                  name="operatorId"
-                  aria-label="Operator identity"
-                  placeholder="Operator identity"
-                  required
-                />
-                <select
-                  className="login__input"
-                  name="evidenceVisibility"
-                  aria-label="External run evidence visibility"
-                  defaultValue="unknown"
-                >
-                  <option value="unknown">visibility unknown</option>
-                  <option value="importer_described">importer-described</option>
-                </select>
-                <input
-                  className="login__input"
-                  name="visibilityNote"
-                  aria-label="External run visibility note"
-                  placeholder="Visibility note"
-                />
-                <input
-                  className="login__input"
-                  name="snapshotBinding"
-                  aria-label="Package snapshot identity"
-                  placeholder="Package snapshot identity"
-                />
-                <label className="import-warn">
-                  <input type="checkbox" name="redacted" /> I redacted secrets before save
-                </label>
-                <button className="login__submit" type="submit">
-                  Import external run
-                </button>
-                </form>
-              ) : null}
-              {canWrite ? (
-                <form className="composer" onSubmit={(e) => void addNote(e)}>
-                <select
-                  className="login__input"
-                  name="kind"
-                  aria-label="Timeline entry kind"
-                  defaultValue="note"
-                >
-                  <option value="message">message</option>
-                  <option value="note">note</option>
-                  <option value="hypothesis">hypothesis</option>
-                  <option value="action">action</option>
-                </select>
-                <label className="timeline__meta">
-                  Timeline entry visibility
-                  <select
-                    className="login__input"
-                    name="privacyClass"
-                    aria-label="Timeline entry visibility"
-                    defaultValue="owner_only"
+                {canLead ? (
+                  <form
+                    key={current.id}
+                    className="composer"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const next = String(new FormData(e.currentTarget).get("status") ?? "");
+                      void setStatus(next);
+                    }}
                   >
-                    <option value="owner_only">private to the case</option>
-                    <option value="share_safe">eligible for share-safe export</option>
-                  </select>
-                </label>
-                <textarea
-                  className="login__input"
-                  name="body"
-                  aria-label="Timeline entry body"
-                  required
-                  rows={3}
-                />
-                <button className="login__submit" type="submit">
-                  Add to timeline
-                </button>
-                </form>
-              ) : null}
-            </details>
-            {!readOnly ? (
-              <details className="case-view__support">
-                <summary>Case export tools</summary>
-                <ExportPanel caseId={current.id} canWrite={canWrite} canLead={canLead} />
-              </details>
-            ) : null}
+                    <select
+                      className="login__input"
+                      name="status"
+                      aria-label="Case status"
+                      defaultValue={current.status}
+                    >
+                      <option value="open">open</option>
+                      <option value="monitoring">monitoring</option>
+                      <option value="resolved">resolved</option>
+                      <option value="archived">archived</option>
+                    </select>
+                    <button className="login__submit" type="submit">
+                      Update status
+                    </button>
+                  </form>
+                ) : !readOnly ? (
+                  <p className="triage-step__note">Only a case lead can change the case status.</p>
+                ) : null}
+                {!readOnly ? (
+                  <details className="case-view__support">
+                    <summary>Case export tools</summary>
+                    <ExportPanel caseId={current.id} canWrite={canWrite} canLead={canLead} />
+                  </details>
+                ) : (
+                  <p className="triage-step__note" role="status">
+                    Static read-only view: status changes and exports are unavailable.
+                  </p>
+                )}
+              </div>
+            </TriageStepSection>
           </>
         ) : (
           <p className="shell__copy">Select or create a case.</p>
