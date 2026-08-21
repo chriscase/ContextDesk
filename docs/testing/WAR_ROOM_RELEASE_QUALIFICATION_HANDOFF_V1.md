@@ -261,36 +261,38 @@ These remain draft and open:
 - [PR #940](https://github.com/chriscase/ContextDesk/pull/940), Grok mixed-
   provider credential isolation, remains draft/open at head `8202f248`. Its
   security slice was selectively integrated and revalidated on this local
-  branch; the PR itself was not modified.
+  branch; the PR itself was not modified. Its current remote CI is not a
+  substitute for this local validation and still has failing/in-progress Rust
+  checks on that separate PR head.
 
-Neither PR is merged, closed, or retargeted.
+None of these PRs is merged, closed, or retargeted.
 
 The planned Claude Code adversarial UI/accessibility/security lane has no
 active result to integrate. The available Claude control channel is archived,
 and read-only Computer Use access to the Claude application was denied in this
 session. No Claude-authored hardening change is therefore claimed.
 
-## Current Vercel live attempt
+## Current Vercel live evidence
 
-An owner-authorized, isolated `gateway diagnose --level basic` attempt was made
-from this branch on 2026-08-20 using the protected-file credential reference
-and the exact Vercel catalog model `openai/gpt-oss-120b`. The command used the
-share-safe default (no private capture), attempted 15 of 23 bounded diagnostic
-requests, removed 2 temporary corpora and 3 temporary sessions, and reported
-no cleanup failures.
+An owner-authorized, isolated `gateway diagnose --level basic` run completed on
+2026-08-21 from source build `583a9822bfe3`, using the protected-file
+credential reference and the exact model `openai/gpt-oss-120b` discovered from
+the current Vercel catalog. It used the share-safe default, made 19 of 23
+bounded requests, removed 2 temporary corpora and 3 temporary sessions, and
+reported no cleanup failures.
 
-This is **not** a Vercel/model result. An independent catalog-discovery call
-failed before HTTP with:
+The scoped result is recorded in
+`docs/benchmarks/VERCEL_GATEWAY_DIAGNOSTIC_GPT_OSS_WAR_ROOM_20260821.md`:
 
-```text
-DNS resolve failed for `ai-gateway.vercel.sh`
-```
+- gateway/model compatibility: **pass**;
+- ContextDesk product workflow compatibility: **pass**;
+- known-truth answer usefulness: **fail**, because the typed scorer rejected
+  `typed_symptom_separation` for the linked-log triage case.
 
-The diagnostic’s transport/response-contract failures are therefore treated as
-local network-environment failures, not as evidence about GPT-OSS or Vercel.
-The share-safe report contained no credential, endpoint, provider body, or
-private capture. A rerun is appropriate after DNS/network access is restored.
-No additional provider attempt was made after the DNS failure.
+This is valid evidence about the exact Vercel/model/build combination, not a
+universal GPT-OSS quality claim and not employer-gateway evidence. The failure
+is retained as a useful product signal: the host completed the workflow and
+withheld a usefulness claim rather than presenting an overconfident diagnosis.
 
 ## What the current GUI can demonstrate
 
@@ -320,9 +322,9 @@ the collaborative surface for reviewing and adjudicating the resulting runs.
 
 1. **Real employer-provider execution is not yet evidenced in this
    environment.** The employer aliases (`gpt-oss-120b`, `qwen-3.6-27b`, and
-   `ministral-3-14b-instruct-2512`) are not configured here. Vercel credentials
-   were available through the protected-file reference, but DNS blocked the
-   current attempt before a provider result was obtained.
+   `ministral-3-14b-instruct-2512`) are not configured here. Vercel now has a
+   current, scoped GPT-OSS diagnostic result, but its known-truth usefulness
+   scorer failed on typed symptom separation; it is not a clean quality pass.
 2. **The next required rehearsal is hosted and vertical.** PR #936’s hosted
    browser job passed on its older base, and the local `collab.yml` workflow
    contains the same browser lane. It still needs a hosted browser run on this
