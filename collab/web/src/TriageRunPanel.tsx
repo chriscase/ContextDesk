@@ -473,16 +473,6 @@ export function TriageRunPanel(props: {
     }
   }
 
-  function onBenchArtifactFile(file: File | null) {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === "string") setBenchArtifactText(reader.result);
-    };
-    reader.onerror = () => setError("Bench artifact file could not be read.");
-    reader.readAsText(file);
-  }
-
   function reuse(job: JobView) {
     setSelectedSnapshotId(job.snapshotId);
     setMode(job.request.mode);
@@ -668,14 +658,6 @@ export function TriageRunPanel(props: {
                   raw JSON is only the import input.
                 </p>
               </div>
-              <label className="triage-runs__field">
-                Artifact file
-                <input
-                  type="file"
-                  accept="application/json,.json"
-                  onChange={(event) => onBenchArtifactFile(event.target.files?.[0] ?? null)}
-                />
-              </label>
               <label className="triage-runs__field">
                 Artifact JSON
                 <textarea
