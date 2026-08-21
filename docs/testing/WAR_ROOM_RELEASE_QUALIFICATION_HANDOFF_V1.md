@@ -51,7 +51,7 @@ The current full local demo gate passes:
 
 - contracts: 49 tests;
 - server: 145 passed, 10 environment-gated skips;
-- web: 39 tests;
+- web: 40 tests;
 - typecheck, lint, and static synthetic demo build.
 
 The exact-branch browser attempt was also checked:
@@ -77,7 +77,7 @@ The operator-readiness slice is now local and validated as well:
   focused tests;
 - the generated `COLLAB_BRIDGE_BIN` name is wired through the production
   entrypoint, while legacy `COLLAB_TRIAGE_RUNNER` deployments remain supported;
-- the full server gate is now 137 passed / 10 environment-gated skips.
+- the full server gate is now 145 passed / 10 environment-gated skips.
 
 The hosted release-qualification slice from Grok Build PR #939 was reviewed
 against the current branch and selectively integrated locally in commit
@@ -115,10 +115,11 @@ The local follow-up hardening after reviewing Grok Build PR #939 is also green:
   mask credential- and endpoint-shaped excerpts; and
 - timeline payloads are presented as readable fields rather than a raw JSON
   block. Raw JSON remains available through the existing export/projection
-  paths where appropriate.
+  paths where appropriate; denied case writes now surface bounded generic
+  permission alerts instead of being silently ignored.
 
 The post-hardening qualification and demo gates remain green at the current
-HEAD: 49 contract tests, 145 server tests with 10 environment-gated skips, 39
+HEAD: 49 contract tests, 145 server tests with 10 environment-gated skips, 40
 web tests, typecheck, lint, and static synthetic demo build. A local
 qualification/doctor/sanitizer round-trip also passed with the required
 `qualify-memory.json` and `doctor.json` outputs.
