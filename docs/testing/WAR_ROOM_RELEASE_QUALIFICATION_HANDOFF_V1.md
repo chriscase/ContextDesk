@@ -151,6 +151,8 @@ The diagnostic’s transport/response-contract failures are therefore treated as
 local network-environment failures, not as evidence about GPT-OSS or Vercel.
 The share-safe report contained no credential, endpoint, provider body, or
 private capture. A rerun is appropriate after DNS/network access is restored.
+On 2026-08-21, a DNS-only retry still could not resolve `ai-gateway.vercel.sh`,
+so no second provider attempt was made.
 
 ## What the current GUI can demonstrate
 
@@ -190,8 +192,9 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
    uses memory plus filesystem evidence; hosted qualification covers the
    PostgreSQL path.
 5. **The local merge branch is unpublished.** A future push or PR publication
-   requires restored DNS/network access; this handoff does not imply that
-   remote state contains the latest local handoff updates.
+   requires restored DNS/network access; a DNS-only check for `github.com` on
+   2026-08-21 still failed, and this handoff does not imply that remote state
+   contains the latest local handoff updates.
 6. **Provider quality is not certified.** The harness proves lifecycle,
    provenance, privacy, and comparison mechanics; it does not establish that
    any model reached the correct diagnosis.
