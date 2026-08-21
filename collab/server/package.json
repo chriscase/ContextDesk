@@ -11,6 +11,8 @@
     "demo": "npm run build && node dist/demo.js",
     "demo:static": "npm run build && node dist/demo-static.js",
     "qualify": "npm run build && node dist/qualification-cli.js",
+    "doctor": "npm run build && node dist/doctor-cli.js",
+    "config:init": "npm run build && node dist/config-init-cli.js",
     "qualify:source": "tsx src/qualification-cli.ts",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",

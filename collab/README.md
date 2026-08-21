@@ -263,6 +263,14 @@ From `collab/`: `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`
 `npm run demo`, `npm run demo:static`, `npm run demo:check`, `npm run e2e`,
 `npm run migrate`, `npm run migrate:down`, `npm run migrate:dry-run`.
 
+For a non-networking deployment preflight, run `npm run doctor` (or
+`npm run doctor -- --json` for machine-readable output). It checks runtime,
+storage, authentication/TLS, paths, session-cookie safety, and host-owned
+triage profile configuration without contacting PostgreSQL, LDAP, Vercel, or a
+model provider. To create a private local-demo template, run
+`npm run config:init -- --output .env.local`; it refuses to overwrite an
+existing file unless `--force` is supplied.
+
 `npm run e2e` is the Playwright war-room qualification against a
 `MapAuthAdapter` fixture server (no LDAP, no Postgres). See
 [`docs/testing/COLLAB_WAR_ROOM_BROWSER_QUALIFICATION_V1.md`](../docs/testing/COLLAB_WAR_ROOM_BROWSER_QUALIFICATION_V1.md).

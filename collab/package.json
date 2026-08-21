@@ -21,6 +21,8 @@
     "demo": "npm run build -w @cd-collab/contracts && npm run build:demo -w @cd-collab/web && npm run demo -w @cd-collab/server",
     "demo:static": "npm run build -w @cd-collab/contracts && npm run build:demo -w @cd-collab/web && npm run demo:static -w @cd-collab/server",
     "qualify": "npm run build -w @cd-collab/contracts && npm run qualify -w @cd-collab/server -- --all",
+    "doctor": "npm run build -w @cd-collab/contracts && npm run doctor -w @cd-collab/server --",
+    "config:init": "npm run config:init -w @cd-collab/server --",
     "demo:check": "npm run typecheck && npm run lint && npm test && npm run demo:static",
     "dev": "npm run dev -w @cd-collab/server",
     "start": "npm run start -w @cd-collab/server"
