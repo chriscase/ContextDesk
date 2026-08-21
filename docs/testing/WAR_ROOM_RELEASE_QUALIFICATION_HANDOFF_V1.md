@@ -20,7 +20,8 @@ The branch contains the qualification harness, portable launcher, provider-free
 browser bridge vertical, selectively ported operator-readiness
 contracts/configuration tools, and the opt-in live qualification runner
 described below. It is not published because the
-workstation could not resolve `github.com` during the last push attempt.
+workstation could not resolve `github.com` during the last push attempt. A later
+read-only fetch of PR #939 succeeded, but this branch remains unpublished.
 
 No merge, close, retarget, or rewrite was performed on any external PR.
 
@@ -49,7 +50,7 @@ The current report proves:
 The full local demo gate also passed:
 
 - contracts: 49 tests;
-- server: 134 passed, 10 environment-gated skips;
+- server: 137 passed, 10 environment-gated skips;
 - web: 37 tests;
 - typecheck, lint, and static synthetic demo build.
 
@@ -69,7 +70,25 @@ The operator-readiness slice is now local and validated as well:
   focused tests;
 - the generated `COLLAB_BRIDGE_BIN` name is wired through the production
   entrypoint, while legacy `COLLAB_TRIAGE_RUNNER` deployments remain supported;
-- the full server gate is now 134 passed / 10 environment-gated skips.
+- the full server gate is now 137 passed / 10 environment-gated skips.
+
+The hosted release-qualification slice from Grok Build PR #939 was reviewed
+against the current branch and selectively integrated locally in commit
+`805d9357`:
+
+- `.github/workflows/collab-qualify.yml` runs Node 22, memory qualification,
+  PostgreSQL 16 qualification, configuration initialization, and doctor;
+- `qualification-cli` and `doctor-cli` can persist their typed JSON reports;
+- the CI artifact sanitizer accepts only typed share-safe doctor,
+  provider-free qualification, and provider-free live-qualification reports;
+- live provider lanes are rejected before artifact upload, and raw reports are
+  never uploaded; and
+- the sanitizer has focused tests for valid reports, live-run rejection, and
+  secret/privacy failures.
+
+The local memory qualification and artifact round-trip passed. The hosted
+workflow itself has not run for this unpublished branch, and PostgreSQL remains
+environment-gated locally.
 
 The opt-in live qualification runner is now local and validated:
 
@@ -174,8 +193,7 @@ The diagnostic’s transport/response-contract failures are therefore treated as
 local network-environment failures, not as evidence about GPT-OSS or Vercel.
 The share-safe report contained no credential, endpoint, provider body, or
 private capture. A rerun is appropriate after DNS/network access is restored.
-On 2026-08-21, a DNS-only retry still could not resolve `ai-gateway.vercel.sh`,
-so no second provider attempt was made.
+No additional provider attempt was made after the DNS failure.
 
 ## What the current GUI can demonstrate
 
@@ -219,8 +237,8 @@ the collaborative surface for reviewing and adjudicating the resulting runs.
    uses memory plus filesystem evidence; hosted qualification covers the
    PostgreSQL path.
 5. **The local merge branch is unpublished.** A future push or PR publication
-   requires restored DNS/network access; a DNS-only check for `github.com` on
-   2026-08-21 still failed, and this handoff does not imply that remote state
+   requires restored DNS/network access; the last DNS-only check for
+   `github.com` failed, and this handoff does not imply that remote state
    contains the latest local handoff updates.
 6. **Provider quality is not certified.** The harness proves lifecycle,
    provenance, privacy, and comparison mechanics; it does not establish that
@@ -231,10 +249,9 @@ the collaborative surface for reviewing and adjudicating the resulting runs.
 
 ## Next delegated milestone
 
-The next Grok Build slice is hosted release qualification: run the current
-memory and PostgreSQL qualification paths in CI, exercise `config:init` and
-`doctor`, publish only sanitized reports, and prove live profiles remain
-skipped unless a future workflow explicitly opts in. A hosted Cursor browser
-run against this exact branch, Claude adversarial UI/security review, and real
-employer/Vercel rehearsals remain pending until branch publication and the
-relevant network/profile access are available.
+The hosted release-qualification slice is now implemented locally. The next
+delegated milestone is a hosted browser qualification run against this exact
+branch, followed by explicit employer/Vercel rehearsals when credentials and
+host profile ids are supplied. Claude adversarial UI/security review and real
+provider quality validation remain pending; neither is implied by a green
+hosted qualification run.
