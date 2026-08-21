@@ -54,6 +54,18 @@ The current full local demo gate passes:
 - web: 41 tests;
 - typecheck, lint, and static synthetic demo build.
 
+The latest operator qualification pass at the current local HEAD also passes
+honestly:
+
+- `npm run qualify` completed all 9 memory-backed steps; PostgreSQL was skipped
+  only because `COLLAB_TEST_ADMIN_URL` is not configured;
+- `npm run qualify:live -- --json` reported all four requested aliases as
+  `live_disabled`, with no provider invocation; and
+- `npm run qualify:live -- --live --yes --json` exited 1 with
+  `--live requires --profiles or COLLAB_LIVE_PROFILES`, while
+  `npm run doctor -- --json` reported `ok: true`, zero errors, and two
+  configuration warnings.
+
 The exact-branch browser attempt was also checked:
 
 - `npm run typecheck -w @cd-collab/e2e` passed;
