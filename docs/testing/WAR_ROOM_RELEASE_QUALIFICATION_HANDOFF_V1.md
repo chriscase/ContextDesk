@@ -117,6 +117,11 @@ These remain draft and open:
 
 Neither PR is merged, closed, or retargeted.
 
+The planned Claude Code adversarial UI/accessibility/security lane has no
+active result to integrate. The available Claude control channel is archived,
+and read-only Computer Use access to the Claude application was denied in this
+session. No Claude-authored hardening change is therefore claimed.
+
 ## Current Vercel live attempt
 
 An owner-authorized, isolated `gateway diagnose --level basic` attempt was made
@@ -181,6 +186,9 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
 6. **Provider quality is not certified.** The harness proves lifecycle,
    provenance, privacy, and comparison mechanics; it does not establish that
    any model reached the correct diagnosis.
+7. **Claude hardening remains unverified.** The current local component tests
+   cover the War-Room surfaces, but a separate adversarial Claude review has
+   not been obtained because the Claude session was unavailable.
 
 ## Next delegated milestone
 
