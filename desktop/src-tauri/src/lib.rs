@@ -8427,6 +8427,9 @@ struct LogIngestReportDto {
     /// Separate operation phase timings (#824). Progress chrome stays one
     /// monotonic Stream for interleaved work; completion/diagnostics list these.
     phase_timings: cd_core::log_analysis::IngestPhaseTimings,
+    /// Fail-closed import result contract. Present on every published run so
+    /// the desktop cannot read Partial as Complete from a missing field.
+    outcome: cd_core::log_analysis::ImportOutcomeReport,
 }
 
 const DEMO_LOG_IDENTITY: &str = "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1";
@@ -9515,18 +9518,177 @@ const LOG_REANALYZE_CANCEL_KEY: &str = "log_reanalyze";
 enum LogIngestRunError {
     Cancelled,
     Failed(String),
+    /// Ingest classified a rejection; the typed outcome must cross IPC.
+    Rejected {
+        message: String,
+        outcome: Box<cd_core::log_analysis::ImportOutcomeReport>,
+    },
 }
 
 impl LogIngestRunError {
     fn message(&self) -> &str {
         match self {
             Self::Cancelled => "ingest cancelled",
-            Self::Failed(message) => message,
+            Self::Failed(message) | Self::Rejected { message, .. } => message,
         }
     }
 
-    fn into_message(self) -> String {
-        self.message().to_string()
+    fn into_command_error(self) -> ImportCommandErrorDto {
+        match self {
+            Self::Cancelled => ImportCommandErrorDto {
+                message: "ingest cancelled".into(),
+                outcome: None,
+            },
+            Self::Failed(message) => ImportCommandErrorDto {
+                message,
+                outcome: None,
+            },
+            Self::Rejected { message, outcome } => ImportCommandErrorDto {
+                message,
+                outcome: Some(*outcome),
+            },
+        }
+    }
+}
+
+/// Structured import-command rejection so a classified outcome is not dropped.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportCommandErrorDto {
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<cd_core::log_analysis::ImportOutcomeReport>,
+}
+
+impl From<String> for ImportCommandErrorDto {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            outcome: None,
+        }
+    }
+}
+
+/// Project a core import failure into the string the UI shows.
+///
+/// Fail-closed: [`cd_core::log_analysis::operator_import_error`] strips any
+/// `[member=` transport frame — well-formed or not — before the string
+/// crosses IPC. A ZIP member name that itself contains the marker cannot
+/// leave leftover `[member=` in the webview.
+fn import_error_message(error: &cd_core::error::CoreError) -> String {
+    cd_core::log_analysis::operator_import_error(error)
+}
+
+#[cfg(test)]
+mod import_error_projection_tests {
+    use super::import_error_message;
+    use cd_core::error::CoreError;
+
+    /// The `[member=…]` transport marker must never reach the UI, while the
+    /// engine's own wording survives at the front and the member is still
+    /// named through the scrubbed locator.
+    #[test]
+    fn member_annotation_is_stripped_and_the_scrubbed_locator_is_named() {
+        let error =
+            CoreError::Message("zip open: invalid Zip archive [member=bundles/inner.zip]".into());
+        let shown = import_error_message(&error);
+        assert!(!shown.contains("[member="), "marker leaked: {shown}");
+        assert!(
+            shown.starts_with("zip open: invalid Zip archive"),
+            "engine wording must stay at the front: {shown}"
+        );
+        assert!(
+            shown.contains("bundles/inner.zip"),
+            "the failing member must still be named: {shown}"
+        );
+    }
+
+    /// A secret-bearing member name is scrubbed by the same redaction the
+    /// outcome report uses — the raw annotated identity must not pass
+    /// through to the UI.
+    #[test]
+    fn secret_bearing_member_names_are_scrubbed() {
+        let error = CoreError::Message(
+            "zip open: invalid Zip archive [member=bundles/sk-abcdefghijklmnopqrst.bin]".into(),
+        );
+        let shown = import_error_message(&error);
+        assert!(!shown.contains("[member="), "marker leaked: {shown}");
+        assert!(
+            !shown.contains("abcdefghijklmnopqrst"),
+            "credential-shaped member name reached the UI string: {shown}"
+        );
+    }
+
+    /// Errors without an annotation pass through byte for byte.
+    #[test]
+    fn unannotated_messages_pass_through_unchanged() {
+        let error = CoreError::Message("policy denied: plan is stale".into());
+        assert_eq!(import_error_message(&error), error.to_string());
+    }
+
+    /// The seal is fail-closed: a malformed or nested frame is cut, never
+    /// returned with leftover `[member=`.
+    #[test]
+    fn malformed_member_frames_never_reach_the_ui() {
+        for raw in [
+            "zip open: missing end record [member=]",
+            "zip open: missing end record [member=foo [member=sk-abcdefghijklmnopqrst]]",
+            "zip open: missing end record [member=x] [member=secret]",
+        ] {
+            let shown = import_error_message(&CoreError::Message(raw.into()));
+            assert!(
+                !shown.contains("[member="),
+                "fail-open seal leaked marker from {raw:?}: {shown}"
+            );
+            assert!(
+                shown.starts_with("zip open: missing end record"),
+                "engine wording must survive: {shown}"
+            );
+        }
+    }
+
+    /// A rejected ingest keeps the classified outcome on the command error
+    /// and still seals the transport marker.
+    #[test]
+    fn rejected_ingest_error_carries_the_classified_outcome() {
+        let error =
+            CoreError::Message("zip open: missing end record [member=bundles/inner.zip]".into());
+        let classified = cd_core::log_analysis::ImportOutcomeReport::rejected_from_error(&error);
+        let dto = super::LogIngestRunError::Rejected {
+            message: import_error_message(&error),
+            outcome: Box::new(classified),
+        }
+        .into_command_error();
+        assert!(
+            !dto.message.contains("[member="),
+            "command error leaked marker: {}",
+            dto.message
+        );
+        let outcome = dto
+            .outcome
+            .as_ref()
+            .expect("rejected ingest must carry the outcome");
+        assert_eq!(
+            outcome.class,
+            cd_core::log_analysis::ImportOutcomeClass::Rejected
+        );
+        assert!(!outcome.published);
+        assert!(
+            outcome
+                .defects
+                .iter()
+                .any(|defect| defect.source.identity.contains("bundles/inner.zip")),
+            "locator missing: {outcome:?}"
+        );
+        let wire = serde_json::to_value(&dto).expect("command error must serialize");
+        assert_eq!(wire["outcome"]["class"], "rejected");
+        assert_eq!(wire["outcome"]["published"], false);
+        assert!(
+            wire["message"]
+                .as_str()
+                .is_some_and(|message| !message.contains("[member=")),
+            "serialized message leaked marker: {wire}"
+        );
     }
 }
 
@@ -9655,61 +9817,28 @@ async fn run_log_ingest(
     let name_owned = name.unwrap_or_else(|| "corpus".into());
     let cancel_for_job = cancel.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        let result = match (managed_identity, selection) {
-            (Some(identity), Some(selection)) => {
-                cd_core::log_analysis::ingest_path_with_policy_selection_and_observer_managed(
-                    &cache,
-                    &selected_path,
-                    &name_owned,
-                    &policy,
-                    embed_backend,
-                    &progress,
-                    Some(&cancel_for_job),
-                    &identity,
-                    &selection,
-                )
-            }
-            (Some(identity), None) => {
-                cd_core::log_analysis::ingest_path_with_policy_and_observer_managed(
-                    &cache,
-                    &selected_path,
-                    &name_owned,
-                    &policy,
-                    embed_backend,
-                    &progress,
-                    Some(&cancel_for_job),
-                    &identity,
-                )
-            }
-            (None, Some(selection)) => {
-                cd_core::log_analysis::ingest_path_with_policy_selection_and_observer(
-                    &cache,
-                    &selected_path,
-                    &name_owned,
-                    &policy,
-                    embed_backend,
-                    &progress,
-                    Some(&cancel_for_job),
-                    &selection,
-                )
-            }
-            (None, None) => cd_core::log_analysis::ingest_path_with_policy_and_observer(
-                &cache,
-                &selected_path,
-                &name_owned,
-                &policy,
-                embed_backend,
-                &progress,
-                Some(&cancel_for_job),
-            ),
-        };
-        result.map_err(|error| match error {
-            cd_core::error::CoreError::Cancelled => LogIngestRunError::Cancelled,
-            other => LogIngestRunError::Failed(other.to_string()),
-        })
+        let (result, classified) = cd_core::log_analysis::ingest_path_with_outcome(
+            &cache,
+            &selected_path,
+            &name_owned,
+            &policy,
+            embed_backend,
+            &progress,
+            Some(&cancel_for_job),
+            selection.as_ref(),
+            managed_identity.as_deref(),
+        );
+        match result {
+            Ok(report) => Ok((report, classified)),
+            Err(cd_core::error::CoreError::Cancelled) => Err(LogIngestRunError::Cancelled),
+            Err(other) => Err(LogIngestRunError::Rejected {
+                message: import_error_message(&other),
+                outcome: Box::new(classified),
+            }),
+        }
     })
     .await;
-    let report = match outcome {
+    let (report, classified) = match outcome {
         Ok(Ok(report)) => {
             state
                 .failed_log_ingest_diagnostic
@@ -9782,6 +9911,7 @@ async fn run_log_ingest(
             .collect(),
         embedding: report.embedding,
         phase_timings: report.phase_timings,
+        outcome: classified,
     })
 }
 
@@ -9794,7 +9924,7 @@ async fn ingest_log_path(
     path: String,
     name: Option<String>,
     correlation_id: Option<String>,
-) -> Result<LogIngestReportDto, String> {
+) -> Result<LogIngestReportDto, ImportCommandErrorDto> {
     let invocation = ProcessProgressInvocation::new(correlation_id);
     let cancel_key = format!("{LOG_INGEST_CANCEL_KEY}:{}", invocation.correlation_id);
     let cancel = cd_core::process_progress::CancelFlag::new();
@@ -9824,7 +9954,7 @@ async fn ingest_log_path(
         &cancel_key,
         &cancel_registration,
     );
-    result.map_err(LogIngestRunError::into_message)
+    result.map_err(LogIngestRunError::into_command_error)
 }
 
 struct DemoLogIngestReceipt {
@@ -10063,7 +10193,9 @@ async fn install_demo_log_corpus_transaction<B: DemoLogInstallBackend>(
             backend.select_corpus(prior_active_corpus);
             return DemoLogInstallDto::cancelled();
         }
-        Err(LogIngestRunError::Failed(error)) => {
+        Err(
+            LogIngestRunError::Failed(error) | LogIngestRunError::Rejected { message: error, .. },
+        ) => {
             backend.select_corpus(prior_active_corpus);
             return DemoLogInstallDto::failed(error, true);
         }
@@ -10825,7 +10957,7 @@ async fn log_preview_import(
             std::path::Path::new(&path),
             Some(&cancel),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| import_error_message(&error))
     })
     .await
     .map_err(|error| format!("import preview task join: {error}"));
@@ -10856,7 +10988,7 @@ async fn log_run_import(
     plan_version: u32,
     selected: Vec<String>,
     correlation_id: Option<String>,
-) -> Result<LogIngestReportDto, String> {
+) -> Result<LogIngestReportDto, ImportCommandErrorDto> {
     let invocation = ProcessProgressInvocation::new(correlation_id);
     let cancel_key = format!("{LOG_INGEST_CANCEL_KEY}:{}", invocation.correlation_id);
     let cancel = cd_core::process_progress::CancelFlag::new();
@@ -10880,7 +11012,7 @@ async fn log_run_import(
             &selected,
             Some(&verify_cancel),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| import_error_message(&error))
     })
     .await
     .map_err(|error| format!("import plan verification task join: {error}"));
@@ -10892,7 +11024,7 @@ async fn log_run_import(
                 &cancel_key,
                 &cancel_registration,
             );
-            return Err(message);
+            return Err(message.into());
         }
     };
     let result = run_log_ingest(
@@ -10911,7 +11043,7 @@ async fn log_run_import(
         &cancel_key,
         &cancel_registration,
     );
-    result.map_err(LogIngestRunError::into_message)
+    result.map_err(LogIngestRunError::into_command_error)
 }
 
 /// Apply reviewed timezone declarations to one or more sources atomically
@@ -15215,8 +15347,8 @@ mod log_noise_candidate_host_tests {
             "run_log_ingest must use spawn_blocking for trusted-core ingest"
         );
         assert!(
-            body.contains("ingest_path_with_policy_and_observer"),
-            "run_log_ingest must call the shipped core ingest path"
+            body.contains("ingest_path_with_outcome"),
+            "run_log_ingest must call the classified-outcome ingest path"
         );
         assert!(
             !body.contains("LogCorpus::open("),

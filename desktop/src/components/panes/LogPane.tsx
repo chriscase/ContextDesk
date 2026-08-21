@@ -68,6 +68,7 @@ import {
   type LogDiagnosticStatus,
 } from "../../lib/logDiagnosticReport";
 import { HELP_TEMPLATE_GROUPING } from "../../lib/helpContent";
+import { operatorImportCommandFailure } from "../../lib/importOutcome";
 import {
   DismissibleLayerContext,
   useDismissibleLayer,
@@ -84,7 +85,10 @@ import { ImportActivitySummary } from "../activity/ImportActivitySummary";
 import { ActivityEventList } from "../activity/ActivityEventList";
 import { ActivityToggle } from "../activity/ActivityToggle";
 import { useActivityInspector } from "../../hooks/useActivityInspector";
-import type { ImportRunInput } from "../../lib/activity/types";
+import {
+  activityOutcomeFromImportClass,
+  type ImportRunInput,
+} from "../../lib/activity/types";
 import {
   forgetCorpusImportActivity,
   publishImportRunActivity,
@@ -945,14 +949,14 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       recordImportRun({
         startedAtMs,
         endedAtMs: Date.now(),
-        outcome: "completed",
+        outcome: activityOutcomeFromImportClass(r.outcome?.class),
         sourceKind: quickImportSourceKind(mode, path),
         report: r,
       });
       await refresh();
       await selectCorpus(r.corpusId);
     } catch (e) {
-      setError(String(e));
+      setError(operatorImportCommandFailure(e).message);
       let diagnostic: FailedLogIngestDiagnosticDto | null = null;
       try {
         diagnostic = await hostGetFailedLogIngestDiagnostic();

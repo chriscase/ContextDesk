@@ -174,7 +174,20 @@ export function importLedgerSections(run: ImportRunInput): LedgerSection[] {
           detail: `${formatCount(report.ignoredFiles)} ignored · ${formatCount(report.failedFiles)} failed`,
         });
       }
-      if (report.partial) {
+      if (run.outcome === "partial" || report.outcome?.class === "partial") {
+        rows.push({
+          term: "Coverage",
+          detail: report.partial
+            ? "Partial — some discovered files were not imported (see above)"
+            : "Partial — the import finished with defects; this is not a complete run",
+        });
+      } else if (run.outcome === "unknown") {
+        rows.push({
+          term: "Coverage",
+          detail:
+            "Unknown — the host did not certify this import; do not treat it as complete",
+        });
+      } else if (report.partial) {
         rows.push({
           term: "Coverage",
           detail: "Partial — some discovered files were not imported (see above)",

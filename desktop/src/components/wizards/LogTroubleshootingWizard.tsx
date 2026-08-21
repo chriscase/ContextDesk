@@ -14,6 +14,7 @@ import {
   type ProcessProgressDto as HostProcessProgressDto,
 } from "../../lib/host";
 import { openDirectoryDialog, openFileDialog } from "../../lib/dialogs";
+import { operatorImportCommandFailure } from "../../lib/importOutcome";
 import {
   formatBytes,
   formatEventsPerTemplate,
@@ -223,7 +224,7 @@ export function LogTroubleshootingWizard({
       }
       setRunDone(true);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(operatorImportCommandFailure(e).message);
     } finally {
       setBusy(false);
     }

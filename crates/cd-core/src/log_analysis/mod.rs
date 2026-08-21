@@ -19,6 +19,7 @@ pub mod frame;
 pub mod governed_citation;
 pub mod hybrid_retrieval;
 pub mod import_diagnose;
+pub mod import_outcome;
 pub mod import_preview;
 pub mod import_profile;
 pub mod ingest;
@@ -116,8 +117,14 @@ pub use import_diagnose::{
     ImportDiagnosticReport, IMPORT_DIAGNOSTIC_REDACTION_MODE, IMPORT_DIAGNOSTIC_SCHEMA_ID,
     IMPORT_DIAGNOSTIC_SCHEMA_VERSION,
 };
+pub use import_outcome::{
+    operator_import_error, outcome_from_ingest, strip_member_annotation, DefectLedger,
+    ImportDefect, ImportDefectCode, ImportDefectSeverity, ImportOutcomeClass, ImportOutcomeCounts,
+    ImportOutcomePrivacy, ImportOutcomeReport, RecordLocation, SourceLocator,
+    IMPORT_OUTCOME_SCHEMA_ID, IMPORT_OUTCOME_SCHEMA_VERSION, MAX_IMPORT_DEFECTS,
+};
 pub use ingest::{
-    ingest_path, ingest_path_with_observer, ingest_path_with_policy,
+    ingest_path, ingest_path_with_observer, ingest_path_with_outcome, ingest_path_with_policy,
     ingest_path_with_policy_and_observer, ingest_path_with_policy_and_observer_managed,
     ingest_path_with_policy_selection_and_observer,
     ingest_path_with_policy_selection_and_observer_managed, IngestPhaseTimings, IngestReport,

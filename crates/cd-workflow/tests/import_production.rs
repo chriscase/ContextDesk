@@ -255,3 +255,65 @@ fn cancellation_publishes_nothing_and_retry_over_the_same_source_succeeds() {
     assert_eq!(retried.events_imported, 50_000);
     assert_eq!(LogCorpus::list_summaries(cache.path()).unwrap().len(), 1);
 }
+
+/// The whole path the CLI takes, end to end: a corrupt nested container must
+/// come back rejected *and* named.
+///
+/// This is the shape that motivated the outcome contract — the failure is
+/// raised by the preview walk, before ingest starts, so a report built only
+/// from ingest state cannot see the member. Asserting through
+/// `default_import_with_outcome` keeps that gap from reopening.
+#[test]
+fn a_corrupt_nested_member_is_named_by_the_workflow_outcome() {
+    use cd_core::log_analysis::import_outcome::{
+        ImportDefectSeverity, ImportOutcomeClass, ImportOutcomeReport,
+    };
+    use cd_core::process_progress::NoopProcessProgress;
+    use cd_workflow::import::default_import_with_outcome;
+
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("cache");
+    let source = temp.path().join("mixed.zip");
+    std::fs::write(
+        &source,
+        zip_bytes(&[
+            (
+                "logs/app.log",
+                b"2024-01-01T00:00:00Z INFO service started\n".as_slice(),
+            ),
+            (
+                "bundles/inner.zip",
+                b"PK\x03\x04 not a real central directory".as_slice(),
+            ),
+        ]),
+    )
+    .unwrap();
+
+    let (result, outcome): (_, ImportOutcomeReport) = default_import_with_outcome(
+        &cache,
+        &source,
+        &AppConfig::default(),
+        None,
+        &NoopProcessProgress,
+    );
+
+    assert!(result.is_err(), "a corrupt member must reject the import");
+    assert!(outcome.invariants_hold(), "{outcome:?}");
+    assert_eq!(outcome.class, ImportOutcomeClass::Rejected);
+    assert!(!outcome.published);
+    assert!(outcome.corpus_id.is_none());
+    assert!(
+        LogCorpus::list_ids(&cache).unwrap_or_default().is_empty(),
+        "a rejected import must leave the library untouched"
+    );
+
+    let defect = outcome
+        .defects
+        .iter()
+        .find(|d| d.severity == ImportDefectSeverity::Fatal)
+        .expect("a rejection must carry a fatal defect");
+    assert_eq!(
+        defect.source.identity, "bundles/inner.zip",
+        "the operator must be told which member stopped the run"
+    );
+}

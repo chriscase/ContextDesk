@@ -9,7 +9,7 @@
  * are the courtesy layer that explains itself inline.
  */
 import type { WireImportPreviewItem, WireImportPreviewPlan, WireImportPreviewReport } from "@contextdesk/contracts";
-import type { ImportRunReport } from "@contextdesk/client";
+import type { ImportOutcomeClass, ImportRunReport } from "@contextdesk/client";
 import type { WireProcessProgress } from "@contextdesk/contracts";
 
 /** Flow stages. Post-publication review is part of `summary`, never a gate. */
@@ -42,6 +42,8 @@ export type ImportFlowState = {
    */
   exitRequested: boolean;
   error: string | null;
+  /** Classified outcome attached to a failed run; absent on plain host strings. */
+  errorOutcome: ImportRunReport["outcome"];
   progress: WireProcessProgress | null;
   runReport: ImportRunReport | null;
 };
@@ -56,6 +58,7 @@ export const INITIAL_IMPORT_FLOW_STATE: ImportFlowState = {
   rangeAnchor: null,
   exitRequested: false,
   error: null,
+  errorOutcome: undefined,
   progress: null,
   runReport: null,
 };
@@ -75,7 +78,7 @@ export type ImportFlowEvent =
   | { type: "RUN_STARTED" }
   | { type: "PROGRESS"; progress: WireProcessProgress }
   | { type: "PUBLISHED"; report: ImportRunReport }
-  | { type: "RUN_FAILED"; message: string }
+  | { type: "RUN_FAILED"; message: string; outcome?: ImportRunReport["outcome"] }
   | { type: "RUN_CANCELLED" }
   | { type: "RETRY" }
   | { type: "EXIT_REQUESTED" }
@@ -377,7 +380,14 @@ export function importFlowReducer(
     case "RUN_STARTED":
       if (state.stage !== "preflight" && state.stage !== "selector") return state;
       if (importDisabledReason(state) !== null) return state;
-      return { ...state, stage: "running", progress: null, error: null, exitRequested: false };
+      return {
+        ...state,
+        stage: "running",
+        progress: null,
+        error: null,
+        errorOutcome: undefined,
+        exitRequested: false,
+      };
     case "PROGRESS":
       if (state.stage !== "running") return state;
       return { ...state, progress: event.progress };
@@ -386,13 +396,25 @@ export function importFlowReducer(
       return { ...state, stage: "summary", runReport: event.report };
     case "RUN_FAILED":
       if (state.stage !== "running") return state;
-      return { ...state, stage: "run_failed", error: event.message };
+      return {
+        ...state,
+        stage: "run_failed",
+        error: event.message,
+        errorOutcome: event.outcome,
+      };
     case "RUN_CANCELLED":
       if (state.stage !== "running") return state;
       return { ...state, stage: "run_cancelled", error: null };
     case "RETRY":
       if (state.stage !== "run_failed" && state.stage !== "run_cancelled") return state;
-      return { ...state, stage: "preflight", error: null, progress: null, exitRequested: false };
+      return {
+        ...state,
+        stage: "preflight",
+        error: null,
+        errorOutcome: undefined,
+        progress: null,
+        exitRequested: false,
+      };
     case "EXIT_REQUESTED":
       if (state.stage !== "running") return state;
       return { ...state, exitRequested: true };
@@ -495,6 +517,26 @@ export function timezoneGroups(report: ImportRunReport): TimezoneGroup[] {
     group.records += source.lines;
   }
   return [...groups.values()].sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/**
+ * Classified import class from the host document.
+ *
+ * Fail-closed both ways: only an explicit `complete` class may render as
+ * complete, and a class the host did not state is never invented. A report
+ * carrying only the legacy `partial` bool keeps the class that bool has
+ * always declared; a report with no class signal at all is `unknown` —
+ * published, but uncertified, and never presented as complete or as a
+ * defect-ledger PARTIAL the host never claimed.
+ */
+export function classifiedImportClass(
+  report: ImportRunReport | null | undefined,
+): ImportOutcomeClass | "unknown" {
+  if (!report) return "rejected";
+  const cls = report.outcome?.class;
+  if (cls === "complete" || cls === "partial" || cls === "rejected") return cls;
+  if (report.partial) return "partial";
+  return "unknown";
 }
 
 /** IANA zone gate matching the shipped review dialog's rule. */

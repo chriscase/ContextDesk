@@ -7,6 +7,7 @@ import {
   importDisabledReason,
   importFlowReducer,
   preselectedIdentities,
+  classifiedImportClass,
   selectedForRun,
   selectedImportableCount,
   selectorRows,
@@ -207,9 +208,45 @@ describe("run lifecycle", () => {
     expect(state.stage).toBe("running");
     state = importFlowReducer(state, { type: "RUN_FAILED", message: "disk full" });
     expect(state.stage).toBe("run_failed");
+    expect(state.errorOutcome).toBeUndefined();
     state = importFlowReducer(state, { type: "RETRY" });
     expect(state.stage).toBe("preflight");
     expect(state.selected).toBe(selectedBefore);
+  });
+
+  it("keeps a classified rejected outcome on RUN_FAILED", () => {
+    let state = previewedState();
+    state = importFlowReducer(state, { type: "RUN_STARTED" });
+    const outcome: NonNullable<ImportRunReport["outcome"]> = {
+      schemaId: "contextdesk.import_outcome.v1",
+      schemaVersion: 1,
+      class: "rejected",
+      published: false,
+      counts: {
+        sourcesDiscovered: 1,
+        sourcesImported: 0,
+        sourcesFailed: 1,
+        sourcesExcluded: 0,
+        sourcesIgnored: 0,
+        recordsImported: 0,
+        recordsMalformed: 0,
+      },
+      defects: [],
+      defectCounts: {},
+      privacy: {
+        redactionMode: "identity_structural_only",
+        policySummary: "structural",
+        defectsTruncated: false,
+      },
+      manifestDigest: "sha256:rejected",
+    };
+    state = importFlowReducer(state, {
+      type: "RUN_FAILED",
+      message: "zip open: missing end record",
+      outcome,
+    });
+    expect(state.stage).toBe("run_failed");
+    expect(state.errorOutcome).toEqual(outcome);
   });
 });
 
@@ -342,5 +379,76 @@ describe("timezone groups", () => {
     expect(groups[0]!.label).toBe("classic-syslog-record · zone abbreviation not resolved");
     expect(groups[1]!.sources).toEqual(["b.log", "a.log"]);
     expect(groups[1]!.records).toBe(30);
+  });
+});
+
+describe("classifiedImportClass", () => {
+  it("reads the typed class and never treats a missing outcome as complete", () => {
+    const report: ImportRunReport = {
+      corpusId: "c",
+      lines: 1,
+      templates: 1,
+      reductionRatio: 1,
+      embedded: 0,
+      files: 1,
+      discoveredFiles: 1,
+      excludedFiles: 0,
+      failedFiles: 0,
+      ignoredFiles: 0,
+      exclusionCounts: {},
+      exclusionExamples: [],
+      partial: false,
+      sourceBytes: 1,
+      corpusBytes: 1,
+      tsMin: null,
+      tsMax: null,
+      formatCounts: {},
+      confidence: {
+        corpusTimeQuality: "wall",
+        counts: {
+          wall: 1,
+          orderOnly: 0,
+          mixed: 0,
+          matched: 1,
+          ambiguous: 0,
+          unknown: 0,
+          unresolved: 0,
+        },
+        sources: [],
+      },
+    };
+    // No typed class and no legacy signal: unknown, never an invented verdict.
+    expect(classifiedImportClass(report)).toBe("unknown");
+    // The legacy bool is a host-declared signal, not an invention — keep it.
+    expect(classifiedImportClass({ ...report, partial: true })).toBe("partial");
+    expect(
+      classifiedImportClass({
+        ...report,
+        outcome: {
+          schemaId: "contextdesk.import_outcome.v1",
+          schemaVersion: 1,
+          class: "partial",
+          published: true,
+          corpusId: "c",
+          counts: {
+            sourcesDiscovered: 1,
+            sourcesImported: 1,
+            sourcesFailed: 0,
+            sourcesExcluded: 0,
+            sourcesIgnored: 0,
+            recordsImported: 1,
+            recordsMalformed: 2,
+          },
+          defects: [],
+          defectCounts: {},
+          privacy: {
+            redactionMode: "identity_structural_only",
+            policySummary: "structural",
+            defectsTruncated: false,
+          },
+          manifestDigest: "sha256:x",
+        },
+      }),
+    ).toBe("partial");
   });
 });
