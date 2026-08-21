@@ -13,7 +13,7 @@ needs an environment-dependent rehearsal.
 The local branch is:
 
 ```text
-codex/merge-consolidation-demo @ 61f97868
+codex/merge-consolidation-demo @ cac7ead6
 ```
 
 The local qualification additions are in `e3e40a2e`; the portable compiled
@@ -49,9 +49,21 @@ The current report proves:
 The full local demo gate also passed:
 
 - contracts: 41 tests;
-- server: 106 passed, 10 environment-gated skips;
+- server: 109 passed, 10 environment-gated skips;
 - web: 36 tests;
 - typecheck, lint, and static synthetic demo build.
+
+The operator-readiness slice is now local and validated as well:
+
+- `npm run doctor` reports a versioned, machine-readable status without
+  contacting PostgreSQL, LDAP, Vercel, or a model provider;
+- `npm run config:init -- --output PATH` creates a mode-600 private-demo
+  template and required `.data/evidence` directory, and refuses accidental
+  overwrite;
+- doctor/config tests: 8 passed, including plaintext-LDAP rejection,
+  external insecure-cookie rejection, malformed profile detection, secret-safe
+  output, and initializer overwrite protection;
+- the full server gate is now 109 passed / 10 environment-gated skips.
 
 The direct bridge and server integration checks passed:
 
@@ -129,11 +141,11 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
    employer aliases (`gpt-oss-120b`, `qwen-3.6-27b`, and
    `ministral-3-14b-instruct-2512`) and the Vercel-compatible alias are not
    configured here, so no live result is claimed.
-2. **The next required rehearsal is vertical.** A hermetic fixture must drive
-   the real `RustBridgeTriageExecutor` through the current GUI/server path, followed by
-   an explicitly enabled employer/Vercel run when credentials and host profile
-   ids are supplied. The current launcher is covered by component tests, but
-   not yet by a hosted browser run on this exact local merge state.
+2. **The next required rehearsal is hosted and vertical.** The provider-free
+   fixture now drives the real `RustBridgeTriageExecutor` through the current
+   GUI/server path. It still needs a hosted browser run on this exact branch,
+   followed by explicitly enabled employer/Vercel runs when credentials and
+   host profile ids are supplied.
 3. **Local browser execution is sandbox-limited.** The hosted Cursor browser
    job is green; this workstation blocks both the `tsx` fixture IPC pipe and a
    compiled demo listener on `127.0.0.1`, so local Playwright/browser execution
@@ -143,18 +155,17 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
    PostgreSQL path.
 5. **The local merge branch is unpublished.** A future push or PR publication
    requires restored DNS/network access; this handoff does not imply that
-   remote state contains `61f97868`.
+   remote state contains `cac7ead6`.
 6. **Provider quality is not certified.** The harness proves lifecycle,
    provenance, privacy, and comparison mechanics; it does not establish that
    any model reached the correct diagnosis.
 
 ## Next delegated milestone
 
-The next independent Grok Build slice is an operator-ready configuration
-initializer and `npm run doctor` command. It should make the private demo and
-deployment prerequisites visible without printing secrets or contacting live
-providers. After the local branch is publishable, the follow-on vertical
-rehearsal should add a hermetic fixture for the real Rust bridge, browser
-coverage for launch → run → comparison-with-pasted-chat, and explicit opt-in
-instructions for employer and Vercel profiles without placing credentials,
-prompts, endpoints, request ids, or raw captures in Collab.
+The operator-ready initializer and `npm run doctor` slice is implemented and
+locally validated at `cac7ead6`; Grok Build can review it when a remote branch
+is available. The next delegated action is a hosted Cursor browser run against
+this exact branch, followed by an explicitly opt-in live rehearsal for the
+employer profiles and Vercel where configured. Those runs must retain the
+existing redaction boundary: no credentials, prompts, endpoints, request ids,
+or raw captures in Collab.
