@@ -13,7 +13,7 @@ needs an environment-dependent rehearsal.
 The local branch is:
 
 ```text
-codex/merge-consolidation-demo (unpublished local branch; current HEAD)
+codex/merge-consolidation-demo @ b77236da (unpublished local branch)
 ```
 
 The branch contains the qualification harness, portable launcher, provider-free
@@ -47,10 +47,10 @@ The current report proves:
   a newer profile package;
 - all live aliases were reported as not run rather than being fabricated.
 
-The full local demo gate also passed before the final CLI safety additions:
+The current full local demo gate passes:
 
 - contracts: 49 tests;
-- server: 137 passed, 10 environment-gated skips;
+- server: 145 passed, 10 environment-gated skips;
 - web: 37 tests;
 - typecheck, lint, and static synthetic demo build.
 
@@ -117,10 +117,11 @@ The local follow-up hardening after reviewing Grok Build PR #939 is also green:
   block. Raw JSON remains available through the existing export/projection
   paths where appropriate.
 
-The full post-hardening demo gate passed: 49 contract tests, 144 server tests
-with 10 environment-gated skips, 37 web tests, typecheck, lint, and static
-synthetic demo build. A local qualification/doctor/sanitizer round-trip also
-passed with the required `qualify-memory.json` and `doctor.json` outputs.
+The post-hardening qualification and demo gates remain green at the current
+HEAD: 49 contract tests, 145 server tests with 10 environment-gated skips, 37
+web tests, typecheck, lint, and static synthetic demo build. A local
+qualification/doctor/sanitizer round-trip also passed with the required
+`qualify-memory.json` and `doctor.json` outputs.
 
 The opt-in live qualification runner is now local and validated:
 
@@ -143,7 +144,7 @@ The opt-in live qualification runner is now local and validated:
 
 The direct bridge and server integration checks passed:
 
-- Rust `collab_triage_run` unit boundary: 10 passed;
+- Rust `collab_triage_run` unit boundary: 11 passed;
 - Rust `collab_triage_run_cli`: 3 passed;
 - Collab triage-run/Experiment Lab integration: 38 passed;
 - Rust bridge executor tests: result ordering, bounded progress, timeout, and
@@ -304,6 +305,10 @@ the collaborative surface for reviewing and adjudicating the resulting runs.
    adversarial tests cover the War-Room surfaces and the delegated audit
    findings were addressed locally, but no separate Claude Code patch/review
    has been obtained because that session was unavailable.
+
+The exact local bridge-browser scenario was attempted at this HEAD and failed
+before Playwright startup with `listen EPERM 127.0.0.1:8788`; this is an
+environment limitation, not a browser test result.
 
 ## Next delegated milestone
 
