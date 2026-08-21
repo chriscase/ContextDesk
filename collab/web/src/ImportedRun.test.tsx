@@ -8,6 +8,7 @@ describe("imported run rendering", () => {
   it("shows the unverified banner and renders script text inertly", () => {
     render(
       <ImportedRun
+        canCorroborate
         run={{
           id: "r1",
           outputText: INJECT,
@@ -30,6 +31,7 @@ describe("imported run rendering", () => {
   it("renders contradicted runs distinctly", () => {
     const { container } = render(
       <ImportedRun
+        canCorroborate
         run={{
           id: "r2",
           outputText: "no",

@@ -7,6 +7,7 @@ import "./styles/login.css";
 import "./styles/cases.css";
 import "./styles/catalog.css";
 import "./styles/export.css";
+import "./styles/experiment-lab.css";
 
 const root = document.getElementById("root");
 if (!root) {

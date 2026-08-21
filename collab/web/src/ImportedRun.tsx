@@ -12,6 +12,7 @@ interface ImportedRunView {
 
 export function ImportedRun(props: {
   run: ImportedRunView;
+  canCorroborate: boolean;
   onCorroborate: (id: string, state: "corroborated" | "contradicted", linkId: string) => void;
 }) {
   const run = props.run;
@@ -51,7 +52,7 @@ export function ImportedRun(props: {
         <pre className="imported-run__text">{run.promptText}</pre>
       )}
       <pre className="imported-run__text">{run.outputText}</pre>
-      {run.corroborationState === "unverified" ? (
+      {props.canCorroborate && run.corroborationState === "unverified" ? (
         <form
           className="composer"
           onSubmit={(event) => {

@@ -8,7 +8,11 @@ or crate internals. Published `packages/contracts` artifacts may be consumed
 read-only later; v1 does not.
 
 Parent epic: #883. Skeleton is #884. Auth/authz/audit is #885. Cases/timeline
-is #886. Source catalog and manual import is #887. Export is #888.
+is #886. Source catalog and manual import is #887. Export is #888. Experiment
+Lab human adjudication v1 imports a share-safe experiment package/summary into
+a case, shows the candidate matrix and evidence agreement, records helpfulness,
+and accepts a revision-safe decision. It does not duplicate bench scoring
+schemas. Demo: [`docs/benchmarks/EXPERIMENT_LAB_HUMAN_ADJUDICATION_V1.md`](../docs/benchmarks/EXPERIMENT_LAB_HUMAN_ADJUDICATION_V1.md).
 
 ## Layout
 
@@ -20,6 +24,43 @@ is #886. Source catalog and manual import is #887. Export is #888.
 | `server/src/modules/*` | Modular-monolith boundaries (lint-enforced) |
 | `server/src/db/migrations/` | Versioned, reviewed SQL |
 | `deploy/` | Example compose, env template, Dockerfile |
+
+## Release qualification
+
+From `collab/`:
+
+```bash
+npm run qualify
+```
+
+The command is hermetic and credential-free by default. It walks the current
+Experiment Lab and case-memory seams with fake host-connector lanes (no second
+jobs table, no lease implementation):
+
+1. Create a case and freeze content-addressed evidence.
+2. Run two or more ContextDesk-owned lanes at the Experiment Lab import seam
+   (bounded concurrency, durable run ids, same-snapshot identity,
+   cancel / deadline / partial).
+3. Import an external strategy/chat trace with a different question path.
+4. Compare shared evidence, unique evidence, disagreements, unknowns,
+   helpfulness, gold alignment, and an accepted decision.
+5. Export and re-import the share-safe package; fail closed on prompts,
+   credentials, endpoints, request ids, and raw captures.
+6. Re-run a newer profile/version package and keep lineage.
+
+It prints a machine-readable `{ "reports": [...] }` JSON document on stdout
+(`cd-collab.qualification_report.v1` per backend) and a short human summary on
+stderr. PostgreSQL is included when `COLLAB_TEST_ADMIN_URL` is set; otherwise
+that backend is skipped with an explicit reason. Collab has no domain SQLite
+store on this architecture — local mode is in-process memory plus filesystem
+evidence.
+
+Live profiles (`COLLAB_LIVE_PROFILES`, `COLLAB_LIVE_VERCEL`) are opt-in and
+never fabricated. Unconfigured aliases are `credentials_not_configured`.
+Configured aliases still stay `ran: false` with
+`opt_in_host_not_invoked_in_hermetic_suite` because collab cannot import
+`cd-workflow`. Details:
+[`docs/testing/COLLAB_RELEASE_QUALIFICATION_CURRENT_ARCH_V1.md`](../docs/testing/COLLAB_RELEASE_QUALIFICATION_CURRENT_ARCH_V1.md).
 
 ## Decisions
 
@@ -174,6 +215,19 @@ are reserved. Other code may depend on a module only through that module's
 `index.ts`. Cross-module deep imports fail `eslint-plugin-boundaries`
 (`boundaries/entry-point`). See `server/src/modules/boundaries.test.ts`.
 
+## Synthetic demo
+
+For a hermetic synthetic Experiment Lab demonstration with no PostgreSQL,
+LDAP, provider calls, or persistent state, use `npm run demo`. It binds only to
+`127.0.0.1`, uses the public fixture credential `demo` / `demo`, and removes
+its temporary evidence when it stops. `COLLAB_DEMO_PORT` selects a different
+loopback port. The production entry point and readiness contract are unchanged.
+
+`npm run demo:static` generates a self-contained, read-only fallback at
+`collab/.demo/contextdesk-synthetic-demo.html`. The presenter sequence and the
+local-only external-chat intake workflow are documented in
+[`CONTEXTDESK_DEMO_RUNBOOK.md`](../docs/benchmarks/CONTEXTDESK_DEMO_RUNBOOK.md).
+
 ## Local PostgreSQL
 
 ```bash
@@ -202,4 +256,5 @@ Compose example: `deploy/README.md`.
 ## Scripts
 
 From `collab/`: `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`,
-`npm run migrate`, `npm run migrate:down`, `npm run migrate:dry-run`.
+`npm run demo`, `npm run demo:static`, `npm run demo:check`, `npm run migrate`,
+`npm run migrate:down`, `npm run migrate:dry-run`.

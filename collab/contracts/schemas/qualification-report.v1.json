@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cd-collab.qualification_report.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "privacyClass",
+    "backend",
+    "steps",
+    "concurrency",
+    "comparison",
+    "lineage",
+    "liveProfiles",
+    "caveats"
+  ],
+  "properties": {
+    "schemaId": { "const": "cd-collab.qualification_report.v1" },
+    "privacyClass": { "const": "share_safe" },
+    "backend": { "enum": ["memory", "postgres"] },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "note"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["passed", "failed", "skipped", "partial"] },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "concurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configuredLimit", "observedMaxActive", "sameSnapshot", "durableRunCount"],
+      "properties": {
+        "configuredLimit": { "type": "integer", "minimum": 1 },
+        "observedMaxActive": { "type": "integer", "minimum": 0 },
+        "sameSnapshot": { "type": "boolean" },
+        "durableRunCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sharedEvidenceCount",
+        "uniqueEvidenceCount",
+        "disagreementCount",
+        "unknownCount",
+        "questionPathCount",
+        "helpfulnessRecorded",
+        "goldAligned",
+        "acceptedDecision"
+      ],
+      "properties": {
+        "sharedEvidenceCount": { "type": "integer", "minimum": 0 },
+        "uniqueEvidenceCount": { "type": "integer", "minimum": 0 },
+        "disagreementCount": { "type": "integer", "minimum": 0 },
+        "unknownCount": { "type": "integer", "minimum": 0 },
+        "questionPathCount": { "type": "integer", "minimum": 0 },
+        "helpfulnessRecorded": { "type": "boolean" },
+        "goldAligned": { "type": "boolean" },
+        "acceptedDecision": { "type": "boolean" }
+      }
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "predecessorPackageAlias",
+        "successorPackageAlias",
+        "goldVersion",
+        "predecessorGoldPresent"
+      ],
+      "properties": {
+        "predecessorPackageAlias": { "type": "string", "minLength": 1 },
+        "successorPackageAlias": { "type": "string", "minLength": 1 },
+        "goldVersion": { "type": "integer", "minimum": 0 },
+        "predecessorGoldPresent": { "type": "boolean" }
+      }
+    },
+    "liveProfiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alias", "configured", "ran", "skippedReason"],
+        "properties": {
+          "alias": {
+            "enum": [
+              "gpt-oss-120b",
+              "qwen-3.6-27b",
+              "ministral-3-14b-instruct-2512",
+              "vercel-compatible"
+            ]
+          },
+          "configured": { "type": "boolean" },
+          "ran": { "type": "boolean" },
+          "skippedReason": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "caveats": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "enum": [
+          "agreement_not_correctness",
+          "gold_is_human_benchmark",
+          "live_results_are_not_fabricated"
+        ]
+      }
+    }
+  }
+}

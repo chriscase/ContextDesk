@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/gold-reference.v1.json",
+  "title": "cd-collab Gold Reference v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "goldId",
+    "version",
+    "predecessorGoldId",
+    "caseId",
+    "experimentId",
+    "packageId",
+    "taskFingerprint",
+    "snapshotFingerprint",
+    "acceptedDecisionId",
+    "acceptedDecisionRevision",
+    "auditRefs",
+    "evidenceAnchors",
+    "notes",
+    "promotedById",
+    "promotedByUsername",
+    "createdAt"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.gold_reference.v1" },
+    "goldId": { "type": "string", "minLength": 1 },
+    "version": { "type": "integer", "minimum": 1 },
+    "predecessorGoldId": { "type": ["string", "null"] },
+    "caseId": { "type": "string", "minLength": 1 },
+    "experimentId": { "type": "string", "minLength": 1 },
+    "packageId": { "type": "string", "minLength": 1 },
+    "taskFingerprint": { "type": "string", "minLength": 1 },
+    "snapshotFingerprint": { "type": "string", "minLength": 1 },
+    "acceptedDecisionId": { "type": "string", "minLength": 1 },
+    "acceptedDecisionRevision": { "type": "integer", "minimum": 1 },
+    "auditRefs": { "type": "array", "items": { "type": "string" } },
+    "evidenceAnchors": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "expectedRelationships": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["evidenceRef", "role"],
+        "properties": {
+          "evidenceRef": { "type": "string", "minLength": 1 },
+          "role": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "helpfulnessDimensions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "evidence_support",
+          "actionability",
+          "uncertainty_calibration",
+          "unsafe_unsupported_claims"
+        ]
+      }
+    },
+    "notes": { "type": "array", "items": { "type": "string" } },
+    "promotedById": { "type": "string", "minLength": 1 },
+    "promotedByUsername": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "minLength": 1 }
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "schemaId": "cd-collab.interaction_trace.v1",
+  "traceId": "trace-chat-operator-v1",
+  "candidateId": "cand-chat-operator",
+  "sourceKind": "plain_text",
+  "completeness": "partial",
+  "privacyClass": "share_safe",
+  "rawHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "events": [
+    {
+      "eventId": "evt-cand-chat-operator-1",
+      "sequence": 1,
+      "kind": "question",
+      "actor": "human",
+      "role": null,
+      "parentEventId": null,
+      "evidenceRefs": [],
+      "observedAt": { "status": "unknown" },
+      "excerpt": "What timed out in checkout?",
+      "excerptHash": "024d6a0f87591bfb6b2345d364f4f8dc3c9126141e8cfb36f9d6daee6597cc8c",
+      "unknowns": ["timestamp"]
+    },
+    {
+      "eventId": "evt-cand-chat-operator-2",
+      "sequence": 2,
+      "kind": "assistant_response",
+      "actor": "assistant",
+      "role": null,
+      "parentEventId": "evt-cand-chat-operator-1",
+      "evidenceRefs": ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+      "observedAt": { "status": "unknown" },
+      "excerpt": "The checkout log and inventory timeout line up.",
+      "excerptHash": "5f36aacd70f67dde1b890391c3b1c848595f3409fd122d752d4b22945b532ee2",
+      "unknowns": ["timestamp"]
+    }
+  ],
+  "efficiency": {
+    "turnCount": { "status": "observed", "count": 2 },
+    "evidenceAcquisitionSteps": { "status": "observed", "count": 1 },
+    "latency": { "status": "unknown" },
+    "cost": { "status": "unknown" },
+    "providerCalls": { "status": "unknown" }
+  },
+  "unknowns": ["tools"],
+  "notes": ["Ambiguous transcript structure stays unknown."],
+  "createdAt": "2026-08-19T00:00:00Z"
+}

@@ -1,0 +1,62 @@
+{
+  "schemaId": "cd-collab.qualification_report.v1",
+  "privacyClass": "share_safe",
+  "backend": "memory",
+  "steps": [
+    { "id": "start_case", "status": "passed", "note": "case created" },
+    { "id": "freeze_evidence", "status": "passed", "note": "inventory verified" }
+  ],
+  "concurrency": {
+    "configuredLimit": 2,
+    "observedMaxActive": 2,
+    "sameSnapshot": true,
+    "durableRunCount": 3
+  },
+  "comparison": {
+    "sharedEvidenceCount": 1,
+    "uniqueEvidenceCount": 2,
+    "disagreementCount": 1,
+    "unknownCount": 0,
+    "questionPathCount": 2,
+    "helpfulnessRecorded": true,
+    "goldAligned": true,
+    "acceptedDecision": true
+  },
+  "lineage": {
+    "predecessorPackageAlias": "pkg-host-owned-v1",
+    "successorPackageAlias": "pkg-host-owned-v2",
+    "goldVersion": 1,
+    "predecessorGoldPresent": true
+  },
+  "liveProfiles": [
+    {
+      "alias": "gpt-oss-120b",
+      "configured": false,
+      "ran": false,
+      "skippedReason": "credentials_not_configured"
+    },
+    {
+      "alias": "qwen-3.6-27b",
+      "configured": false,
+      "ran": false,
+      "skippedReason": "credentials_not_configured"
+    },
+    {
+      "alias": "ministral-3-14b-instruct-2512",
+      "configured": false,
+      "ran": false,
+      "skippedReason": "credentials_not_configured"
+    },
+    {
+      "alias": "vercel-compatible",
+      "configured": false,
+      "ran": false,
+      "skippedReason": "credentials_not_configured"
+    }
+  ],
+  "caveats": [
+    "agreement_not_correctness",
+    "gold_is_human_benchmark",
+    "live_results_are_not_fabricated"
+  ]
+}

@@ -25,16 +25,29 @@ export function appRoleUrl(databaseUrl: string): string {
 }
 
 async function ensureAppRole(admin: Client): Promise<void> {
-  await admin.query(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'collab_app') THEN
-        CREATE ROLE collab_app LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
-      ELSE
-        ALTER ROLE collab_app WITH LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
-      END IF;
-    END $$;
-  `);
+  await admin.query("BEGIN");
+  try {
+    // Vitest runs database-backed files concurrently. Serialize only the
+    // shared cluster role mutation; each test's disposable database remains
+    // independent and can be created and exercised in parallel.
+    await admin.query(
+      "SELECT pg_advisory_xact_lock(hashtext('contextdesk'), hashtext('collab_app_test_role'))",
+    );
+    await admin.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'collab_app') THEN
+          CREATE ROLE collab_app LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
+        ELSE
+          ALTER ROLE collab_app WITH LOGIN PASSWORD '${COLLAB_APP_ROLE_PASSWORD}';
+        END IF;
+      END $$;
+    `);
+    await admin.query("COMMIT");
+  } catch (error) {
+    await admin.query("ROLLBACK");
+    throw error;
+  }
 }
 
 export async function withDisposableDb(

@@ -11,16 +11,23 @@ const addFormats =
   addFormatsImport;
 import { describe, expect, it } from "vitest";
 import {
+  AGREEMENT_NOT_CORRECTNESS,
   BRIEF_SCHEMA_ID,
   CASE_SCHEMA_ID,
+  EXPERIMENT_PACKAGE_SCHEMA_ID,
+  EXPERIMENT_SUMMARY_SCHEMA_ID,
   FILE_SERVER_REF_SCHEMA_ID,
   PACKAGE_SCHEMA_ID,
   SOURCE_SCHEMA_ID,
   parseBrief,
   parseCase,
+  parseExperimentImport,
+  parseExperimentPackage,
+  parseExperimentSummary,
   parseFileServerReference,
   parseHealthResponse,
   parsePromptPackage,
+  parseQualificationReport,
   parseSource,
 } from "./index.js";
 
@@ -113,6 +120,49 @@ describe("contracts unknown-field rejection", () => {
         extra: true,
       }),
     ).toThrow(/unknown key/);
+  });
+
+  it("accepts the synthetic three-model experiment package and rejects unknown fields", () => {
+    const valid = JSON.parse(
+      readFileSync(join(fixturesDir, "experiment-package.valid.json"), "utf8"),
+    );
+    const pkg = parseExperimentPackage(valid);
+    expect(pkg.schemaId).toBe(EXPERIMENT_PACKAGE_SCHEMA_ID);
+    expect(pkg.candidates).toHaveLength(3);
+    expect(pkg.candidates.every((c) => c.cost.status === "unknown")).toBe(true);
+    expect(pkg.candidates.every((c) => c.goldState === "unknown")).toBe(true);
+    expect(pkg.agreement.notes).toContain(AGREEMENT_NOT_CORRECTNESS);
+    const invalid = JSON.parse(
+      readFileSync(join(fixturesDir, "experiment-package.unknown-field.json"), "utf8"),
+    );
+    expect(() => parseExperimentPackage(invalid)).toThrow(/unknown key/);
+  });
+
+  it("accepts an experiment summary without fabricating agreement or gold", () => {
+    const valid = JSON.parse(
+      readFileSync(join(fixturesDir, "experiment-summary.valid.json"), "utf8"),
+    );
+    const summary = parseExperimentSummary(valid);
+    expect(summary.schemaId).toBe(EXPERIMENT_SUMMARY_SCHEMA_ID);
+    expect(summary.agreement).toBeNull();
+    expect(summary.candidates.every((c) => c.goldState === "unknown")).toBe(true);
+    expect(parseExperimentImport(valid).schemaId).toBe(EXPERIMENT_SUMMARY_SCHEMA_ID);
+  });
+
+  it("rejects fabricated cost or missing agreement caveat", () => {
+    const valid = JSON.parse(
+      readFileSync(join(fixturesDir, "experiment-package.valid.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const candidates = structuredClone(valid.candidates) as Record<string, unknown>[];
+    candidates[0] = { ...candidates[0], cost: { status: "observed", amount: "0.01" } };
+    expect(() =>
+      parseExperimentPackage({ ...valid, candidates }),
+    ).toThrow(/unknown key|cost/);
+    const agreement = structuredClone(valid.agreement) as { notes: string[] };
+    agreement.notes = ["strategies concurred"];
+    expect(() =>
+      parseExperimentPackage({ ...valid, agreement }),
+    ).toThrow(/agreement-is-not-correctness/);
   });
 
   it("accepts never-hashed refs as unverified", () => {
@@ -219,5 +269,26 @@ describe("JSON Schema additionalProperties: false", () => {
         leak: true,
       }),
     ).toBe(false);
+  });
+
+  it("qualification report schema accepts the fixture and rejects prompt keys", () => {
+    const validate = ajv.compile(loadSchema("qualification-report.v1.json"));
+    expect(
+      validate(
+        JSON.parse(readFileSync(join(fixturesDir, "qualification-report.valid.json"), "utf8")),
+      ),
+    ).toBe(true);
+    expect(
+      validate(
+        JSON.parse(
+          readFileSync(join(fixturesDir, "qualification-report.unknown-field.json"), "utf8"),
+        ),
+      ),
+    ).toBe(false);
+    expect(() =>
+      parseQualificationReport(
+        JSON.parse(readFileSync(join(fixturesDir, "qualification-report.valid.json"), "utf8")),
+      ),
+    ).not.toThrow();
   });
 });

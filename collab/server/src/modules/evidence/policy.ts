@@ -7,6 +7,16 @@ export const ALLOWED_MEDIA = new Set([
   "application/octet-stream",
 ]);
 
+export function assertSafeFilename(filename: string): void {
+  if (
+    filename.length === 0 ||
+    filename.includes("\0") ||
+    filename.split(/[\\/]/).some((part) => part === "" || part === "." || part === "..")
+  ) {
+    throw new Error("filename contains a path segment that is not allowed");
+  }
+}
+
 export function assertUploadAllowed(mediaType: string, byteLength: number): void {
   if (byteLength > MAX_UPLOAD_BYTES) {
     throw new Error("upload exceeds size cap");

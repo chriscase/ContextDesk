@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { ImportedRun } from "./ImportedRun.js";
 
@@ -29,11 +30,11 @@ interface RunRow {
   promptCompleteness: string;
 }
 
-export function Cases(props: { roles?: string[] }) {
+export function Cases(props: { roles?: string[]; readOnly?: boolean }) {
   const roles = props.roles ?? [];
-  const canLead = roles.includes("case-lead") || roles.includes("admin");
-  const canWrite =
-    canLead || roles.includes("contributor");
+  const readOnly = props.readOnly === true;
+  const canLead = !readOnly && (roles.includes("case-lead") || roles.includes("admin"));
+  const canWrite = !readOnly && (canLead || roles.includes("contributor"));
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
@@ -45,7 +46,9 @@ export function Cases(props: { roles?: string[] }) {
     const res = await fetch("/api/cases");
     if (!res.ok) return;
     const body = (await res.json()) as { cases?: CaseRow[] };
-    setCases(body.cases ?? []);
+    const next = body.cases ?? [];
+    setCases(next);
+    setActive((current) => current ?? next[0]?.id ?? null);
   }, []);
 
   const loadTimeline = useCallback(async (id: string) => {
@@ -167,18 +170,20 @@ export function Cases(props: { roles?: string[] }) {
             </li>
           ))}
         </ul>
-        <form className="case-form" onSubmit={(e) => void createCase(e)}>
-          <input
-            className="login__input"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="New case title"
-            required
-          />
-          <button className="login__submit" type="submit">
-            Create case
-          </button>
-        </form>
+        {!readOnly ? (
+          <form className="case-form" onSubmit={(e) => void createCase(e)}>
+            <input
+              className="login__input"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="New case title"
+              required
+            />
+            <button className="login__submit" type="submit">
+              Create case
+            </button>
+          </form>
+        ) : null}
       </aside>
       <article className="case-view">
         {current ? (
@@ -209,69 +214,92 @@ export function Cases(props: { roles?: string[] }) {
                 </button>
               </form>
             ) : null}
-            <ol className="timeline">
-              {events.map((ev) => (
-                <li key={ev.seq} className="timeline__item">
-                  <div className="timeline__meta">
-                    #{ev.seq} {ev.kind} · {ev.actorUsername}
-                  </div>
-                  <div>{ev.payload}</div>
-                </li>
-              ))}
-            </ol>
-            {runs.map((run) => (
-              <ImportedRun key={run.id} run={run} onCorroborate={corroborate} />
-            ))}
-            <form className="composer" onSubmit={(e) => void importRun(e)}>
-              <p className="import-warn">
-                Pasted prompts may contain secrets. Mask them before save. Imported
-                output stays unverified until a human corroborates it. Without a
-                #888 package, visibility is importer-described or unknown.
-              </p>
-              <textarea className="login__input" name="outputText" required rows={3} placeholder="Output" />
-              <textarea className="login__input" name="promptText" rows={2} placeholder="Prompt (optional)" />
-              <select className="login__input" name="sourceId" required defaultValue="">
-                <option value="" disabled>
-                  Source
-                </option>
-                {sources.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name} ({s.kind})
-                  </option>
+            <ExperimentLab
+              caseId={current.id}
+              canWrite={canWrite}
+              canLead={canLead}
+              readOnly={readOnly}
+            />
+            <details className="case-view__support">
+              <summary>Case timeline and external evidence</summary>
+              <ol className="timeline">
+                {events.map((ev) => (
+                  <li key={ev.seq} className="timeline__item">
+                    <div className="timeline__meta">
+                      #{ev.seq} {ev.kind} · {ev.actorUsername}
+                    </div>
+                    <div>{ev.payload}</div>
+                  </li>
                 ))}
-              </select>
-              <input className="login__input" name="operatorUsername" placeholder="Operator username" required />
-              <input className="login__input" name="operatorId" placeholder="Operator identity" required />
-              <select className="login__input" name="evidenceVisibility" defaultValue="unknown">
-                <option value="unknown">visibility unknown</option>
-                <option value="importer_described">importer-described</option>
-              </select>
-              <input className="login__input" name="visibilityNote" placeholder="Visibility note" />
-              <input
-                className="login__input"
-                name="snapshotBinding"
-                placeholder="Package snapshot identity"
-              />
-              <label className="import-warn">
-                <input type="checkbox" name="redacted" /> I redacted secrets before save
-              </label>
-              <button className="login__submit" type="submit">
-                Import external run
-              </button>
-            </form>
-            <ExportPanel caseId={current.id} canWrite={canWrite} canLead={canLead} />
-            <form className="composer" onSubmit={(e) => void addNote(e)}>
-              <select className="login__input" name="kind" defaultValue="note">
-                <option value="message">message</option>
-                <option value="note">note</option>
-                <option value="hypothesis">hypothesis</option>
-                <option value="action">action</option>
-              </select>
-              <textarea className="login__input" name="body" required rows={3} />
-              <button className="login__submit" type="submit">
-                Add to timeline
-              </button>
-            </form>
+              </ol>
+              {runs.map((run) => (
+                <ImportedRun
+                  key={run.id}
+                  run={run}
+                  canCorroborate={canWrite}
+                  onCorroborate={corroborate}
+                />
+              ))}
+              {canWrite ? (
+                <form className="composer" onSubmit={(e) => void importRun(e)}>
+                <p className="import-warn">
+                  Pasted prompts may contain secrets. Mask them before save. Imported
+                  output stays unverified until a human corroborates it. Without a
+                  #888 package, visibility is importer-described or unknown.
+                </p>
+                <textarea className="login__input" name="outputText" required rows={3} placeholder="Output" />
+                <textarea className="login__input" name="promptText" rows={2} placeholder="Prompt (optional)" />
+                <select className="login__input" name="sourceId" required defaultValue="">
+                  <option value="" disabled>
+                    Source
+                  </option>
+                  {sources.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.kind})
+                    </option>
+                  ))}
+                </select>
+                <input className="login__input" name="operatorUsername" placeholder="Operator username" required />
+                <input className="login__input" name="operatorId" placeholder="Operator identity" required />
+                <select className="login__input" name="evidenceVisibility" defaultValue="unknown">
+                  <option value="unknown">visibility unknown</option>
+                  <option value="importer_described">importer-described</option>
+                </select>
+                <input className="login__input" name="visibilityNote" placeholder="Visibility note" />
+                <input
+                  className="login__input"
+                  name="snapshotBinding"
+                  placeholder="Package snapshot identity"
+                />
+                <label className="import-warn">
+                  <input type="checkbox" name="redacted" /> I redacted secrets before save
+                </label>
+                <button className="login__submit" type="submit">
+                  Import external run
+                </button>
+                </form>
+              ) : null}
+              {canWrite ? (
+                <form className="composer" onSubmit={(e) => void addNote(e)}>
+                <select className="login__input" name="kind" defaultValue="note">
+                  <option value="message">message</option>
+                  <option value="note">note</option>
+                  <option value="hypothesis">hypothesis</option>
+                  <option value="action">action</option>
+                </select>
+                <textarea className="login__input" name="body" required rows={3} />
+                <button className="login__submit" type="submit">
+                  Add to timeline
+                </button>
+                </form>
+              ) : null}
+            </details>
+            {!readOnly ? (
+              <details className="case-view__support">
+                <summary>Case export tools</summary>
+                <ExportPanel caseId={current.id} canWrite={canWrite} canLead={canLead} />
+              </details>
+            ) : null}
           </>
         ) : (
           <p className="shell__copy">Select or create a case.</p>
