@@ -49,7 +49,7 @@ The full local demo gate also passed:
 
 - contracts: 47 tests;
 - server: 129 passed, 10 environment-gated skips;
-- web: 36 tests;
+- web: 37 tests;
 - typecheck, lint, and static synthetic demo build.
 
 The operator-readiness slice is now local and validated as well:
@@ -77,6 +77,10 @@ The direct bridge and server integration checks passed:
 - Collab triage-run/Experiment Lab integration: 38 passed;
 - Rust bridge executor tests: result ordering, bounded progress, timeout, and
   output overflow covered.
+
+The War-Room UI also bounds and redacts provider-shaped error responses before
+they reach the visible alert surface; the focused regression test covers
+authorization-shaped text, gateway endpoints, and token-like content.
 
 The new provider-free browser bridge vertical is also prepared:
 

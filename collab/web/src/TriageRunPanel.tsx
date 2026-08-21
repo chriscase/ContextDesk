@@ -98,9 +98,26 @@ const DEFAULT_CANDIDATES: CandidateOption[] = [
 ];
 const DEFAULT_GATEWAY_CONCURRENCY = 2;
 const GATEWAY_CONCURRENCY_OPTIONS = [1, 2, 3, 4] as const;
+const MAX_ERROR_LENGTH = 240;
 
 function shortHash(value: string | null): string {
   return value ? `${value.slice(0, 12)}…` : "not available";
+}
+
+function boundedError(message: string, fallback: string): string {
+  const trimmed = message.trim();
+  if (!trimmed) return fallback;
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.includes("bearer ")
+    || lower.includes("api_key")
+    || lower.includes("apikey")
+    || lower.includes("authorization")
+    || lower.includes("ai-gateway.vercel.sh")
+  ) return fallback;
+  return trimmed.length > MAX_ERROR_LENGTH
+    ? `${trimmed.slice(0, MAX_ERROR_LENGTH - 1)}…`
+    : trimmed;
 }
 
 function errorText(response: Response, fallback: string): Promise<string> {
@@ -109,7 +126,7 @@ function errorText(response: Response, fallback: string): Promise<string> {
     .then((body: unknown) => {
       if (typeof body === "object" && body !== null && "error" in body) {
         const error = (body as { error?: unknown }).error;
-        if (typeof error === "string") return error;
+        if (typeof error === "string") return boundedError(error, fallback);
       }
       return fallback;
     })
@@ -260,7 +277,7 @@ export function TriageRunPanel(props: {
       });
     } catch (cause) {
       if (requestToken === loadRequestToken.current) {
-        setError(cause instanceof Error ? cause.message : "Triage runs could not be loaded.");
+        setError(cause instanceof Error ? boundedError(cause.message, "Triage runs could not be loaded.") : "Triage runs could not be loaded.");
       }
     } finally {
       if (requestToken === loadRequestToken.current) setLoading(false);
@@ -350,7 +367,7 @@ export function TriageRunPanel(props: {
       else setParentJobId(null);
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Triage run could not be started.");
+      setError(cause instanceof Error ? boundedError(cause.message, "Triage run could not be started.") : "Triage run could not be started.");
     } finally {
       setRunning(false);
     }
@@ -392,7 +409,7 @@ export function TriageRunPanel(props: {
         }),
       );
     } catch (cause) {
-      setHandoffError(cause instanceof Error ? cause.message : "Experiment review could not be created.");
+      setHandoffError(cause instanceof Error ? boundedError(cause.message, "Experiment review could not be created.") : "Experiment review could not be created.");
     } finally {
       setHandoffJobId(null);
     }

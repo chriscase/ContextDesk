@@ -210,6 +210,28 @@ describe("TriageRunPanel", () => {
     expect(screen.queryByRole("button", { name: /Run synthetic comparison/ })).toBeNull();
   });
 
+  it("redacts provider-shaped errors instead of rendering secrets or endpoints", async () => {
+    const secret = "sk-live-should-never-render";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) {
+          return response({ error: `Authorization: Bearer ${secret}; endpoint https://ai-gateway.vercel.sh/v1` }, false);
+        }
+        if (url.endsWith("/evidence")) return response({ artifacts: [] });
+        if (url.endsWith("/imports")) return response({ runs: [] });
+        return response({ jobs: [] });
+      }),
+    );
+
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("Snapshots could not be loaded.");
+    expect(screen.queryByText(secret)).toBeNull();
+    expect(screen.queryByText(/ai-gateway\.vercel\.sh/)).toBeNull();
+  });
+
   it("configures each gateway lane with its own host profile", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
