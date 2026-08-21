@@ -192,6 +192,34 @@ describe("case list and view", () => {
     expect(await screen.findByRole("option", { name: "New source (external-tool)" })).toBeTruthy();
   });
 
+  it("surfaces a bounded error when a case write is denied", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/cases" && (init?.method ?? "GET") === "POST") {
+          return { ok: false, status: 403, json: async () => ({ error: "permission denied" }) };
+        }
+        if (url === "/api/cases") {
+          return { ok: true, json: async () => ({ cases: [] }) };
+        }
+        if (url === "/api/catalog/sources") {
+          return { ok: true, json: async () => ({ sources: [] }) };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+
+    render(<Cases roles={["contributor"]} />);
+    const title = await screen.findByPlaceholderText("New case title");
+    fireEvent.change(title, { target: { value: "Denied case" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create case" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Case could not be created. You may not have permission to create cases.",
+    );
+    expect(screen.queryByText("permission denied")).toBeNull();
+  });
+
   it("filters the loaded case list by title, problem, id, and creator", async () => {
     vi.stubGlobal(
       "fetch",

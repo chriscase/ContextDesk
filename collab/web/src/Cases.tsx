@@ -75,6 +75,7 @@ export function Cases(props: {
   const [sources, setSources] = useState<{ id: string; name: string; kind: string }[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [importError, setImportError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const activeCaseRef = useRef<string | null>(null);
   const loadGeneration = useRef(0);
 
@@ -122,17 +123,22 @@ export function Cases(props: {
     loadGeneration.current += 1;
     setEvents([]);
     setRuns([]);
+    setActionError(null);
     if (active) void loadTimeline(active);
   }, [active, loadTimeline]);
 
   async function createCase(event: FormEvent) {
     event.preventDefault();
+    setActionError(null);
     const res = await fetch("/api/cases", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title, severity: "medium" }),
     });
-    if (!res.ok) return;
+    if (!res.ok) {
+      setActionError("Case could not be created. You may not have permission to create cases.");
+      return;
+    }
     const created = (await res.json()) as CaseRow;
     setTitle("");
     setActive(created.id);
@@ -141,11 +147,16 @@ export function Cases(props: {
 
   async function setStatus(status: string) {
     if (!active) return;
-    await fetch(`/api/cases/${active}/status`, {
+    setActionError(null);
+    const response = await fetch(`/api/cases/${active}/status`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ status }),
     });
+    if (!response.ok) {
+      setActionError("Case status could not be updated. You may not have permission to change it.");
+      return;
+    }
     await refresh();
   }
 
@@ -189,7 +200,8 @@ export function Cases(props: {
     linkId: string,
   ) {
     if (!active) return;
-    await fetch(`/api/cases/${active}/imports/${id}/corroborate`, {
+    setActionError(null);
+    const response = await fetch(`/api/cases/${active}/imports/${id}/corroborate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -197,21 +209,30 @@ export function Cases(props: {
         links: [{ kind: "contribution", id: linkId }],
       }),
     });
+    if (!response.ok) {
+      setActionError("The imported run could not be updated. You may not have permission to corroborate it.");
+      return;
+    }
     await loadTimeline(active);
   }
 
   async function addNote(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!active) return;
+    setActionError(null);
     const form = event.currentTarget;
     const data = new FormData(form);
     const body = String(data.get("body") ?? "");
     const kind = String(data.get("kind") ?? "note");
-    await fetch(`/api/cases/${active}/contributions`, {
+    const response = await fetch(`/api/cases/${active}/contributions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ kind, body }),
     });
+    if (!response.ok) {
+      setActionError("Timeline entry could not be added. You may not have permission to write to this case.");
+      return;
+    }
     form.reset();
     await loadTimeline(active);
   }
@@ -276,6 +297,7 @@ export function Cases(props: {
         ) : null}
       </aside>
       <article className="case-view">
+        {actionError ? <p className="case-memory__error" role="alert">{actionError}</p> : null}
         {current ? (
           <>
             <h2 className="case-view__title">

@@ -110,8 +110,9 @@ successful POST and skipped `loadTimeline` / `reset`.
 - The case import dropdown now refreshes after catalog add/retire events; a
   future pass can still surface a clear `403` when a stale client attempts a
   write.
-- Create case / Import / Add to timeline are now hidden for viewers. A future
-  pass can still surface a clear `403` when a stale client attempts a write.
+- Create case / Import / Add to timeline are now hidden for viewers. If a stale
+  client still attempts a case write, the UI now surfaces a bounded generic
+  permission alert rather than silently ignoring the response.
 - Add a privacy-class control on contributions if share_safe scan fixtures are
   meant to be UI-driven. The share_safe scan fixture still POSTs
   `privacyClass: "share_safe"` because the composer has no such control.
