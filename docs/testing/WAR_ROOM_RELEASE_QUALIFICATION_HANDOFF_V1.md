@@ -54,6 +54,13 @@ The full local demo gate also passed:
 - web: 37 tests;
 - typecheck, lint, and static synthetic demo build.
 
+The exact-branch browser attempt was also checked:
+
+- `npm run typecheck -w @cd-collab/e2e` passed;
+- `npm run test -w @cd-collab/e2e` could not start its fixture because this
+  environment denies the loopback listener (`listen EPERM 127.0.0.1:8788`).
+  No browser result is claimed from that failed start.
+
 The operator-readiness slice is now local and validated as well:
 
 - `npm run doctor` reports the versioned share-safe
@@ -165,6 +172,13 @@ These remain draft and open:
   readiness, remains draft/open at head `eed1ffb5`. Its operator contract and
   configuration-shape improvements were selectively ported and revalidated on
   this local branch; the PR itself was not modified.
+- [PR #939](https://github.com/chriscase/ContextDesk/pull/939), Grok hosted
+  release qualification, remains draft/open at head `52f651ba`. Its remote
+  workflow run `32440407855` passed the complete job, including memory and
+  PostgreSQL qualification, doctor, sanitization, and artifact upload. The
+  sanitized artifact was retained by GitHub as artifact `9432232253`. This is
+  hosted evidence for the workflow on its older base; the workflow was
+  selectively ported to this local branch and has not run here remotely.
 
 Neither PR is merged, closed, or retargeted.
 
@@ -225,11 +239,11 @@ the collaborative surface for reviewing and adjudicating the resulting runs.
    `ministral-3-14b-instruct-2512`) are not configured here. Vercel credentials
    were available through the protected-file reference, but DNS blocked the
    current attempt before a provider result was obtained.
-2. **The next required rehearsal is hosted and vertical.** The provider-free
-   fixture now drives the real `RustBridgeTriageExecutor` through the current
-   GUI/server path. It still needs a hosted browser run on this exact branch,
-   followed by explicitly enabled employer/Vercel runs when credentials and
-   host profile ids are supplied.
+2. **The next required rehearsal is hosted and vertical.** PR #936’s hosted
+   browser job passed on its older base, and the local `collab.yml` workflow
+   contains the same browser lane. It still needs a hosted browser run on this
+   exact branch, followed by explicitly enabled employer/Vercel runs when
+   credentials and host profile ids are supplied.
 3. **Local browser execution is sandbox-limited.** The hosted Cursor browser
    job is green; this workstation blocks the fixture listener on `127.0.0.1`,
    so local Playwright/browser execution is not claimed.
