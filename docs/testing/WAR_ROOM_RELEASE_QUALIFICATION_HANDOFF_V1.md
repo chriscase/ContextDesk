@@ -1,6 +1,6 @@
 # War-Room release-qualification handoff v1
 
-**Status:** isolated local integration; `main` and all source PRs remain untouched.
+**Status:** isolated published integration; `main` and all source PRs remain untouched.
 
 **As-of:** 2026-08-21
 
@@ -10,20 +10,21 @@ needs an environment-dependent rehearsal.
 
 ## Current integration state
 
-The local branch is:
+The published branch is:
 
 ```text
-codex/merge-consolidation-demo (unpublished local branch; see the branch tip for the latest validated commit)
+codex/merge-consolidation-demo @ 74cf30104e6076f4738ae6c987a6ec3c8001da6b
 ```
 
 The branch contains the qualification harness, portable launcher, provider-free
 browser bridge vertical, selectively ported operator-readiness
 contracts/configuration tools, and the opt-in live qualification runner
-described below. It remains unpublished because no external branch publication
-was authorized in this run. GitHub DNS/network access is currently restored,
-but no push or PR write has been performed.
+described below. GitHub DNS/network access is restored, and the exact branch
+tip has been pushed; no PR write was performed.
 
-No merge, close, retarget, or rewrite was performed on any external PR.
+The branch is published at `origin/codex/merge-consolidation-demo`; no PR was
+opened for it. No merge, close, retarget, or rewrite was performed on any
+external PR.
 
 ## Proven locally
 
@@ -107,9 +108,13 @@ against the current branch and selectively integrated locally in commit
 - the sanitizer has focused tests for valid reports, live-run rejection, and
   secret/privacy failures.
 
-The local memory qualification and artifact round-trip passed. The hosted
-workflow itself has not run for this unpublished branch, and PostgreSQL remains
-environment-gated locally.
+The local memory qualification and artifact round-trip passed. The exact
+published branch was then qualified remotely on commit
+`74cf30104e6076f4738ae6c987a6ec3c8001da6b` by
+[collab-qualify run 32451824096](https://github.com/chriscase/ContextDesk/actions/runs/32451824096).
+Its hosted release qualification passed typecheck, lint, tests, build, memory
+qualification, PostgreSQL qualification, configuration initialization, doctor,
+sanitization, and share-safe artifact upload.
 
 The local follow-up hardening after reviewing Grok Build PR #939 is also green:
 
@@ -197,8 +202,11 @@ locally: support panels are opened before their assertions, snapshot freezing
 refreshes the run panel, the bridge request checks the actual `modelId` field,
 and deterministic output hashes are valid SHA-256 digests. The fixture now uses
 Node's ESM loader rather than the `tsx` CLI, so hosted runs do not depend on the
-CLI's IPC pipe. The exact-branch hosted browser job remains authoritative once
-this branch is published.
+CLI's IPC pipe. The exact-branch hosted browser jobs are now authoritative:
+[collab run 32451824126](https://github.com/chriscase/ContextDesk/actions/runs/32451824126)
+passed the standard browser qualification, the provider-free Rust bridge
+comparison browser qualification, and the full Collab typecheck/lint/test/
+migration/build job. All jobs used the exact published commit above.
 
 The final local CLI safety pass adds two fail-closed protections:
 
@@ -236,6 +244,17 @@ browser surface.
 
 ## Hosted delegated evidence
 
+### Exact published merge-branch evidence
+
+The isolated merge branch is published, and both workflows passed on the exact
+same SHA `74cf30104e6076f4738ae6c987a6ec3c8001da6b`:
+
+- [collab-qualify run 32451824096](https://github.com/chriscase/ContextDesk/actions/runs/32451824096): hosted release qualification, including PostgreSQL and sanitized artifact upload;
+- [collab run 32451824126](https://github.com/chriscase/ContextDesk/actions/runs/32451824126): full Collab checks, standard Playwright browser qualification, and the real provider-free Rust bridge browser qualification.
+
+These runs validate the published isolated branch. They do not merge it and do
+not change any source PR.
+
 These remain draft and open:
 
 - [PR #936](https://github.com/chriscase/ContextDesk/pull/936), Cursor browser
@@ -256,8 +275,8 @@ These remain draft and open:
   workflow run `32440407855` passed the complete job, including memory and
   PostgreSQL qualification, doctor, sanitization, and artifact upload. The
   sanitized artifact was retained by GitHub as artifact `9432232253`. This is
-  hosted evidence for the workflow on its older base; the workflow was
-  selectively ported to this local branch and has not run here remotely.
+  hosted evidence for the workflow on its older base; the selectively ported
+  workflow also passed on the exact published branch in run `32451824096`.
 - [PR #940](https://github.com/chriscase/ContextDesk/pull/940), Grok mixed-
   provider credential isolation, remains draft/open at head `8202f248`. Its
   security slice was selectively integrated and revalidated on this local
@@ -339,17 +358,17 @@ the collaborative surface for reviewing and adjudicating the resulting runs.
    `ministral-3-14b-instruct-2512`) are not configured here. Vercel now has a
    current, scoped GPT-OSS diagnostic result, but its known-truth usefulness
    scorer failed on typed symptom separation; it is not a clean quality pass.
-2. **The next required rehearsal is hosted and vertical.** PR #936’s hosted
-   browser job passed on its older base, and the local `collab.yml` workflow
-   contains the same browser lane. It still needs a hosted browser run on this
-   exact branch, followed by explicitly enabled employer/Vercel runs when
-   credentials and host profile ids are supplied.
+2. **The next required rehearsal is provider-backed and vertical.** The exact
+   branch now passes hosted browser, bridge, PostgreSQL, and full Collab
+   qualification. The remaining live rehearsal is to supply private per-profile
+   credentials for the employer gateway and/or Vercel and run the explicitly
+   enabled lanes through the same GUI/bridge path.
 3. **PostgreSQL is hosted-proven, not locally configured.** The local report
    uses memory plus filesystem evidence; hosted qualification covers the
    PostgreSQL path.
-4. **The local merge branch is unpublished.** GitHub DNS/network access now
-   resolves, but publication still needs explicit authorization; this handoff
-   does not imply that remote state contains the latest local changes.
+4. **The isolated merge branch is not merged.** It is intentionally published
+   as `origin/codex/merge-consolidation-demo` for review, but no PR was opened
+   and no source PR or `main` was changed.
 5. **Provider quality is not certified.** The harness proves lifecycle,
    provenance, privacy, and comparison mechanics; it does not establish that
    any model reached the correct diagnosis.
@@ -365,10 +384,10 @@ the collaborative surface for reviewing and adjudicating the resulting runs.
 
 ## Next delegated milestone
 
-The hosted release-qualification slice and local hardening are implemented. The
-next milestone is to publish this exact local branch as a draft branch/PR when
-authorized, run the distinct hosted bridge browser job and PostgreSQL
-qualification on that exact SHA, then perform explicit employer/Vercel
-rehearsals using a private four-profile catalog and per-profile credentials.
-Real provider quality validation remains pending; neither it nor a
-Claude-authored review is implied by a green hosted qualification run.
+The isolated release-qualification milestone is complete. The next milestone
+is an authorized provider-backed rehearsal: configure private per-profile
+credentials for the employer gateway and/or Vercel, run a small same-snapshot
+matrix through the GUI bridge, inspect latency, terminal-answer, unknown, and
+error semantics, and import the resulting share-safe comparison into
+Experiment Lab. Real provider quality validation remains pending; neither it
+nor a Claude-authored review is implied by the green hosted qualification runs.
