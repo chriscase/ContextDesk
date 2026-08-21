@@ -1,5 +1,6 @@
 interface ImportedRunView {
   id: string;
+  sourceId?: string;
   outputText: string;
   corroborationState: string;
   evidenceVisibility: string;
@@ -12,6 +13,8 @@ interface ImportedRunView {
 
 export function ImportedRun(props: {
   run: ImportedRunView;
+  /** Catalog entry matching run.sourceId; null when the id matches no loaded source. */
+  source?: { id: string; name: string; kind: string } | null;
   canCorroborate: boolean;
   onCorroborate: (id: string, state: "corroborated" | "contradicted", linkId: string) => void;
 }) {
@@ -46,6 +49,22 @@ export function ImportedRun(props: {
         {run.evidenceVisibility}
         {run.snapshotBinding ? ` · snapshot ${run.snapshotBinding}` : " · no package snapshot"}
       </p>
+      {/* Attribution shows only what was recorded: the exact source id, plus catalog
+          name/kind when that id matches a loaded source. A missing match stays explicit
+          ("catalog metadata unavailable") — never guessed. */}
+      {run.sourceId ? (
+        <p className="catalog__meta">
+          source <code>{run.sourceId}</code>
+          {props.source ? (
+            <>
+              {" "}
+              · {props.source.name} · kind {props.source.kind}
+            </>
+          ) : (
+            <> · catalog metadata unavailable</>
+          )}
+        </p>
+      ) : null}
       {run.promptText === null ? (
         <p className="timeline__meta">Prompt unknown ({run.promptCompleteness})</p>
       ) : (
