@@ -3,6 +3,7 @@
 name: collab-qualify
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - "collab/**"

@@ -163,6 +163,8 @@ The new provider-free browser bridge vertical is also prepared:
 - `.github/workflows/collab.yml` now has a separate `collab-browser-bridge` job,
   enables the bridge explicitly, uploads a distinct Playwright artifact, and
   supports `workflow_dispatch`; the default browser job remains provider-free.
+- `.github/workflows/collab-qualify.yml` also supports `workflow_dispatch` for
+  the memory/PostgreSQL/doctor qualification without any provider calls.
 
 The full browser flow is not claimed locally because this workstation blocks
 the fixture's loopback listener before Playwright can start. The fixture now
