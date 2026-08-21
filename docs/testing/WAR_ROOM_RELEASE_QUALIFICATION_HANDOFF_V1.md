@@ -118,8 +118,9 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
    ids are supplied. The current launcher is covered by component tests, but
    not yet by a hosted browser run on this exact local merge state.
 3. **Local browser execution is sandbox-limited.** The hosted Cursor browser
-   job is green; this workstation's `tsx` fixture launcher cannot open its IPC
-   pipe under the current sandbox, so local Playwright execution is not claimed.
+   job is green; this workstation blocks both the `tsx` fixture IPC pipe and a
+   compiled demo listener on `127.0.0.1`, so local Playwright/browser execution
+   is not claimed.
 4. **PostgreSQL is hosted-proven, not locally configured.** The local report
    uses memory plus filesystem evidence; hosted qualification covers the
    PostgreSQL path.
