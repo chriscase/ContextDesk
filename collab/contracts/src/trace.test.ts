@@ -15,13 +15,13 @@ import {
   buildStrategyComparison,
   extractPlainTranscript,
   parseInteractionTrace,
-  parseLabImport,
   parsePlainTranscript,
   parseStrategyPackage,
   projectShareSafeTrace,
   sha256Hex,
   traceFingerprint,
 } from "./trace.js";
+import { parseLabImport } from "./lab-import.js";
 
 const Ajv2020 =
   (Ajv2020Import as unknown as { default?: unknown }).default ?? Ajv2020Import;

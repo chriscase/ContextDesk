@@ -200,6 +200,7 @@ export function ExperimentLab(props: {
   const [experiments, setExperiments] = useState<ExperimentView[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [payload, setPayload] = useState("");
+  const [benchPayload, setBenchPayload] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [exported, setExported] = useState<ShareSafeExport | null>(null);
   const [presence, setPresence] = useState<PresenceView | null>(null);
@@ -311,6 +312,45 @@ export function ExperimentLab(props: {
     } catch {
       setError("Experiment import failed");
     }
+  }
+
+  async function importBenchArtifact(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    let body: unknown;
+    try {
+      body = JSON.parse(benchPayload);
+    } catch {
+      setError("Bench artifact JSON is invalid");
+      return;
+    }
+    try {
+      const res = await fetch(`/api/cases/${props.caseId}/experiments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        setError(await responseError(res, "Bench artifact import failed"));
+        return;
+      }
+      const json = (await res.json()) as ExperimentView;
+      setBenchPayload("");
+      selectExperiment(json.id);
+      await refresh();
+    } catch {
+      setError("Bench artifact import failed");
+    }
+  }
+
+  function onBenchFileSelected(file: File | null) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") setBenchPayload(reader.result);
+    };
+    reader.onerror = () => setError("Bench artifact file could not be read");
+    reader.readAsText(file);
   }
 
   async function recordHelpfulness(event: FormEvent<HTMLFormElement>) {
@@ -622,6 +662,38 @@ export function ExperimentLab(props: {
             />
             <button className="login__submit" type="submit">
               Import experiment
+            </button>
+          </form>
+        </details>
+      ) : null}
+      {canWrite ? (
+        <details className="experiment-lab__tools">
+          <summary>Import bench-compare / recorded artifact</summary>
+          <p className="experiment-lab__section-note">
+            Choose a hermetic multi-strategy bench artifact (or paste share-safe lanes with
+            synthetic model labels). The converter lands candidates and traces on this case without
+            inventing gold, cost, usage, or provider calls. Raw JSON stays here; the primary view
+            remains the candidate table, evidence, and accepted decision.
+          </p>
+          <form className="composer" onSubmit={(event) => void importBenchArtifact(event)}>
+            <label className="experiment-lab__file">
+              <span>Artifact file</span>
+              <input
+                type="file"
+                accept="application/json,.json"
+                onChange={(event) => onBenchFileSelected(event.target.files?.[0] ?? null)}
+              />
+            </label>
+            <textarea
+              className="login__input"
+              rows={6}
+              value={benchPayload}
+              onChange={(event) => setBenchPayload(event.target.value)}
+              placeholder="Paste cd-collab.bench_run_artifact.v1 or bench-compare JSON with lanes"
+              required
+            />
+            <button className="login__submit" type="submit">
+              Convert and import onto case
             </button>
           </form>
         </details>

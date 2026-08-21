@@ -784,6 +784,12 @@ describe("accepted decision to versioned gold", () => {
 const STRATEGY = JSON.parse(
   readFileSync(join(here, "../../../../contracts/fixtures/strategy-package.converge.json"), "utf8"),
 ) as unknown;
+const BENCH_ARTIFACT = JSON.parse(
+  readFileSync(
+    join(here, "../../../../contracts/fixtures/bench-run-artifact.multi-strategy.json"),
+    "utf8",
+  ),
+) as unknown;
 const PLAIN = JSON.parse(
   readFileSync(join(here, "../../../../contracts/fixtures/plain-transcript.incomplete.json"), "utf8"),
 ) as unknown;
@@ -1123,6 +1129,81 @@ describe("interaction traces and strategy comparison", () => {
       expect(raw).not.toContain('"snapshotFingerprint"');
       expect(raw).not.toContain("Which inventory call is blocking checkout?");
       expect(raw).not.toContain("programmatic-agent");
+    });
+  });
+
+  it("imports a hermetic bench-run artifact, accepts a decision, and keeps share-safe export fail-closed", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", DAVE);
+      const created = await createCase(app, alice);
+      const imported = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments`,
+        headers: { cookie: alice },
+        payload: BENCH_ARTIFACT,
+      });
+      expect(imported.statusCode).toBe(200);
+      const view = JSON.parse(imported.body) as {
+        id: string;
+        packageId: string;
+        candidates: { modelLabel: string; goldState: string; cost: { status: string }; usage: { status: string } }[];
+        agreement: { sharedAnchors: { evidenceRef: string }[]; notes: string[] };
+        traces: { completeness: string; unknowns: string[] }[];
+        comparison: { sharedEvidence: unknown[] };
+      };
+      expect(view.packageId).toBe("pkg-synth-bench-multi-strategy-v1");
+      expect(view.candidates.map((c) => c.modelLabel)).toEqual([
+        "qwen-3.6-27b",
+        "gpt-oss-120b",
+        "ministral-3-14b-instruct-2512",
+      ]);
+      expect(view.candidates.every((c) => c.goldState === "unknown")).toBe(true);
+      expect(view.candidates.every((c) => c.cost.status === "unknown")).toBe(true);
+      expect(view.candidates.every((c) => c.usage.status === "unknown")).toBe(true);
+      expect(view.traces).toHaveLength(3);
+      expect(view.traces.every((trace) => trace.completeness === "partial")).toBe(true);
+      expect(
+        view.agreement.sharedAnchors.some((row) => row.evidenceRef === "ev-demo-checkout-log"),
+      ).toBe(true);
+      expect(view.comparison.sharedEvidence.length).toBeGreaterThan(0);
+
+      const proposed = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${view.id}/decisions`,
+        headers: { cookie: alice },
+        payload: {
+          text: "Treat inventory timeout as the human-accepted cause for this synthetic bench import.",
+          rationale: "Human decision after reviewing converted lanes; not a gold claim yet.",
+          evidenceRefs: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+        },
+      });
+      expect(proposed.statusCode).toBe(200);
+      const proposal = JSON.parse(proposed.body) as { id: string; revision: number };
+      const accepted = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${view.id}/decisions/${proposal.id}/accept`,
+        headers: { cookie: dave },
+        payload: { expectedRevision: proposal.revision },
+      });
+      expect(accepted.statusCode).toBe(200);
+
+      const exportRes = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${view.id}/export`,
+        headers: { cookie: dave },
+      });
+      expect(exportRes.statusCode).toBe(200);
+      const exported = parseLabExportV2(JSON.parse(exportRes.body));
+      expect(exported.privacyClass).toBe("share_safe");
+      expect(exported.traces).toHaveLength(3);
+      expect(exported.review.candidates).toHaveLength(3);
+      const raw = exportRes.body as string;
+      expect(raw).not.toContain("DeepSeek");
+      expect(raw).not.toContain("ai-gateway.vercel.sh");
+      expect(raw).not.toContain("qwen-3.6-27b");
+      expect(raw).not.toContain('"prompt"');
+      expect(raw).not.toContain("bearer ");
     });
   });
 });
