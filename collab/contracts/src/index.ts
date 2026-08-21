@@ -64,6 +64,28 @@ export { TIMELINE_SCHEMA_ID, parseTimeline } from "./timeline.js";
 export type { TimelineEventV1, TimelineV1 } from "./timeline.js";
 
 export {
+  LIVE_PROFILE_ALIASES,
+  QUALIFICATION_BACKENDS,
+  QUALIFICATION_CAVEATS,
+  QUALIFICATION_REPORT_SCHEMA_ID,
+  QUALIFICATION_STEP_STATUSES,
+  parseQualificationReport,
+  renderQualificationSummary,
+} from "./qualification.js";
+export type {
+  LiveProfileAlias,
+  QualificationBackend,
+  QualificationCaveat,
+  QualificationComparisonV1,
+  QualificationConcurrencyV1,
+  QualificationLineageV1,
+  QualificationLiveProfileV1,
+  QualificationReportV1,
+  QualificationStepStatus,
+  QualificationStepV1,
+} from "./qualification.js";
+
+export {
   PRESENCE_SCHEMA_ID,
   PRESENCE_SURFACES,
   parseCasePresence,

@@ -23,7 +23,7 @@ import {
   hashContributionContent,
   isContributionKind,
 } from "../contributions/index.js";
-import { assertUploadAllowed } from "../evidence/index.js";
+import { assertFilenameAllowed, assertUploadAllowed } from "../evidence/index.js";
 import { LegalHoldError, assertCanTombstone, visibleBody } from "../provenance/index.js";
 import { deriveCaseBoard, type AcceptedDecisionBoardInput } from "./board.js";
 import {
@@ -527,6 +527,7 @@ export class CaseService {
   ): Promise<{ artifact: ArtifactV1; summary: ContributionV1 }> {
     await this.requireCase(caseId);
     const privacy = defaultPrivacy(input.privacyClass);
+    if (input.filename !== undefined) assertFilenameAllowed(input.filename);
     const sourceId = await this.resolveSourceId(actor, input.sourceId);
     const id = randomUUID();
     let contentHash: string | null = null;
