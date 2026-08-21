@@ -21,6 +21,7 @@ export interface ContributionView {
 
 export interface RunRow {
   id: string;
+  sourceId: string;
   outputText: string;
   corroborationState: string;
   evidenceVisibility: string;
@@ -274,16 +275,19 @@ export function TriageWorkspace(props: {
             </article>
             <article className="triage-capture__card" aria-labelledby="triage-capture-import-title">
               <header className="triage-capture__card-head">
-                <h4 id="triage-capture-import-title">Output from another AI</h4>
+                <h4 id="triage-capture-import-title">Pasted external output</h4>
                 <span className="triage-chip triage-chip--imported">imported · unverified</span>
               </header>
               <p className="triage-capture__card-copy">
-                Paste an analysis produced anywhere else. It stays unverified until a person
-                corroborates it against case evidence.
+                Paste output produced anywhere else — another AI, a diagnostic tool, an external
+                service, a report someone curated, or material gathered by hand. It stays
+                unverified until a person corroborates it against case evidence.
               </p>
               <p className="import-warn">
-                Pasted prompts and outputs can contain secrets — mask them before saving. Without a
-                signed evidence package, visibility is whatever the importer describes, or unknown.
+                Pasted prompts and outputs can contain secrets — mask them before saving. Evidence
+                visibility is whatever the importer describes, or unknown; a package snapshot
+                identity, when recorded, is a content-addressed reference — not a signature or a
+                verification.
               </p>
               {props.importError ? (
                 <p className="case-memory__error" role="alert">
@@ -428,8 +432,8 @@ export function TriageWorkspace(props: {
             <li>
               <span className="triage-chip triage-chip--imported">imported · unverified</span>
               <span>
-                Output pasted from another tool or model; unverified until a person corroborates
-                it.
+                Output pasted from an AI, a tool, a service, a report, or material gathered
+                elsewhere; unverified until a person corroborates it.
               </span>
             </li>
             <li>
@@ -496,6 +500,7 @@ export function TriageWorkspace(props: {
                 <ImportedRun
                   key={run.id}
                   run={run}
+                  source={props.sources.find((source) => source.id === run.sourceId) ?? null}
                   canCorroborate={props.canWrite}
                   onCorroborate={props.onCorroborate}
                 />
