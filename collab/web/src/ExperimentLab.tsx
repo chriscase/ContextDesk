@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 interface CandidateRow {
   candidateId: string;
@@ -169,7 +169,11 @@ async function responseError(response: Response, fallback: string): Promise<stri
       typeof body.error === "string" &&
       body.error.trim()
     ) {
-      return body.error;
+      const message = body.error.trim();
+      if (/(authorization|bearer|api[_-]?key|credential|secret|token|https?:\/\/)/i.test(message)) {
+        return fallback;
+      }
+      return message.length > 240 ? `${message.slice(0, 237)}…` : message;
     }
   } catch {
     // Preserve a useful fallback when the server returned no JSON body.
@@ -199,28 +203,29 @@ export function ExperimentLab(props: {
   const [error, setError] = useState<string | null>(null);
   const [exported, setExported] = useState<ShareSafeExport | null>(null);
   const [presence, setPresence] = useState<PresenceView | null>(null);
+  const refreshGeneration = useRef(0);
 
   const refresh = useCallback(async (preferredId?: string) => {
+    const generation = ++refreshGeneration.current;
+    const isCurrent = () => generation === refreshGeneration.current;
     try {
       const res = await fetch(`/api/cases/${props.caseId}/experiments`);
       if (!res.ok) {
-        setError(await responseError(res, "Experiment history could not be loaded"));
+        const message = await responseError(res, "Experiment history could not be loaded");
+        if (isCurrent()) setError(message);
         return;
       }
       const body = (await res.json()) as { experiments?: ExperimentView[] };
+      if (!isCurrent()) return;
       const nextExperiments = body.experiments ?? [];
       setExperiments(nextExperiments);
       if (preferredId && nextExperiments.some((row) => row.id === preferredId)) {
         setActive(preferredId);
       }
     } catch {
-      setError("Experiment history could not be loaded");
+      if (isCurrent()) setError("Experiment history could not be loaded");
     }
   }, [props.caseId]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
 
   useEffect(() => {
     function handleExperimentCreated(event: Event) {
@@ -236,10 +241,13 @@ export function ExperimentLab(props: {
   }, [refresh]);
 
   useEffect(() => {
+    refreshGeneration.current += 1;
+    setExperiments([]);
     setActive(null);
     setExported(null);
     setError(null);
     setPresence(null);
+    void refresh();
   }, [props.caseId]);
 
   useEffect(() => {

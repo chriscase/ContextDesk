@@ -8,13 +8,13 @@ on:
       - "collab/**"
       - ".github/workflows/collab-qualify.yml"
       - "docs/testing/COLLAB_HOSTED_RELEASE_QUALIFICATION_V1.md"
-      - "docs/testing/COLLAB_RELEASE_QUALIFICATION_CURRENT_ARCH_V1.md"
+      - "docs/testing/WAR_ROOM_RELEASE_QUALIFICATION_HANDOFF_V1.md"
   pull_request:
     paths:
       - "collab/**"
       - ".github/workflows/collab-qualify.yml"
       - "docs/testing/COLLAB_HOSTED_RELEASE_QUALIFICATION_V1.md"
-      - "docs/testing/COLLAB_RELEASE_QUALIFICATION_CURRENT_ARCH_V1.md"
+      - "docs/testing/WAR_ROOM_RELEASE_QUALIFICATION_HANDOFF_V1.md"
 
 concurrency:
   group: collab-qualify-${{ github.event.pull_request.number || github.run_id }}
@@ -62,15 +62,15 @@ jobs:
       - name: prepare report directories
         run: mkdir -p .ci-qualify/raw .ci-qualify/sanitized
       - name: qualify memory
-        run: npm run --silent qualify -- --backend memory --out .ci-qualify/raw/qualify-memory.json
+        run: node server/dist/qualification-cli.js --backend memory --out .ci-qualify/raw/qualify-memory.json
       - name: qualify postgres
-        run: npm run --silent qualify -- --backend postgres --out .ci-qualify/raw/qualify-postgres.json
+        run: node server/dist/qualification-cli.js --backend postgres --out .ci-qualify/raw/qualify-postgres.json
       - name: config init and doctor
         run: |
-          npm run --silent config:init -- --output .env.local --yes
+          node server/dist/config-init-cli.js --profile postgres --output .env.local --yes
           node server/dist/doctor-cli.js --json --env-file .env.local --out .ci-qualify/raw/doctor.json
       - name: sanitize reports
-        run: node server/dist/ci-artifact-cli.js --in .ci-qualify/raw --out .ci-qualify/sanitized
+        run: node server/dist/ci-artifact-cli.js --in .ci-qualify/raw --out .ci-qualify/sanitized --require qualify-memory.json,qualify-postgres.json,doctor.json
       - uses: actions/upload-artifact@v4
         with:
           name: collab-qualify-reports

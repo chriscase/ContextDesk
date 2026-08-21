@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export const CONFIG_INIT_PROFILES = ["demo", "postgres", "ldap"] as const;
@@ -183,7 +183,10 @@ export async function initConfig(input: ConfigInitInput): Promise<ConfigInitResu
   }
   const body = renderConfigFile(profile);
   await mkdir(dirname(outputPath), { recursive: true });
-  await writeFile(outputPath, body, { encoding: "utf8", flag: "w" });
+  await writeFile(outputPath, body, { encoding: "utf8", flag: "w", mode: 0o600 });
+  // writeFile's mode only applies on creation; forced overwrites must also
+  // tighten an existing environment file.
+  await chmod(outputPath, 0o600);
   const evidence = evidenceRootFrom(body);
   const evidencePath = isAbsolute(evidence) ? evidence : resolve(cwd, evidence);
   await mkdir(evidencePath, { recursive: true });

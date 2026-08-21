@@ -18,6 +18,23 @@ describe("hosted CI artifact sanitizer", () => {
     expect(() => assertReleaseArtifactSafe({ reports: [qualification, doctor, live] })).not.toThrow();
   });
 
+  it("rejects an empty report wrapper and can require named outputs", async () => {
+    expect(() => assertReleaseArtifactSafe({ reports: [] })).toThrow(/must not be empty/);
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-ci-required-"));
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    await mkdir(source, { recursive: true });
+    await writeFile(join(source, "doctor.json"), JSON.stringify(await fixture("doctor-report.valid.json")));
+    await expect(
+      sanitizeCiArtifacts({
+        sourceDir: source,
+        destDir: destination,
+        requiredNames: ["doctor.json", "qualify-postgres.json"],
+      }),
+    ).rejects.toThrow(/qualify-postgres\.json/);
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("rejects a live provider lane even when the rest of the report is typed", async () => {
     const report = (await fixture("live-qualification-report.valid.json")) as Record<string, unknown>;
     report.liveOptIn = true;

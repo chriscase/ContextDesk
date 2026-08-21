@@ -143,7 +143,9 @@ async function main(): Promise<void> {
     if (options.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     else process.stdout.write(`${renderLiveQualificationSummary(report)}\n`);
     process.stderr.write(`${renderLiveQualificationSummary(report)}\n`);
-    if (report.verdict === "failed") process.exitCode = 1;
+    // An explicitly requested live run that cannot form a comparison must be
+    // visible to CI/operators as a failure, rather than a successful no-op.
+    if (report.verdict === "failed" || (options.live && report.verdict === "skipped")) process.exitCode = 1;
   } finally {
     await rm(root, { recursive: true, force: true });
   }

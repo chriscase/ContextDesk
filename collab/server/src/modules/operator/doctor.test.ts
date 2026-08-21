@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -337,6 +337,7 @@ describe("operator config:init", () => {
       expect(body).toContain("COLLAB_AUTH_MODE=local");
       expect(body).toContain("does not contact PostgreSQL");
       expect(body).not.toMatch(/connected to/i);
+      expect((await stat(result.outputPath)).mode & 0o777).toBe(0o600);
       expect(result.createdDirectories.length).toBe(1);
       const probe = join(result.createdDirectories[0] ?? "", ".keep");
       await writeFile(probe, "ok");

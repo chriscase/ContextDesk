@@ -1,10 +1,11 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Client } from "pg";
 import { renderQualificationSummary, type QualificationBackend, type QualificationReportV1 } from "@cd-collab/contracts";
 import { migrateUp } from "./db/migrate.js";
 import { FilesystemEvidenceStore } from "./evidence/store.js";
-import { adminUrl, withDisposableDb } from "./test/disposable-db.js";
+import { adminUrl, appRoleUrl, withDisposableDb } from "./test/disposable-db.js";
 import { MemoryAuditStore, PgAuditStore } from "./modules/audit/index.js";
 import { CatalogService, PgCatalogStore } from "./modules/catalog/index.js";
 import { CaseService, PgCaseStore } from "./modules/cases/index.js";
@@ -43,8 +44,10 @@ async function runMemory(): Promise<QualificationReportV1> {
 async function runPostgres(): Promise<QualificationReportV1> {
   if (!adminUrl()) throw new Error("postgres qualification requires COLLAB_TEST_ADMIN_URL");
   let report: QualificationReportV1 | undefined;
-  await withDisposableDb(async (client) => {
-    await migrateUp(client);
+  await withDisposableDb(async (admin, url) => {
+    await migrateUp(admin);
+    const client = new Client({ connectionString: appRoleUrl(url) });
+    await client.connect();
     const root = await mkdtemp(join(tmpdir(), "cd-collab-qualify-pg-"));
     const store = new FilesystemEvidenceStore({ rootDir: root });
     const audit = new PgAuditStore(client);
@@ -55,6 +58,7 @@ async function runPostgres(): Promise<QualificationReportV1> {
       report = await runQualification({ cases, experiments, backend: "postgres", liveEnv: process.env });
     } finally {
       await rm(root, { recursive: true, force: true });
+      await client.end();
     }
   });
   if (!report) throw new Error("postgres qualification produced no report");

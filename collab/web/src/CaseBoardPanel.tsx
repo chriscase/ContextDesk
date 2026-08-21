@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 const ARTIFACT_KINDS = ["log", "email", "attachment", "file_server_ref"] as const;
 const PRIVACY_CLASSES = ["owner_only", "share_safe"] as const;
@@ -98,8 +98,11 @@ export function CaseBoardPanel(props: {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const loadGeneration = useRef(0);
 
   const load = useCallback(async (snapshotId?: string | null) => {
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => generation === loadGeneration.current;
     setLoading(true);
     setError(null);
     try {
@@ -112,6 +115,7 @@ export function CaseBoardPanel(props: {
       if (!evidenceResponse.ok) throw new Error(await errorText(evidenceResponse, "Evidence could not be loaded."));
       if (!snapshotsResponse.ok) throw new Error(await errorText(snapshotsResponse, "Snapshots could not be loaded."));
       if (!boardResponse.ok) throw new Error(await errorText(boardResponse, "Case board could not be loaded."));
+      if (!isCurrent()) return;
       const evidenceBody = (await evidenceResponse.json()) as { artifacts?: ArtifactView[] };
       const snapshotsBody = (await snapshotsResponse.json()) as { snapshots?: SnapshotView[] };
       const boardBody = (await boardResponse.json()) as { snapshotId: string | null; findings: BoardFinding[]; notice: string };
@@ -120,9 +124,9 @@ export function CaseBoardPanel(props: {
       setBoard(boardBody);
       setSelectedSnapshotId(boardBody.snapshotId);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Case memory could not be loaded.");
+      if (isCurrent()) setError(cause instanceof Error ? cause.message : "Case memory could not be loaded.");
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [props.caseId]);
 

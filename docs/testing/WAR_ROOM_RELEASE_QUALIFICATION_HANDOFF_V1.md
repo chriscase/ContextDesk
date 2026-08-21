@@ -97,6 +97,31 @@ The local memory qualification and artifact round-trip passed. The hosted
 workflow itself has not run for this unpublished branch, and PostgreSQL remains
 environment-gated locally.
 
+The local follow-up hardening after reviewing Grok Build PR #939 is also green:
+
+- PostgreSQL qualification migrates with the disposable admin connection but
+  exercises the catalog, case, audit, and experiment stores through the
+  least-privilege `collab_app` connection;
+- hosted qualification uses the compiled CLIs once the build is complete,
+  initializes the explicit `postgres` profile, and requires the memory,
+  PostgreSQL, and doctor reports before upload; empty or partial report sets
+  are rejected;
+- generated environment files are mode 600 even when an existing file is
+  force-overwritten, and an explicitly requested live run that cannot form a
+  two-lane gateway comparison exits nonzero instead of silently succeeding;
+- case navigation invalidates stale timeline, snapshot-board, and Experiment
+  Lab responses; owner-only imported chat output is hidden from other case
+  members; failed imports preserve their form; and visible export findings
+  mask credential- and endpoint-shaped excerpts; and
+- timeline payloads are presented as readable fields rather than a raw JSON
+  block. Raw JSON remains available through the existing export/projection
+  paths where appropriate.
+
+The full post-hardening demo gate passed: 49 contract tests, 138 server tests
+with 10 environment-gated skips, 37 web tests, typecheck, lint, and static
+synthetic demo build. A local qualification/doctor/sanitizer round-trip also
+passed with the required `qualify-memory.json` and `doctor.json` outputs.
+
 The opt-in live qualification runner is now local and validated:
 
 - `npm run qualify:live -- --json` creates synthetic frozen evidence and
@@ -258,14 +283,15 @@ the collaborative surface for reviewing and adjudicating the resulting runs.
    provenance, privacy, and comparison mechanics; it does not establish that
    any model reached the correct diagnosis.
 7. **Claude hardening remains unverified.** The current local component tests
-   cover the War-Room surfaces, but a separate adversarial Claude review has
-   not been obtained because the Claude session was unavailable.
+   cover the War-Room surfaces. The delegated audit findings were addressed
+   locally, but a separate Claude-authored patch/review has not been obtained
+   because the Claude session was unavailable.
 
 ## Next delegated milestone
 
-The hosted release-qualification slice is now implemented locally. The next
-delegated milestone is a hosted browser qualification run against this exact
-branch, followed by explicit employer/Vercel rehearsals when credentials and
-host profile ids are supplied. Claude adversarial UI/security review and real
-provider quality validation remain pending; neither is implied by a green
-hosted qualification run.
+The hosted release-qualification slice and its local hardening are now
+implemented. The next delegated milestone is a hosted browser qualification
+run against this exact branch, followed by explicit employer/Vercel rehearsals
+when credentials and host profile ids are supplied. Real provider quality
+validation remains pending; neither it nor a Claude-authored review is implied
+by a green hosted qualification run.

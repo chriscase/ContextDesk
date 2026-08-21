@@ -15,7 +15,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function documents(raw: unknown): unknown[] {
-  return isRecord(raw) && Array.isArray(raw.reports) ? raw.reports : [raw];
+  if (isRecord(raw) && Array.isArray(raw.reports)) {
+    if (raw.reports.length === 0) throw new Error("release artifact reports must not be empty");
+    return raw.reports;
+  }
+  return [raw];
 }
 
 /**
@@ -60,9 +64,14 @@ export function assertReleaseArtifactSafe(raw: unknown): void {
 export async function sanitizeCiArtifacts(input: {
   sourceDir: string;
   destDir: string;
+  requiredNames?: readonly string[];
 }): Promise<string[]> {
   const names = (await readdir(input.sourceDir)).filter((name) => name.endsWith(".json")).sort();
   if (names.length === 0) throw new Error("no JSON reports to sanitize");
+  const missing = (input.requiredNames ?? []).filter((name) => !names.includes(name));
+  if (missing.length > 0) {
+    throw new Error(`required release artifact(s) missing: ${missing.join(", ")}`);
+  }
   await mkdir(input.destDir, { recursive: true });
   const written: string[] = [];
   for (const name of names) {

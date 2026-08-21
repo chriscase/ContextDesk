@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { ImportedRun } from "./ImportedRun.js";
@@ -38,6 +38,26 @@ interface RunRow {
   promptCompleteness: string;
 }
 
+function timelinePayload(payload: string): string {
+  try {
+    const value: unknown = JSON.parse(payload);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return String(value);
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => {
+        const label = key.replaceAll(/([a-z])([A-Z])/g, "$1 $2");
+        const rendered = Array.isArray(item)
+          ? item.join(", ")
+          : typeof item === "object" && item !== null
+            ? JSON.stringify(item)
+            : String(item);
+        return `${label}: ${rendered}`;
+      })
+      .join(" · ");
+  } catch {
+    return payload;
+  }
+}
+
 export function Cases(props: {
   roles?: string[];
   readOnly?: boolean;
@@ -54,6 +74,9 @@ export function Cases(props: {
   const [title, setTitle] = useState("");
   const [sources, setSources] = useState<{ id: string; name: string; kind: string }[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
+  const [importError, setImportError] = useState<string | null>(null);
+  const activeCaseRef = useRef<string | null>(null);
+  const loadGeneration = useRef(0);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/cases");
@@ -65,14 +88,17 @@ export function Cases(props: {
   }, []);
 
   const loadTimeline = useCallback(async (id: string) => {
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => generation === loadGeneration.current && activeCaseRef.current === id;
     const res = await fetch(`/api/cases/${id}/timeline`);
-    if (!res.ok) return;
+    if (!res.ok || !isCurrent()) return;
     const body = (await res.json()) as { events?: TimelineEvent[] };
+    if (!isCurrent()) return;
     setEvents(body.events ?? []);
     const imported = await fetch(`/api/cases/${id}/imports`);
-    if (imported.ok) {
+    if (imported.ok && isCurrent()) {
       const list = (await imported.json()) as { runs?: RunRow[] };
-      setRuns(list.runs ?? []);
+      if (isCurrent()) setRuns(list.runs ?? []);
     }
   }, []);
 
@@ -86,6 +112,10 @@ export function Cases(props: {
   }, [refresh]);
 
   useEffect(() => {
+    activeCaseRef.current = active;
+    loadGeneration.current += 1;
+    setEvents([]);
+    setRuns([]);
     if (active) void loadTimeline(active);
   }, [active, loadTimeline]);
 
@@ -117,25 +147,34 @@ export function Cases(props: {
     event.preventDefault();
     if (!active) return;
     const form = event.currentTarget;
+    setImportError(null);
     const data = new FormData(form);
-    const response = await fetch(`/api/cases/${active}/imports`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        outputText: String(data.get("outputText") ?? ""),
-        promptText: String(data.get("promptText") ?? "") || null,
-        sourceId: String(data.get("sourceId") ?? ""),
-        operatorId: String(data.get("operatorId") ?? ""),
-        operatorUsername: String(data.get("operatorUsername") ?? ""),
-        evidenceVisibility: String(data.get("evidenceVisibility") ?? "unknown"),
-        visibilityNote: String(data.get("visibilityNote") ?? "") || null,
-        snapshotBinding: String(data.get("snapshotBinding") ?? "") || null,
-        redacted: data.get("redacted") === "on",
-      }),
-    });
-    if (response.ok) window.dispatchEvent(new Event("contextdesk:external-run-imported"));
-    form.reset();
-    await loadTimeline(active);
+    try {
+      const response = await fetch(`/api/cases/${active}/imports`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          outputText: String(data.get("outputText") ?? ""),
+          promptText: String(data.get("promptText") ?? "") || null,
+          sourceId: String(data.get("sourceId") ?? ""),
+          operatorId: String(data.get("operatorId") ?? ""),
+          operatorUsername: String(data.get("operatorUsername") ?? ""),
+          evidenceVisibility: String(data.get("evidenceVisibility") ?? "unknown"),
+          visibilityNote: String(data.get("visibilityNote") ?? "") || null,
+          snapshotBinding: String(data.get("snapshotBinding") ?? "") || null,
+          redacted: data.get("redacted") === "on",
+        }),
+      });
+      if (!response.ok) {
+        setImportError("External run could not be imported. Review the fields and try again.");
+        return;
+      }
+      window.dispatchEvent(new Event("contextdesk:external-run-imported"));
+      form.reset();
+      await loadTimeline(active);
+    } catch {
+      setImportError("External run could not be imported. Check the connection and try again.");
+    }
   }
 
   async function corroborate(
@@ -279,7 +318,7 @@ export function Cases(props: {
                     <div className="timeline__meta">
                       #{ev.seq} {ev.kind} · {ev.actorUsername}
                     </div>
-                    <div>{ev.payload}</div>
+                    <div>{timelinePayload(ev.payload)}</div>
                   </li>
                 ))}
               </ol>
@@ -293,6 +332,7 @@ export function Cases(props: {
               ))}
               {canWrite ? (
                 <form className="composer" onSubmit={(e) => void importRun(e)}>
+                {importError ? <p className="import-warn" role="alert">{importError}</p> : null}
                 <p className="import-warn">
                   Pasted prompts may contain secrets. Mask them before save. Imported
                   output stays unverified until a human corroborates it. Without a
