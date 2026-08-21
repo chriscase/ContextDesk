@@ -294,6 +294,20 @@ universal GPT-OSS quality claim and not employer-gateway evidence. The failure
 is retained as a useful product signal: the host completed the workflow and
 withheld a usefulness claim rather than presenting an overconfident diagnosis.
 
+Two additional exact Vercel catalog models were run against the same
+diagnostic. The matrix is recorded in
+`docs/benchmarks/VERCEL_GATEWAY_WAR_ROOM_MODEL_MATRIX_20260821.md`:
+
+- `alibaba/qwen3.6-27b`: gateway compatibility, product workflow, and
+  known-truth usefulness all **passed**; linked-log triage took about 158.5
+  seconds;
+- `mistral/ministral-14b`: gateway compatibility, product workflow, and
+  usefulness all **failed**; the direct structured response had a contract
+  failure and the product triage produced no visible terminal answer.
+
+These are Vercel model IDs, not proof that the employer aliases with similar
+names behave identically.
+
 ## What the current GUI can demonstrate
 
 The current War-Room surface can:
