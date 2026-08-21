@@ -1,0 +1,187 @@
+{
+  "schemaId": "cd-collab.bench_run_artifact.v1",
+  "privacyClass": "share_safe",
+  "packageId": "pkg-synth-bench-multi-strategy-v1",
+  "createdAt": "2026-08-21T00:00:00.000Z",
+  "taskFingerprint": "tkf-48e82e8fa651d1ec5b7e7751710a32fa708306ad8dbec679c5ce1224d872e8f6",
+  "snapshotFingerprint": "snf-0ddcedab95ee0d1c170a6c521290c0fcfed92565fb8faf76e4f3b8140359d683",
+  "notes": [
+    "Hermetic multi-strategy fixture projected from share-safe bench runs. Not live provider output."
+  ],
+  "lanes": [
+    {
+      "candidateId": "cand-qwen-3.6-27b",
+      "modelLabel": "qwen-3.6-27b",
+      "role": "single",
+      "shareSafe": {
+        "privacy": "share_safe",
+        "bench_run_id": "run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sdk_run_id": "cdrun-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "task_fingerprint": "tkf-48e82e8fa651d1ec5b7e7751710a32fa708306ad8dbec679c5ce1224d872e8f6",
+        "snapshot_fingerprint": "snf-0ddcedab95ee0d1c170a6c521290c0fcfed92565fb8faf76e4f3b8140359d683",
+        "policy_fingerprint": "pol-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packet_fingerprint": "pkf-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "corpus_fingerprint": "cof-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "model_fingerprints": [
+          "mdf-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "slots": [],
+        "source_kind": "contextdesk_sdk",
+        "fairness": "same_snapshot",
+        "status": "completed",
+        "terminal_kind": "completed",
+        "execution_packet_state": "matched",
+        "terminal_category": null,
+        "result_kind": "grounded_final",
+        "validation_state": "passed",
+        "partial_result_is_provenance_only": false,
+        "reason_codes": ["deterministic_mock"],
+        "configured_role_slots": 1,
+        "completed_role_slots": 1,
+        "distinct_models": 1,
+        "distinct_gateways": 1,
+        "root_cause_established": true,
+        "visible_evidence_count": 2,
+        "usage": "unknown",
+        "cost": "unknown",
+        "answer_included": false,
+        "raw_output_included": false,
+        "sdk_result": {
+          "schema_id": "contextdesk.triage.result_share_safe.v2",
+          "run_id": "cdrun-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "kind": "grounded_final",
+          "validation_state": "passed",
+          "packet_id": "pkt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "reconciliation": {
+            "state": "reconciled",
+            "configured_role_slots": 1,
+            "completed_role_slots": 1,
+            "distinct_models": 1,
+            "distinct_gateways": 1,
+            "supported_claim_ids": ["claim-ev-demo-checkout-log", "claim-ev-demo-inventory-timeout"],
+            "root_cause_established": true
+          },
+          "accepted_evidence_ids": ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+          "reason_codes": ["deterministic_mock"]
+        }
+      }
+    },
+    {
+      "candidateId": "cand-gpt-oss-120b",
+      "modelLabel": "gpt-oss-120b",
+      "role": "single",
+      "shareSafe": {
+        "privacy": "share_safe",
+        "bench_run_id": "run-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sdk_run_id": "cdrun-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "task_fingerprint": "tkf-48e82e8fa651d1ec5b7e7751710a32fa708306ad8dbec679c5ce1224d872e8f6",
+        "snapshot_fingerprint": "snf-0ddcedab95ee0d1c170a6c521290c0fcfed92565fb8faf76e4f3b8140359d683",
+        "policy_fingerprint": "pol-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "request_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "packet_fingerprint": "pkf-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "corpus_fingerprint": "cof-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "model_fingerprints": [
+          "mdf-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "slots": [],
+        "source_kind": "contextdesk_sdk",
+        "fairness": "same_snapshot",
+        "status": "completed",
+        "terminal_kind": "completed",
+        "execution_packet_state": "matched",
+        "terminal_category": null,
+        "result_kind": "grounded_final",
+        "validation_state": "passed",
+        "partial_result_is_provenance_only": false,
+        "reason_codes": ["deterministic_mock"],
+        "configured_role_slots": 1,
+        "completed_role_slots": 1,
+        "distinct_models": 1,
+        "distinct_gateways": 1,
+        "root_cause_established": true,
+        "visible_evidence_count": 2,
+        "usage": "unknown",
+        "cost": "unknown",
+        "answer_included": false,
+        "raw_output_included": false,
+        "sdk_result": {
+          "schema_id": "contextdesk.triage.result_share_safe.v2",
+          "run_id": "cdrun-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "kind": "grounded_final",
+          "validation_state": "passed",
+          "packet_id": "pkt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "reconciliation": {
+            "state": "reconciled",
+            "configured_role_slots": 1,
+            "completed_role_slots": 1,
+            "distinct_models": 1,
+            "distinct_gateways": 1,
+            "supported_claim_ids": ["claim-ev-demo-checkout-log", "claim-ev-demo-retry-storm"],
+            "root_cause_established": true
+          },
+          "accepted_evidence_ids": ["ev-demo-checkout-log", "ev-demo-retry-storm"],
+          "reason_codes": ["deterministic_mock"]
+        }
+      }
+    },
+    {
+      "candidateId": "cand-ministral-3-14b",
+      "modelLabel": "ministral-3-14b-instruct-2512",
+      "role": "single",
+      "shareSafe": {
+        "privacy": "share_safe",
+        "bench_run_id": "run-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "sdk_run_id": "cdrun-ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "task_fingerprint": "tkf-48e82e8fa651d1ec5b7e7751710a32fa708306ad8dbec679c5ce1224d872e8f6",
+        "snapshot_fingerprint": "snf-0ddcedab95ee0d1c170a6c521290c0fcfed92565fb8faf76e4f3b8140359d683",
+        "policy_fingerprint": "pol-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "request_fingerprint": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "packet_fingerprint": "pkf-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "corpus_fingerprint": "cof-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "model_fingerprints": [
+          "mdf-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        ],
+        "slots": [],
+        "source_kind": "contextdesk_sdk",
+        "fairness": "same_snapshot",
+        "status": "partial",
+        "terminal_kind": "completed",
+        "execution_packet_state": "matched",
+        "terminal_category": null,
+        "result_kind": "grounded_final",
+        "validation_state": "passed",
+        "partial_result_is_provenance_only": false,
+        "reason_codes": ["deterministic_mock"],
+        "configured_role_slots": 1,
+        "completed_role_slots": 1,
+        "distinct_models": 1,
+        "distinct_gateways": 1,
+        "root_cause_established": false,
+        "visible_evidence_count": 1,
+        "usage": "unknown",
+        "cost": "unknown",
+        "answer_included": false,
+        "raw_output_included": false,
+        "sdk_result": {
+          "schema_id": "contextdesk.triage.result_share_safe.v2",
+          "run_id": "cdrun-ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "kind": "grounded_final",
+          "validation_state": "passed",
+          "packet_id": "pkt-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "reconciliation": {
+            "state": "reconciled",
+            "configured_role_slots": 1,
+            "completed_role_slots": 1,
+            "distinct_models": 1,
+            "distinct_gateways": 1,
+            "supported_claim_ids": ["claim-ev-demo-checkout-log"],
+            "root_cause_established": false
+          },
+          "accepted_evidence_ids": ["ev-demo-checkout-log"],
+          "reason_codes": ["deterministic_mock"]
+        }
+      }
+    }
+  ]
+}
