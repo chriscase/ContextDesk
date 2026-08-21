@@ -99,7 +99,7 @@ export const WAR_ROOM_SURFACE_MAP: SurfaceRow[] = [
     requested: "responsive layout and basic accessibility",
     status: "present",
     actual:
-      "Workbench stacks at 720px. Login labels exist. Several composer fields are placeholder-only (recorded as UI fixes, not product changes in this PR).",
+      "Workbench stacks at 720px. Login labels exist, and the case composer controls have accessible names plus visible keyboard focus states.",
     probe: "375px viewport + labeled login controls + main landmark",
   },
 ];

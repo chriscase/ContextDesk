@@ -292,7 +292,7 @@ describe("case list and view", () => {
         seq: 1,
         kind: "case_created",
         actorUsername: "alice",
-        targetId: "case-c1",
+        targetId: "case-c1" as string | null,
         serverTime: "2026-08-15T00:00:00.000Z",
         payload: "{}",
       },
@@ -353,6 +353,7 @@ describe("case list and view", () => {
             seq: events.length + 1,
             kind: "contribution_created",
             actorUsername: "alice",
+            targetId: null,
             serverTime: "2026-08-15T00:00:00.000Z",
             payload: '{"kind":"note"}',
           });
