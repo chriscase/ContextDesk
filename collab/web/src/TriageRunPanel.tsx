@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 interface SnapshotView {
   id: string;
@@ -99,6 +99,16 @@ const DEFAULT_CANDIDATES: CandidateOption[] = [
 const DEFAULT_GATEWAY_CONCURRENCY = 2;
 const GATEWAY_CONCURRENCY_OPTIONS = [1, 2, 3, 4] as const;
 const MAX_ERROR_LENGTH = 240;
+// Synthetic fixture labels; suggestions only — the operator may type any
+// non-DeepSeek model id their host profile actually serves.
+const SUGGESTED_MODEL_IDS = [
+  "qwen-3.6-27b",
+  "gpt-oss-120b",
+  "ministral-3-14b-instruct-2512",
+] as const;
+const LANE_ROLES = ["reviewer", "contributor", "challenger", "single"] as const;
+const DEEPSEEK_PATTERN = /deepseek/i;
+const DEEPSEEK_REJECTION = "DeepSeek lanes are not permitted in this deployment.";
 
 function shortHash(value: string | null): string {
   return value ? `${value.slice(0, 12)}…` : "not available";
@@ -215,6 +225,7 @@ export function TriageRunPanel(props: {
   const [handoffJobId, setHandoffJobId] = useState<string | null>(null);
   const [handoffExperimentId, setHandoffExperimentId] = useState<string | null>(null);
   const [handoffError, setHandoffError] = useState<string | null>(null);
+  const [lanePickerError, setLanePickerError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loadRequestToken = useRef(0);
 
@@ -345,12 +356,61 @@ export function TriageRunPanel(props: {
     return () => window.clearInterval(timer);
   }, [hasActiveJob, load]);
 
+  function addLane(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const alias = String(data.get("laneAlias") ?? "").trim();
+    const model = String(data.get("laneModel") ?? "").trim();
+    const role = String(data.get("laneRole") ?? "").trim() || "single";
+    const profileId = String(data.get("laneProfile") ?? "").trim();
+    setLanePickerError(null);
+    if (!alias || !model) {
+      setLanePickerError("Lane alias and model id are required.");
+      return;
+    }
+    if ([alias, model, profileId].some((value) => DEEPSEEK_PATTERN.test(value))) {
+      setLanePickerError(DEEPSEEK_REJECTION);
+      return;
+    }
+    if (candidateOptions.some((candidate) => candidate.candidateId === alias)) {
+      setLanePickerError("A lane with this alias already exists.");
+      return;
+    }
+    setCandidateOptions((current) => [
+      ...current,
+      {
+        candidateId: alias,
+        role,
+        provider: mode === "gateway" ? providerForProfile(profileId, "openai-compatible") : "synthetic",
+        profileId: profileId || null,
+        model,
+        version: null,
+      },
+    ]);
+    setSelectedCandidates((current) => [...current, alias]);
+    if (profileId) {
+      setLaneProfiles((current) => ({ ...current, [alias]: profileId }));
+    }
+    form.reset();
+  }
+
   async function launch() {
     setRunning(true);
     setError(null);
     const candidates = candidateOptions.filter((candidate) =>
       selectedCandidates.includes(candidate.candidateId),
     );
+    if (
+      candidates.some((candidate) =>
+        [candidate.candidateId, candidate.model, mode === "gateway" ? profileFor(candidate) : ""]
+          .some((value) => DEEPSEEK_PATTERN.test(value)),
+      )
+    ) {
+      setError(DEEPSEEK_REJECTION);
+      setRunning(false);
+      return;
+    }
     try {
       const response = await fetch(`/api/cases/${props.caseId}/triage-runs`, {
         method: "POST",
@@ -544,7 +604,7 @@ export function TriageRunPanel(props: {
                           />
                           <span>
                             <strong>{candidate.model}</strong>
-                            <small>{candidate.role}</small>
+                            <small>{candidate.candidateId} · {candidate.role}</small>
                           </span>
                         </label>
                         {mode === "gateway" && selectedCandidates.includes(candidate.candidateId) ? (
@@ -585,6 +645,84 @@ export function TriageRunPanel(props: {
                         {selectedCandidates.length < 2 ? " Gateway comparisons require at least two lanes." : ""}
                       </span>
                     ) : null}
+                    <details className="triage-runs__lane-picker">
+                      <summary>Add a model lane</summary>
+                      <form className="triage-runs__lane-picker-form" onSubmit={addLane}>
+                        <p className="case-memory__note">
+                          Identifiers only: lane alias, model id, and (for gateway runs) a host
+                          profile id. Endpoints, credentials, and raw provider traffic never enter
+                          the browser. DeepSeek lanes are rejected.
+                        </p>
+                        <label className="triage-runs__field">
+                          Lane alias
+                          <input
+                            name="laneAlias"
+                            aria-label="New lane alias"
+                            placeholder="e.g. qwen-reviewer"
+                            required
+                          />
+                        </label>
+                        <label className="triage-runs__field">
+                          Model id
+                          <input
+                            name="laneModel"
+                            aria-label="New lane model id"
+                            list="triage-model-suggestions"
+                            placeholder="e.g. qwen-3.6-27b"
+                            required
+                          />
+                        </label>
+                        <datalist id="triage-model-suggestions">
+                          {SUGGESTED_MODEL_IDS.map((model) => (
+                            <option key={model} value={model} />
+                          ))}
+                        </datalist>
+                        <label className="triage-runs__field">
+                          Role
+                          <select name="laneRole" aria-label="New lane role" defaultValue="reviewer">
+                            {LANE_ROLES.map((role) => (
+                              <option key={role} value={role}>
+                                {role}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        {mode === "gateway" ? (
+                          gatewayProfiles.length > 0 ? (
+                            <label className="triage-runs__field">
+                              Host profile
+                              <select name="laneProfile" aria-label="New lane host profile" defaultValue="">
+                                <option value="" disabled>
+                                  Select a profile
+                                </option>
+                                {gatewayProfiles.map((profile) => (
+                                  <option key={profile.id} value={profile.id}>
+                                    {profile.label} · {profile.provider}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          ) : (
+                            <label className="triage-runs__field">
+                              Host profile id
+                              <input
+                                name="laneProfile"
+                                aria-label="New lane host profile id"
+                                placeholder="profile:employer-gateway"
+                              />
+                            </label>
+                          )
+                        ) : null}
+                        {lanePickerError ? (
+                          <p className="case-memory__error" role="alert">
+                            {lanePickerError}
+                          </p>
+                        ) : null}
+                        <button className="case-memory__secondary-button" type="submit">
+                          Add lane
+                        </button>
+                      </form>
+                    </details>
                   </fieldset>
                   <button
                     className="login__submit"
@@ -638,8 +776,8 @@ export function TriageRunPanel(props: {
                 <section className="triage-runs__comparison" aria-labelledby="triage-runs-comparison-heading">
                   <div className="triage-runs__comparison-heading">
                     <div>
-                      <h4 id="triage-runs-comparison-heading">Compare completed runs</h4>
-                      <p className="case-memory__note">Select two or more runs to see their evidence overlap and lane outcomes. Agreement is not proof of correctness.</p>
+                      <h4 id="triage-runs-comparison-heading">Compare finished runs</h4>
+                      <p className="case-memory__note">Select two or more finished runs — including partial or failed ones — to see their evidence overlap and lane outcomes. Agreement is not proof of correctness.</p>
                     </div>
                     <span className="case-memory__badge">{comparedJobs.length} selected</span>
                   </div>
@@ -655,12 +793,12 @@ export function TriageRunPanel(props: {
                               : current.filter((id) => id !== job.id),
                           )}
                         />
-                        {job.request.strategyId} · {shortHash(job.snapshotFingerprint)}
+                        {job.request.strategyId} · {statusLabel(job.status)} · {shortHash(job.snapshotFingerprint)}
                       </label>
                     ))}
                   </div>
                   {comparedJobs.length < 2 ? (
-                    <p className="case-memory__empty">Choose at least two completed runs.</p>
+                    <p className="case-memory__empty">Choose at least two finished runs.</p>
                   ) : (
                     <>
                       <p className={comparedSnapshotsMatch ? "triage-runs__comparison-note" : "triage-runs__comparison-note is-warning"}>

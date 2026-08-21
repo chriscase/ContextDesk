@@ -349,6 +349,12 @@ export class TriageRunService {
       if (!candidate.candidateId || !candidate.role || !candidate.provider || !candidate.model) {
         throw new TriageRunConflictError("candidate id, role, provider, and model are required");
       }
+      if (
+        [candidate.candidateId, candidate.model, candidate.provider, candidate.profileId ?? "", candidate.version ?? ""]
+          .some((value) => /deepseek/i.test(value))
+      ) {
+        throw new TriageRunConflictError("DeepSeek lanes are not permitted in this deployment");
+      }
       if (request.mode === "gateway" && !candidate.profileId) {
         throw new TriageRunConflictError("gateway candidates require a provider profile id");
       }

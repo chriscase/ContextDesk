@@ -253,13 +253,15 @@ describe("experiment lab", () => {
     );
     render(<ExperimentLab caseId="c1" canWrite canLead />);
     expect(await screen.findByText(/Gold reference v1/)).toBeTruthy();
-    expect(screen.getByText(/accepted decision dec-1 r2/)).toBeTruthy();
+    expect(
+      screen.getByText(/accepted decision “Treat inventory timeout as the benchmark cause\.” \(r2\)/),
+    ).toBeTruthy();
     expect(screen.getByText(/promoted by dave/)).toBeTruthy();
     expect(
-      screen.getByText(/Helpfulness: dave scored cand-qwen-3.6-27b evidence_support 3/),
+      screen.getByText(/Helpfulness: dave scored qwen-3.6-27b evidence support 3\/3/),
     ).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Gold alignment" })).toBeTruthy();
-    expect(screen.getByText(/cand-qwen-3.6-27b: aligned/)).toBeTruthy();
+    expect(screen.getByText(/qwen-3.6-27b: aligned — cites every benchmark anchor/)).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Promote accepted decision to gold" }),
     ).toBeTruthy();
@@ -590,6 +592,73 @@ describe("experiment lab", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Accept decision" }));
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("revision_conflict: decision changed");
+  });
+
+  it("explains alignment, divergence, and decision state in plain language", async () => {
+    const explained = {
+      ...seededStrategyView,
+      decisions: [
+        {
+          id: "dec-strategy",
+          status: "accepted",
+          revision: 2,
+          text: "Both strategies converge on inventory timeout.",
+          rationale: "Human benchmark, not a truth claim.",
+        },
+      ],
+      comparison: {
+        ...seededStrategyView.comparison,
+        divergence: [{ kind: "question", summary: "Approaches asked different questions" }],
+      },
+      alignments: [
+        {
+          candidateId: "cand-programmatic-agent",
+          status: "partial",
+          matchedAnchors: ["ev-demo-checkout-log"],
+          missingAnchors: [],
+          extraAnchors: ["ev-demo-pool-exhaustion"],
+          roleMismatches: [{ evidenceRef: "ev-demo-inventory-timeout", role: "symptom" }],
+          notes: ["Gold alignment is not a correctness verdict."],
+        },
+        {
+          candidateId: "cand-chat-operator",
+          status: "unscored",
+          matchedAnchors: [],
+          missingAnchors: [],
+          extraAnchors: [],
+          notes: ["Gold alignment is not a correctness verdict."],
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        if (String(input).endsWith("/experiments")) {
+          return { ok: true, json: async () => ({ experiments: [explained] }) };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+    render(<ExperimentLab caseId="c1" canWrite={false} canLead={false} readOnly />);
+
+    expect(await screen.findByText(/programmatic-agent: partially aligned/)).toBeTruthy();
+    expect(
+      screen.getByText(/role differs on ev-demo-inventory-timeout \(treated as symptom\)/),
+    ).toBeTruthy();
+    expect(screen.getByText(/beyond the benchmark: ev-demo-pool-exhaustion/)).toBeTruthy();
+    expect(
+      screen.getByText(/chat-operator: unscored — no cited evidence to compare/),
+    ).toBeTruthy();
+    const summary = screen.getByLabelText("Experiment summary");
+    expect(summary.textContent).toMatch(/Divergences1/);
+    expect(summary.textContent).toMatch(/Decisionaccepted r2/);
+    expect(
+      screen.getByText(/pasted chat · partial trace — unproven steps stay unknown/),
+    ).toBeTruthy();
+    expect(screen.getByText(/structured run · complete trace/)).toBeTruthy();
+    expect(
+      screen.getByText(/accepted decision \(r2\): “Both strategies converge on inventory timeout\.”/),
+    ).toBeTruthy();
   });
 
   it("keeps seeded model and interaction-strategy packages selectable", async () => {
