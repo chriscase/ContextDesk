@@ -22,6 +22,8 @@ interface TimelineEvent {
   seq: number;
   kind: string;
   actorUsername: string;
+  targetId?: string | null;
+  clientTime?: string | null;
   serverTime: string;
   payload: string;
 }
@@ -316,7 +318,12 @@ export function Cases(props: {
                   void setStatus(next);
                 }}
               >
-                <select className="login__input" name="status" defaultValue={current.status}>
+                <select
+                  className="login__input"
+                  name="status"
+                  aria-label="Case status"
+                  defaultValue={current.status}
+                >
                   <option value="open">open</option>
                   <option value="monitoring">monitoring</option>
                   <option value="resolved">resolved</option>
@@ -341,11 +348,12 @@ export function Cases(props: {
             <TriageRunPanel caseId={current.id} canLead={canLead} readOnly={readOnly} />
             <details className="case-view__support">
               <summary>Case timeline and external evidence</summary>
-              <ol className="timeline">
+                <ol className="timeline">
                 {events.map((ev) => (
                   <li key={ev.seq} className="timeline__item">
                     <div className="timeline__meta">
                       #{ev.seq} {ev.kind} · {ev.actorUsername}
+                      {ev.targetId ? ` · target ${ev.targetId}` : ""}
                     </div>
                     <div>{timelinePayload(ev.payload)}</div>
                   </li>
@@ -367,9 +375,28 @@ export function Cases(props: {
                   output stays unverified until a human corroborates it. Without a
                   #888 package, visibility is importer-described or unknown.
                 </p>
-                <textarea className="login__input" name="outputText" required rows={3} placeholder="Output" />
-                <textarea className="login__input" name="promptText" rows={2} placeholder="Prompt (optional)" />
-                <select className="login__input" name="sourceId" required defaultValue="">
+                <textarea
+                  className="login__input"
+                  name="outputText"
+                  aria-label="External run output"
+                  required
+                  rows={3}
+                  placeholder="Output"
+                />
+                <textarea
+                  className="login__input"
+                  name="promptText"
+                  aria-label="External run prompt (optional)"
+                  rows={2}
+                  placeholder="Prompt (optional)"
+                />
+                <select
+                  className="login__input"
+                  name="sourceId"
+                  aria-label="External run source"
+                  required
+                  defaultValue=""
+                >
                   <option value="" disabled>
                     Source
                   </option>
@@ -379,16 +406,39 @@ export function Cases(props: {
                     </option>
                   ))}
                 </select>
-                <input className="login__input" name="operatorUsername" placeholder="Operator username" required />
-                <input className="login__input" name="operatorId" placeholder="Operator identity" required />
-                <select className="login__input" name="evidenceVisibility" defaultValue="unknown">
+                <input
+                  className="login__input"
+                  name="operatorUsername"
+                  aria-label="Operator username"
+                  placeholder="Operator username"
+                  required
+                />
+                <input
+                  className="login__input"
+                  name="operatorId"
+                  aria-label="Operator identity"
+                  placeholder="Operator identity"
+                  required
+                />
+                <select
+                  className="login__input"
+                  name="evidenceVisibility"
+                  aria-label="External run evidence visibility"
+                  defaultValue="unknown"
+                >
                   <option value="unknown">visibility unknown</option>
                   <option value="importer_described">importer-described</option>
                 </select>
-                <input className="login__input" name="visibilityNote" placeholder="Visibility note" />
+                <input
+                  className="login__input"
+                  name="visibilityNote"
+                  aria-label="External run visibility note"
+                  placeholder="Visibility note"
+                />
                 <input
                   className="login__input"
                   name="snapshotBinding"
+                  aria-label="Package snapshot identity"
                   placeholder="Package snapshot identity"
                 />
                 <label className="import-warn">
@@ -401,7 +451,12 @@ export function Cases(props: {
               ) : null}
               {canWrite ? (
                 <form className="composer" onSubmit={(e) => void addNote(e)}>
-                <select className="login__input" name="kind" defaultValue="note">
+                <select
+                  className="login__input"
+                  name="kind"
+                  aria-label="Timeline entry kind"
+                  defaultValue="note"
+                >
                   <option value="message">message</option>
                   <option value="note">note</option>
                   <option value="hypothesis">hypothesis</option>
@@ -419,7 +474,13 @@ export function Cases(props: {
                     <option value="share_safe">eligible for share-safe export</option>
                   </select>
                 </label>
-                <textarea className="login__input" name="body" required rows={3} />
+                <textarea
+                  className="login__input"
+                  name="body"
+                  aria-label="Timeline entry body"
+                  required
+                  rows={3}
+                />
                 <button className="login__submit" type="submit">
                   Add to timeline
                 </button>

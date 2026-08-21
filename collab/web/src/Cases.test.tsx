@@ -292,6 +292,7 @@ describe("case list and view", () => {
         seq: 1,
         kind: "case_created",
         actorUsername: "alice",
+        targetId: "case-c1",
         serverTime: "2026-08-15T00:00:00.000Z",
         payload: "{}",
       },
@@ -362,7 +363,9 @@ describe("case list and view", () => {
     );
     render(<Cases roles={["contributor"]} />);
     fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
-    expect(await screen.findByText(/#1 case_created/)).toBeTruthy();
+    expect(await screen.findByText(/#1 case_created.*target case-c1/)).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Timeline entry kind" })).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Timeline entry body" })).toBeTruthy();
     expect(
       await screen.findByRole("option", { name: "Fixture chat assistant (external-tool)" }),
     ).toBeTruthy();

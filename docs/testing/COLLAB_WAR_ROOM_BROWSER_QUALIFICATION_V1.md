@@ -74,7 +74,7 @@ values already used by collab HTTP tests.
 | Helpfulness / accepted decision | Automated through Experiment Lab component coverage and server/contract tests. |
 | Share-safe export | Automated, including planted-credential fail-closed; timeline composer exposes private/share-safe contribution visibility with a private default. |
 | Reload / restart persistence | Reload automated. Process restart remains opt-in and requires a Postgres-backed deployment. |
-| Responsive / basic a11y | Automated at 375px and labeled login controls. |
+| Responsive / basic a11y | Automated at 375px; case composer controls have accessible names and keyboard-visible focus states; login controls are labeled. |
 
 Source of truth: `collab/e2e/src/surface-map.ts`.
 
@@ -105,15 +105,14 @@ successful POST and skipped `loadTimeline` / `reset`.
 
 ## Remaining product work
 
-- Show contribution body and `targetId` on timeline rows so corroboration works
-  without a second client.
+- Show privacy-safe contribution bodies on timeline rows so corroboration works
+  without a second client; target identifiers are now visible for attribution.
 - The case import dropdown now refreshes after catalog add/retire events; a
   future pass can still surface a clear `403` when a stale client attempts a
   write.
 - Create case / Import / Add to timeline are now hidden for viewers. If a stale
   client still attempts a case write, the UI now surfaces a bounded generic
   permission alert rather than silently ignoring the response.
-- `:focus-visible` styles and labels on placeholder-only composer fields.
 - Add incremental per-lane progress to the durable Postgres-backed UI path.
 - Add a first-class live profile/catalog setup flow so operators do not need to
   prepare a private file by hand.
