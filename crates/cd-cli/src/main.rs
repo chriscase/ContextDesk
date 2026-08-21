@@ -8,6 +8,7 @@ mod envelope;
 mod human_hierarchy;
 mod presentation;
 mod progress;
+mod provider_credentials;
 mod provider_probe;
 mod render;
 
@@ -226,7 +227,18 @@ async fn dispatch(
         Command::TriagePolicy {
             action: cli::TriagePolicyAction::Qualify(args),
         } => {
-            let secrets = adapters::secret_store();
+            let secrets = match live_secret_store(
+                format,
+                "triage_policy",
+                app_cfg,
+                resolved.default_provider_profile.value.as_deref(),
+                &[],
+                false,
+                false,
+            ) {
+                Ok(store) => store,
+                Err(code) => return code,
+            };
             let result = commands::triage_policy::qualify(args, paths, app_cfg, &secrets).await;
             let verdict = result
                 .as_ref()
@@ -245,7 +257,18 @@ async fn dispatch(
             unreachable!("provider-free triage policy commands return before stateful dispatch")
         }
         Command::Triage { action } => {
-            let secrets = Arc::new(adapters::secret_store());
+            let secrets = match live_secret_store(
+                format,
+                "triage_run",
+                app_cfg,
+                resolved.default_provider_profile.value.as_deref(),
+                &[],
+                false,
+                false,
+            ) {
+                Ok(store) => Arc::new(store),
+                Err(code) => return code,
+            };
             let result = match action {
                 cli::TriageAction::Run(args) => {
                     commands::triage::run_stateful(args, paths, app_cfg, secrets).await
@@ -302,7 +325,18 @@ async fn dispatch(
             emit(format, resolved.color.value, "session", result)
         }
         Command::Chat(args) => {
-            let secrets = adapters::secret_store();
+            let secrets = match live_secret_store(
+                format,
+                "chat",
+                app_cfg,
+                resolved.default_provider_profile.value.as_deref(),
+                &[],
+                matches!(args.mode, cli::ChatMode::Review),
+                true,
+            ) {
+                Ok(store) => store,
+                Err(code) => return code,
+            };
             let sessions = adapters::session_store(paths);
             let result = commands::chat::run(
                 args,
@@ -366,7 +400,18 @@ async fn dispatch(
         }
         Command::Capabilities => unreachable!("capabilities is state-free"),
         Command::Doctor(args) => {
-            let secrets = adapters::secret_store();
+            let secrets = match live_secret_store(
+                format,
+                "doctor",
+                app_cfg,
+                resolved.default_provider_profile.value.as_deref(),
+                &[],
+                false,
+                false,
+            ) {
+                Ok(store) => store,
+                Err(code) => return code,
+            };
             let sessions = adapters::session_store(paths);
             let result = commands::doctor::run(
                 args,
@@ -419,7 +464,22 @@ async fn dispatch(
             emit(format, resolved.color.value, "exception_episodes", result)
         }
         Command::RetrievalStatus(args) => {
-            let secrets = adapters::secret_store();
+            let secrets = match if args.probe {
+                live_secret_store(
+                    format,
+                    "retrieval_status",
+                    app_cfg,
+                    resolved.default_provider_profile.value.as_deref(),
+                    &[],
+                    false,
+                    true,
+                )
+            } else {
+                Ok(adapters::secret_store())
+            } {
+                Ok(store) => store,
+                Err(code) => return code,
+            };
             let result = commands::retrieval_status::run(
                 args,
                 &paths.cache_root,
@@ -430,7 +490,22 @@ async fn dispatch(
             emit(format, resolved.color.value, "retrieval_status", result)
         }
         Command::RetrievalDiagnose(args) => {
-            let secrets = adapters::secret_store();
+            let secrets = match if args.confirm {
+                live_secret_store(
+                    format,
+                    "retrieval_diagnose",
+                    app_cfg,
+                    resolved.default_provider_profile.value.as_deref(),
+                    &[],
+                    false,
+                    true,
+                )
+            } else {
+                Ok(adapters::secret_store())
+            } {
+                Ok(store) => store,
+                Err(code) => return code,
+            };
             let result = commands::retrieval_diagnose::run(
                 args,
                 &paths.cache_root,
@@ -453,7 +528,18 @@ async fn dispatch(
             )
         }
         Command::RetrievalReanalyze(args) => {
-            let secrets = adapters::secret_store();
+            let secrets = match live_secret_store(
+                format,
+                "retrieval_reanalyze",
+                app_cfg,
+                resolved.default_provider_profile.value.as_deref(),
+                &[],
+                false,
+                true,
+            ) {
+                Ok(store) => store,
+                Err(code) => return code,
+            };
             let result = commands::retrieval_reanalyze::run(
                 args,
                 &paths.cache_root,
@@ -465,7 +551,22 @@ async fn dispatch(
             emit(format, resolved.color.value, "retrieval_reanalyze", result)
         }
         Command::Models(args) => {
-            let secrets = adapters::secret_store();
+            let secrets = match if args.action.is_some() {
+                live_secret_store(
+                    format,
+                    "models",
+                    app_cfg,
+                    resolved.default_provider_profile.value.as_deref(),
+                    &[],
+                    false,
+                    false,
+                )
+            } else {
+                Ok(adapters::secret_store())
+            } {
+                Ok(store) => store,
+                Err(code) => return code,
+            };
             let result = commands::models::run(
                 args,
                 paths,
@@ -479,7 +580,18 @@ async fn dispatch(
         }
         Command::Gateway { action } => match action {
             cli::GatewayAction::Diagnose(args) => {
-                let secrets = adapters::secret_store();
+                let secrets = match live_secret_store(
+                    format,
+                    "gateway_diagnose",
+                    app_cfg,
+                    resolved.default_provider_profile.value.as_deref(),
+                    &[],
+                    false,
+                    false,
+                ) {
+                    Ok(store) => store,
+                    Err(code) => return code,
+                };
                 let sessions = adapters::session_store(paths);
                 let result = commands::gateway::run(
                     args,
@@ -517,6 +629,27 @@ async fn dispatch(
                 emit(format, resolved.color.value, "gateway_ledger", result)
             }
         },
+    }
+}
+
+fn live_secret_store(
+    format: OutputFormat,
+    command: &'static str,
+    cfg: &cd_core::config::AppConfig,
+    selected_profile_id: Option<&str>,
+    extra_profile_ids: &[String],
+    include_reviewer: bool,
+    include_retrieval_roles: bool,
+) -> Result<adapters::CliSecretStore, i32> {
+    match adapters::secret_store_for_live(
+        cfg,
+        selected_profile_id,
+        extra_profile_ids,
+        include_reviewer,
+        include_retrieval_roles,
+    ) {
+        Ok(store) => Ok(store),
+        Err(error) => Err(emit_error(format, command, error)),
     }
 }
 

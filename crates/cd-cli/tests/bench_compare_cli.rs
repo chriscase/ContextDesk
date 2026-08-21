@@ -252,7 +252,7 @@ fn concurrency_one_is_accepted_and_fails_on_the_missing_library() {
             data_dir.path().to_str().expect("data path"),
             "bench-compare",
             "--library",
-            "/path/that/need-not-exist",
+            "/path/that-need-not-exist",
             "--task",
             "task:missing",
             "--candidate",
@@ -267,4 +267,164 @@ fn concurrency_one_is_accepted_and_fails_on_the_missing_library() {
         .stderr(predicate::str::contains(
             "benchmark library could not be opened",
         ));
+}
+
+fn remote_profile(id: &str, api_key_ref: &str) -> cd_core::providers::ProviderProfile {
+    use cd_core::providers::{
+        ProviderCapabilities, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
+    };
+    ProviderProfile {
+        id: id.into(),
+        label: id.into(),
+        kind: ProviderKind::OpenAiCompatible,
+        base_url: "https://gateway.example/v1".into(),
+        api_key_ref: Some(api_key_ref.into()),
+        chat_model: "synthetic-model".into(),
+        embedding_model: None,
+        embedding_base_url: None,
+        capabilities: ProviderCapabilities {
+            tools: true,
+            stream: true,
+            embeddings: false,
+        },
+        local_only: false,
+        deadline_preference: ProviderDeadlinePreference::Auto,
+    }
+}
+
+fn write_app_config(
+    data_dir: &std::path::Path,
+    profiles: Vec<cd_core::providers::ProviderProfile>,
+) {
+    use cd_core::config::{save_config, AppConfig};
+    use cd_core::providers::ProviderConfig;
+    let active_id = profiles.first().map(|profile| profile.id.clone());
+    let cfg = AppConfig {
+        providers: ProviderConfig {
+            active_id,
+            profiles,
+        },
+        ..AppConfig::default()
+    };
+    save_config(&data_dir.join("config.json"), &cfg).expect("write app config");
+}
+
+fn candidate_for_profile(profile_id: &str, cancellation_id: &str) -> serde_json::Value {
+    json!({
+        "policy": {
+            "kind": "standard",
+            "model": {
+                "profile_id": profile_id,
+                "model_id": "synthetic-model"
+            }
+        },
+        "cancellation_id": cancellation_id,
+        "strategy": {
+            "name": "fixture",
+            "operator": "test",
+            "created_at": "2026-01-15T08:00:00Z"
+        }
+    })
+}
+
+#[test]
+fn mixed_employer_and_vercel_reject_the_global_api_key_before_library_or_provider_access() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    write_app_config(
+        data_dir.path(),
+        vec![
+            remote_profile("employer", "provider/employer/api_key"),
+            remote_profile("vercel", "provider/vercel/api_key"),
+        ],
+    );
+    let candidates = tempfile::tempdir().expect("candidate dir");
+    let first = candidates.path().join("employer.json");
+    let second = candidates.path().join("vercel.json");
+    std::fs::write(
+        &first,
+        serde_json::to_vec(&candidate_for_profile("employer", "cancel:employer"))
+            .expect("candidate JSON"),
+    )
+    .expect("employer candidate");
+    std::fs::write(
+        &second,
+        serde_json::to_vec(&candidate_for_profile("vercel", "cancel:vercel"))
+            .expect("candidate JSON"),
+    )
+    .expect("vercel candidate");
+
+    const SHARED: &str = "synthetic-shared-key-must-not-leak";
+    let mut command = Command::cargo_bin("contextdesk").expect("contextdesk binary");
+    command
+        .env("CONTEXTDESK_PROVIDER_API_KEY", SHARED)
+        .args([
+            "--data-dir",
+            data_dir.path().to_str().expect("data path"),
+            "bench-compare",
+            "--library",
+            "/path/that-must-not-be-opened",
+            "--task",
+            "task:missing",
+            "--candidate",
+            first.to_str().expect("first path"),
+            "--candidate",
+            second.to_str().expect("second path"),
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("mixed-provider"))
+        .stderr(predicate::str::contains("employer"))
+        .stderr(predicate::str::contains("vercel"))
+        .stderr(predicate::str::contains(SHARED).not())
+        .stderr(predicate::str::contains("benchmark library").not());
+}
+
+#[test]
+fn single_profile_comparison_still_accepts_the_global_override() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    write_app_config(
+        data_dir.path(),
+        vec![remote_profile("vercel", "provider/vercel/api_key")],
+    );
+    let candidates = tempfile::tempdir().expect("candidate dir");
+    let first = candidates.path().join("a.json");
+    let second = candidates.path().join("b.json");
+    std::fs::write(
+        &first,
+        serde_json::to_vec(&candidate_for_profile("vercel", "cancel:one")).expect("candidate JSON"),
+    )
+    .expect("first candidate");
+    std::fs::write(
+        &second,
+        serde_json::to_vec(&candidate_for_profile("vercel", "cancel:two")).expect("candidate JSON"),
+    )
+    .expect("second candidate");
+
+    let mut command = Command::cargo_bin("contextdesk").expect("contextdesk binary");
+    command
+        .env(
+            "CONTEXTDESK_PROVIDER_API_KEY",
+            "synthetic-shared-key-must-not-leak",
+        )
+        .args([
+            "--data-dir",
+            data_dir.path().to_str().expect("data path"),
+            "bench-compare",
+            "--library",
+            "/path/that-need-not-exist",
+            "--task",
+            "task:missing",
+            "--candidate",
+            first.to_str().expect("first path"),
+            "--candidate",
+            second.to_str().expect("second path"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "benchmark library could not be opened",
+        ))
+        .stderr(predicate::str::contains("mixed-provider").not())
+        .stderr(predicate::str::contains("synthetic-shared-key-must-not-leak").not());
 }

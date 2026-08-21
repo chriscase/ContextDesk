@@ -1,13 +1,16 @@
 # ContextDesk CLI
 
-For ephemeral automation or CI, set `CONTEXTDESK_PROVIDER_API_KEY` for the
-current process only when one selected provider profile will use it. It
-overrides provider credential lookup only; ContextDesk does not persist or
-print the value, and connector credentials remain isolated. `bench-compare`
-rejects this global override when the selected policies use more than one
-provider profile, preventing an employer credential from being applied to a
-Vercel lane (or vice versa). For mixed-provider comparisons, configure each
-profile with its own Keychain reference or protected `file:` reference.
+For ephemeral automation or CI against **one** selected provider profile, set
+`CONTEXTDESK_PROVIDER_API_KEY` for the current process. It overrides only that
+profile's Keychain-style `provider/<id>/api_key` reference. ContextDesk does
+not persist or print the value, and connector credentials remain isolated.
+Protected `file:` references are never replaced by the global override.
+
+Mixed-provider live work — including `bench-compare` across employer and Vercel
+profiles, chat `--mode review` with a different reviewer profile, or retrieval
+roles that use a second credential — **rejects** the global override. Unset
+`CONTEXTDESK_PROVIDER_API_KEY` and give each selected profile its own Keychain
+or owner-only `file:` reference. See [Same-snapshot comparison](#same-snapshot-comparison-contextdesk-bench-compare).
 
 `cd-cli` (binary: `contextdesk`) is a thin adapter over `cd_workflow`, which
 packages host-neutral operations around the production `cd_core` engine. The
@@ -849,8 +852,25 @@ and explicit strategy metadata (`name`, `operator`, `created_at`, with optional
 `version`/`build`); `overrides` may set the public deadline and provider-call
 bound. When no deadline is supplied, the bridge applies the bounded Standard
 180-second whole-comparison deadline. Provider endpoints and credentials remain
-in the existing host config
-and credential adapter.
+in the existing host config and credential adapter.
+
+**Credentials.** `CONTEXTDESK_PROVIDER_API_KEY` is safe only when every
+candidate (and any retrieval role the run would read) resolves through **one**
+Keychain-style provider reference. A comparison that names two credentialed
+profiles — for example an employer gateway and Vercel — refuses the global
+override before opening the library or contacting a provider. Configure each
+profile with its own Keychain id (`provider/<id>/api_key`) or protected `file:`
+path; do not share one process-wide key. ContextDesk never prints, exports, or
+embeds secret bytes in comparison reports or errors.
+
+Safe operator sequence for a mixed live comparison:
+
+1. Unset `CONTEXTDESK_PROVIDER_API_KEY`.
+2. Put each gateway's credential in Keychain or an owner-only mode-`600` file.
+3. Point each AppConfig profile at **its** `api_key_ref` only.
+4. Qualify each profile separately (`contextdesk --profile <id> models verify …`).
+5. Run `bench-compare` with candidate documents that name those exact profile ids.
+6. Treat the owner-only report as operator-private; share only `share_safe`.
 
 The command prepares and proves one isolated corpus before any candidate runs,
 reuses that packet/corpus identity across a bounded concurrent candidate list

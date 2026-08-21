@@ -4,7 +4,9 @@
 # Import, recorded/replay ingest, and report use existing offline commands.
 # Live commands generate temporary candidate documents containing only exact
 # profile/model selections and strategy metadata; credentials remain in the
-# host configuration and credential adapter.
+# host configuration and credential adapter. Mixed-profile live runs must not
+# set CONTEXTDESK_PROVIDER_API_KEY; each profile uses its own Keychain or
+# protected-file reference.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

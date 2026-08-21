@@ -187,11 +187,13 @@ The new provider-free browser bridge vertical is also prepared:
 - `.github/workflows/collab-qualify.yml` also supports `workflow_dispatch` for
   the memory/PostgreSQL/doctor qualification without any provider calls.
 
-The full browser flow is not claimed locally because this workstation blocks
-the fixture's loopback listener before Playwright can start. The fixture now
-uses Node's ESM loader rather than the `tsx` CLI, so hosted runs do not depend
-on the CLI's IPC pipe. It is intended for the hosted browser job once this
-branch can be published.
+The full browser flow is not claimed locally. An earlier attempt was blocked
+before Playwright by the workstation's loopback policy; after that environment
+recovered, Playwright launched but the first fixture checks could not find the
+expected Experiment Lab heading/login controls, so the run was stopped without
+claiming a browser pass. The fixture now uses Node's ESM loader rather than the
+`tsx` CLI, so hosted runs do not depend on the CLI's IPC pipe. The exact-branch
+hosted browser job remains authoritative once this branch is published.
 
 The final local CLI safety pass adds two fail-closed protections:
 
@@ -202,6 +204,17 @@ The final local CLI safety pass adds two fail-closed protections:
 - progress claim text is rejected when it contains URLs, absolute/private
   paths, request/trace identifiers, or credential-shaped material. The
   owner-only benchmark record remains the source for full details.
+
+Grok Build PR #940 added the stronger credential boundary and was selectively
+integrated into this local branch after review. The CLI now binds the process
+override to at most one selected Keychain-style provider reference; protected
+`file:` references remain distinct, and mixed employer/Vercel profiles,
+reviewer profiles, and retrieval-role credentials fail before library or
+provider access. The integration passed `cargo test -p cd-cli --all-targets
+--offline` (198 unit tests plus all CLI integration targets), including the
+new mixed-provider isolation cases. A strict clippy run still encounters the
+repository's existing `canonicalize` policy findings in `cd-core`; clippy with
+that baseline lint waived is clean for the integrated tree.
 
 The standalone headless comparison package also passed:
 
@@ -240,6 +253,10 @@ These remain draft and open:
   sanitized artifact was retained by GitHub as artifact `9432232253`. This is
   hosted evidence for the workflow on its older base; the workflow was
   selectively ported to this local branch and has not run here remotely.
+- [PR #940](https://github.com/chriscase/ContextDesk/pull/940), Grok mixed-
+  provider credential isolation, remains draft/open at head `8202f248`. Its
+  security slice was selectively integrated and revalidated on this local
+  branch; the PR itself was not modified.
 
 Neither PR is merged, closed, or retargeted.
 
