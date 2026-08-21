@@ -539,11 +539,25 @@ fn safe_run_summary(run: &cd_triage_bench::TriageRun) -> String {
 
 fn safe_projected_text(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    !lower.contains("bearer ")
-        && !lower.contains("ai-gateway.vercel.sh")
-        && !lower.contains("apikey")
-        && !lower.contains("api_key")
-        && !lower.contains("authorization")
+    cd_triage_sdk::scan_share_safe_text(value).is_empty()
+        && !lower.contains("xai-")
+        && !lower.contains("ghp_")
+        && !lower.contains("token=")
+        && !lower.contains("password=")
+        && !lower.contains("credential=")
+        && !lower.contains("private key")
+        && !lower.contains("-----begin")
+        && !lower.contains("request_id")
+        && !lower.contains("request-id")
+        && !lower.contains("x-request-id")
+        && !lower.contains("trace_id")
+        && !lower.contains("span_id")
+        && !lower.contains("/users/")
+        && !lower.contains("/home/")
+        && !lower.contains("/private/")
+        && !lower.contains("/var/folders/")
+        && !lower.contains("/tmp/")
+        && !lower.contains("c:\\users\\")
         && !value
             .chars()
             .any(|character| character == '\0' || character.is_control())
@@ -1364,5 +1378,23 @@ mod tests {
             "terminal": {"category": "provider response: secret"}
         });
         assert_eq!(safe_terminal_code(&unknown), None);
+    }
+
+    #[test]
+    fn progress_claim_projection_rejects_urls_paths_and_request_ids() {
+        for value in [
+            "inspect https://example.test/next",
+            "read /tmp/private.log",
+            "gateway request_id=req-123",
+            "x-request-id: abc",
+        ] {
+            assert!(
+                !safe_projected_text(value),
+                "unsafe claim accepted: {value}"
+            );
+        }
+        assert!(safe_projected_text(
+            "inventory timeout is supported by ev-demo"
+        ));
     }
 }
