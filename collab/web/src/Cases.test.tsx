@@ -150,6 +150,48 @@ describe("case list and view", () => {
     expect(screen.queryByRole("button", { name: "Create case" })).toBeNull();
   });
 
+  it("refreshes the import source list after a catalog change", async () => {
+    let catalogRefreshes = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url === "/api/cases") {
+          return {
+            ok: true,
+            json: async () => ({
+              cases: [{ id: "c1", title: "Fixture incident", status: "open", severity: "high" }],
+            }),
+          };
+        }
+        if (url === "/api/catalog/sources") {
+          catalogRefreshes += 1;
+          return {
+            ok: true,
+            json: async () => ({
+              sources: catalogRefreshes > 1
+                ? [{ id: "s1", name: "New source", kind: "external-tool" }]
+                : [],
+            }),
+          };
+        }
+        if (url.endsWith("/timeline") || url.endsWith("/imports")) {
+          return { ok: true, json: async () => ({ events: [], runs: [] }) };
+        }
+        if (url.endsWith("/experiments") || url.endsWith("/export/inventory")) {
+          return { ok: true, json: async () => ({ experiments: [], items: [] }) };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+
+    render(<Cases roles={["contributor"]} />);
+    await screen.findByRole("button", { name: "Fixture incident" });
+    expect(screen.queryByRole("option", { name: /New source/ })).toBeNull();
+    window.dispatchEvent(new Event("contextdesk:source-catalog-changed"));
+    expect(await screen.findByRole("option", { name: "New source (external-tool)" })).toBeTruthy();
+  });
+
   it("filters the loaded case list by title, problem, id, and creator", async () => {
     vi.stubGlobal(
       "fetch",

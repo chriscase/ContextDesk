@@ -36,11 +36,13 @@ export function Catalog(props: { canLead: boolean }) {
     });
     form.reset();
     await refresh();
+    window.dispatchEvent(new Event("contextdesk:source-catalog-changed"));
   }
 
   async function retire(id: string) {
     await fetch(`/api/catalog/sources/${id}/retire`, { method: "POST" });
     await refresh();
+    window.dispatchEvent(new Event("contextdesk:source-catalog-changed"));
   }
 
   return (

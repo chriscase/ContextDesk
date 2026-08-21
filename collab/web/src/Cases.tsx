@@ -87,6 +87,13 @@ export function Cases(props: {
     setActive((current) => current ?? next[0]?.id ?? null);
   }, []);
 
+  const refreshSources = useCallback(async () => {
+    const res = await fetch("/api/catalog/sources");
+    if (!res.ok) return;
+    const body = (await res.json()) as { sources?: { id: string; name: string; kind: string }[] };
+    setSources(body.sources ?? []);
+  }, []);
+
   const loadTimeline = useCallback(async (id: string) => {
     const generation = ++loadGeneration.current;
     const isCurrent = () => generation === loadGeneration.current && activeCaseRef.current === id;
@@ -104,12 +111,11 @@ export function Cases(props: {
 
   useEffect(() => {
     void refresh();
-    void fetch("/api/catalog/sources")
-      .then((res) => (res.ok ? res.json() : { sources: [] }))
-      .then((body: { sources?: { id: string; name: string; kind: string }[] }) => {
-        setSources(body.sources ?? []);
-      });
-  }, [refresh]);
+    void refreshSources();
+    const refreshCatalog = () => void refreshSources();
+    window.addEventListener("contextdesk:source-catalog-changed", refreshCatalog);
+    return () => window.removeEventListener("contextdesk:source-catalog-changed", refreshCatalog);
+  }, [refresh, refreshSources]);
 
   useEffect(() => {
     activeCaseRef.current = active;

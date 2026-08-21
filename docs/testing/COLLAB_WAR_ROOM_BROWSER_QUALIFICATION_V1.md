@@ -108,9 +108,9 @@ successful POST and skipped `loadTimeline` / `reset`.
 - Add an evidence upload control (and show content hashes) instead of API-only.
 - Show contribution body and `targetId` on timeline rows so corroboration works
   without a second client.
-- Refresh `/api/catalog/sources` after writes; contributors currently see a
-  stale empty import dropdown until reload (the fixture server pre-seeds
-  sources to make import testable).
+- The case import dropdown now refreshes after catalog add/retire events; a
+  future pass can still surface a clear `403` when a stale client attempts a
+  write.
 - Create case / Import / Add to timeline are now hidden for viewers. A future
   pass can still surface a clear `403` when a stale client attempts a write.
 - Add a privacy-class control on contributions if share_safe scan fixtures are
