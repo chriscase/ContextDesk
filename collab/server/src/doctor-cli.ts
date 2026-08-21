@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { doctorExitCode, renderDoctorSummary } from "@cd-collab/contracts";
@@ -27,6 +27,11 @@ async function main(): Promise<void> {
     cwd: process.cwd(),
     nodeVersion: process.versions.node,
   });
+  const outputPath = argValue(argv, "--out");
+  if (outputPath) {
+    await mkdir(dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  }
   if (json) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } else {

@@ -1,0 +1,79 @@
+# Hosted collab release qualification. This proves application and storage
+# readiness; it never contacts LDAP, Vercel, employer gateways, or providers.
+name: collab-qualify
+
+on:
+  push:
+    paths:
+      - "collab/**"
+      - ".github/workflows/collab-qualify.yml"
+      - "docs/testing/COLLAB_HOSTED_RELEASE_QUALIFICATION_V1.md"
+      - "docs/testing/COLLAB_RELEASE_QUALIFICATION_CURRENT_ARCH_V1.md"
+  pull_request:
+    paths:
+      - "collab/**"
+      - ".github/workflows/collab-qualify.yml"
+      - "docs/testing/COLLAB_HOSTED_RELEASE_QUALIFICATION_V1.md"
+      - "docs/testing/COLLAB_RELEASE_QUALIFICATION_CURRENT_ARCH_V1.md"
+
+concurrency:
+  group: collab-qualify-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  collab-qualify:
+    name: collab hosted release qualification
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: collab
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      COLLAB_TEST_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      COLLAB_LIVE_VERCEL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: collab/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - name: prepare report directories
+        run: mkdir -p .ci-qualify/raw .ci-qualify/sanitized
+      - name: qualify memory
+        run: npm run --silent qualify -- --backend memory --out .ci-qualify/raw/qualify-memory.json
+      - name: qualify postgres
+        run: npm run --silent qualify -- --backend postgres --out .ci-qualify/raw/qualify-postgres.json
+      - name: config init and doctor
+        run: |
+          npm run --silent config:init -- --output .env.local --yes
+          node server/dist/doctor-cli.js --json --env-file .env.local --out .ci-qualify/raw/doctor.json
+      - name: sanitize reports
+        run: node server/dist/ci-artifact-cli.js --in .ci-qualify/raw --out .ci-qualify/sanitized
+      - uses: actions/upload-artifact@v4
+        with:
+          name: collab-qualify-reports
+          path: collab/.ci-qualify/sanitized/
+          if-no-files-found: error
+          retention-days: 14

@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { renderQualificationSummary, type QualificationBackend, type QualificationReportV1 } from "@cd-collab/contracts";
 import { migrateUp } from "./db/migrate.js";
 import { FilesystemEvidenceStore } from "./evidence/store.js";
@@ -19,6 +19,11 @@ function requestedBackend(argv: string[]): QualificationBackend | "all" {
     throw new Error("qualify --backend must be memory, postgres, or all");
   }
   return "all";
+}
+
+function argValue(argv: string[], name: string): string | undefined {
+  const index = argv.indexOf(name);
+  return index >= 0 ? argv[index + 1] : undefined;
 }
 
 async function runMemory(): Promise<QualificationReportV1> {
@@ -57,7 +62,9 @@ async function runPostgres(): Promise<QualificationReportV1> {
 }
 
 async function main(): Promise<void> {
-  const mode = requestedBackend(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const mode = requestedBackend(argv);
+  const outputPath = argValue(argv, "--out");
   const reports: QualificationReportV1[] = [];
   if (mode === "memory" || mode === "all") reports.push(await runMemory());
   if (mode === "postgres") {
@@ -66,7 +73,13 @@ async function main(): Promise<void> {
     if (adminUrl()) reports.push(await runPostgres());
     else process.stderr.write("postgres skipped: COLLAB_TEST_ADMIN_URL not set\n");
   }
-  process.stdout.write(`${JSON.stringify({ reports }, null, 2)}\n`);
+  const output = { reports };
+  const serialized = `${JSON.stringify(output, null, 2)}\n`;
+  if (outputPath) {
+    await mkdir(dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, serialized, "utf8");
+  }
+  process.stdout.write(serialized);
   for (const report of reports) process.stderr.write(`${renderQualificationSummary(report)}\n`);
 }
 

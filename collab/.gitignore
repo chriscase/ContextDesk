@@ -8,5 +8,6 @@ coverage/
 .env.*
 !.env.example
 deploy/.env
+.ci-qualify/
 *.log
 !e2e/fixtures/**/*.log

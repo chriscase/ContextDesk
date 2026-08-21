@@ -8,3 +8,4 @@ export type { ConfigInitInput, ConfigInitProfile, ConfigInitResult } from "./con
 export { parseEnvFile, mergeEnv } from "./env-file.js";
 export { nodeOperatorFs } from "./fs.js";
 export type { OperatorFs } from "./fs.js";
+export { assertReleaseArtifactSafe, sanitizeCiArtifacts } from "./ci-artifact.js";
