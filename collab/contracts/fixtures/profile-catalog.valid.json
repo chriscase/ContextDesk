@@ -1,0 +1,10 @@
+{
+  "schemaId": "cd-collab.profile_catalog.v1",
+  "privacyClass": "share_safe",
+  "profiles": [
+    { "alias": "gpt-oss-120b" },
+    { "alias": "qwen-3.6-27b" },
+    { "alias": "ministral-3-14b-instruct-2512" },
+    { "alias": "vercel-compatible" }
+  ]
+}

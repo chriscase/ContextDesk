@@ -62,6 +62,28 @@ Configured aliases still stay `ran: false` with
 `cd-workflow`. Details:
 [`docs/testing/COLLAB_RELEASE_QUALIFICATION_CURRENT_ARCH_V1.md`](../docs/testing/COLLAB_RELEASE_QUALIFICATION_CURRENT_ARCH_V1.md).
 
+## Operator readiness
+
+From `collab/`:
+
+```bash
+npm run config:init -- --output .env.local --yes
+set -a && . ./.env.local && set +a
+npm run doctor
+```
+
+`doctor` is compile-first (`node server/dist/doctor-cli.js`, not `tsx`). It
+prints `OK` / `WARN` / `ERROR` for Node version, built artifacts, storage
+shape, evidence-root writability, static directory, auth mode, LDAP TLS,
+cookie security, optional host-bridge path, profile-catalog syntax, and port.
+It exits nonzero on `ERROR`. It never prints secrets or credential URLs and
+never contacts PostgreSQL, LDAP, Vercel, or model providers.
+
+Doctor output proves configuration *shape* only, not provider compatibility.
+Shortest paths (synthetic demo, private local War Room, PostgreSQL/LDAP
+deployment, live-profile preparation):
+[`docs/testing/COLLAB_OPERATOR_READINESS_V1.md`](../docs/testing/COLLAB_OPERATOR_READINESS_V1.md).
+
 ## Decisions
 
 ### HTTP framework: Fastify 5
@@ -256,5 +278,6 @@ Compose example: `deploy/README.md`.
 ## Scripts
 
 From `collab/`: `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`,
-`npm run demo`, `npm run demo:static`, `npm run demo:check`, `npm run migrate`,
+`npm run demo`, `npm run demo:static`, `npm run demo:check`, `npm run qualify`,
+`npm run doctor`, `npm run config:init`, `npm run migrate`,
 `npm run migrate:down`, `npm run migrate:dry-run`.

@@ -1,0 +1,14 @@
+{
+  "schemaId": "cd-collab.doctor_report.v1",
+  "privacyClass": "share_safe",
+  "ok": true,
+  "errorCount": 0,
+  "warnCount": 0,
+  "checks": [],
+  "caveats": [
+    "doctor_checks_configuration_shape_only",
+    "not_provider_compatibility",
+    "live_results_are_not_fabricated"
+  ],
+  "prompt": "leak"
+}

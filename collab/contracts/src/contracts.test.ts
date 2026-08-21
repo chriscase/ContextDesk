@@ -27,6 +27,8 @@ import {
   parseFileServerReference,
   parseHealthResponse,
   parsePromptPackage,
+  parseDoctorReport,
+  parseProfileCatalog,
   parseQualificationReport,
   parseSource,
 } from "./index.js";
@@ -288,6 +290,40 @@ describe("JSON Schema additionalProperties: false", () => {
     expect(() =>
       parseQualificationReport(
         JSON.parse(readFileSync(join(fixturesDir, "qualification-report.valid.json"), "utf8")),
+      ),
+    ).not.toThrow();
+  });
+
+  it("doctor report schema accepts the fixture and rejects prompt keys", () => {
+    const validate = ajv.compile(loadSchema("doctor-report.v1.json"));
+    expect(
+      validate(JSON.parse(readFileSync(join(fixturesDir, "doctor-report.valid.json"), "utf8"))),
+    ).toBe(true);
+    expect(
+      validate(
+        JSON.parse(readFileSync(join(fixturesDir, "doctor-report.unknown-field.json"), "utf8")),
+      ),
+    ).toBe(false);
+    expect(() =>
+      parseDoctorReport(
+        JSON.parse(readFileSync(join(fixturesDir, "doctor-report.valid.json"), "utf8")),
+      ),
+    ).not.toThrow();
+  });
+
+  it("profile catalog schema accepts the fixture and rejects endpoint keys", () => {
+    const validate = ajv.compile(loadSchema("profile-catalog.v1.json"));
+    expect(
+      validate(JSON.parse(readFileSync(join(fixturesDir, "profile-catalog.valid.json"), "utf8"))),
+    ).toBe(true);
+    expect(
+      validate(
+        JSON.parse(readFileSync(join(fixturesDir, "profile-catalog.unknown-field.json"), "utf8")),
+      ),
+    ).toBe(false);
+    expect(() =>
+      parseProfileCatalog(
+        JSON.parse(readFileSync(join(fixturesDir, "profile-catalog.valid.json"), "utf8")),
       ),
     ).not.toThrow();
   });

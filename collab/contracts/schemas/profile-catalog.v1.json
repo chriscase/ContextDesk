@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cd-collab.profile_catalog.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "privacyClass", "profiles"],
+  "properties": {
+    "schemaId": { "const": "cd-collab.profile_catalog.v1" },
+    "privacyClass": { "const": "share_safe" },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alias"],
+        "properties": {
+          "alias": {
+            "enum": [
+              "gpt-oss-120b",
+              "qwen-3.6-27b",
+              "ministral-3-14b-instruct-2512",
+              "vercel-compatible"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

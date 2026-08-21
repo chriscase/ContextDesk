@@ -329,3 +329,24 @@ export type {
   QualificationStepStatus,
   QualificationStepV1,
 } from "./qualification.js";
+
+export {
+  DOCTOR_CAVEATS,
+  DOCTOR_CHECK_IDS,
+  DOCTOR_CHECK_STATUSES,
+  DOCTOR_REPORT_SCHEMA_ID,
+  PROFILE_CATALOG_SCHEMA_ID,
+  doctorExitCode,
+  parseDoctorReport,
+  parseProfileCatalog,
+  renderDoctorSummary,
+} from "./doctor.js";
+export type {
+  DoctorCaveat,
+  DoctorCheckId,
+  DoctorCheckStatus,
+  DoctorCheckV1,
+  DoctorReportV1,
+  ProfileCatalogEntryV1,
+  ProfileCatalogV1,
+} from "./doctor.js";
