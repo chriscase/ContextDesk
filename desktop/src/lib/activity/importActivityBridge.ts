@@ -139,6 +139,22 @@ const IMPORT_LABEL_TUPLES: ReadonlyMap<
     "Corpus published",
     { origin: "governed_write", phases: TERMINAL_PHASE, statuses: new Set<ActivityStatus>(["ok"]) },
   ],
+  // A partial import publishes a corpus, so it carries the same governed-write
+  // origin and `ok` status as a clean publish — the class, not the status, is
+  // what makes it partial. Without this tuple `safeProjectedEvent` rejects the
+  // terminal, `safeEventsForRun` then drops the whole causal chain, and the
+  // bridge silently stores and broadcasts nothing for a published corpus.
+  [
+    "Corpus published with defects (PARTIAL)",
+    { origin: "governed_write", phases: TERMINAL_PHASE, statuses: new Set<ActivityStatus>(["ok"]) },
+  ],
+  // An unknown outcome still published a corpus (the host returned a report)
+  // but did not certify a class. The trace must survive — dropping it would
+  // repeat the PARTIAL allowlist failure for the unverified case.
+  [
+    "Corpus published — outcome unverified (UNKNOWN)",
+    { origin: "governed_write", phases: TERMINAL_PHASE, statuses: new Set<ActivityStatus>(["ok"]) },
+  ],
   [
     "Import cancelled — nothing published",
     {
@@ -452,7 +468,9 @@ export async function publishImportRunActivity(
   const corpusId = run.report?.corpusId;
   if (
     typeof window === "undefined" ||
-    run.outcome !== "completed" ||
+    (run.outcome !== "completed" &&
+      run.outcome !== "partial" &&
+      run.outcome !== "unknown") ||
     !validCorpusId(corpusId)
   ) {
     return;

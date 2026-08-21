@@ -2228,6 +2228,14 @@ export type LogIngestReportDto = {
   confidence?: LogImportConfidenceDto | null;
   /** Completion/diagnostic phase breakdown (#824); optional for older hosts. */
   phaseTimings?: LogIngestPhaseTimingsDto | null;
+  /** Classified complete/partial/rejected document from current hosts. */
+  outcome?: {
+    schemaId: string;
+    schemaVersion: number;
+    class: "complete" | "partial" | "rejected";
+    published: boolean;
+    corpusId?: string | null;
+  } | null;
 };
 
 export type DemoLogInstallDto = {

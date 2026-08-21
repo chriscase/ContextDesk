@@ -26,6 +26,7 @@ import {
   EngineError,
   type EngineClient,
   type EventRevisionReport,
+  type ImportOutcomeReport,
   type ImportRunReport,
   type ImportRunRequest,
   type TimezoneApplyRequest,
@@ -38,6 +39,29 @@ import {
 
 /** Fixed declaration timestamp the mock stamps (2026-07-01T00:00:00Z). */
 export const MOCK_DECLARED_AT_UNIX_SECS = 1_782_864_000;
+
+function completeMockOutcome(
+  corpusId: string,
+  counts: ImportOutcomeReport["counts"],
+): ImportOutcomeReport {
+  return {
+    schemaId: "contextdesk.import_outcome.v1",
+    schemaVersion: 1,
+    class: "complete",
+    published: true,
+    corpusId,
+    counts,
+    defects: [],
+    defectCounts: {},
+    privacy: {
+      redactionMode: "identity_structural_only",
+      policySummary:
+        "Source and archive member identities are reported after secret scrubbing.",
+      defectsTruncated: false,
+    },
+    manifestDigest: "sha256:mock-complete",
+  };
+}
 
 /** Scenario knobs; every field has a deterministic default. */
 export type MockScenario = {
@@ -408,6 +432,15 @@ export class MockEngineClient implements EngineClient {
             ? { "date-level-logger-thread-record": importable.length }
             : {},
         embedding: { state: "keyword_only", modelId: null },
+        outcome: completeMockOutcome(corpusId, {
+          sourcesDiscovered: this.#preview.counts.total,
+          sourcesImported: importable.length,
+          sourcesFailed: 0,
+          sourcesExcluded: this.#preview.counts.blocked,
+          sourcesIgnored: this.#preview.counts.ignored + notSelected,
+          recordsImported: importable.length * 1_000,
+          recordsMalformed: 0,
+        }),
         confidence: {
           corpusTimeQuality: unresolvedSources.length > 0 ? "order_only" : "wall",
           counts: {

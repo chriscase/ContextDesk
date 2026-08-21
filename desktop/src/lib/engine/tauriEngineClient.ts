@@ -23,6 +23,7 @@ import {
 import {
   EngineError,
   classifyEngineMessage,
+  hostImportFailure,
   type EngineClient,
   type EventRevisionReport,
   type ImportRunReport,
@@ -49,13 +50,8 @@ const liveTransport: TauriTransport = {
 };
 
 function toEngineError(error: unknown): EngineError {
-  const message =
-    typeof error === "string"
-      ? error
-      : error instanceof Error
-        ? error.message
-        : String(error);
-  return new EngineError(classifyEngineMessage(message), message);
+  const { message, outcome } = hostImportFailure(error);
+  return new EngineError(classifyEngineMessage(message), message, outcome);
 }
 
 async function call<T>(
