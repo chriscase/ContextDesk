@@ -66,7 +66,7 @@ values already used by collab HTTP tests.
 | --- | --- |
 | Local-auth demo login | Adapted: fixture `MapAuthAdapter` through the real login form. Production remains LDAP-backed; invented `/api/auth/local` returns 404. |
 | Create/open a case | Automated. |
-| Upload and freeze evidence | Automated through the Case Board panel; content-addressed evidence is frozen into a same-snapshot run input. |
+| Upload and freeze evidence | Automated through the Case Board panel; spec 03 drives the file picker, summary, privacy class, upload POST, and snapshot freeze into a same-snapshot run input. |
 | Two or more comparison lanes | Automated in the bridge job with three selected fixture profiles and concurrency 2. The default job covers synthetic/offline mode. |
 | running / partial / failed / cancelled / completed | Automated through run history and lane cards; the fixture proves completed progress and the server tests cover partial/failure/cancellation/deadline retention. |
 | Import plain-text chat | Automated with `fixtures/chats/*.txt`. |

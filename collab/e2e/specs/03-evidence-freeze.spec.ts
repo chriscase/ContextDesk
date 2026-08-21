@@ -99,4 +99,27 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
     await expect(page.locator('input[type="file"]')).toHaveCount(1);
     await expect(page.getByRole("button", { name: "Upload evidence" })).toBeVisible();
   });
+
+  test("uploads evidence through the war-room form and renders its privacy class", async ({ page }) => {
+    await loginAs(page, FIXTURE_USERS.dave);
+    await createCase(page, uniqueTitle("UI evidence upload"));
+    const file = page.getByLabel("File");
+    await file.setInputFiles({
+      name: "ui-upload.log",
+      mimeType: "text/plain",
+      buffer: fixtureBytes("evidence", "shared-timeout.log"),
+    });
+    await page.getByLabel("Summary").fill("Uploaded through the war-room form");
+    await page.getByLabel("Artifact kind").selectOption("log");
+    await page.getByLabel("Privacy class").selectOption("share_safe");
+    const [posted] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes("/api/cases/") && res.url().endsWith("/evidence") && res.request().method() === "POST",
+      ),
+      page.getByRole("button", { name: "Upload evidence" }).click(),
+    ]);
+    expect(posted.ok(), await posted.text()).toBeTruthy();
+    await expect(page.getByText("ui-upload.log")).toBeVisible();
+    await expect(page.getByText(/hash [0-9a-f]{12}… · share_safe/)).toBeVisible();
+  });
 });
