@@ -13,12 +13,13 @@ needs an environment-dependent rehearsal.
 The local branch is:
 
 ```text
-codex/merge-consolidation-demo @ c6cd9782
+codex/merge-consolidation-demo @ 61f97868
 ```
 
 The local qualification additions are in `e3e40a2e`; the portable compiled
 qualification launcher is in `8854b26e`; the latest qualification evidence and
-handoff corrections are in `c6cd9782`. The branch is not published because
+handoff corrections are in `84880bc1`, and the provider-free browser bridge
+vertical is in `61f97868`. The branch is not published because
 the workstation could not resolve `github.com` during the last push attempt.
 
 No merge, close, retarget, or rewrite was performed on any external PR.
@@ -59,6 +60,21 @@ The direct bridge and server integration checks passed:
 - Collab triage-run/Experiment Lab integration: 38 passed;
 - Rust bridge executor tests: result ordering, bounded progress, timeout, and
   output overflow covered.
+
+The new provider-free browser bridge vertical is also prepared:
+
+- `COLLAB_E2E_BRIDGE=1` switches the Playwright fixture from the synthetic
+  executor to the real `RustBridgeTriageExecutor`;
+- the checked-in bridge command self-check passed with two candidates and
+  persisted-lane progress events;
+- e2e and server typechecks passed, and the focused triage-run suite remained
+  green at 19 tests;
+- the browser flow covers gateway-mode profile selection, bounded concurrency,
+  same-snapshot completion, and pasted-chat handoff to Experiment Lab.
+
+The full browser flow is not claimed locally because this workstation blocks
+the fixture's `tsx` IPC pipe before Playwright can start. It is intended for
+the hosted browser job once this branch can be published.
 
 The standalone headless comparison package also passed:
 
@@ -127,7 +143,7 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
    PostgreSQL path.
 5. **The local merge branch is unpublished.** A future push or PR publication
    requires restored DNS/network access; this handoff does not imply that
-   remote state contains `c6cd9782`.
+   remote state contains `61f97868`.
 6. **Provider quality is not certified.** The harness proves lifecycle,
    provenance, privacy, and comparison mechanics; it does not establish that
    any model reached the correct diagnosis.
