@@ -9,6 +9,9 @@
 .case-view {
   border: 1px solid var(--border);
   padding: 0.85rem;
+  /* Grid items default to min-width auto; without 0 wide lab content (the
+     comparison matrix) widens the page instead of scrolling in its wrapper. */
+  min-width: 0;
 }
 
 .case-list__title,
