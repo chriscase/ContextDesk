@@ -149,7 +149,9 @@ npm run qualify:live -- --catalog ./live-qualification-catalog.json \
 
 Never run the `--live --yes` command in ordinary CI. Use it only as an
 explicitly authorized operator action against a configured employer or Vercel
-gateway.
+gateway. An explicitly requested live run is a release gate: partial,
+inconclusive, failed, or skipped results exit nonzero; only a completed,
+same-snapshot matrix succeeds.
 
 ## Residual
 

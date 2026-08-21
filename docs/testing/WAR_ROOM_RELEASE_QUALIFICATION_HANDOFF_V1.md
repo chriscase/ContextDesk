@@ -130,7 +130,10 @@ The opt-in live qualification runner is now local and validated:
 - a catalog-backed preflight preserves configured alias/model/provider
   provenance while remaining skipped;
 - an explicit `--live --yes` invocation with no bridge reports
-  `bridge_not_configured` rather than claiming a run;
+  `bridge_not_configured` rather than claiming a run and exits nonzero;
+- any explicit live matrix that is partial, inconclusive, failed, or skipped
+  exits nonzero; only a completed, same-snapshot matrix is a successful live
+  qualification;
 - fake-bridge tests cover same-snapshot execution, concurrency propagation,
   observed overlap, lane failures/unknowns, insufficient profiles, and the
   absence of raw summaries or durable host run ids in the report;
