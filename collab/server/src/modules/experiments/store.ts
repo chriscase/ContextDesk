@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import type {
   ExperimentAgreementV1,
@@ -375,7 +376,7 @@ export class PgExperimentStore implements ExperimentStore {
     await this.db.query(
       `INSERT INTO experiment_traces (id, experiment_id, candidate_id, fingerprint, created_at, payload)
        VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
-      [row.traceId, experimentId, row.candidateId, fingerprint, row.createdAt, JSON.stringify(row)],
+      [randomUUID(), experimentId, row.candidateId, fingerprint, row.createdAt, JSON.stringify(row)],
     );
   }
 
