@@ -10,7 +10,7 @@
     "test": "vitest run",
     "demo": "npm run build && node dist/demo.js",
     "demo:static": "npm run build && node dist/demo-static.js",
-    "qualify": "tsx src/qualification-cli.ts --all",
+    "qualify": "node dist/qualification-cli.js",
     "doctor": "node dist/doctor-cli.js",
     "config:init": "node dist/config-init-cli.js",
     "dev": "tsx watch src/index.ts",

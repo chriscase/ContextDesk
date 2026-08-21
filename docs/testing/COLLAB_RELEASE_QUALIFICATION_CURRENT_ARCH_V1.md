@@ -73,8 +73,17 @@ There is **no** collab domain SQLite on this architecture. Adding one would be
 a competing storage path. The host product's SQLite (memory/watchers) stays in
 `cd-core` / `cd-server`; collab must not import those crates.
 
-Hosted `collab.yml` already supplies Postgres and OpenLDAP. Locally, omit those
-URLs: Postgres and live LDAP tests skip, memory qualification still runs.
+Hosted `collab.yml` already supplies Postgres and OpenLDAP for the ordinary
+collab typecheck/lint/test lane. Hosted **release qualification** is a
+separate workflow, [`.github/workflows/collab-qualify.yml`](../../.github/workflows/collab-qualify.yml):
+Node 22, `npm ci`, typecheck, lint, tests, build, `qualify --backend memory`,
+PostgreSQL `qualify --backend postgres`, `config:init`, `doctor --json`, and
+sanitized artifact upload. That lane does not contact LDAP, Vercel, or model
+providers. See
+[`COLLAB_HOSTED_RELEASE_QUALIFICATION_V1.md`](./COLLAB_HOSTED_RELEASE_QUALIFICATION_V1.md).
+
+Locally, omit `COLLAB_TEST_ADMIN_URL`: Postgres and live LDAP tests skip,
+memory qualification still runs.
 
 ## Auth boundaries
 

@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   renderQualificationSummary,
   type QualificationBackend,
@@ -15,13 +15,16 @@ import { CaseService, PgCaseStore } from "./modules/cases/index.js";
 import { ExperimentService, MemoryExperimentStore, PgExperimentStore } from "./modules/experiments/index.js";
 import { runQualification } from "./modules/qualification/index.js";
 
+function argValue(argv: string[], name: string): string | undefined {
+  const idx = argv.indexOf(name);
+  if (idx < 0) return undefined;
+  return argv[idx + 1];
+}
+
 function requestedBackend(argv: string[]): QualificationBackend | "all" {
-  const idx = argv.indexOf("--backend");
-  if (idx >= 0) {
-    const value = argv[idx + 1];
-    if (value === "memory" || value === "postgres" || value === "all") return value;
-    throw new Error("qualify --backend must be memory, postgres, or all");
-  }
+  const value = argValue(argv, "--backend");
+  if (value === "memory" || value === "postgres" || value === "all") return value;
+  if (value) throw new Error("qualify --backend must be memory, postgres, or all");
   if (argv.includes("--all")) return "all";
   return "all";
 }
@@ -82,7 +85,9 @@ async function runPostgres(): Promise<QualificationReportV1> {
 }
 
 async function main(): Promise<void> {
-  const mode = requestedBackend(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const mode = requestedBackend(argv);
+  const out = argValue(argv, "--out");
   const reports: QualificationReportV1[] = [];
   if (mode === "memory" || mode === "all") {
     reports.push(await runMemory());
@@ -96,7 +101,13 @@ async function main(): Promise<void> {
       process.stderr.write("postgres skipped: COLLAB_TEST_ADMIN_URL not set\n");
     }
   }
-  process.stdout.write(`${JSON.stringify({ reports }, null, 2)}\n`);
+  const json = `${JSON.stringify({ reports }, null, 2)}\n`;
+  if (out) {
+    await mkdir(dirname(out), { recursive: true });
+    await writeFile(out, json, "utf8");
+  } else {
+    process.stdout.write(json);
+  }
   for (const report of reports) {
     process.stderr.write(`${renderQualificationSummary(report)}\n`);
   }

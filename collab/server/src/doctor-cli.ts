@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { doctorExitCode, renderDoctorSummary } from "@cd-collab/contracts";
@@ -13,6 +13,7 @@ function argValue(argv: string[], name: string): string | undefined {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const json = argv.includes("--json");
+  const out = argValue(argv, "--out");
   const envFile = argValue(argv, "--env-file");
   let env: NodeJS.ProcessEnv = { ...process.env };
   if (envFile) {
@@ -27,8 +28,13 @@ async function main(): Promise<void> {
     cwd: process.cwd(),
     nodeVersion: process.versions.node,
   });
-  if (json) {
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  const payload = `${JSON.stringify(report, null, 2)}\n`;
+  if (out) {
+    await mkdir(dirname(out), { recursive: true });
+    await writeFile(out, payload, "utf8");
+    process.stderr.write(`${renderDoctorSummary(report)}\n`);
+  } else if (json) {
+    process.stdout.write(payload);
   } else {
     process.stdout.write(`${renderDoctorSummary(report)}\n`);
   }

@@ -4,6 +4,7 @@ coverage/
 *.tsbuildinfo
 .eslintcache
 .data/
+.ci-qualify/
 .env
 .env.*
 !.env.example

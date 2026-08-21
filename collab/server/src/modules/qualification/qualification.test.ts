@@ -12,6 +12,7 @@ import { CatalogService, PgCatalogStore } from "../catalog/index.js";
 import { CaseService, PgCaseStore } from "../cases/index.js";
 import { MAX_UPLOAD_BYTES } from "../evidence/index.js";
 import { ExperimentService, MemoryExperimentStore, PgExperimentStore } from "../experiments/index.js";
+import { assertReleaseArtifactSafe } from "../operator/index.js";
 import { inspectLiveProfiles } from "./live.js";
 import { runQualification } from "./harness.js";
 
@@ -189,6 +190,10 @@ describe.skipIf(!adminUrl())("postgres qualification backend", () => {
         expect(report.steps.every((step) => step.status === "passed")).toBe(true);
         expect(report.comparison.acceptedDecision).toBe(true);
         expect(report.lineage.successorPackageAlias).toContain("v2");
+        expect(report.liveProfiles.every((profile) => !profile.ran)).toBe(true);
+        expect(report.liveProfiles.every((profile) => profile.skippedReason !== null)).toBe(true);
+        expect(JSON.stringify(report)).not.toMatch(/postgres:\/\//);
+        expect(() => assertReleaseArtifactSafe({ reports: [report] })).not.toThrow();
       } finally {
         await rm(root, { recursive: true, force: true });
       }

@@ -413,10 +413,13 @@ describe("doctor compile-first scripts", () => {
     ) as { scripts: Record<string, string> };
     expect(pkg.scripts.doctor).toMatch(/node server\/dist\/doctor-cli\.js/);
     expect(pkg.scripts["config:init"]).toMatch(/node server\/dist\/config-init-cli\.js/);
+    expect(pkg.scripts.qualify).toMatch(/node dist\/qualification-cli\.js|qualify -w @cd-collab\/server/);
     expect(serverPkg.scripts.doctor).toBe("node dist/doctor-cli.js");
     expect(serverPkg.scripts["config:init"]).toBe("node dist/config-init-cli.js");
+    expect(serverPkg.scripts.qualify).toBe("node dist/qualification-cli.js");
     expect(pkg.scripts.doctor).not.toMatch(/tsx/);
     expect(pkg.scripts["config:init"]).not.toMatch(/tsx/);
+    expect(serverPkg.scripts.qualify).not.toMatch(/tsx/);
   });
 });
 

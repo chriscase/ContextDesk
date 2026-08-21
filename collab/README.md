@@ -61,6 +61,10 @@ Configured aliases still stay `ran: false` with
 `opt_in_host_not_invoked_in_hermetic_suite` because collab cannot import
 `cd-workflow`. Details:
 [`docs/testing/COLLAB_RELEASE_QUALIFICATION_CURRENT_ARCH_V1.md`](../docs/testing/COLLAB_RELEASE_QUALIFICATION_CURRENT_ARCH_V1.md).
+Hosted CI: [`.github/workflows/collab-qualify.yml`](../.github/workflows/collab-qualify.yml)
+proves application/storage readiness (memory + PostgreSQL, doctor shape), not
+model quality. Details:
+[`docs/testing/COLLAB_HOSTED_RELEASE_QUALIFICATION_V1.md`](../docs/testing/COLLAB_HOSTED_RELEASE_QUALIFICATION_V1.md).
 
 ## Operator readiness
 
