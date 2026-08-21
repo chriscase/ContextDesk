@@ -258,16 +258,17 @@ No additional provider attempt was made after the DNS failure.
 The current War-Room surface can:
 
 1. create/open a case and select a frozen snapshot;
-2. launch deterministic synthetic comparisons;
-3. launch configured gateway comparisons through the host-owned Rust bridge;
-4. select a profile per lane and choose bounded concurrency;
-5. show run/lane lifecycle, partial results, evidence references, and unknown
+2. upload bounded evidence with an explicit privacy class and freeze a snapshot;
+3. launch deterministic synthetic comparisons;
+4. launch configured gateway comparisons through the host-owned Rust bridge;
+5. select a profile per lane and choose bounded concurrency;
+6. show run/lane lifecycle, partial results, evidence references, and unknown
    usage/cost;
-6. compare completed runs for same-snapshot/shared-evidence signals;
-7. import a pasted chat and hand it off with a connected run to Experiment Lab;
-8. review similarities, differences, question paths, helpfulness, gold, and
+7. compare completed runs for same-snapshot/shared-evidence signals;
+8. import a pasted chat and hand it off with a connected run to Experiment Lab;
+9. review similarities, differences, question paths, helpfulness, gold, and
    accepted decisions;
-9. export a share-safe review projection.
+10. export a share-safe review projection.
 
 Agreement is explicitly not correctness. Unknown values remain unknown.
 

@@ -105,7 +105,6 @@ successful POST and skipped `loadTimeline` / `reset`.
 
 ## Remaining product work
 
-- Add an evidence upload control (and show content hashes) instead of API-only.
 - Show contribution body and `targetId` on timeline rows so corroboration works
   without a second client.
 - The case import dropdown now refreshes after catalog add/retire events; a
