@@ -57,4 +57,25 @@ describe("source catalog UI", () => {
     expect(await screen.findByText(/Fixture chat assistant/)).toBeTruthy();
     expect(name.value).toBe("");
   });
+
+  it("surfaces a bounded error when a catalog write is denied", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/catalog/sources" && (init?.method ?? "GET") === "POST") {
+          return { ok: false, status: 403, json: async () => ({ error: "permission denied" }) };
+        }
+        return { ok: true, json: async () => ({ sources: [] }) };
+      }),
+    );
+    render(<Catalog canLead={true} />);
+    const name = await screen.findByRole("textbox", { name: "Source name" });
+    fireEvent.change(name, { target: { value: "Denied source" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add source" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Source could not be added. You may not have permission to manage the catalog.",
+    );
+    expect(screen.queryByText("permission denied")).toBeNull();
+  });
 });

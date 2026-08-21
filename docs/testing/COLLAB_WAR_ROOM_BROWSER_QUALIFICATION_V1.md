@@ -108,9 +108,8 @@ successful POST and skipped `loadTimeline` / `reset`.
 - Timeline rows now show the current non-tombstoned contribution body and target
   identifier; historical revision-specific body rendering remains a future
   refinement.
-- The case import dropdown now refreshes after catalog add/retire events; a
-  future pass can still surface a clear `403` when a stale client attempts a
-  write.
+- The case import dropdown refreshes after catalog add/retire events, and stale
+  catalog writes surface a bounded generic permission alert.
 - Create case / Import / Add to timeline are now hidden for viewers. If a stale
   client still attempts a case write, the UI now surfaces a bounded generic
   permission alert rather than silently ignoring the response.
