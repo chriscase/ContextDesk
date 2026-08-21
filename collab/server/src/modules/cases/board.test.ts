@@ -57,6 +57,37 @@ describe("deriveCaseBoard", () => {
     expect(board.notice).toBe("Agreement is not proof of correctness.");
   });
 
+  it("projects accepted decisions into the newly-concluded bucket", () => {
+    const board = deriveCaseBoard({
+      caseId: "case-1",
+      snapshotId: null,
+      generatedAt: "2026-08-20T00:00:00.000Z",
+      artifacts: [],
+      contributions: [],
+      acceptedDecisions: [
+        {
+          id: "decision-1",
+          statement: "Treat inventory timeout as the benchmark investigation path.",
+          evidenceRefs: ["evidence-2", "evidence-1"],
+        },
+        {
+          id: "decision-2",
+          statement: "Both strategies converge on inventory timeout.",
+          evidenceRefs: [],
+        },
+      ],
+    });
+    const concluded = board.findings.filter((finding) => finding.bucket === "newly_concluded");
+    expect(concluded.map((finding) => finding.statement)).toEqual([
+      "Treat inventory timeout as the benchmark investigation path.",
+      "Both strategies converge on inventory timeout.",
+    ]);
+    expect(concluded[0]?.basis).toBe("accepted_decision");
+    expect(concluded[0]?.evidenceRefs).toEqual(["evidence-1", "evidence-2"]);
+    expect(concluded[0]?.agreement).toBe("unknown");
+    expect(concluded[0]?.confidence).toBe("unknown");
+  });
+
   it("marks shared evidence as agreement without treating it as correctness", () => {
     const first = hypothesis("hypothesis-1", "supported");
     const second = hypothesis("hypothesis-2", "supported");

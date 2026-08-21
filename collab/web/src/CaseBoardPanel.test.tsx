@@ -73,6 +73,16 @@ describe("CaseBoardPanel", () => {
                 agreement: "shared",
                 confidence: "medium",
               },
+              {
+                id: "concluded-1",
+                bucket: "newly_concluded",
+                statement: "Treat inventory timeout as the benchmark investigation path.",
+                evidenceRefs: ["artifact-1"],
+                contributionRefs: [],
+                agreement: "unknown",
+                confidence: "unknown",
+                basis: "accepted_decision",
+              },
             ],
           }),
         };
@@ -85,6 +95,10 @@ describe("CaseBoardPanel", () => {
     expect(screen.getByText("Snapshot lineage")).toBeTruthy();
     expect(screen.getByText("Multiple supported hypotheses reference the same evidence.")).toBeTruthy();
     expect(screen.getByText(/Agreement is not proof of correctness/)).toBeTruthy();
+    expect(screen.getByText("Treat inventory timeout as the benchmark investigation path.")).toBeTruthy();
+    expect(screen.getByText("Accepted decision")).toBeTruthy();
+    expect(screen.getByText(/No open unknowns recorded/)).toBeTruthy();
+    expect(screen.getByText(/agreement shared · confidence medium · 1 evidence ref/)).toBeTruthy();
     expect(screen.queryByText(/schemaId/)).toBeNull();
   });
 
@@ -181,6 +195,56 @@ describe("CaseBoardPanel", () => {
     });
     expect(await screen.findByText("checkout.log")).toBeTruthy();
     expect(evidenceLoads).toBe(2);
+  });
+
+  it("uploads a sanitized log and freezes a snapshot in one step", async () => {
+    let snapshotBody: unknown;
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/evidence") && init?.method === "POST") {
+        return { ok: true, json: async () => ({ artifact: { id: "artifact-9" } }) };
+      }
+      if (url.endsWith("/snapshots") && init?.method === "POST") {
+        snapshotBody = JSON.parse(String(init.body));
+        return {
+          ok: true,
+          json: async () => ({
+            id: "snapshot-9",
+            fingerprint: "d".repeat(64),
+            parentSnapshotId: null,
+            evidence: [{ evidenceId: "artifact-9", ordinal: 0 }],
+            visibility: "share_safe",
+            createdAt: "2026-08-20T00:00:00.000Z",
+            createdBy: "lead",
+          }),
+        };
+      }
+      if (url.endsWith("/evidence")) return { ok: true, json: async () => ({ artifacts: [] }) };
+      if (url.endsWith("/snapshots")) return { ok: true, json: async () => ({ snapshots: [] }) };
+      return { ok: true, json: async () => ({ snapshotId: null, notice: "", findings: [] }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const frozen = vi.fn();
+    window.addEventListener("contextdesk:snapshot-frozen", frozen);
+    try {
+      render(<CaseBoardPanel caseId="case-1" canWrite canLead readOnly={false} />);
+      const uploadHeading = await screen.findByRole("heading", { name: "Upload evidence" });
+      const fileInput = screen.getByLabelText("File");
+      const file = new File(["sanitized"], "sanitized.log", { type: "text/plain" });
+      Object.defineProperty(fileInput, "files", { configurable: true, value: [file] });
+      fireEvent.change(fileInput);
+      fireEvent.change(screen.getByLabelText("Summary"), {
+        target: { value: "Sanitized checkout log" },
+      });
+      fireEvent.click(screen.getByRole("checkbox", { name: /Freeze a snapshot with this upload/ }));
+      fireEvent.submit(uploadHeading.closest("form")!);
+
+      await waitFor(() => expect(snapshotBody).toEqual({ evidenceIds: ["artifact-9"] }));
+      expect(frozen).toHaveBeenCalled();
+      expect(screen.queryByRole("alert")).toBeNull();
+    } finally {
+      window.removeEventListener("contextdesk:snapshot-frozen", frozen);
+    }
   });
 
   it("rejects oversized files before reading or posting them", async () => {

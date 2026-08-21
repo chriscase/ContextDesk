@@ -196,6 +196,58 @@ describe("TriageRunPanel", () => {
     expect(screen.queryByText(/schemaId/)).toBeNull();
   });
 
+  it("adds an operator-picked lane by identifiers only and rejects DeepSeek", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) {
+          return response({
+            snapshots: [
+              {
+                id: "snapshot-1",
+                fingerprint: "a".repeat(64),
+                evidence: [{ evidenceId: "artifact-1" }],
+                createdBy: "lead",
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/evidence")) return response({ artifacts: [] });
+        if (url.endsWith("/imports")) return response({ runs: [] });
+        if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+        if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: false });
+        return response({ jobs: [] });
+      }),
+    );
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    expect(await screen.findByText("Add a model lane")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("New lane alias"), {
+      target: { value: "deepseek-lane" },
+    });
+    fireEvent.change(screen.getByLabelText("New lane model id"), {
+      target: { value: "qwen-3.6-27b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add lane" }));
+    expect(
+      await screen.findByText("DeepSeek lanes are not permitted in this deployment."),
+    ).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("New lane alias"), {
+      target: { value: "extra-challenger" },
+    });
+    fireEvent.change(screen.getByLabelText("New lane model id"), {
+      target: { value: "ministral-3-14b-instruct-2512" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add lane" }));
+    await waitFor(() =>
+      expect(screen.getAllByText("ministral-3-14b-instruct-2512").length).toBeGreaterThanOrEqual(2),
+    );
+    expect(screen.queryByText("DeepSeek lanes are not permitted in this deployment.")).toBeNull();
+    expect(screen.getByText(/extra-challenger · reviewer/)).toBeTruthy();
+  });
+
   it("keeps read-only history visible without launch or cancellation controls", async () => {
     vi.stubGlobal(
       "fetch",

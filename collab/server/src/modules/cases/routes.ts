@@ -84,11 +84,28 @@ async function requireCaseAccess(
   return true;
 }
 
+/**
+ * Narrow read-only view of the experiments module: enough to surface each
+ * experiment's accepted decision on the case board without a module cycle.
+ */
+export interface AcceptedDecisionSource {
+  list(
+    caseId: string,
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<
+    {
+      decisions: { id: string; status: string; text: string; evidenceRefs: string[] }[];
+    }[]
+  >;
+}
+
 export interface CaseRouteDeps {
   auth: ActiveSessionDeps;
   roles: MutableGroupRoleMap;
   audit: AuditStore;
   domain: CaseService;
+  experiments?: AcceptedDecisionSource;
 }
 
 export async function registerCaseRoutes(
@@ -341,7 +358,25 @@ export async function registerCaseRoutes(
     }
     const query = request.query as { snapshotId?: string };
     try {
-      const board = await deps.domain.getCaseBoard(id, ctx.actor, ctx.isAdmin, query.snapshotId);
+      let acceptedDecisions;
+      if (deps.experiments) {
+        const experiments = await deps.experiments.list(id, ctx.actor, ctx.isAdmin);
+        acceptedDecisions = experiments.flatMap((experiment) => {
+          const accepted = [...experiment.decisions]
+            .reverse()
+            .find((decision) => decision.status === "accepted");
+          return accepted
+            ? [{ id: accepted.id, statement: accepted.text, evidenceRefs: accepted.evidenceRefs }]
+            : [];
+        });
+      }
+      const board = await deps.domain.getCaseBoard(
+        id,
+        ctx.actor,
+        ctx.isAdmin,
+        query.snapshotId,
+        acceptedDecisions,
+      );
       return board ?? { error: "not_found" };
     } catch (err) {
       return domainError(reply, err);
