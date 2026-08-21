@@ -7,7 +7,7 @@ test.describe("responsive layout and basic accessibility", () => {
     await page.goto("/");
     await expect(page.locator("html")).toHaveAttribute("lang", "en");
     await expect(page.locator("main.shell")).toBeVisible();
-    await expect(page.getByRole("heading", { level: 1, name: "cd-collab" })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "ContextDesk Experiment Lab" })).toBeVisible();
     await expect(page.getByLabel("Username")).toBeVisible();
     await expect(page.getByLabel("Password")).toBeVisible();
     await expect(page.getByRole("button", { name: "Sign in" })).toBeEnabled();

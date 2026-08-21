@@ -22,7 +22,7 @@ export function fixtureBytes(...parts: string[]): Buffer {
 
 export async function loginAs(page: Page, user: FixtureUser): Promise<void> {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "cd-collab" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "ContextDesk Experiment Lab" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Sign (in|out)/ })).toBeVisible();
   const signOut = page.getByRole("button", { name: "Sign out" });
   if (await signOut.isVisible()) {
@@ -43,13 +43,19 @@ export async function loginAs(page: Page, user: FixtureUser): Promise<void> {
 
 export async function createCase(page: Page, title: string): Promise<void> {
   await page.getByPlaceholder("New case title").fill(title);
-  await page.getByRole("button", { name: "Create case" }).click();
-  await expect(page.getByRole("heading", { name: new RegExp(title) })).toBeVisible();
+  const [created] = await Promise.all([
+    page.waitForResponse(
+      (res) => res.url().endsWith("/api/cases") && res.request().method() === "POST",
+    ),
+    page.getByRole("button", { name: "Create case" }).click(),
+  ]);
+  expect(created.ok(), await created.text()).toBeTruthy();
+  await expect(page.locator("h2.case-view__title").filter({ hasText: title })).toBeVisible();
 }
 
 export async function openCase(page: Page, title: string): Promise<void> {
   await page.locator(".case-list").getByRole("button", { name: title, exact: true }).click();
-  await expect(page.getByRole("heading", { name: new RegExp(title) })).toBeVisible();
+  await expect(page.locator("h2.case-view__title").filter({ hasText: title })).toBeVisible();
 }
 
 interface CaseRow {

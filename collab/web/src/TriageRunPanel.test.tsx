@@ -185,8 +185,7 @@ describe("TriageRunPanel", () => {
     );
 
     render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
-    expect(await screen.findByRole("heading", { name: "Run history" })).toBeTruthy();
-    expect(screen.getByText("Start a snapshot-bound comparison")).toBeTruthy();
+    expect(await screen.findByText("Start a snapshot-bound comparison")).toBeTruthy();
     expect(screen.getAllByText("qwen-3.6-27b", { exact: false }).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("reviewer · settled")).toBeTruthy();
     expect(screen.getByText("Lanes settle independently; final same-snapshot proof waits for all lanes.")).toBeTruthy();

@@ -25,6 +25,13 @@ import { CatalogService } from "../../server/src/modules/catalog/index.js";
 import { CaseService } from "../../server/src/modules/cases/index.js";
 import { ExportService, testExportPrivacyConfig } from "../../server/src/modules/export/index.js";
 import { ImportService, MemoryRunStore } from "../../server/src/modules/import/index.js";
+import { ExperimentService, MemoryExperimentStore } from "../../server/src/modules/experiments/index.js";
+import { PresenceService } from "../../server/src/modules/presence/index.js";
+import {
+  DeterministicMockTriageExecutor,
+  MemoryTriageJobStore,
+  TriageRunService,
+} from "../../server/src/modules/triage-runs/index.js";
 import { adapterUsers, FIXTURE_ROLE_MAP, SEEDED_SOURCES } from "./users.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -58,6 +65,18 @@ async function main(): Promise<void> {
     catalog,
     runs: new MemoryRunStore(),
   });
+  const triageRuns = new TriageRunService({
+    cases: domain,
+    audit,
+    jobs: new MemoryTriageJobStore(),
+    executor: new DeterministicMockTriageExecutor(),
+  });
+  const experiments = new ExperimentService({
+    cases: domain,
+    audit,
+    experiments: new MemoryExperimentStore(),
+  });
+  const presence = new PresenceService();
   const exporter = new ExportService({
     cases: domain,
     catalog,
@@ -99,6 +118,9 @@ async function main(): Promise<void> {
     domain,
     catalog,
     imports,
+    triageRuns,
+    presence,
+    experiments,
     exporter,
     security: {
       auth: {

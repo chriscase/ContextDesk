@@ -1,9 +1,9 @@
 /**
  * Capability map for the collaborative triage war-room *demo qualification*.
  *
- * Probed against `codex/merge-consolidation-v2` HEAD. Local-only commit
- * `37a1579b` is not in this repository and is not assumed. Open PR #935
- * (war-room snapshot/case-board contracts) is also not merged here.
+ * Probed against the isolated `codex/merge-consolidation-demo` integration
+ * branch. This map describes the current runnable War-Room surface, not an
+ * older remote base or an unmerged PR.
  */
 export type SurfaceStatus = "present" | "adapted" | "absent";
 
@@ -34,26 +34,26 @@ export const WAR_ROOM_SURFACE_MAP: SurfaceRow[] = [
   {
     id: "evidence-freeze",
     requested: "upload and freeze synthetic evidence",
-    status: "adapted",
+    status: "present",
     actual:
-      "`POST /api/cases/:id/evidence` stores content-addressed immutable blobs. The web shell has no upload control and no snapshot-freeze HTTP API (`cd-collab.snapshot.v1` lives on unmerged PR #935).",
-    probe: "API upload + timeline/export inventory; /api/snapshots 404",
+      "CaseBoardPanel exposes content-addressed evidence upload, selected-evidence snapshot freeze, and immutable snapshot lineage through the case-scoped APIs.",
+    probe: "Evidence board → upload → select artifact → Freeze selected evidence",
   },
   {
     id: "comparison-lanes",
     requested: "launch two or more comparison lanes",
-    status: "absent",
+    status: "present",
     actual:
-      "No lane launcher, no `/api/lanes` / `/api/comparisons`. Closest browser analog is two imported external runs on one case.",
-    probe: "DOM + invented lane routes 404",
+      "TriageRunPanel launches a snapshot-bound synthetic or configured-gateway comparison with independently tracked candidate lanes and bounded gateway concurrency.",
+    probe: "Run history → Start a snapshot-bound comparison → model lanes",
   },
   {
     id: "run-states",
     requested: "running, partial, failed, cancelled, and completed states",
-    status: "adapted",
+    status: "present",
     actual:
-      "SDK/bench attempt statuses are not rendered. Case statuses and imported-run corroboration (unverified / corroborated / contradicted) are the shipped browser states. Failed login is the auth failure analog.",
-    probe: "case status select + imported-run banners; no lane status badges",
+      "Connected run history renders queued/running/terminal lane progress, same-snapshot proof, partial/failure states, cancellation requests, and honest unknown usage/cost fields.",
+    probe: "Run history candidate cards and lane progress",
   },
   {
     id: "import-chat",
@@ -65,18 +65,18 @@ export const WAR_ROOM_SURFACE_MAP: SurfaceRow[] = [
   {
     id: "agreement-board",
     requested: "shared/unique evidence, similarities/differences, disagreements, and question paths",
-    status: "absent",
+    status: "present",
     actual:
-      "No case-board / agreement projection in the UI (PR #935 contracts only). Disagreement analog: corroborate vs contradict an imported run. Question paths have no control.",
-    probe: "human judgment form; no shared/unique/question-path headings",
+      "Experiment Lab and the case board project shared/unique evidence, disagreements, question-path traces, unknowns, and the explicit agreement-is-not-proof caveat.",
+    probe: "Experiment Lab candidate comparison and CaseBoardPanel finding buckets",
   },
   {
     id: "helpfulness",
     requested: "helpfulness and accepted decision",
-    status: "absent",
+    status: "present",
     actual:
-      "No helpfulness score or accepted-decision control. Closest analog is Record human judgment (corroborated / contradicted).",
-    probe: "no helpfulness/accepted-decision copy",
+      "Experiment Lab records attributed helpfulness dimensions, human decisions, accepted state, gold promotion, and separate gold alignment.",
+    probe: "Experiment Lab Helpfulness, Decision, and Gold alignment sections",
   },
   {
     id: "share-safe-export",

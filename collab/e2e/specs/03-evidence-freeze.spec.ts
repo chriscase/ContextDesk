@@ -60,17 +60,43 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
     await screenshot(page, "03-evidence-inventory");
   });
 
-  test("snapshot freeze HTTP from unmerged war-room work is not present", async ({ request }) => {
-    for (const path of INVENTED_ROUTES.filter((row) => row.includes("snapshot") || row.includes("freeze"))) {
+  test("snapshot freeze is available through the war-room board", async ({ page }) => {
+    const title = uniqueTitle("Snapshot case");
+    await loginAs(page, FIXTURE_USERS.dave);
+    await createCase(page, title);
+    const caseId = await caseIdForTitle(page, title);
+    await expect(page.getByRole("heading", { name: "Evidence and snapshots" })).toBeVisible();
+
+    await uploadEvidence(page, caseId, {
+      kind: "log",
+      summary: "Shared synthetic timeout log",
+      filename: "shared-timeout.log",
+      mediaType: "text/plain",
+      bytes: fixtureBytes("evidence", "shared-timeout.log"),
+      privacyClass: "share_safe",
+    });
+    await page.reload();
+    await openCase(page, title);
+    const include = page.getByRole("checkbox", { name: "Include shared-timeout.log in snapshot" });
+    await expect(include).toBeVisible();
+    await include.check();
+    await page.getByRole("button", { name: "Freeze selected evidence (1)" }).click();
+    await expect(page.getByText(/1 items ·/)).toBeVisible();
+    await expect(page.getByText(/Runs bound to a snapshot never silently widen/)).toBeVisible();
+  });
+
+  test("unscoped snapshot routes remain absent", async ({ request }) => {
+    for (const path of INVENTED_ROUTES.filter((row) => row === "/api/snapshots" || row.includes("/freeze"))) {
       const res = await request.post(path, { data: {} });
       expect(res.status(), path).toBe(404);
     }
   });
 
-  test("the web shell has no evidence upload control", async ({ page }) => {
+  test("the war-room exposes an evidence upload control", async ({ page }) => {
     await loginAs(page, FIXTURE_USERS.dave);
-    await createCase(page, uniqueTitle("No upload widget"));
-    await expect(page.getByRole("button", { name: /upload evidence|freeze snapshot/i })).toHaveCount(0);
-    await expect(page.locator('input[type="file"]')).toHaveCount(0);
+    await createCase(page, uniqueTitle("Upload widget"));
+    await expect(page.getByRole("heading", { name: "Upload evidence" })).toBeVisible();
+    await expect(page.locator('input[type="file"]')).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Upload evidence" })).toBeVisible();
   });
 });
