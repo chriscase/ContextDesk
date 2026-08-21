@@ -17,6 +17,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const collabRoot = join(here, "../../../..");
 const catalogValid = join(collabRoot, "contracts/fixtures/profile-catalog.valid.json");
 const catalogUnknown = join(collabRoot, "contracts/fixtures/profile-catalog.unknown-field.json");
+const liveCatalogValid = join(collabRoot, "contracts/fixtures/live-qualification-catalog.valid.json");
 
 function memoryFs(
   entries: Record<string, "file" | "dir" | "ro-dir">,
@@ -221,6 +222,26 @@ describe("operator doctor", () => {
       cwd: root,
       nodeVersion: "22.5.0",
       fs: memoryFs(files, { [`${root}/catalog.json`]: body }),
+    });
+    expect(statusOf(report, "profile_catalog")).toBe("ok");
+  });
+
+  it("accepts the share-safe live qualification catalog without contacting providers", async () => {
+    const root = "/fixture-collab";
+    const files = built(root);
+    files[`${root}/live-catalog.json`] = "file";
+    const body = await readFile(liveCatalogValid, "utf8");
+    const report = runDoctor({
+      env: {
+        COLLAB_AUTH_MODE: "local",
+        COLLAB_LIVE_PROFILE_CATALOG: "live-catalog.json",
+        COLLAB_LIVE_PROFILES: "gpt-oss-120b,qwen-3.6-27b",
+        COLLAB_EVIDENCE_ROOT: ".data/evidence",
+      },
+      collabRoot: root,
+      cwd: root,
+      nodeVersion: "22.5.0",
+      fs: memoryFs(files, { [`${root}/live-catalog.json`]: body }),
     });
     expect(statusOf(report, "profile_catalog")).toBe("ok");
   });

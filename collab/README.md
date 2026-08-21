@@ -228,6 +228,28 @@ any model provider. Its versioned output is
 `cd-collab.doctor_report.v1`; see
 [`COLLAB_OPERATOR_READINESS_V1.md`](../docs/testing/COLLAB_OPERATOR_READINESS_V1.md).
 
+## Opt-in live qualification
+
+The live qualification runner is a separate, explicit operator action. Its
+default preflight creates synthetic frozen evidence and emits a skipped,
+share-safe `cd-collab.live_qualification_report.v1`; it never invokes a
+provider. A live run requires both `--live` and `--yes`, a
+`cd-collab.live_qualification_catalog.v1` file, and the configured Rust host
+bridge. The bridge owns credentials and provider endpoints.
+
+```bash
+npm run qualify:live -- --catalog ./live-qualification-catalog.json \
+  --profiles gpt-oss-120b,qwen-3.6-27b,ministral-3-14b-instruct-2512 \
+  --live --yes --concurrency 2 --json
+```
+
+The report preserves model/provider provenance, the exact same-snapshot
+fingerprint, bounded concurrency evidence, lane statuses, evidence counts,
+unknown counts, and safe error codes. It excludes raw output, prompts,
+credentials, endpoints, request IDs, and durable host run IDs. Agreement is
+never treated as correctness; usage and cost remain unknown. Do not run the
+live command in ordinary CI.
+
 ## Local PostgreSQL
 
 ```bash

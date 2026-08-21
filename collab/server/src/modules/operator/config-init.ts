@@ -68,6 +68,7 @@ ${ldapBindSecretLine()}
 # COLLAB_BRIDGE_BIN=
 
 # Optional live profile catalog (syntax only; doctor does not call providers)
+# COLLAB_LIVE_PROFILE_CATALOG=
 # COLLAB_PROFILE_CATALOG=
 # COLLAB_LIVE_PROFILES=
 # COLLAB_LIVE_VERCEL=0
@@ -98,6 +99,7 @@ ${ldapBindSecretLine()}
 COLLAB_GROUP_ROLE_MAP=cn=viewers,ou=groups,dc=example,dc=test=viewer;cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin
 
 # COLLAB_BRIDGE_BIN=
+# COLLAB_LIVE_PROFILE_CATALOG=
 # COLLAB_PROFILE_CATALOG=
 # COLLAB_LIVE_PROFILES=
 # COLLAB_LIVE_VERCEL=0
@@ -127,6 +129,7 @@ ${ldapBindSecretLine()}
 COLLAB_GROUP_ROLE_MAP=cn=viewers,ou=groups,dc=example,dc=test=viewer;cn=contributors,ou=groups,dc=example,dc=test=contributor;cn=admins,ou=groups,dc=example,dc=test=admin
 
 # COLLAB_BRIDGE_BIN=
+# COLLAB_LIVE_PROFILE_CATALOG=
 # COLLAB_PROFILE_CATALOG=
 # COLLAB_LIVE_PROFILES=
 # COLLAB_LIVE_VERCEL=0

@@ -4,6 +4,7 @@ import {
   DOCTOR_CHECK_IDS,
   LIVE_PROFILE_ALIASES,
   parseDoctorReport,
+  parseLiveQualificationCatalog,
   parseProfileCatalog,
   type DoctorCheckId,
   type DoctorCheckStatus,
@@ -229,7 +230,8 @@ function checkProfiles(
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
-  const catalogPath = env.COLLAB_PROFILE_CATALOG?.trim();
+  const liveCatalogPath = env.COLLAB_LIVE_PROFILE_CATALOG?.trim();
+  const catalogPath = liveCatalogPath ?? env.COLLAB_PROFILE_CATALOG?.trim();
   const legacyCatalog = env.COLLAB_TRIAGE_PROFILE_CATALOG?.trim();
   if (legacyCatalog && !catalogPath) {
     try {
@@ -255,7 +257,11 @@ function checkProfiles(
       return check("profile_catalog", "error", "profile catalog file is missing");
     }
     try {
-      parseProfileCatalog(JSON.parse(fs.readFile(path)) as unknown);
+      if (liveCatalogPath) {
+        parseLiveQualificationCatalog(JSON.parse(fs.readFile(path)) as unknown);
+      } else {
+        parseProfileCatalog(JSON.parse(fs.readFile(path)) as unknown);
+      }
     } catch {
       return check("profile_catalog", "error", "profile catalog JSON is malformed");
     }

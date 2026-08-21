@@ -101,22 +101,46 @@ StartTLS still refuses to boot.
 
 ### Prepare employer/Vercel live profiles
 
-Optional, never required for doctor or qualify. Collab still does not invoke
-`cd-workflow`.
+Optional, never required for doctor or the hermetic qualification suite. The
+live qualification command invokes only the configured ContextDesk host bridge;
+the bridge remains the credential owner.
 
 ```bash
-# after a valid catalog file (additionalProperties: false):
-# COLLAB_PROFILE_CATALOG=./catalog.json
+# The live catalog uses cd-collab.live_qualification_catalog.v1 and contains
+# only alias, host profile id, model id, provider label, and display label.
+# It contains no credentials, endpoints, prompts, or raw outputs.
+# COLLAB_LIVE_PROFILE_CATALOG=./live-qualification-catalog.json
+# COLLAB_BRIDGE_BIN=/absolute/path/to/contextdesk
 # COLLAB_LIVE_PROFILES=gpt-oss-120b,qwen-3.6-27b,ministral-3-14b-instruct-2512
-# COLLAB_LIVE_VERCEL=1
-# COLLAB_BRIDGE_BIN=/absolute/path/to/contextdesk   # path only; not executed
 npm run doctor -- --json
 ```
 
-Unknown aliases, a missing bridge path, or unknown JSON fields fail closed.
-Configured live aliases remain a *syntax* check. Qualification still reports
-`ran: false` with an explicit skip reason unless a separate live host is
-invoked outside this suite.
+Unknown aliases, a missing bridge path, malformed catalog data, or unknown JSON
+fields fail closed. The report is `cd-collab.live_qualification_report.v1` and
+contains exact model/provider provenance, same-snapshot status, bounded
+concurrency evidence, lane status, evidence/unknown counts, and safe error
+codes. It never contains raw output, prompts, credentials, endpoints, request
+IDs, or durable host run IDs. Agreement remains evidence of convergence, not
+proof of correctness; usage and cost remain unknown.
+
+Provider-free preflight; never invokes the bridge:
+
+```bash
+npm run qualify:live -- --catalog ./live-qualification-catalog.json \
+  --profiles gpt-oss-120b,qwen-3.6-27b --json
+```
+
+Explicit live run; both flags are required, and the host bridge owns secrets:
+
+```bash
+npm run qualify:live -- --catalog ./live-qualification-catalog.json \
+  --profiles gpt-oss-120b,qwen-3.6-27b,ministral-3-14b-instruct-2512 \
+  --live --yes --concurrency 2 --json
+```
+
+Never run the `--live --yes` command in ordinary CI. Use it only as an
+explicitly authorized operator action against a configured employer or Vercel
+gateway.
 
 ## Residual
 

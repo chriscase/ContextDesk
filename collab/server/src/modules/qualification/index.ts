@@ -5,3 +5,8 @@ export { runQualification } from "./harness.js";
 export type { QualificationDeps } from "./harness.js";
 export { runFakeHostLanes, exerciseHostLaneContracts, DEFAULT_HOST_LANE_CONCURRENCY } from "./host-lanes.js";
 export { inspectLiveProfiles } from "./live.js";
+export { runLiveQualification } from "./live-runner.js";
+export type {
+  LiveQualificationFixtureV1,
+  LiveQualificationRunnerOptions,
+} from "./live-runner.js";

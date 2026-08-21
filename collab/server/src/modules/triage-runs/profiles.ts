@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { parseLiveQualificationCatalog } from "@cd-collab/contracts";
+
 export interface TriageProfileOption {
   id: string;
   label: string;
@@ -39,4 +42,29 @@ export function parseTriageProfileCatalog(raw: string | undefined): TriageProfil
     profiles.push({ id, label: row.label.trim(), provider: row.provider.trim() });
   }
   return profiles;
+}
+
+/**
+ * Resolve the operator-facing catalog used by the live qualification path.
+ * The file contains safe profile metadata only; credentials remain owned by
+ * the host bridge. The legacy inline catalog remains supported for existing
+ * deployments.
+ */
+export function loadConfiguredTriageProfileCatalog(
+  env: NodeJS.ProcessEnv = process.env,
+): TriageProfileOption[] {
+  const path = env.COLLAB_LIVE_PROFILE_CATALOG?.trim();
+  if (!path) return parseTriageProfileCatalog(env.COLLAB_TRIAGE_PROFILE_CATALOG);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    throw new Error("live qualification profile catalog could not be loaded");
+  }
+  const catalog = parseLiveQualificationCatalog(raw);
+  return catalog.profiles.map((profile) => ({
+    id: profile.profileId,
+    label: profile.label,
+    provider: profile.provider,
+  }));
 }

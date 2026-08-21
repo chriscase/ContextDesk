@@ -23,7 +23,7 @@ import { ExportService, testExportPrivacyConfig } from "./modules/export/index.j
 import { ImportService, MemoryRunStore } from "./modules/import/index.js";
 import {
   MemoryTriageJobStore,
-  parseTriageProfileCatalog,
+  loadConfiguredTriageProfileCatalog,
   RustBridgeTriageExecutor,
   TriageRunService,
   type RustBridgeTriageExecutorOptions,
@@ -388,7 +388,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
     ...(options.gatewayRunner
       ? { gatewayExecutor: new RustBridgeTriageExecutor(options.gatewayRunner) }
       : {}),
-    profiles: parseTriageProfileCatalog(process.env.COLLAB_TRIAGE_PROFILE_CATALOG),
+    profiles: loadConfiguredTriageProfileCatalog(),
   });
   const presence = new PresenceService();
   const exporter = new ExportService({

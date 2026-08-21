@@ -28,7 +28,7 @@ import { ImportService, PgRunStore, type RunStore } from "./modules/import/index
 import { ExperimentService, PgExperimentStore, type ExperimentStore } from "./modules/experiments/index.js";
 import {
   PgTriageJobStore,
-  parseTriageProfileCatalog,
+  loadConfiguredTriageProfileCatalog,
   RustBridgeTriageExecutor,
   triageBridgeOptions,
   TriageRunService,
@@ -124,7 +124,7 @@ async function main(): Promise<void> {
           gatewayExecutor: new RustBridgeTriageExecutor(bridge),
         }
       : {}),
-    profiles: parseTriageProfileCatalog(process.env.COLLAB_TRIAGE_PROFILE_CATALOG),
+    profiles: loadConfiguredTriageProfileCatalog(),
   });
   await triageRuns.recoverPending();
   const exporter = new ExportService({

@@ -1,0 +1,14 @@
+{
+  "schemaId": "cd-collab.live_qualification_report.v1",
+  "privacyClass": "share_safe",
+  "liveOptIn": false,
+  "confirmed": false,
+  "snapshotFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "taskFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "concurrency": { "configuredLimit": 2, "observedMaxActive": null, "sameSnapshot": null },
+  "lanes": [
+    { "alias": "gpt-oss-120b", "profileId": null, "modelId": null, "provider": null, "label": null, "configured": false, "ran": false, "status": "skipped", "skippedReason": "live_disabled", "errorCode": null, "evidenceCount": 0, "unknownCount": 0, "startedAt": null, "finishedAt": null }
+  ],
+  "verdict": "skipped",
+  "caveats": ["agreement_not_correctness", "usage_and_cost_unknown", "live_results_are_not_fabricated", "raw_output_not_in_report"]
+}

@@ -17,8 +17,9 @@ codex/merge-consolidation-demo (unpublished local branch; current HEAD)
 ```
 
 The branch contains the qualification harness, portable launcher, provider-free
-browser bridge vertical, and the selectively ported operator-readiness
-contracts/configuration tools described below. It is not published because the
+browser bridge vertical, selectively ported operator-readiness
+contracts/configuration tools, and the opt-in live qualification runner
+described below. It is not published because the
 workstation could not resolve `github.com` during the last push attempt.
 
 No merge, close, retarget, or rewrite was performed on any external PR.
@@ -47,8 +48,8 @@ The current report proves:
 
 The full local demo gate also passed:
 
-- contracts: 47 tests;
-- server: 129 passed, 10 environment-gated skips;
+- contracts: 49 tests;
+- server: 134 passed, 10 environment-gated skips;
 - web: 37 tests;
 - typecheck, lint, and static synthetic demo build.
 
@@ -61,14 +62,30 @@ The operator-readiness slice is now local and validated as well:
   a mode-600 profile-specific template and required `.data/evidence` directory,
   and refuses accidental overwrite;
 - the versioned profile catalog contract rejects unknown fields, endpoints,
-  and duplicate aliases; the operator suite has 19 passing tests, including
+  and duplicate aliases; the operator suite has 20 passing tests, including
   plaintext-LDAP rejection, external insecure-cookie rejection, artifact and
   port checks, safe catalog parsing, secret-safe output, and initializer
   overwrite protection; the bridge runtime configuration has 4 additional
   focused tests;
 - the generated `COLLAB_BRIDGE_BIN` name is wired through the production
   entrypoint, while legacy `COLLAB_TRIAGE_RUNNER` deployments remain supported;
-- the full server gate is now 129 passed / 10 environment-gated skips.
+- the full server gate is now 134 passed / 10 environment-gated skips.
+
+The opt-in live qualification runner is now local and validated:
+
+- `npm run qualify:live -- --json` creates synthetic frozen evidence and
+  reports all four lanes as skipped with `live_disabled`; it never invokes a
+  bridge;
+- a catalog-backed preflight preserves configured alias/model/provider
+  provenance while remaining skipped;
+- an explicit `--live --yes` invocation with no bridge reports
+  `bridge_not_configured` rather than claiming a run;
+- fake-bridge tests cover same-snapshot execution, concurrency propagation,
+  observed overlap, lane failures/unknowns, insufficient profiles, and the
+  absence of raw summaries or durable host run ids in the report;
+- the report is the strict, share-safe
+  `cd-collab.live_qualification_report.v1` contract. It contains no raw
+  output, prompts, credentials, endpoints, request ids, or host run ids.
 
 The direct bridge and server integration checks passed:
 
@@ -178,6 +195,11 @@ The current War-Room surface can:
 
 Agreement is explicitly not correctness. Unknown values remain unknown.
 
+The live qualification CLI is intentionally separate from the GUI's existing
+gateway launcher: it is an operator qualification path for validating the
+bridge/profile configuration and producing a portable report. The GUI remains
+the collaborative surface for reviewing and adjudicating the resulting runs.
+
 ## Exact remaining risks
 
 1. **Real employer-provider execution is not yet evidenced in this
@@ -209,12 +231,10 @@ Agreement is explicitly not correctness. Unknown values remain unknown.
 
 ## Next delegated milestone
 
-The next Grok Build slice is an opt-in live-qualification runner layered on
-the existing `RustBridgeTriageExecutor` and triage-job service. It should
-exercise explicitly selected employer/Vercel profiles, preserve exact model
-and snapshot provenance, and emit a versioned share-safe report without
-credentials, prompts, endpoints, request ids, or raw captures. Its default
-path must remain provider-free and hermetic. A hosted Cursor browser run
-against the exact current branch and real provider rehearsals remain pending
-until the branch can be published and the relevant network/profile access is
-available.
+The next Grok Build slice is hosted release qualification: run the current
+memory and PostgreSQL qualification paths in CI, exercise `config:init` and
+`doctor`, publish only sanitized reports, and prove live profiles remain
+skipped unless a future workflow explicitly opts in. A hosted Cursor browser
+run against this exact branch, Claude adversarial UI/security review, and real
+employer/Vercel rehearsals remain pending until branch publication and the
+relevant network/profile access are available.

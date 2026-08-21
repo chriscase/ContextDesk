@@ -16,7 +16,7 @@ export type {
 } from "./service.js";
 export { MemoryTriageJobStore, PgTriageJobStore } from "./store.js";
 export type { TriageJobStore } from "./store.js";
-export { parseTriageProfileCatalog } from "./profiles.js";
+export { loadConfiguredTriageProfileCatalog, parseTriageProfileCatalog } from "./profiles.js";
 export type { TriageProfileOption } from "./profiles.js";
 export { RustBridgeTriageExecutor } from "./runner.js";
 export type { RustBridgeTriageExecutorOptions } from "./runner.js";
