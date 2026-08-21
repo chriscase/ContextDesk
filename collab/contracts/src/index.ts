@@ -98,14 +98,17 @@ export type {
 
 export {
   CONTRIBUTION_KINDS,
+  CONTRIBUTION_LIST_SCHEMA_ID,
   CONTRIBUTION_SCHEMA_ID,
   HYPOTHESIS_STATUSES,
   PROVENANCE_SCHEMA_ID,
+  parseContributionList,
   parseContribution,
   parseProvenance,
 } from "./contribution.js";
 export type {
   ContributionKind,
+  ContributionListV1,
   ContributionV1,
   HypothesisStatus,
   ProvenanceV1,

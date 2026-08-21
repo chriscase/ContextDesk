@@ -28,6 +28,14 @@ interface TimelineEvent {
   payload: string;
 }
 
+interface ContributionView {
+  id: string;
+  kind: string;
+  body: string | null;
+  privacyClass: string;
+  tombstoned: boolean;
+}
+
 interface RunRow {
   id: string;
   outputText: string;
@@ -73,6 +81,7 @@ export function Cases(props: {
   const [active, setActive] = useState<string | null>(null);
   const [caseSearch, setCaseSearch] = useState("");
   const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [contributions, setContributions] = useState<ContributionView[]>([]);
   const [title, setTitle] = useState("");
   const [sources, setSources] = useState<{ id: string; name: string; kind: string }[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
@@ -105,6 +114,13 @@ export function Cases(props: {
     const body = (await res.json()) as { events?: TimelineEvent[] };
     if (!isCurrent()) return;
     setEvents(body.events ?? []);
+    const contributionResponse = await fetch(`/api/cases/${id}/contributions`);
+    if (contributionResponse.ok && isCurrent()) {
+      const contributionBody = (await contributionResponse.json()) as {
+        contributions?: ContributionView[];
+      };
+      setContributions(contributionBody.contributions ?? []);
+    }
     const imported = await fetch(`/api/cases/${id}/imports`);
     if (imported.ok && isCurrent()) {
       const list = (await imported.json()) as { runs?: RunRow[] };
@@ -124,6 +140,7 @@ export function Cases(props: {
     activeCaseRef.current = active;
     loadGeneration.current += 1;
     setEvents([]);
+    setContributions([]);
     setRuns([]);
     setActionError(null);
     if (active) void loadTimeline(active);
@@ -349,15 +366,29 @@ export function Cases(props: {
             <details className="case-view__support">
               <summary>Case timeline and external evidence</summary>
                 <ol className="timeline">
-                {events.map((ev) => (
-                  <li key={ev.seq} className="timeline__item">
-                    <div className="timeline__meta">
-                      #{ev.seq} {ev.kind} · {ev.actorUsername}
-                      {ev.targetId ? ` · target ${ev.targetId}` : ""}
-                    </div>
-                    <div>{timelinePayload(ev.payload)}</div>
-                  </li>
-                ))}
+                {events.map((ev) => {
+                  const contribution = ev.targetId
+                    ? contributions.find((item) => item.id === ev.targetId)
+                    : undefined;
+                  return (
+                    <li key={ev.seq} className="timeline__item">
+                      <div className="timeline__meta">
+                        #{ev.seq} {ev.kind} · {ev.actorUsername}
+                        {ev.targetId ? ` · target ${ev.targetId}` : ""}
+                      </div>
+                      {contribution?.body && !contribution.tombstoned ? (
+                        <div>
+                          <span className="timeline__meta">
+                            Current {contribution.kind} · {contribution.privacyClass}
+                          </span>
+                          <div>{contribution.body}</div>
+                        </div>
+                      ) : (
+                        <div>{timelinePayload(ev.payload)}</div>
+                      )}
+                    </li>
+                  );
+                })}
               </ol>
               {runs.map((run) => (
                 <ImportedRun

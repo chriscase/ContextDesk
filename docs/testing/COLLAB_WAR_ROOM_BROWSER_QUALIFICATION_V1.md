@@ -105,8 +105,9 @@ successful POST and skipped `loadTimeline` / `reset`.
 
 ## Remaining product work
 
-- Show privacy-safe contribution bodies on timeline rows so corroboration works
-  without a second client; target identifiers are now visible for attribution.
+- Timeline rows now show the current non-tombstoned contribution body and target
+  identifier; historical revision-specific body rendering remains a future
+  refinement.
 - The case import dropdown now refreshes after catalog add/retire events; a
   future pass can still surface a clear `403` when a stale client attempts a
   write.

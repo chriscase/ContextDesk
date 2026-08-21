@@ -71,6 +71,25 @@ export function parseContribution(raw: unknown): ContributionV1 {
   return raw as ContributionV1;
 }
 
+export const CONTRIBUTION_LIST_SCHEMA_ID = "cd-collab.contribution_list.v1" as const;
+
+export interface ContributionListV1 {
+  schemaId: typeof CONTRIBUTION_LIST_SCHEMA_ID;
+  caseId: string;
+  contributions: ContributionV1[];
+}
+
+const contributionListShape: ObjectShape = {
+  schemaId: f.req(f.en(CONTRIBUTION_LIST_SCHEMA_ID)),
+  caseId: f.req(f.str),
+  contributions: f.req(f.arr(f.obj(contributionShape))),
+};
+
+export function parseContributionList(raw: unknown): ContributionListV1 {
+  checkObject("$", contributionListShape, raw);
+  return raw as ContributionListV1;
+}
+
 export const PROVENANCE_SCHEMA_ID = "cd-collab.provenance.v1" as const;
 
 export interface ProvenanceV1 {

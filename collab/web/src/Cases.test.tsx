@@ -326,6 +326,22 @@ describe("case list and view", () => {
         if (url === "/api/cases/c1/imports" && method === "GET") {
           return { ok: true, json: async () => ({ runs: [...runs] }) };
         }
+        if (url === "/api/cases/c1/contributions" && method === "GET") {
+          return {
+            ok: true,
+            json: async () => ({
+              contributions: [
+                {
+                  id: "n1",
+                  kind: "note",
+                  body: "On-call observation",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                },
+              ],
+            }),
+          };
+        }
         if (url === "/api/cases/c1/export/inventory") {
           return { ok: true, json: async () => ({ items: [] }) };
         }
@@ -353,7 +369,7 @@ describe("case list and view", () => {
             seq: events.length + 1,
             kind: "contribution_created",
             actorUsername: "alice",
-            targetId: null,
+            targetId: "n1",
             serverTime: "2026-08-15T00:00:00.000Z",
             payload: '{"kind":"note"}',
           });
@@ -394,6 +410,7 @@ describe("case list and view", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Add to timeline" }));
     expect(await screen.findByText(/#2 contribution_created/)).toBeTruthy();
+    expect(screen.getByText("On-call observation")).toBeTruthy();
     expect(postedPrivacy).toBe("share_safe");
   });
 

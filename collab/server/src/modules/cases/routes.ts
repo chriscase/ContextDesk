@@ -4,6 +4,7 @@ import {
   CASE_LIST_SCHEMA_ID,
   CASE_SEVERITIES,
   CASE_STATUSES,
+  CONTRIBUTION_LIST_SCHEMA_ID,
   HYPOTHESIS_STATUSES,
   PRIVACY_CLASSES,
   PROVENANCE_SCHEMA_ID,
@@ -410,6 +411,23 @@ export async function registerCaseRoutes(
     } catch (err) {
       return domainError(reply, err);
     }
+  });
+
+  app.get("/api/cases/:id/contributions", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return { error: "not_found" };
+    }
+    return {
+      schemaId: CONTRIBUTION_LIST_SCHEMA_ID,
+      caseId: id,
+      contributions: await deps.domain.listContributions(id, ctx.actor, ctx.isAdmin),
+    };
   });
 
   app.post("/api/cases/:id/contributions/:cid/revisions", async (request, reply) => {
