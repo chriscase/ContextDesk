@@ -14,6 +14,7 @@ interface SnapshotView {
   visibility?: string;
   parentSnapshotId?: string | null;
   protocolVersion?: string;
+  fairnessClass?: "same_snapshot" | "unknown";
 }
 
 interface ArtifactView {
@@ -338,7 +339,7 @@ export function TriageRunPanel(props: {
     [compareJobIds, completedJobs],
   );
   const sharedRefs = useMemo(() => sharedEvidence(comparedJobs), [comparedJobs]);
-  const comparedSnapshotsMatch = comparedJobs.length > 1
+  const comparedRunBindingsMatch = comparedJobs.length > 1
     && comparedJobs.every((job) => job.sameSnapshot === true && job.snapshotFingerprint === comparedJobs[0]?.snapshotFingerprint);
   const selectedGatewayCandidates = useMemo(
     () => candidateOptions.filter((candidate) => selectedCandidates.includes(candidate.candidateId)),
@@ -907,10 +908,10 @@ export function TriageRunPanel(props: {
                     <p className="case-memory__empty">Choose at least two finished runs.</p>
                   ) : (
                     <>
-                      <p className={comparedSnapshotsMatch ? "triage-runs__comparison-note" : "triage-runs__comparison-note is-warning"}>
-                        {comparedSnapshotsMatch
-                          ? "All selected runs proved the same frozen snapshot."
-                          : "Selected runs do not all prove the same snapshot; treat overlap as exploratory, not a controlled comparison."}
+                      <p className={comparedRunBindingsMatch ? "triage-runs__comparison-note" : "triage-runs__comparison-note is-warning"}>
+                        {comparedRunBindingsMatch
+                          ? "Selected run records report one snapshot fingerprint. The Evidence Snapshot Cockpit below verifies whether the underlying snapshots also establish content equivalence."
+                          : "Selected run records differ or lack settled binding proof; treat overlap as exploratory. The Evidence Snapshot Cockpit below explains the exact limitation."}
                       </p>
                       <div className="triage-runs__comparison-grid">
                         {comparedJobs.map((job) => (
