@@ -255,21 +255,22 @@ WebKit/GTK packages from the CI `tauri-host` job were installed so `gdk-3.0` /
 `fuse3` / `xdg-desktop-portal` configure errors; the required GTK/WebKit
 dev packages were present (`ii`).
 
-### GitHub CI on PR #961 (head `939942d5` at that run)
+### GitHub CI on PR #961
 
 `.github/workflows/ci.yml` rust/desktop jobs only fire for PRs targeting
 `main`. This PR targets `merge/war-room-pilot`, so collab workflows are the
-hosted CI that ran:
+hosted CI that ran.
 
-| Check | Conclusion |
+Superseded `0fb2e6bf` (rustfmt only, before the browser locator repairs) failed
+collab browser and bridge. From `939942d5` (locator repairs) through the Tauri
+boxing and this report, the collab set is green on the PR head:
+
+| Check | Result |
 | --- | --- |
-| collab (typecheck, lint, test, migrate dry-run) | **success** (duplicate runs from two pushes) |
+| collab (typecheck, lint, test, migrate dry-run) | **success** |
 | collab war-room browser qualification | **success** |
 | collab war-room browser bridge qualification | **success** |
 | collab hosted release qualification (memory + postgres) | **success** |
-
-Later commits (Tauri boxing + this report) do not touch `collab/**`, so those
-collab jobs are not expected to re-run.
 
 ## Surface verification (what was proven)
 
