@@ -34,6 +34,8 @@
 
 /// Isolated host-bounded cross-candidate causal-synthesis contract.
 pub mod causal_synthesis;
+/// Host-only derivation of a causal-synthesis topology from validated records.
+pub mod causal_topology;
 pub mod contracts;
 /// Bounded provider execution for contribution proposals.
 pub mod contribution_pipeline;
@@ -44,6 +46,7 @@ pub mod pipeline;
 pub mod triage_policy;
 
 pub use causal_synthesis::*;
+pub use causal_topology::*;
 pub use contracts::*;
 pub use contribution_pipeline::*;
 pub use contributions::*;
