@@ -24,11 +24,10 @@
 //!   contradiction ids are model-authored labels; a downstream stage may
 //!   reference only the (candidate, claim) pairs the host recorded from
 //!   already-validated findings, never a pair the host did not record.
-//! * Causal establishment is never produced here. The final synthesis reuses
-//!   [`crate::investigation_answer::validate_model_answer`], whose
-//!   `root_cause_established` requires host `Cause` provenance. An isolated
-//!   host-bounded cross-candidate contract lives in [`causal_synthesis`] and
-//!   is not wired into the live pipeline in this slice.
+//! * Causal establishment remains host-only. The reviewer pipeline may grant
+//!   `Cause`/`Symptom` roles only after a proposal passes the host-derived
+//!   [`causal_synthesis`] topology, and the final synthesis must still pass
+//!   [`crate::investigation_answer::validate_model_answer`].
 //! * Every dynamic value that could be displayed passes through the shared
 //!   presentation boundary ([`crate::investigation_answer::literal_span`]).
 
@@ -93,6 +92,8 @@ pub enum InvestigationRole {
     Investigator,
     /// Reviews typed candidate findings for evidence gaps and contradictions.
     Reviewer,
+    /// Fills only host-admitted cross-candidate causal relationship slots.
+    CausalSynthesizer,
     /// Produces the final host-validated investigation answer.
     Synthesizer,
 }
@@ -103,6 +104,7 @@ impl InvestigationRole {
         match self {
             Self::Investigator => "investigator",
             Self::Reviewer => "reviewer",
+            Self::CausalSynthesizer => "causal_synthesizer",
             Self::Synthesizer => "synthesizer",
         }
     }

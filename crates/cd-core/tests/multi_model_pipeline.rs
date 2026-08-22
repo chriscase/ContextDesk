@@ -13,9 +13,12 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cd_core::agent::{ChatBackend, ScriptedBackend};
+use cd_core::agent::{build_fast_triage_packet, ChatBackend, ScriptedBackend};
 use cd_core::chat::ChatCompletion;
 use cd_core::error::CoreError;
+use cd_core::fast_triage::{
+    FastTriageClockCompatibility, FastTriageNeighborhoodBudget, FastTriagePacketV1,
+};
 use cd_core::investigation_answer::{AnswerBindingV1, LogSnapshotRevisionV1};
 use cd_core::log_analysis::SearchEvidenceIdentity;
 use cd_core::multi_model::{
@@ -138,6 +141,14 @@ fn answer_json(groups: &[(&str, &[u64])]) -> String {
     format!(r#"{{"schema":"contextdesk.investigation_answer.v1","candidates":[{cands}]}}"#)
 }
 
+fn causal_answer_json() -> String {
+    r#"{"schema":"contextdesk.investigation_answer.v1","candidates":[{"candidate_id":"k1","initiating_causes":[{"claim_id":"root-k1","text":"bounded initiating cause","evidence_ids":["e:k1:1"]}]},{"candidate_id":"k2","symptoms":[{"claim_id":"symptom-k2","text":"bounded propagated symptom","evidence_ids":["e:k2:2"]}]}]}"#.into()
+}
+
+fn causal_proposal_json() -> String {
+    r#"{"schema":"contextdesk.multi_model.causal_synthesis.v1","relations":[{"kind":"initiating_trigger","candidate_id":"k1","claim_id":"cc-k1","evidence_ids":["e:k1:1"],"note":"bounded"},{"kind":"propagated_symptom","candidate_id":"k2","claim_id":"s-k2","evidence_ids":["e:k2:2"],"note":"bounded"}]}"#.into()
+}
+
 fn role_ids() -> MultiModelRoleIds {
     MultiModelRoleIds {
         investigator_profile: "p-inv".into(),
@@ -183,6 +194,7 @@ fn run_with_backends(
         user_text: "q",
         candidates,
         comparison_context: None,
+        causal_packet: None,
         binding: binding(),
         budget,
         role_ids: role_ids(),
@@ -197,6 +209,62 @@ fn run_with_backends(
     let outcome = rt
         .block_on(run_review_pipeline(&backends, inputs, &mut |e| {
             stages.push(e)
+        }))
+        .expect("pipeline never returns a raw Err");
+    RunResult { outcome, stages }
+}
+
+fn run_with_causal_packet(
+    investigator: Vec<ChatCompletion>,
+    reviewer: Vec<ChatCompletion>,
+    candidates: &[BroadLogTriageCandidate],
+    budget: MultiModelBudget,
+) -> RunResult {
+    let packet = build_fast_triage_packet(
+        candidates,
+        None,
+        binding(),
+        FastTriageClockCompatibility::OrderOnly,
+        FastTriageNeighborhoodBudget::default(),
+    )
+    .expect("host packet");
+    run_with_packet(investigator, reviewer, candidates, budget, &packet)
+}
+
+fn run_with_packet(
+    investigator: Vec<ChatCompletion>,
+    reviewer: Vec<ChatCompletion>,
+    candidates: &[BroadLogTriageCandidate],
+    budget: MultiModelBudget,
+    packet: &FastTriagePacketV1,
+) -> RunResult {
+    let inv = ScriptedBackend::new(investigator);
+    let rev = ScriptedBackend::new(reviewer);
+    let backends = MultiModelBackends {
+        investigator: &inv,
+        reviewer: &rev,
+        synthesizer: &inv,
+    };
+    let mut stages = Vec::new();
+    let inputs = ReviewPipelineInputs {
+        user_text: "q",
+        candidates,
+        comparison_context: None,
+        causal_packet: Some(packet),
+        binding: binding(),
+        budget,
+        role_ids: role_ids(),
+        deadline_ms: 0,
+        started_at: None,
+        cancel: None,
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let outcome = rt
+        .block_on(run_review_pipeline(&backends, inputs, &mut |event| {
+            stages.push(event)
         }))
         .expect("pipeline never returns a raw Err");
     RunResult { outcome, stages }
@@ -287,6 +355,111 @@ fn happy_path_reviews_and_synthesizes_a_host_validated_answer() {
             .any(|s| s.role == InvestigationRole::Reviewer
                 && s.outcome == StageOutcomeKind::Completed));
     }
+}
+
+#[test]
+fn validated_causal_chain_can_authorize_root_only_through_final_answer_validation() {
+    let candidates = two_candidates();
+    let investigator = vec![
+        completion(finding_json("k1", &[1])),
+        completion(
+            r#"{"schema":"contextdesk.multi_model.candidate_finding.v1","candidate_id":"k2","symptoms":[{"claim_id":"s-k2","text":"bounded symptom","evidence_ids":["e:k2:2"]}]}"#
+                .into(),
+        ),
+        completion(causal_proposal_json()),
+        completion(causal_answer_json()),
+    ];
+    let reviewer = vec![completion(review_json("", ""))];
+    let RunResult { outcome, stages } = run_with_causal_packet(
+        investigator,
+        reviewer,
+        &candidates,
+        MultiModelBudget::default(),
+    );
+
+    let (envelope, _, _) = expect_completed(&outcome);
+    assert!(envelope.answer.root_cause_established);
+    assert!(stages.iter().any(|stage| {
+        stage.role == InvestigationRole::CausalSynthesizer
+            && stage.outcome == Some(StageOutcomeKind::Completed)
+    }));
+    if let MultiModelOutcome::Completed { telemetry, .. } = outcome {
+        assert!(telemetry.stages.iter().any(|stage| {
+            stage.role == InvestigationRole::CausalSynthesizer
+                && stage.outcome == StageOutcomeKind::Completed
+        }));
+    }
+}
+
+#[test]
+fn rejected_causal_chain_keeps_a_useful_final_answer_causal_neutral() {
+    let candidates = two_candidates();
+    let investigator = vec![
+        completion(finding_json("k1", &[1])),
+        completion(
+            r#"{"schema":"contextdesk.multi_model.candidate_finding.v1","candidate_id":"k2","symptoms":[{"claim_id":"s-k2","text":"bounded symptom","evidence_ids":["e:k2:2"]}]}"#
+                .into(),
+        ),
+        // The symptom slot is deliberately promoted to an initiating trigger.
+        // The topology validator must reject it before final synthesis.
+        completion(
+            r#"{"schema":"contextdesk.multi_model.causal_synthesis.v1","relations":[{"kind":"initiating_trigger","candidate_id":"k2","claim_id":"s-k2","evidence_ids":["e:k2:2"]}]}"#
+                .into(),
+        ),
+        completion(answer_json(&[("k1", &[1]), ("k2", &[2])])),
+    ];
+    let reviewer = vec![completion(review_json("", ""))];
+    let budget = MultiModelBudget {
+        max_total_provider_rounds: 5,
+        max_semantic_corrections_per_stage: 0,
+        ..MultiModelBudget::default()
+    };
+    let RunResult { outcome, stages } =
+        run_with_causal_packet(investigator, reviewer, &candidates, budget);
+
+    let (envelope, _, _) = expect_completed(&outcome);
+    assert!(!envelope.answer.root_cause_established);
+    assert!(stages.iter().any(|stage| {
+        stage.role == InvestigationRole::CausalSynthesizer
+            && stage.outcome == Some(StageOutcomeKind::SemanticInvalid)
+    }));
+}
+
+#[test]
+fn packet_from_another_turn_cannot_supply_causal_authority() {
+    let candidates = two_candidates();
+    let mut other_binding = binding();
+    other_binding.turn_id = "s::other-turn".into();
+    let packet = build_fast_triage_packet(
+        &candidates,
+        None,
+        other_binding,
+        FastTriageClockCompatibility::OrderOnly,
+        FastTriageNeighborhoodBudget::default(),
+    )
+    .expect("other-turn packet");
+    let investigator = vec![
+        completion(finding_json("k1", &[1])),
+        completion(
+            r#"{"schema":"contextdesk.multi_model.candidate_finding.v1","candidate_id":"k2","symptoms":[{"claim_id":"s-k2","text":"bounded symptom","evidence_ids":["e:k2:2"]}]}"#
+                .into(),
+        ),
+        completion(answer_json(&[("k1", &[1]), ("k2", &[2])])),
+    ];
+    let reviewer = vec![completion(review_json("", ""))];
+    let RunResult { outcome, stages } = run_with_packet(
+        investigator,
+        reviewer,
+        &candidates,
+        MultiModelBudget::default(),
+        &packet,
+    );
+
+    let (envelope, _, _) = expect_completed(&outcome);
+    assert!(!envelope.answer.root_cause_established);
+    assert!(stages
+        .iter()
+        .all(|stage| stage.role != InvestigationRole::CausalSynthesizer));
 }
 
 #[test]
@@ -1112,6 +1285,7 @@ fn run_with_user_text(
         user_text,
         candidates,
         comparison_context: None,
+        causal_packet: None,
         binding: binding(),
         budget,
         role_ids: role_ids(),
@@ -1261,6 +1435,7 @@ fn a_reviewer_deadline_under_the_whole_turn_clock_is_terminal() {
         user_text: "q",
         candidates: &cands,
         comparison_context: None,
+        causal_packet: None,
         binding: binding(),
         budget: MultiModelBudget::default(),
         role_ids: role_ids(),
@@ -1336,6 +1511,7 @@ fn cancellation_is_classified_from_the_signal_not_the_provider_error_text() {
         user_text: "q",
         candidates: &cands,
         comparison_context: None,
+        causal_packet: None,
         binding: binding(),
         budget: MultiModelBudget::default(),
         role_ids: role_ids(),
