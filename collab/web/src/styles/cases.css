@@ -678,6 +678,199 @@
   border-color: var(--accent);
 }
 
+.snapshot-cockpit {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+  margin-top: 0.9rem;
+  padding: 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 0.55rem;
+}
+
+.snapshot-cockpit__header h4 {
+  font-size: 0.9rem;
+}
+
+.snapshot-cockpit h5 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.snapshot-cockpit__verdict {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 0.45rem;
+  font-size: 0.78rem;
+}
+
+.snapshot-cockpit__verdict p {
+  margin: 0;
+  max-width: 46rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.snapshot-cockpit__verdict--controlled {
+  border-left-color: var(--success);
+}
+
+.snapshot-cockpit__verdict--controlled strong {
+  color: var(--success);
+}
+
+.snapshot-cockpit__verdict--mismatch {
+  border-left-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 6%, transparent);
+}
+
+.snapshot-cockpit__verdict--mismatch strong {
+  color: var(--danger);
+}
+
+.snapshot-cockpit__verdict--pending {
+  border-left-color: var(--warning);
+}
+
+.snapshot-cockpit__verdict--pending strong {
+  color: var(--warning);
+}
+
+.snapshot-cockpit__verdict--guide {
+  border-left-style: dashed;
+}
+
+.snapshot-cockpit__verdict--guide strong {
+  color: var(--muted);
+}
+
+.snapshot-cockpit__runs {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.45rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.snapshot-cockpit__run {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  font-size: 0.75rem;
+}
+
+.snapshot-cockpit__run span {
+  color: var(--muted);
+  font-size: 0.7rem;
+  overflow-wrap: anywhere;
+}
+
+.snapshot-cockpit__run button {
+  margin-left: auto;
+}
+
+.snapshot-cockpit__identity {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+}
+
+.snapshot-cockpit__identity-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.snapshot-cockpit__identity-header select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.snapshot-cockpit__fingerprint-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.snapshot-cockpit__fingerprint-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: flex-start;
+}
+
+/* Fingerprints are long unbroken tokens; they must wrap inside their own box
+   instead of widening the page on narrow screens. */
+.snapshot-cockpit__fingerprint {
+  flex: 1 1 14rem;
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--surface-input);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  user-select: all;
+}
+
+.snapshot-cockpit__copy-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.snapshot-cockpit__meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  gap: 0.5rem 0.9rem;
+  margin: 0;
+}
+
+.snapshot-cockpit__meta > div {
+  min-width: 0;
+}
+
+.snapshot-cockpit__meta dt {
+  color: var(--muted);
+  font-size: 0.65rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.snapshot-cockpit__meta dd {
+  margin: 0.15rem 0 0;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 900px) {
   .case-memory__grid,
   .case-memory__board-grid,
