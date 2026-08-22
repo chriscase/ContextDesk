@@ -106,5 +106,114 @@ describe("UI shell", () => {
     fireEvent.change(selector, { target: { value: "grokptah" } });
     expect((selector as HTMLSelectElement).value).toBe("grokptah");
     expect(document.documentElement.dataset.theme).toBe("grokptah");
+    expect(screen.getByRole("tablist", { name: "Workflow stages" })).toBeTruthy();
+  });
+});
+
+describe("workflow stage navigator", () => {
+  function stubSignedOutFetch() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        json: async () => ({}),
+      }),
+    );
+  }
+
+  it("presents the four stages in order without disturbing the login form", async () => {
+    stubSignedOutFetch();
+    render(<App />);
+
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.map((tab) => tab.getAttribute("aria-label"))).toEqual([
+      "Capture",
+      "Analyze",
+      "Compare",
+      "Decide",
+    ]);
+    expect(screen.getByText("Manual evidence intake")).toBeTruthy();
+    expect(screen.getByText("AI-assisted normalization")).toBeTruthy();
+    expect(screen.getByText("Models side by side")).toBeTruthy();
+    expect(screen.getByText("Human call, safe export")).toBeTruthy();
+    expect(screen.getByText(/not a progress tracker/)).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
+  });
+
+  it("explains each stage in the panel when selected", async () => {
+    stubSignedOutFetch();
+    render(<App />);
+
+    const panel = screen.getByRole("tabpanel");
+    expect(panel.textContent).toMatch(/provenance/);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Analyze" }));
+    expect(panel.textContent).toMatch(/normalizes raw captures/);
+    expect(panel.textContent).toMatch(/human review/);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Compare" }));
+    expect(panel.textContent).toMatch(/human-accepted benchmark/);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Decide" }));
+    expect(panel.textContent).toMatch(/share-safe export/);
+    expect(screen.getByRole("tab", { name: "Decide" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: "Capture" }).getAttribute("aria-selected")).toBe(
+      "false",
+    );
+  });
+
+  it("moves between stages with the keyboard", async () => {
+    stubSignedOutFetch();
+    render(<App />);
+
+    const capture = screen.getByRole("tab", { name: "Capture" });
+    expect(capture.getAttribute("tabindex")).toBe("0");
+
+    fireEvent.keyDown(capture, { key: "ArrowRight" });
+    const analyze = screen.getByRole("tab", { name: "Analyze" });
+    expect(analyze.getAttribute("aria-selected")).toBe("true");
+    expect(analyze.getAttribute("tabindex")).toBe("0");
+    expect(capture.getAttribute("tabindex")).toBe("-1");
+
+    fireEvent.keyDown(analyze, { key: "End" });
+    const decide = screen.getByRole("tab", { name: "Decide" });
+    expect(decide.getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.keyDown(decide, { key: "ArrowRight" });
+    expect(capture.getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.keyDown(capture, { key: "Home" });
+    expect(capture.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("stays available in the static read-only fallback", async () => {
+    window.__CONTEXTDESK_STATIC_READ_ONLY__ = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url === "/api/auth/me") {
+          return {
+            ok: true,
+            json: async () => ({ identity: { username: "demo" }, roles: ["case-lead"] }),
+          };
+        }
+        if (url === "/api/cases") {
+          return { ok: true, json: async () => ({ cases: [] }) };
+        }
+        if (url === "/api/catalog/sources") {
+          return { ok: true, json: async () => ({ sources: [] }) };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+    render(<App />);
+
+    expect(await screen.findByText(/Static read-only fallback/)).toBeTruthy();
+    expect(screen.getByRole("tablist", { name: "Workflow stages" })).toBeTruthy();
+    expect(screen.getAllByRole("tab")).toHaveLength(4);
+    expect(screen.getByText(/not a progress tracker/)).toBeTruthy();
   });
 });
