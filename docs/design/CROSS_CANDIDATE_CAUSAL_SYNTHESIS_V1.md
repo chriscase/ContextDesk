@@ -6,6 +6,8 @@ execution. Not a close of issue #868. Does not change
 
 Code: `cd_core::multi_model::causal_synthesis`
 Tests: `crates/cd-core/tests/cross_candidate_causal_synthesis.rs`
+Qualification: `crates/cd-core/tests/cross_candidate_causal_synthesis_adversarial.rs`
+with held-out and opaque fixtures under `crates/cd-core/tests/fixtures/`.
 
 ## Why this exists
 
@@ -54,6 +56,28 @@ trigger slot.
 
 Model `note` text is stored as untrusted display only. It is never host truth.
 The validated value has **no** `root_cause_established` field.
+
+## Qualification lab
+
+A child laboratory (`cross_candidate_causal_synthesis_adversarial`) loads two
+structurally equivalent JSON topologies with **disjoint inert IDs**. Both must
+validate to the same ordered relationship-kind sequence through the shipped
+`validate_causal_synthesis` entry. The opaque fixture may not use parent
+example aliases or domain vocabulary in IDs or notes; only the kind wire
+labels may carry semantics.
+
+The lab also checks:
+
+- raw `claim_id` reuse across candidates is accepted; a duplicate pair inside
+  one candidate fails `DuplicateId`
+- mutating only `note` does not change validated kinds or host authority
+- serialized/debug validated values never contain `root_cause_established`
+- a table-driven mutation matrix maps false union, foreign evidence, wrong
+  scope, duplicate evidence, duplicate candidate/claim relation, decoy
+  promotion, recovery-as-cause, omitted disproof, cross-corpus evidence,
+  wrong revision, and chronology/frequency fields to the exact typed errors
+
+This lab qualifies the isolated contract. It does not production-wire it.
 
 ## What this slice does not do
 
