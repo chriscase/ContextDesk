@@ -9545,7 +9545,7 @@ impl LogIngestRunError {
             },
             Self::Rejected { message, outcome } => ImportCommandErrorDto {
                 message,
-                outcome: Some(*outcome),
+                outcome: Some(outcome),
             },
         }
     }
@@ -9557,7 +9557,7 @@ impl LogIngestRunError {
 struct ImportCommandErrorDto {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    outcome: Option<cd_core::log_analysis::ImportOutcomeReport>,
+    outcome: Option<Box<cd_core::log_analysis::ImportOutcomeReport>>,
 }
 
 impl From<String> for ImportCommandErrorDto {
