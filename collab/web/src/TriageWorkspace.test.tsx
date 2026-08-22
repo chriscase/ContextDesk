@@ -305,6 +305,79 @@ describe("imported-run source attribution", () => {
   });
 });
 
+describe("retired-source-safe manual intake", () => {
+  const activeSource = {
+    id: "s1",
+    name: "Fixture chat assistant",
+    kind: "external-tool",
+    lifecycle: "active",
+  };
+  const retiredSource = {
+    id: "s2",
+    name: "Legacy scanner",
+    kind: "external-tool",
+    lifecycle: "retired",
+  };
+
+  function sourceChooser(): HTMLSelectElement {
+    return screen.getByRole("combobox", { name: "External run source" }) as HTMLSelectElement;
+  }
+
+  it("offers active sources in the new-intake chooser and excludes retired ones", () => {
+    render(<TriageWorkspace {...makeProps({ sources: [activeSource, retiredSource] })} />);
+    expect(
+      screen.getByRole("option", { name: "Fixture chat assistant (external-tool)" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "Legacy scanner (external-tool)" })).toBeNull();
+    const chooser = sourceChooser();
+    fireEvent.change(chooser, { target: { value: "s1" } });
+    expect(chooser.value).toBe("s1");
+  });
+
+  it("keeps a source without a recorded lifecycle selectable rather than guessing retired", () => {
+    render(<TriageWorkspace {...makeProps()} />);
+    expect(
+      screen.getByRole("option", { name: "Fixture chat assistant (external-tool)" }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/All registered sources are retired/)).toBeNull();
+  });
+
+  it("resolves a historical imported run's retired source name and kind from the catalog", () => {
+    render(
+      <TriageWorkspace
+        {...makeProps({
+          sources: [retiredSource],
+          runs: [{ ...sampleRun, sourceId: "s2" }],
+        })}
+      />,
+    );
+    const card = document.querySelector(".imported-run") as HTMLElement;
+    expect(card.textContent).toContain("source s2");
+    expect(card.textContent).toContain("Legacy scanner");
+    expect(card.textContent).toContain("kind external-tool");
+    expect(card.textContent).not.toContain("catalog metadata unavailable");
+    expect(screen.queryByRole("option", { name: "Legacy scanner (external-tool)" })).toBeNull();
+  });
+
+  it("gives honest, actionable guidance when every registered source is retired", () => {
+    render(<TriageWorkspace {...makeProps({ sources: [retiredSource] })} />);
+    const hint = screen.getByText(/All registered sources are retired/);
+    expect(hint.textContent).toContain(
+      "A case lead can register an active source in the source catalog",
+    );
+    expect(hint.textContent).toContain("keep their retired source’s name and kind");
+    expect(screen.queryByText(/No sources are registered yet/)).toBeNull();
+    const selectable = Array.from(sourceChooser().options).filter((option) => !option.disabled);
+    expect(selectable.length).toBe(0);
+  });
+
+  it("keeps the register-a-source guidance when no sources exist at all", () => {
+    render(<TriageWorkspace {...makeProps({ sources: [] })} />);
+    expect(screen.getByText(/No sources are registered yet/)).toBeTruthy();
+    expect(screen.queryByText(/All registered sources are retired/)).toBeNull();
+  });
+});
+
 describe("triage workspace permissions", () => {
   it("hides all mutation controls in static read-only mode but keeps the record browsable", () => {
     render(<TriageWorkspace {...makeProps({ canWrite: false, readOnly: true })} />);

@@ -36,6 +36,8 @@ export interface SourceOption {
   id: string;
   name: string;
   kind: string;
+  /** Catalog lifecycle ("active" | "retired"); older payloads may omit it. */
+  lifecycle?: string;
 }
 
 const HUMAN_CONTRIBUTION_KINDS = new Set(["message", "note", "hypothesis", "action", "upload"]);
@@ -138,6 +140,11 @@ export function TriageWorkspace(props: {
   onImportRun: (event: FormEvent<HTMLFormElement>) => void;
   onCorroborate: (id: string, state: "corroborated" | "contradicted", linkId: string) => void;
 }) {
+  // Only an explicitly retired source is excluded from new intake; a source with
+  // no recorded lifecycle stays selectable rather than being guessed retired. The
+  // full catalog (props.sources) still resolves historical run attribution below,
+  // so retired sources keep their recorded name and kind on existing imports.
+  const activeSources = props.sources.filter((source) => source.lifecycle !== "retired");
   const humanEntries = props.contributions.filter(
     (row) => !row.tombstoned && HUMAN_CONTRIBUTION_KINDS.has(row.kind),
   ).length;
@@ -322,17 +329,22 @@ export function TriageWorkspace(props: {
                     <option value="" disabled>
                       Source
                     </option>
-                    {props.sources.map((source) => (
+                    {activeSources.map((source) => (
                       <option key={source.id} value={source.id}>
                         {source.name} ({source.kind})
                       </option>
                     ))}
                   </select>
                 </label>
-                {props.sources.length === 0 ? (
+                {activeSources.length === 0 ? (
                   <p className="triage-capture__hint">
-                    No sources are registered yet. A case lead can add one in the source catalog
-                    further down the page.
+                    {props.sources.length === 0
+                      ? "No sources are registered yet. A case lead can add one in the source " +
+                        "catalog further down the page."
+                      : "All registered sources are retired, so none can be selected for new " +
+                        "intake. A case lead can register an active source in the source catalog " +
+                        "further down the page; imports already on the record keep their retired " +
+                        "source’s name and kind."}
                   </p>
                 ) : null}
                 <div className="triage-capture__operator">
@@ -500,6 +512,8 @@ export function TriageWorkspace(props: {
                 <ImportedRun
                   key={run.id}
                   run={run}
+                  // Attribution searches the full catalog, retired sources included:
+                  // a run recorded against a since-retired source keeps its name/kind.
                   source={props.sources.find((source) => source.id === run.sourceId) ?? null}
                   canCorroborate={props.canWrite}
                   onCorroborate={props.onCorroborate}
