@@ -641,7 +641,57 @@ export function parseExperimentReviewExport(raw: unknown): ExperimentReviewExpor
 }
 
 function assertAliasArray(path: string, values: string[], prefix: string): void {
-  values.forEach((value, index) => assertShareSafeAlias(`${path}[${index}]`, value, prefix));
+  const seen = new Set<string>();
+  values.forEach((value, index) => {
+    const itemPath = `${path}[${index}]`;
+    assertShareSafeAlias(itemPath, value, prefix);
+    if (seen.has(value)) {
+      throw new ContractViolation(itemPath, "duplicate alias");
+    }
+    seen.add(value);
+  });
+}
+
+function assertDecisionRevisionHonesty(
+  path: string,
+  decision: ShareSafeExperimentDecisionV2,
+): void {
+  if (decision.revision < 1) {
+    throw new ContractViolation(`${path}.revision`, "must be >= 1");
+  }
+  if (decision.revision === 1) {
+    if (decision.predecessorRevision !== null) {
+      throw new ContractViolation(
+        `${path}.predecessorRevision`,
+        "revision 1 must not name a predecessor",
+      );
+    }
+    return;
+  }
+  if (decision.predecessorRevision !== decision.revision - 1) {
+    throw new ContractViolation(
+      `${path}.predecessorRevision`,
+      "must be the immediate predecessor revision",
+    );
+  }
+}
+
+function assertGoldRevisionHonesty(path: string, gold: ShareSafeGoldReferenceV2): void {
+  if (gold.version === 1 && gold.predecessorGoldAlias !== null) {
+    throw new ContractViolation(
+      `${path}.predecessorGoldAlias`,
+      "version 1 must not name a predecessor",
+    );
+  }
+  if (gold.version > 1 && !gold.predecessorGoldAlias) {
+    throw new ContractViolation(
+      `${path}.predecessorGoldAlias`,
+      "version > 1 requires a predecessor",
+    );
+  }
+  if (gold.predecessorGoldAlias === gold.goldAlias) {
+    throw new ContractViolation(`${path}.predecessorGoldAlias`, "cannot name the current gold");
+  }
 }
 
 function assertReviewV2Aliases(row: ExperimentReviewExportV2): void {
@@ -692,9 +742,7 @@ function assertReviewV2Aliases(row: ExperimentReviewExportV2): void {
   if (row.decision) {
     assertShareSafeAlias("$.decision.decisionAlias", row.decision.decisionAlias, "decision");
     assertAliasArray("$.decision.evidenceAliases", row.decision.evidenceAliases, "evidence");
-    if (row.decision.revision < 1) {
-      throw new ContractViolation("$.decision.revision", "must be >= 1");
-    }
+    assertDecisionRevisionHonesty("$.decision", row.decision);
   }
   if (row.gold) {
     assertShareSafeAlias("$.gold.goldAlias", row.gold.goldAlias, "gold");
@@ -719,6 +767,7 @@ function assertReviewV2Aliases(row: ExperimentReviewExportV2): void {
     if (row.gold.version < 1 || row.gold.acceptedDecisionRevision < 1) {
       throw new ContractViolation("$.gold", "gold version and accepted revision must be >= 1");
     }
+    assertGoldRevisionHonesty("$.gold", row.gold);
   }
   for (const [index, alignment] of row.alignments.entries()) {
     const path = `$.alignments[${index}]`;
