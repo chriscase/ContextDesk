@@ -10,7 +10,11 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { EngineClient } from "@contextdesk/client";
 import { EngineError } from "@contextdesk/client";
-import type { ImportRunInput } from "../../lib/activity/types";
+import {
+  activityOutcomeFromImportClass,
+  type ImportRunInput,
+} from "../../lib/activity/types";
+import { sealImportOperatorMessage } from "../../lib/importOutcome";
 import { openDirectoryDialog, openFileDialog } from "../../lib/dialogs";
 import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
 import type { ProcessProgressDto } from "../wizards/types";
@@ -20,6 +24,7 @@ import {
   INITIAL_IMPORT_FLOW_STATE,
   importDisabledReason,
   importFlowReducer,
+  classifiedImportClass,
   selectedForRun,
   selectedImportableCount,
   type ImportFlowState,
@@ -180,7 +185,9 @@ export function ImportFlow({
       if (!mountedRef.current || previewExitRequestedRef.current) return;
       dispatch({
         type: "PREVIEW_FAILED",
-        message: error instanceof Error ? error.message : String(error),
+        message: sealImportOperatorMessage(
+          error instanceof Error ? error.message : String(error),
+        ),
       });
     } finally {
       previewActiveRef.current = false;
@@ -218,7 +225,9 @@ export function ImportFlow({
       onRunSettled?.({
         startedAtMs,
         endedAtMs: Date.now(),
-        outcome: "completed",
+        outcome: activityOutcomeFromImportClass(
+          classifiedImportClass(report),
+        ),
         sourceKind,
         report,
       });
@@ -235,7 +244,10 @@ export function ImportFlow({
       } else {
         dispatch({
           type: "RUN_FAILED",
-          message: error instanceof Error ? error.message : String(error),
+          message: sealImportOperatorMessage(
+            error instanceof Error ? error.message : String(error),
+          ),
+          outcome: error instanceof EngineError ? error.outcome : undefined,
         });
         onRunSettled?.({
           startedAtMs,
@@ -260,6 +272,12 @@ export function ImportFlow({
   const unresolvedTime = state.runReport
     ? state.runReport.confidence.counts.unresolved
     : 0;
+  const runClass = classifiedImportClass(state.runReport);
+  const runIsComplete = runClass === "complete";
+  const runDefects = state.runReport?.outcome?.defects ?? [];
+  const failedOutcome = state.errorOutcome;
+  const failedDefects = failedOutcome?.defects ?? [];
+  const failedPublished = failedOutcome?.published === true;
 
   return (
     <div className={`import-flow import-flow--${variant}`}>
@@ -371,8 +389,9 @@ export function ImportFlow({
             </p>
           ) : null}
           <p className="import-flow__hint">
-            Importing publishes one corpus atomically. Cancel or failure before publication
-            leaves nothing in the library.
+            Every import ends as complete, partial, or rejected. Complete and partial
+            publish one corpus atomically; rejected or cancelled leaves the library
+            unchanged. Partial is not done — the defect ledger names what is missing.
           </p>
         </section>
       ) : null}
@@ -422,9 +441,24 @@ export function ImportFlow({
 
       {state.stage === "run_failed" ? (
         <section className="import-flow__error-panel" role="alert">
-          <p>Import failed: {state.error}</p>
+          <p>
+            {failedOutcome?.class === "rejected"
+              ? `Import rejected: ${state.error}`
+              : `Import failed: ${state.error}`}
+          </p>
+          {failedDefects.length > 0 ? (
+            <ul className="import-flow__defects">
+              {failedDefects.map((defect) => (
+                <li key={`${defect.code}:${defect.source.identity}`}>
+                  {defect.source.identity} — {defect.code}
+                </li>
+              ))}
+            </ul>
+          ) : null}
           <p className="import-flow__hint">
-            Nothing was published — the library is unchanged.
+            {failedPublished
+              ? "A corpus was published before this failure — the library is not unchanged."
+              : "Nothing was published — the library is unchanged."}
           </p>
           <div className="import-flow__row">
             <button type="button" onClick={() => dispatch({ type: "RETRY" })}>
@@ -446,15 +480,44 @@ export function ImportFlow({
       ) : null}
 
       {state.stage === "summary" && state.runReport ? (
-        <section className="import-flow__summary" aria-label="Import finished">
-          <p className="import-flow__done" role="status">
-            Import finished — corpus {state.runReport.corpusId}.{" "}
+        <section
+          className="import-flow__summary"
+          aria-label={
+            runIsComplete
+              ? "Import finished"
+              : runClass === "partial"
+                ? "Import finished with defects"
+                : "Import finished with unverified outcome"
+          }
+        >
+          <p
+            className={
+              runIsComplete
+                ? "import-flow__done"
+                : "import-flow__done import-flow__done--partial"
+            }
+            role="status"
+          >
+            {runIsComplete
+              ? `Import finished — corpus ${state.runReport.corpusId}.`
+              : runClass === "partial"
+                ? `Import finished with defects (PARTIAL) — corpus ${state.runReport.corpusId}.`
+                : `Import finished, but the outcome is unverified (UNKNOWN) — corpus ${state.runReport.corpusId}. The host did not certify completeness.`}{" "}
             {state.runReport.lines.toLocaleString()} events from {state.runReport.files}{" "}
             source{state.runReport.files === 1 ? "" : "s"}.
             {state.runReport.ignoredFiles > 0
               ? ` ${state.runReport.ignoredFiles} kept out — counted, never silent.`
               : ""}
           </p>
+          {!runIsComplete && runDefects.length > 0 ? (
+            <ul className="import-flow__defects">
+              {runDefects.map((defect) => (
+                <li key={`${defect.code}:${defect.source.identity}`}>
+                  {defect.source.identity} — {defect.code}
+                </li>
+              ))}
+            </ul>
+          ) : null}
           {unresolvedTime > 0 ? (
             <TimeReviewCard
               engine={engine}

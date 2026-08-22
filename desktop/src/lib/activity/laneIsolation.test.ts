@@ -19,8 +19,25 @@ import {
   determinismForOrigin,
   isNondeterministicOrigin,
   ACTIVITY_ORIGINS,
+  type ImportActivityOutcome,
   type ImportRunInput,
 } from "./types";
+import type { ProcessProgressPhase } from "../../components/wizards/types";
+
+/**
+ * Host progress phases are process lifecycle, not outcome classes:
+ * `ProcessProgressPhase` has no `"partial"`. A partial import is one the host
+ * *finished* — the corpus was published, with defects — so it ends on
+ * `"completed"`, and `settleImportActivityAttempt` rewrites that last event
+ * into the classified terminal.
+ */
+function terminalProgressPhase(
+  outcome: ImportActivityOutcome,
+): ProcessProgressPhase {
+  if (outcome === "failed") return "failed";
+  if (outcome === "cancelled") return "cancelled";
+  return "completed";
+}
 
 const DESKTOP_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -105,7 +122,7 @@ function importActivities(run: ImportRunInput) {
     ["embed", 30],
     ["validate", 40],
     ["publish", 50],
-    [run.outcome === "completed" ? "completed" : run.outcome, 60],
+    [terminalProgressPhase(run.outcome), 60],
   ] as const) {
     attempt = recordImportProgress(attempt, {
       operation_id: "host-lane-isolation",

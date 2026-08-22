@@ -9,6 +9,9 @@
 .case-view {
   border: 1px solid var(--border);
   padding: 0.85rem;
+  /* Grid items default to min-width auto; without 0 wide lab content (the
+     comparison matrix) widens the page instead of scrolling in its wrapper. */
+  min-width: 0;
 }
 
 .case-list__title,
@@ -257,6 +260,31 @@
   font-size: 0.78rem;
 }
 
+.case-memory__freeze-toggle small {
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.case-memory__bucket-hint {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.case-memory__finding-tag {
+  display: inline-block;
+  margin-bottom: 0.25rem;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
 .triage-runs {
   margin-top: 1.25rem;
   padding: 1rem;
@@ -318,7 +346,8 @@
 }
 
 .triage-runs__field input,
-.triage-runs__field select {
+.triage-runs__field select,
+.triage-runs__field textarea {
   min-width: 0;
   padding: 0.5rem;
   border: 1px solid var(--border);
@@ -530,6 +559,32 @@
 .triage-runs__status--timed_out,
 .triage-runs__status--cancelled {
   border-color: var(--danger, #ff8f8f);
+}
+
+/* A partial run finished with unsettled or failed lanes; it must not read as
+   a normal completed run. */
+.triage-runs__status--partial {
+  border-color: var(--warning, #f0b429);
+  color: var(--warning, #f0b429);
+}
+
+.triage-runs__lane-picker {
+  margin-top: 0.6rem;
+}
+
+.triage-runs__lane-picker summary {
+  color: var(--muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.triage-runs__lane-picker-form {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.55rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
 }
 
 .triage-runs__provenance,

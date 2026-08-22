@@ -349,7 +349,17 @@ export function recordImportProgress(
   };
 }
 
+function importPublished(outcome: ImportRunInput["outcome"]): boolean {
+  return outcome === "completed" || outcome === "partial" || outcome === "unknown";
+}
+
 function terminalLabel(run: ImportRunInput): string {
+  if (run.outcome === "partial") {
+    return "Corpus published with defects (PARTIAL)";
+  }
+  if (run.outcome === "unknown") {
+    return "Corpus published — outcome unverified (UNKNOWN)";
+  }
   if (run.outcome === "completed") {
     return "Corpus published — Explorer can refresh";
   }
@@ -360,7 +370,7 @@ function terminalLabel(run: ImportRunInput): string {
 }
 
 function terminalDetail(run: ImportRunInput): string {
-  if (run.outcome === "completed" && run.report) {
+  if (importPublished(run.outcome) && run.report) {
     return [
       countLabel(run.report.lines, "event"),
       countLabel(run.report.templates, "template"),
@@ -387,16 +397,14 @@ export function settleImportActivityAttempt(
         label: `Log corpus ${corpusId}`,
       }
     : workspaceScope();
-  const status =
-    run.outcome === "completed"
-      ? ("ok" as const)
-      : run.outcome === "cancelled"
-        ? ("cancelled" as const)
-        : ("failed" as const);
-  const origin =
-    run.outcome === "completed"
-      ? ("governed_write" as const)
-      : ("deterministic_host" as const);
+  const status = importPublished(run.outcome)
+    ? ("ok" as const)
+    : run.outcome === "cancelled"
+      ? ("cancelled" as const)
+      : ("failed" as const);
+  const origin = importPublished(run.outcome)
+    ? ("governed_write" as const)
+    : ("deterministic_host" as const);
   const events: ActivityEventInput[] = attempt.events.map(
     (event): ActivityEventInput => ({
       ...event,

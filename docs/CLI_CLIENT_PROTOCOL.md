@@ -111,6 +111,13 @@ Failure:
 }
 ```
 
+`error.details` is optional and additive: when the failing command has a
+typed document of its own — today the import outcome
+(`contextdesk.import_outcome.v1`, see
+[CLI.md](CLI.md#import-outcomes-and-the-defect-ledger)) — it rides under
+`error.details`; it is omitted entirely otherwise. Clients must tolerate
+both and must not treat its presence as an envelope change.
+
 Fixture: `fixtures/cli-client-protocol/envelope.ok.json`, `envelope.err.json`.
 
 ### Completed verdict envelope (`ok:true` + nonzero exit)

@@ -1,0 +1,24 @@
+{
+  "schemaId": "cd-collab.snapshot.v1",
+  "id": "snapshot-1",
+  "caseId": "case-1",
+  "fingerprint": "29f77120a40b56cb8f03b3fd4f1413e67efc518c0f715fd1f2ddba1449d58f49",
+  "parentSnapshotId": null,
+  "evidence": [
+    {
+      "evidenceId": "artifact-b",
+      "ordinal": 1,
+      "contentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "expectedHash": null,
+      "verificationStatus": "verified",
+      "privacyClass": "owner_only"
+    }
+  ],
+  "visibility": "owner_only",
+  "protocolVersion": "triage-v1",
+  "fairnessClass": "same_snapshot",
+  "status": "frozen",
+  "createdAt": "2026-08-20T00:00:00.000Z",
+  "createdBy": "alice",
+  "leak": true
+}

@@ -139,6 +139,7 @@ cargo test -p cd-cli --test cli_activity_parity -- --nocapture
 cargo test -p cd-cli --test cli_public_acceptance_lab -- --nocapture
 cargo test -p cd-cli --test chat_cancellation -- --nocapture
 cargo test -p cd-cli --test exact_head_timezone_utc_lab -- --nocapture
+cargo test -p cd-cli --test import_outcome_cli -- --nocapture
 ```
 
 ---
@@ -148,6 +149,8 @@ cargo test -p cd-cli --test exact_head_timezone_utc_lab -- --nocapture
 - [`docs/DEMO_RUNBOOK.md`](DEMO_RUNBOOK.md) — concise 10–15 min GUI + CLI
   rehearsal (public fixtures; honest LQA residual on tips without the command).
 - [`docs/CLI.md`](CLI.md) — command grammar including `timezone apply-all`,
-  `chat --activity`, `--trace`, `--context-selection`.
+  `chat --activity`, `--trace`, `--context-selection`, and the typed
+  import outcome contract (complete / partial / rejected with located,
+  coded defects).
 - `scripts/cli-live-provider-rehearsal.sh` — ZIP import + dry-run / live turns.
 - `scripts/cli-activity-parity-demo.sh` — offline activity/trace mock demo.

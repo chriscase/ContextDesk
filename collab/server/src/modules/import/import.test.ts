@@ -2,7 +2,13 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseCase, parseExternalRun, parseSource, parseTimeline } from "@cd-collab/contracts";
+import {
+  parseCase,
+  parseExternalRun,
+  parseSource,
+  parseSourceList,
+  parseTimeline,
+} from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
@@ -406,6 +412,122 @@ describe("external-run import", () => {
       expect(audits.some((a) => a.action === "external_run_import")).toBe(true);
       expect(audits.some((a) => a.action === "run_corroboration")).toBe(true);
       expect(audits.every((a) => a.action !== "auto_verify_import")).toBe(true);
+    });
+  });
+
+  it("rejects imports from a retired source while keeping it listed for attribution", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", "fixture-dave-secret");
+      const legacyTool = parseSource(
+        JSON.parse(
+          (
+            await app.inject({
+              method: "POST",
+              url: "/api/catalog/sources",
+              headers: { cookie: dave },
+              payload: { name: "Legacy assistant", kind: "external-tool" },
+            })
+          ).body,
+        ),
+      );
+      const activeTool = parseSource(
+        JSON.parse(
+          (
+            await app.inject({
+              method: "POST",
+              url: "/api/catalog/sources",
+              headers: { cookie: dave },
+              payload: { name: "Current assistant", kind: "external-tool" },
+            })
+          ).body,
+        ),
+      );
+      const created = parseCase(
+        JSON.parse(
+          (
+            await app.inject({
+              method: "POST",
+              url: "/api/cases",
+              headers: { cookie: alice },
+              payload: { title: "Retired source fixture" },
+            })
+          ).body,
+        ),
+      );
+
+      const retired = parseSource(
+        JSON.parse(
+          (
+            await app.inject({
+              method: "POST",
+              url: `/api/catalog/sources/${legacyTool.id}/retire`,
+              headers: { cookie: dave },
+            })
+          ).body,
+        ),
+      );
+      expect(retired.id).toBe(legacyTool.id);
+      expect(retired.lifecycle).toBe("retired");
+
+      const listed = parseSourceList(
+        JSON.parse(
+          (
+            await app.inject({
+              method: "GET",
+              url: "/api/catalog/sources",
+              headers: { cookie: alice },
+            })
+          ).body,
+        ),
+      );
+      const stillListed = listed.sources.find((s) => s.id === legacyTool.id);
+      expect(stillListed?.lifecycle).toBe("retired");
+
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/imports`,
+        headers: { cookie: alice },
+        payload: {
+          outputText: "output attributed to a retired tool",
+          sourceId: legacyTool.id,
+          operatorId: "op",
+          operatorUsername: "op",
+        },
+      });
+      expect(rejected.statusCode).toBe(400);
+      expect(JSON.parse(rejected.body)).toEqual({ error: "source is retired" });
+
+      const accepted = parseExternalRun(
+        JSON.parse(
+          (
+            await app.inject({
+              method: "POST",
+              url: `/api/cases/${created.id}/imports`,
+              headers: { cookie: alice },
+              payload: {
+                outputText: "output attributed to an active tool",
+                sourceId: activeTool.id,
+                operatorId: "op",
+                operatorUsername: "op",
+              },
+            })
+          ).body,
+        ),
+      );
+      expect(accepted.sourceId).toBe(activeTool.id);
+
+      const runs = JSON.parse(
+        (
+          await app.inject({
+            method: "GET",
+            url: `/api/cases/${created.id}/imports`,
+            headers: { cookie: alice },
+          })
+        ).body,
+      ) as { runs: { id: string }[] };
+      expect(runs.runs).toHaveLength(1);
+      expect(runs.runs[0]?.id).toBe(accepted.id);
     });
   });
 

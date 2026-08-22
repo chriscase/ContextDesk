@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/snapshot.v1.json",
+  "title": "cd-collab Snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "id",
+    "caseId",
+    "fingerprint",
+    "parentSnapshotId",
+    "evidence",
+    "visibility",
+    "protocolVersion",
+    "fairnessClass",
+    "status",
+    "createdAt",
+    "createdBy"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.snapshot.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "caseId": { "type": "string", "minLength": 1 },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^(?:[a-z][a-z0-9_-]{0,31}-)?[a-f0-9]{64}$"
+    },
+    "parentSnapshotId": {
+      "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }]
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "evidenceId",
+          "ordinal",
+          "contentHash",
+          "expectedHash",
+          "verificationStatus",
+          "privacyClass"
+        ],
+        "properties": {
+          "evidenceId": { "type": "string", "minLength": 1 },
+          "ordinal": { "type": "integer", "minimum": 0 },
+          "contentHash": {
+            "anyOf": [
+              { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              { "type": "null" }
+            ]
+          },
+          "expectedHash": {
+            "anyOf": [
+              { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              { "type": "null" }
+            ]
+          },
+          "verificationStatus": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] }
+        }
+      }
+    },
+    "visibility": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "protocolVersion": { "type": "string", "minLength": 1 },
+    "fairnessClass": { "type": "string", "enum": ["same_snapshot", "unknown"] },
+    "status": { "type": "string", "enum": ["frozen"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "createdBy": { "type": "string", "minLength": 1 }
+  }
+}

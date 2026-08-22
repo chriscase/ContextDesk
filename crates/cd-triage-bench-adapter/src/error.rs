@@ -39,6 +39,9 @@ pub enum AdapterError {
     /// Bytes were not a `TriageReplayV1` JSON object.
     #[error("replay JSON is not a TriageReplayV1")]
     ReplayJson,
+    /// Hermetic collab export input failed schema or honesty checks.
+    #[error("collab export schema rejected: {0}")]
+    Schema(String),
 }
 
 impl AdapterError {

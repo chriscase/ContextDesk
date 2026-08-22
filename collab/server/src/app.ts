@@ -124,6 +124,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         roles: security.roles,
         audit: security.audit,
         domain: deps.domain,
+        ...(deps.experiments ? { experiments: deps.experiments } : {}),
       });
     }
     if (deps.catalog) {

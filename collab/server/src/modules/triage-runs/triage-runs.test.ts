@@ -174,6 +174,25 @@ describe("snapshot-bound triage runs", () => {
     }
   });
 
+  it("rejects DeepSeek lanes in any identifier field", async () => {
+    const fx = await fixture(new DeterministicMockTriageExecutor());
+    try {
+      for (const overlay of [
+        { model: "deepseek-v3.2" },
+        { candidateId: "deepseek-reviewer" },
+        { profileId: "profile:DeepSeek-gateway" },
+      ]) {
+        const req = request(fx.snapshot.id);
+        req.candidates[0] = { ...req.candidates[0]!, ...overlay };
+        await expect(fx.service.create(fx.caseId, actor, req, "test", false)).rejects.toThrow(
+          /DeepSeek lanes are not permitted/,
+        );
+      }
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
   it("records cancellation instead of fabricating a terminal result", async () => {
     const executor: TriageRunExecutor = {
       execute: async (_context: TriageExecutionContext, signal: AbortSignal): Promise<TriageCandidateRunV1> =>
