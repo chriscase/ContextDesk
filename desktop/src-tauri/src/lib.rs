@@ -1869,6 +1869,20 @@ fn get_config(state: State<'_, AppState>) -> AppConfig {
     state.config.lock().expect("config lock").clone()
 }
 
+/// Non-secret reviewer candidate row for the Settings surface: identity
+/// fields only — never a credential reference, endpoint, or full profile.
+#[derive(Clone, Serialize)]
+struct ReviewerCandidateDto {
+    /// Provider profile id.
+    id: String,
+    /// Human label.
+    label: String,
+    /// The profile's default chat model.
+    chat_model: String,
+    /// Local-only profiles cannot egress, so no remote acknowledgement applies.
+    local_only: bool,
+}
+
 /// Non-secret multi-model settings for the Settings surface. The reviewer
 /// references a provider profile id; no credential ever crosses IPC.
 #[derive(Clone, Serialize)]
@@ -1883,11 +1897,55 @@ struct MultiModelSettingsDto {
     reviewer_allow_remote: bool,
     /// Whether the reviewer must be measured-qualified.
     reviewer_require_qualified: bool,
+    /// Measured JsonProposal verdict for the recorded reviewer, read from the
+    /// cached qualification store only (a peek — this never starts a probe):
+    /// `"qualified"` | `"unqualified"` | `"unverified"` | `"unconfigured"`.
+    reviewer_qualification: String,
+    /// Active (investigator) profile id, so the surface can say honestly when
+    /// the reviewer is the same profile filling a second role.
+    active_profile_id: Option<String>,
+    /// Existing provider profiles the reviewer role may reference.
+    candidate_profiles: Vec<ReviewerCandidateDto>,
 }
 
-#[tauri::command]
-fn get_multi_model_settings(state: State<'_, AppState>) -> MultiModelSettingsDto {
-    let cfg = state.config.lock().expect("config lock");
+/// Measured reviewer qualification from the cached store, as the same
+/// JsonProposal contract verdict `agent_turn` consults at turn time. Absent,
+/// stale, or inconclusive evidence is `"unverified"` — never `"qualified"` —
+/// and a reviewer pointing at a missing profile has no measurable identity,
+/// so it is `"unverified"` too.
+fn reviewer_qualification_label(
+    cfg: &AppConfig,
+    store: &cd_core::capability_qualification::QualificationStore,
+) -> &'static str {
+    use cd_core::capability_qualification::{
+        capability_contract_verdict, CapabilityContract, ContractVerdict, QualificationKey,
+    };
+    let Some(rev) = cfg.multi_model.reviewer.as_ref() else {
+        return "unconfigured";
+    };
+    let Some(prof) = cfg
+        .providers
+        .profiles
+        .iter()
+        .find(|p| p.id == rev.profile_id)
+    else {
+        return "unverified";
+    };
+    let model = rev.model.as_deref().unwrap_or(&prof.chat_model);
+    let key = QualificationKey::with_provider_kind(&prof.id, &prof.base_url, model, prof.kind);
+    match capability_contract_verdict(store.get(&key), CapabilityContract::JsonProposal) {
+        ContractVerdict::Qualified => "qualified",
+        ContractVerdict::Unqualified => "unqualified",
+        ContractVerdict::Inconclusive => "unverified",
+    }
+}
+
+/// Project the config plus cached qualification evidence into the Settings
+/// DTO. Pure read: no probe, no disk write, no host rebuild.
+fn multi_model_settings_dto(
+    cfg: &AppConfig,
+    store: &cd_core::capability_qualification::QualificationStore,
+) -> MultiModelSettingsDto {
     let mm = &cfg.multi_model;
     let mode = if cfg.contributions.enabled {
         cd_core::multi_model::MultiModelMode::Contributions
@@ -1900,12 +1958,35 @@ fn get_multi_model_settings(state: State<'_, AppState>) -> MultiModelSettingsDto
         reviewer_model: mm.reviewer.as_ref().and_then(|r| r.model.clone()),
         reviewer_allow_remote: mm.reviewer.as_ref().is_some_and(|r| r.allow_remote),
         reviewer_require_qualified: mm.reviewer.as_ref().is_none_or(|r| r.require_qualified),
+        reviewer_qualification: reviewer_qualification_label(cfg, store).to_string(),
+        active_profile_id: cfg.providers.active_id.clone(),
+        candidate_profiles: cfg
+            .providers
+            .profiles
+            .iter()
+            .map(|p| ReviewerCandidateDto {
+                id: p.id.clone(),
+                label: p.label.clone(),
+                chat_model: p.chat_model.clone(),
+                local_only: p.local_only,
+            })
+            .collect(),
     }
 }
 
+#[tauri::command]
+fn get_multi_model_settings(state: State<'_, AppState>) -> MultiModelSettingsDto {
+    let cfg = state.config.lock().expect("config lock").clone();
+    let store = state
+        .qualification_store
+        .lock()
+        .expect("qualification_store");
+    multi_model_settings_dto(&cfg, &store)
+}
+
 /// Set the default multi-model mode (`single`/`review`/`contributions`). Persists and rebuilds
-/// the host. Reviewer assignment is edited via the provider config; this is
-/// the on/off toggle the composer honors by default.
+/// the host. Reviewer assignment is edited via `set_multi_model_reviewer`;
+/// this is the on/off toggle the composer honors by default.
 #[tauri::command]
 fn set_multi_model_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
     let new_mode = match mode.as_str() {
@@ -1925,6 +2006,296 @@ fn set_multi_model_mode(state: State<'_, AppState>, mode: String) -> Result<(), 
     *state.config.lock().expect("config lock") = cfg;
     let _ = ensure_host(&state);
     Ok(())
+}
+
+/// Validate and apply a reviewer assignment onto `cfg` without touching disk.
+/// `None`/blank profile clears the assignment. An unknown profile, or a
+/// remote-egress acknowledgement on a local-only profile (where it would be
+/// meaningless), fails with no change at all. Measured qualification is
+/// mandatory for this surface: every assigned reviewer is recorded with
+/// `require_qualified = true` — the renderer has no way to relax it.
+fn apply_reviewer_assignment(
+    cfg: &mut AppConfig,
+    profile_id: Option<&str>,
+    model: Option<&str>,
+    allow_remote: bool,
+) -> Result<(), String> {
+    let profile_id = profile_id.map(str::trim).filter(|s| !s.is_empty());
+    let Some(profile_id) = profile_id else {
+        cfg.multi_model.reviewer = None;
+        return Ok(());
+    };
+    let Some(profile) = cfg.providers.profiles.iter().find(|p| p.id == profile_id) else {
+        return Err(format!("unknown provider profile: {profile_id}"));
+    };
+    if profile.local_only && allow_remote {
+        return Err("remote egress acknowledgement is meaningless for a local-only profile".into());
+    }
+    let model = model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    cfg.multi_model.reviewer = Some(cd_core::config::ReviewerRoleConfig {
+        profile_id: profile_id.to_string(),
+        model,
+        require_qualified: true,
+        allow_remote,
+    });
+    Ok(())
+}
+
+/// Assign (or clear) the multi-model reviewer role. This records
+/// configuration only: it never starts a qualification probe and never runs
+/// a turn — each review turn re-checks qualification and egress itself.
+/// There is deliberately no `require_qualified` input: the untrusted
+/// renderer cannot disable measured qualification.
+#[tauri::command]
+fn set_multi_model_reviewer(
+    state: State<'_, AppState>,
+    profile_id: Option<String>,
+    model: Option<String>,
+    allow_remote: bool,
+) -> Result<(), String> {
+    let mut cfg = state.config.lock().expect("config lock").clone();
+    apply_reviewer_assignment(
+        &mut cfg,
+        profile_id.as_deref(),
+        model.as_deref(),
+        allow_remote,
+    )?;
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    *state.config.lock().expect("config lock") = cfg;
+    let _ = ensure_host(&state);
+    Ok(())
+}
+
+#[cfg(test)]
+mod multi_model_reviewer_assignment_tests {
+    use super::*;
+    use cd_core::capability_qualification::{
+        CapabilityCheckResult, CapabilityKind, CapabilityStatus, QualificationKey,
+        QualificationReport, QualificationStore,
+    };
+    use cd_core::config::ReviewerRoleConfig;
+    use cd_core::openai_chat_contract::{MODE_PLAIN, MODE_PROMPTED_JSON};
+    use cd_core::providers::ProviderCapabilities;
+
+    fn profile(id: &str, local_only: bool) -> ProviderProfile {
+        ProviderProfile {
+            id: id.into(),
+            label: format!("{id} label"),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://api.example.test/v1".into(),
+            api_key_ref: Some("keychain:synthetic-reviewer-ref".into()),
+            chat_model: "profile-default-model".into(),
+            embedding_model: None,
+            embedding_base_url: None,
+            capabilities: ProviderCapabilities::default(),
+            local_only,
+            deadline_preference: ProviderDeadlinePreference::Auto,
+        }
+    }
+
+    fn config_with(profiles: Vec<ProviderProfile>) -> AppConfig {
+        AppConfig {
+            providers: ProviderConfig {
+                active_id: None,
+                profiles,
+            },
+            ..AppConfig::default()
+        }
+    }
+
+    fn assigned(profile_id: &str) -> ReviewerRoleConfig {
+        ReviewerRoleConfig {
+            profile_id: profile_id.into(),
+            model: None,
+            require_qualified: true,
+            allow_remote: false,
+        }
+    }
+
+    /// A report whose evidence passes the honesty checks (exact request
+    /// modes, dialect matching the key's transport protocol).
+    fn honest_report(key: &QualificationKey, structured: CapabilityStatus) -> QualificationReport {
+        let dialect = Some(key.transport_protocol.clone());
+        QualificationReport {
+            key: key.clone(),
+            checks: vec![
+                CapabilityCheckResult {
+                    kind: CapabilityKind::BasicGeneration,
+                    status: CapabilityStatus::Pass,
+                    elapsed_ms: 1,
+                    tested_at: 1,
+                    reason: String::new(),
+                    request_mode: Some(MODE_PLAIN.to_string()),
+                    dialect: dialect.clone(),
+                    schema_strict: None,
+                    schema_probe_id: None,
+                },
+                CapabilityCheckResult {
+                    kind: CapabilityKind::StructuredOutput,
+                    status: structured,
+                    elapsed_ms: 1,
+                    tested_at: 1,
+                    reason: String::new(),
+                    request_mode: Some(MODE_PROMPTED_JSON.to_string()),
+                    dialect,
+                    schema_strict: None,
+                    schema_probe_id: None,
+                },
+            ],
+            role_hint: String::new(),
+            cancelled: false,
+            stale: false,
+            finished_at: 1,
+        }
+    }
+
+    #[test]
+    fn unknown_profile_is_rejected_without_any_write() {
+        let mut cfg = config_with(vec![profile("known", false)]);
+        cfg.multi_model.reviewer = Some(assigned("known"));
+        let before = cfg.multi_model.clone();
+
+        let err = apply_reviewer_assignment(&mut cfg, Some("missing"), None, false)
+            .expect_err("unknown profile must fail");
+        assert!(err.contains("unknown provider profile"), "err: {err}");
+        assert_eq!(cfg.multi_model, before);
+    }
+
+    #[test]
+    fn local_only_profile_rejects_remote_acknowledgement() {
+        let mut cfg = config_with(vec![profile("local", true)]);
+        let before = cfg.multi_model.clone();
+
+        let err = apply_reviewer_assignment(&mut cfg, Some("local"), None, true)
+            .expect_err("local-only + allow_remote must fail");
+        assert!(err.contains("local-only"), "err: {err}");
+        assert_eq!(cfg.multi_model, before);
+
+        // Without the meaningless acknowledgement the same profile records.
+        apply_reviewer_assignment(&mut cfg, Some("local"), None, false)
+            .expect("local profile without remote ack records");
+        assert_eq!(
+            cfg.multi_model
+                .reviewer
+                .as_ref()
+                .map(|r| r.profile_id.as_str()),
+            Some("local")
+        );
+    }
+
+    #[test]
+    fn clear_and_blank_profile_ids_clear_the_reviewer() {
+        for cleared in [None, Some(""), Some("   ")] {
+            let mut cfg = config_with(vec![profile("known", false)]);
+            cfg.multi_model.reviewer = Some(assigned("known"));
+            apply_reviewer_assignment(&mut cfg, cleared, Some("ignored"), false)
+                .expect("clearing never fails");
+            assert_eq!(cfg.multi_model.reviewer, None, "cleared via {cleared:?}");
+        }
+    }
+
+    #[test]
+    fn assignment_records_identity_and_normalizes_blank_model() {
+        let mut cfg = config_with(vec![profile("remote", false)]);
+
+        apply_reviewer_assignment(&mut cfg, Some(" remote "), Some("   "), true)
+            .expect("valid assignment");
+        let rev = cfg.multi_model.reviewer.clone().expect("recorded");
+        assert_eq!(rev.profile_id, "remote");
+        assert_eq!(rev.model, None, "blank override means profile default");
+        assert!(rev.allow_remote);
+        assert!(rev.require_qualified);
+
+        apply_reviewer_assignment(&mut cfg, Some("remote"), Some(" override-model "), false)
+            .expect("valid assignment");
+        let rev = cfg.multi_model.reviewer.clone().expect("recorded");
+        assert_eq!(rev.model.as_deref(), Some("override-model"));
+        assert!(!rev.allow_remote);
+    }
+
+    /// Regression: measured qualification is mandatory for assignment. The
+    /// apply path has no input that could record `require_qualified = false`,
+    /// and re-assigning over a hand-relaxed config restores `true`.
+    #[test]
+    fn assignment_cannot_record_optional_qualification() {
+        let mut cfg = config_with(vec![profile("remote", false)]);
+        cfg.multi_model.reviewer = Some(ReviewerRoleConfig {
+            profile_id: "remote".into(),
+            model: None,
+            require_qualified: false,
+            allow_remote: false,
+        });
+
+        apply_reviewer_assignment(&mut cfg, Some("remote"), None, false).expect("valid assignment");
+        assert!(
+            cfg.multi_model
+                .reviewer
+                .as_ref()
+                .expect("recorded")
+                .require_qualified,
+            "every assignment records mandatory qualification"
+        );
+    }
+
+    #[test]
+    fn qualification_label_reports_measured_truth_only() {
+        let mut cfg = config_with(vec![profile("rev", false)]);
+        let mut store = QualificationStore::default();
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "unconfigured");
+
+        // Recorded but never measured: unverified, never qualified.
+        cfg.multi_model.reviewer = Some(assigned("rev"));
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "unverified");
+
+        let p = cfg.providers.profiles[0].clone();
+        let key = QualificationKey::with_provider_kind(&p.id, &p.base_url, &p.chat_model, p.kind);
+        store.put(honest_report(&key, CapabilityStatus::Pass));
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "qualified");
+
+        store.put(honest_report(&key, CapabilityStatus::Fail));
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "unqualified");
+
+        // A model override reads its own cache slot, not the default model's.
+        store.put(honest_report(&key, CapabilityStatus::Pass));
+        cfg.multi_model.reviewer.as_mut().unwrap().model = Some("other-model".into());
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "unverified");
+
+        // A reviewer pointing at a deleted profile has no measurable identity.
+        cfg.multi_model.reviewer.as_mut().unwrap().model = None;
+        cfg.multi_model.reviewer.as_mut().unwrap().profile_id = "gone".into();
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "unverified");
+    }
+
+    #[test]
+    fn settings_dto_exposes_candidates_without_secrets() {
+        let mut cfg = config_with(vec![profile("rev", false), profile("loc", true)]);
+        cfg.providers.active_id = Some("rev".into());
+        cfg.multi_model.reviewer = Some(assigned("rev"));
+        let store = QualificationStore::default();
+
+        let dto = multi_model_settings_dto(&cfg, &store);
+        assert_eq!(dto.candidate_profiles.len(), 2);
+        assert_eq!(dto.reviewer_qualification, "unverified");
+        assert_eq!(dto.active_profile_id.as_deref(), Some("rev"));
+        let loc = dto
+            .candidate_profiles
+            .iter()
+            .find(|c| c.id == "loc")
+            .expect("local candidate listed");
+        assert!(loc.local_only);
+        assert_eq!(loc.chat_model, "profile-default-model");
+        assert_eq!(loc.label, "loc label");
+
+        let json = serde_json::to_string(&dto).expect("serialize");
+        assert!(!json.contains("api_key_ref"), "no credential refs in DTO");
+        assert!(!json.contains("synthetic-reviewer-ref"));
+        assert!(!json.contains("base_url"), "no endpoints in DTO");
+        assert!(!json.contains("api.example.test"));
+    }
 }
 
 #[tauri::command]
@@ -14287,6 +14658,7 @@ pub fn run() {
             save_app_config,
             get_multi_model_settings,
             set_multi_model_mode,
+            set_multi_model_reviewer,
             get_s3_backup_settings,
             save_s3_backup_settings,
             run_s3_workspace_backup,

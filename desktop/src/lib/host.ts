@@ -603,6 +603,26 @@ export async function hostGetConfig(): Promise<HostConfigDto | null> {
   return invoke<HostConfigDto>("get_config");
 }
 
+/** Non-secret reviewer candidate row: identity only, no credentials. */
+export type ReviewerCandidateDto = {
+  id: string;
+  label: string;
+  chat_model: string;
+  /** Local-only profiles cannot egress; no remote acknowledgement applies. */
+  local_only: boolean;
+};
+
+/**
+ * Measured reviewer qualification, from the host's cached JsonProposal
+ * capability verdict (a cache peek — reading settings never starts a probe).
+ * `unverified` is never qualified.
+ */
+export type ReviewerQualification =
+  | "qualified"
+  | "unqualified"
+  | "unverified"
+  | "unconfigured";
+
 /** Non-secret multi-model settings for the Settings surface. */
 export type MultiModelSettingsDto = {
   mode: "single" | "review" | "contributions" | string;
@@ -610,6 +630,11 @@ export type MultiModelSettingsDto = {
   reviewer_model: string | null;
   reviewer_allow_remote: boolean;
   reviewer_require_qualified: boolean;
+  reviewer_qualification: ReviewerQualification | string;
+  /** Active (investigator) profile id, for honest same-profile copy. */
+  active_profile_id: string | null;
+  /** Existing provider profiles the reviewer role may reference. */
+  candidate_profiles: ReviewerCandidateDto[];
 };
 
 export async function hostGetMultiModelSettings(): Promise<MultiModelSettingsDto | null> {
@@ -622,6 +647,23 @@ export async function hostSetMultiModelMode(
 ): Promise<void> {
   if (!isTauri()) return;
   await invoke<void>("set_multi_model_mode", { mode });
+}
+
+/**
+ * Assign (or clear, via null/blank profileId) the multi-model reviewer role.
+ * Records configuration only — never starts a probe, never runs a turn. The
+ * host rejects unknown profiles and a remote acknowledgement on a local-only
+ * profile without writing anything. Measured qualification is mandatory:
+ * there is deliberately no way to relax `require_qualified` over IPC — every
+ * assigned reviewer is recorded with it `true`.
+ */
+export async function hostSetMultiModelReviewer(args: {
+  profileId: string | null;
+  model: string | null;
+  allowRemote: boolean;
+}): Promise<void> {
+  if (!isTauri()) return;
+  await invoke<void>("set_multi_model_reviewer", args);
 }
 
 /** Non-secret S3-compatible backup settings. Credential values never cross IPC. */
