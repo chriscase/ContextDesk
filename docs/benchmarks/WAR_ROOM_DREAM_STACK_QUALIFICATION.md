@@ -309,7 +309,7 @@ CI green on #961 is **not** approval to merge.
 | Snapshot contract | contracts snapshot tests in the 63; #959 fixtures/schema |
 | Browser compatibility | full e2e 22/3; responsive 375px matrix with #952 locators; #948/#955 helper once |
 | Bridge | local `COLLAB_E2E_BRIDGE=1` 1/1 |
-| Hosted | local memory qualify 9/9; GitHub hosted job is the postgres proof |
+| Hosted | local memory qualify 9/9; GitHub hosted qualify **success** on `50e0cadf` (postgres + memory) |
 
 ## CI green vs mergeable vs approved to merge
 
