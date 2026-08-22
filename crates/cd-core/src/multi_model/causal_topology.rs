@@ -300,9 +300,13 @@ fn assign_claim(
             symptom_ids.push(entry.evidence_id.clone());
             continue;
         }
-        if is_positional_chronology(&class) {
+        if is_positional_chronology(&class)
+            || class.category == FastTriageEvidenceCategory::Propagation
+        {
             // Preceding/following same-source rows never establish trigger
-            // or recovery. They may remain unrelated competing explanations.
+            // or recovery. A propagation row is downstream by host
+            // construction and likewise cannot initiate the chain. These
+            // rows may remain unrelated competing explanations.
             if claim.claim_kind == ClaimKind::CompetingExplanation {
                 unrelated_ids.push(entry.evidence_id.clone());
             }
@@ -481,9 +485,10 @@ fn admit_disconfirmation(
                 ledger,
                 binding,
             );
-            let mut admitted = identities
-                .values()
-                .any(|identity| identity.candidate_id == pair.0 && identity.claim_id == pair.1);
+            // Naming a claim pair in reviewer prose is not enough to mint a
+            // disconfirmation slot. At least one citation must belong to that
+            // exact already-validated claim identity.
+            let mut admitted = false;
             for evidence_id in evidence_ids {
                 if let Some(existing) = identities.get(&evidence_id) {
                     if existing.candidate_id == pair.0 && existing.claim_id == pair.1 {
@@ -539,35 +544,27 @@ fn disconfirmation_evidence(
     ledger: &HostEvidenceLedger,
     binding: &AnswerBindingV1,
 ) -> Vec<String> {
-    let mut ids = contradiction
+    let Some(claim) = find_claim(findings, candidate_id, claim_id) else {
+        return Vec::new();
+    };
+    let claim_evidence = claim
+        .evidence_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    contradiction
         .evidence_ids
         .iter()
         .filter(|evidence_id| {
-            ledger.get(evidence_id).is_some_and(|entry| {
-                entry.candidate_id == candidate_id
-                    && entry.corpus_id == binding.corpus_id
-                    && entry.revision == binding.revision
-            })
+            claim_evidence.contains(evidence_id.as_str())
+                && ledger.get(evidence_id).is_some_and(|entry| {
+                    entry.candidate_id == candidate_id
+                        && entry.corpus_id == binding.corpus_id
+                        && entry.revision == binding.revision
+                })
         })
         .cloned()
-        .collect::<Vec<_>>();
-    if ids.is_empty() {
-        if let Some(claim) = find_claim(findings, candidate_id, claim_id) {
-            ids = claim
-                .evidence_ids
-                .iter()
-                .filter(|evidence_id| {
-                    ledger.get(evidence_id).is_some_and(|entry| {
-                        entry.candidate_id == candidate_id
-                            && entry.corpus_id == binding.corpus_id
-                            && entry.revision == binding.revision
-                    })
-                })
-                .cloned()
-                .collect();
-        }
-    }
-    ids
+        .collect()
 }
 
 fn find_claim<'a>(
