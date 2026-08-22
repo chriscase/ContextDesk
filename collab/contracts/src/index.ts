@@ -124,6 +124,7 @@ export {
   SNAPSHOT_STATUSES,
   parseSnapshot,
   parseSnapshotList,
+  snapshotFairness,
   snapshotFingerprint,
 } from "./snapshot.js";
 export type {
