@@ -226,7 +226,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
             </label>
           ))}
           {inventoryStatus === "ready" && items.length > 0 ? (
-            <p className="case-memory__note" role="status">
+            <p className="case-memory__note" aria-live="polite">
               {selectedCount} of {selectableItems.length} selectable item
               {selectableItems.length === 1 ? "" : "s"} selected.
               {selectedCount === 0
