@@ -28,28 +28,38 @@ pipeline may still emit a useful non-empty answer. That answer stays
 causal-neutral: model prose, chronology, frequency, and ordering never become
 host truth.
 
+The hardened production boundary also proves:
+
+- reviewer contradiction citations are intersected with each named claim's
+  own validated evidence ids; naming a claim without citing its evidence does
+  not mint a disconfirmation slot;
+- downstream `propagation` and `following_same_source` evidence cannot initiate
+  a causal chain, and production v1 does not infer recovery from chronology;
+- the optional causal call receives only the whole-turn character budget left
+  after reserving one mandatory final-answer prompt; and
+- missing/invalid topology, causal deadline, and causal cancellation all emit
+  explicit typed causal-stage progress without leaking model content.
+
 ## What this lab does not do
 
 - It does not re-implement validators or copy the isolated-contract fixture
   lab.
-- It does not production-edit `pipeline.rs`, `agent.rs`, or the contract
-  modules.
+- It does not alter `agent.rs`, the public causal contract, provider/profile
+  defaults, credentials, or UI.
 - It does not close #868. Rendered-answer establishment in live provider
   paths, desktop, collab, and CLI remain out of this child.
 
-## Residual (not a production-authority defect)
+## Remaining limits
 
-A causal-stage `CallResult::Deadline` / `Cancelled` returns the turn-level
-`MultiModelOutcome::Deadline` / `Cancelled` without the `deadline_outcome`
-stage tag used by investigator, reviewer, and synthesizer. The turn still
-fails closed, does not establish a root cause, and does not start synthesis.
-Stage-level deadline tagging for the causal synthesizer is future telemetry
-polish, not a grant of authority.
+Production v1 intentionally has no host-owned recovery classifier, so it admits
+no recovery slot rather than guessing from chronology. Packet-id binding and
+held-out/live-provider usefulness remain later defense-in-depth and quality
+work. Neither limit grants causal authority.
 
 Reviewer collusion prose is not an independent fail-closed axis on this
 production path. An otherwise-valid causal proposal (trigger, symptom, and
 required disconfirmation) plus a colluding review still establishes after
 both validators pass. Collusion neither grants nor vetoes host authority.
 
-Handbook impact: none — qualification of already-wired production seams;
-no new evidence-flow change.
+Handbook impact: bounded pipeline semantics and qualification only; no provider,
+profile, credential, UI, or default-mode change.
