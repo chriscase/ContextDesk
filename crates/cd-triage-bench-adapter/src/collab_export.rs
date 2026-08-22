@@ -375,8 +375,14 @@ mod tests {
             package["traces"][0]["efficiency"]["evidenceAcquisitionSteps"]["status"],
             "unknown"
         );
-        assert_eq!(package["traces"][0]["efficiency"]["turnCount"]["status"], "unknown");
-        assert_eq!(package["traces"][0]["efficiency"]["latency"]["status"], "unknown");
+        assert_eq!(
+            package["traces"][0]["efficiency"]["turnCount"]["status"],
+            "unknown"
+        );
+        assert_eq!(
+            package["traces"][0]["efficiency"]["latency"]["status"],
+            "unknown"
+        );
     }
 
     #[test]
