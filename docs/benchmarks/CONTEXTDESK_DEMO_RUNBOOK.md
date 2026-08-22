@@ -97,7 +97,13 @@ Use opaque local labels throughout:
 
 Redact the chat before import. The plain transcript contract may contain different questions from the ContextDesk run; that is expected. If turn structure, tool use, timing, cost, or evidence cannot be proved, leave it unknown. Do not infer missing structure.
 
-The current programmatic trace template is manually adapted from an owner-only ContextDesk run. There is not yet an automatic run-to-trace converter, so verify each event, parent link, and evidence alias rather than inventing provenance. Declare any evidence needed for gold alignment in the experiment package as well as the trace until trace-derived alignment is implemented.
+The programmatic ContextDesk path can be produced automatically from a hermetic
+`cd-collab.bench_run_artifact.v1` (or a `contextdesk.cli.bench_compare.v1`
+payload with labeled lanes): Experiment Lab and TriageRunPanel convert
+share-safe lane projections into `interaction_trace.v1` / `strategy_package.v1`
+without inventing gold, cost, usage, prompts, or provider calls. Ambiguous
+structure stays unknown. DeepSeek lane labels are rejected. Keep real-data
+artifacts owner-local; only synthetic fixtures belong in git.
 
 Import in this order through Experiment Lab:
 

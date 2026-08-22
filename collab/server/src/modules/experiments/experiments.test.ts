@@ -784,6 +784,12 @@ describe("accepted decision to versioned gold", () => {
 const STRATEGY = JSON.parse(
   readFileSync(join(here, "../../../../contracts/fixtures/strategy-package.converge.json"), "utf8"),
 ) as unknown;
+const BENCH_ARTIFACT = JSON.parse(
+  readFileSync(
+    join(here, "../../../../contracts/fixtures/bench-run-artifact.multi-strategy.json"),
+    "utf8",
+  ),
+) as unknown;
 const PLAIN = JSON.parse(
   readFileSync(join(here, "../../../../contracts/fixtures/plain-transcript.incomplete.json"), "utf8"),
 ) as unknown;
@@ -1123,6 +1129,145 @@ describe("interaction traces and strategy comparison", () => {
       expect(raw).not.toContain('"snapshotFingerprint"');
       expect(raw).not.toContain("Which inventory call is blocking checkout?");
       expect(raw).not.toContain("programmatic-agent");
+    });
+  });
+
+  it("imports a hermetic bench-run artifact, accepts a decision, and keeps share-safe export fail-closed", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", DAVE);
+      const created = await createCase(app, alice);
+      const imported = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments`,
+        headers: { cookie: alice },
+        payload: BENCH_ARTIFACT,
+      });
+      expect(imported.statusCode).toBe(200);
+      const view = JSON.parse(imported.body) as {
+        id: string;
+        packageId: string;
+        candidates: { modelLabel: string; goldState: string; cost: { status: string }; usage: { status: string } }[];
+        agreement: { sharedAnchors: { evidenceRef: string }[]; notes: string[] };
+        traces: {
+          completeness: string;
+          unknowns: string[];
+          events: { kind: string; sequence: number; excerpt: string | null }[];
+          efficiency: {
+            providerCalls: { status: string };
+            evidenceAcquisitionSteps: { status: string };
+            turnCount: { status: string };
+            latency: { status: string };
+            cost: { status: string };
+          };
+        }[];
+        comparison: {
+          sharedEvidence: unknown[];
+          questionPaths: unknown[];
+          divergence: { summary: string }[];
+          efficiency: {
+            efficiency: {
+              providerCalls: { status: string };
+              evidenceAcquisitionSteps: { status: string };
+            };
+          }[];
+        };
+      };
+      expect(view.packageId).toBe("pkg-synth-bench-multi-strategy-v1");
+      expect(view.candidates.map((c) => c.modelLabel)).toEqual([
+        "qwen-3.6-27b",
+        "gpt-oss-120b",
+        "ministral-3-14b-instruct-2512",
+      ]);
+      expect(view.candidates.every((c) => c.goldState === "unknown")).toBe(true);
+      expect(view.candidates.every((c) => c.cost.status === "unknown")).toBe(true);
+      expect(view.candidates.every((c) => c.usage.status === "unknown")).toBe(true);
+      expect(view.traces).toHaveLength(3);
+      expect(view.traces.every((trace) => trace.completeness === "partial")).toBe(true);
+      // Unobserved efficiency stays unknown — never invent from role slots / evidence counts.
+      expect(
+        view.traces.every(
+          (trace) =>
+            trace.efficiency.providerCalls.status === "unknown"
+            && trace.efficiency.evidenceAcquisitionSteps.status === "unknown"
+            && trace.efficiency.turnCount.status === "unknown"
+            && trace.efficiency.latency.status === "unknown"
+            && trace.efficiency.cost.status === "unknown",
+        ),
+      ).toBe(true);
+      expect(
+        view.traces.every(
+          (trace) =>
+            trace.events.length === 1
+            && trace.events[0]?.kind === "assistant_response"
+            && trace.events.every((event) => event.kind !== "question" && event.kind !== "hypothesis")
+            && trace.events[0]?.excerpt === null,
+        ),
+      ).toBe(true);
+      expect(view.comparison.questionPaths).toHaveLength(0);
+      expect(
+        view.comparison.divergence.every(
+          (row) => row.summary !== "Approaches asked different questions",
+        ),
+      ).toBe(true);
+      expect(
+        view.comparison.efficiency.every(
+          (row) =>
+            row.efficiency.providerCalls.status === "unknown"
+            && row.efficiency.evidenceAcquisitionSteps.status === "unknown",
+        ),
+      ).toBe(true);
+      expect(
+        view.agreement.sharedAnchors.some((row) => row.evidenceRef === "ev-demo-checkout-log"),
+      ).toBe(true);
+      expect(view.comparison.sharedEvidence.length).toBeGreaterThan(0);
+
+      const proposed = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${view.id}/decisions`,
+        headers: { cookie: alice },
+        payload: {
+          text: "Treat inventory timeout as the human-accepted cause for this synthetic bench import.",
+          rationale: "Human decision after reviewing converted lanes; not a gold claim yet.",
+          evidenceRefs: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+        },
+      });
+      expect(proposed.statusCode).toBe(200);
+      const proposal = JSON.parse(proposed.body) as { id: string; revision: number };
+      const accepted = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${view.id}/decisions/${proposal.id}/accept`,
+        headers: { cookie: dave },
+        payload: { expectedRevision: proposal.revision },
+      });
+      expect(accepted.statusCode).toBe(200);
+
+      const exportRes = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${view.id}/export`,
+        headers: { cookie: dave },
+      });
+      expect(exportRes.statusCode).toBe(200);
+      const exported = parseLabExportV2(JSON.parse(exportRes.body));
+      expect(exported.privacyClass).toBe("share_safe");
+      expect(exported.traces).toHaveLength(3);
+      expect(exported.review.candidates).toHaveLength(3);
+      expect(
+        exported.traces.every(
+          (trace) =>
+            trace.efficiency.providerCalls.status === "unknown"
+            && trace.efficiency.evidenceAcquisitionSteps.status === "unknown",
+        ),
+      ).toBe(true);
+      expect(exported.comparison.questionPaths).toHaveLength(0);
+      const raw = exportRes.body as string;
+      expect(raw).not.toContain("DeepSeek");
+      expect(raw).not.toContain("ai-gateway.vercel.sh");
+      expect(raw).not.toContain("qwen-3.6-27b");
+      expect(raw).not.toContain('"prompt"');
+      expect(raw).not.toContain("bearer ");
+      expect(raw).not.toContain("root_cause_established=true");
+      expect(raw).not.toContain("Approaches asked different questions");
     });
   });
 });
