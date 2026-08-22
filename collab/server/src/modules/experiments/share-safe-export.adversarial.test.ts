@@ -681,6 +681,24 @@ const PROJECTION_MATRIX: ProjectionRow[] = [
     expect: "reject",
   },
   {
+    name: "selected_gold_disagrees_with_same_id_history_row",
+    apply: (source) => {
+      const clone = structuredClone(source);
+      clone.gold = gold({
+        version: 2,
+        predecessorGoldId: IDS.goldDangling,
+      });
+      clone.comparison = {
+        ...clone.comparison,
+        gold: { ...clone.comparison.gold, version: 2 },
+      };
+      // Keep clone.golds unchanged: the selected pointer reuses the same goldId
+      // while disagreeing with the authoritative history row.
+      return clone;
+    },
+    expect: "reject",
+  },
+  {
     name: "contradictory_comparison_gold",
     apply: (source) => {
       const clone = structuredClone(source);

@@ -192,6 +192,23 @@ function assertDecisionChain(path: string, decision: ExperimentDecisionV1): void
   }
 }
 
+function goldProjectionIdentity(gold: GoldReferenceV1): string {
+  return JSON.stringify({
+    version: gold.version,
+    predecessorGoldId: gold.predecessorGoldId,
+    acceptedDecisionId: gold.acceptedDecisionId,
+    acceptedDecisionRevision: gold.acceptedDecisionRevision,
+    evidenceAnchors: uniqueSorted(gold.evidenceAnchors),
+    expectedRelationships: [...(gold.expectedRelationships ?? [])]
+      .map((row) => ({ evidenceRef: row.evidenceRef, role: row.role }))
+      .sort(
+        (a, b) =>
+          a.evidenceRef.localeCompare(b.evidenceRef) || a.role.localeCompare(b.role),
+      ),
+    helpfulnessDimensions: uniqueSorted(gold.helpfulnessDimensions ?? []),
+  });
+}
+
 function assertExportIntegrity(view: ReviewExportSource): void {
   if (view.candidates.length === 0) {
     throwViolation("$.candidates", "at least one candidate is required");
@@ -345,8 +362,12 @@ function assertExportIntegrity(view: ReviewExportSource): void {
   }
 
   if (view.gold) {
-    if (!goldById.has(view.gold.goldId)) {
+    const historicalGold = goldById.get(view.gold.goldId);
+    if (!historicalGold) {
       throwViolation("$.gold.goldId", "exported gold is missing from gold history");
+    }
+    if (goldProjectionIdentity(view.gold) !== goldProjectionIdentity(historicalGold)) {
+      throwViolation("$.gold", "selected gold does not match its history row");
     }
     assertSame("$.gold.packageId", view.gold.packageId, view.packageId);
     assertSame("$.gold.taskFingerprint", view.gold.taskFingerprint, view.taskFingerprint);
