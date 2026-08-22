@@ -382,9 +382,13 @@ fn missing_packet_stays_causal_neutral_with_a_useful_answer() {
     let RunResult { outcome, stages } =
         run_default(inv, vec![completion(empty_review())], &candidates, None);
     assert!(!established(&outcome));
-    assert!(stages
+    let withheld = stages
         .iter()
-        .all(|stage| stage.role != InvestigationRole::CausalSynthesizer));
+        .find(|stage| stage.role == InvestigationRole::CausalSynthesizer)
+        .expect("missing packet has explicit causal-stage accounting");
+    assert!(!withheld.started);
+    assert_eq!(withheld.outcome, Some(StageOutcomeKind::Skipped));
+    assert!(withheld.detail.contains("causal packet unavailable"));
     let content = completed_content(&outcome);
     assert!(content.contains("# Investigation answer"));
     assert!(!content.is_empty());
@@ -841,6 +845,14 @@ fn malformed_exhaustion_provider_budget_timeout_cancel_preserve_final_reserve() 
             .any(|stage| stage.role == InvestigationRole::Synthesizer && stage.started),
         "deadline must not spend the final-answer reserve"
     );
+    let deadline = stages
+        .iter()
+        .find(|stage| {
+            stage.role == InvestigationRole::CausalSynthesizer
+                && stage.outcome == Some(StageOutcomeKind::Deadline)
+        })
+        .expect("causal deadline has a terminal stage event");
+    assert!(deadline.detail.contains("1 provider attempt(s)"));
 
     let cancel = Arc::new(AtomicBool::new(false));
     struct CancelOnCausal {
@@ -877,7 +889,7 @@ fn malformed_exhaustion_provider_budget_timeout_cancel_preserve_final_reserve() 
         ]),
     };
     let rev = ScriptedBackend::new(vec![completion(empty_review())]);
-    let RunResult { outcome, .. } = run_pipeline(
+    let RunResult { outcome, stages } = run_pipeline(
         &cancelling,
         &rev,
         &candidates,
@@ -895,6 +907,14 @@ fn malformed_exhaustion_provider_budget_timeout_cancel_preserve_final_reserve() 
         outcome_label(&outcome)
     );
     assert!(!established(&outcome));
+    let cancelled = stages
+        .iter()
+        .find(|stage| {
+            stage.role == InvestigationRole::CausalSynthesizer
+                && stage.outcome == Some(StageOutcomeKind::Cancelled)
+        })
+        .expect("causal cancellation has a terminal stage event");
+    assert!(cancelled.detail.contains("1 provider attempt(s)"));
 }
 
 #[test]
