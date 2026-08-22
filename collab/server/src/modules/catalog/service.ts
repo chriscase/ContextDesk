@@ -118,9 +118,12 @@ export class CatalogService {
     );
   }
 
+  // Resolves a source for new attributions (imports). Retired sources stay
+  // visible via list/get for historical attribution but cannot be reused here.
   async requireSource(id: string): Promise<SourceV1> {
     const found = await this.get(id);
     if (!found) throw new Error("source not found");
+    if (found.lifecycle === "retired") throw new Error("source is retired");
     return found;
   }
 }
