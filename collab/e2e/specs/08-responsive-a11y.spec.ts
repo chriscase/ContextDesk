@@ -50,17 +50,12 @@ test.describe("responsive layout and basic accessibility", () => {
     expect(box?.width ?? 0).toBeLessThanOrEqual(375);
     await expect(page.locator(".case-list")).toBeVisible();
     await expect(page.locator(".case-view")).toBeVisible();
-    const comparisonTable = page.getByRole("table", {
-      name: /Candidate comparison/,
-    });
-    await expect(comparisonTable).toBeVisible();
+    await expect(page.locator("table.experiment-lab__matrix")).toBeVisible();
 
     const narrowDocWidth = await page.evaluate(() => document.documentElement.scrollWidth);
     expect(narrowDocWidth).toBeLessThanOrEqual(375);
 
-    const wrap = page
-      .locator(".experiment-lab__matrix-wrap")
-      .filter({ has: comparisonTable });
+    const wrap = page.locator(".experiment-lab__matrix-wrap");
     const wrapMetrics = await wrap.evaluate((el) => ({
       clientWidth: el.clientWidth,
       scrollWidth: el.scrollWidth,

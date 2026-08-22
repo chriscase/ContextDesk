@@ -1969,8 +1969,11 @@ export function ExperimentLab(props: {
                 </ul>
               </details>
               {crossRows.length ? (
-                <div className="experiment-lab__matrix-wrap experiment-lab__crossexam-wrap">
-                  <table className="experiment-lab__matrix experiment-lab__crossexam">
+                /* Deliberately NOT experiment-lab__matrix / __matrix-wrap: the
+                   browser qualification suite strict-locates those classes and
+                   must keep resolving to exactly one candidate matrix. */
+                <div className="experiment-lab__crossexam-wrap">
+                  <table className="experiment-lab__crossexam">
                     <caption>
                       Evidence cross-examination — recorded citations, benchmark anchors, and trace
                       coverage

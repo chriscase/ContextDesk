@@ -911,7 +911,8 @@
     grid-template-columns: 1fr;
   }
 
-  .experiment-lab__matrix-wrap {
+  .experiment-lab__matrix-wrap,
+  .experiment-lab__crossexam-wrap {
     margin-right: -0.35rem;
     padding-bottom: 0.2rem;
   }
@@ -1186,20 +1187,55 @@
   border-top: 1px solid var(--border);
 }
 
+/* The cross-examination table deliberately does not share the
+   experiment-lab__matrix / __matrix-wrap identity: browser qualification
+   strict-locates those classes and must keep resolving to exactly one
+   candidate matrix. The shared table treatment is reproduced here, scoped. */
 .experiment-lab__crossexam-wrap {
   overflow-x: auto;
 }
 
 .experiment-lab__crossexam {
+  width: 100%;
   min-width: 36rem;
+  margin: 0.75rem 0 0;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.experiment-lab__crossexam caption {
+  margin-bottom: 0.45rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: left;
 }
 
 .experiment-lab__crossexam th,
 .experiment-lab__crossexam td {
   min-width: 9.5rem;
+  padding: 0.48rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
   white-space: normal;
   vertical-align: top;
   overflow-wrap: anywhere;
+}
+
+.experiment-lab__crossexam th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.experiment-lab__crossexam thead th {
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__crossexam tbody th {
+  color: var(--fg);
+  font-weight: 600;
 }
 
 .experiment-lab__crossexam tbody th,
@@ -1211,12 +1247,8 @@
   background: var(--lab-surface);
 }
 
-/* The sticky first column needs opaque rows, so the shared zebra striping is
-   turned off here in favor of plain row borders. */
-.experiment-lab__crossexam tbody tr:nth-child(even) {
-  background: transparent;
-}
-
+/* No zebra striping here (unlike the matrix): the sticky first column needs
+   opaque rows, so plain row borders carry the row rhythm instead. */
 .experiment-lab__crossexam tfoot th,
 .experiment-lab__crossexam tfoot td {
   border-top: 2px solid var(--lab-border-strong);

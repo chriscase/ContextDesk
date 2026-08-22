@@ -1436,6 +1436,39 @@ describe("decision readiness cockpit", () => {
     ).toBe(2);
   });
 
+  it("keeps exactly one candidate matrix and one separately named cross-examination table", async () => {
+    stubExperiments([cockpitView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+
+    await screen.findByRole("table", { name: /Evidence cross-examination/ });
+    // The browser qualification suite strict-locates table.experiment-lab__matrix
+    // and .experiment-lab__matrix-wrap; the cross-examination table must never
+    // share that identity, and each table keeps its own accessible name.
+    const matrixTables = document.querySelectorAll("table.experiment-lab__matrix");
+    expect(matrixTables.length).toBe(1);
+    expect(document.querySelectorAll(".experiment-lab__matrix-wrap").length).toBe(1);
+    const crossexamTables = document.querySelectorAll("table.experiment-lab__crossexam");
+    expect(crossexamTables.length).toBe(1);
+    const crossexam = crossexamTables[0] as HTMLElement;
+    expect(crossexam.classList.contains("experiment-lab__matrix")).toBe(false);
+    expect(crossexam.parentElement?.classList.contains("experiment-lab__crossexam-wrap")).toBe(
+      true,
+    );
+    expect(crossexam.parentElement?.classList.contains("experiment-lab__matrix-wrap")).toBe(
+      false,
+    );
+    expect(
+      within(matrixTables[0] as HTMLElement).getByText(
+        "Candidate comparison — observed run facts and review signals",
+      ),
+    ).toBeTruthy();
+    expect(
+      within(crossexam).getByText(
+        /Evidence cross-examination — recorded citations, benchmark anchors, and trace/,
+      ),
+    ).toBeTruthy();
+  });
+
   it("focuses one lane while keeping every other lane visible and unfiltered", async () => {
     stubExperiments([cockpitView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
