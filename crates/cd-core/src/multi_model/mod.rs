@@ -26,10 +26,14 @@
 //!   already-validated findings, never a pair the host did not record.
 //! * Causal establishment is never produced here. The final synthesis reuses
 //!   [`crate::investigation_answer::validate_model_answer`], whose
-//!   `root_cause_established` requires host `Cause` provenance.
+//!   `root_cause_established` requires host `Cause` provenance. An isolated
+//!   host-bounded cross-candidate contract lives in [`causal_synthesis`] and
+//!   is not wired into the live pipeline in this slice.
 //! * Every dynamic value that could be displayed passes through the shared
 //!   presentation boundary ([`crate::investigation_answer::literal_span`]).
 
+/// Isolated host-bounded cross-candidate causal-synthesis contract.
+pub mod causal_synthesis;
 pub mod contracts;
 /// Bounded provider execution for contribution proposals.
 pub mod contribution_pipeline;
@@ -39,6 +43,7 @@ pub mod pipeline;
 /// Versioned, provider-neutral triage policy and pure preflight compiler.
 pub mod triage_policy;
 
+pub use causal_synthesis::*;
 pub use contracts::*;
 pub use contribution_pipeline::*;
 pub use contributions::*;
