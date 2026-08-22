@@ -186,6 +186,557 @@ function truncateText(value: string, max = 96): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
+// ————— Decision-readiness cockpit projections —————
+// Every builder below restates facts already present in the experiment view.
+// Nothing here ranks, scores, infers a winner, or persists state: the same
+// view always produces the same rows, facets, and queue, in the same order.
+
+interface EvidenceCellFacts {
+  recorded: boolean;
+  roles: string[];
+  matchedGold: boolean;
+  missingGold: boolean;
+  extraGold: boolean;
+  benchmarkRoleDiffers: string | null;
+}
+
+interface EvidenceCrossRow {
+  evidenceRef: string;
+  inGold: boolean | null;
+  conflict: boolean;
+  singleLane: boolean;
+  uncitedAnchor: boolean;
+  cells: Record<string, EvidenceCellFacts>;
+}
+
+function buildEvidenceCrossRows(view: ExperimentView): EvidenceCrossRow[] {
+  const rows = new Map<string, EvidenceCrossRow>();
+  const candidateIds = view.candidates.map((row) => row.candidateId);
+  const ensure = (evidenceRef: string): EvidenceCrossRow => {
+    let row = rows.get(evidenceRef);
+    if (!row) {
+      const cells: Record<string, EvidenceCellFacts> = {};
+      for (const candidateId of candidateIds) {
+        cells[candidateId] = {
+          recorded: false,
+          roles: [],
+          matchedGold: false,
+          missingGold: false,
+          extraGold: false,
+          benchmarkRoleDiffers: null,
+        };
+      }
+      row = {
+        evidenceRef,
+        inGold: null,
+        conflict: false,
+        singleLane: false,
+        uncitedAnchor: false,
+        cells,
+      };
+      rows.set(evidenceRef, row);
+    }
+    return row;
+  };
+  const cite = (evidenceRef: string, candidateId: string, role?: string) => {
+    const cell = ensure(evidenceRef).cells[candidateId];
+    if (!cell) return;
+    cell.recorded = true;
+    if (role && !cell.roles.includes(role)) cell.roles.push(role);
+  };
+  for (const anchor of view.agreement.sharedAnchors) {
+    for (const candidateId of anchor.candidateIds) cite(anchor.evidenceRef, candidateId, anchor.role);
+  }
+  for (const conflictRow of view.agreement.roleConflicts) {
+    ensure(conflictRow.evidenceRef).conflict = true;
+    for (const assignment of conflictRow.assignments) {
+      cite(conflictRow.evidenceRef, assignment.candidateId, assignment.role);
+    }
+  }
+  for (const specific of view.agreement.candidateSpecific) {
+    for (const evidenceRef of specific.evidenceRefs) cite(evidenceRef, specific.candidateId);
+  }
+  for (const evidenceRef of view.gold?.evidenceAnchors ?? []) ensure(evidenceRef);
+  for (const alignment of view.alignments ?? []) {
+    for (const evidenceRef of alignment.matchedAnchors) {
+      cite(evidenceRef, alignment.candidateId);
+      const cell = rows.get(evidenceRef)?.cells[alignment.candidateId];
+      if (cell) cell.matchedGold = true;
+    }
+    for (const evidenceRef of alignment.missingAnchors) {
+      const cell = ensure(evidenceRef).cells[alignment.candidateId];
+      if (cell) cell.missingGold = true;
+    }
+    for (const evidenceRef of alignment.extraAnchors) {
+      cite(evidenceRef, alignment.candidateId);
+      const cell = rows.get(evidenceRef)?.cells[alignment.candidateId];
+      if (cell) cell.extraGold = true;
+    }
+    for (const mismatch of alignment.roleMismatches ?? []) {
+      cite(mismatch.evidenceRef, alignment.candidateId, mismatch.role);
+      const cell = rows.get(mismatch.evidenceRef)?.cells[alignment.candidateId];
+      if (cell) cell.benchmarkRoleDiffers = mismatch.role;
+    }
+  }
+  for (const shared of view.comparison?.sharedEvidence ?? []) {
+    for (const candidateId of shared.candidateIds) cite(shared.evidenceRef, candidateId);
+  }
+  for (const unique of view.comparison?.uniqueEvidence ?? []) {
+    for (const evidenceRef of unique.evidenceRefs) cite(evidenceRef, unique.candidateId);
+  }
+  for (const convergence of view.comparison?.convergence ?? []) {
+    for (const candidateId of convergence.candidateIds) cite(convergence.evidenceRef, candidateId);
+  }
+  const goldAnchors = view.gold ? new Set(view.gold.evidenceAnchors) : null;
+  const result = [...rows.values()];
+  for (const row of result) {
+    row.inGold = goldAnchors ? goldAnchors.has(row.evidenceRef) : null;
+    const citedBy = candidateIds.filter((candidateId) => row.cells[candidateId]?.recorded);
+    row.singleLane = candidateIds.length > 1 && citedBy.length === 1;
+    row.uncitedAnchor = row.inGold === true && citedBy.length === 0;
+  }
+  return result;
+}
+
+interface TraceCoverageFact {
+  candidateId: string;
+  hasTrace: boolean;
+  completeness: string;
+  refsInEvents: number;
+  totalRefs: number;
+}
+
+function buildTraceCoverage(view: ExperimentView, rows: EvidenceCrossRow[]): TraceCoverageFact[] {
+  return view.candidates.map((candidate) => {
+    const trace = (view.traces ?? []).find((row) => row.candidateId === candidate.candidateId);
+    if (!trace) {
+      return {
+        candidateId: candidate.candidateId,
+        hasTrace: false,
+        completeness: "unknown",
+        refsInEvents: 0,
+        totalRefs: rows.length,
+      };
+    }
+    const eventRefs = new Set<string>();
+    for (const event of trace.events) {
+      for (const evidenceRef of event.evidenceRefs) eventRefs.add(evidenceRef);
+    }
+    return {
+      candidateId: candidate.candidateId,
+      hasTrace: true,
+      completeness: trace.completeness,
+      refsInEvents: rows.filter((row) => eventRefs.has(row.evidenceRef)).length,
+      totalRefs: rows.length,
+    };
+  });
+}
+
+function traceCoverageLabel(fact: TraceCoverageFact): string {
+  if (!fact.hasTrace) return "no trace recorded — coverage unknown";
+  const counted = `${fact.refsInEvents} of ${fact.totalRefs} cross-examined refs appear in its events`;
+  if (fact.completeness === "exact") return `complete trace — ${counted}`;
+  const kind = fact.completeness === "partial" ? "partial trace" : "trace coverage unknown";
+  return `${kind} — ${counted}; the rest stay unknown`;
+}
+
+interface ReviewQueueItem {
+  id: string;
+  facetId: string;
+  category: string;
+  text: string;
+  href: string;
+  hrefLabel: string;
+  candidateIds: string[];
+}
+
+// Fixed category order. The queue is a projection of recorded facts, never a
+// priority ranking: same record in, same queue out, top to bottom.
+const REVIEW_QUEUE_CATEGORIES = [
+  "Run completion",
+  "Recorded conflicts",
+  "Single-lane evidence",
+  "Unknown measurements",
+  "Trace completeness",
+  "Human observations",
+  "Benchmark comparison",
+  "Decision state",
+] as const;
+
+function buildReviewQueue(view: ExperimentView): ReviewQueueItem[] {
+  const items: ReviewQueueItem[] = [];
+  const label = (candidateId: string): string =>
+    view.candidates.find((row) => row.candidateId === candidateId)?.modelLabel ?? candidateId;
+  const readable = (summary: string): string =>
+    view.candidates.reduce((text, row) => text.split(row.candidateId).join(row.modelLabel), summary);
+  const push = (item: Omit<ReviewQueueItem, "id">) => {
+    items.push({ ...item, id: `${item.category}:${items.length}` });
+  };
+  for (const candidate of view.candidates) {
+    if (candidate.runStatus !== "completed") {
+      push({
+        facetId: "completion",
+        category: "Run completion",
+        text: `${candidate.modelLabel} run is recorded as ${candidate.runStatus}, not completed`,
+        href: "#candidate-comparison-heading",
+        hrefLabel: "open run facts",
+        candidateIds: [candidate.candidateId],
+      });
+    }
+  }
+  for (const conflictRow of view.agreement.roleConflicts) {
+    push({
+      facetId: "divergence",
+      category: "Recorded conflicts",
+      text: `Role conflict recorded on ${conflictRow.evidenceRef} — ${conflictRow.assignments
+        .map((assignment) => `${label(assignment.candidateId)} as ${assignment.role}`)
+        .join("; ")}`,
+      href: "#cross-exam-heading",
+      hrefLabel: "open cross-examination",
+      candidateIds: conflictRow.assignments.map((assignment) => assignment.candidateId),
+    });
+  }
+  for (const divergenceRow of view.comparison?.divergence ?? []) {
+    push({
+      facetId: "divergence",
+      category: "Recorded conflicts",
+      text: `Recorded ${divergenceRow.kind} divergence — ${readable(divergenceRow.summary)}`,
+      href: "#strategy-heading",
+      hrefLabel: "open strategy comparison",
+      candidateIds: [],
+    });
+  }
+  for (const specific of view.agreement.candidateSpecific) {
+    if (!specific.evidenceRefs.length) continue;
+    push({
+      facetId: "divergence",
+      category: "Single-lane evidence",
+      text: `Only ${label(specific.candidateId)} cites ${specific.evidenceRefs.join(", ")} — no other lane corroborates it`,
+      href: "#cross-exam-heading",
+      hrefLabel: "open cross-examination",
+      candidateIds: [specific.candidateId],
+    });
+  }
+  for (const candidate of view.candidates) {
+    const unknownFacts = [
+      candidate.observedLatency.status === "unknown" ? "latency" : null,
+      candidate.cost.status === "unknown" ? "cost" : null,
+      candidate.usage.status === "unknown" ? "usage" : null,
+    ].filter((fact): fact is string => fact !== null);
+    if (unknownFacts.length) {
+      push({
+        facetId: "measurements",
+        category: "Unknown measurements",
+        text: `${candidate.modelLabel} has no recorded ${unknownFacts.join(", ")}`,
+        href: "#candidate-comparison-heading",
+        hrefLabel: "open run facts",
+        candidateIds: [candidate.candidateId],
+      });
+    }
+  }
+  for (const candidate of view.candidates) {
+    const trace = (view.traces ?? []).find((row) => row.candidateId === candidate.candidateId);
+    if (!trace) {
+      push({
+        facetId: "traces",
+        category: "Trace completeness",
+        text: `${candidate.modelLabel} has no recorded interaction trace`,
+        href: "#strategy-heading",
+        hrefLabel: "open strategy paths",
+        candidateIds: [candidate.candidateId],
+      });
+      continue;
+    }
+    if (trace.completeness !== "exact") {
+      push({
+        facetId: "traces",
+        category: "Trace completeness",
+        text: `${candidate.modelLabel} trace is ${
+          trace.completeness === "partial" ? "partial" : "of unknown coverage"
+        } — unproven steps stay unknown`,
+        href: "#strategy-heading",
+        hrefLabel: "open strategy paths",
+        candidateIds: [candidate.candidateId],
+      });
+    }
+    if (trace.unknowns.length) {
+      push({
+        facetId: "traces",
+        category: "Trace completeness",
+        text: `${candidate.modelLabel} trace leaves ${trace.unknowns.join(", ")} unknown`,
+        href: "#strategy-heading",
+        hrefLabel: "open strategy paths",
+        candidateIds: [candidate.candidateId],
+      });
+    }
+  }
+  for (const candidate of view.candidates) {
+    const reviewed = view.observations.some((row) => row.candidateId === candidate.candidateId);
+    if (!reviewed) {
+      push({
+        facetId: "observations",
+        category: "Human observations",
+        text: `${candidate.modelLabel} has no recorded human helpfulness observation`,
+        href: "#helpfulness-heading",
+        hrefLabel: "open helpfulness",
+        candidateIds: [candidate.candidateId],
+      });
+    }
+  }
+  if (!view.gold) {
+    push({
+      facetId: "benchmark",
+      category: "Benchmark comparison",
+      text: "No gold benchmark is recorded — benchmark comparison stays unknown for every lane",
+      href: "#gold-alignment-heading",
+      hrefLabel: "open gold alignment",
+      candidateIds: [],
+    });
+  }
+  for (const alignment of view.alignments ?? []) {
+    if (alignment.status === "unknown" && view.gold) {
+      push({
+        facetId: "benchmark",
+        category: "Benchmark comparison",
+        text: `${label(alignment.candidateId)} is not compared against the benchmark`,
+        href: "#gold-alignment-heading",
+        hrefLabel: "open gold alignment",
+        candidateIds: [alignment.candidateId],
+      });
+    } else if (alignment.status === "unscored") {
+      push({
+        facetId: "benchmark",
+        category: "Benchmark comparison",
+        text: `${label(alignment.candidateId)} cited no evidence to compare against the benchmark`,
+        href: "#gold-alignment-heading",
+        hrefLabel: "open gold alignment",
+        candidateIds: [alignment.candidateId],
+      });
+    }
+    if (alignment.missingAnchors.length) {
+      push({
+        facetId: "benchmark",
+        category: "Benchmark comparison",
+        text: `${label(alignment.candidateId)} does not cite benchmark anchor${
+          alignment.missingAnchors.length === 1 ? "" : "s"
+        } ${alignment.missingAnchors.join(", ")}`,
+        href: "#cross-exam-heading",
+        hrefLabel: "open cross-examination",
+        candidateIds: [alignment.candidateId],
+      });
+    }
+    if (alignment.extraAnchors.length) {
+      push({
+        facetId: "benchmark",
+        category: "Benchmark comparison",
+        text: `${label(alignment.candidateId)} cites ${alignment.extraAnchors.join(", ")} outside the benchmark anchors`,
+        href: "#cross-exam-heading",
+        hrefLabel: "open cross-examination",
+        candidateIds: [alignment.candidateId],
+      });
+    }
+    if ((alignment.roleMismatches ?? []).length) {
+      push({
+        facetId: "benchmark",
+        category: "Benchmark comparison",
+        text: `${label(alignment.candidateId)} records a different role than the benchmark on ${(
+          alignment.roleMismatches ?? []
+        )
+          .map((mismatch) => mismatch.evidenceRef)
+          .join(", ")}`,
+        href: "#cross-exam-heading",
+        hrefLabel: "open cross-examination",
+        candidateIds: [alignment.candidateId],
+      });
+    }
+  }
+  const latestDecision = view.decisions.at(-1);
+  if (!latestDecision) {
+    push({
+      facetId: "decision",
+      category: "Decision state",
+      text: "No human decision is recorded for this experiment",
+      href: "#decision-heading",
+      hrefLabel: "open decision",
+      candidateIds: [],
+    });
+  } else if (latestDecision.status !== "accepted") {
+    push({
+      facetId: "decision",
+      category: "Decision state",
+      text: `Decision r${latestDecision.revision} is ${latestDecision.status} and awaits human adjudication`,
+      href: "#decision-heading",
+      hrefLabel: "open decision",
+      candidateIds: [],
+    });
+  }
+  return items;
+}
+
+interface ReadinessFacet {
+  id: string;
+  label: string;
+  state: string;
+  meaning: string;
+  href: string;
+  hrefLabel: string;
+}
+
+function buildReadinessFacets(view: ExperimentView): ReadinessFacet[] {
+  const laneCount = view.candidates.length;
+  const plural = (count: number): string => (count === 1 ? "" : "s");
+  const statusCounts: [string, number][] = [];
+  for (const candidate of view.candidates) {
+    const entry = statusCounts.find(([status]) => status === candidate.runStatus);
+    if (entry) entry[1] += 1;
+    else statusCounts.push([candidate.runStatus, 1]);
+  }
+  const sharedCount = view.agreement.sharedAnchors.length;
+  const conflictCount = view.agreement.roleConflicts.length;
+  const singleLaneSets = view.agreement.candidateSpecific.filter(
+    (row) => row.evidenceRefs.length,
+  ).length;
+  const strategyDivergences = (view.comparison?.divergence ?? []).length;
+  const divergenceParts = [
+    conflictCount ? `${conflictCount} role conflict${plural(conflictCount)}` : null,
+    singleLaneSets ? `${singleLaneSets} single-lane citation set${plural(singleLaneSets)}` : null,
+    strategyDivergences
+      ? `${strategyDivergences} strategy divergence${plural(strategyDivergences)}`
+      : null,
+  ].filter((part): part is string => part !== null);
+  let unknownMeasurements = 0;
+  for (const candidate of view.candidates) {
+    if (candidate.observedLatency.status === "unknown") unknownMeasurements += 1;
+    if (candidate.cost.status === "unknown") unknownMeasurements += 1;
+    if (candidate.usage.status === "unknown") unknownMeasurements += 1;
+  }
+  let completeTraces = 0;
+  let partialTraces = 0;
+  let unknownTraces = 0;
+  let missingTraces = 0;
+  for (const candidate of view.candidates) {
+    const trace = (view.traces ?? []).find((row) => row.candidateId === candidate.candidateId);
+    if (!trace) missingTraces += 1;
+    else if (trace.completeness === "exact") completeTraces += 1;
+    else if (trace.completeness === "partial") partialTraces += 1;
+    else unknownTraces += 1;
+  }
+  const traceParts = [
+    completeTraces ? `${completeTraces} complete` : null,
+    partialTraces ? `${partialTraces} partial` : null,
+    unknownTraces ? `${unknownTraces} unknown coverage` : null,
+    missingTraces ? `${missingTraces} missing` : null,
+  ].filter((part): part is string => part !== null);
+  const reviewedLanes = view.candidates.filter((candidate) =>
+    view.observations.some((row) => row.candidateId === candidate.candidateId),
+  ).length;
+  const latestDecision = view.decisions.at(-1);
+  const alignmentCounts: [string, number][] = [];
+  for (const alignment of view.alignments ?? []) {
+    const entry = alignmentCounts.find(([status]) => status === alignment.status);
+    if (entry) entry[1] += 1;
+    else alignmentCounts.push([alignment.status, 1]);
+  }
+  return [
+    {
+      id: "completion",
+      label: "Candidate completion",
+      state: laneCount
+        ? `${laneCount} lane${plural(laneCount)} · ${statusCounts
+            .map(([status, count]) => `${count} ${status}`)
+            .join(" · ")}`
+        : "no candidate lanes recorded",
+      meaning:
+        "Run status for every candidate lane, exactly as imported. A lane that did not complete contributes partial facts at most.",
+      href: "#candidate-comparison-heading",
+      hrefLabel: "run facts",
+    },
+    {
+      id: "agreement",
+      label: "Shared evidence",
+      state: sharedCount
+        ? `${sharedCount} shared anchor${plural(sharedCount)} recorded`
+        : "none recorded",
+      meaning:
+        "Evidence anchors more than one lane cites. Agreement is not proof of correctness — it only narrows where to look.",
+      href: "#evidence-heading",
+      hrefLabel: "evidence map",
+    },
+    {
+      id: "divergence",
+      label: "Divergence",
+      state: divergenceParts.length ? divergenceParts.join(" · ") : "none recorded",
+      meaning:
+        "Recorded role conflicts, single-lane evidence, and strategy divergences. Differences are leads to investigate, not a ranking.",
+      href: "#cross-exam-heading",
+      hrefLabel: "cross-examination",
+    },
+    {
+      id: "measurements",
+      label: "Unknown measurements",
+      state: unknownMeasurements
+        ? `${unknownMeasurements} measurement${plural(unknownMeasurements)} unknown`
+        : "no unknown measurements recorded",
+      meaning:
+        "Latency, cost, and usage facts the record leaves unknown. Unknown stays unknown until an import resolves it.",
+      href: "#candidate-comparison-heading",
+      hrefLabel: "run facts",
+    },
+    {
+      id: "traces",
+      label: "Trace completeness",
+      state: traceParts.length ? traceParts.join(" · ") : "no candidate lanes recorded",
+      meaning:
+        "Whether each lane's interaction trace is complete, partial, or missing. Partial and missing traces cannot prove what happened in unrecorded steps.",
+      href: "#strategy-heading",
+      hrefLabel: "strategy paths",
+    },
+    {
+      id: "observations",
+      label: "Human observations",
+      state: `${view.observations.length} recorded · ${reviewedLanes} of ${laneCount} lane${plural(
+        laneCount,
+      )} reviewed`,
+      meaning:
+        "Human helpfulness observations recorded per lane. They describe usefulness as judged by a person, separate from any benchmark.",
+      href: "#helpfulness-heading",
+      hrefLabel: "helpfulness",
+    },
+    {
+      id: "decision",
+      label: "Decision state",
+      state: latestDecision
+        ? `${latestDecision.status} r${latestDecision.revision}${
+            latestDecision.status === "accepted" ? "" : " — not accepted"
+          }`
+        : "none recorded",
+      meaning:
+        "The latest recorded human decision and its revision. Only an accepted decision is adjudicated; a proposal is not an outcome.",
+      href: "#decision-heading",
+      hrefLabel: "decision",
+    },
+    {
+      id: "benchmark",
+      label: "Benchmark state",
+      state: view.gold
+        ? `v${view.gold.version} recorded · ${view.gold.evidenceAnchors.length} anchor${plural(
+            view.gold.evidenceAnchors.length,
+          )}${
+            alignmentCounts.length
+              ? ` · alignment ${alignmentCounts
+                  .map(([status, count]) => `${count} ${status}`)
+                  .join(", ")}`
+              : ""
+          }`
+        : "none recorded — alignment stays unknown",
+      meaning:
+        "The recorded gold benchmark, if any. A gold reference is a human benchmark decision, not an infallible truth claim.",
+      href: "#gold-alignment-heading",
+      hrefLabel: "gold alignment",
+    },
+  ];
+}
+
 async function responseError(response: Response, fallback: string): Promise<string> {
   try {
     const body: unknown = await response.json();
@@ -231,6 +782,8 @@ export function ExperimentLab(props: {
   const [error, setError] = useState<string | null>(null);
   const [exported, setExported] = useState<ShareSafeExport | null>(null);
   const [presence, setPresence] = useState<PresenceView | null>(null);
+  // Ephemeral highlight only — focus is never persisted and never filters data.
+  const [focusedCandidateId, setFocusedCandidateId] = useState<string | null>(null);
   const refreshGeneration = useRef(0);
 
   const refresh = useCallback(async (preferredId?: string) => {
@@ -275,6 +828,7 @@ export function ExperimentLab(props: {
     setExported(null);
     setError(null);
     setPresence(null);
+    setFocusedCandidateId(null);
     void refresh();
   }, [props.caseId]);
 
@@ -400,11 +954,26 @@ export function ExperimentLab(props: {
   if (current && !current.gold) {
     scanUnknowns.push("Gold benchmark — none recorded for this experiment");
   }
+  // Cockpit projections — pure restatements of the current view (see builders).
+  const crossRows = current ? buildEvidenceCrossRows(current) : [];
+  const traceCoverage = current ? buildTraceCoverage(current, crossRows) : [];
+  const reviewQueue = current ? buildReviewQueue(current) : [];
+  const readinessFacets = current ? buildReadinessFacets(current) : [];
+  const queuedByFacet = (facetId: string): number =>
+    reviewQueue.filter((item) => item.facetId === facetId).length;
+  // Guard against a stale id after refresh: focus only ever points at a lane
+  // that exists in the current experiment, otherwise it silently resets.
+  const focusedCandidate =
+    current?.candidates.find((row) => row.candidateId === focusedCandidateId) ?? null;
+  const focusQueueCount = focusedCandidate
+    ? reviewQueue.filter((item) => item.candidateIds.includes(focusedCandidate.candidateId)).length
+    : 0;
 
   function selectExperiment(id: string) {
     setActive(id);
     setExported(null);
     setError(null);
+    setFocusedCandidateId(null);
   }
 
   async function importPackage(event: FormEvent) {
@@ -983,14 +1552,254 @@ export function ExperimentLab(props: {
             </div>
             <nav className="experiment-lab__shortcuts" aria-label="Section shortcuts">
               <span>Jump to:</span>
+              <a href="#readiness-heading">Readiness</a>
+              <a href="#review-queue-heading">Review queue</a>
               <a href="#candidate-comparison-heading">Run facts</a>
               <a href="#evidence-heading">Evidence</a>
+              <a href="#cross-exam-heading">Cross-examination</a>
               <a href="#strategy-heading">Strategy paths</a>
               <a href="#helpfulness-heading">Helpfulness</a>
               <a href="#gold-alignment-heading">Gold alignment</a>
               <a href="#decision-heading">Decision</a>
               {canExport ? <a href="#export-heading">Export</a> : null}
             </nav>
+          </section>
+          <section
+            className="experiment-lab__section experiment-lab__readiness"
+            aria-labelledby="readiness-heading"
+          >
+            <div className="experiment-lab__section-heading">
+              <div>
+                <p className="experiment-lab__eyebrow">War-room cockpit</p>
+                <h4 id="readiness-heading" className="experiment-lab__heading">
+                  Decision readiness
+                </h4>
+              </div>
+              <span className="experiment-lab__section-kicker">Recorded state · you judge sufficiency</span>
+            </div>
+            <p className="experiment-lab__section-note">
+              Eight facets of the record, stated as facts. Whether the record is sufficient for a
+              decision is a human judgment — this panel only shows what is recorded and what stays
+              unknown, and the review queue below lists everything that still needs human eyes.
+            </p>
+            <div className="experiment-lab__focus" role="group" aria-label="Candidate focus">
+              <span className="experiment-lab__focus-label">Focus a lane</span>
+              <button
+                type="button"
+                className="experiment-lab__focus-chip"
+                aria-pressed={focusedCandidate === null}
+                onClick={() => setFocusedCandidateId(null)}
+              >
+                All lanes
+              </button>
+              {current.candidates.map((row) => (
+                <button
+                  key={row.candidateId}
+                  type="button"
+                  className="experiment-lab__focus-chip"
+                  aria-pressed={focusedCandidate?.candidateId === row.candidateId}
+                  onClick={() =>
+                    setFocusedCandidateId((previous) =>
+                      previous === row.candidateId ? null : row.candidateId,
+                    )
+                  }
+                >
+                  {row.modelLabel}
+                </button>
+              ))}
+            </div>
+            {focusedCandidate ? (
+              <p className="experiment-lab__focus-status" role="status">
+                Focused on {focusedCandidate.modelLabel}. Every other lane stays visible in every
+                table and list — focus highlights, it never filters the decision basis.
+              </p>
+            ) : null}
+            {focusedCandidate ? (
+              <article
+                className="experiment-lab__focus-digest"
+                aria-labelledby="focus-digest-heading"
+              >
+                <div className="experiment-lab__section-heading">
+                  <div>
+                    <p className="experiment-lab__eyebrow">Focused lane digest</p>
+                    <h5 id="focus-digest-heading" className="experiment-lab__focus-digest-title">
+                      {focusedCandidate.modelLabel}
+                    </h5>
+                    {focusedCandidate.candidateId !== focusedCandidate.modelLabel ? (
+                      <p className="experiment-lab__candidate-id">{focusedCandidate.candidateId}</p>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    className="experiment-lab__focus-chip"
+                    onClick={() => setFocusedCandidateId(null)}
+                  >
+                    Show all lanes equally
+                  </button>
+                </div>
+                <dl className="experiment-lab__export-facts experiment-lab__focus-facts">
+                  <div>
+                    <dt>Run status</dt>
+                    <dd>{focusedCandidate.runStatus}</dd>
+                  </div>
+                  <div>
+                    <dt>Latency</dt>
+                    <dd>{latencyLabel(focusedCandidate.observedLatency)}</dd>
+                  </div>
+                  <div>
+                    <dt>Cost</dt>
+                    <dd>{focusedCandidate.cost.status}</dd>
+                  </div>
+                  <div>
+                    <dt>Usage</dt>
+                    <dd>{focusedCandidate.usage.status}</dd>
+                  </div>
+                  <div>
+                    <dt>Helpfulness</dt>
+                    <dd>{focusedCandidate.helpfulnessState}</dd>
+                  </div>
+                  <div>
+                    <dt>Gold state</dt>
+                    <dd>{focusedCandidate.goldState}</dd>
+                  </div>
+                </dl>
+                <ul className="experiment-lab__detail-list">
+                  <li>
+                    Evidence only this lane cites:{" "}
+                    {current.agreement.candidateSpecific
+                      .find((row) => row.candidateId === focusedCandidate.candidateId)
+                      ?.evidenceRefs.join(", ") || "none recorded"}
+                  </li>
+                  <li>
+                    Role conflicts involving this lane:{" "}
+                    {current.agreement.roleConflicts
+                      .filter((row) =>
+                        row.assignments.some(
+                          (assignment) => assignment.candidateId === focusedCandidate.candidateId,
+                        ),
+                      )
+                      .map((row) => row.evidenceRef)
+                      .join(", ") || "none recorded"}
+                  </li>
+                  <li>
+                    Benchmark comparison:{" "}
+                    {(() => {
+                      const alignment = (current.alignments ?? []).find(
+                        (row) => row.candidateId === focusedCandidate.candidateId,
+                      );
+                      return alignment
+                        ? ALIGNMENT_STATUS_LABELS[alignment.status] ?? alignment.status
+                        : "no alignment recorded";
+                    })()}
+                  </li>
+                  <li>
+                    Trace:{" "}
+                    {(() => {
+                      const trace = (current.traces ?? []).find(
+                        (row) => row.candidateId === focusedCandidate.candidateId,
+                      );
+                      return trace
+                        ? `${TRACE_SOURCE_LABELS[trace.sourceKind] ?? trace.sourceKind} · ${
+                            TRACE_COMPLETENESS_LABELS[trace.completeness] ?? trace.completeness
+                          }`
+                        : "no trace recorded";
+                    })()}
+                  </li>
+                  <li>
+                    Human observations for this lane:{" "}
+                    {
+                      current.observations.filter(
+                        (row) => row.candidateId === focusedCandidate.candidateId,
+                      ).length
+                    }{" "}
+                    recorded
+                  </li>
+                  <li>
+                    Review queue entries naming this lane: {focusQueueCount} —{" "}
+                    <a href="#review-queue-heading">open the queue</a>
+                  </li>
+                </ul>
+                <p className="experiment-lab__scan-caveat">
+                  Focus restates recorded facts for one lane. The comparison above and below keeps
+                  every lane — the decision basis is never trimmed to the focused lane.
+                </p>
+              </article>
+            ) : null}
+            <div className="experiment-lab__facets">
+              {readinessFacets.map((facet) => (
+                <article key={facet.id} className="experiment-lab__facet">
+                  <h5 className="experiment-lab__facet-title">{facet.label}</h5>
+                  <p className="experiment-lab__facet-state">{facet.state}</p>
+                  <p className="experiment-lab__facet-queue">
+                    {queuedByFacet(facet.id)
+                      ? `${queuedByFacet(facet.id)} item${
+                          queuedByFacet(facet.id) === 1 ? "" : "s"
+                        } in the review queue`
+                      : "nothing queued from this facet"}
+                  </p>
+                  <details className="experiment-lab__facet-details">
+                    <summary>What this measures</summary>
+                    <p>{facet.meaning}</p>
+                    <a href={facet.href}>Open {facet.hrefLabel}</a>
+                  </details>
+                </article>
+              ))}
+            </div>
+          </section>
+          <section
+            className="experiment-lab__section experiment-lab__queue"
+            aria-labelledby="review-queue-heading"
+          >
+            <div className="experiment-lab__section-heading">
+              <div>
+                <p className="experiment-lab__eyebrow">Deterministic projection</p>
+                <h4 id="review-queue-heading" className="experiment-lab__heading">
+                  Human review queue
+                </h4>
+              </div>
+              <span className="experiment-lab__section-kicker">Fixed order · not a priority ranking</span>
+            </div>
+            <p className="experiment-lab__section-note">
+              Every entry restates a recorded conflict, gap, unknown, incomplete trace, missing
+              observation, or decision state — grouped in a fixed category order. The same record
+              always produces the same queue; nothing here is scored or ranked.
+            </p>
+            {reviewQueue.length ? (
+              REVIEW_QUEUE_CATEGORIES.map((category) => {
+                const items = reviewQueue.filter((item) => item.category === category);
+                if (!items.length) return null;
+                return (
+                  <div key={category} className="experiment-lab__queue-group">
+                    <h5 className="experiment-lab__queue-category">
+                      {category}
+                      <span className="experiment-lab__queue-count">
+                        {items.length} item{items.length === 1 ? "" : "s"}
+                      </span>
+                    </h5>
+                    <ol className="experiment-lab__queue-list">
+                      {items.map((item) => (
+                        <li key={item.id}>
+                          <span className="experiment-lab__queue-text">{item.text}</span>{" "}
+                          <a className="experiment-lab__queue-link" href={item.href}>
+                            {item.hrefLabel}
+                          </a>
+                          {focusedCandidate &&
+                          item.candidateIds.includes(focusedCandidate.candidateId) ? (
+                            <span className="experiment-lab__focus-flag">involves focused lane</span>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                );
+              })
+            ) : (
+              <p className="experiment-lab__empty">
+                The recorded facts list no open conflicts, gaps, or unknowns for this experiment.
+                An empty queue does not certify correctness — it only means nothing further was
+                recorded.
+              </p>
+            )}
           </section>
           <section className="experiment-lab__gold" aria-label="Gold reference">
             {current.gold ? (
@@ -1047,9 +1856,19 @@ export function ExperimentLab(props: {
               </thead>
               <tbody>
                 {current.candidates.map((row) => (
-                  <tr key={row.candidateId}>
+                  <tr
+                    key={row.candidateId}
+                    className={
+                      focusedCandidate?.candidateId === row.candidateId
+                        ? "experiment-lab__matrix-row--focused"
+                        : undefined
+                    }
+                  >
                     <th scope="row">
                       {row.modelLabel}
+                      {focusedCandidate?.candidateId === row.candidateId ? (
+                        <span className="experiment-lab__focus-flag">focused</span>
+                      ) : null}
                       {row.candidateId !== row.modelLabel ? (
                         <span className="experiment-lab__candidate-id">{row.candidateId}</span>
                       ) : null}
@@ -1114,6 +1933,170 @@ export function ExperimentLab(props: {
                   <p className="experiment-lab__empty">No candidate-specific evidence recorded.</p>
                 )}
               </div>
+            </div>
+            <div className="experiment-lab__crossexam-block">
+              <h5 id="cross-exam-heading" className="experiment-lab__subheading experiment-lab__heading">
+                Evidence cross-examination
+              </h5>
+              <p className="experiment-lab__section-note">
+                Every recorded evidence reference, cross-examined lane by lane: who cites it, in
+                what recorded role, how it relates to the benchmark anchors, and how far each
+                lane&apos;s trace can vouch for it. Absence of a record is stated as “not
+                recorded”, never assumed to mean the lane ignored it.
+              </p>
+              <details className="experiment-lab__tools experiment-lab__crossexam-legend">
+                <summary>How to read this table</summary>
+                <ul className="experiment-lab__detail-list">
+                  <li>
+                    <span aria-hidden="true">●</span> cited — the lane&apos;s recorded citations
+                    include this evidence, with the recorded role when one exists.
+                  </li>
+                  <li>
+                    <span aria-hidden="true">○</span> not recorded — the record lists no citation
+                    of this evidence by that lane. Absence of a record is not proof the lane
+                    ignored it.
+                  </li>
+                  <li>
+                    The benchmark column states whether the reference is an anchor of the recorded
+                    gold benchmark — a human benchmark decision, not a truth claim. Without a
+                    benchmark it stays unknown.
+                  </li>
+                  <li>
+                    Trace coverage counts how many cross-examined references appear in each
+                    lane&apos;s recorded trace events. Partial or missing traces leave the rest
+                    unknown.
+                  </li>
+                </ul>
+              </details>
+              {crossRows.length ? (
+                <div className="experiment-lab__matrix-wrap experiment-lab__crossexam-wrap">
+                  <table className="experiment-lab__matrix experiment-lab__crossexam">
+                    <caption>
+                      Evidence cross-examination — recorded citations, benchmark anchors, and trace
+                      coverage
+                    </caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Evidence</th>
+                        {current.candidates.map((row) => (
+                          <th
+                            scope="col"
+                            key={row.candidateId}
+                            className={
+                              focusedCandidate?.candidateId === row.candidateId
+                                ? "experiment-lab__crossexam-col--focused"
+                                : undefined
+                            }
+                          >
+                            {row.modelLabel}
+                            {focusedCandidate?.candidateId === row.candidateId ? (
+                              <span className="experiment-lab__focus-flag">focused</span>
+                            ) : null}
+                          </th>
+                        ))}
+                        <th scope="col">Benchmark anchor</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {crossRows.map((row) => (
+                        <tr key={row.evidenceRef}>
+                          <th scope="row">
+                            <span className="experiment-lab__crossexam-ref">{row.evidenceRef}</span>
+                            {row.conflict ? (
+                              <span className="experiment-lab__crossexam-badge experiment-lab__crossexam-badge--conflict">
+                                role conflict
+                              </span>
+                            ) : null}
+                            {row.singleLane ? (
+                              <span className="experiment-lab__crossexam-badge">single lane</span>
+                            ) : null}
+                            {row.uncitedAnchor ? (
+                              <span className="experiment-lab__crossexam-badge">
+                                anchor no lane cites
+                              </span>
+                            ) : null}
+                          </th>
+                          {current.candidates.map((candidate) => {
+                            const cell = row.cells[candidate.candidateId];
+                            return (
+                              <td
+                                key={candidate.candidateId}
+                                className={
+                                  focusedCandidate?.candidateId === candidate.candidateId
+                                    ? "experiment-lab__crossexam-col--focused"
+                                    : undefined
+                                }
+                              >
+                                {cell?.recorded ? (
+                                  <>
+                                    <span className="experiment-lab__crossexam-mark" aria-hidden="true">
+                                      ●
+                                    </span>{" "}
+                                    cited
+                                    {cell.roles.length
+                                      ? ` as ${cell.roles.join(", ")}`
+                                      : " — role not recorded"}
+                                    {cell.matchedGold ? (
+                                      <small>matches a benchmark anchor</small>
+                                    ) : null}
+                                    {cell.extraGold ? (
+                                      <small>outside the benchmark anchors</small>
+                                    ) : null}
+                                    {cell.benchmarkRoleDiffers ? (
+                                      <small>
+                                        benchmark records a different relationship
+                                      </small>
+                                    ) : null}
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className="experiment-lab__crossexam-mark" aria-hidden="true">
+                                      ○
+                                    </span>{" "}
+                                    not recorded
+                                    {cell?.missingGold ? (
+                                      <small>benchmark anchor this lane does not cite</small>
+                                    ) : null}
+                                  </>
+                                )}
+                              </td>
+                            );
+                          })}
+                          <td>
+                            {row.inGold === null
+                              ? "unknown — no benchmark recorded"
+                              : row.inGold
+                                ? "anchor"
+                                : "not an anchor"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr>
+                        <th scope="row">Trace coverage</th>
+                        {traceCoverage.map((fact) => (
+                          <td
+                            key={fact.candidateId}
+                            className={
+                              focusedCandidate?.candidateId === fact.candidateId
+                                ? "experiment-lab__crossexam-col--focused"
+                                : undefined
+                            }
+                          >
+                            {traceCoverageLabel(fact)}
+                          </td>
+                        ))}
+                        <td>not applicable</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              ) : (
+                <p className="experiment-lab__empty">
+                  No evidence citations are recorded for this experiment yet.
+                </p>
+              )}
             </div>
           </section>
           <section className="experiment-lab__section" aria-labelledby="strategy-heading">
@@ -1203,10 +2186,20 @@ export function ExperimentLab(props: {
             <h5 className="experiment-lab__subheading">Strategy paths</h5>
             <div className="experiment-lab__paths">
               {(current.traces ?? []).map((trace) => (
-                <article key={trace.candidateId} className="experiment-lab__path">
+                <article
+                  key={trace.candidateId}
+                  className={
+                    focusedCandidate?.candidateId === trace.candidateId
+                      ? "experiment-lab__path experiment-lab__path--focused"
+                      : "experiment-lab__path"
+                  }
+                >
                   <header className="experiment-lab__path-header">
                     <div>
                       <p className="experiment-lab__eyebrow">Candidate path</p>
+                      {focusedCandidate?.candidateId === trace.candidateId ? (
+                        <span className="experiment-lab__focus-flag">focused</span>
+                      ) : null}
                       <h5 className="experiment-lab__path-title">{candidateLabel(trace.candidateId)}</h5>
                       {candidateLabel(trace.candidateId) !== trace.candidateId ? (
                         <p className="experiment-lab__path-id">{trace.candidateId}</p>

@@ -947,3 +947,381 @@
     padding: 0.7rem;
   }
 }
+
+/* ————— Decision-readiness cockpit ————— */
+/* The cockpit groups recorded facts; nothing in this styling may rank lanes.
+   Focus mode highlights — it must never dim other lanes below legibility or
+   hide them, because the decision basis always stays fully visible. */
+
+.experiment-lab__readiness {
+  border-color: var(--lab-border-strong);
+}
+
+.experiment-lab__facets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+}
+
+.experiment-lab__facet {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--bg);
+}
+
+.experiment-lab__facet-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__facet-state {
+  margin: 0;
+  color: var(--fg);
+  font-size: 0.88rem;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__facet-queue {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.experiment-lab__facet-details {
+  margin-top: auto;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.experiment-lab__facet-details summary {
+  cursor: pointer;
+  color: var(--fg);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.experiment-lab__facet-details p {
+  margin: 0.4rem 0;
+  line-height: 1.5;
+}
+
+.experiment-lab__facet-details a,
+.experiment-lab__queue-link,
+.experiment-lab__focus-digest a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.experiment-lab__facet-details a:hover,
+.experiment-lab__queue-link:hover,
+.experiment-lab__focus-digest a:hover {
+  text-decoration: underline;
+}
+
+.experiment-lab__facet-details summary:focus-visible,
+.experiment-lab__facet-details a:focus-visible,
+.experiment-lab__queue-link:focus-visible,
+.experiment-lab__focus-digest a:focus-visible,
+.experiment-lab__focus-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Candidate focus mode */
+.experiment-lab__focus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+}
+
+.experiment-lab__focus-label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__focus-chip {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__focus-chip[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.experiment-lab__focus-status {
+  margin: 0.6rem 0 0;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--lab-border-strong);
+  border-left-width: 3px;
+  border-radius: 0.45rem;
+  background: var(--lab-surface-raised);
+  color: var(--fg);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.experiment-lab__focus-flag {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.experiment-lab__focus-digest {
+  min-width: 0;
+  margin-top: 0.7rem;
+  padding: 0.75rem;
+  border: 1px solid var(--lab-border-strong);
+  border-radius: 0.6rem;
+  background: var(--bg);
+}
+
+.experiment-lab__focus-digest-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__focus-facts {
+  margin: 0.65rem 0 0.2rem;
+}
+
+/* Human review queue */
+.experiment-lab__queue-group {
+  margin-top: 0.75rem;
+}
+
+.experiment-lab__queue-category {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.45rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__queue-count {
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.experiment-lab__queue-list {
+  margin: 0.45rem 0 0;
+  padding-left: 1.35rem;
+}
+
+.experiment-lab__queue-list li {
+  margin: 0.35rem 0;
+  padding: 0.35rem 0.45rem 0.35rem 0.55rem;
+  border-left: 2px solid var(--lab-border-strong);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__queue-text {
+  margin-right: 0.35rem;
+}
+
+.experiment-lab__queue-link {
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+/* Evidence cross-examination */
+.experiment-lab__crossexam-block {
+  margin-top: 1rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--border);
+}
+
+.experiment-lab__crossexam-wrap {
+  overflow-x: auto;
+}
+
+.experiment-lab__crossexam {
+  min-width: 36rem;
+}
+
+.experiment-lab__crossexam th,
+.experiment-lab__crossexam td {
+  min-width: 9.5rem;
+  white-space: normal;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__crossexam tbody th,
+.experiment-lab__crossexam tfoot th {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 11rem;
+  background: var(--lab-surface);
+}
+
+/* The sticky first column needs opaque rows, so the shared zebra striping is
+   turned off here in favor of plain row borders. */
+.experiment-lab__crossexam tbody tr:nth-child(even) {
+  background: transparent;
+}
+
+.experiment-lab__crossexam tfoot th,
+.experiment-lab__crossexam tfoot td {
+  border-top: 2px solid var(--lab-border-strong);
+  border-bottom: none;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.experiment-lab__crossexam tfoot th {
+  color: var(--fg);
+}
+
+.experiment-lab__crossexam-ref {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.74rem;
+}
+
+.experiment-lab__crossexam-badge {
+  display: inline-block;
+  margin: 0.25rem 0.3rem 0 0;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.experiment-lab__crossexam-badge--conflict {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--warning);
+}
+
+.experiment-lab__crossexam-mark {
+  color: var(--accent);
+}
+
+.experiment-lab__crossexam td small {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.experiment-lab__crossexam-col--focused {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent), inset -2px 0 0 var(--accent);
+}
+
+.experiment-lab__matrix-row--focused th,
+.experiment-lab__matrix-row--focused td {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.experiment-lab__matrix-row--focused th {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.experiment-lab__path--focused {
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Deliberately no animation anywhere in the cockpit: motion here would only
+   decorate, theme flips would repaint mid-transition, and a motionless surface
+   respects prefers-reduced-motion by construction. */
+
+@media (max-width: 720px) {
+  .experiment-lab__facets {
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  }
+
+  .experiment-lab__queue-link {
+    white-space: normal;
+  }
+}
+
+@media (max-width: 480px) {
+  .experiment-lab__facets {
+    grid-template-columns: 1fr;
+  }
+
+  .experiment-lab__crossexam {
+    min-width: 32rem;
+    font-size: 0.72rem;
+  }
+
+  .experiment-lab__crossexam th,
+  .experiment-lab__crossexam td {
+    min-width: 8rem;
+  }
+
+  .experiment-lab__crossexam tbody th,
+  .experiment-lab__crossexam tfoot th {
+    min-width: 9rem;
+  }
+
+  .experiment-lab__focus-digest {
+    padding: 0.6rem;
+  }
+}
