@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">ContextDesk War Room operator journey</title>
+  <desc id="desc">A five-stage flow from human capture through bounded comparison and human decision to share-safe export, with the host trust boundary below the browser.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#f7f5ff"/><stop offset="1" stop-color="#eef8f7"/>
+    </linearGradient>
+    <linearGradient id="host" x1="0" x2="1">
+      <stop offset="0" stop-color="#193b5b"/><stop offset="1" stop-color="#245c69"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#17324d" flood-opacity=".14"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10z" fill="#55718b"/>
+    </marker>
+    <style>
+      .stage{fill:#fff;stroke:#b8c9d4;stroke-width:2}.num{fill:#4d5bd4}.numtext{fill:#fff;font:700 16px system-ui,sans-serif}.head{fill:#17324d;font:700 18px system-ui,sans-serif}.body{fill:#425b70;font:14px system-ui,sans-serif}.small{fill:#6c8192;font:12px system-ui,sans-serif}.hosthead{fill:#fff;font:700 17px system-ui,sans-serif}.hostbody{fill:#d8eef0;font:13px system-ui,sans-serif}.shield{fill:#b9f0dd;stroke:#2c8c78;stroke-width:2}
+    </style>
+  </defs>
+  <rect width="1200" height="560" rx="26" fill="url(#bg)"/>
+  <text x="52" y="52" class="head" font-size="25">The War Room: evidence → understanding → decision</text>
+  <text x="52" y="78" class="small">The browser guides the operator; the trusted host owns identity, credentials, lineage, and redaction.</text>
+
+  <g filter="url(#shadow)">
+    <rect class="stage" x="42" y="120" width="198" height="150" rx="16"/>
+    <circle class="num" cx="70" cy="150" r="18"/><text class="numtext" x="65" y="156">1</text>
+    <text class="head" x="98" y="156">Capture</text>
+    <text class="body" x="62" y="190">Notes, uploads,</text><text class="body" x="62" y="210">source identity,</text><text class="body" x="62" y="230">privacy class.</text>
+    <text class="small" x="62" y="252">Human evidence stays human.</text>
+
+    <rect class="stage" x="270" y="120" width="198" height="150" rx="16"/>
+    <circle class="num" cx="298" cy="150" r="18"/><text class="numtext" x="293" y="156">2</text>
+    <text class="head" x="326" y="156">Analyze</text>
+    <text class="body" x="290" y="190">Import external AI</text><text class="body" x="290" y="210">as unverified, or</text><text class="body" x="290" y="230">run bounded lanes.</text>
+    <text class="small" x="290" y="252">No provenance shortcuts.</text>
+
+    <rect class="stage" x="498" y="120" width="198" height="150" rx="16"/>
+    <circle class="num" cx="526" cy="150" r="18"/><text class="numtext" x="521" y="156">3</text>
+    <text class="head" x="554" y="156">Compare</text>
+    <text class="body" x="518" y="190">Same snapshot,</text><text class="body" x="518" y="210">roles, claims,</text><text class="body" x="518" y="230">differences, unknowns.</text>
+    <text class="small" x="518" y="252">Agreement is not proof.</text>
+
+    <rect class="stage" x="726" y="120" width="198" height="150" rx="16"/>
+    <circle class="num" cx="754" cy="150" r="18"/><text class="numtext" x="749" y="156">4</text>
+    <text class="head" x="782" y="156">Decide</text>
+    <text class="body" x="746" y="190">Human proposal,</text><text class="body" x="746" y="210">revision, acceptance,</text><text class="body" x="746" y="230">evidence refs.</text>
+    <text class="small" x="746" y="252">A judgment, not a verdict.</text>
+
+    <rect class="stage" x="954" y="120" width="198" height="150" rx="16"/>
+    <circle class="num" cx="982" cy="150" r="18"/><text class="numtext" x="977" y="156">5</text>
+    <text class="head" x="1010" y="156">Export</text>
+    <text class="body" x="974" y="190">Share-safe or</text><text class="body" x="974" y="210">owner-only, with</text><text class="body" x="974" y="230">snapshot proof.</text>
+    <text class="small" x="974" y="252">Redaction is explicit.</text>
+  </g>
+
+  <path d="M241 195h22M469 195h22M697 195h22M925 195h22" stroke="#55718b" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="42" y="330" width="1110" height="178" rx="20" fill="url(#host)" filter="url(#shadow)"/>
+  <path class="shield" d="M93 365l27-12 27 12v25c0 19-12 32-27 39-15-7-27-20-27-39z"/>
+  <path d="M105 379l10 10 19-21" fill="none" stroke="#245c69" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="hosthead" x="172" y="371">Trusted host boundary</text>
+  <text class="hostbody" x="172" y="397">Resolves provider identity and credentials · freezes evidence · binds exact fingerprints</text>
+  <text class="hostbody" x="172" y="420">Validates citations and role topology · records observed latency/resources · redacts exports</text>
+  <line x1="172" y1="446" x2="1095" y2="446" stroke="#6ea3a6" stroke-opacity=".65"/>
+  <text class="small" x="172" y="473" fill="#b9d7db">The browser may request and display a check; it cannot manufacture a qualification or unlock hidden evidence.</text>
+  <text x="1085" y="371" text-anchor="end" class="hosthead">NO SECRETS</text>
+</svg>
