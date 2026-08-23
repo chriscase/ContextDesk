@@ -1,5 +1,6 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CaseDiscussion } from "./CaseDiscussion.js";
 import { Cases } from "./Cases.js";
 
 afterEach(() => {
@@ -561,5 +562,698 @@ describe("focused investigation view", () => {
     expect(
       await screen.findByRole("option", { name: "New source (external-tool)" }),
     ).toBeTruthy();
+  });
+});
+
+describe("case discussion panel", () => {
+  async function openDiscussion() {
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+    await screen.findByRole("heading", { name: "Situation" });
+    fireEvent.click(screen.getByRole("button", { name: "Discussion" }));
+    return await screen.findByRole("complementary", { name: "Discussion" });
+  }
+
+  it("opens beside the stage, closes on Escape, and returns focus to the control", async () => {
+    stubCaseFetch();
+    render(<Cases roles={["case-lead"]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+    await screen.findByRole("heading", { name: "Situation" });
+    const toggle = screen.getByRole("button", { name: "Discussion" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(toggle);
+    const panel = await screen.findByRole("complementary", { name: "Discussion" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(panel);
+    // The panel accompanies the stage rather than replacing it.
+    expect(screen.getByRole("heading", { name: "Situation" })).toBeTruthy();
+
+    fireEvent.keyDown(panel, { key: "Escape" });
+    expect(screen.queryByRole("complementary", { name: "Discussion" })).toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(toggle);
+
+    fireEvent.click(toggle);
+    const reopened = await screen.findByRole("complementary", { name: "Discussion" });
+    fireEvent.click(within(reopened).getByRole("button", { name: "Close discussion" }));
+    expect(screen.queryByRole("complementary", { name: "Discussion" })).toBeNull();
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it("lists only durable human messages with recorded author, time, and privacy", async () => {
+    stubCaseFetch({
+      onRequest: (url, init) => {
+        if (url === "/api/cases/c1/contributions" && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              contributions: [
+                {
+                  id: "m1",
+                  kind: "message",
+                  body: "Failover completed cleanly",
+                  privacyClass: "share_safe",
+                  tombstoned: false,
+                  authorUsername: "alice",
+                  createdAt: "2026-08-20T14:05:00.000Z",
+                },
+                {
+                  id: "m2",
+                  kind: "message",
+                  body: "Withdrawn theory",
+                  privacyClass: "owner_only",
+                  tombstoned: true,
+                  authorUsername: "dave",
+                },
+                {
+                  id: "n1",
+                  kind: "note",
+                  body: "A capture note",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                  authorUsername: "alice",
+                },
+                {
+                  id: "x1",
+                  kind: "external_run",
+                  body: "AI output text",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                  authorUsername: "alice",
+                },
+                {
+                  id: "m3",
+                  kind: "message",
+                  body: "Second message without an author",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                },
+                {
+                  id: "m0",
+                  kind: "message",
+                  body: "Earlier kickoff message",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                  authorUsername: "erin",
+                  createdAt: "2026-08-19T08:00:00.000Z",
+                },
+              ],
+            }),
+          });
+        }
+        return null;
+      },
+    });
+    render(<Cases roles={["case-lead"]} />);
+    const panel = await openDiscussion();
+
+    expect(await within(panel).findByText("Failover completed cleanly")).toBeTruthy();
+    expect(within(panel).getByText("alice")).toBeTruthy();
+    expect(within(panel).getAllByText(/2026/).length).toBeGreaterThan(0);
+    expect(within(panel).getByText("share-safe")).toBeTruthy();
+    expect(within(panel).getByText("Second message without an author")).toBeTruthy();
+    expect(within(panel).getByText("Author not recorded")).toBeTruthy();
+    expect(within(panel).getAllByText("private to the case").length).toBeGreaterThan(0);
+    expect(within(panel).getByText("3 recorded messages")).toBeTruthy();
+    // The thread scroller is a named, keyboard-focusable region so the list
+    // can be scrolled without a pointer.
+    const scroller = within(panel).getByRole("region", { name: "Discussion messages" });
+    expect(scroller.getAttribute("tabindex")).toBe("0");
+    expect(within(scroller).getByText("Failover completed cleanly")).toBeTruthy();
+    // Tombstoned entries, capture notes, and imported AI output never appear
+    // in the thread — and nothing labels external output as a human message.
+    expect(within(panel).queryByText("Withdrawn theory")).toBeNull();
+    expect(within(panel).queryByText("A capture note")).toBeNull();
+    expect(within(panel).queryByText("AI output text")).toBeNull();
+    // The wire arrives ordered by id; the thread re-sorts by recorded time,
+    // keeping messages without a recorded time at the end in wire order.
+    const bodies = Array.from(panel.querySelectorAll(".discussion__message-body")).map(
+      (node) => node.textContent,
+    );
+    expect(bodies).toEqual([
+      "Earlier kickoff message",
+      "Failover completed cleanly",
+      "Second message without an author",
+    ]);
+  });
+
+  it("posts kind=message with the chosen visibility and shows it only after the server confirms", async () => {
+    let posted: unknown = null;
+    let saved = false;
+    stubCaseFetch({
+      cases: [fixtureCases[0]],
+      onRequest: (url, init) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (url === "/api/cases/c1/contributions" && method === "POST") {
+          return (async () => {
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            posted = JSON.parse(String(init?.body ?? "{}"));
+            saved = true;
+            return { ok: true, json: async () => ({ id: "m9" }) };
+          })();
+        }
+        if (url === "/api/cases/c1/contributions" && method === "GET") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              contributions: saved
+                ? [
+                    {
+                      id: "m9",
+                      kind: "message",
+                      body: "Rollback is our fallback",
+                      privacyClass: "share_safe",
+                      tombstoned: false,
+                      authorUsername: "alice",
+                      createdAt: "2026-08-21T09:00:00.000Z",
+                    },
+                  ]
+                : [],
+            }),
+          });
+        }
+        return null;
+      },
+    });
+    render(<Cases roles={["contributor"]} />);
+    const panel = await openDiscussion();
+
+    const messageBox = within(panel).getByRole("textbox", { name: "Message" });
+    fireEvent.change(messageBox, { target: { value: "Rollback is our fallback" } });
+    fireEvent.change(within(panel).getByRole("combobox", { name: "Message visibility" }), {
+      target: { value: "share_safe" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: "Post to discussion" }));
+    // Pending is announced and the message is never displayed as durable early.
+    // The thread scope matters: the draft legitimately sits in the composer.
+    const inThread = { selector: ".discussion__message-body" };
+    expect(within(panel).getByText("Saving your message to the case record…")).toBeTruthy();
+    expect(within(panel).queryByText("Rollback is our fallback", inThread)).toBeNull();
+
+    expect(await within(panel).findByText("Rollback is our fallback", inThread)).toBeTruthy();
+    expect(within(panel).getByText("Message saved to the case record.")).toBeTruthy();
+    expect(posted).toEqual({
+      kind: "message",
+      body: "Rollback is our fallback",
+      privacyClass: "share_safe",
+    });
+    expect((messageBox as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("keeps the draft and reports an honest failure, then retries successfully", async () => {
+    let attempts = 0;
+    let savedBody: string | null = null;
+    stubCaseFetch({
+      cases: [fixtureCases[0]],
+      onRequest: (url, init) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (url === "/api/cases/c1/contributions" && method === "POST") {
+          attempts += 1;
+          if (attempts === 1) {
+            return Promise.resolve({
+              ok: false,
+              status: 403,
+              json: async () => ({ error: "denied" }),
+            });
+          }
+          savedBody = String(
+            (JSON.parse(String(init?.body ?? "{}")) as { body?: unknown }).body ?? "",
+          );
+          return Promise.resolve({ ok: true, json: async () => ({ id: "m1" }) });
+        }
+        if (url === "/api/cases/c1/contributions" && method === "GET") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              contributions: savedBody
+                ? [
+                    {
+                      id: "m1",
+                      kind: "message",
+                      body: savedBody,
+                      privacyClass: "owner_only",
+                      tombstoned: false,
+                      authorUsername: "dave",
+                    },
+                  ]
+                : [],
+            }),
+          });
+        }
+        return null;
+      },
+    });
+    render(<Cases roles={["contributor"]} />);
+    const panel = await openDiscussion();
+
+    const messageBox = within(panel).getByRole("textbox", {
+      name: "Message",
+    }) as HTMLTextAreaElement;
+    fireEvent.change(messageBox, { target: { value: "Check the failover logs" } });
+    fireEvent.click(within(panel).getByRole("button", { name: "Post to discussion" }));
+
+    const alert = await within(panel).findByRole("alert");
+    expect(alert.textContent).toContain("was not saved");
+    expect(within(panel).queryByText("denied")).toBeNull();
+    expect(messageBox.value).toBe("Check the failover logs");
+    // The draft stays in the composer only — nothing shows in the thread.
+    const inThread = { selector: ".discussion__message-body" };
+    expect(within(panel).queryByText("Check the failover logs", inThread)).toBeNull();
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Post to discussion" }));
+    expect(await within(panel).findByText("Check the failover logs", inThread)).toBeTruthy();
+    expect(within(panel).getByText("Message saved to the case record.")).toBeTruthy();
+  });
+
+  it("shows another user's saved message via bounded polling, labeled as live refresh", async () => {
+    let reads = 0;
+    const stub = vi.fn(async (input: RequestInfo, _init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/cases/c1/contributions") {
+        reads += 1;
+        return {
+          ok: true,
+          json: async () => ({
+            contributions:
+              reads > 1
+                ? [
+                    {
+                      id: "m1",
+                      kind: "message",
+                      body: "Dave saw a retry storm",
+                      privacyClass: "owner_only",
+                      tombstoned: false,
+                      authorUsername: "dave",
+                      createdAt: "2026-08-21T10:00:00.000Z",
+                    },
+                  ]
+                : [],
+          }),
+        };
+      }
+      if (url === "/api/cases/c1/presence") {
+        return {
+          ok: true,
+          json: async () => ({
+            schemaId: "cd-collab.case_presence.v1",
+            caseId: "c1",
+            ttlSeconds: 45,
+            members: [
+              {
+                identityId: "u1",
+                username: "alice",
+                surface: "case_board",
+                lastSeenAt: "2026-08-21T10:00:00.000Z",
+              },
+              {
+                identityId: "u2",
+                username: "dave",
+                surface: "experiment_lab",
+                lastSeenAt: "2026-08-21T10:00:05.000Z",
+              },
+            ],
+          }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", stub);
+    render(
+      <CaseDiscussion
+        caseId="c1"
+        participant={{ username: "alice", roles: ["contributor"] }}
+        canWrite
+        readOnly={false}
+        onClose={vi.fn()}
+        pollIntervalMs={25}
+      />,
+    );
+
+    expect(await screen.findByText(/No discussion messages yet/)).toBeTruthy();
+    expect(await screen.findByText("Dave saw a retry storm")).toBeTruthy();
+    expect(screen.getByText(/2 active on this case now/)).toBeTruthy();
+    expect(screen.getByText(/live refresh by polling/)).toBeTruthy();
+    expect(screen.getByText(/not realtime chat/)).toBeTruthy();
+    // The panel only reads presence — it never announces a surface of its own.
+    const writes = stub.mock.calls.filter(
+      (call) => ((call[1] as RequestInit | undefined)?.method ?? "GET") !== "GET",
+    );
+    expect(writes).toEqual([]);
+  });
+
+  it("says presence is unavailable rather than inventing a count", async () => {
+    stubCaseFetch();
+    render(<Cases roles={["case-lead"]} />);
+    const panel = await openDiscussion();
+    expect(await within(panel).findByText(/Presence unavailable right now/)).toBeTruthy();
+    expect(within(panel).queryByText(/active on this case now/)).toBeNull();
+  });
+
+  it("lets a static read-only viewer browse the thread but not post", async () => {
+    stubCaseFetch({
+      onRequest: (url, init) => {
+        if (url === "/api/cases/c1/contributions" && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              contributions: [
+                {
+                  id: "m1",
+                  kind: "message",
+                  body: "Recorded during the incident",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                  authorUsername: "alice",
+                },
+              ],
+            }),
+          });
+        }
+        return null;
+      },
+    });
+    render(<Cases roles={["case-lead"]} readOnly />);
+    const panel = await openDiscussion();
+    expect(await within(panel).findByText("Recorded during the incident")).toBeTruthy();
+    expect(within(panel).queryByRole("textbox")).toBeNull();
+    expect(within(panel).queryByRole("button", { name: "Post to discussion" })).toBeNull();
+    expect(within(panel).getByText(/posting is unavailable/)).toBeTruthy();
+  });
+
+  it("tells a read-limited role how to get posting access", async () => {
+    stubCaseFetch();
+    render(<Cases roles={["viewer"]} />);
+    const panel = await openDiscussion();
+    expect(within(panel).queryByRole("textbox")).toBeNull();
+    expect(
+      within(panel).getByText(/Ask a case lead for contributor access/),
+    ).toBeTruthy();
+  });
+
+  it("persists across stages and stacks through the discussion layout classes", async () => {
+    stubCaseFetch();
+    render(<Cases roles={["case-lead"]} />);
+    const panel = await openDiscussion();
+
+    const work = document.querySelector(".case-view__work") as HTMLElement;
+    expect(work.classList.contains("case-view__work--discussing")).toBe(true);
+    // Stage content keeps reading order ahead of the complementary panel, so
+    // the narrow-screen single-column layout stacks stage first, then panel.
+    const stagePanels = work.querySelector(".stage-panels");
+    expect(stagePanels).toBeTruthy();
+    expect(stagePanels?.nextElementSibling).toBe(panel);
+    expect(panel.tagName).toBe("ASIDE");
+
+    const stageNav = screen.getByRole("navigation", { name: "Investigation stages" });
+    fireEvent.click(within(stageNav).getByRole("button", { name: /Analyze/ }));
+    expect(await screen.findByRole("heading", { name: "Evidence and snapshots" })).toBeTruthy();
+    expect(screen.getByRole("complementary", { name: "Discussion" })).toBeTruthy();
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Close discussion" }));
+    expect(document.querySelector(".case-view__work--discussing")).toBeNull();
+    expect(screen.queryByRole("complementary", { name: "Discussion" })).toBeNull();
+  });
+
+  it("never renders the prior case's thread after the focused case changes", async () => {
+    let releaseCaseTwo = () => undefined as void;
+    const caseTwoGate = new Promise<void>((resolve) => {
+      releaseCaseTwo = resolve;
+    });
+    const stub = vi.fn(async (input: RequestInfo, _init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/cases/c1/contributions") {
+        return {
+          ok: true,
+          json: async () => ({
+            contributions: [
+              {
+                id: "m1",
+                kind: "message",
+                body: "Case one message",
+                privacyClass: "owner_only",
+                tombstoned: false,
+                authorUsername: "alice",
+                createdAt: "2026-08-21T10:00:00.000Z",
+              },
+            ],
+          }),
+        };
+      }
+      if (url === "/api/cases/c2/contributions") {
+        await caseTwoGate;
+        return {
+          ok: true,
+          json: async () => ({
+            contributions: [
+              {
+                id: "m2",
+                kind: "message",
+                body: "Case two message",
+                privacyClass: "owner_only",
+                tombstoned: false,
+                authorUsername: "dave",
+                createdAt: "2026-08-21T11:00:00.000Z",
+              },
+            ],
+          }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", stub);
+    const { rerender } = render(
+      <CaseDiscussion caseId="c1" canWrite readOnly={false} onClose={vi.fn()} pollIntervalMs={60_000} />,
+    );
+    expect(await screen.findByText("Case one message")).toBeTruthy();
+
+    rerender(
+      <CaseDiscussion caseId="c2" canWrite readOnly={false} onClose={vi.fn()} pollIntervalMs={60_000} />,
+    );
+    // Immediately after the case switch nothing from case one may remain,
+    // even though case two is still loading.
+    expect(screen.queryByText("Case one message")).toBeNull();
+    expect(screen.getByText("Loading the discussion…")).toBeTruthy();
+
+    releaseCaseTwo();
+    expect(await screen.findByText("Case two message")).toBeTruthy();
+    expect(screen.queryByText("Case one message")).toBeNull();
+  });
+
+  it("lets stale contribution and presence responses lose to newer ones", async () => {
+    let threadCalls = 0;
+    let releaseStaleThread = () => undefined as void;
+    const staleThreadGate = new Promise<void>((resolve) => {
+      releaseStaleThread = resolve;
+    });
+    let presenceCalls = 0;
+    let releaseStalePresence = () => undefined as void;
+    const stalePresenceGate = new Promise<void>((resolve) => {
+      releaseStalePresence = resolve;
+    });
+    const member = (username: string) => ({
+      identityId: `u-${username}`,
+      username,
+      surface: "case_board",
+      lastSeenAt: "2026-08-21T10:00:00.000Z",
+    });
+    const stub = vi.fn(async (input: RequestInfo, _init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/cases/c1/contributions") {
+        threadCalls += 1;
+        if (threadCalls === 1) {
+          // The oldest request resolves last, after newer ones already applied.
+          await staleThreadGate;
+          return {
+            ok: true,
+            json: async () => ({
+              contributions: [
+                {
+                  id: "m0",
+                  kind: "message",
+                  body: "Stale-only message",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                  authorUsername: "alice",
+                  createdAt: "2026-08-21T09:00:00.000Z",
+                },
+              ],
+            }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            contributions: [
+              {
+                id: "m1",
+                kind: "message",
+                body: "Newer message",
+                privacyClass: "owner_only",
+                tombstoned: false,
+                authorUsername: "dave",
+                createdAt: "2026-08-21T10:00:00.000Z",
+              },
+            ],
+          }),
+        };
+      }
+      if (url === "/api/cases/c1/presence") {
+        presenceCalls += 1;
+        if (presenceCalls === 1) {
+          await stalePresenceGate;
+          return {
+            ok: true,
+            json: async () => ({
+              schemaId: "cd-collab.case_presence.v1",
+              caseId: "c1",
+              ttlSeconds: 45,
+              members: [member("alice"), member("dave")],
+            }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            schemaId: "cd-collab.case_presence.v1",
+            caseId: "c1",
+            ttlSeconds: 45,
+            members: [member("alice")],
+          }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", stub);
+    render(
+      <CaseDiscussion caseId="c1" canWrite readOnly={false} onClose={vi.fn()} pollIntervalMs={25} />,
+    );
+    expect(await screen.findByText("Newer message")).toBeTruthy();
+    expect(await screen.findByText(/1 active on this case now/)).toBeTruthy();
+
+    // Now let the oldest responses land — they must lose, not overwrite.
+    releaseStaleThread();
+    releaseStalePresence();
+    await waitFor(() => expect(threadCalls).toBeGreaterThan(3));
+    expect(screen.queryByText("Stale-only message")).toBeNull();
+    expect(screen.getByText("Newer message")).toBeTruthy();
+    expect(screen.getByText(/1 active on this case now/)).toBeTruthy();
+    expect(screen.queryByText(/2 active on this case now/)).toBeNull();
+  });
+
+  it("returns the composer to unsaved as soon as a saved or failed outcome is edited", async () => {
+    let failNext = false;
+    stubCaseFetch({
+      cases: [fixtureCases[0]],
+      onRequest: (url, init) => {
+        if (url === "/api/cases/c1/contributions" && (init?.method ?? "GET").toUpperCase() === "POST") {
+          return failNext
+            ? Promise.resolve({ ok: false, status: 403, json: async () => ({}) })
+            : Promise.resolve({ ok: true, json: async () => ({ id: "m1" }) });
+        }
+        return null;
+      },
+    });
+    render(<Cases roles={["contributor"]} />);
+    const panel = await openDiscussion();
+    const messageBox = within(panel).getByRole("textbox", { name: "Message" });
+
+    fireEvent.change(messageBox, { target: { value: "first message" } });
+    fireEvent.click(within(panel).getByRole("button", { name: "Post to discussion" }));
+    await within(panel).findByText("Message saved to the case record.");
+    fireEvent.change(messageBox, { target: { value: "second draft" } });
+    expect(within(panel).queryByText("Message saved to the case record.")).toBeNull();
+
+    failNext = true;
+    fireEvent.click(within(panel).getByRole("button", { name: "Post to discussion" }));
+    await within(panel).findByRole("alert");
+    fireEvent.change(messageBox, { target: { value: "second draft, edited" } });
+    expect(within(panel).queryByRole("alert")).toBeNull();
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Post to discussion" }));
+    await within(panel).findByRole("alert");
+    fireEvent.change(within(panel).getByRole("combobox", { name: "Message visibility" }), {
+      target: { value: "share_safe" },
+    });
+    expect(within(panel).queryByRole("alert")).toBeNull();
+  });
+
+  it("requires an explicit inline discard decision before closing on a dirty draft", async () => {
+    stubCaseFetch();
+    render(<Cases roles={["contributor"]} />);
+    const panel = await openDiscussion();
+    const toggle = screen.getByRole("button", { name: "Discussion" });
+    const messageBox = within(panel).getByRole("textbox", {
+      name: "Message",
+    }) as HTMLTextAreaElement;
+    fireEvent.change(messageBox, { target: { value: "half-written thought" } });
+
+    // Escape path: close is refused, the inline confirmation takes focus.
+    fireEvent.keyDown(panel, { key: "Escape" });
+    expect(screen.getByRole("complementary", { name: "Discussion" })).toBeTruthy();
+    const confirmGroup = within(panel).getByRole("group", { name: /has not been posted/ });
+    const keepButton = within(confirmGroup).getByRole("button", { name: "Keep editing" });
+    expect(document.activeElement).toBe(keepButton);
+
+    // Keep editing cancels: draft intact, focus back in the composer.
+    fireEvent.click(keepButton);
+    expect(within(panel).queryByRole("group", { name: /has not been posted/ })).toBeNull();
+    expect(messageBox.value).toBe("half-written thought");
+    expect(document.activeElement).toBe(messageBox);
+
+    // Escape while the confirmation is showing also means keep editing.
+    fireEvent.keyDown(panel, { key: "Escape" });
+    within(panel).getByRole("group", { name: /has not been posted/ });
+    fireEvent.keyDown(panel, { key: "Escape" });
+    expect(within(panel).queryByRole("group", { name: /has not been posted/ })).toBeNull();
+    expect(screen.getByRole("complementary", { name: "Discussion" })).toBeTruthy();
+    expect(document.activeElement).toBe(messageBox);
+
+    // Close-button path: same guard; explicit discard actually closes and
+    // only then does focus return to the toggle.
+    fireEvent.click(within(panel).getByRole("button", { name: "Close discussion" }));
+    const secondGroup = within(panel).getByRole("group", { name: /has not been posted/ });
+    fireEvent.click(within(secondGroup).getByRole("button", { name: "Discard draft" }));
+    expect(screen.queryByRole("complementary", { name: "Discussion" })).toBeNull();
+    expect(document.activeElement).toBe(toggle);
+
+    // Reopening starts from a clean composer — the discard was real.
+    fireEvent.click(toggle);
+    const reopened = await screen.findByRole("complementary", { name: "Discussion" });
+    expect(
+      (within(reopened).getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value,
+    ).toBe("");
+  });
+
+  it("refuses to close while a post is saving, then closes normally after it lands", async () => {
+    let resolvePost = () => undefined as void;
+    stubCaseFetch({
+      cases: [fixtureCases[0]],
+      onRequest: (url, init) => {
+        if (url === "/api/cases/c1/contributions" && (init?.method ?? "GET").toUpperCase() === "POST") {
+          return new Promise((resolve) => {
+            resolvePost = () => resolve({ ok: true, json: async () => ({ id: "m1" }) });
+          });
+        }
+        return null;
+      },
+    });
+    render(<Cases roles={["contributor"]} />);
+    const panel = await openDiscussion();
+    fireEvent.change(within(panel).getByRole("textbox", { name: "Message" }), {
+      target: { value: "saving now" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: "Post to discussion" }));
+    expect(within(panel).getByText("Saving your message to the case record…")).toBeTruthy();
+
+    fireEvent.keyDown(panel, { key: "Escape" });
+    expect(screen.getByRole("complementary", { name: "Discussion" })).toBeTruthy();
+    expect(within(panel).getByText(/panel stays open until it finishes/)).toBeTruthy();
+    fireEvent.click(within(panel).getByRole("button", { name: "Close discussion" }));
+    expect(screen.getByRole("complementary", { name: "Discussion" })).toBeTruthy();
+
+    resolvePost();
+    await within(panel).findByText("Message saved to the case record.");
+    fireEvent.keyDown(panel, { key: "Escape" });
+    expect(screen.queryByRole("complementary", { name: "Discussion" })).toBeNull();
   });
 });

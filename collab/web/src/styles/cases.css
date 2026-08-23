@@ -247,7 +247,57 @@
 }
 
 .focus-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
   margin-bottom: 0.9rem;
+}
+
+.focus-head__primary {
+  min-width: 0;
+}
+
+.focus-head__discussion {
+  display: grid;
+  justify-items: end;
+  gap: 0.3rem;
+  text-align: right;
+}
+
+.focus-head__discussion-toggle {
+  padding: 0.45rem 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.focus-head__discussion-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.focus-head__discussion-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.focus-head__discussion-toggle[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.focus-head__discussion-context {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 .focus-head .case-view__title {
@@ -1316,5 +1366,292 @@
 
   .triage-runs__lane {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ————— Case discussion panel ————— */
+
+.case-view__work {
+  min-width: 0;
+}
+
+.case-view__work--discussing {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(19rem, 30vw, 24rem);
+  gap: 1.2rem;
+  align-items: start;
+}
+
+.case-view__work--discussing > .stage-panels {
+  min-width: 0;
+}
+
+.discussion {
+  position: sticky;
+  top: 6.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  max-height: calc(100vh - 7.4rem);
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .discussion {
+    animation: discussion-enter 160ms ease-out;
+  }
+
+  @keyframes discussion-enter {
+    from {
+      opacity: 0;
+      transform: translateX(0.6rem);
+    }
+
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}
+
+.discussion:focus {
+  outline: none;
+}
+
+.discussion:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.discussion__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.discussion__head-copy {
+  min-width: 0;
+}
+
+.discussion__title {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.discussion__context {
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.discussion__close {
+  flex-shrink: 0;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.discussion__close:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.discussion__close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.discussion__presence {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.discussion__note {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--surface-deep) 55%, transparent);
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.discussion__thread {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+}
+
+.discussion__count {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.discussion__empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.discussion__scroll {
+  min-height: 0;
+  overflow-y: auto;
+  border-radius: 0.6rem;
+}
+
+.discussion__scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.discussion__messages {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.discussion__message {
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: color-mix(in srgb, var(--surface-deep) 45%, transparent);
+}
+
+.discussion__message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.55rem;
+  margin: 0 0 0.3rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.discussion__author {
+  color: var(--fg);
+  font-size: 0.8rem;
+}
+
+.discussion__privacy {
+  padding: 0.05rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.66rem;
+  letter-spacing: 0.02em;
+}
+
+.discussion__privacy--share {
+  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
+  color: var(--success);
+}
+
+.discussion__message-body {
+  margin: 0;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.discussion__composer {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.discussion__pending {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.discussion__saved {
+  margin: 0;
+  color: var(--success);
+  font-size: 0.78rem;
+}
+
+.discussion__notice {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.discussion__discard {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border));
+  border-radius: 0.6rem;
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+
+.discussion__discard-copy {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.discussion__discard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.discussion__discard-keep,
+.discussion__discard-confirm {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.discussion__discard-keep {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  font-weight: 600;
+}
+
+.discussion__discard-keep:hover,
+.discussion__discard-confirm:hover {
+  border-color: var(--accent);
+}
+
+.discussion__discard-keep:focus-visible,
+.discussion__discard-confirm:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 900px) {
+  .case-view__work--discussing {
+    grid-template-columns: 1fr;
+  }
+
+  .discussion {
+    position: static;
+    max-height: none;
+  }
+
+  .discussion__scroll {
+    max-height: 20rem;
   }
 }
