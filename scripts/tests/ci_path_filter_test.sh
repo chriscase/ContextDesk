@@ -120,6 +120,40 @@ if "cargo test -p cd-triage-bench" in aggregate_runs:
         "the bench crate has shipped in-workspace dependents; it must take the full "
         "gate rather than an isolated lane that never compiles them"
     )
+collab_step = next(
+    (s for s in aggregate["steps"] if s.get("name") == "record isolated collab routing"),
+    None,
+)
+if not collab_step:
+    raise SystemExit("aggregate must record isolated collab routing")
+collab_script = collab_step.get("run") or ""
+if ".github/workflows/collab.yml" not in collab_script:
+    raise SystemExit("collab-only aggregate must require the dedicated collab.yml validator")
+if ".github/workflows/collab-qualify.yml" not in collab_script:
+    raise SystemExit(
+        "collab-only aggregate must require the dedicated collab-qualify.yml validator"
+    )
+if "refusing a green filtered gate" not in collab_script:
+    raise SystemExit("collab-only aggregate must still fail closed without dedicated validators")
+if not (root / ".github/workflows/collab.yml").is_file():
+    raise SystemExit("dedicated collab.yml validator is missing from the tree")
+if not (root / ".github/workflows/collab-qualify.yml").is_file():
+    raise SystemExit("dedicated collab-qualify.yml validator is missing from the tree")
+# Simulate the collab-only aggregate step against this tree: with both
+# dedicated validators present it must succeed (exit 0).
+collab_sim = subprocess.run(
+    ["sh", "-eu", "-c", collab_script],
+    cwd=root,
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    check=False,
+)
+if collab_sim.returncode != 0:
+    raise SystemExit(
+        "collab-only aggregate rejected a tree that has dedicated validators: "
+        + collab_sim.stdout
+    )
 
 # Dependency guard. An isolated surface is only sound while nothing outside it
 # depends on it. This walks the real workspace manifests so re-introducing an

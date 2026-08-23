@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { createCase, loginAs, uniqueTitle } from "../src/helpers.js";
+import { createCase, gotoStage, loginAs, uniqueTitle } from "../src/helpers.js";
 import { INVENTED_ROUTES, WAR_ROOM_SURFACE_MAP } from "../src/surface-map.js";
 import { FIXTURE_USERS } from "../src/users.js";
 
@@ -14,11 +14,14 @@ test.describe("comparison lanes and requested war-room states", () => {
   test("the current war-room renders connected comparison and review surfaces", async ({ page }) => {
     await loginAs(page, FIXTURE_USERS.dave);
     await createCase(page, uniqueTitle("War-room surfaces"));
+    // Analyze (createCase lands here): evidence board + lane runner.
     await expect(page.getByRole("heading", { name: "Evidence and snapshots" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Experiment lab", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Run history" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Start a snapshot-bound comparison" })).toBeVisible();
     await expect(page.getByText("Freeze evidence above before launching a run.")).toBeVisible();
+    // Compare stage owns the experiment-lab review surface (one stage at a time).
+    await gotoStage(page, "Compare");
+    await expect(page.getByRole("heading", { name: "Experiment lab", exact: true })).toBeVisible();
     await expect(page.getByText(/Compare seeded, connected ContextDesk, and pasted-chat triage candidates/)).toBeVisible();
     await expect(page.getByText(/Sources: seeded · ContextDesk connector · pasted chat/)).toBeVisible();
   });

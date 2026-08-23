@@ -1541,3 +1541,44 @@ describe("decision readiness cockpit", () => {
     expect(screen.getByRole("region", { name: "Human review queue" })).toBeTruthy();
   });
 });
+
+describe("focused surfaces", () => {
+  it("renders the complete lab when no surface prop is given (backwards compatible)", async () => {
+    stubExperiments([goldView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    expect(await screen.findByRole("heading", { name: "Experiment lab" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "At a glance" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Accepted decision" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Export review" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Import experiment" })).toBeTruthy();
+  });
+
+  it("comparison surface shows review material without decision or export controls", async () => {
+    stubExperiments([goldView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead surface="comparison" />);
+    expect(await screen.findByRole("heading", { name: "Experiment lab" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "At a glance" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Strategy comparison" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Import experiment" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Accepted decision" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Export review" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Export share-safe review" })).toBeNull();
+  });
+
+  it("decision surface shows the journal and export without the comparison material", async () => {
+    stubExperiments([goldView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead surface="decision" />);
+    expect(await screen.findByRole("heading", { name: "Decision journal" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Accepted decision" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Export review" })).toBeTruthy();
+    expect(
+      screen.getByText(/Latest decision r2 \(accepted\): Treat inventory timeout/),
+    ).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "At a glance" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Strategy comparison" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Gold alignment" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Import experiment" })).toBeNull();
+    // Identity truth stays visible on both surfaces.
+    expect(screen.getByText(/The server remains authoritative/)).toBeTruthy();
+  });
+});

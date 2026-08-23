@@ -4,6 +4,14 @@
   padding-top: 0.85rem;
 }
 
+/* The decision surface sits inside the Decide page, which already carries the
+   step banner; it should read as one journal, not a second stacked lab. */
+.experiment-lab--decision {
+  margin-top: 0.5rem;
+  border-top: 0;
+  padding-top: 0;
+}
+
 .experiment-lab__heading {
   margin: 0.85rem 0 0.35rem;
   font-size: 0.95rem;

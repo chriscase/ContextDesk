@@ -20,53 +20,107 @@ export function fixtureBytes(...parts: string[]): Buffer {
   return readFileSync(join(FIXTURE_ROOT, ...parts));
 }
 
+export type StageName = "Situation" | "Capture" | "Analyze" | "Compare" | "Decide";
+
+/**
+ * On narrow viewports the primary nav and account menu collapse behind the
+ * Menu toggle. Returns a closer so flows leave the shell as they found it.
+ */
+async function revealTopbar(page: Page): Promise<() => Promise<void>> {
+  const toggle = page.getByRole("button", { name: "Menu" });
+  if ((await toggle.isVisible()) && (await toggle.getAttribute("aria-expanded")) === "false") {
+    await toggle.click();
+    return async () => {
+      await toggle.click();
+    };
+  }
+  return async () => {};
+}
+
+/** Switch the focused investigation to one of its work stages. */
+export async function gotoStage(page: Page, stage: StageName): Promise<void> {
+  const nav = page.getByRole("navigation", { name: "Investigation stages" });
+  const link = nav.getByRole("button", { name: new RegExp(`^${stage}`) });
+  await link.click();
+  await expect(link).toHaveAttribute("aria-current", "page");
+}
+
 export async function loginAs(page: Page, user: FixtureUser): Promise<void> {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "ContextDesk Experiment Lab" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Sign (in|out)/ })).toBeVisible();
-  const signOut = page.getByRole("button", { name: "Sign out" });
-  if (await signOut.isVisible()) {
-    const already = page.getByText(new RegExp(`Signed in as\\s+${user.username}`));
-    if (await already.isVisible()) {
-      await expect(page.getByText(new RegExp(`Roles:\\s+${user.expectedRoles.join(", ")}`))).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "ContextDesk War Room" }).first(),
+  ).toBeVisible();
+
+  const signIn = page.getByRole("button", { name: "Sign in" });
+  if (!(await signIn.isVisible())) {
+    // Already inside the authenticated shell — reuse or replace the session.
+    const closeTopbar = await revealTopbar(page);
+    const accountTrigger = page.getByRole("button", { name: /^Signed in as / });
+    await expect(accountTrigger).toBeVisible();
+    const sameUser = page.getByRole("button", { name: `Signed in as ${user.username}` });
+    if (await sameUser.isVisible()) {
+      await sameUser.click();
+      await expect(
+        page.getByText(`Roles: ${user.expectedRoles.join(", ")}`),
+      ).toBeVisible();
+      await sameUser.click();
+      await closeTopbar();
       return;
     }
-    await signOut.click();
+    await accountTrigger.click();
+    await page.getByRole("button", { name: "Sign out" }).click();
     await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
   }
+
   await page.getByLabel("Username").fill(user.username);
   await page.getByLabel("Password").fill(user.password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByText(new RegExp(`Signed in as\\s+${user.username}`))).toBeVisible();
-  await expect(page.getByText(new RegExp(`Roles:\\s+${user.expectedRoles.join(", ")}`))).toBeVisible();
+
+  // Wait for the authenticated shell before probing its (possibly collapsed)
+  // top bar, otherwise the reveal check races the post-login render.
+  await expect(page.locator("header.topbar")).toBeVisible();
+  const closeTopbar = await revealTopbar(page);
+  const accountTrigger = page.getByRole("button", { name: `Signed in as ${user.username}` });
+  await expect(accountTrigger).toBeVisible();
+  await accountTrigger.click();
+  await expect(page.getByText(`Roles: ${user.expectedRoles.join(", ")}`)).toBeVisible();
+  await accountTrigger.click();
+  await closeTopbar();
 }
 
 export async function createCase(page: Page, title: string): Promise<void> {
-  await page.getByPlaceholder("New case title").fill(title);
+  const field = page.getByPlaceholder("New investigation title");
+  if (!(await field.isVisible())) {
+    const closeTopbar = await revealTopbar(page);
+    await page.getByRole("button", { name: "Start investigation" }).click();
+    await closeTopbar();
+  }
+  await field.fill(title);
   const [created] = await Promise.all([
     page.waitForResponse(
       (res) => res.url().endsWith("/api/cases") && res.request().method() === "POST",
     ),
-    page.getByRole("button", { name: "Create case" }).click(),
+    page.getByRole("button", { name: "Create investigation" }).click(),
   ]);
   expect(created.ok(), await created.text()).toBeTruthy();
   await expect(page.locator("h2.case-view__title").filter({ hasText: title })).toBeVisible();
+  // Land on Analyze — the evidence board and lane runner most flows need next.
+  await gotoStage(page, "Analyze");
 }
 
 export async function openCase(page: Page, title: string): Promise<void> {
   await page.locator(".case-list").getByRole("button", { name: title, exact: true }).click();
   await expect(page.locator("h2.case-view__title").filter({ hasText: title })).toBeVisible();
+  await gotoStage(page, "Analyze");
 }
 
+/** Capture holds the timeline, note composer, and external-run import form. */
 export async function openCaseSupport(page: Page): Promise<void> {
-  const support = page.locator("details.case-view__support").first();
-  if ((await support.getAttribute("open")) === null) {
-    await support.locator("summary").click();
-  }
-  await expect(support).toHaveAttribute("open", "");
+  await gotoStage(page, "Capture");
 }
 
 export async function openExportSupport(page: Page): Promise<void> {
+  await gotoStage(page, "Decide");
   const support = page.locator("details.case-view__support").last();
   if ((await support.getAttribute("open")) === null) {
     await support.locator("summary").click();

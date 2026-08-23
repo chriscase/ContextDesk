@@ -96,11 +96,18 @@
   border: 0;
 }
 
-.session {
-  margin-top: 1.25rem;
+/* The signed-out gate: one column, product identity above the form. */
+.login-screen {
+  padding: 1.4rem 1.5rem 1.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.85rem;
+  background: color-mix(in srgb, var(--fg) 2%, var(--bg));
 }
 
-.session__roles {
-  color: var(--muted);
-  font-size: 0.85rem;
+@media (max-width: 480px) {
+  .login-screen {
+    padding: 1.1rem 1rem 1.25rem;
+    border: 0;
+    background: transparent;
+  }
 }

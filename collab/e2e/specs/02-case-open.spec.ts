@@ -1,46 +1,62 @@
 import { expect, test } from "@playwright/test";
-import { createCase, loginAs, openCase, openCaseSupport, screenshot, uniqueTitle } from "../src/helpers.js";
+import {
+  createCase,
+  gotoStage,
+  loginAs,
+  openCase,
+  openCaseSupport,
+  screenshot,
+  uniqueTitle,
+} from "../src/helpers.js";
 import { FIXTURE_USERS } from "../src/users.js";
 
-test.describe("create and open a case", () => {
-  test("contributor creates a case and reopens it from the list", async ({ page }) => {
+test.describe("create and open an investigation", () => {
+  test("contributor creates an investigation and reopens it from the overview", async ({ page }) => {
     const title = uniqueTitle("Fixture case");
     await loginAs(page, FIXTURE_USERS.alice);
     await createCase(page, title);
+    await expect(page.locator(".focus-head .status-pill")).toHaveText("open");
+    await expect(page.locator(".focus-head")).toContainText("medium severity");
     await openCaseSupport(page);
-    await expect(page.getByText(/open \/ medium/)).toBeVisible();
     await expect(page.locator(".timeline__item").filter({ hasText: "case_created" })).toBeVisible();
+
+    const accountTrigger = page.getByRole("button", { name: `Signed in as ${FIXTURE_USERS.alice.username}` });
+    await accountTrigger.click();
     await page.getByRole("button", { name: "Sign out" }).click();
     await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
+
     await loginAs(page, FIXTURE_USERS.alice);
     await openCase(page, title);
-    await expect(page.getByText(/open \/ medium/)).toBeVisible();
+    await expect(page.locator(".focus-head .status-pill")).toHaveText("open");
+    // Breadcrumb reflects War Room / Investigations / title / stage.
+    const crumbs = page.getByRole("navigation", { name: "Breadcrumb" });
+    await expect(crumbs).toContainText("War Room");
+    await expect(crumbs).toContainText("Investigations");
+    await expect(crumbs.locator('[aria-current="page"]')).toHaveText("Analyze");
     await screenshot(page, "02-case-open");
   });
 
-  test("admin can cycle shipped case statuses", async ({ page }) => {
+  test("admin can cycle shipped case statuses from the Decide stage", async ({ page }) => {
     const title = uniqueTitle("Status case");
     await loginAs(page, FIXTURE_USERS.dave);
     await createCase(page, title);
+    await gotoStage(page, "Decide");
     const statusForm = page.locator("form.composer").filter({
       has: page.getByRole("button", { name: "Update status" }),
     });
-    await statusForm.locator('select[name="status"]').selectOption("monitoring");
-    await statusForm.getByRole("button", { name: "Update status" }).click();
-    await expect(page.locator("h2.case-view__title")).toContainText("monitoring");
-    await statusForm.locator('select[name="status"]').selectOption("resolved");
-    await statusForm.getByRole("button", { name: "Update status" }).click();
-    await expect(page.locator("h2.case-view__title")).toContainText("resolved");
-    await statusForm.locator('select[name="status"]').selectOption("archived");
-    await statusForm.getByRole("button", { name: "Update status" }).click();
-    await expect(page.locator("h2.case-view__title")).toContainText("archived");
+    for (const status of ["monitoring", "resolved", "archived"] as const) {
+      await statusForm.locator('select[name="status"]').selectOption(status);
+      await statusForm.getByRole("button", { name: "Update status" }).click();
+      await expect(page.locator(".focus-head .status-pill")).toHaveText(status);
+    }
     await screenshot(page, "02-case-status-archived");
   });
 
-  test("viewer does not persist a created case (write is server-denied)", async ({ page }) => {
+  test("viewer gets the overview without any creation entry points", async ({ page }) => {
     await loginAs(page, FIXTURE_USERS.carol);
-    await expect(page.getByPlaceholder("New case title")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Create case" })).toHaveCount(0);
-    await expect(page.getByText("Select or create a case.")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Operating picture" })).toBeVisible();
+    await expect(page.getByPlaceholder("New investigation title")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Create investigation" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Start investigation" })).toHaveCount(0);
   });
 });

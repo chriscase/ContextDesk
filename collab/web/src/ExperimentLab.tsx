@@ -768,7 +768,17 @@ export function ExperimentLab(props: {
   caseStatus?: string;
   caseSeverity?: string;
   participant?: { username: string; roles: string[] };
+  /**
+   * Which part of the lab to present. "full" (the default, and the behavior
+   * existing consumers already rely on) renders everything; "comparison"
+   * renders only the review/comparison material; "decision" renders only the
+   * human decision journal and share-safe export.
+   */
+  surface?: "full" | "comparison" | "decision";
 }) {
+  const surface = props.surface ?? "full";
+  const showComparison = surface !== "decision";
+  const showDecision = surface !== "comparison";
   const readOnly = props.readOnly === true;
   const canWrite = props.canWrite && !readOnly;
   const canLead = props.canLead && !readOnly;
@@ -1255,19 +1265,24 @@ export function ExperimentLab(props: {
   }
 
   return (
-    <section className="experiment-lab">
+    <section
+      className={`experiment-lab${surface === "decision" ? " experiment-lab--decision" : ""}`}
+    >
       <header className="experiment-lab__header">
         <div>
           <p className="experiment-lab__eyebrow">
-            Case {props.caseTitle ?? props.caseId} · collaborative triage war room
+            Case {props.caseTitle ?? props.caseId} ·{" "}
+            {surface === "decision" ? "human adjudication" : "comparison lab"}
           </p>
-          <h3 className="case-view__title">Experiment lab</h3>
+          <h3 className="case-view__title">
+            {surface === "decision" ? "Decision journal" : "Experiment lab"}
+          </h3>
           <p className="experiment-lab__case-state">
             <span>{props.caseStatus ?? "status unavailable"}</span>
             <span>{props.caseSeverity ?? "severity unavailable"} severity</span>
           </p>
         </div>
-        <div className="experiment-lab__presence" aria-label="War room presence">
+        <div className="experiment-lab__presence" aria-label="Case presence">
           <span className="experiment-lab__presence-dot" aria-hidden="true" />
           <div>
             <span className="experiment-lab__eyebrow">Current participant</span>
@@ -1286,20 +1301,22 @@ export function ExperimentLab(props: {
           ) : null}
         </div>
       </header>
+      {showComparison ? (
+        <>
       <p className="experiment-lab__intro">
         Compare seeded, connected ContextDesk, and pasted-chat triage candidates across model and
         strategy lanes. Agreement is not proof of correctness. A gold reference is a human
         benchmark decision, not an infallible truth claim. Gold alignment is scored separately
         from helpfulness.
       </p>
-      <div className="experiment-lab__future-slots" aria-label="War room extension slots">
+      <div className="experiment-lab__future-slots" aria-label="Extension slots">
         <span>Sources: seeded · ContextDesk connector · pasted chat</span>
         <span>Presence: {presence ? `${presence.members.length} active` : "checking…"} · live refresh</span>
         <span>Next extensions: semantic search · multi-worker leases</span>
       </div>
       <details className="experiment-lab__tools experiment-lab__extensions">
-        <summary>War room extension points</summary>
-        <div className="experiment-lab__extension-grid" aria-label="War room extension points">
+        <summary>Extension points</summary>
+        <div className="experiment-lab__extension-grid" aria-label="Extension points">
           <div>
             <span>Case comments</span>
             <small>Case timeline and notes</small>
@@ -1330,6 +1347,8 @@ export function ExperimentLab(props: {
           </div>
         </div>
       </details>
+        </>
+      ) : null}
       <p className="experiment-lab__authority">
         Actions in this room are attributed to <strong>{participantName}</strong> ({participantRole}).
         The server remains authoritative for permissions, provenance, and accepted state.
@@ -1340,7 +1359,7 @@ export function ExperimentLab(props: {
           projection. Editing, importing, scoring, and benchmark changes are unavailable.
         </p>
       ) : null}
-      {canWrite ? (
+      {showComparison && canWrite ? (
         <details className="experiment-lab__tools">
           <summary>Import another experiment package</summary>
           <form className="composer" onSubmit={(event) => void importPackage(event)}>
@@ -1358,7 +1377,7 @@ export function ExperimentLab(props: {
           </form>
         </details>
       ) : null}
-      {canWrite ? (
+      {showComparison && canWrite ? (
         <details className="experiment-lab__tools">
           <summary>Import bench-compare / recorded artifact</summary>
           <p className="experiment-lab__section-note">
@@ -1412,6 +1431,8 @@ export function ExperimentLab(props: {
             package {current.packageId} · task {current.taskFingerprint.slice(0, 12)} · snapshot{" "}
             {current.snapshotFingerprint.slice(0, 12)}
           </p>
+          {showComparison ? (
+            <>
           <section className="experiment-lab__scan" aria-labelledby="scan-heading">
             <div className="experiment-lab__section-heading">
               <div>
@@ -2379,6 +2400,10 @@ export function ExperimentLab(props: {
             ))}
           </ul>
           </section>
+            </>
+          ) : null}
+          {showDecision ? (
+            <>
           <section className="experiment-lab__section" aria-labelledby="decision-heading">
             <div className="experiment-lab__section-heading">
               <div>
@@ -2555,6 +2580,8 @@ export function ExperimentLab(props: {
                 </div>
               ) : null}
             </section>
+          ) : null}
+            </>
           ) : null}
         </>
       ) : null}

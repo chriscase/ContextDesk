@@ -82,12 +82,14 @@ DuckDB library artifact. See
 ## Path-aware routing
 
 For a Rust-touching PR, `rust tests (ubuntu aggregate)` runs the complete
-fail-closed eight-shard workspace gate. A PR that changes only
-`crates/cd-triage-bench/**` (or benchmark documentation) skips the eight
-shards but keeps the same required check name and runs the complete
-`cd-triage-bench` test suite in the aggregate job. A collaboration-only path
-is routed only when no collaboration implementation is present; if source
-appears before its dedicated validator exists, the aggregate fails closed.
+fail-closed eight-shard workspace gate. A collaboration-only PR (paths under
+`collab/**`, `crates/cd-collab/**`, or `docs/collab/**`) skips the eight
+Ubuntu Rust shards but keeps the same required check name. When collaboration
+source is present, the aggregate accepts the filtered route only if the
+dedicated validators exist (`.github/workflows/collab.yml` and
+`collab-qualify.yml`); otherwise it fails closed. Those workflows — not the
+Rust shards — cover collab typecheck/lint/test/build, hosted qualify, and
+war-room browser qualification.
 
 ## Triage fast lane (advisory, not a gate)
 
