@@ -284,13 +284,31 @@ export function parseTriageJobCreateRequest(raw: unknown): TriageJobCreateReques
   return parseTriageJobRequest(raw);
 }
 
+/**
+ * Candidates must be fingerprinted with an explicit field order. PostgreSQL
+ * jsonb reorders object keys; spreading the row back into JSON.stringify would
+ * otherwise change the digest after createOrReturn/get round-trips.
+ */
+function canonicalTriageCandidateSpec(
+  candidate: TriageCandidateSpecV1,
+): TriageCandidateSpecV1 {
+  return {
+    candidateId: candidate.candidateId,
+    role: candidate.role,
+    provider: candidate.provider,
+    profileId: candidate.profileId,
+    model: candidate.model,
+    version: candidate.version,
+  };
+}
+
 export function triageJobRequestFingerprint(
   snapshotFingerprint: string,
   request: TriageJobRequestV1,
 ): string {
   const candidates = [...request.candidates]
-    .sort((a, b) => a.candidateId.localeCompare(b.candidateId))
-    .map((candidate) => ({ ...candidate }));
+    .map(canonicalTriageCandidateSpec)
+    .sort((a, b) => a.candidateId.localeCompare(b.candidateId));
   return createHash("sha256").update(
     JSON.stringify({
       snapshotFingerprint,
@@ -300,7 +318,7 @@ export function triageJobRequestFingerprint(
       question: request.question,
       policyFingerprint: request.policyFingerprint,
       taskFingerprint: request.taskFingerprint,
-      candidates: candidates.map((candidate) => ({ ...candidate, profileId: candidate.profileId })),
+      candidates,
     }),
     "utf8",
   ).digest("hex");

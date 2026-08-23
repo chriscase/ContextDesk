@@ -180,4 +180,63 @@ describe("triage job contracts", () => {
       /must not reference the job itself/,
     );
   });
+
+  it("keeps request fingerprints stable across jsonb-style key reordering", () => {
+    const insertionOrder = request.candidates[0]!;
+    const jsonbOrder = {
+      candidateId: insertionOrder.candidateId,
+      model: insertionOrder.model,
+      profileId: insertionOrder.profileId,
+      provider: insertionOrder.provider,
+      role: insertionOrder.role,
+      version: insertionOrder.version,
+    };
+    expect(JSON.stringify(insertionOrder)).not.toBe(JSON.stringify(jsonbOrder));
+    const fromInsertion = triageJobRequestFingerprint(snapshotFingerprint, request);
+    const fromJsonb = triageJobRequestFingerprint(snapshotFingerprint, {
+      ...request,
+      candidates: [jsonbOrder],
+    });
+    expect(fromJsonb).toBe(fromInsertion);
+    expect(
+      parseTriageJob({
+        schemaId: "cd-collab.triage_job.v1",
+        id: "job-1",
+        caseId: "case-1",
+        snapshotId: request.snapshotId,
+        snapshotFingerprint,
+        requestFingerprint: fromInsertion,
+        cancellationId: "cancel-1",
+        request: { ...request, candidates: [jsonbOrder] },
+        status: "queued",
+        candidates: [
+          {
+            ...jsonbOrder,
+            status: "queued",
+            benchmarkRunId: null,
+            outputHash: null,
+            summary: null,
+            evidenceRefs: [],
+            unknowns: [],
+            usageStatus: "unknown",
+            costStatus: "unknown",
+            errorCode: null,
+            startedAt: null,
+            finishedAt: null,
+            privacyClass: "owner_only",
+          },
+        ],
+        sameSnapshot: null,
+        agreementNotice: "Agreement is not proof of correctness.",
+        requestedBy: "lead",
+        requestedByUsername: "lead",
+        createdAt: "2026-08-20T00:00:00.000Z",
+        updatedAt: "2026-08-20T00:00:00.000Z",
+        startedAt: null,
+        finishedAt: null,
+        cancelRequestedAt: null,
+        stoppedReason: null,
+      }).requestFingerprint,
+    ).toBe(fromInsertion);
+  });
 });

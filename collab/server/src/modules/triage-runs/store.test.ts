@@ -163,6 +163,48 @@ describe("triage job stores", () => {
       /payload does not match authoritative columns/,
     );
   });
+
+  it("parses PostgreSQL jsonb payloads after candidate key reordering", async () => {
+    const valid = job();
+    const insertion = valid.request.candidates[0]!;
+    const jsonbCandidate = {
+      candidateId: insertion.candidateId,
+      model: insertion.model,
+      profileId: insertion.profileId,
+      provider: insertion.provider,
+      role: insertion.role,
+      version: insertion.version,
+    };
+    expect(JSON.stringify(insertion)).not.toBe(JSON.stringify(jsonbCandidate));
+    const payload = {
+      ...valid,
+      request: { ...valid.request, candidates: [jsonbCandidate] },
+      candidates: valid.candidates.map((candidate) => ({
+        ...candidate,
+        ...jsonbCandidate,
+      })),
+    };
+    const row = {
+      id: valid.id,
+      case_id: valid.caseId,
+      snapshot_id: valid.snapshotId,
+      snapshot_fingerprint: valid.snapshotFingerprint,
+      request_fingerprint: valid.requestFingerprint,
+      status: valid.status,
+      payload,
+      lease_owner: null,
+      lease_expires_at: null,
+      parent_job_id: null,
+      idempotency_scope_digest: null,
+      idempotency_binding_digest: null,
+    };
+    const db: Queryable = {
+      query: async () => ({ rows: [row], rowCount: 1 } as never),
+    };
+    const loaded = await new PgTriageJobStore(db).get(valid.id);
+    expect(loaded?.requestFingerprint).toBe(valid.requestFingerprint);
+    expect(loaded?.request.candidates[0]).toEqual(jsonbCandidate);
+  });
 });
 
 describe.skipIf(!adminUrl())("PostgreSQL triage job integrity", () => {
