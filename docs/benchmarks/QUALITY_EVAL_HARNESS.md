@@ -195,6 +195,12 @@ Future policy (non-binding design):
 
 ## Attaching later live experiments
 
+The provider-neutral, truth-isolated request/response boundary for the checked-in
+known-answer cases is specified in
+[`INVESTIGATION_TEAM_KNOWN_ANSWER_V1.md`](INVESTIGATION_TEAM_KNOWN_ANSWER_V1.md).
+It prepares and deterministically scores provider responses, but deliberately
+does not perform network execution or make readiness/recommendation claims.
+
 Live DeepSeek / Grok / Vercel / embedding / rerank runners should:
 
 1. Produce `RetrievalRanking` and/or `CandidateAnswer` records with the same schemas.

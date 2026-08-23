@@ -19,6 +19,7 @@
 pub mod answer_score;
 pub mod diagnostic_score;
 pub mod export;
+pub mod live_known_answer;
 pub mod matrix;
 pub mod metrics;
 pub mod run;
@@ -30,6 +31,14 @@ pub use diagnostic_score::score_diagnostic_dimensions;
 pub use export::{
     gate_export_text, normalize_for_stability, serialize_json, serialize_jsonl, write_export,
     ExportFormat,
+};
+pub use live_known_answer::{
+    live_known_answer_prompt_set_hash, parse_live_known_answer_response,
+    prepare_live_known_answer_suite, score_live_known_answer_response,
+    serialize_live_known_answer_prompt, LiveAnswerClaim, LiveCitation, LiveEvidenceDocument,
+    LiveKnownAnswerPrompt, LiveKnownAnswerResponse, LiveKnownAnswerScore, LiveResponseContract,
+    PreparedLiveKnownAnswerCase, LIVE_KNOWN_ANSWER_PACKET_ID, LIVE_KNOWN_ANSWER_PROMPT_SCHEMA_ID,
+    LIVE_KNOWN_ANSWER_RESPONSE_MAX_BYTES, LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID,
 };
 pub use matrix::{matrix_summary_lines, matrix_summary_rows};
 pub use metrics::{round6, score_retrieval, validate_ranking};
