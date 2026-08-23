@@ -15,6 +15,8 @@ evidence snapshot, and agreement is never presented as proof of correctness.
 
 ![War Room evidence flow](assets/operator-journey.svg)
 
+For a screen-by-screen explanation, see the [end-to-end walkthrough](end-to-end-walkthrough.md).
+
 ## The mental model
 
 | Stage | What the operator does | What ContextDesk proves | What it must never imply |
@@ -174,6 +176,7 @@ without labeling it.
 ## Evidence records
 
 - [War Room operator journey v1](../benchmarks/WAR_ROOM_OPERATOR_JOURNEY_V1.md)
+- [End-to-end walkthrough](end-to-end-walkthrough.md)
 - [Collab browser qualification](../testing/COLLAB_WAR_ROOM_BROWSER_QUALIFICATION_V1.md)
 - [Connected triage runs](../benchmarks/CONNECTED_TRIAGE_RUNS_V1.md)
 - Investigation Team readiness: use the host qualification report and its

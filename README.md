@@ -66,12 +66,12 @@ This is a CI evidence status, not a claim that the application cannot run on Ubu
 | Need | Start here |
 | ---- | ---------- |
 | **Install / build** | [Install](#install) · [Development](#development) · [DEV.md](docs/DEV.md) · [Packaging](docs/PACKAGING.md) |
-| **GUI use** | [Configure a provider](#configure-a-provider) · [War Room operator guide](docs/war-room/README.md) · Help [first run](docs/help/getting-started/first-run.md) · [Log Explorer](docs/help/log-analysis/log-explorer.md) · [demo datasets](docs/help/log-analysis/demo-datasets.md) |
+| **GUI use** | [Configure a provider](#configure-a-provider) · [War Room operator guide](docs/war-room/README.md) · [End-to-end War Room walkthrough](docs/war-room/end-to-end-walkthrough.md) · Help [first run](docs/help/getting-started/first-run.md) · [Log Explorer](docs/help/log-analysis/log-explorer.md) · [demo datasets](docs/help/log-analysis/demo-datasets.md) |
 | **CLI** | [CLI and log normalization](#cli-and-log-normalization) · [CLI guide](docs/CLI.md) |
 | **Normalization** | [NORMALIZATION.md](docs/NORMALIZATION.md) · [spec](docs/specs/NORMALIZED_LOG_EVENTS_V1.md) |
 | **Logging quality assessment (LQA)** | [LQA guide](docs/help/log-analysis/logging-quality-assessment.md) · [Demo runbook](docs/DEMO_RUNBOOK.md#f-logging-quality-assessment-jsonmarkdown-export) |
 | **Architecture** | [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [PRODUCT.md](docs/PRODUCT.md) · [AGENTS.md](AGENTS.md) |
-| **Repeatable demo (GUI + CLI)** | **[Demo runbook](docs/DEMO_RUNBOOK.md)** · [Demo acceptance](docs/DEMO_ACCEPTANCE.md) · [War Room journey](docs/benchmarks/WAR_ROOM_OPERATOR_JOURNEY_V1.md) |
+| **Repeatable demo (GUI + CLI)** | **[Demo runbook](docs/DEMO_RUNBOOK.md)** · [Demo acceptance](docs/DEMO_ACCEPTANCE.md) · [War Room journey](docs/benchmarks/WAR_ROOM_OPERATOR_JOURNEY_V1.md) · [End-to-end walkthrough](docs/war-room/end-to-end-walkthrough.md) |
 
 ## CLI and log normalization
 
