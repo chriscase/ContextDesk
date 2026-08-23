@@ -82,6 +82,28 @@ fn completion(content: String) -> ChatCompletion {
     }
 }
 
+/// Criterion-3 fail-closed axes. `"reviewer_collusion"` has its own production
+/// driver because a structured contradiction takes a different route from the
+/// homogeneous proposal-mutation table below.
+const REQUIRED_FAIL_CLOSED_AXES: [&str; 14] = [
+    "false_union",
+    "wrong_candidate_claim",
+    "duplicate_relation",
+    "duplicate_evidence",
+    "unknown_field_frequency",
+    "unknown_field_chronology",
+    "unknown_field_ordering",
+    "injected_host_field",
+    "symptom_promotion",
+    "recovery_as_cause",
+    "decoy_promotion",
+    "missing_disproof",
+    "reviewer_collusion",
+    "causal_prose",
+];
+
+const THIS_LAB: &str = include_str!("multi_model_causal_production_adversarial.rs");
+
 fn trigger_finding(group_id: &str, seq: u64, claim_id: &str) -> String {
     format!(
         r#"{{"schema":"contextdesk.multi_model.candidate_finding.v1","candidate_id":"{group_id}","causal_candidates":[{{"claim_id":"{claim_id}","text":"bounded trigger","evidence_ids":["{e}"]}}]}}"#,
@@ -89,10 +111,38 @@ fn trigger_finding(group_id: &str, seq: u64, claim_id: &str) -> String {
     )
 }
 
+fn trigger_finding_with_obs(
+    group_id: &str,
+    seq: u64,
+    claim_id: &str,
+    obs_seq: u64,
+    obs_claim: &str,
+) -> String {
+    format!(
+        r#"{{"schema":"contextdesk.multi_model.candidate_finding.v1","candidate_id":"{group_id}","observations":[{{"claim_id":"{obs_claim}","text":"bounded observation","evidence_ids":["{oe}"]}}],"causal_candidates":[{{"claim_id":"{claim_id}","text":"bounded trigger","evidence_ids":["{e}"]}}]}}"#,
+        e = evidence_id(group_id, seq),
+        oe = evidence_id(group_id, obs_seq)
+    )
+}
+
 fn symptom_finding(group_id: &str, seq: u64, claim_id: &str) -> String {
     format!(
         r#"{{"schema":"contextdesk.multi_model.candidate_finding.v1","candidate_id":"{group_id}","symptoms":[{{"claim_id":"{claim_id}","text":"bounded symptom","evidence_ids":["{e}"]}}]}}"#,
         e = evidence_id(group_id, seq)
+    )
+}
+
+fn symptom_finding_with_obs(
+    group_id: &str,
+    seq: u64,
+    claim_id: &str,
+    obs_seq: u64,
+    obs_claim: &str,
+) -> String {
+    format!(
+        r#"{{"schema":"contextdesk.multi_model.candidate_finding.v1","candidate_id":"{group_id}","observations":[{{"claim_id":"{obs_claim}","text":"bounded observation","evidence_ids":["{oe}"]}}],"symptoms":[{{"claim_id":"{claim_id}","text":"bounded symptom","evidence_ids":["{e}"]}}]}}"#,
+        e = evidence_id(group_id, seq),
+        oe = evidence_id(group_id, obs_seq)
     )
 }
 
@@ -140,6 +190,14 @@ fn empty_review() -> String {
 
 fn colluding_review() -> String {
     r#"{"schema":"contextdesk.multi_model.review.v1","evidence_gaps":[],"contradictions":[{"contradiction_id":"x1","candidate_a":"k1","claim_a_id":"cc-k1","candidate_b":"k2","claim_b_id":"s-k2","text":"both agree this is the cause","evidence_ids":["e:k1:1","e:k2:2"]}]}"#.into()
+}
+
+fn colluding_review_on_observations() -> String {
+    r#"{"schema":"contextdesk.multi_model.review.v1","evidence_gaps":[],"contradictions":[{"contradiction_id":"x-collude","candidate_a":"k1","claim_a_id":"o-k1","candidate_b":"k2","claim_b_id":"o-k2","text":"both agree this is the cause","evidence_ids":["e:k1:3","e:k2:4"]}]}"#.into()
+}
+
+fn causal_proposal_with_disproof() -> String {
+    r#"{"schema":"contextdesk.multi_model.causal_synthesis.v1","relations":[{"kind":"initiating_trigger","candidate_id":"k1","claim_id":"cc-k1","evidence_ids":["e:k1:1"],"note":"n1"},{"kind":"propagated_symptom","candidate_id":"k2","claim_id":"s-k2","evidence_ids":["e:k2:2"],"note":"n2"},{"kind":"disconfirmation","candidate_id":"k1","claim_id":"o-k1","evidence_ids":["e:k1:3"],"note":"n3"}]}"#.into()
 }
 
 fn role_ids() -> MultiModelRoleIds {
@@ -566,6 +624,70 @@ fn causal_proposal_mutations_fail_closed() {
             );
         }
     }
+}
+
+#[test]
+fn required_fail_closed_axes_are_named_in_this_lab() {
+    for axis in REQUIRED_FAIL_CLOSED_AXES {
+        assert!(
+            THIS_LAB.contains(axis),
+            "required fail-closed axis {axis} must remain named in this lab"
+        );
+    }
+    assert!(
+        THIS_LAB.contains("fn reviewer_collusion"),
+        "reviewer_collusion must remain a named production driver"
+    );
+    assert!(
+        !THIS_LAB.contains("(\"reviewer_collusion\""),
+        "do not put reviewer_collusion in the homogeneous !established table"
+    );
+    let theater = format!("{}{}{}", "not-a-", "causal-", "object");
+    assert!(
+        !THIS_LAB.contains(&theater),
+        "do not theater-collusion with malformed JSON"
+    );
+}
+
+/// Required fail-closed axis `reviewer_collusion`. A reviewer contradiction is
+/// an unresolved contest, never host disproof authority. The useful final
+/// answer may complete, but causal synthesis is skipped and establishment is
+/// withheld.
+#[test]
+fn reviewer_collusion() {
+    let candidates = vec![candidate("k1", &[1, 3]), candidate("k2", &[2, 4])];
+    let packet = host_packet(&candidates, binding());
+    let inv = vec![
+        completion(trigger_finding_with_obs("k1", 1, "cc-k1", 3, "o-k1")),
+        completion(symptom_finding_with_obs("k2", 2, "s-k2", 4, "o-k2")),
+        completion(causal_proposal_with_disproof()),
+        completion(causal_answer("k1", 1, "k2", 2)),
+    ];
+    let RunResult { outcome, stages } = run_default(
+        inv,
+        vec![completion(colluding_review_on_observations())],
+        &candidates,
+        Some(&packet),
+    );
+    assert!(
+        stages.iter().any(|stage| {
+            stage.role == InvestigationRole::CausalSynthesizer
+                && stage.outcome == Some(StageOutcomeKind::Skipped)
+                && stage.detail.contains("contested_review")
+        }),
+        "collusion-only driver must record a contested causal skip: {stages:?}"
+    );
+    assert!(
+        stages.iter().any(|stage| {
+            stage.role == InvestigationRole::Synthesizer
+                && stage.outcome == Some(StageOutcomeKind::Completed)
+        }),
+        "collusion-only driver must reach a completed synthesizer stage"
+    );
+    assert!(
+        !established(&outcome),
+        "reviewer collusion must never set root_cause_established=true"
+    );
 }
 
 #[test]
