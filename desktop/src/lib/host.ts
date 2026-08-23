@@ -1543,6 +1543,20 @@ export type InvestigationQualificationAxisDto = {
   notes: string[];
 };
 
+export type InvestigationTeamAttemptFailureDto = {
+  attempt_id: string;
+  role: string;
+  reason: string;
+};
+
+export type InvestigationTeamMemberDto = {
+  role: string;
+  subject_storage_id: string;
+  profile_id: string;
+  model_id: string;
+  endpoint_fingerprint: string;
+};
+
 export type InvestigationTeamQualificationDto = {
   status: "qualified" | "failed" | "partial" | "stale" | string;
   schema_id: string;
@@ -1556,6 +1570,10 @@ export type InvestigationTeamQualificationDto = {
   quality: InvestigationQualificationAxisDto;
   speed: InvestigationQualificationAxisDto;
   resource: InvestigationQualificationAxisDto;
+  /** Exact non-secret identities captured by the host for this report. */
+  members?: InvestigationTeamMemberDto[];
+  /** Older process-local reports may omit this field; absence means none. */
+  failures?: InvestigationTeamAttemptFailureDto[];
   redacted_json: string;
   redacted_markdown: string;
 };
@@ -1594,6 +1612,22 @@ export async function hostRunSyntheticInvestigationTeamQualification(): Promise<
   return invoke<InvestigationTeamQualificationDto>(
     "run_synthetic_investigation_team_qualification",
   );
+}
+
+/** Run a user-triggered provider-backed check through the trusted host. */
+export async function hostRunLiveInvestigationTeamQualification(): Promise<InvestigationTeamQualificationDto> {
+  if (!isTauri()) {
+    throw new Error("Measured qualification requires the trusted desktop host");
+  }
+  return invoke<InvestigationTeamQualificationDto>(
+    "run_live_investigation_team_qualification",
+  );
+}
+
+/** Cooperatively cancel the provider-backed check. */
+export async function hostCancelLiveInvestigationTeamQualification(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("cancel_live_investigation_team_qualification");
 }
 
 export async function hostGetDefaultChatModel(): Promise<string | null> {

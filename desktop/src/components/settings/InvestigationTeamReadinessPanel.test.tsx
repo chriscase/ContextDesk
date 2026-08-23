@@ -7,6 +7,8 @@ const host = vi.hoisted(() => ({
   get: vi.fn(),
   qualification: vi.fn(),
   runSynthetic: vi.fn(),
+  runLive: vi.fn(),
+  cancelLive: vi.fn(),
 }));
 
 vi.mock("../../lib/host", async () => {
@@ -20,6 +22,10 @@ vi.mock("../../lib/host", async () => {
       host.qualification(...args),
     hostRunSyntheticInvestigationTeamQualification: (...args: unknown[]) =>
       host.runSynthetic(...args),
+    hostRunLiveInvestigationTeamQualification: (...args: unknown[]) =>
+      host.runLive(...args),
+    hostCancelLiveInvestigationTeamQualification: (...args: unknown[]) =>
+      host.cancelLive(...args),
   };
 });
 
@@ -54,9 +60,13 @@ beforeEach(() => {
   host.get.mockReset();
   host.qualification.mockReset();
   host.runSynthetic.mockReset();
+  host.runLive.mockReset();
+  host.cancelLive.mockReset();
   host.get.mockResolvedValue(settings());
   host.qualification.mockResolvedValue(null);
   host.runSynthetic.mockResolvedValue(null);
+  host.runLive.mockResolvedValue(null);
+  host.cancelLive.mockResolvedValue(true);
 });
 
 describe("InvestigationTeamReadinessPanel", () => {
@@ -92,6 +102,23 @@ describe("InvestigationTeamReadinessPanel", () => {
       quality: { contract_met: false, metrics: {}, notes: ["partial"] },
       speed: { contract_met: true, metrics: {}, notes: [] },
       resource: { contract_met: true, metrics: {}, notes: [] },
+      members: [
+        {
+          role: "investigator",
+          subject_storage_id: "subject-investigator",
+          profile_id: "run-investigator",
+          model_id: "run-model-a",
+          endpoint_fingerprint: "1".repeat(64),
+        },
+        {
+          role: "reviewer",
+          subject_storage_id: "subject-reviewer",
+          profile_id: "run-reviewer",
+          model_id: "run-model-b",
+          endpoint_fingerprint: "2".repeat(64),
+        },
+      ],
+      failures: [],
       redacted_json: "{\"safe\":true}",
       redacted_markdown: "safe",
     });
@@ -101,6 +128,9 @@ describe("InvestigationTeamReadinessPanel", () => {
     expect(report.textContent).toMatch(/incomplete attempts remain/i);
     expect(report.textContent).toMatch(/pipeline fingerprint/i);
     expect(report.textContent).toMatch(/evaluator truth and provider credentials are not exposed/i);
+    expect(screen.getByTestId("investigation-team-qualification-members").textContent).toMatch(
+      /investigator.*run-investigator.*run-model-a/s,
+    );
   });
 
   it("does not call the provider and can retry a host read failure", async () => {
@@ -111,6 +141,31 @@ describe("InvestigationTeamReadinessPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.getByTestId("investigation-team-readiness")).toBeTruthy());
     expect(host.get).toHaveBeenCalledTimes(2);
+  });
+
+  it("labels stale host evidence as unusable for a new run", async () => {
+    host.qualification.mockResolvedValue({
+      status: "stale",
+      schema_id: "contextdesk.investigation_team_qualification.v1",
+      suite_version: "contextdesk.investigation_team_qualification.suite.v1",
+      observed_at: 1_777_000_000,
+      stale: true,
+      incomplete_attempts: false,
+      fingerprint_digest: "s".repeat(64),
+      scoring_digest: "t".repeat(64),
+      capability: { contract_met: true, metrics: {}, notes: [] },
+      quality: { contract_met: true, metrics: {}, notes: [] },
+      speed: { contract_met: true, metrics: {}, notes: [] },
+      resource: { contract_met: true, metrics: {}, notes: [] },
+      members: [],
+      failures: [],
+      redacted_json: "{\"safe\":true}",
+      redacted_markdown: "safe",
+    });
+    render(<InvestigationTeamReadinessPanel />);
+    const report = await screen.findByTestId("investigation-team-qualification-report");
+    expect(report.getAttribute("data-status")).toBe("stale");
+    expect(report.textContent).toMatch(/stale evidence.*do not use it for a new run/i);
   });
 
   it("keeps browser preview absent when the host is unavailable", async () => {
@@ -133,6 +188,8 @@ describe("InvestigationTeamReadinessPanel", () => {
       quality: { contract_met: true, metrics: {}, notes: [] },
       speed: { contract_met: true, metrics: {}, notes: [] },
       resource: { contract_met: true, metrics: {}, notes: [] },
+      members: [],
+      failures: [],
       redacted_json: "{\"safe\":true}",
       redacted_markdown: "safe",
     });
@@ -158,6 +215,59 @@ describe("InvestigationTeamReadinessPanel", () => {
     expect(
       (await screen.findByTestId("investigation-team-synthetic-error")).textContent,
     ).toContain("no active provider profile");
+    expect(screen.queryByTestId("investigation-team-qualification-report")).toBeNull();
+  });
+
+  it("shows measured role failures instead of hiding a partial result", async () => {
+    host.runLive.mockResolvedValue({
+      status: "partial",
+      schema_id: "contextdesk.investigation_team_qualification.v1",
+      suite_version: "contextdesk.investigation_team_qualification.suite.v1",
+      observed_at: 1_777_000_000,
+      stale: false,
+      incomplete_attempts: true,
+      fingerprint_digest: "e".repeat(64),
+      scoring_digest: "f".repeat(64),
+      capability: { contract_met: true, metrics: {}, notes: [] },
+      quality: { contract_met: false, metrics: {}, notes: [] },
+      speed: { contract_met: true, metrics: {}, notes: [] },
+      resource: { contract_met: true, metrics: {}, notes: [] },
+      members: [],
+      failures: [
+        {
+          attempt_id: "live-qualification-attempt-2",
+          role: "reviewer",
+          reason: "provider response was not strict qualification JSON",
+        },
+      ],
+      redacted_json: "{\"safe\":true}",
+      redacted_markdown: "safe",
+    });
+    render(<InvestigationTeamReadinessPanel />);
+    await screen.findByTestId("investigation-team-readiness");
+    fireEvent.click(screen.getByTestId("investigation-team-run-live"));
+    const failures = await screen.findByTestId(
+      "investigation-team-qualification-failures",
+    );
+    expect(failures.textContent).toMatch(/reviewer/i);
+    expect(failures.textContent).toMatch(/strict qualification JSON/i);
+    expect(screen.getByTestId("investigation-team-qualification-axes").textContent).toMatch(
+      /capability/i,
+    );
+    expect(screen.getByTestId("investigation-team-redacted-json").textContent).toContain(
+      '"safe":true',
+    );
+    expect(host.runLive).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces measured-host setup errors without retaining an old report", async () => {
+    host.runLive.mockRejectedValue(new Error("reviewer remote evidence egress is not acknowledged"));
+    render(<InvestigationTeamReadinessPanel />);
+    await screen.findByTestId("investigation-team-readiness");
+    fireEvent.click(screen.getByTestId("investigation-team-run-live"));
+    expect(
+      (await screen.findByTestId("investigation-team-live-error")).textContent,
+    ).toContain("remote evidence egress");
     expect(screen.queryByTestId("investigation-team-qualification-report")).toBeNull();
   });
 });

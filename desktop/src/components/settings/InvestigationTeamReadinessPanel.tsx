@@ -1,16 +1,17 @@
 /**
  * Honest Investigation Team readiness summary.
  *
- * This is intentionally a settings/readiness surface, not an execution
- * control. It reads host-recorded role assignments and measured qualification
- * labels, then keeps configuration, measured readiness, and actual execution
- * visibly separate. A future host-produced qualification report can extend
- * this matrix without changing its honesty rules.
+ * This is a settings/readiness surface with explicit, user-triggered checks.
+ * It reads host-recorded role assignments and measured qualification labels,
+ * then keeps configuration, measured readiness, and actual execution visibly
+ * separate. No check runs on mount.
  */
 import { useCallback, useEffect, useState } from "react";
 import {
   hostGetInvestigationTeamQualification,
   hostGetMultiModelSettings,
+  hostCancelLiveInvestigationTeamQualification,
+  hostRunLiveInvestigationTeamQualification,
   hostRunSyntheticInvestigationTeamQualification,
   type ContributionAssignmentDto,
   type InvestigationTeamQualificationDto,
@@ -180,6 +181,8 @@ export function InvestigationTeamReadinessPanel() {
     "idle",
   );
   const [syntheticError, setSyntheticError] = useState<string | null>(null);
+  const [livePhase, setLivePhase] = useState<"idle" | "running" | "error">("idle");
+  const [liveError, setLiveError] = useState<string | null>(null);
   const [phase, setPhase] = useState<"loading" | "ready" | "absent" | "error">(
     "loading",
   );
@@ -227,6 +230,28 @@ export function InvestigationTeamReadinessPanel() {
     }
   };
 
+  const runLive = async () => {
+    setLivePhase("running");
+    setLiveError(null);
+    try {
+      const report = await hostRunLiveInvestigationTeamQualification();
+      setQualification(report);
+      setLivePhase("idle");
+    } catch (error) {
+      setQualification(null);
+      setLivePhase("error");
+      setLiveError(
+        error instanceof Error
+          ? error.message
+          : "The host could not complete measured qualification.",
+      );
+    }
+  };
+
+  const cancelLive = async () => {
+    await hostCancelLiveInvestigationTeamQualification();
+  };
+
   if (phase === "absent") return null;
   if (phase === "loading") {
     return (
@@ -250,6 +275,7 @@ export function InvestigationTeamReadinessPanel() {
 
   const rows = rowsFor(settings);
   const summary = summaryFor(settings, rows);
+  const failures = qualification?.failures ?? [];
   return (
     <section
       className="mm-team__readiness it-readiness"
@@ -305,10 +331,95 @@ export function InvestigationTeamReadinessPanel() {
               </dd>
             </div>
           </dl>
+          <div
+            className="it-readiness__axes"
+            data-testid="investigation-team-qualification-axes"
+          >
+            {(["capability", "quality", "speed", "resource"] as const).map((axis) => {
+              const value = qualification[axis];
+              const metrics = Object.entries(value.metrics);
+              return (
+                <article className="it-readiness__axis" key={axis}>
+                  <div className="it-readiness__axis-title">
+                    <strong>{axis}</strong>
+                    <span data-state={value.contract_met ? "pass" : "fail"}>
+                      {value.contract_met ? "Pass" : "Needs attention"}
+                    </span>
+                  </div>
+                  {metrics.length > 0 ? (
+                    <ul className="it-readiness__metrics">
+                      {metrics.map(([key, metric]) => (
+                        <li key={key}>
+                          <code>{key}</code> {metric}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {value.notes.length > 0 ? (
+                    <ul className="it-readiness__notes">
+                      {value.notes.map((note) => <li key={note}>{note}</li>)}
+                    </ul>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+          <div
+            className="it-readiness__members"
+            data-testid="investigation-team-qualification-members"
+          >
+            <strong>Executed pipeline identity</strong>
+            <p className="it-readiness__detail">
+              These role, profile, model, subject, and deployment identities came
+              from this host-produced report—not from the current settings snapshot.
+            </p>
+            {(qualification.members ?? []).length > 0 ? (
+              <ul>
+                {(qualification.members ?? []).map((member) => (
+                  <li key={member.role + ":" + member.profile_id + ":" + member.model_id}>
+                    <strong>{member.role}</strong>
+                    <code>{member.profile_id}</code>
+                    <code>{member.model_id}</code>
+                    <small>
+                      subject <code>{member.subject_storage_id}</code> · deployment{" "}
+                      <code>{member.endpoint_fingerprint}</code>
+                    </small>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="it-readiness__detail">No member identities were recorded.</p>
+            )}
+          </div>
           <p className="it-readiness__detail">
             Redacted JSON and Markdown are available from the host-owned result;
             evaluator truth and provider credentials are not exposed here.
           </p>
+          <div className="it-readiness__exports" data-testid="investigation-team-redacted-exports">
+            <details>
+              <summary>View redacted JSON</summary>
+              <pre data-testid="investigation-team-redacted-json">{qualification.redacted_json}</pre>
+            </details>
+            <details>
+              <summary>View redacted Markdown</summary>
+              <pre data-testid="investigation-team-redacted-markdown">{qualification.redacted_markdown}</pre>
+            </details>
+          </div>
+          {failures.length > 0 ? (
+            <div
+              className="it-readiness__failures"
+              data-testid="investigation-team-qualification-failures"
+            >
+              <strong>Role attempts needing attention</strong>
+              <ul>
+                {failures.map((failure) => (
+                  <li key={failure.attempt_id}>
+                    <code>{failure.role}</code>: {failure.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       ) : (
         <p className="it-readiness__detail" data-testid="investigation-team-no-report">
@@ -343,7 +454,7 @@ export function InvestigationTeamReadinessPanel() {
       )}
 
       <div
-        className="it-readiness__synthetic"
+        className="it-readiness__check"
         aria-busy={syntheticPhase === "running"}
       >
         <div>
@@ -374,6 +485,45 @@ export function InvestigationTeamReadinessPanel() {
             data-testid="investigation-team-synthetic-error"
           >
             {syntheticError}
+          </p>
+        ) : null}
+      </div>
+
+      <div className="it-readiness__check" aria-busy={livePhase === "running"}>
+        <div>
+          <strong>Measured provider check</strong>
+          <p className="it-readiness__detail">
+            Sends one bounded opaque fixture per configured V1 role. It records
+            exact model identity, latency, resource proxy, and any failed or
+            incomplete attempt; it never uses workspace evidence.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="btn btn--primary btn--sm"
+          data-testid="investigation-team-run-live"
+          onClick={() => void runLive()}
+          disabled={livePhase === "running"}
+        >
+          {livePhase === "running" ? "Running measured check…" : "Run measured check"}
+        </button>
+        {livePhase === "running" ? (
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onClick={() => void cancelLive()}
+          >
+            Cancel check
+          </button>
+        ) : null}
+        {livePhase === "running" ? (
+          <span className="it-readiness__detail" role="status">
+            Provider calls are limited to the configured role set.
+          </span>
+        ) : null}
+        {liveError ? (
+          <p className="field__error" role="alert" data-testid="investigation-team-live-error">
+            {liveError}
           </p>
         ) : null}
       </div>

@@ -8434,6 +8434,173 @@ fn run_synthetic_investigation_team_qualification(
         .ok_or_else(|| "synthetic qualification did not publish a report".into())
 }
 
+fn live_investigation_target(
+    state: &AppState,
+    profile_id: &str,
+    model_override: Option<&str>,
+    role: cd_core::investigation_team_qualification::InvestigationTeamRole,
+) -> Result<investigation_team_qualification_host::LiveQualificationTarget, String> {
+    let req = QualificationSelectReq {
+        profile_id: Some(profile_id.to_string()),
+        model_id: model_override.map(str::to_string),
+        base_url: None,
+        api_key: None,
+    };
+    let (profile, model, api_key) = resolve_qualification_target(state, &req)?;
+    let extra_headers = if matches!(profile.kind, ProviderKind::XaiGrokBuild) {
+        cd_core::grok_auth::assert_grok_base_allowed(&profile.base_url)
+            .map_err(|error| error.to_string())?;
+        cd_core::grok_auth::load_grok_session_credentials()
+            .map_err(|error| format!("Grok session required: {error}"))?
+            .request_headers()
+    } else {
+        Vec::new()
+    };
+    let member = cd_core::investigation_team_qualification::MemberBinding::from_deployment(
+        role,
+        &profile.id,
+        &model,
+        &profile.base_url,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(
+        investigation_team_qualification_host::LiveQualificationTarget {
+            member,
+            backend: cd_workflow::capability_qualification::backend_for_provider(profile.kind),
+            base_url: profile.base_url,
+            api_key,
+            extra_headers,
+            local_only: profile.local_only,
+        },
+    )
+}
+
+fn resolve_live_investigation_targets(
+    state: &AppState,
+    cfg: &AppConfig,
+) -> Result<Vec<investigation_team_qualification_host::LiveQualificationTarget>, String> {
+    let mode = if cfg.contributions.enabled {
+        cd_core::multi_model::MultiModelMode::Contributions
+    } else {
+        cfg.multi_model.mode
+    };
+    let active = cfg
+        .providers
+        .active()
+        .ok_or_else(|| "no active provider profile is configured".to_string())?;
+    let investigator_role = if matches!(mode, cd_core::multi_model::MultiModelMode::Single) {
+        cd_core::investigation_team_qualification::InvestigationTeamRole::Single
+    } else {
+        cd_core::investigation_team_qualification::InvestigationTeamRole::Investigator
+    };
+    let mut targets = vec![live_investigation_target(
+        state,
+        &active.id,
+        None,
+        investigator_role,
+    )?];
+
+    match mode {
+        cd_core::multi_model::MultiModelMode::Single => {}
+        cd_core::multi_model::MultiModelMode::Review => {
+            let reviewer = cfg
+                .multi_model
+                .reviewer
+                .as_ref()
+                .ok_or_else(|| "review mode has no configured reviewer profile".to_string())?;
+            let profile = cfg
+                .providers
+                .profiles
+                .iter()
+                .find(|candidate| candidate.id == reviewer.profile_id)
+                .ok_or_else(|| {
+                    format!("reviewer profile is not present: {}", reviewer.profile_id)
+                })?;
+            if !profile.local_only && !reviewer.allow_remote {
+                return Err("reviewer remote evidence egress is not acknowledged".into());
+            }
+            targets.push(live_investigation_target(
+                state,
+                &reviewer.profile_id,
+                reviewer.model.as_deref(),
+                cd_core::investigation_team_qualification::InvestigationTeamRole::Reviewer,
+            )?);
+        }
+        cd_core::multi_model::MultiModelMode::Contributions => {
+            return Err(
+                "live qualification V1 does not yet represent contribution-role topology; it fails closed instead of relabeling roles".into(),
+            );
+        }
+    }
+    Ok(targets)
+}
+
+/// Run one explicit provider-backed qualification check. The host resolves
+/// credentials and exact role identity; the renderer supplies no evaluator
+/// truth and cannot publish a result.
+#[tauri::command]
+async fn run_live_investigation_team_qualification(
+    state: State<'_, AppState>,
+) -> Result<investigation_team_qualification_host::InvestigationTeamQualificationDto, String> {
+    state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification")
+        .clear();
+    let cfg = state.config.lock().expect("config").clone();
+    let targets = resolve_live_investigation_targets(&state, &cfg)?;
+    let cancel = {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        if cancels
+            .contains_key(investigation_team_qualification_host::LIVE_QUALIFICATION_CANCEL_KEY)
+        {
+            return Err("Investigation Team qualification is already running".into());
+        }
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cancels.insert(
+            investigation_team_qualification_host::LIVE_QUALIFICATION_CANCEL_KEY.to_string(),
+            flag.clone(),
+        );
+        flag
+    };
+    let observed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
+        .as_secs() as i64;
+    let worker_cancel = cancel.clone();
+    let execution = tokio::task::spawn_blocking(move || {
+        investigation_team_qualification_host::execute_live(targets, observed_at, &worker_cancel)
+    })
+    .await
+    .map_err(|error| format!("live qualification worker join: {error}"))?;
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        cancels.remove(investigation_team_qualification_host::LIVE_QUALIFICATION_CANCEL_KEY);
+    }
+    let execution = execution.map_err(|error| error.to_string())?;
+    let mut store = state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification");
+    store.publish_live(execution);
+    store
+        .latest()
+        .ok_or_else(|| "live qualification did not publish a report".into())
+}
+
+#[tauri::command]
+fn cancel_live_investigation_team_qualification(state: State<'_, AppState>) -> bool {
+    let cancels = state.cancels.lock().expect("cancels");
+    if let Some(flag) =
+        cancels.get(investigation_team_qualification_host::LIVE_QUALIFICATION_CANCEL_KEY)
+    {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
+}
+
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
 ///
 /// For remote gateways, walks `expand_base_candidates` (TriageTool parity) and
@@ -15305,6 +15472,8 @@ pub fn run() {
             get_investigation_team_qualification,
             clear_investigation_team_qualification,
             run_synthetic_investigation_team_qualification,
+            run_live_investigation_team_qualification,
+            cancel_live_investigation_team_qualification,
             get_active_provider,
             get_turn_activity,
             get_developer_turn_activity,
