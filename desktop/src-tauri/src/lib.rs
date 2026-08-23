@@ -1977,12 +1977,7 @@ fn role_qualification_label(
     use cd_core::capability_qualification::{
         capability_contract_verdict, CapabilityContract, ContractVerdict, QualificationKey,
     };
-    let Some(prof) = cfg
-        .providers
-        .profiles
-        .iter()
-        .find(|p| p.id == profile_id)
-    else {
+    let Some(prof) = cfg.providers.profiles.iter().find(|p| p.id == profile_id) else {
         return "unverified";
     };
     let model = model_override.unwrap_or(&prof.chat_model);
@@ -2641,7 +2636,10 @@ mod multi_model_reviewer_assignment_tests {
         ] {
             let error = apply_contribution_team(&mut cfg, assignments, policy)
                 .expect_err("invalid team must fail");
-            assert!(error.contains(expected), "error={error}, expected={expected}");
+            assert!(
+                error.contains(expected),
+                "error={error}, expected={expected}"
+            );
             assert_eq!(cfg.contributions, before, "invalid input must not mutate");
         }
     }
