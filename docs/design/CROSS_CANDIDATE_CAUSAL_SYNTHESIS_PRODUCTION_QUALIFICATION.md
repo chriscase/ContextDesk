@@ -46,10 +46,17 @@ fails closed, does not establish a root cause, and does not start synthesis.
 Stage-level deadline tagging for the causal synthesizer is future telemetry
 polish, not a grant of authority.
 
-Reviewer collusion prose is not an independent fail-closed axis on this
-production path. An otherwise-valid causal proposal (trigger, symptom, and
-required disconfirmation) plus a colluding review still establishes after
-both validators pass. Collusion neither grants nor vetoes host authority.
+## Required fail-closed axis that production currently fails
+
+`reviewer_collusion` remains a required fail-closed axis. On the shipped
+pipeline it currently fails: an otherwise-valid causal proposal (trigger,
+symptom, and required disconfirmation) plus a colluding review on observation
+claims `o-k1`/`o-k2` still yields `CausalSynthesizer Completed`,
+`Synthesizer Completed`, and `root_cause_established = true`. The named
+driver `reviewer_collusion` records that exact counterexample. Making the
+axis fail closed would require production edits, which this child must not
+do. Stop: #977 stays closed; do not open a qualification PR; no production
+edits.
 
 Handbook impact: none — qualification of already-wired production seams;
 no new evidence-flow change.
