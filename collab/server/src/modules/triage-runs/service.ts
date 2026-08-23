@@ -1,13 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  TRIAGE_JOB_SCHEMA_ID,
   TRIAGE_JOB_CAPABILITIES_SCHEMA_ID,
+  TRIAGE_JOB_REQUEST_SCHEMA_ID,
+  TRIAGE_JOB_SCHEMA_ID,
+  parseSnapshot,
+  snapshotFairness,
+  snapshotFingerprint,
   type CaseV1,
-  type TriageJobMode,
-  type TriageJobCapabilitiesV1,
   type SnapshotV1,
   type TriageCandidateRunV1,
   type TriageCandidateSpecV1,
+  type TriageJobCapabilitiesV1,
+  type TriageJobMode,
   type TriageJobRequestV1,
   type TriageJobStatus,
   type TriageJobV1,
@@ -110,6 +114,37 @@ function requestFingerprint(snapshotFingerprint: string, request: TriageJobReque
       taskFingerprint: request.taskFingerprint,
       candidates: candidates.map((candidate) => ({ ...candidate, profileId: candidate.profileId })),
     }),
+  );
+}
+
+type TriageFromJobCreateV1 = {
+  fromJobId: string;
+  snapshotId: string;
+  mode: TriageJobMode;
+};
+
+function snapshotIdentityFingerprint(snapshot: SnapshotV1): string {
+  return snapshotFingerprint({
+    parentSnapshotId: snapshot.parentSnapshotId,
+    evidence: snapshot.evidence,
+    visibility: snapshot.visibility,
+    protocolVersion: snapshot.protocolVersion,
+  });
+}
+
+function snapshotIsHashComplete(snapshot: SnapshotV1): boolean {
+  return snapshot.evidence.every(
+    (item) => item.contentHash !== null || item.expectedHash !== null,
+  );
+}
+
+function honestSameSnapshot(snapshot: SnapshotV1): boolean {
+  return (
+    snapshot.status === "frozen" &&
+    snapshot.fairnessClass === "same_snapshot" &&
+    snapshotFairness(snapshot.evidence) === "same_snapshot" &&
+    snapshotIsHashComplete(snapshot) &&
+    snapshot.fingerprint === snapshotIdentityFingerprint(snapshot)
   );
 }
 
@@ -312,16 +347,92 @@ export class TriageRunService {
     }
   }
 
+  private async requireSnapshotForCreate(
+    caseId: string,
+    actor: Actor,
+    snapshotId: string,
+    isAdmin: boolean,
+    options: { gateway: boolean },
+  ): Promise<SnapshotV1> {
+    const snapshot = (await this.deps.cases.listSnapshots(caseId, actor, isAdmin)).find(
+      (item) => item.id === snapshotId,
+    );
+    if (!snapshot) throw new TriageRunConflictError("snapshot not found for case");
+    if (snapshot.caseId !== caseId || snapshot.id !== snapshotId) {
+      throw new TriageRunConflictError("snapshot identity mismatch");
+    }
+    if (snapshot.status !== "frozen") {
+      throw new TriageRunConflictError("snapshot is not frozen");
+    }
+    try {
+      parseSnapshot(snapshot);
+    } catch {
+      throw new TriageRunConflictError("snapshot is malformed");
+    }
+    if (snapshot.fingerprint !== snapshotIdentityFingerprint(snapshot)) {
+      throw new TriageRunConflictError("snapshot identity mismatch");
+    }
+    if (options.gateway && !honestSameSnapshot(snapshot)) {
+      throw new TriageRunConflictError(
+        "snapshot is not eligible for an honest same-snapshot comparison",
+      );
+    }
+    return snapshot;
+  }
+
+  private async buildRequestFromJob(
+    caseId: string,
+    actor: Actor,
+    request: TriageFromJobCreateV1,
+    isAdmin: boolean,
+  ): Promise<TriageJobRequestV1> {
+    const parent = await this.deps.jobs.get(request.fromJobId);
+    if (!parent || parent.caseId !== caseId) {
+      throw new TriageRunConflictError("parent triage job not found for case");
+    }
+    const snapshot = await this.requireSnapshotForCreate(
+      caseId,
+      actor,
+      request.snapshotId,
+      isAdmin,
+      { gateway: request.mode === "gateway" },
+    );
+    const copied: TriageJobRequestV1 = {
+      schemaId: TRIAGE_JOB_REQUEST_SCHEMA_ID,
+      snapshotId: snapshot.id,
+      mode: request.mode,
+      strategyId: parent.request.strategyId,
+      question: parent.request.question,
+      policyFingerprint: parent.request.policyFingerprint,
+      taskFingerprint: parent.request.taskFingerprint,
+      parentJobId: parent.id,
+      candidates: parent.request.candidates.map((candidate) => ({ ...candidate })),
+    };
+    if (request.mode === "gateway" && parent.request.concurrency !== undefined) {
+      copied.concurrency = parent.request.concurrency;
+    }
+    return copied;
+  }
+
   async create(
     caseId: string,
     actor: Actor,
-    request: TriageJobRequestV1,
+    input: TriageJobRequestV1 | TriageFromJobCreateV1,
     origin: string,
     isAdmin: boolean,
   ): Promise<TriageJobV1> {
     if (!(await this.deps.cases.getCase(caseId, actor, isAdmin))) {
       throw new TriageRunNotFoundError();
     }
+    if ("fromJobId" in input) {
+      const allowed = new Set(["fromJobId", "snapshotId", "mode"]);
+      if (Object.keys(input).some((key) => !allowed.has(key))) {
+        throw new TriageRunConflictError("conflicting fromJobId overrides are not permitted");
+      }
+    }
+    const request = "fromJobId" in input
+      ? await this.buildRequestFromJob(caseId, actor, input, isAdmin)
+      : input;
     if (request.mode === "gateway" && !this.deps.gatewayExecutor) {
       throw new TriageRunConflictError("gateway execution is not configured in this server");
     }
@@ -661,7 +772,11 @@ export class TriageRunService {
             },
           }, controller.signal);
           if (results.length !== currentJob.candidates.length) throw new Error("gateway returned an incomplete candidate set");
-          currentJob = { ...currentJob, sameSnapshot: true, updatedAt: now() };
+          currentJob = {
+            ...currentJob,
+            sameSnapshot: honestSameSnapshot(snapshot) ? true : null,
+            updatedAt: now(),
+          };
           await this.deps.jobs.update(currentJob);
           for (const result of results) {
             if (!progressCandidates.has(result.candidateId)) await recordCandidate(result);
@@ -694,7 +809,11 @@ export class TriageRunService {
         }
       } else {
         const executor = this.deps.executor ?? new DeterministicMockTriageExecutor();
-        currentJob = { ...currentJob, sameSnapshot: true, updatedAt: now() };
+        currentJob = {
+          ...currentJob,
+          sameSnapshot: honestSameSnapshot(snapshot) ? true : null,
+          updatedAt: now(),
+        };
         await this.deps.jobs.update(currentJob);
         for (let index = 0; index < job.candidates.length; index += 1) {
           if (leaseLost) return;

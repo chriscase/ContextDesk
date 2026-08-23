@@ -41,6 +41,45 @@ describe("triage job contracts", () => {
     expect(JSON.stringify(capabilities)).not.toContain("endpoint");
   });
 
+  it("parses a fromJobId rerun body and rejects mixed or unknown fields", () => {
+    expect(JSON.stringify(parseTriageJobRequest(request))).toBe(JSON.stringify(request));
+    expect(
+      parseTriageJobRequest({
+        fromJobId: "job-1",
+        snapshotId: "snapshot-2",
+        mode: "deterministic_mock",
+      }),
+    ).toEqual({
+      fromJobId: "job-1",
+      snapshotId: "snapshot-2",
+      mode: "deterministic_mock",
+    });
+    expect(() =>
+      parseTriageJobRequest({
+        fromJobId: "job-1",
+        snapshotId: "snapshot-2",
+        mode: "deterministic_mock",
+        question: "override",
+      }),
+    ).toThrow();
+    expect(() =>
+      parseTriageJobRequest({
+        ...request,
+        fromJobId: "job-1",
+      }),
+    ).toThrow();
+    expect(() => parseTriageJobRequest({ fromJobId: "job-1" })).toThrow();
+    expect(() =>
+      parseTriageJobRequest({
+        fromJobId: "job-1",
+        snapshotId: "snapshot-2",
+        mode: "live",
+      }),
+    ).toThrow();
+    const withParent = { ...request, parentJobId: "job-0" };
+    expect(JSON.stringify(parseTriageJobRequest(withParent))).toBe(JSON.stringify(withParent));
+  });
+
   it("rejects contract drift and preserves unknown metrics", () => {
     expect(() => parseTriageJobRequest({ ...request, unexpected: true })).toThrow();
     expect(
