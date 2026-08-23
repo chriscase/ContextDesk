@@ -9,7 +9,14 @@
  * reviewer configures profiles, qualifies anything, or guarantees extra
  * executed models.
  */
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MultiModelReviewToggle } from "./MultiModelReviewToggle";
 import type {
@@ -21,6 +28,7 @@ const host = vi.hoisted(() => ({
   get: vi.fn(),
   setMode: vi.fn(),
   setReviewer: vi.fn(),
+  setContributors: vi.fn(),
 }));
 
 vi.mock("../../lib/host", async () => {
@@ -32,6 +40,8 @@ vi.mock("../../lib/host", async () => {
     hostGetMultiModelSettings: (...args: unknown[]) => host.get(...args),
     hostSetMultiModelMode: (...args: unknown[]) => host.setMode(...args),
     hostSetMultiModelReviewer: (...args: unknown[]) => host.setReviewer(...args),
+    hostSetMultiModelContributors: (...args: unknown[]) =>
+      host.setContributors(...args),
   };
 });
 
@@ -59,6 +69,16 @@ function dto(over: Partial<MultiModelSettingsDto> = {}): MultiModelSettingsDto {
     reviewer_qualification: "unconfigured",
     active_profile_id: null,
     candidate_profiles: [],
+    contribution_assignments: [],
+    contribution_policy: {
+      max_contributors: 4,
+      max_parallel: 3,
+      max_rounds: 2,
+      max_context_chars: 120_000,
+      max_total_provider_rounds: 12,
+      max_semantic_corrections_per_stage: 1,
+      max_context_chars_total: null,
+    },
     ...over,
   };
 }
@@ -74,9 +94,11 @@ beforeEach(() => {
   host.get.mockReset();
   host.setMode.mockReset();
   host.setReviewer.mockReset();
+  host.setContributors.mockReset();
   host.get.mockResolvedValue(dto());
   host.setMode.mockResolvedValue(undefined);
   host.setReviewer.mockResolvedValue(undefined);
+  host.setContributors.mockResolvedValue(undefined);
 });
 
 describe("MultiModelReviewToggle", () => {
@@ -365,8 +387,8 @@ describe("MultiModelReviewToggle", () => {
       name: "Contributions",
     });
     const text = describedText(contributions);
-    expect(text).toMatch(/this screen doesn’t create them/i);
-    expect(text).toMatch(/skipped and recorded/i);
+    expect(text).toMatch(/no contribution roles are recorded/i);
+    expect(text).toMatch(/deterministic floor/i);
   });
 
   describe("reviewer assignment", () => {
@@ -804,6 +826,158 @@ describe("MultiModelReviewToggle", () => {
         allowRemote: false,
       });
       await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    });
+  });
+
+  describe("contribution team", () => {
+    it("shows recorded roles, measured readiness, and configured-versus-executed truth", async () => {
+      host.get.mockResolvedValue(
+        dto({
+          mode: "contributions",
+          candidate_profiles: [LOCAL_CANDIDATE, REMOTE_CANDIDATE],
+          contribution_assignments: [
+            {
+              role: "observation_extractor",
+              profile_id: "loc-1",
+              model: null,
+              allow_remote: false,
+              require_qualified: true,
+              qualification: "qualified",
+            },
+            {
+              role: "contradiction_checker",
+              profile_id: "rem-1",
+              model: "remote-review-model",
+              allow_remote: false,
+              require_qualified: true,
+              qualification: "unverified",
+            },
+          ],
+        }),
+      );
+      render(<MultiModelReviewToggle />);
+      await screen.findByRole("group", { name: "Contribution team" });
+
+      const contributionMode = screen.getByRole("radio", {
+        name: "Contributions",
+      });
+      expect(describedText(contributionMode)).toMatch(/2 roles are recorded/i);
+      expect(describedText(contributionMode)).toMatch(/1 currently has/i);
+      expect(screen.getAllByText("Measured qualified")).toHaveLength(1);
+      expect(screen.getAllByText("Not measured yet (unverified)").length).toBeGreaterThan(0);
+      expect(
+        screen
+          .getByText(/configured is not executed/i)
+          .closest(".mm-team__execution-truth")?.textContent,
+      ).toMatch(/activity inspector records/i);
+      expect(screen.queryByText(/will run|will contribute/i)).toBeNull();
+    });
+
+    it("builds an ordered remote team with explicit egress and exact hard budgets", async () => {
+      host.get
+        .mockResolvedValueOnce(
+          dto({ candidate_profiles: [LOCAL_CANDIDATE, REMOTE_CANDIDATE] }),
+        )
+        .mockResolvedValueOnce(
+          dto({
+            candidate_profiles: [LOCAL_CANDIDATE, REMOTE_CANDIDATE],
+            contribution_assignments: [
+              {
+                role: "observation_extractor",
+                profile_id: "rem-1",
+                model: "custom-observer",
+                allow_remote: true,
+                require_qualified: true,
+                qualification: "unverified",
+              },
+            ],
+          }),
+      );
+      render(<MultiModelReviewToggle />);
+      const group = await screen.findByRole("group", {
+        name: "Contribution team",
+      });
+
+      fireEvent.click(
+        within(group).getByRole("button", { name: "Add contribution role" }),
+      );
+      fireEvent.change(within(group).getByLabelText("Provider profile"), {
+        target: { value: "rem-1" },
+      });
+      fireEvent.change(
+        within(group).getByLabelText(/model override/i),
+        { target: { value: "  custom-observer  " } },
+      );
+      const egress = within(group).getByRole("checkbox", {
+        name: /allow this remote role/i,
+      });
+      expect((egress as HTMLInputElement).checked).toBe(false);
+      fireEvent.click(egress);
+      fireEvent.click(within(group).getByText("Advanced limits"));
+      fireEvent.change(within(group).getByLabelText("Provider-call cap"), {
+        target: { value: "8" },
+      });
+      fireEvent.click(
+        within(group).getByRole("button", { name: "Save contribution team" }),
+      );
+
+      await waitFor(() => expect(host.setContributors).toHaveBeenCalledTimes(1));
+      expect(host.setContributors).toHaveBeenCalledWith({
+        assignments: [
+          {
+            role: "observation_extractor",
+            profileId: "rem-1",
+            model: "custom-observer",
+            allowRemote: true,
+          },
+        ],
+        policy: {
+          maxContributors: 4,
+          maxParallel: 3,
+          maxRounds: 2,
+          maxContextChars: 120_000,
+          maxTotalProviderRounds: 8,
+          maxSemanticCorrectionsPerStage: 1,
+          maxContextCharsTotal: null,
+        },
+      });
+      expect(
+        await screen.findByText(/saved — 1 contribution role recorded/i),
+      ).toBeTruthy();
+    });
+
+    it("keeps a final reviewer last and blocks an invalid plan before host submission", async () => {
+      host.get.mockResolvedValue(
+        dto({ candidate_profiles: [LOCAL_CANDIDATE] }),
+      );
+      render(<MultiModelReviewToggle />);
+      await screen.findByRole("group", { name: "Contribution team" });
+      fireEvent.click(
+        screen.getByRole("button", { name: "Add contribution role" }),
+      );
+      fireEvent.change(screen.getByLabelText("Responsibility"), {
+        target: { value: "reviewer" },
+      });
+      fireEvent.change(screen.getByLabelText("Provider profile"), {
+        target: { value: "loc-1" },
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "Add contribution role" }),
+      );
+      const profiles = screen.getAllByLabelText("Provider profile");
+      fireEvent.change(profiles[0]!, { target: { value: "loc-1" } });
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: /move final contribution reviewer earlier/i,
+        }),
+      );
+      expect(screen.getByText(/final reviewer must be the last role/i)).toBeTruthy();
+      expect(
+        (screen.getByRole("button", {
+          name: "Save contribution team",
+        }) as HTMLButtonElement).disabled,
+      ).toBe(true);
+      expect(host.setContributors).not.toHaveBeenCalled();
     });
   });
 });
