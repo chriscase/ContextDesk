@@ -20,6 +20,7 @@ import {
   type MutableGroupRoleMap,
 } from "./modules/authz/index.js";
 import type { AuditStore } from "./modules/audit/index.js";
+import { registerAdminDirectoryRoutes } from "./modules/admin/index.js";
 import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/index.js";
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
@@ -122,6 +123,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       auth: security.auth,
       roles: security.roles,
       roleStore,
+      audit: security.audit,
+    });
+    await registerAdminDirectoryRoutes(app, {
+      auth: security.auth,
+      roles: security.roles,
       audit: security.audit,
     });
     if (deps.domain) {

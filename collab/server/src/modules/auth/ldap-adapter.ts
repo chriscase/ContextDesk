@@ -1,6 +1,11 @@
 import type { ConnectionOptions } from "node:tls";
 import { Client, type ClientOptions } from "ldapts";
-import type { AuthAdapter, AuthIdentity, AuthSuccess } from "./adapter.js";
+import type {
+  AuthAdapter,
+  AuthIdentity,
+  AuthSuccess,
+  DirectorySearchOptions,
+} from "./adapter.js";
 import type { LdapConfig } from "./ldap-config.js";
 import { escapeDn, escapeFilter, interpolate } from "./ldap-escape.js";
 import type { AuthLog } from "./log.js";
@@ -44,6 +49,15 @@ export function ldapClientOptions(config: LdapConfig): ClientOptions {
     options.tlsOptions = ldapTlsOptions(config);
   }
   return options;
+}
+
+export function directoryIdentityFilter(term: string): string {
+  const escaped = escapeFilter(term);
+  return `(&(objectClass=person)(|(uid=${escaped}*)(cn=${escaped}*)(displayName=${escaped}*)))`;
+}
+
+export function directoryGroupFilter(term: string): string {
+  return `(&(objectClass=groupOfNames)(cn=${escapeFilter(term)}*))`;
 }
 
 export class LdapAuthAdapter implements AuthAdapter {
@@ -102,6 +116,86 @@ export class LdapAuthAdapter implements AuthAdapter {
     }
   }
 
+  async searchIdentities(
+    term: string,
+    options: DirectorySearchOptions,
+  ) {
+    const base = directoryUserSearchBase(this.config);
+    if (!base) throw new Error("LDAP user search base unavailable");
+    const client = this.directoryClient(options.timeoutMs);
+    try {
+      await this.startDirectorySession(client);
+      const { searchEntries } = await client.search(base, {
+        scope: "sub",
+        filter: directoryIdentityFilter(term),
+        attributes: ["uid", "cn", "displayName"],
+        sizeLimit: boundedLimit(options.limit),
+      });
+      return searchEntries
+        .map((entry) => {
+          const id = typeof entry.dn === "string" ? entry.dn : "";
+          const username = firstString(entry.uid);
+          const displayName =
+            firstString(entry.displayName) ?? firstString(entry.cn) ?? username;
+          if (!id || !username || !displayName) return null;
+          return { id, username, displayName, source: "ldap" as const };
+        })
+        .filter((entry) => entry !== null)
+        .sort((a, b) =>
+          a.username.localeCompare(b.username) || a.id.localeCompare(b.id),
+        )
+        .slice(0, boundedLimit(options.limit));
+    } finally {
+      await safeUnbind(client);
+    }
+  }
+
+  async searchDirectoryGroups(
+    term: string,
+    options: DirectorySearchOptions,
+  ) {
+    if (!this.config.groupSearchBase) {
+      throw new Error("LDAP group search base unavailable");
+    }
+    const client = this.directoryClient(options.timeoutMs);
+    try {
+      await this.startDirectorySession(client);
+      const { searchEntries } = await client.search(this.config.groupSearchBase, {
+        scope: "sub",
+        filter: directoryGroupFilter(term),
+        attributes: ["cn"],
+        sizeLimit: boundedLimit(options.limit),
+      });
+      return searchEntries
+        .map((entry) => {
+          const dn = typeof entry.dn === "string" ? entry.dn : "";
+          const name = firstString(entry.cn);
+          if (!dn || !name) return null;
+          return { dn, name, source: "ldap" as const };
+        })
+        .filter((entry) => entry !== null)
+        .sort((a, b) => a.name.localeCompare(b.name) || a.dn.localeCompare(b.dn))
+        .slice(0, boundedLimit(options.limit));
+    } finally {
+      await safeUnbind(client);
+    }
+  }
+
+  private directoryClient(timeoutMs: number): Client {
+    const boundedTimeout = Math.max(100, Math.min(this.config.timeoutMs, timeoutMs));
+    return new Client(ldapClientOptions({ ...this.config, timeoutMs: boundedTimeout }));
+  }
+
+  private async startDirectorySession(client: Client): Promise<void> {
+    if (!this.config.bindDn || !this.config.bindPassword) {
+      throw new Error("LDAP directory search requires service bind");
+    }
+    if (this.config.starttls) {
+      await client.startTLS(ldapTlsOptions(this.config));
+    }
+    await client.bind(this.config.bindDn, this.config.bindPassword);
+  }
+
   private async resolveUserDn(
     client: Client,
     username: string,
@@ -157,5 +251,33 @@ export class LdapAuthAdapter implements AuthAdapter {
     return searchEntries
       .map((e) => (typeof e.dn === "string" ? e.dn : ""))
       .filter((v) => v.length > 0);
+  }
+}
+
+function directoryUserSearchBase(config: LdapConfig): string | null {
+  if (config.userSearchBase) return config.userSearchBase;
+  const template = config.userDnTemplate;
+  const marker = "{username},";
+  if (!template) return null;
+  const markerIndex = template.indexOf(marker);
+  if (markerIndex < 0) return null;
+  const base = template.slice(markerIndex + marker.length);
+  return base && !base.includes("{") && !base.includes("}") ? base : null;
+}
+
+function boundedLimit(limit: number): number {
+  return Math.max(1, Math.min(20, Math.trunc(limit)));
+}
+
+function firstString(value: unknown): string | null {
+  const first = Array.isArray(value) ? value[0] : value;
+  return typeof first === "string" && first.trim().length > 0 ? first : null;
+}
+
+async function safeUnbind(client: Client): Promise<void> {
+  try {
+    await client.unbind();
+  } catch {
+    // ignore cleanup failures; the primary operation remains authoritative
   }
 }
