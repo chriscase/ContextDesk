@@ -12,9 +12,10 @@ use crate::config::{ColorMode, OutputFormat};
 use crate::envelope::{CliError, CliResult, Render};
 use crate::progress::CliProgressObserver;
 use cd_core::config::AppConfig;
+use cd_core::log_analysis::import_outcome::{ImportOutcomeClass, ImportOutcomeReport};
 use cd_core::log_analysis::import_preview::ImportPreviewItem;
 use cd_core::process_progress::CancelFlag;
-use cd_workflow::import::{default_import_with_observer, DefaultImportOutcome};
+use cd_workflow::import::{default_import_with_outcome, DefaultImportOutcome};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
@@ -44,6 +45,9 @@ pub struct ImportOutput {
     pub reviewed_format_warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<Vec<SelectionItem>>,
+    /// Fail-closed import result contract. `partial` above stays a bare bool
+    /// for existing scripts; this says partial *how*, and which member.
+    pub outcome: ImportOutcomeReport,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,8 +84,16 @@ impl From<&ImportPreviewItem> for SelectionItem {
 
 impl Render for ImportOutput {
     fn render_text(&self) -> String {
+        // Never say "complete" for a partial corpus. The verdict comes from the
+        // typed contract, not from whether the command returned Ok.
+        let headline = match self.outcome.class {
+            ImportOutcomeClass::Complete => "Import complete",
+            ImportOutcomeClass::Partial => "Import complete with defects (PARTIAL)",
+            // Unreachable on this arm: a rejected import returns `Err`.
+            ImportOutcomeClass::Rejected => "Import rejected",
+        };
         let mut out = format!(
-            "Import complete\n\n  Corpus       {}\n  Corpus ID    {}\n  Events       {}\n  Templates    {}",
+            "{headline}\n\n  Corpus       {}\n  Corpus ID    {}\n  Events       {}\n  Templates    {}",
             self.corpus_name,
             self.corpus_id,
             self.events_imported,
@@ -151,6 +163,10 @@ impl Render for ImportOutput {
                 self.corpus_id
             ));
         }
+        if !self.outcome.defects.is_empty() || self.outcome.class != ImportOutcomeClass::Complete {
+            out.push_str("\n\n");
+            out.push_str(self.outcome.render_summary().trim_end());
+        }
         if let Some(selection) = &self.selection {
             out.push_str("\n\nselection:\n");
             for item in selection {
@@ -195,6 +211,7 @@ impl From<DefaultImportOutcome> for ImportOutput {
                 .collect(),
             reviewed_format_warnings: outcome.reviewed_format_warnings,
             selection: None,
+            outcome: outcome.outcome,
         }
     }
 }
@@ -231,7 +248,7 @@ pub async fn run(
     let cancel_for_task = cancel.clone();
     let observer_for_task = observer.clone();
     let mut import_task = tokio::task::spawn_blocking(move || {
-        default_import_with_observer(
+        default_import_with_outcome(
             &cache_root_owned,
             &source_owned,
             &cfg_owned,
@@ -240,7 +257,7 @@ pub async fn run(
         )
     });
 
-    // `default_import_with_observer` runs on a blocking thread so this task
+    // `default_import_with_outcome` runs on a blocking thread so this task
     // stays free to race it against Ctrl-C; on cancel we set the flag and
     // wait for the SAME task to actually return (ingest's staging cleanup
     // runs via `Drop` on that thread, not here) rather than abandoning it.
@@ -261,19 +278,30 @@ pub async fn run(
     observer.finish();
 
     let outcome = match joined {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(core_error)) => {
+        Ok((Ok(outcome), _)) => outcome,
+        Ok((Err(core_error), outcome)) => {
             if matches!(&core_error, cd_core::error::CoreError::Cancelled) {
                 return Err(CliError::cancelled(
                     "import cancelled — no partial corpus was published, safe to retry",
                 ));
             }
-            let message = core_error.to_string();
-            return Err(if message.contains("nothing importable") {
-                CliError::user(message)
+            // A rejected import is where a bare engine message used to be the
+            // whole answer. Lead with it (scripts match on it today), then say
+            // which source or archive member stopped the run, and carry the
+            // typed document for `--format json`.
+            // The locator is its own field below, so strip the marker the
+            // engine used to carry it out rather than printing it twice.
+            // Publication copy is driven by the typed `published` bit: after
+            // ingest succeeds, timezone default-apply can still return Err
+            // with a Complete/Partial outcome, and claiming "nothing was
+            // published" about that corpus would be false.
+            let located = import_failure_prose(&core_error, &outcome);
+            let error = if located.contains("nothing importable") {
+                CliError::user(located)
             } else {
-                CliError::internal(message)
-            });
+                CliError::internal(located)
+            };
+            return Err(error.with_details(outcome.to_json()));
         }
         Err(join_error) => {
             return Err(CliError::internal(format!(
@@ -305,4 +333,100 @@ pub async fn run(
     }
     output.selection = plan_items;
     Ok(output)
+}
+
+/// Operator prose for an import that returned `Err`.
+///
+/// The publication sentence is driven by [`ImportOutcomeReport::published`],
+/// not by whether a defect exists. A Partial/Complete outcome can ride with
+/// `Err` when timezone default-apply fails after ingest has already published.
+fn import_failure_prose(
+    core_error: &cd_core::error::CoreError,
+    outcome: &ImportOutcomeReport,
+) -> String {
+    let message =
+        cd_core::log_analysis::import_outcome::strip_member_annotation(&core_error.to_string())
+            .to_string();
+    debug_assert!(
+        !message.contains("[member="),
+        "import failure prose left a transport marker: {message}"
+    );
+    let publication = if outcome.published {
+        match outcome.corpus_id.as_deref() {
+            Some(id) => format!(
+                "a corpus was published before this failure — the library is not unchanged (corpus {id})"
+            ),
+            None => {
+                "a corpus was published before this failure — the library is not unchanged"
+                    .to_string()
+            }
+        }
+    } else {
+        "nothing was published — the library is unchanged".to_string()
+    };
+    match outcome.defects.first() {
+        Some(defect) => format!(
+            "{message}\n\nfailing source: {} ({})\n{publication}",
+            defect.source.identity,
+            defect.code.as_str()
+        ),
+        None => format!("{message}\n\n{publication}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::import_failure_prose;
+    use cd_core::error::CoreError;
+    use cd_core::log_analysis::import_outcome::{DefectLedger, ImportOutcomeReport};
+    use cd_core::log_analysis::ingest::IngestStats;
+
+    #[test]
+    fn published_bit_drives_the_publication_sentence() {
+        let mut ledger = DefectLedger::new();
+        ledger.record_malformed_structured_record(
+            "logs/malformed.jsonl",
+            cd_core::log_analysis::import_outcome::RecordLocation::new(2, 40),
+        );
+        let stats = IngestStats {
+            discovered_files: 2,
+            files: 2,
+            lines: 8,
+            partial: true,
+            ..IngestStats::default()
+        };
+        let published = ImportOutcomeReport::published("corpus-published", &stats, &ledger);
+        assert!(published.published);
+        let shown = import_failure_prose(
+            &CoreError::Message("default timezone is not a valid IANA zone".into()),
+            &published,
+        );
+        assert!(
+            !shown.contains("nothing was published"),
+            "published outcome must not claim the library is unchanged: {shown}"
+        );
+        assert!(
+            shown.contains("a corpus was published before this failure"),
+            "{shown}"
+        );
+        assert!(shown.contains("corpus-published"), "{shown}");
+        assert!(
+            shown.contains("failing source: logs/malformed.jsonl"),
+            "{shown}"
+        );
+
+        let rejected = ImportOutcomeReport::rejected_without_locator(&CoreError::Message(
+            "zip open: missing end record".into(),
+        ));
+        assert!(!rejected.published);
+        let shown = import_failure_prose(
+            &CoreError::Message("zip open: missing end record [member=bundles/inner.zip]".into()),
+            &rejected,
+        );
+        assert!(
+            shown.contains("nothing was published — the library is unchanged"),
+            "{shown}"
+        );
+        assert!(!shown.contains("[member="), "marker leaked: {shown}");
+    }
 }
