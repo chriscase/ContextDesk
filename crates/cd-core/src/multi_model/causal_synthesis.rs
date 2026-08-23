@@ -212,6 +212,52 @@ impl HostCausalTopologyV1 {
     pub fn admitted_claims(&self) -> &BTreeSet<(String, String)> {
         &self.admitted_claims
     }
+
+    /// Content-free, deterministic model-facing boundary for one causal call.
+    ///
+    /// This exposes only the host-admitted slots and their exact evidence ids.
+    /// It deliberately omits evidence content, chronology, frequency, and all
+    /// model prose. The returned JSON is prompt scaffolding, never authority;
+    /// [`validate_causal_synthesis`] re-checks the response against this typed
+    /// topology.
+    pub fn prompt_manifest(&self) -> String {
+        let allowed_relations = self
+            .allowed_slots
+            .iter()
+            .map(|slot| {
+                let evidence_ids = self
+                    .identities
+                    .values()
+                    .filter(|identity| {
+                        identity.candidate_id == slot.candidate_id
+                            && identity.claim_id == slot.claim_id
+                    })
+                    .map(|identity| identity.evidence_id.clone())
+                    .collect::<Vec<_>>();
+                serde_json::json!({
+                    "kind": slot.kind.as_str(),
+                    "candidate_id": slot.candidate_id,
+                    "claim_id": slot.claim_id,
+                    "evidence_ids": evidence_ids,
+                })
+            })
+            .collect::<Vec<_>>();
+        let required_kinds = [
+            CausalRelationKind::InitiatingTrigger,
+            CausalRelationKind::PropagatedSymptom,
+            CausalRelationKind::Disconfirmation,
+        ]
+        .into_iter()
+        .filter(|kind| self.required_kinds.contains(kind))
+        .map(CausalRelationKind::as_str)
+        .collect::<Vec<_>>();
+        serde_json::json!({
+            "schema": "contextdesk.multi_model.causal_topology_prompt.v1",
+            "allowed_relations": allowed_relations,
+            "required_kinds": required_kinds,
+        })
+        .to_string()
+    }
 }
 
 /// Strict model proposal. Host-owned authority fields are structurally absent.
@@ -494,6 +540,25 @@ mod tests {
             },
         )
         .expect("topology");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&topology.prompt_manifest()).expect("prompt manifest");
+        assert_eq!(
+            manifest["schema"],
+            "contextdesk.multi_model.causal_topology_prompt.v1"
+        );
+        assert_eq!(manifest["allowed_relations"].as_array().unwrap().len(), 5);
+        assert_eq!(manifest["required_kinds"].as_array().unwrap().len(), 3);
+        let manifest_text = manifest.to_string();
+        for forbidden in [
+            "corpus_id",
+            "revision",
+            "chronology",
+            "frequency",
+            "model_note",
+            "root_cause_established",
+        ] {
+            assert!(!manifest_text.contains(forbidden));
+        }
         let valid = format!(
             r#"{{"schema":"{CAUSAL_SYNTHESIS_SCHEMA_V1}","relations":[{{"kind":"initiating_trigger","candidate_id":"k1","claim_id":"c:k1:t","evidence_ids":["e:k1:1"]}},{{"kind":"propagated_symptom","candidate_id":"k1","claim_id":"c:k1:s","evidence_ids":["e:k1:2"]}},{{"kind":"unrelated_competing","candidate_id":"k2","claim_id":"c:k2:u","evidence_ids":["e:k2:1"]}},{{"kind":"recovery","candidate_id":"k1","claim_id":"c:k1:r","evidence_ids":["e:k1:3"]}},{{"kind":"disconfirmation","candidate_id":"k2","claim_id":"c:k2:d","evidence_ids":["e:k2:2"]}}]}}"#
         );
