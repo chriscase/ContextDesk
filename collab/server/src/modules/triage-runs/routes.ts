@@ -1,7 +1,8 @@
 import {
   AUTH_ERROR_SCHEMA_ID,
   TRIAGE_JOB_LIST_SCHEMA_ID,
-  parseTriageJobRequest,
+  isTriageFromJobRequest,
+  parseTriageJobCreateRequest,
   projectTriageJobShareSafe,
   type AuthErrorV1,
 } from "@cd-collab/contracts";
@@ -148,7 +149,28 @@ export async function registerTriageRunRoutes(
     }
     const caseId = (request.params as { id: string }).id;
     try {
-      const parsed = parseTriageJobRequest(request.body);
+      const parsed = parseTriageJobCreateRequest(request.body);
+      const rawKey = request.headers["idempotency-key"];
+      if (isTriageFromJobRequest(parsed)) {
+        if (
+          typeof rawKey !== "string"
+          || Buffer.byteLength(rawKey, "utf8") < 1
+          || Buffer.byteLength(rawKey, "utf8") > 256
+        ) {
+          throw new Error("Idempotency-Key must be between 1 and 256 bytes for reruns");
+        }
+        return await deps.runs.create(
+          caseId,
+          ctx.actor,
+          parsed,
+          request.ip,
+          ctx.isAdmin,
+          rawKey,
+        );
+      }
+      if (rawKey !== undefined) {
+        throw new Error("Idempotency-Key is only accepted for fromJobId reruns");
+      }
       return await deps.runs.create(caseId, ctx.actor, parsed, request.ip, ctx.isAdmin);
     } catch (error) {
       return fail(reply, error);

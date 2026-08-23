@@ -1,20 +1,33 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  TRIAGE_JOB_SCHEMA_ID,
   TRIAGE_JOB_CAPABILITIES_SCHEMA_ID,
+  TRIAGE_JOB_REQUEST_SCHEMA_ID,
+  TRIAGE_JOB_SCHEMA_ID,
+  isTriageFromJobRequest,
+  parseTriageJobCreateRequest,
+  parseSnapshot,
+  snapshotFairness,
+  snapshotFingerprint,
+  triageJobRequestFingerprint,
   type CaseV1,
-  type TriageJobMode,
-  type TriageJobCapabilitiesV1,
   type SnapshotV1,
   type TriageCandidateRunV1,
   type TriageCandidateSpecV1,
+  type TriageJobCapabilitiesV1,
+  type TriageJobCreateRequestV1,
+  type TriageFromJobRequestV1,
+  type TriageJobMode,
   type TriageJobRequestV1,
   type TriageJobStatus,
   type TriageJobV1,
 } from "@cd-collab/contracts";
 import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
-import type { TriageJobStore } from "./store.js";
+import {
+  TriageJobIdempotencyConflictError,
+  type TriageJobIdempotencyAdmission,
+  type TriageJobStore,
+} from "./store.js";
 import type { TriageProfileOption } from "./profiles.js";
 
 const MAX_CANDIDATES = 16;
@@ -25,6 +38,7 @@ const MAX_GATEWAY_EVIDENCE_ITEM_BYTES = 4 * 1024 * 1024;
 const MAX_GATEWAY_EVIDENCE_AGGREGATE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_WORKER_LEASE_MS = 60_000;
 const WORKER_HEARTBEAT_MS = 20_000;
+const MAX_IDEMPOTENCY_KEY_BYTES = 256;
 const AGREEMENT_NOTICE = "Agreement is not proof of correctness." as const;
 
 export class TriageRunNotFoundError extends Error {
@@ -95,22 +109,64 @@ function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function requestFingerprint(snapshotFingerprint: string, request: TriageJobRequestV1): string {
-  const candidates = [...request.candidates]
-    .sort((a, b) => a.candidateId.localeCompare(b.candidateId))
-    .map((candidate) => ({ ...candidate }));
-  return sha256(
-    JSON.stringify({
-      snapshotFingerprint,
-      mode: request.mode,
-      concurrency: request.concurrency ?? null,
-      strategyId: request.strategyId,
-      question: request.question,
-      policyFingerprint: request.policyFingerprint,
-      taskFingerprint: request.taskFingerprint,
-      candidates: candidates.map((candidate) => ({ ...candidate, profileId: candidate.profileId })),
-    }),
+function snapshotIdentityFingerprint(snapshot: SnapshotV1): string {
+  return snapshotFingerprint({
+    parentSnapshotId: snapshot.parentSnapshotId,
+    evidence: snapshot.evidence,
+    visibility: snapshot.visibility,
+    protocolVersion: snapshot.protocolVersion,
+  });
+}
+
+function snapshotIsHashComplete(snapshot: SnapshotV1): boolean {
+  return snapshot.evidence.every(
+    (item) => item.contentHash !== null || item.expectedHash !== null,
   );
+}
+
+function honestSameSnapshot(snapshot: SnapshotV1): boolean {
+  return (
+    snapshot.status === "frozen" &&
+    snapshot.fairnessClass === "same_snapshot" &&
+    snapshotFairness(snapshot.evidence) === "same_snapshot" &&
+    snapshotIsHashComplete(snapshot) &&
+    snapshot.fingerprint === snapshotIdentityFingerprint(snapshot)
+  );
+}
+
+function exactEvidencePacket(
+  snapshot: SnapshotV1,
+  evidence: readonly TriageExecutionEvidence[],
+): boolean {
+  if (!honestSameSnapshot(snapshot) || evidence.length !== snapshot.evidence.length) return false;
+  return snapshot.evidence.every((item, index) => {
+    const materialized = evidence[index];
+    const expectedHash = item.contentHash ?? item.expectedHash;
+    if (
+      !materialized
+      || materialized.evidenceId !== item.evidenceId
+      || materialized.ordinal !== item.ordinal
+      || materialized.contentBase64 === null
+      || expectedHash === null
+    ) return false;
+    const bytes = Buffer.from(materialized.contentBase64, "base64");
+    return createHash("sha256").update(bytes).digest("hex") === expectedHash;
+  });
+}
+
+function cloneSnapshot(snapshot: SnapshotV1): SnapshotV1 {
+  return {
+    ...snapshot,
+    evidence: snapshot.evidence.map((item) => ({ ...item })),
+  };
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const item of Object.values(value)) deepFreeze(item);
+  }
+  return value;
 }
 
 function emptyCandidate(spec: TriageCandidateSpecV1): TriageCandidateRunV1 {
@@ -312,16 +368,210 @@ export class TriageRunService {
     }
   }
 
+  private snapshotIndex(
+    snapshots: SnapshotV1[],
+  ): Map<string, SnapshotV1> {
+    const byId = new Map<string, SnapshotV1>();
+    for (const snapshot of snapshots) {
+      if (typeof snapshot.id !== "string" || byId.has(snapshot.id)) {
+        throw new TriageRunConflictError("snapshot identities are ambiguous");
+      }
+      byId.set(snapshot.id, snapshot);
+    }
+    return byId;
+  }
+
+  private requireSnapshotFromIndex(
+    snapshots: Map<string, SnapshotV1>,
+    caseId: string,
+    snapshotId: string,
+    options: { gateway: boolean },
+  ): SnapshotV1 {
+    const snapshot = snapshots.get(snapshotId);
+    if (!snapshot) throw new TriageRunConflictError("snapshot not found for case");
+    if (snapshot.caseId !== caseId || snapshot.id !== snapshotId) {
+      throw new TriageRunConflictError("snapshot identity mismatch");
+    }
+    if (snapshot.status !== "frozen") {
+      throw new TriageRunConflictError("snapshot is not frozen");
+    }
+    try {
+      parseSnapshot(snapshot);
+    } catch {
+      throw new TriageRunConflictError("snapshot is malformed");
+    }
+    if (snapshot.fingerprint !== snapshotIdentityFingerprint(snapshot)) {
+      throw new TriageRunConflictError("snapshot identity mismatch");
+    }
+    if (options.gateway && !honestSameSnapshot(snapshot)) {
+      throw new TriageRunConflictError(
+        "snapshot is not eligible for an honest same-snapshot comparison",
+      );
+    }
+    return deepFreeze(cloneSnapshot(snapshot));
+  }
+
+  private async requireParentJob(
+    caseId: string,
+    fromJobId: string,
+  ): Promise<TriageJobV1> {
+    let parent: TriageJobV1 | null;
+    try {
+      parent = await this.deps.jobs.get(fromJobId);
+    } catch {
+      throw new TriageRunConflictError("parent triage job is malformed");
+    }
+    if (!parent || parent.caseId !== caseId) {
+      throw new TriageRunConflictError("parent triage job not found for case");
+    }
+    const seen = new Set<string>();
+    let cursor = parent;
+    while (true) {
+      if (seen.has(cursor.id)) {
+        throw new TriageRunConflictError("parent triage job lineage contains a cycle");
+      }
+      seen.add(cursor.id);
+      if (!cursor.parentJobId) break;
+      let ancestor: TriageJobV1 | null;
+      try {
+        ancestor = await this.deps.jobs.get(cursor.parentJobId);
+      } catch {
+        throw new TriageRunConflictError("parent triage job lineage is malformed");
+      }
+      if (!ancestor || ancestor.caseId !== caseId) {
+        throw new TriageRunConflictError("parent triage job lineage leaves the case");
+      }
+      cursor = ancestor;
+    }
+    return parent;
+  }
+
+  private requireForwardSnapshotDescendant(
+    snapshots: Map<string, SnapshotV1>,
+    caseId: string,
+    parent: SnapshotV1,
+    target: SnapshotV1,
+  ): void {
+    if (target.id === parent.id || target.fingerprint === parent.fingerprint) {
+      throw new TriageRunConflictError("rerun target must be a distinct forward snapshot descendant");
+    }
+    const seen = new Set<string>([target.id]);
+    let cursor = target;
+    while (cursor.parentSnapshotId !== null) {
+      if (seen.has(cursor.parentSnapshotId)) {
+        throw new TriageRunConflictError("snapshot ancestry contains a cycle");
+      }
+      seen.add(cursor.parentSnapshotId);
+      const ancestor = this.requireSnapshotFromIndex(
+        snapshots,
+        caseId,
+        cursor.parentSnapshotId,
+        { gateway: false },
+      );
+      if (ancestor.id === parent.id) {
+        if (ancestor.fingerprint !== parent.fingerprint) {
+          throw new TriageRunConflictError("parent snapshot fingerprint mismatch");
+        }
+        return;
+      }
+      cursor = ancestor;
+    }
+    throw new TriageRunConflictError("rerun target must be a distinct forward snapshot descendant");
+  }
+
+  private buildRequestFromJob(
+    parent: TriageJobV1,
+    target: SnapshotV1,
+    request: TriageFromJobRequestV1,
+  ): TriageJobRequestV1 {
+    const copied: TriageJobRequestV1 = {
+      schemaId: TRIAGE_JOB_REQUEST_SCHEMA_ID,
+      snapshotId: target.id,
+      mode: request.mode,
+      strategyId: parent.request.strategyId,
+      question: parent.request.question,
+      policyFingerprint: parent.request.policyFingerprint,
+      taskFingerprint: parent.request.taskFingerprint,
+      candidates: parent.request.candidates.map((candidate) => ({ ...candidate })),
+    };
+    if (request.mode === "gateway" && parent.request.concurrency !== undefined) {
+      copied.concurrency = parent.request.concurrency;
+    }
+    return copied;
+  }
+
+  private idempotencyAdmission(
+    actor: Actor,
+    caseId: string,
+    parent: TriageJobV1,
+    target: SnapshotV1,
+    mode: TriageJobMode,
+    idempotencyKey: string | undefined,
+  ): TriageJobIdempotencyAdmission {
+    if (
+      idempotencyKey === undefined
+      || Buffer.byteLength(idempotencyKey, "utf8") < 1
+      || Buffer.byteLength(idempotencyKey, "utf8") > MAX_IDEMPOTENCY_KEY_BYTES
+    ) {
+      throw new TriageRunConflictError(
+        `Idempotency-Key must be between 1 and ${MAX_IDEMPOTENCY_KEY_BYTES} bytes for reruns`,
+      );
+    }
+    return {
+      scopeDigest: sha256(JSON.stringify({ actorId: actor.id, caseId, key: idempotencyKey })),
+      bindingDigest: sha256(JSON.stringify({
+        actorId: actor.id,
+        caseId,
+        parentJobId: parent.id,
+        targetSnapshotId: target.id,
+        targetSnapshotFingerprint: target.fingerprint,
+        mode,
+      })),
+    };
+  }
+
   async create(
     caseId: string,
     actor: Actor,
-    request: TriageJobRequestV1,
+    input: TriageJobCreateRequestV1,
     origin: string,
     isAdmin: boolean,
+    idempotencyKey?: string,
   ): Promise<TriageJobV1> {
     if (!(await this.deps.cases.getCase(caseId, actor, isAdmin))) {
       throw new TriageRunNotFoundError();
     }
+    const parsedInput = parseTriageJobCreateRequest(input);
+    const fromJob = isTriageFromJobRequest(parsedInput);
+    if (!fromJob && idempotencyKey !== undefined) {
+      throw new TriageRunConflictError("Idempotency-Key is only accepted for fromJobId reruns");
+    }
+    const parent = fromJob
+      ? await this.requireParentJob(caseId, parsedInput.fromJobId)
+      : null;
+    const listedSnapshots = await this.deps.cases.listSnapshots(caseId, actor, isAdmin);
+    const snapshots = this.snapshotIndex(listedSnapshots);
+    const target = this.requireSnapshotFromIndex(
+      snapshots,
+      caseId,
+      parsedInput.snapshotId,
+      { gateway: parsedInput.mode === "gateway" },
+    );
+    if (parent) {
+      const parentSnapshot = this.requireSnapshotFromIndex(
+        snapshots,
+        caseId,
+        parent.snapshotId,
+        { gateway: false },
+      );
+      if (parentSnapshot.fingerprint !== parent.snapshotFingerprint) {
+        throw new TriageRunConflictError("parent snapshot fingerprint mismatch");
+      }
+      this.requireForwardSnapshotDescendant(snapshots, caseId, parentSnapshot, target);
+    }
+    const request = parent
+      ? this.buildRequestFromJob(parent, target, parsedInput as TriageFromJobRequestV1)
+      : parsedInput as TriageJobRequestV1;
     if (request.mode === "gateway" && !this.deps.gatewayExecutor) {
       throw new TriageRunConflictError("gateway execution is not configured in this server");
     }
@@ -370,30 +620,20 @@ export class TriageRunService {
       }
       ids.add(candidate.candidateId);
     }
-    const snapshot = (await this.deps.cases.listSnapshots(caseId, actor, isAdmin)).find(
-      (item) => item.id === request.snapshotId,
-    );
-    if (!snapshot) throw new TriageRunConflictError("snapshot not found for case");
-    if (request.parentJobId) {
-      const parent = await this.deps.jobs.get(request.parentJobId);
-      if (!parent || parent.caseId !== caseId) {
-        throw new TriageRunConflictError("parent triage job not found for case");
-      }
-    }
     const createdAt = now();
     const job: TriageJobV1 = {
       schemaId: TRIAGE_JOB_SCHEMA_ID,
       id: randomUUID(),
       caseId,
-      snapshotId: snapshot.id,
-      snapshotFingerprint: snapshot.fingerprint,
+      snapshotId: target.id,
+      snapshotFingerprint: target.fingerprint,
       request: {
         ...normalizedRequest,
         candidates: normalizedRequest.candidates.map((candidate) => ({ ...candidate })),
       },
-      requestFingerprint: requestFingerprint(snapshot.fingerprint, normalizedRequest),
+      requestFingerprint: triageJobRequestFingerprint(target.fingerprint, normalizedRequest),
       cancellationId: randomUUID(),
-      ...(normalizedRequest.parentJobId ? { parentJobId: normalizedRequest.parentJobId } : {}),
+      ...(parent ? { parentJobId: parent.id } : {}),
       status: "queued",
       candidates: normalizedRequest.candidates.map(emptyCandidate),
       sameSnapshot: null,
@@ -407,32 +647,54 @@ export class TriageRunService {
       cancelRequestedAt: null,
       stoppedReason: null,
     };
-    await this.deps.jobs.insert(job);
-    await this.deps.cases.appendDomainTimeline(caseId, {
-      kind: "triage_job_created",
-      actor,
-      targetId: job.id,
-      clientTime: null,
-      payload: {
-        snapshotId: job.snapshotId,
-        snapshotFingerprint: job.snapshotFingerprint,
-        requestFingerprint: job.requestFingerprint,
-        candidateCount: job.candidates.length,
-        mode: job.request.mode,
-        ...(job.parentJobId ? { parentJobId: job.parentJobId } : {}),
-      },
-    });
-    await this.deps.audit.append({
-      identity: actor.id,
-      action: "triage_job_create",
-      target: job.id,
-      origin,
-      outcome: "success",
-    });
-    queueMicrotask(() => {
-      void this.execute(job.id, actor, isAdmin);
-    });
-    return job;
+    const idempotency = parent
+      ? this.idempotencyAdmission(
+          actor,
+          caseId,
+          parent,
+          target,
+          parsedInput.mode,
+          idempotencyKey,
+        )
+      : null;
+    let admission;
+    try {
+      admission = await this.deps.jobs.createOrReturn(job, idempotency);
+    } catch (error) {
+      if (error instanceof TriageJobIdempotencyConflictError) {
+        throw new TriageRunConflictError(error.message);
+      }
+      throw error;
+    }
+    if (!admission.created) return admission.job;
+    try {
+      await this.deps.cases.appendDomainTimeline(caseId, {
+        kind: "triage_job_created",
+        actor,
+        targetId: admission.job.id,
+        clientTime: null,
+        payload: {
+          snapshotId: admission.job.snapshotId,
+          snapshotFingerprint: admission.job.snapshotFingerprint,
+          requestFingerprint: admission.job.requestFingerprint,
+          candidateCount: admission.job.candidates.length,
+          mode: admission.job.request.mode,
+          ...(admission.job.parentJobId ? { parentJobId: admission.job.parentJobId } : {}),
+        },
+      });
+      await this.deps.audit.append({
+        identity: actor.id,
+        action: "triage_job_create",
+        target: admission.job.id,
+        origin,
+        outcome: "success",
+      });
+    } finally {
+      queueMicrotask(() => {
+        void this.execute(admission.job.id, actor, isAdmin, target);
+      });
+    }
+    return admission.job;
   }
 
   async cancel(
@@ -486,7 +748,12 @@ export class TriageRunService {
     return cancelled;
   }
 
-  private async execute(jobId: string, actor: Actor, isAdmin: boolean): Promise<void> {
+  private async execute(
+    jobId: string,
+    actor: Actor,
+    isAdmin: boolean,
+    admittedSnapshot?: SnapshotV1,
+  ): Promise<void> {
     const controller = new AbortController();
     this.controllers.set(jobId, controller);
     let leaseTimer: ReturnType<typeof setInterval> | undefined;
@@ -552,15 +819,32 @@ export class TriageRunService {
         });
         return;
       }
-      const snapshot = (await this.deps.cases.listSnapshots(job.caseId, actor, isAdmin)).find(
-        (item) => item.id === job?.snapshotId,
+      const executionSnapshots = this.snapshotIndex(
+        await this.deps.cases.listSnapshots(job.caseId, actor, isAdmin),
       );
-      if (!snapshot) throw new Error("snapshot disappeared before execution");
+      const currentSnapshot = this.requireSnapshotFromIndex(
+        executionSnapshots,
+        job.caseId,
+        job.snapshotId,
+        { gateway: job.request.mode === "gateway" },
+      );
+      if (
+        currentSnapshot.id !== job.snapshotId
+        || currentSnapshot.fingerprint !== job.snapshotFingerprint
+        || (admittedSnapshot !== undefined && (
+          admittedSnapshot.id !== currentSnapshot.id
+          || admittedSnapshot.fingerprint !== currentSnapshot.fingerprint
+        ))
+      ) {
+        throw new Error("snapshot identity changed after admission");
+      }
+      const snapshot = admittedSnapshot ?? currentSnapshot;
       const caseRow = await this.deps.cases.getCase(job.caseId, actor, isAdmin);
       if (!caseRow) throw new Error("case disappeared before execution");
       const evidence = job.request.mode === "gateway"
         ? await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, true)
         : await this.materializeEvidence(job.caseId, snapshot, actor, isAdmin, false);
+      const commonPacketVerified = exactEvidencePacket(snapshot, evidence);
       const persistCandidate = async (result: TriageCandidateRunV1): Promise<void> => {
         if (leaseLost) return;
         const latest = await this.deps.jobs.get(currentJob.id);
@@ -644,13 +928,13 @@ export class TriageRunService {
         await this.deps.jobs.update(currentJob);
         try {
           const progressCandidates = new Set<string>();
-          const results = await executor.executeBatch({
+          const batchContext = deepFreeze<TriageBatchExecutionContext>({
             jobId: job.id,
             requestedBy: job.requestedBy,
             createdAt: job.createdAt,
-            case: caseRow,
+            case: structuredClone(caseRow),
             snapshot,
-            request: job.request,
+            request: structuredClone(job.request),
             evidence,
             onCandidateStarted: async (candidateId) => {
               await recordCandidateStarted(candidateId);
@@ -659,12 +943,32 @@ export class TriageRunService {
               progressCandidates.add(result.candidateId);
               await recordCandidate(result);
             },
-          }, controller.signal);
+          });
+          const results = await executor.executeBatch(batchContext, controller.signal);
           if (results.length !== currentJob.candidates.length) throw new Error("gateway returned an incomplete candidate set");
-          currentJob = { ...currentJob, sameSnapshot: true, updatedAt: now() };
-          await this.deps.jobs.update(currentJob);
+          const resultIds = new Set(results.map((result) => result.candidateId));
+          if (
+            resultIds.size !== results.length
+            || currentJob.request.candidates.some((candidate) => !resultIds.has(candidate.candidateId))
+          ) {
+            throw new Error("gateway returned invalid candidate identities");
+          }
           for (const result of results) {
             if (!progressCandidates.has(result.candidateId)) await recordCandidate(result);
+          }
+          currentJob = (await this.deps.jobs.get(jobId)) ?? currentJob;
+          if (
+            !isTerminal(currentJob.status)
+            && currentJob.cancelRequestedAt === null
+            && currentJob.workerId === this.workerId
+            && commonPacketVerified
+          ) {
+            currentJob = {
+              ...currentJob,
+              sameSnapshot: true,
+              updatedAt: now(),
+            };
+            await this.deps.jobs.update(currentJob);
           }
         } catch (error) {
           const cancelled = job.cancelRequestedAt !== null || (controller.signal.aborted && !leaseLost);
@@ -694,8 +998,6 @@ export class TriageRunService {
         }
       } else {
         const executor = this.deps.executor ?? new DeterministicMockTriageExecutor();
-        currentJob = { ...currentJob, sameSnapshot: true, updatedAt: now() };
-        await this.deps.jobs.update(currentJob);
         for (let index = 0; index < job.candidates.length; index += 1) {
           if (leaseLost) return;
           currentJob = (await this.deps.jobs.get(jobId)) ?? currentJob;
@@ -761,6 +1063,21 @@ export class TriageRunService {
           }
           await recordCandidate(result);
           if (leaseLost) return;
+        }
+        currentJob = (await this.deps.jobs.get(jobId)) ?? currentJob;
+        if (
+          !isTerminal(currentJob.status)
+          && currentJob.cancelRequestedAt === null
+          && currentJob.workerId === this.workerId
+          && commonPacketVerified
+          && currentJob.candidates.every((candidate) => isTerminal(candidate.status))
+        ) {
+          currentJob = {
+            ...currentJob,
+            sameSnapshot: true,
+            updatedAt: now(),
+          };
+          await this.deps.jobs.update(currentJob);
         }
       }
       if (leaseLost) return;
@@ -839,10 +1156,10 @@ export class TriageRunService {
       const artifact = await this.deps.cases.getArtifact(caseId, item.evidenceId);
       if (!artifact) throw new Error("snapshot evidence disappeared before execution");
       const bytes = await this.deps.cases.getArtifactBytes(caseId, item.evidenceId, actor, isAdmin);
-      if (requireContent && item.contentHash && !bytes) {
+      if (requireContent && bytes === null) {
         throw new Error("snapshot evidence content is unavailable to the gateway runner");
       }
-      if (bytes && requireContent) {
+      if (bytes !== null && requireContent) {
         if (bytes.byteLength > MAX_GATEWAY_EVIDENCE_ITEM_BYTES) {
           throw new Error("gateway evidence item exceeds the bounded size");
         }
@@ -851,7 +1168,8 @@ export class TriageRunService {
           throw new Error("gateway evidence exceeds the aggregate bound");
         }
         const actualHash = createHash("sha256").update(bytes).digest("hex");
-        if (item.contentHash && actualHash !== item.contentHash) {
+        const expectedHash = item.contentHash ?? item.expectedHash;
+        if (expectedHash === null || actualHash !== expectedHash) {
           throw new Error("snapshot evidence integrity verification failed");
         }
       }
@@ -865,6 +1183,6 @@ export class TriageRunService {
         contentBase64: bytes ? Buffer.from(bytes).toString("base64") : null,
       });
     }
-    return evidence;
+    return deepFreeze(evidence);
   }
 }

@@ -157,6 +157,7 @@ export type {
 
 export {
   TRIAGE_CANDIDATE_STATUSES,
+  TRIAGE_JOB_CREATE_REQUEST_SCHEMA_ID,
   TRIAGE_JOB_CAPABILITIES_SCHEMA_ID,
   TRIAGE_JOB_LIST_SCHEMA_ID,
   TRIAGE_JOB_MODES,
@@ -166,16 +167,20 @@ export {
   TRIAGE_JOB_STATUSES,
   parseTriageJob,
   parseTriageJobCapabilities,
+  parseTriageJobCreateRequest,
   parseTriageJobList,
   parseTriageJobRequest,
   parseTriageJobShareSafe,
   projectTriageJobShareSafe,
+  isTriageFromJobRequest,
+  triageJobRequestFingerprint,
 } from "./triage-job.js";
 export type {
   TriageCandidateRunV1,
   TriageCandidateSpecV1,
   TriageCandidateStatus,
   TriageJobCapabilitiesV1,
+  TriageJobCreateRequestV1,
   TriageJobListV1,
   TriageJobMode,
   TriageJobRequestV1,
@@ -183,6 +188,7 @@ export type {
   TriageJobShareSafeV1,
   TriageJobStatus,
   TriageJobV1,
+  TriageFromJobRequestV1,
 } from "./triage-job.js";
 
 export {

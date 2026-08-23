@@ -18,10 +18,23 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("009_triage_jobs");
       expect(up.applied).toContain("010_presence");
       expect(up.applied).toContain("011_triage_worker_leases");
+      expect(up.applied).toContain("012_triage_job_rerun_integrity");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
       expect(tables.rows).toHaveLength(1);
+      const rerunColumns = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'triage_jobs'
+           AND column_name IN ('parent_job_id', 'idempotency_scope_digest', 'idempotency_binding_digest')
+         ORDER BY column_name`,
+      );
+      expect(rerunColumns.rows.map((row) => row.column_name)).toEqual([
+        "idempotency_binding_digest",
+        "idempotency_scope_digest",
+        "parent_job_id",
+      ]);
+      expect((await migrateDown(client)).rolledBack).toBe("012_triage_job_rerun_integrity");
       expect((await migrateDown(client)).rolledBack).toBe("011_triage_worker_leases");
       expect((await migrateDown(client)).rolledBack).toBe("010_presence");
       expect((await migrateDown(client)).rolledBack).toBe("009_triage_jobs");
@@ -57,10 +70,12 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("009_triage_jobs");
       expect(dry.pending).toContain("010_presence");
       expect(dry.pending).toContain("011_triage_worker_leases");
+      expect(dry.pending).toContain("012_triage_job_rerun_integrity");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,
       );
+      expect(dry.sql.some((s) => s.includes("triage_jobs_idempotency_scope_uidx"))).toBe(true);
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'evidence_file_references'`,
       );
