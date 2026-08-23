@@ -56,10 +56,15 @@ no recovery slot rather than guessing from chronology. Packet-id binding and
 held-out/live-provider usefulness remain later defense-in-depth and quality
 work. Neither limit grants causal authority.
 
-Reviewer collusion prose is not an independent fail-closed axis on this
-production path. An otherwise-valid causal proposal (trigger, symptom, and
-required disconfirmation) plus a colluding review still establishes after
-both validators pass. Collusion neither grants nor vetoes host authority.
+## Reviewer-collusion fail-closed gate
+
+`reviewer_collusion` is a required fail-closed axis. An otherwise-valid causal
+proposal plus a reviewer contradiction on observation claims now records a
+`contested_review` causal-stage skip and keeps `root_cause_established = false`.
+The final synthesizer may still return a useful bounded answer. This policy is
+structural: any validated cross-candidate contradiction is unresolved and
+cannot be converted from model prose into host-owned disproof authority.
+Empty-review causal qualification and pair-keyed claim reuse remain valid.
 
 Handbook impact: bounded pipeline semantics and qualification only; no provider,
 profile, credential, UI, or default-mode change.
