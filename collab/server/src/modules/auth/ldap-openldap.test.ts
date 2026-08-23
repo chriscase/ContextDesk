@@ -2,7 +2,11 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { LdapAuthAdapter } from "./ldap-adapter.js";
+import {
+  LdapAuthAdapter,
+  directoryGroupFilter,
+  directoryIdentityFilter,
+} from "./ldap-adapter.js";
 import { loadLdapConfig } from "./ldap-config.js";
 import { liveLdapConfigured, missingRequiredLiveLdapEnv } from "./ldap-coverage.js";
 import { createAuthLog } from "./log.js";
@@ -21,6 +25,17 @@ describe("hosted OpenLDAP coverage pin", () => {
     expect(yml).toMatch(/COLLAB_LDAP_BIND_DN:/);
     expect(yml).toMatch(/COLLAB_LDAP_USER_DN_TEMPLATE:/);
     expect(yml).toMatch(/COLLAB_LDAP_GROUP_SEARCH_BASE:/);
+  });
+});
+
+describe("LDAP administrative directory filters", () => {
+  it("escapes assertion values before adding a server-owned prefix wildcard", () => {
+    expect(directoryIdentityFilter("a*)(uid=*)")).toBe(
+      "(&(objectClass=person)(|(uid=a\\2a\\29\\28uid=\\2a\\29*)(cn=a\\2a\\29\\28uid=\\2a\\29*)(displayName=a\\2a\\29\\28uid=\\2a\\29*)))",
+    );
+    expect(directoryGroupFilter("ad*(member=*)")).toBe(
+      "(&(objectClass=groupOfNames)(cn=ad\\2a\\28member=\\2a\\29*))",
+    );
   });
 });
 
@@ -53,6 +68,31 @@ describe.skipIf(!configured)("OpenLDAP fixture (encrypted)", () => {
     const result = await adapter.authenticate("alice", secret);
     expect(result).toBeNull();
     expect(log.lines().join("\n")).not.toContain(secret);
+  });
+
+  it("service-searches only projected identity and group attributes", async () => {
+    const log = createAuthLog();
+    const adapter = new LdapAuthAdapter(loadLdapConfig(), log);
+    const identities = await adapter.searchIdentities("ali", {
+      limit: 20,
+      timeoutMs: 3_000,
+    });
+    expect(identities).toContainEqual({
+      id: "uid=alice,ou=people,dc=example,dc=test",
+      username: "alice",
+      displayName: "Alice",
+      source: "ldap",
+    });
+    const groups = await adapter.searchDirectoryGroups("adm", {
+      limit: 20,
+      timeoutMs: 3_000,
+    });
+    expect(groups).toContainEqual({
+      dn: "cn=admins,ou=groups,dc=example,dc=test",
+      name: "admins",
+      source: "ldap",
+    });
+    expect(JSON.stringify({ identities, groups })).not.toMatch(/member|password/i);
   });
 });
 

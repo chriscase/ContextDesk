@@ -43,6 +43,31 @@ export type {
 } from "./auth.js";
 
 export {
+  ADMIN_DIRECTORY_ERROR_SCHEMA_ID,
+  ADMIN_DIRECTORY_GROUPS_SCHEMA_ID,
+  ADMIN_DIRECTORY_IDENTITIES_SCHEMA_ID,
+  ADMIN_DIRECTORY_MAX_RESULTS,
+  ADMIN_DIRECTORY_MAX_TERM_LENGTH,
+  ADMIN_DIRECTORY_MIN_TERM_LENGTH,
+  ADMIN_DIRECTORY_SEARCH_REQUEST_SCHEMA_ID,
+  normalizeAdminDirectorySearchTerm,
+  parseAdminDirectoryError,
+  parseAdminDirectoryGroupSearchResponse,
+  parseAdminDirectoryIdentitySearchResponse,
+  parseAdminDirectorySearchRequest,
+} from "./admin-directory.js";
+export type {
+  AdminDirectoryErrorCode,
+  AdminDirectoryErrorV1,
+  AdminDirectoryGroupSearchResponseV1,
+  AdminDirectoryGroupV1,
+  AdminDirectoryIdentitySearchResponseV1,
+  AdminDirectoryIdentityV1,
+  AdminDirectorySearchRequestV1,
+  AdminDirectorySource,
+} from "./admin-directory.js";
+
+export {
   CASE_LIST_SCHEMA_ID,
   CASE_SCHEMA_ID,
   CASE_SEVERITIES,
