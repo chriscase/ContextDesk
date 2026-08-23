@@ -30,6 +30,14 @@ On that path the lab showed:
   share-safe aliases stay `package-1` / `task-1` / `snapshot-1`; crossing raw
   identities between experiments is rejected before those constants are
   applied.
+- The exported `snapshotProof` is host-owned. A trusted ContextDesk triage job
+  bound to an exact frozen snapshot reports that snapshot's stored
+  `same_snapshot` / `unknown` fairness class plus `root` / `derived` lineage.
+  A bound external run may participate; an unbound run or generic imported
+  package fails closed to an entirely `unknown` proof.
+- Snapshot and parent identities remain private: the export uses `snapshot-1`
+  and, for derived lineage, `snapshot-parent-1`. Raw fingerprints and snapshot
+  ids are never exported.
 - Equivalent **bag reorders** of nested candidate lists, evidence refs,
   decisions, golds, traces/events, and comparison rows produce identical
   aliases and identical JSON. Candidate aliases still follow the stored
@@ -81,6 +89,10 @@ assembled export and call `parseLabExportV2`.
 | `tampered_omissions` | parser | `ContractViolation` |
 | `tampered_caveats_missing` / `tampered_caveats_duplicate` | parser | `ContractViolation` |
 | `tampered_gold_revision` / `tampered_gold_decision_alias` | parser | `ContractViolation` |
+| unknown snapshot-proof field | parser | `ContractViolation` |
+| unknown basis claiming known fairness | parser | `ContractViolation` |
+| host basis with unknown lineage | parser | `ContractViolation` |
+| derived lineage without parent / root lineage with parent | parser | `ContractViolation` |
 | `planted_leak_string` / `planted_forbidden_key` | parser | `ContractViolation` |
 
 ## Production repair
@@ -98,6 +110,10 @@ all inside the allowlist:
   or missing gold/decision/evidence/candidate refs, multiple accepted
   identities, and dishonest source revision chains; non-candidate aliases are
   seeded from sorted unique ids; bag output is canonicalized by alias.
+- `collab/server/src/modules/experiments/service.ts` and `store.ts` — trusted
+  triage handoff derives and immutably persists a host snapshot proof inside a
+  private storage envelope. Legacy rows and public imports read as unknown;
+  malformed stored proof fails closed.
 
 ## Non-claims
 
@@ -105,15 +121,20 @@ This lab does **not** prove:
 
 - Signatures, checksums, or cryptographic provenance of an export
 - Correctness of the human decision or of gold-as-truth
-- Same-snapshot fairness across candidates or live runs
-- That HTTP, UI, or store paths cannot assemble a dishonest source (those
-  surfaces are out of scope here)
+- Cryptographic authenticity of the fairness label after a document leaves
+  ContextDesk; the structural parser is not a signature verifier
+- Same-snapshot fairness for generic imports, unbound external runs, or live
+  systems that do not supply the host-frozen snapshot proof
+- That the UI cannot mislabel the typed proof (visual/browser assertions remain
+  a separate surface)
 
 ## Remaining operator-journey limitations
 
-- The case-lead **Export** button, Fastify routes, and experiment store are not
-  exercised by this lab. Service tests and e2e remain the operator-journey
-  coverage.
+- The service and memory/PostgreSQL store boundaries are exercised, including
+  the full synthetic operator journey from named human evidence through frozen
+  snapshot, bound external AI import, two ContextDesk candidates, comparison,
+  helpfulness, accepted decision, and parsed share-safe export. The case-lead
+  **Export** button still needs its own browser assertion for the new proof.
 - Candidate-matrix **row order** is the alias seed for `approach-*` (locked by
   existing package-order exports). Nested candidate lists and other bags are
   reorder-stable; reversing the stored matrix itself is a different

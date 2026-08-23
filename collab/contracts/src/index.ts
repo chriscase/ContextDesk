@@ -285,6 +285,8 @@ export {
   HELPFULNESS_STATES,
   PACKAGE_GOLD_STATES,
   RUN_STATUSES,
+  SNAPSHOT_LINEAGE_CLASSES,
+  SNAPSHOT_PROOF_BASES,
   UNKNOWN_MEASUREMENT,
   parseExperimentDecision,
   parseExperimentImport,
@@ -325,6 +327,9 @@ export type {
   ShareSafeGoldReferenceV2,
   ShareSafeHelpfulnessObservationV2,
   ShareSafeRoleConflictV2,
+  ShareSafeSnapshotProofV2,
+  SnapshotLineageClass,
+  SnapshotProofBasis,
   UnknownMeasurement,
 } from "./experiment.js";
 

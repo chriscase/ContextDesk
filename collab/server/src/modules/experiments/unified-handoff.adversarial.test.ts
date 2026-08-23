@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TriageCandidateRunV1 } from "@cd-collab/contracts";
+import { parseLabExportV2, type TriageCandidateRunV1 } from "@cd-collab/contracts";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
@@ -89,6 +89,7 @@ async function withApp(
     cases: CaseService;
     imports: ImportService;
     runs: TriageRunService;
+    experiments: ExperimentService;
   }) => Promise<void>,
 ) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-unified-handoff-"));
@@ -140,7 +141,7 @@ async function withApp(
     },
   });
   try {
-    await fn({ app, catalog, cases, imports, runs });
+    await fn({ app, catalog, cases, imports, runs, experiments });
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
@@ -243,6 +244,167 @@ function handoffUrl(caseId: string, jobId: string): string {
 }
 
 describe("unified comparison handoff adversarial contract", () => {
+  it("qualifies the honest operator journey from human evidence through accepted share-safe export", async () => {
+    await withApp(async ({ catalog, cases, imports, runs, experiments }) => {
+      const humanSource = await catalog.create(
+        DAVE_ACTOR,
+        {
+          name: "On-call observation",
+          kind: "human",
+          description: "Evidence gathered manually during triage.",
+        },
+        "test",
+      );
+      const externalSource = await catalog.create(
+        DAVE_ACTOR,
+        {
+          name: "External AI assistant",
+          kind: "external-tool",
+          description: "Output imported by the operator from another system.",
+        },
+        "test",
+      );
+      const created = await cases.createCase(
+        DAVE_ACTOR,
+        { title: "Checkout latency operator journey" },
+        "test",
+      );
+      const baselineSnapshot = await cases.createSnapshot(
+        created.id,
+        DAVE_ACTOR,
+        { evidenceIds: [], visibility: "share_safe" },
+        "test",
+      );
+      const manualEvidence = await cases.addEvidence(
+        created.id,
+        DAVE_ACTOR,
+        {
+          kind: "note",
+          filename: "operator-observation.txt",
+          mediaType: "text/plain",
+          bytes: new TextEncoder().encode("Inventory calls began timing out after the deploy."),
+          summary: "Human-observed timing relationship.",
+          privacyClass: "share_safe",
+          sourceId: humanSource.id,
+        },
+        "test",
+      );
+      const snapshot = await cases.createSnapshot(
+        created.id,
+        DAVE_ACTOR,
+        { evidenceIds: [manualEvidence.artifact.id], visibility: "share_safe" },
+        "test",
+      );
+      expect(snapshot.fairnessClass).toBe("same_snapshot");
+      expect(snapshot.parentSnapshotId).toBe(baselineSnapshot.id);
+
+      const externalRun = await imports.importRun(
+        created.id,
+        DAVE_ACTOR,
+        {
+          outputText: "Inspect the inventory timeout path before changing checkout retries.",
+          promptText: "What should the on-call team inspect next?",
+          sourceId: externalSource.id,
+          operatorId: DAVE_ACTOR.id,
+          operatorUsername: DAVE_ACTOR.username,
+          provider: "external-provider",
+          model: "external-model",
+          promptCompleteness: "exact",
+          outputCompleteness: "exact",
+          workflowCompleteness: "unknown",
+          evidenceVisibility: "complete",
+          snapshotBinding: snapshot.fingerprint,
+          privacyClass: "share_safe",
+        },
+        "test",
+        true,
+      );
+      expect(externalRun.sourceId).toBe(externalSource.id);
+      expect(externalRun.snapshotBinding).toBe(snapshot.fingerprint);
+
+      const job = await createJob(runs, created.id, snapshot.id, ["reviewer-a", "challenger-b"]);
+      expect(job.status).toBe("completed");
+      expect(job.snapshotFingerprint).toBe(snapshot.fingerprint);
+      expect(job.candidates.every((candidate) => candidate.evidenceRefs.includes(manualEvidence.artifact.id))).toBe(
+        true,
+      );
+
+      const experiment = await experiments.importTriageJob(
+        created.id,
+        DAVE_ACTOR,
+        job,
+        externalRun,
+        "test",
+        true,
+      );
+      expect(experiment.candidates).toHaveLength(3);
+      expect(experiment.snapshotFingerprint).toBe(`snap-${snapshot.fingerprint}`);
+      expect(experiment.agreement.notes.join(" ")).not.toContain("no exact snapshot binding");
+      expect(experiment.traces.some((trace) => trace.sourceKind === "plain_text")).toBe(true);
+
+      await experiments.recordHelpfulness(
+        created.id,
+        experiment.id,
+        DAVE_ACTOR,
+        {
+          candidateId: "reviewer-a",
+          dimension: "actionability",
+          score: 3,
+          rationale: "The recommendation is bounded and immediately testable.",
+          evidenceRefs: [manualEvidence.artifact.id],
+        },
+        "test",
+        true,
+      );
+      const proposed = await experiments.proposeDecision(
+        created.id,
+        experiment.id,
+        DAVE_ACTOR,
+        {
+          text: "Inspect inventory timeout propagation before changing retry policy.",
+          rationale: "Human decision after comparing the bounded candidate outputs.",
+          evidenceRefs: [manualEvidence.artifact.id],
+        },
+        "test",
+        true,
+      );
+      const accepted = await experiments.acceptDecision(
+        created.id,
+        experiment.id,
+        DAVE_ACTOR,
+        proposed.revision,
+        "test",
+        true,
+      );
+      expect(accepted.status).toBe("accepted");
+
+      const exported = parseLabExportV2(
+        await experiments.exportShareSafe(created.id, experiment.id, DAVE_ACTOR, true),
+      );
+      expect(exported.review.decision?.status).toBe("accepted");
+      expect(exported.review.observations).toHaveLength(1);
+      expect(exported.review.snapshotAlias).toBe("snapshot-1");
+      expect(exported.review.snapshotProof).toEqual({
+        basis: "host_frozen_snapshot",
+        fairnessClass: "same_snapshot",
+        lineageClass: "derived",
+        parentSnapshotAlias: "snapshot-parent-1",
+      });
+      const serialized = JSON.stringify(exported);
+      expect(serialized).not.toContain(snapshot.fingerprint);
+      for (const privateOrRawValue of [
+        DAVE_ACTOR.id,
+        DAVE_ACTOR.username,
+        "external-provider",
+        "external-model",
+        "Inventory calls began timing out after the deploy.",
+        "Inspect the inventory timeout path before changing checkout retries.",
+      ]) {
+        expect(serialized).not.toContain(privateOrRawValue);
+      }
+    });
+  });
+
   it("requires a same-case lead, preserves frozen identity, and is idempotent", async () => {
     await withApp(async ({ app, cases, runs }) => {
       const dave = await login(app, "dave", DAVE);
@@ -415,6 +577,7 @@ describe("unified comparison handoff adversarial contract", () => {
       });
       expect(response.statusCode).toBe(200);
       const view = JSON.parse(response.body) as {
+        snapshotProof: { basis: string; fairnessClass: string; lineageClass: string };
         traces: {
           candidateId: string;
           sourceKind: string;
@@ -423,6 +586,11 @@ describe("unified comparison handoff adversarial contract", () => {
         }[];
       };
       const chatTrace = view.traces.find((trace) => trace.sourceKind === "plain_text");
+      expect(view.snapshotProof).toEqual({
+        basis: "unknown",
+        fairnessClass: "unknown",
+        lineageClass: "unknown",
+      });
       expect(chatTrace).toBeDefined();
       expect(chatTrace?.completeness).toBe("partial");
       expect(chatTrace?.unknowns).toEqual(expect.arrayContaining(["turns", "tools", "evidence"]));
