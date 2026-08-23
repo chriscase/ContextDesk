@@ -1,18 +1,21 @@
 /**
- * Investigation team cockpit — the multi-model mode selector.
+ * Investigation team cockpit — the multi-model mode selector plus reviewer
+ * assignment.
  *
  * Presents the three host-validated investigation routes (single, review,
- * contributions) as an explicit, keyboard-complete choice with honest
- * readiness detail drawn only from recorded settings fields. Selecting a
- * team changes the default route the composer honors; provider profiles,
- * credentials, qualification, and reconciliation stay host-owned, and the
- * reviewer/contribution routes degrade honestly when their configured roles
- * are unavailable.
+ * contributions) as an explicit, keyboard-complete choice, and lets an
+ * existing provider profile be assigned the reviewer role. Readiness detail
+ * is drawn only from recorded settings fields and the host's cached measured
+ * qualification; provider profiles, credentials, probes, and reconciliation
+ * stay host-owned. Assignment records configuration only — every review turn
+ * re-checks qualification and egress itself, and the reviewer/contribution
+ * routes degrade honestly when their configured roles are unavailable.
  */
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   hostGetMultiModelSettings,
   hostSetMultiModelMode,
+  hostSetMultiModelReviewer,
   type MultiModelSettingsDto,
 } from "../../lib/host";
 
@@ -54,6 +57,25 @@ function teamName(mode: TeamMode): string {
   return TEAM_OPTIONS.find((o) => o.mode === mode)?.name ?? mode;
 }
 
+type MeasuredQualification = "qualified" | "unqualified" | "unverified";
+
+/**
+ * Normalize the host's measured verdict for display. Anything that is not an
+ * explicit measured pass/fail — including an unexpected value — reads as
+ * unverified: unverified is never qualified.
+ */
+function measuredQualification(s: MultiModelSettingsDto): MeasuredQualification {
+  if (s.reviewer_qualification === "qualified") return "qualified";
+  if (s.reviewer_qualification === "unqualified") return "unqualified";
+  return "unverified";
+}
+
+const QUALIFICATION_LABEL: Record<MeasuredQualification, string> = {
+  qualified: "Measured qualified",
+  unqualified: "Measured — did not qualify",
+  unverified: "Not measured yet (unverified)",
+};
+
 export function MultiModelReviewToggle() {
   const [settings, setSettings] = useState<MultiModelSettingsDto | null>(null);
   const [phase, setPhase] = useState<
@@ -64,8 +86,23 @@ export function MultiModelReviewToggle() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [lastAttempt, setLastAttempt] = useState<TeamMode | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Reviewer-assignment draft. Synced from recorded settings on load and
+  // after an assignment save; never clobbered by a mode save.
+  const [draftProfileId, setDraftProfileId] = useState("");
+  const [draftModel, setDraftModel] = useState("");
+  const [draftAllowRemote, setDraftAllowRemote] = useState(false);
+  const [assignBusy, setAssignBusy] = useState(false);
+  const [assignError, setAssignError] = useState<string | null>(null);
+  const [assignNotice, setAssignNotice] = useState<string | null>(null);
+  const [lastAssign, setLastAssign] = useState<"save" | "clear" | null>(null);
   const aliveRef = useRef(true);
   const baseId = useId();
+
+  const syncDraft = useCallback((s: MultiModelSettingsDto) => {
+    setDraftProfileId(s.reviewer_profile_id?.trim() ?? "");
+    setDraftModel(s.reviewer_model ?? "");
+    setDraftAllowRemote(s.reviewer_allow_remote);
+  }, []);
 
   const load = useCallback(async () => {
     setPhase("loading");
@@ -74,6 +111,7 @@ export function MultiModelReviewToggle() {
       if (!aliveRef.current) return;
       if (s) {
         setSettings(s);
+        syncDraft(s);
         setPhase("ready");
       } else {
         // No host (browser preview) — keep the surface out of the way.
@@ -83,7 +121,7 @@ export function MultiModelReviewToggle() {
     } catch {
       if (aliveRef.current) setPhase("load-error");
     }
-  }, []);
+  }, [syncDraft]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -94,7 +132,7 @@ export function MultiModelReviewToggle() {
   }, [load]);
 
   async function setMode(next: TeamMode) {
-    if (busy) return;
+    if (busy || assignBusy) return;
     setBusy(true);
     setSaveError(null);
     setNotice(null);
@@ -115,6 +153,51 @@ export function MultiModelReviewToggle() {
         setBusy(false);
         setPendingMode(null);
       }
+    }
+  }
+
+  async function submitAssignment(kind: "save" | "clear") {
+    if (busy || assignBusy || !settings) return;
+    setAssignBusy(true);
+    setAssignError(null);
+    setAssignNotice(null);
+    setLastAssign(kind);
+    try {
+      const profileId = kind === "clear" ? null : draftProfileId.trim() || null;
+      const candidate =
+        profileId != null
+          ? (settings.candidate_profiles.find((c) => c.id === profileId) ??
+            null)
+          : null;
+      // Measured qualification is mandatory — the host records it and offers
+      // the renderer no way to relax it, so it is not sent here.
+      await hostSetMultiModelReviewer({
+        profileId,
+        model: profileId != null ? draftModel.trim() || null : null,
+        // A local-only profile cannot egress, so no acknowledgement is ever
+        // submitted for one; consent applies to remote profiles only.
+        allowRemote:
+          profileId != null && candidate?.local_only !== true
+            ? draftAllowRemote
+            : false,
+      });
+      const fresh = await hostGetMultiModelSettings();
+      if (!aliveRef.current) return;
+      if (fresh) {
+        setSettings(fresh);
+        syncDraft(fresh);
+      }
+      setAssignNotice(
+        profileId != null
+          ? "Saved — reviewer assignment recorded. Nothing runs until a review-mode investigation turn."
+          : "Saved — reviewer cleared. Review-mode turns proceed single-model and record it.",
+      );
+    } catch (err) {
+      if (aliveRef.current) {
+        setAssignError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (aliveRef.current) setAssignBusy(false);
     }
   }
 
@@ -163,6 +246,71 @@ export function MultiModelReviewToggle() {
   // guidance rather than a configured-looking empty identity chip.
   const reviewerProfileId = settings.reviewer_profile_id?.trim() || null;
   const reviewerConfigured = reviewerProfileId != null;
+  const candidates = settings.candidate_profiles;
+  const qualification = measuredQualification(settings);
+
+  // Recorded readiness gates — what stands between the recorded assignment
+  // and an actual review at turn time. Never claims a review will happen.
+  const recordedCandidate = reviewerConfigured
+    ? (candidates.find((c) => c.id === reviewerProfileId) ?? null)
+    : null;
+  // Egress identity of the recorded reviewer, derived from the profile's
+  // actual locality plus the acknowledgement — never from the acknowledgement
+  // alone. A remote profile without acknowledgement is still remote; only a
+  // profile that is genuinely local-only may be described as local.
+  const recordedEgress: "local" | "remote-acknowledged" | "remote-unacknowledged" | "unavailable" =
+    recordedCandidate == null
+      ? "unavailable"
+      : recordedCandidate.local_only
+        ? "local"
+        : settings.reviewer_allow_remote
+          ? "remote-acknowledged"
+          : "remote-unacknowledged";
+  const gates: string[] = [];
+  if (reviewerConfigured) {
+    if (!recordedCandidate) {
+      gates.push("the recorded profile no longer exists in provider settings");
+    } else if (!recordedCandidate.local_only && !settings.reviewer_allow_remote) {
+      gates.push("remote evidence egress is not acknowledged");
+    }
+    if (settings.reviewer_require_qualified && qualification !== "qualified") {
+      gates.push(
+        qualification === "unqualified"
+          ? "the measured qualification failed"
+          : "qualification has not been measured yet",
+      );
+    }
+  }
+
+  // Assignment-editor derived state.
+  const selectedCandidate =
+    candidates.find((c) => c.id === draftProfileId) ?? null;
+  const selectedIsRemote = selectedCandidate != null && !selectedCandidate.local_only;
+  const draftMissing = draftProfileId !== "" && selectedCandidate == null;
+  const activeProfileId = settings.active_profile_id?.trim() || null;
+  const effectiveDraftModel =
+    draftModel.trim() || selectedCandidate?.chat_model || "";
+  const sameAsInvestigator =
+    selectedCandidate != null &&
+    activeProfileId === selectedCandidate.id &&
+    effectiveDraftModel === selectedCandidate.chat_model;
+
+  function onPickProfile(id: string) {
+    setDraftProfileId(id);
+    const cand = candidates.find((c) => c.id === id) ?? null;
+    const isRecorded = reviewerConfigured && id === reviewerProfileId;
+    // Egress consent never carries across profiles: restore the recorded
+    // acknowledgement only when returning to the recorded remote reviewer.
+    setDraftAllowRemote(
+      Boolean(
+        cand &&
+          !cand.local_only &&
+          isRecorded &&
+          settings?.reviewer_allow_remote,
+      ),
+    );
+    setDraftModel(isRecorded ? (settings?.reviewer_model ?? "") : "");
+  }
 
   function optionNote(mode: TeamMode): {
     tone: "warn" | "info";
@@ -183,9 +331,16 @@ export function MultiModelReviewToggle() {
         );
       }
       parts.push(
-        settings.reviewer_allow_remote
-          ? "Remote use is permitted for this reviewer."
-          : "Local only — remote reviewer calls are not permitted.",
+        {
+          local:
+            "The reviewer profile is local-only; evidence never leaves this machine.",
+          "remote-acknowledged":
+            "Remote evidence egress is acknowledged for this reviewer.",
+          "remote-unacknowledged":
+            "This reviewer is a remote provider and egress is not acknowledged, so review degrades to single-model and records it.",
+          unavailable:
+            "The recorded reviewer profile is unavailable, so egress cannot be evaluated and review degrades.",
+        }[recordedEgress],
       );
       return { tone: "info", text: parts.join(" ") };
     }
@@ -197,6 +352,10 @@ export function MultiModelReviewToggle() {
     }
     return null;
   }
+
+  const assignSaveDisabled = assignBusy || busy;
+  const assignClearDisabled =
+    assignBusy || busy || (!reviewerConfigured && draftProfileId === "");
 
   return (
     <section className="settings-block mm-team">
@@ -303,54 +462,236 @@ export function MultiModelReviewToggle() {
         </p>
       ) : null}
 
+      <fieldset
+        className="mm-team__assign"
+        aria-busy={assignBusy || undefined}
+        aria-describedby={`${baseId}-assign-lead`}
+      >
+        <legend className="mm-team__assign-title">Reviewer assignment</legend>
+        <p className="mm-team__assign-lead" id={`${baseId}-assign-lead`}>
+          Assign an existing provider profile the reviewer role. Saving records
+          the assignment only — nothing runs until a review-mode investigation
+          turn, and each turn re-checks qualification and egress first.
+        </p>
+
+        <div className="mm-team__assign-grid">
+          <div className="mm-team__assign-field">
+            <label
+              className="mm-team__assign-label"
+              htmlFor={`${baseId}-assign-profile`}
+            >
+              Profile
+            </label>
+            <select
+              id={`${baseId}-assign-profile`}
+              className="mm-team__assign-control"
+              value={draftProfileId}
+              onChange={(e) => onPickProfile(e.currentTarget.value)}
+            >
+              <option value="">No reviewer</option>
+              {candidates.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label} — {c.chat_model}
+                  {c.local_only ? " (local)" : " (remote)"}
+                </option>
+              ))}
+              {draftMissing ? (
+                <option value={draftProfileId}>
+                  {draftProfileId} (not found)
+                </option>
+              ) : null}
+            </select>
+          </div>
+
+          <div className="mm-team__assign-field">
+            <label
+              className="mm-team__assign-label"
+              htmlFor={`${baseId}-assign-model`}
+            >
+              Model override{" "}
+              <span className="mm-team__assign-optional">(optional)</span>
+            </label>
+            <input
+              id={`${baseId}-assign-model`}
+              className="mm-team__assign-control"
+              type="text"
+              value={draftModel}
+              disabled={draftProfileId === ""}
+              aria-describedby={`${baseId}-assign-model-hint`}
+              onChange={(e) => setDraftModel(e.currentTarget.value)}
+            />
+            <p
+              className="mm-team__assign-hint"
+              id={`${baseId}-assign-model-hint`}
+            >
+              Empty uses the profile default
+              {selectedCandidate ? ` (${selectedCandidate.chat_model})` : ""}.
+            </p>
+          </div>
+        </div>
+
+        {selectedIsRemote ? (
+          <div className="mm-team__assign-ack">
+            <input
+              id={`${baseId}-assign-ack`}
+              type="checkbox"
+              checked={draftAllowRemote}
+              aria-describedby={`${baseId}-assign-ack-desc`}
+              onChange={(e) => setDraftAllowRemote(e.currentTarget.checked)}
+            />
+            <div className="mm-team__assign-ack-text">
+              <label htmlFor={`${baseId}-assign-ack`}>
+                Allow remote evidence egress for review
+              </label>
+              <p id={`${baseId}-assign-ack-desc`}>
+                Review turns would send investigation evidence — prompts and
+                bounded context from your linked logs — to this remote
+                provider. Without this acknowledgement the assignment still
+                saves, but review turns proceed single-model and record it.
+              </p>
+            </div>
+          </div>
+        ) : selectedCandidate ? (
+          <p className="mm-team__assign-note">
+            Local-only profile — evidence never leaves this machine, so no
+            egress acknowledgement applies.
+          </p>
+        ) : null}
+
+        {sameAsInvestigator ? (
+          <p className="mm-team__assign-note">
+            Same profile and model as the current investigator. That’s allowed
+            — the reviewer is a second prompt in a second role, not a second
+            model. It can still catch mistakes, but it shares this model’s
+            blind spots.
+          </p>
+        ) : null}
+
+        <div className="mm-team__assign-actions">
+          <button
+            type="button"
+            className="btn btn--primary btn--sm"
+            disabled={assignSaveDisabled}
+            onClick={() => void submitAssignment("save")}
+          >
+            Save reviewer
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            disabled={assignClearDisabled}
+            onClick={() => void submitAssignment("clear")}
+          >
+            Clear reviewer
+          </button>
+        </div>
+
+        {assignBusy ? (
+          <p className="mm-team__status" role="status" data-busy="true">
+            Saving reviewer assignment…
+          </p>
+        ) : assignError ? (
+          <div className="mm-team__error" role="alert">
+            <p className="mm-team__error-msg">
+              Couldn’t save the reviewer assignment: {assignError}
+            </p>
+            {lastAssign ? (
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                onClick={() => void submitAssignment(lastAssign)}
+              >
+                Try again
+              </button>
+            ) : null}
+          </div>
+        ) : assignNotice ? (
+          <p className="mm-team__status" role="status" data-tone="ok">
+            {assignNotice}
+          </p>
+        ) : null}
+      </fieldset>
+
       <div className="mm-team__readiness">
         <h4 className="mm-team__readiness-title">Set up right now</h4>
         {reviewerConfigured ? (
-          <dl className="mm-team__facts">
-            <div className="mm-team__fact">
-              <dt>Reviewer profile</dt>
-              <dd>
-                <code>{reviewerProfileId}</code>
-              </dd>
-            </div>
-            <div className="mm-team__fact">
-              <dt>Reviewer model</dt>
-              <dd>
-                {settings.reviewer_model ? (
-                  <code>{settings.reviewer_model}</code>
-                ) : (
-                  "profile default"
-                )}
-              </dd>
-            </div>
-            <div className="mm-team__fact">
-              <dt>Qualification</dt>
-              <dd>
-                {settings.reviewer_require_qualified
-                  ? "Required before it reviews"
-                  : "Not required"}
-              </dd>
-            </div>
-            <div className="mm-team__fact">
-              <dt>Remote access</dt>
-              <dd>
-                {settings.reviewer_allow_remote
-                  ? "Permitted"
-                  : "Not permitted — local only"}
-              </dd>
-            </div>
-          </dl>
+          <>
+            <dl className="mm-team__facts">
+              <div className="mm-team__fact">
+                <dt>Reviewer profile</dt>
+                <dd>
+                  <code>{reviewerProfileId}</code>
+                </dd>
+              </div>
+              <div className="mm-team__fact">
+                <dt>Reviewer model</dt>
+                <dd>
+                  {settings.reviewer_model ? (
+                    <code>{settings.reviewer_model}</code>
+                  ) : (
+                    "profile default"
+                  )}
+                </dd>
+              </div>
+              <div className="mm-team__fact">
+                <dt>Qualification policy</dt>
+                <dd>
+                  {settings.reviewer_require_qualified
+                    ? "Required before it reviews"
+                    : "Not required"}
+                </dd>
+              </div>
+              <div className="mm-team__fact">
+                <dt>Measured qualification</dt>
+                <dd>
+                  <span className="mm-team__qual" data-state={qualification}>
+                    {QUALIFICATION_LABEL[qualification]}
+                  </span>
+                </dd>
+              </div>
+              <div className="mm-team__fact">
+                <dt>Remote access</dt>
+                <dd>
+                  {
+                    {
+                      local: "Local-only profile — no remote egress applies",
+                      "remote-acknowledged":
+                        "Remote provider — egress acknowledged",
+                      "remote-unacknowledged":
+                        "Remote provider — egress not acknowledged",
+                      unavailable:
+                        "Profile unavailable — egress cannot be evaluated",
+                    }[recordedEgress]
+                  }
+                </dd>
+              </div>
+            </dl>
+            {gates.length > 0 ? (
+              <p className="mm-team__gate" data-tone="warn">
+                Not ready — {gates.join("; ")}. Review-mode turns proceed
+                single-model and record the degradation.
+              </p>
+            ) : (
+              <p className="mm-team__gate" data-tone="ok">
+                Recorded and eligible. Each review turn still re-checks
+                qualification and egress at run time — assignment alone never
+                runs anything, and review applies only to Log Explorer–linked
+                investigation turns.
+              </p>
+            )}
+          </>
         ) : (
           <p className="mm-team__readiness-empty">
             No reviewer is configured. Reviewer mode still saves, but
-            investigations run single-model until a reviewer profile is set in
-            provider configuration.
+            investigations run single-model until a reviewer profile is
+            assigned above.
           </p>
         )}
         <p className="mm-team__honesty">
-          Picking a team changes only the default route. It doesn’t create or
-          qualify profiles, and configured is not the same as executed — each
-          investigation records which models actually ran.
+          Picking a team or assigning a reviewer changes only the recorded
+          configuration. It doesn’t create or qualify profiles, and configured
+          is not the same as executed — each investigation records which
+          models actually ran.
         </p>
       </div>
     </section>
