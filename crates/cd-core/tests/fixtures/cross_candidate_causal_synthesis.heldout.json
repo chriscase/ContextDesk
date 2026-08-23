@@ -1,0 +1,144 @@
+{
+  "corpus_id": "w00c0",
+  "revision": {
+    "event_revision": 4,
+    "template_analysis_revision": 2,
+    "suppression_revision": 1
+  },
+  "identities": [
+    {
+      "candidate_id": "w00a0",
+      "claim_id": "q00aa",
+      "evidence_id": "w00e0",
+      "corpus_id": "w00c0",
+      "revision": {
+        "event_revision": 4,
+        "template_analysis_revision": 2,
+        "suppression_revision": 1
+      }
+    },
+    {
+      "candidate_id": "w00a0",
+      "claim_id": "w00s0",
+      "evidence_id": "w00e1",
+      "corpus_id": "w00c0",
+      "revision": {
+        "event_revision": 4,
+        "template_analysis_revision": 2,
+        "suppression_revision": 1
+      }
+    },
+    {
+      "candidate_id": "w00a1",
+      "claim_id": "q00aa",
+      "evidence_id": "w00e2",
+      "corpus_id": "w00c0",
+      "revision": {
+        "event_revision": 4,
+        "template_analysis_revision": 2,
+        "suppression_revision": 1
+      }
+    },
+    {
+      "candidate_id": "w00a0",
+      "claim_id": "w00r0",
+      "evidence_id": "w00e3",
+      "corpus_id": "w00c0",
+      "revision": {
+        "event_revision": 4,
+        "template_analysis_revision": 2,
+        "suppression_revision": 1
+      }
+    },
+    {
+      "candidate_id": "w00a1",
+      "claim_id": "w00d0",
+      "evidence_id": "w00e4",
+      "corpus_id": "w00c0",
+      "revision": {
+        "event_revision": 4,
+        "template_analysis_revision": 2,
+        "suppression_revision": 1
+      }
+    },
+    {
+      "candidate_id": "w00a0",
+      "claim_id": "q00aa",
+      "evidence_id": "w00e8",
+      "corpus_id": "w00cx",
+      "revision": {
+        "event_revision": 4,
+        "template_analysis_revision": 2,
+        "suppression_revision": 1
+      }
+    },
+    {
+      "candidate_id": "w00a0",
+      "claim_id": "q00aa",
+      "evidence_id": "w00e9",
+      "corpus_id": "w00c0",
+      "revision": {
+        "event_revision": 99,
+        "template_analysis_revision": 2,
+        "suppression_revision": 1
+      }
+    }
+  ],
+  "slots": [
+    { "kind": "initiating_trigger", "candidate_id": "w00a0", "claim_id": "q00aa" },
+    { "kind": "propagated_symptom", "candidate_id": "w00a0", "claim_id": "w00s0" },
+    { "kind": "unrelated_competing", "candidate_id": "w00a1", "claim_id": "q00aa" },
+    { "kind": "recovery", "candidate_id": "w00a0", "claim_id": "w00r0" },
+    { "kind": "disconfirmation", "candidate_id": "w00a1", "claim_id": "w00d0" }
+  ],
+  "required_kinds": [
+    "initiating_trigger",
+    "propagated_symptom",
+    "unrelated_competing",
+    "recovery",
+    "disconfirmation"
+  ],
+  "recovery_evidence_ids": ["w00e3"],
+  "unrelated_evidence_ids": ["w00e2"],
+  "decoy_evidence_ids": ["w00e2"],
+  "proposal": {
+    "schema": "contextdesk.multi_model.causal_synthesis.v1",
+    "relations": [
+      {
+        "kind": "initiating_trigger",
+        "candidate_id": "w00a0",
+        "claim_id": "q00aa",
+        "evidence_ids": ["w00e0"],
+        "note": ""
+      },
+      {
+        "kind": "propagated_symptom",
+        "candidate_id": "w00a0",
+        "claim_id": "w00s0",
+        "evidence_ids": ["w00e1"],
+        "note": ""
+      },
+      {
+        "kind": "unrelated_competing",
+        "candidate_id": "w00a1",
+        "claim_id": "q00aa",
+        "evidence_ids": ["w00e2"],
+        "note": ""
+      },
+      {
+        "kind": "recovery",
+        "candidate_id": "w00a0",
+        "claim_id": "w00r0",
+        "evidence_ids": ["w00e3"],
+        "note": ""
+      },
+      {
+        "kind": "disconfirmation",
+        "candidate_id": "w00a1",
+        "claim_id": "w00d0",
+        "evidence_ids": ["w00e4"],
+        "note": ""
+      }
+    ]
+  }
+}
