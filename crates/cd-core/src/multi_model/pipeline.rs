@@ -627,6 +627,16 @@ fn causal_topology(
             return Err(super::causal_topology::CausalTopologyDeriveError::InvalidBinding);
         }
     }
+    // A reviewer contradiction is a validated, candidate-scoped report of an
+    // unresolved contest, not host proof that either side is true or false.
+    // Treating it as a disconfirmation slot lets colluding reviewer prose
+    // manufacture the final required kind. Production therefore keeps the
+    // useful review and final answer but withholds causal authority whenever a
+    // contradiction remains. The isolated topology contract may still model
+    // disconfirmation supplied by other host-owned callers.
+    if review.is_some_and(|value| !value.contradictions.is_empty()) {
+        return Err(super::causal_topology::CausalTopologyDeriveError::ContestedReview);
+    }
     let classifications = packet
         .rows()
         .iter()
@@ -1471,7 +1481,11 @@ pub async fn run_review_pipeline(
         Some(packet) => match causal_topology(packet, &ledger, &findings, review.as_ref()) {
             Ok(topology) => Some(topology),
             Err(error) => {
-                let outcome = if error == CausalTopologyDeriveError::InsufficientHostProof {
+                let outcome = if matches!(
+                    error,
+                    CausalTopologyDeriveError::InsufficientHostProof
+                        | CausalTopologyDeriveError::ContestedReview
+                ) {
                     StageOutcomeKind::Skipped
                 } else {
                     StageOutcomeKind::SemanticInvalid

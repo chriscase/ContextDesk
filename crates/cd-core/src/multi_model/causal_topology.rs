@@ -36,6 +36,10 @@ pub enum CausalTopologyDeriveError {
     /// No admitted initiating-trigger or propagated-symptom slot can be proven.
     /// The host must not invent slots.
     InsufficientHostProof,
+    /// The validated reviewer reported a cross-candidate contradiction. Model
+    /// prose cannot resolve that contest or manufacture disproof authority, so
+    /// the production route must remain causal-neutral.
+    ContestedReview,
     /// A host identity is not an inert single-line token.
     UnsafeIdentity,
     /// The same evidence id would belong to two distinct identities, the host
@@ -51,6 +55,7 @@ impl CausalTopologyDeriveError {
             Self::WrongRevision => "wrong_revision",
             Self::InvalidBinding => "invalid_binding",
             Self::InsufficientHostProof => "insufficient_host_proof",
+            Self::ContestedReview => "contested_review",
             Self::UnsafeIdentity => "unsafe_identity",
             Self::DuplicateId => "duplicate_id",
         }
@@ -680,6 +685,10 @@ mod tests {
         assert_eq!(
             CausalTopologyDeriveError::WrongRevision.as_str(),
             "wrong_revision"
+        );
+        assert_eq!(
+            CausalTopologyDeriveError::ContestedReview.as_str(),
+            "contested_review"
         );
     }
 }
