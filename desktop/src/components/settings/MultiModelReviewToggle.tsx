@@ -15,7 +15,10 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   hostGetMultiModelSettings,
   hostSetMultiModelMode,
+  hostSetMultiModelContributors,
   hostSetMultiModelReviewer,
+  type ContributionPolicyDto,
+  type ContributionRole,
   type MultiModelSettingsDto,
 } from "../../lib/host";
 
@@ -76,6 +79,64 @@ const QUALIFICATION_LABEL: Record<MeasuredQualification, string> = {
   unverified: "Not measured yet (unverified)",
 };
 
+type ContributorDraft = {
+  role: ContributionRole;
+  profileId: string;
+  model: string;
+  allowRemote: boolean;
+};
+
+const CONTRIBUTION_ROLES: ReadonlyArray<{
+  role: ContributionRole;
+  name: string;
+  purpose: string;
+}> = [
+  {
+    role: "observation_extractor",
+    name: "Observation extractor",
+    purpose: "Pulls host-grounded facts from the bounded evidence packet.",
+  },
+  {
+    role: "timeline_analyst",
+    name: "Timeline analyst",
+    purpose: "Checks chronology without changing host-owned ordering.",
+  },
+  {
+    role: "causal_proposer",
+    name: "Causal proposer",
+    purpose: "Proposes hypotheses and alternatives, never an established root cause.",
+  },
+  {
+    role: "contradiction_checker",
+    name: "Contradiction checker",
+    purpose: "Challenges disagreement, contradictions, and unsupported certainty.",
+  },
+  {
+    role: "evidence_gap",
+    name: "Evidence-gap scout",
+    purpose: "Names useful evidence that is absent from the frozen packet.",
+  },
+  {
+    role: "reviewer",
+    name: "Final contribution reviewer",
+    purpose: "Optionally reviews reconciled contributions; must remain the last role.",
+  },
+];
+
+const DEFAULT_CONTRIBUTION_POLICY: ContributionPolicyDto = {
+  max_contributors: 4,
+  max_parallel: 3,
+  max_rounds: 2,
+  max_context_chars: 120_000,
+  max_total_provider_rounds: 12,
+  max_semantic_corrections_per_stage: 1,
+  max_context_chars_total: null,
+};
+
+function contributionName(role: ContributionRole): string {
+  return CONTRIBUTION_ROLES.find((option) => option.role === role)?.name ?? role;
+}
+
 export function MultiModelReviewToggle() {
   const [settings, setSettings] = useState<MultiModelSettingsDto | null>(null);
   const [phase, setPhase] = useState<
@@ -95,6 +156,12 @@ export function MultiModelReviewToggle() {
   const [assignError, setAssignError] = useState<string | null>(null);
   const [assignNotice, setAssignNotice] = useState<string | null>(null);
   const [lastAssign, setLastAssign] = useState<"save" | "clear" | null>(null);
+  const [contributorDrafts, setContributorDrafts] = useState<ContributorDraft[]>([]);
+  const [contributionPolicy, setContributionPolicy] =
+    useState<ContributionPolicyDto>(DEFAULT_CONTRIBUTION_POLICY);
+  const [contributionBusy, setContributionBusy] = useState(false);
+  const [contributionError, setContributionError] = useState<string | null>(null);
+  const [contributionNotice, setContributionNotice] = useState<string | null>(null);
   const aliveRef = useRef(true);
   const baseId = useId();
 
@@ -102,6 +169,17 @@ export function MultiModelReviewToggle() {
     setDraftProfileId(s.reviewer_profile_id?.trim() ?? "");
     setDraftModel(s.reviewer_model ?? "");
     setDraftAllowRemote(s.reviewer_allow_remote);
+    setContributorDrafts(
+      (s.contribution_assignments ?? []).map((assignment) => ({
+        role: assignment.role,
+        profileId: assignment.profile_id,
+        model: assignment.model ?? "",
+        allowRemote: assignment.allow_remote,
+      })),
+    );
+    setContributionPolicy(
+      s.contribution_policy ?? DEFAULT_CONTRIBUTION_POLICY,
+    );
   }, []);
 
   const load = useCallback(async () => {
@@ -132,7 +210,7 @@ export function MultiModelReviewToggle() {
   }, [load]);
 
   async function setMode(next: TeamMode) {
-    if (busy || assignBusy) return;
+    if (busy || assignBusy || contributionBusy) return;
     setBusy(true);
     setSaveError(null);
     setNotice(null);
@@ -157,7 +235,7 @@ export function MultiModelReviewToggle() {
   }
 
   async function submitAssignment(kind: "save" | "clear") {
-    if (busy || assignBusy || !settings) return;
+    if (busy || assignBusy || contributionBusy || !settings) return;
     setAssignBusy(true);
     setAssignError(null);
     setAssignNotice(null);
@@ -198,6 +276,104 @@ export function MultiModelReviewToggle() {
       }
     } finally {
       if (aliveRef.current) setAssignBusy(false);
+    }
+  }
+
+  function updateContributor(index: number, patch: Partial<ContributorDraft>) {
+    setContributorDrafts((current) =>
+      current.map((draft, draftIndex) =>
+        draftIndex === index ? { ...draft, ...patch } : draft,
+      ),
+    );
+    setContributionError(null);
+    setContributionNotice(null);
+  }
+
+  function addContributor() {
+    setContributorDrafts((current) => {
+      const next: ContributorDraft = {
+        role: "observation_extractor",
+        profileId: "",
+        model: "",
+        allowRemote: false,
+      };
+      const reviewerIndex = current.findIndex((draft) => draft.role === "reviewer");
+      if (reviewerIndex < 0) return [...current, next];
+      return [
+        ...current.slice(0, reviewerIndex),
+        next,
+        ...current.slice(reviewerIndex),
+      ];
+    });
+    setContributionError(null);
+    setContributionNotice(null);
+  }
+
+  function removeContributor(index: number) {
+    setContributorDrafts((current) =>
+      current.filter((_, draftIndex) => draftIndex !== index),
+    );
+    setContributionError(null);
+    setContributionNotice(null);
+  }
+
+  function moveContributor(index: number, direction: -1 | 1) {
+    setContributorDrafts((current) => {
+      const target = index + direction;
+      if (target < 0 || target >= current.length) return current;
+      const next = [...current];
+      [next[index], next[target]] = [next[target]!, next[index]!];
+      return next;
+    });
+    setContributionError(null);
+    setContributionNotice(null);
+  }
+
+  async function saveContributionTeam() {
+    if (busy || assignBusy || contributionBusy || !settings) return;
+    setContributionBusy(true);
+    setContributionError(null);
+    setContributionNotice(null);
+    try {
+      await hostSetMultiModelContributors({
+        assignments: contributorDrafts.map((draft) => ({
+          role: draft.role,
+          profileId: draft.profileId.trim(),
+          model: draft.model.trim() || null,
+          allowRemote: draft.allowRemote,
+        })),
+        policy: {
+          maxContributors: contributionPolicy.max_contributors,
+          maxParallel: contributionPolicy.max_parallel,
+          maxRounds: contributionPolicy.max_rounds,
+          maxContextChars: contributionPolicy.max_context_chars,
+          maxTotalProviderRounds:
+            contributionPolicy.max_total_provider_rounds,
+          maxSemanticCorrectionsPerStage:
+            contributionPolicy.max_semantic_corrections_per_stage,
+          maxContextCharsTotal:
+            contributionPolicy.max_context_chars_total,
+        },
+      });
+      const fresh = await hostGetMultiModelSettings();
+      if (!aliveRef.current) return;
+      if (fresh) {
+        setSettings(fresh);
+        syncDraft(fresh);
+      }
+      setContributionNotice(
+        contributorDrafts.length === 0
+          ? "Saved — contribution roles cleared. Contributions mode will use the deterministic floor and record the missing setup."
+          : `Saved — ${contributorDrafts.length} contribution role${contributorDrafts.length === 1 ? "" : "s"} recorded. Nothing runs until a linked Contributions investigation.`,
+      );
+    } catch (error) {
+      if (aliveRef.current) {
+        setContributionError(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    } finally {
+      if (aliveRef.current) setContributionBusy(false);
     }
   }
 
@@ -312,6 +488,88 @@ export function MultiModelReviewToggle() {
     setDraftModel(isRecorded ? (settings?.reviewer_model ?? "") : "");
   }
 
+  const recordedContributionAssignments = settings.contribution_assignments ?? [];
+  const eligibleContributionCount = recordedContributionAssignments.filter(
+    (assignment) => {
+      const candidate = candidates.find(
+        (row) => row.id === assignment.profile_id,
+      );
+      return (
+        candidate != null &&
+        assignment.qualification === "qualified" &&
+        (candidate.local_only || assignment.allow_remote)
+      );
+    },
+  ).length;
+  const contributionValidation: string[] = [];
+  if (
+    contributorDrafts.some(
+      (draft) =>
+        draft.profileId.trim() === "" ||
+        !candidates.some((candidate) => candidate.id === draft.profileId),
+    )
+  ) {
+    contributionValidation.push("every role needs an existing provider profile");
+  }
+  if (contributorDrafts.length > contributionPolicy.max_contributors) {
+    contributionValidation.push("role count exceeds the contributor cap");
+  }
+  const reviewerDrafts = contributorDrafts.filter(
+    (draft) => draft.role === "reviewer",
+  );
+  if (reviewerDrafts.length > 1) {
+    contributionValidation.push("only one final reviewer is allowed");
+  }
+  if (
+    reviewerDrafts.length === 1 &&
+    contributorDrafts.at(-1)?.role !== "reviewer"
+  ) {
+    contributionValidation.push("the final reviewer must be the last role");
+  }
+  if (
+    contributionPolicy.max_contributors < 1 ||
+    contributionPolicy.max_contributors > 8
+  ) {
+    contributionValidation.push("contributor cap must be between 1 and 8");
+  }
+  if (
+    contributionPolicy.max_parallel < 1 ||
+    contributionPolicy.max_parallel > contributionPolicy.max_contributors
+  ) {
+    contributionValidation.push("parallel calls must fit the contributor cap");
+  }
+  if (
+    contributionPolicy.max_rounds < 1 ||
+    contributionPolicy.max_rounds > 2
+  ) {
+    contributionValidation.push("contribution rounds must be 1 or 2");
+  }
+  if (
+    contributionPolicy.max_context_chars < 24_000 ||
+    contributionPolicy.max_context_chars > 2_000_000
+  ) {
+    contributionValidation.push("context characters must be 24,000–2,000,000");
+  }
+  if (
+    contributionPolicy.max_total_provider_rounds < 1 ||
+    contributionPolicy.max_total_provider_rounds > 64
+  ) {
+    contributionValidation.push("provider rounds must be 1–64");
+  }
+  if (
+    contributionPolicy.max_semantic_corrections_per_stage < 0 ||
+    contributionPolicy.max_semantic_corrections_per_stage > 4
+  ) {
+    contributionValidation.push("semantic corrections must be 0–4");
+  }
+  if (
+    contributionPolicy.max_context_chars_total != null &&
+    (contributionPolicy.max_context_chars_total < 1 ||
+      contributionPolicy.max_context_chars_total > 16_000_000)
+  ) {
+    contributionValidation.push("total model-facing characters must be 1–16,000,000");
+  }
+
   function optionNote(mode: TeamMode): {
     tone: "warn" | "info";
     text: string;
@@ -345,17 +603,31 @@ export function MultiModelReviewToggle() {
       return { tone: "info", text: parts.join(" ") };
     }
     if (mode === "contributions") {
+      if (recordedContributionAssignments.length === 0) {
+        return {
+          tone: "warn",
+          text: "Not set up yet — no contribution roles are recorded, so linked turns use the deterministic floor and record the missing setup.",
+        };
+      }
       return {
         tone: "info",
-        text: "Contribution roles are managed in provider configuration — this screen doesn’t create them. Anything unconfigured or unqualified is skipped and recorded.",
+        text: `${recordedContributionAssignments.length} role${recordedContributionAssignments.length === 1 ? " is" : "s are"} recorded; ${eligibleContributionCount} currently ${eligibleContributionCount === 1 ? "has" : "have"} measured qualification and egress readiness. Runtime re-checks every role and records what actually ran.`,
       };
     }
     return null;
   }
 
-  const assignSaveDisabled = assignBusy || busy;
+  const assignSaveDisabled = assignBusy || busy || contributionBusy;
   const assignClearDisabled =
-    assignBusy || busy || (!reviewerConfigured && draftProfileId === "");
+    assignBusy ||
+    busy ||
+    contributionBusy ||
+    (!reviewerConfigured && draftProfileId === "");
+  const contributionSaveDisabled =
+    busy ||
+    assignBusy ||
+    contributionBusy ||
+    contributionValidation.length > 0;
 
   return (
     <section className="settings-block mm-team">
@@ -610,6 +882,324 @@ export function MultiModelReviewToggle() {
             {assignNotice}
           </p>
         ) : null}
+      </fieldset>
+
+      <fieldset
+        className="mm-team__contributors"
+        aria-busy={contributionBusy || undefined}
+        aria-describedby={`${baseId}-contributors-lead`}
+      >
+        <legend className="mm-team__assign-title">Contribution team</legend>
+        <p className="mm-team__assign-lead" id={`${baseId}-contributors-lead`}>
+          Build an ordered team for linked investigations. Each role receives
+          only the bounded host evidence packet. Models may propose, challenge,
+          or abstain; ContextDesk reconciles their structured output and keeps
+          causal and decision authority.
+        </p>
+
+        <div className="mm-team__contributor-list">
+          {contributorDrafts.length === 0 ? (
+            <p className="mm-team__readiness-empty">
+              No contribution roles yet. Contributions mode will use the
+              deterministic floor and record that no model roles were admitted.
+            </p>
+          ) : null}
+          {contributorDrafts.map((draft, index) => {
+            const candidate =
+              candidates.find((row) => row.id === draft.profileId) ?? null;
+            const recorded = recordedContributionAssignments[index];
+            const recordedQualification: MeasuredQualification =
+              recorded?.profile_id === draft.profileId &&
+              recorded.role === draft.role &&
+              (recorded.model ?? "") === draft.model
+                ? recorded.qualification === "qualified"
+                  ? "qualified"
+                  : recorded.qualification === "unqualified"
+                    ? "unqualified"
+                    : "unverified"
+                : "unverified";
+            const descriptionId = `${baseId}-contributor-${index}-description`;
+            return (
+              <article className="mm-team__contributor" key={index}>
+                <div className="mm-team__contributor-head">
+                  <div>
+                    <strong>Role {index + 1}</strong>
+                    <span className="mm-team__contributor-purpose" id={descriptionId}>
+                      {CONTRIBUTION_ROLES.find(
+                        (option) => option.role === draft.role,
+                      )?.purpose ?? "Bounded model contribution."}
+                    </span>
+                  </div>
+                  <div className="mm-team__contributor-order">
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      disabled={index === 0 || contributionBusy}
+                      aria-label={`Move ${contributionName(draft.role)} earlier`}
+                      onClick={() => moveContributor(index, -1)}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      disabled={
+                        index === contributorDrafts.length - 1 ||
+                        contributionBusy
+                      }
+                      aria-label={`Move ${contributionName(draft.role)} later`}
+                      onClick={() => moveContributor(index, 1)}
+                    >
+                      ↓
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      disabled={contributionBusy}
+                      aria-label={`Remove ${contributionName(draft.role)}`}
+                      onClick={() => removeContributor(index)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mm-team__contributor-grid">
+                  <div className="mm-team__assign-field">
+                    <label
+                      className="mm-team__assign-label"
+                      htmlFor={`${baseId}-contributor-${index}-role`}
+                    >
+                      Responsibility
+                    </label>
+                    <select
+                      id={`${baseId}-contributor-${index}-role`}
+                      className="mm-team__assign-control"
+                      value={draft.role}
+                      aria-describedby={descriptionId}
+                      onChange={(event) =>
+                        updateContributor(index, {
+                          role: event.currentTarget.value as ContributionRole,
+                        })
+                      }
+                    >
+                      {CONTRIBUTION_ROLES.map((option) => (
+                        <option key={option.role} value={option.role}>
+                          {option.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="mm-team__assign-field">
+                    <label
+                      className="mm-team__assign-label"
+                      htmlFor={`${baseId}-contributor-${index}-profile`}
+                    >
+                      Provider profile
+                    </label>
+                    <select
+                      id={`${baseId}-contributor-${index}-profile`}
+                      className="mm-team__assign-control"
+                      value={draft.profileId}
+                      onChange={(event) => {
+                        const profileId = event.currentTarget.value;
+                        updateContributor(index, {
+                          profileId,
+                          model: "",
+                          allowRemote: false,
+                        });
+                      }}
+                    >
+                      <option value="">Choose a profile…</option>
+                      {candidates.map((row) => (
+                        <option key={row.id} value={row.id}>
+                          {row.label} — {row.chat_model}
+                          {row.local_only ? " (local)" : " (remote)"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="mm-team__assign-field">
+                    <label
+                      className="mm-team__assign-label"
+                      htmlFor={`${baseId}-contributor-${index}-model`}
+                    >
+                      Model override <span className="mm-team__assign-optional">(optional)</span>
+                    </label>
+                    <input
+                      id={`${baseId}-contributor-${index}-model`}
+                      className="mm-team__assign-control"
+                      value={draft.model}
+                      disabled={!candidate}
+                      onChange={(event) =>
+                        updateContributor(index, {
+                          model: event.currentTarget.value,
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+
+                {candidate && !candidate.local_only ? (
+                  <label className="mm-team__contributor-egress">
+                    <input
+                      type="checkbox"
+                      checked={draft.allowRemote}
+                      onChange={(event) =>
+                        updateContributor(index, {
+                          allowRemote: event.currentTarget.checked,
+                        })
+                      }
+                    />
+                    <span>
+                      Allow this remote role to receive the bounded evidence
+                      packet. Without acknowledgement it is skipped and recorded.
+                    </span>
+                  </label>
+                ) : candidate ? (
+                  <p className="mm-team__assign-note">
+                    Local-only profile — no remote egress applies.
+                  </p>
+                ) : null}
+
+                <p className="mm-team__contributor-status">
+                  <span
+                    className="mm-team__qual"
+                    data-state={recordedQualification}
+                  >
+                    {QUALIFICATION_LABEL[recordedQualification]}
+                  </span>{" "}
+                  Qualification is mandatory and measured by the host; this
+                  editor cannot bypass it.
+                </p>
+              </article>
+            );
+          })}
+        </div>
+
+        <button
+          type="button"
+          className="btn btn--ghost btn--sm"
+          disabled={
+            contributionBusy ||
+            contributorDrafts.length >= contributionPolicy.max_contributors ||
+            contributorDrafts.length >= 8
+          }
+          onClick={addContributor}
+        >
+          Add contribution role
+        </button>
+
+        <details className="mm-team__budget">
+          <summary>Advanced limits</summary>
+          <p className="mm-team__assign-hint">
+            Hard host ceilings, not targets. Lower limits may skip roles or
+            corrections; the execution receipt reports what actually happened.
+          </p>
+          <div className="mm-team__budget-grid">
+            {(
+              [
+                ["max_contributors", "Contributor cap", 1, 8],
+                ["max_parallel", "Parallel calls", 1, 8],
+                ["max_rounds", "Contribution phases", 1, 2],
+                ["max_context_chars", "Packet characters", 24_000, 2_000_000],
+                ["max_total_provider_rounds", "Provider-call cap", 1, 64],
+                [
+                  "max_semantic_corrections_per_stage",
+                  "Corrections per stage",
+                  0,
+                  4,
+                ],
+              ] as const
+            ).map(([field, label, min, max]) => (
+              <label className="mm-team__budget-field" key={field}>
+                <span>{label}</span>
+                <input
+                  type="number"
+                  min={min}
+                  max={max}
+                  value={contributionPolicy[field]}
+                  onChange={(event) => {
+                    const value = Number(event.currentTarget.value);
+                    setContributionPolicy((current) => ({
+                      ...current,
+                      [field]: value,
+                    }));
+                  }}
+                />
+              </label>
+            ))}
+            <label className="mm-team__budget-field">
+              <span>Total model-facing characters (optional)</span>
+              <input
+                type="number"
+                min={1}
+                max={16_000_000}
+                placeholder="No total cap"
+                value={contributionPolicy.max_context_chars_total ?? ""}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setContributionPolicy((current) => ({
+                    ...current,
+                    max_context_chars_total:
+                      value.trim() === ""
+                        ? null
+                        : Number(value),
+                  }));
+                }}
+              />
+            </label>
+          </div>
+        </details>
+
+        {contributionValidation.length > 0 ? (
+          <p className="mm-team__gate" data-tone="warn" role="alert">
+            Fix before saving: {contributionValidation.join("; ")}.
+          </p>
+        ) : null}
+
+        <div className="mm-team__assign-actions">
+          <button
+            type="button"
+            className="btn btn--primary btn--sm"
+            disabled={contributionSaveDisabled}
+            onClick={() => void saveContributionTeam()}
+          >
+            Save contribution team
+          </button>
+        </div>
+
+        {contributionBusy ? (
+          <p className="mm-team__status" role="status" data-busy="true">
+            Saving contribution team…
+          </p>
+        ) : contributionError ? (
+          <div className="mm-team__error" role="alert">
+            <p className="mm-team__error-msg">
+              Couldn’t save the contribution team: {contributionError}
+            </p>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => void saveContributionTeam()}
+            >
+              Try again
+            </button>
+          </div>
+        ) : contributionNotice ? (
+          <p className="mm-team__status" role="status" data-tone="ok">
+            {contributionNotice}
+          </p>
+        ) : null}
+
+        <div className="mm-team__execution-truth">
+          <strong>Configured is not executed.</strong> Linked Contributions
+          turns re-check every role’s profile, measured qualification, egress,
+          credentials, and budget. Activity Inspector records admitted,
+          completed, skipped, malformed, failed, timed-out, and cancelled stages.
+        </div>
       </fieldset>
 
       <div className="mm-team__readiness">

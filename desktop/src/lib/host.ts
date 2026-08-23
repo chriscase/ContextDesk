@@ -623,6 +623,33 @@ export type ReviewerQualification =
   | "unverified"
   | "unconfigured";
 
+export type ContributionRole =
+  | "observation_extractor"
+  | "timeline_analyst"
+  | "causal_proposer"
+  | "contradiction_checker"
+  | "evidence_gap"
+  | "reviewer";
+
+export type ContributionAssignmentDto = {
+  role: ContributionRole;
+  profile_id: string;
+  model: string | null;
+  allow_remote: boolean;
+  require_qualified: boolean;
+  qualification: ReviewerQualification | string;
+};
+
+export type ContributionPolicyDto = {
+  max_contributors: number;
+  max_parallel: number;
+  max_rounds: number;
+  max_context_chars: number;
+  max_total_provider_rounds: number;
+  max_semantic_corrections_per_stage: number;
+  max_context_chars_total: number | null;
+};
+
 /** Non-secret multi-model settings for the Settings surface. */
 export type MultiModelSettingsDto = {
   mode: "single" | "review" | "contributions" | string;
@@ -635,6 +662,8 @@ export type MultiModelSettingsDto = {
   active_profile_id: string | null;
   /** Existing provider profiles the reviewer role may reference. */
   candidate_profiles: ReviewerCandidateDto[];
+  contribution_assignments: ContributionAssignmentDto[];
+  contribution_policy: ContributionPolicyDto;
 };
 
 export async function hostGetMultiModelSettings(): Promise<MultiModelSettingsDto | null> {
@@ -664,6 +693,32 @@ export async function hostSetMultiModelReviewer(args: {
 }): Promise<void> {
   if (!isTauri()) return;
   await invoke<void>("set_multi_model_reviewer", args);
+}
+
+/**
+ * Save the complete contribution team and its hard route budget. This records
+ * configuration only; the host still re-checks measured qualification,
+ * egress, credentials, and bounds before every linked investigation turn.
+ */
+export async function hostSetMultiModelContributors(args: {
+  assignments: Array<{
+    role: ContributionRole;
+    profileId: string;
+    model: string | null;
+    allowRemote: boolean;
+  }>;
+  policy: {
+    maxContributors: number;
+    maxParallel: number;
+    maxRounds: number;
+    maxContextChars: number;
+    maxTotalProviderRounds: number;
+    maxSemanticCorrectionsPerStage: number;
+    maxContextCharsTotal: number | null;
+  };
+}): Promise<void> {
+  if (!isTauri()) return;
+  await invoke<void>("set_multi_model_contributors", args);
 }
 
 /** Non-secret S3-compatible backup settings. Credential values never cross IPC. */

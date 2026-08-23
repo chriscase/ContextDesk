@@ -1883,6 +1883,31 @@ struct ReviewerCandidateDto {
     local_only: bool,
 }
 
+/// One persisted contribution-role assignment projected without credentials
+/// or provider endpoints. Qualification is a cached measured verdict only;
+/// reading Settings never starts a probe.
+#[derive(Clone, Serialize)]
+struct ContributionAssignmentDto {
+    role: String,
+    profile_id: String,
+    model: Option<String>,
+    allow_remote: bool,
+    require_qualified: bool,
+    qualification: String,
+}
+
+/// Host-owned routing and usage ceilings for the contribution route.
+#[derive(Clone, Serialize)]
+struct ContributionPolicyDto {
+    max_contributors: usize,
+    max_parallel: usize,
+    max_rounds: u8,
+    max_context_chars: usize,
+    max_total_provider_rounds: u32,
+    max_semantic_corrections_per_stage: u8,
+    max_context_chars_total: Option<u64>,
+}
+
 /// Non-secret multi-model settings for the Settings surface. The reviewer
 /// references a provider profile id; no credential ever crosses IPC.
 #[derive(Clone, Serialize)]
@@ -1906,6 +1931,36 @@ struct MultiModelSettingsDto {
     active_profile_id: Option<String>,
     /// Existing provider profiles the reviewer role may reference.
     candidate_profiles: Vec<ReviewerCandidateDto>,
+    /// Explicit contribution-role assignments in execution order.
+    contribution_assignments: Vec<ContributionAssignmentDto>,
+    /// Hard host-owned contribution route ceilings.
+    contribution_policy: ContributionPolicyDto,
+}
+
+/// Nested renderer input for one contributor assignment. The renderer may
+/// choose identity and explicitly acknowledge remote egress; it cannot relax
+/// measured qualification.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContributionAssignmentInput {
+    role: String,
+    profile_id: String,
+    model: Option<String>,
+    allow_remote: bool,
+}
+
+/// Nested renderer input for bounded contribution routing. Every value is
+/// range-checked before the cloned config can be persisted.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContributionPolicyInput {
+    max_contributors: usize,
+    max_parallel: usize,
+    max_rounds: u8,
+    max_context_chars: usize,
+    max_total_provider_rounds: u32,
+    max_semantic_corrections_per_stage: u8,
+    max_context_chars_total: Option<u64>,
 }
 
 /// Measured reviewer qualification from the cached store, as the same
@@ -1913,31 +1968,40 @@ struct MultiModelSettingsDto {
 /// stale, or inconclusive evidence is `"unverified"` — never `"qualified"` —
 /// and a reviewer pointing at a missing profile has no measurable identity,
 /// so it is `"unverified"` too.
-fn reviewer_qualification_label(
+fn role_qualification_label(
     cfg: &AppConfig,
     store: &cd_core::capability_qualification::QualificationStore,
+    profile_id: &str,
+    model_override: Option<&str>,
 ) -> &'static str {
     use cd_core::capability_qualification::{
         capability_contract_verdict, CapabilityContract, ContractVerdict, QualificationKey,
-    };
-    let Some(rev) = cfg.multi_model.reviewer.as_ref() else {
-        return "unconfigured";
     };
     let Some(prof) = cfg
         .providers
         .profiles
         .iter()
-        .find(|p| p.id == rev.profile_id)
+        .find(|p| p.id == profile_id)
     else {
         return "unverified";
     };
-    let model = rev.model.as_deref().unwrap_or(&prof.chat_model);
+    let model = model_override.unwrap_or(&prof.chat_model);
     let key = QualificationKey::with_provider_kind(&prof.id, &prof.base_url, model, prof.kind);
     match capability_contract_verdict(store.get(&key), CapabilityContract::JsonProposal) {
         ContractVerdict::Qualified => "qualified",
         ContractVerdict::Unqualified => "unqualified",
         ContractVerdict::Inconclusive => "unverified",
     }
+}
+
+fn reviewer_qualification_label(
+    cfg: &AppConfig,
+    store: &cd_core::capability_qualification::QualificationStore,
+) -> &'static str {
+    let Some(reviewer) = cfg.multi_model.reviewer.as_ref() else {
+        return "unconfigured";
+    };
+    role_qualification_label(cfg, store, &reviewer.profile_id, reviewer.model.as_deref())
 }
 
 /// Project the config plus cached qualification evidence into the Settings
@@ -1971,6 +2035,37 @@ fn multi_model_settings_dto(
                 local_only: p.local_only,
             })
             .collect(),
+        contribution_assignments: cfg
+            .contributions
+            .roles
+            .iter()
+            .map(|assignment| ContributionAssignmentDto {
+                role: assignment.role.as_str().to_string(),
+                profile_id: assignment.profile_id.clone(),
+                model: assignment.model.clone(),
+                allow_remote: assignment.allow_remote,
+                require_qualified: assignment.require_qualified,
+                qualification: role_qualification_label(
+                    cfg,
+                    store,
+                    &assignment.profile_id,
+                    assignment.model.as_deref(),
+                )
+                .to_string(),
+            })
+            .collect(),
+        contribution_policy: ContributionPolicyDto {
+            max_contributors: cfg.contributions.policy.max_contributors,
+            max_parallel: cfg.contributions.policy.max_parallel,
+            max_rounds: cfg.contributions.policy.max_rounds,
+            max_context_chars: cfg.contributions.policy.max_context_chars,
+            max_total_provider_rounds: cfg.contributions.budget.max_total_provider_rounds,
+            max_semantic_corrections_per_stage: cfg
+                .contributions
+                .budget
+                .max_semantic_corrections_per_stage,
+            max_context_chars_total: cfg.contributions.budget.max_context_chars_total,
+        },
     }
 }
 
@@ -2070,6 +2165,134 @@ fn set_multi_model_reviewer(
     Ok(())
 }
 
+fn contribution_role_from_str(
+    role: &str,
+) -> Result<cd_core::multi_model::ContributionRole, String> {
+    use cd_core::multi_model::ContributionRole;
+    match role {
+        "observation_extractor" => Ok(ContributionRole::ObservationExtractor),
+        "timeline_analyst" => Ok(ContributionRole::TimelineAnalyst),
+        "causal_proposer" => Ok(ContributionRole::CausalProposer),
+        "contradiction_checker" => Ok(ContributionRole::ContradictionChecker),
+        "evidence_gap" => Ok(ContributionRole::EvidenceGap),
+        "reviewer" => Ok(ContributionRole::Reviewer),
+        other => Err(format!("unknown contribution role: {other}")),
+    }
+}
+
+/// Validate and apply a complete contribution-team configuration to a cloned
+/// AppConfig. All validation happens before mutation so an invalid identity,
+/// egress acknowledgement, role order, or budget cannot partially write.
+fn apply_contribution_team(
+    cfg: &mut AppConfig,
+    assignments: Vec<ContributionAssignmentInput>,
+    policy: ContributionPolicyInput,
+) -> Result<(), String> {
+    if !(1..=8).contains(&policy.max_contributors) {
+        return Err("max contributors must be between 1 and 8".into());
+    }
+    if policy.max_parallel == 0 || policy.max_parallel > policy.max_contributors {
+        return Err("max parallel must be between 1 and max contributors".into());
+    }
+    if !(1..=2).contains(&policy.max_rounds) {
+        return Err("contribution rounds must be 1 or 2".into());
+    }
+    if !(24_000..=2_000_000).contains(&policy.max_context_chars) {
+        return Err("context characters must be between 24000 and 2000000".into());
+    }
+    if !(1..=64).contains(&policy.max_total_provider_rounds) {
+        return Err("provider rounds must be between 1 and 64".into());
+    }
+    if policy.max_semantic_corrections_per_stage > 4 {
+        return Err("semantic corrections per stage must be between 0 and 4".into());
+    }
+    if policy
+        .max_context_chars_total
+        .is_some_and(|value| value == 0 || value > 16_000_000)
+    {
+        return Err("total model-facing characters must be between 1 and 16000000".into());
+    }
+
+    let mut roles = Vec::with_capacity(assignments.len());
+    for input in assignments {
+        let role = contribution_role_from_str(input.role.trim())?;
+        let profile_id = input.profile_id.trim();
+        if profile_id.is_empty() {
+            return Err(format!("{} requires a provider profile", role.as_str()));
+        }
+        let Some(profile) = cfg
+            .providers
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return Err(format!("unknown provider profile: {profile_id}"));
+        };
+        if profile.local_only && input.allow_remote {
+            return Err(format!(
+                "remote egress acknowledgement is meaningless for local-only profile: {profile_id}"
+            ));
+        }
+        roles.push(cd_core::config::ContributionRoleConfig {
+            role,
+            profile_id: profile_id.to_string(),
+            model: input
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_string),
+            require_qualified: true,
+            allow_remote: input.allow_remote,
+        });
+    }
+
+    let routing = cd_core::multi_model::ContributionRoutingPolicy {
+        max_contributors: policy.max_contributors,
+        max_parallel: policy.max_parallel,
+        max_rounds: policy.max_rounds,
+        max_context_chars: policy.max_context_chars,
+        reviewer_enabled: roles
+            .iter()
+            .any(|assignment| assignment.role == cd_core::multi_model::ContributionRole::Reviewer),
+    };
+    if !roles.is_empty() {
+        cd_core::multi_model::ContributionRoutingPlan::new(
+            roles.iter().map(|assignment| assignment.role).collect(),
+            routing,
+        )
+        .map_err(|error| format!("invalid contribution plan: {}", error.as_str()))?;
+    }
+
+    cfg.contributions.roles = roles;
+    cfg.contributions.policy = routing;
+    cfg.contributions.budget = cd_core::config::MultiModelBudgetConfig {
+        max_total_provider_rounds: policy.max_total_provider_rounds,
+        max_semantic_corrections_per_stage: policy.max_semantic_corrections_per_stage,
+        max_context_chars_total: policy.max_context_chars_total,
+    };
+    Ok(())
+}
+
+/// Save the complete bounded contribution team. This records configuration
+/// only: it starts no qualification probe and runs no provider. Every role is
+/// still re-admitted against measured qualification, egress, credentials, and
+/// the hard route budget at turn time.
+#[tauri::command]
+fn set_multi_model_contributors(
+    state: State<'_, AppState>,
+    assignments: Vec<ContributionAssignmentInput>,
+    policy: ContributionPolicyInput,
+) -> Result<(), String> {
+    let mut cfg = state.config.lock().expect("config lock").clone();
+    apply_contribution_team(&mut cfg, assignments, policy)?;
+    let path = config_path(&state.branding).map_err(|error| error.to_string())?;
+    save_config(&path, &cfg).map_err(|error| error.to_string())?;
+    *state.config.lock().expect("config lock") = cfg;
+    let _ = ensure_host(&state);
+    Ok(())
+}
+
 #[cfg(test)]
 mod multi_model_reviewer_assignment_tests {
     use super::*;
@@ -2078,6 +2301,7 @@ mod multi_model_reviewer_assignment_tests {
         QualificationReport, QualificationStore,
     };
     use cd_core::config::ReviewerRoleConfig;
+    use cd_core::multi_model::ContributionRole;
     use cd_core::openai_chat_contract::{MODE_PLAIN, MODE_PROMPTED_JSON};
     use cd_core::providers::ProviderCapabilities;
 
@@ -2113,6 +2337,32 @@ mod multi_model_reviewer_assignment_tests {
             model: None,
             require_qualified: true,
             allow_remote: false,
+        }
+    }
+
+    fn contributor(
+        role: &str,
+        profile_id: &str,
+        model: Option<&str>,
+        allow_remote: bool,
+    ) -> ContributionAssignmentInput {
+        ContributionAssignmentInput {
+            role: role.into(),
+            profile_id: profile_id.into(),
+            model: model.map(str::to_string),
+            allow_remote,
+        }
+    }
+
+    fn contribution_policy() -> ContributionPolicyInput {
+        ContributionPolicyInput {
+            max_contributors: 4,
+            max_parallel: 3,
+            max_rounds: 2,
+            max_context_chars: 120_000,
+            max_total_provider_rounds: 12,
+            max_semantic_corrections_per_stage: 1,
+            max_context_chars_total: Some(400_000),
         }
     }
 
@@ -2294,6 +2544,143 @@ mod multi_model_reviewer_assignment_tests {
         assert!(!json.contains("api_key_ref"), "no credential refs in DTO");
         assert!(!json.contains("synthetic-reviewer-ref"));
         assert!(!json.contains("base_url"), "no endpoints in DTO");
+        assert!(!json.contains("api.example.test"));
+    }
+
+    #[test]
+    fn contribution_team_records_order_identity_egress_and_hard_bounds() {
+        let mut cfg = config_with(vec![profile("local", true), profile("remote", false)]);
+        apply_contribution_team(
+            &mut cfg,
+            vec![
+                contributor("observation_extractor", " local ", Some("   "), false),
+                contributor(
+                    "contradiction_checker",
+                    "remote",
+                    Some(" remote-model "),
+                    true,
+                ),
+                contributor("reviewer", "remote", None, true),
+            ],
+            contribution_policy(),
+        )
+        .expect("valid bounded team");
+
+        assert_eq!(cfg.contributions.roles.len(), 3);
+        assert_eq!(
+            cfg.contributions
+                .roles
+                .iter()
+                .map(|assignment| assignment.role)
+                .collect::<Vec<_>>(),
+            vec![
+                ContributionRole::ObservationExtractor,
+                ContributionRole::ContradictionChecker,
+                ContributionRole::Reviewer,
+            ]
+        );
+        assert_eq!(cfg.contributions.roles[0].model, None);
+        assert_eq!(
+            cfg.contributions.roles[1].model.as_deref(),
+            Some("remote-model")
+        );
+        assert!(cfg
+            .contributions
+            .roles
+            .iter()
+            .all(|assignment| assignment.require_qualified));
+        assert!(cfg.contributions.roles[1].allow_remote);
+        assert!(cfg.contributions.policy.reviewer_enabled);
+        assert_eq!(cfg.contributions.policy.max_parallel, 3);
+        assert_eq!(cfg.contributions.budget.max_total_provider_rounds, 12);
+        assert_eq!(
+            cfg.contributions.budget.max_context_chars_total,
+            Some(400_000)
+        );
+    }
+
+    #[test]
+    fn contribution_team_rejects_identity_egress_order_and_budget_without_mutation() {
+        let mut cfg = config_with(vec![profile("local", true), profile("remote", false)]);
+        cfg.contributions.roles = vec![cd_core::config::ContributionRoleConfig {
+            role: ContributionRole::EvidenceGap,
+            profile_id: "local".into(),
+            model: None,
+            require_qualified: true,
+            allow_remote: false,
+        }];
+        let before = cfg.contributions.clone();
+
+        for (assignments, policy, expected) in [
+            (
+                vec![contributor("timeline_analyst", "missing", None, false)],
+                contribution_policy(),
+                "unknown provider profile",
+            ),
+            (
+                vec![contributor("timeline_analyst", "local", None, true)],
+                contribution_policy(),
+                "local-only profile",
+            ),
+            (
+                vec![
+                    contributor("reviewer", "remote", None, true),
+                    contributor("evidence_gap", "local", None, false),
+                ],
+                contribution_policy(),
+                "reviewer_not_final",
+            ),
+            (
+                vec![contributor("timeline_analyst", "local", None, false)],
+                ContributionPolicyInput {
+                    max_parallel: 5,
+                    ..contribution_policy()
+                },
+                "max parallel",
+            ),
+        ] {
+            let error = apply_contribution_team(&mut cfg, assignments, policy)
+                .expect_err("invalid team must fail");
+            assert!(error.contains(expected), "error={error}, expected={expected}");
+            assert_eq!(cfg.contributions, before, "invalid input must not mutate");
+        }
+    }
+
+    #[test]
+    fn contribution_dto_reports_cached_truth_without_secrets_or_endpoints() {
+        let mut cfg = config_with(vec![profile("remote", false)]);
+        apply_contribution_team(
+            &mut cfg,
+            vec![contributor(
+                "causal_proposer",
+                "remote",
+                Some("causal-model"),
+                true,
+            )],
+            contribution_policy(),
+        )
+        .expect("valid team");
+        let mut store = QualificationStore::default();
+        let profile = cfg.providers.profiles[0].clone();
+        let key = QualificationKey::with_provider_kind(
+            &profile.id,
+            &profile.base_url,
+            "causal-model",
+            profile.kind,
+        );
+        store.put(honest_report(&key, CapabilityStatus::Pass));
+
+        let dto = multi_model_settings_dto(&cfg, &store);
+        assert_eq!(dto.contribution_assignments.len(), 1);
+        let assignment = &dto.contribution_assignments[0];
+        assert_eq!(assignment.role, "causal_proposer");
+        assert_eq!(assignment.qualification, "qualified");
+        assert!(assignment.require_qualified);
+        assert_eq!(dto.contribution_policy.max_contributors, 4);
+        let json = serde_json::to_string(&dto).expect("serialize");
+        assert!(!json.contains("api_key_ref"));
+        assert!(!json.contains("synthetic-reviewer-ref"));
+        assert!(!json.contains("base_url"));
         assert!(!json.contains("api.example.test"));
     }
 }
@@ -14659,6 +15046,7 @@ pub fn run() {
             get_multi_model_settings,
             set_multi_model_mode,
             set_multi_model_reviewer,
+            set_multi_model_contributors,
             get_s3_backup_settings,
             save_s3_backup_settings,
             run_s3_workspace_backup,
