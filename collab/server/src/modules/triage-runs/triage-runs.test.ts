@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseTriageJob,
+  parseTriageJobRequest,
   parseTriageJobShareSafe,
   projectTriageJobShareSafe,
   type TriageCandidateRunV1,
@@ -35,10 +37,11 @@ async function fixture(
   const evidence = new FilesystemEvidenceStore({ rootDir: root });
   const audit = new MemoryAuditStore();
   const cases = new CaseService(evidence, audit, new MemoryCaseStore(), new CatalogService());
+  const jobs = new MemoryTriageJobStore();
   const service = new TriageRunService({
     cases,
     audit,
-    jobs: new MemoryTriageJobStore(),
+    jobs,
     ...(executor ? { executor } : {}),
     ...(gatewayExecutor ? { gatewayExecutor } : {}),
     ...(profiles ? { profiles } : {}),
@@ -63,7 +66,7 @@ async function fixture(
     { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
     "test",
   );
-  return { root, cases, service, caseId: created.id, snapshot };
+  return { root, cases, service, jobs, caseId: created.id, snapshot };
 }
 
 function request(snapshotId: string) {
@@ -86,6 +89,127 @@ function request(snapshotId: string) {
       },
     ],
   };
+}
+
+class CountingMockExecutor implements TriageRunExecutor {
+  calls = 0;
+  private readonly inner = new DeterministicMockTriageExecutor();
+  async execute(context: TriageExecutionContext, signal: AbortSignal): Promise<TriageCandidateRunV1> {
+    this.calls += 1;
+    return this.inner.execute(context, signal);
+  }
+}
+
+function gatewayBody(snapshotId: string) {
+  return {
+    ...request(snapshotId),
+    mode: "gateway" as const,
+    candidates: [
+      {
+        candidateId: "gateway-a",
+        role: "reviewer",
+        provider: "openai-compatible",
+        profileId: "profile:a",
+        model: "qwen-3.6-27b",
+        version: null,
+      },
+      {
+        candidateId: "gateway-b",
+        role: "challenger",
+        provider: "openai-compatible",
+        profileId: "profile:a",
+        model: "gpt-oss-120b",
+        version: null,
+      },
+    ],
+  };
+}
+
+function completedGatewayExecutor(state: { calls: number }) {
+  const executor: TriageBatchRunExecutor = {
+    executeBatch: async (context: TriageBatchExecutionContext): Promise<TriageCandidateRunV1[]> => {
+      state.calls += 1;
+      return context.request.candidates.map((candidate) => ({
+        ...candidate,
+        status: "completed",
+        benchmarkRunId: `run-${candidate.candidateId}`,
+        outputHash: `hash-${candidate.candidateId}`,
+        summary: "Gateway result",
+        evidenceRefs: [],
+        unknowns: ["usage", "cost"],
+        usageStatus: "unknown",
+        costStatus: "unknown",
+        errorCode: null,
+        startedAt: "2026-08-20T00:00:00.000Z",
+        finishedAt: "2026-08-20T00:00:00.010Z",
+        privacyClass: "owner_only",
+      }));
+    },
+  };
+  return executor;
+}
+
+async function hashedFollowOnSnapshot(fx: Awaited<ReturnType<typeof fixture>>, body: string) {
+  const artifact = await fx.cases.addEvidence(
+    fx.caseId,
+    actor,
+    {
+      kind: "log",
+      filename: "follow-on.log",
+      mediaType: "text/plain",
+      bytes: new TextEncoder().encode(body),
+      summary: body,
+      privacyClass: "share_safe",
+    },
+    "test",
+  );
+  return fx.cases.createSnapshot(
+    fx.caseId,
+    actor,
+    { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
+    "test",
+  );
+}
+
+async function unknownFairnessSnapshot(fx: Awaited<ReturnType<typeof fixture>>) {
+  const artifact = await fx.cases.addEvidence(
+    fx.caseId,
+    actor,
+    {
+      kind: "file_server_ref",
+      uri: "s3://example.invalid/unhashed.log",
+      summary: "Reference has no recorded content or expected hash.",
+      privacyClass: "share_safe",
+    },
+    "test",
+  );
+  return fx.cases.createSnapshot(
+    fx.caseId,
+    actor,
+    { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
+    "test",
+  );
+}
+
+function patchListSnapshots(
+  cases: CaseService,
+  patch: (snapshot: Awaited<ReturnType<CaseService["listSnapshots"]>>[number]) => Awaited<
+    ReturnType<CaseService["listSnapshots"]>
+  >[number],
+): void {
+  const original = cases.listSnapshots.bind(cases);
+  (cases as { listSnapshots: CaseService["listSnapshots"] }).listSnapshots = async (
+    caseId,
+    actorArg,
+    isAdmin,
+  ) => {
+    const listed = await original(caseId, actorArg, isAdmin);
+    return listed.map(patch);
+  };
+}
+
+async function flush(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
 describe("snapshot-bound triage runs", () => {
@@ -670,6 +794,294 @@ describe("snapshot-bound triage runs", () => {
       expect(parsed.request.parentJobId).toBeUndefined();
       expect(shareSafe.jobId).toBe(completed.id);
       expect(shareSafe.status).toBe("completed");
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("copies only execution inputs onto a new snapshot and keeps non-rerun requests compatible", async () => {
+    const executor = new CountingMockExecutor();
+    const fx = await fixture(executor);
+    try {
+      expect(JSON.stringify(parseTriageJobRequest(request(fx.snapshot.id)))).toBe(
+        JSON.stringify(request(fx.snapshot.id)),
+      );
+      const parent = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      const completedParent = await waitFor(fx.service, fx.caseId, parent.id, "completed");
+      expect(completedParent.candidates[0]?.outputHash).toBeTruthy();
+      expect(completedParent.candidates[0]?.summary).toBeTruthy();
+      const parentCalls = executor.calls;
+      const followOn = await hashedFollowOnSnapshot(fx, "second timeout");
+      expect(followOn.fingerprint).not.toBe(fx.snapshot.fingerprint);
+
+      const child = await fx.service.create(
+        fx.caseId,
+        actor,
+        { fromJobId: parent.id, snapshotId: followOn.id, mode: "deterministic_mock" },
+        "test",
+        false,
+      );
+      expect(child.parentJobId).toBe(parent.id);
+      expect(child.request.parentJobId).toBe(parent.id);
+      expect(child.snapshotId).toBe(followOn.id);
+      expect(child.snapshotFingerprint).toBe(followOn.fingerprint);
+      expect(child.request.snapshotId).toBe(followOn.id);
+      expect(child.request.question).toBe(parent.request.question);
+      expect(child.request.strategyId).toBe(parent.request.strategyId);
+      expect(child.request.policyFingerprint).toBe(parent.request.policyFingerprint);
+      expect(child.request.taskFingerprint).toBe(parent.request.taskFingerprint);
+      expect(child.request.candidates).toEqual(parent.request.candidates);
+      expect(child.requestFingerprint).not.toBe(parent.requestFingerprint);
+      expect(child.candidates[0]?.status).toBe("queued");
+      expect(child.candidates[0]?.outputHash).toBeNull();
+      expect(child.candidates[0]?.summary).toBeNull();
+      expect(child.candidates[0]?.benchmarkRunId).toBeNull();
+      expect(child.candidates[0]?.usageStatus).toBe("unknown");
+      expect(child.candidates[0]?.costStatus).toBe("unknown");
+      expect(child.candidates[0]?.startedAt).toBeNull();
+      expect(child.candidates[0]?.finishedAt).toBeNull();
+      expect(child.sameSnapshot).toBeNull();
+      expect(child.startedAt).toBeNull();
+      expect(child.finishedAt).toBeNull();
+      expect(child.createdAt).not.toBe(parent.createdAt);
+
+      const completedChild = await waitFor(fx.service, fx.caseId, child.id, "completed");
+      expect(completedChild.parentJobId).toBe(parent.id);
+      expect(completedChild.sameSnapshot).toBe(true);
+      expect(executor.calls).toBeGreaterThan(parentCalls);
+
+      const twin = await fx.service.create(
+        fx.caseId,
+        actor,
+        { fromJobId: parent.id, snapshotId: followOn.id, mode: "deterministic_mock" },
+        "test",
+        false,
+      );
+      expect(twin.id).not.toBe(child.id);
+      expect(twin.requestFingerprint).toBe(child.requestFingerprint);
+      expect(twin.parentJobId).toBe(parent.id);
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for foreign or missing parents and snapshots without leaking existence", async () => {
+    const executor = new CountingMockExecutor();
+    const fx = await fixture(executor);
+    try {
+      const parent = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      await waitFor(fx.service, fx.caseId, parent.id, "completed");
+      const jobsAfterParent = (await fx.service.list(fx.caseId, actor, false)).length;
+
+      const otherCase = await fx.cases.createCase(actor, { title: "Other case" }, "test");
+      const otherSnapshot = await fx.cases.createSnapshot(
+        otherCase.id,
+        actor,
+        { evidenceIds: [], visibility: "owner_only" },
+        "test",
+      );
+      const otherParent = await fx.service.create(
+        otherCase.id,
+        actor,
+        request(otherSnapshot.id),
+        "test",
+        false,
+      );
+      await waitFor(fx.service, otherCase.id, otherParent.id, "completed");
+      const callsAfterSetup = executor.calls;
+
+      const missingParent = randomUUID();
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          { fromJobId: missingParent, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow("parent triage job not found for case");
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          { fromJobId: otherParent.id, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow("parent triage job not found for case");
+
+      const missingSnapshot = randomUUID();
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          { fromJobId: parent.id, snapshotId: missingSnapshot, mode: "deterministic_mock" },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow("snapshot not found for case");
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          { fromJobId: parent.id, snapshotId: otherSnapshot.id, mode: "deterministic_mock" },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow("snapshot not found for case");
+
+      await flush();
+      expect(executor.calls).toBe(callsAfterSetup);
+      expect(await fx.service.list(fx.caseId, actor, false)).toHaveLength(jobsAfterParent);
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects malformed, unfrozen, conflicting, DeepSeek, and dishonest live fromJobId reruns before insert", async () => {
+    const mockExecutor = new CountingMockExecutor();
+    const gatewayCalls = { calls: 0 };
+    const fx = await fixture(mockExecutor, completedGatewayExecutor(gatewayCalls));
+    try {
+      const parent = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      await waitFor(fx.service, fx.caseId, parent.id, "completed");
+      const gatewayParent = await fx.service.create(fx.caseId, actor, gatewayBody(fx.snapshot.id), "test", false);
+      await waitFor(fx.service, fx.caseId, gatewayParent.id, "completed");
+      const mockCalls = mockExecutor.calls;
+      const liveCalls = gatewayCalls.calls;
+      const jobsBefore = (await fx.service.list(fx.caseId, actor, false)).length;
+
+      expect(() =>
+        parseTriageJobRequest({
+          fromJobId: parent.id,
+          snapshotId: fx.snapshot.id,
+          mode: "deterministic_mock",
+          question: "override",
+        }),
+      ).toThrow();
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          {
+            fromJobId: parent.id,
+            snapshotId: fx.snapshot.id,
+            mode: "deterministic_mock",
+            question: "override",
+          } as never,
+          "test",
+          false,
+        ),
+      ).rejects.toThrow("conflicting fromJobId overrides are not permitted");
+
+      const stored = await fx.jobs.get(parent.id);
+      await fx.jobs.update({
+        ...stored!,
+        request: {
+          ...stored!.request,
+          candidates: stored!.request.candidates.map((candidate) => ({
+            ...candidate,
+            model: "deepseek-v3.2",
+          })),
+        },
+      });
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          { fromJobId: parent.id, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow(/DeepSeek lanes are not permitted/);
+
+      patchListSnapshots(fx.cases, (item) =>
+        item.id === fx.snapshot.id ? { ...item, status: "unfrozen" as typeof item.status } : item,
+      );
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          { fromJobId: gatewayParent.id, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow("snapshot is not frozen");
+
+      patchListSnapshots(fx.cases, (item) =>
+        item.id === fx.snapshot.id
+          ? {
+              ...item,
+              status: "frozen",
+              evidence: item.evidence.map((evidence) => ({ ...evidence, contentHash: "not-a-hash" })),
+            }
+          : item,
+      );
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          { fromJobId: gatewayParent.id, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow("snapshot is malformed");
+
+      patchListSnapshots(fx.cases, (item) =>
+        item.id === fx.snapshot.id ? { ...item, caseId: "foreign-case" } : item,
+      );
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          { fromJobId: gatewayParent.id, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow("snapshot identity mismatch");
+
+      patchListSnapshots(fx.cases, (item) => item);
+      const unknown = await unknownFairnessSnapshot(fx);
+      expect(unknown.fairnessClass).toBe("unknown");
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          { fromJobId: gatewayParent.id, snapshotId: unknown.id, mode: "gateway" },
+          "test",
+          false,
+        ),
+      ).rejects.toThrow("snapshot is not eligible for an honest same-snapshot comparison");
+
+      const mockUnknown = await fx.service.create(
+        fx.caseId,
+        actor,
+        { fromJobId: gatewayParent.id, snapshotId: unknown.id, mode: "deterministic_mock" },
+        "test",
+        false,
+      );
+      expect(mockUnknown.sameSnapshot).toBeNull();
+      const completedUnknown = await waitFor(fx.service, fx.caseId, mockUnknown.id, "completed");
+      expect(completedUnknown.sameSnapshot).toBeNull();
+      expect(gatewayCalls.calls).toBe(liveCalls);
+
+      const hashed = await hashedFollowOnSnapshot(fx, "gateway follow-on");
+      const gatewayChild = await fx.service.create(
+        fx.caseId,
+        actor,
+        { fromJobId: gatewayParent.id, snapshotId: hashed.id, mode: "gateway" },
+        "test",
+        false,
+      );
+      expect(gatewayChild.parentJobId).toBe(gatewayParent.id);
+      expect(gatewayChild.snapshotFingerprint).toBe(hashed.fingerprint);
+      const completedGateway = await waitFor(fx.service, fx.caseId, gatewayChild.id, "completed");
+      expect(completedGateway.sameSnapshot).toBe(true);
+      expect(gatewayCalls.calls).toBe(liveCalls + 1);
+
+      await flush();
+      expect(mockExecutor.calls).toBeGreaterThan(mockCalls);
+      expect((await fx.service.list(fx.caseId, actor, false)).length).toBe(jobsBefore + 2);
     } finally {
       await rm(fx.root, { recursive: true, force: true });
     }

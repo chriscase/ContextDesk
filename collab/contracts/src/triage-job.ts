@@ -49,6 +49,13 @@ export interface TriageJobRequestV1 {
   candidates: TriageCandidateSpecV1[];
 }
 
+/** HTTP create body for copying execution inputs onto a new frozen snapshot. */
+export interface TriageFromJobRequestV1 {
+  fromJobId: string;
+  snapshotId: string;
+  mode: TriageJobMode;
+}
+
 export interface TriageCandidateRunV1 extends TriageCandidateSpecV1 {
   status: TriageCandidateStatus;
   /** Host-owned durable benchmark/run identity when a live bridge produced one. */
@@ -159,6 +166,12 @@ const requestShape: ObjectShape = {
   candidates: f.req(f.arr(f.obj(candidateSpecShape))),
 };
 
+const fromJobRequestShape: ObjectShape = {
+  fromJobId: f.req(f.str),
+  snapshotId: f.req(f.str),
+  mode: f.req(f.en(...TRIAGE_JOB_MODES)),
+};
+
 const candidateRunShape: ObjectShape = {
   ...candidateSpecShape,
   status: f.req(f.en(...TRIAGE_CANDIDATE_STATUSES)),
@@ -243,7 +256,19 @@ const shareSafeShape: ObjectShape = {
   finishedAt: f.nul(f.str),
 };
 
-export function parseTriageJobRequest(raw: unknown): TriageJobRequestV1 {
+export function isTriageFromJobRequest(
+  request: TriageJobRequestV1 | TriageFromJobRequestV1,
+): request is TriageFromJobRequestV1 {
+  return Object.prototype.hasOwnProperty.call(request, "fromJobId");
+}
+
+export function parseTriageJobRequest(
+  raw: unknown,
+): TriageJobRequestV1 | TriageFromJobRequestV1 {
+  if (raw && typeof raw === "object" && !Array.isArray(raw) && "fromJobId" in raw) {
+    checkObject("$", fromJobRequestShape, raw);
+    return raw as TriageFromJobRequestV1;
+  }
   checkObject("$", requestShape, raw);
   return raw as TriageJobRequestV1;
 }
