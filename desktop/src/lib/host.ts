@@ -1558,6 +1558,8 @@ export type InvestigationTeamMemberDto = {
 };
 
 export type InvestigationTeamQualificationDto = {
+  /** Provider-free wiring check versus a measured configured-provider run. */
+  run_kind: "synthetic" | "measured" | string;
   status: "qualified" | "failed" | "partial" | "stale" | string;
   schema_id: string;
   suite_version: string;
@@ -1578,7 +1580,7 @@ export type InvestigationTeamQualificationDto = {
   redacted_markdown: string;
 };
 
-/** Host-published readout only; no provider call and no renderer setter. */
+/** Latest measured report (or synthetic only when no measured history exists). */
 export async function hostGetInvestigationTeamQualification(): Promise<InvestigationTeamQualificationDto | null> {
   if (!isTauri()) return null;
   try {
@@ -1590,7 +1592,19 @@ export async function hostGetInvestigationTeamQualification(): Promise<Investiga
   }
 }
 
-/** Clear only the process-local readout; durable evidence is untouched. */
+/** Read bounded durable redacted history; no provider call or credential read. */
+export async function hostListInvestigationTeamQualifications(): Promise<InvestigationTeamQualificationDto[]> {
+  if (!isTauri()) return [];
+  try {
+    return await invoke<InvestigationTeamQualificationDto[]>(
+      "list_investigation_team_qualifications",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** Clear only redacted team history; configuration and role evidence remain. */
 export async function hostClearInvestigationTeamQualification(): Promise<boolean> {
   if (!isTauri()) return false;
   try {

@@ -448,10 +448,11 @@ struct AppState {
     /// an incompatible packet/validator workflow.
     triage_role_qualification_store:
         Mutex<cd_core::triage_role_qualification::TriageRoleQualificationStoreV1>,
-    /// Latest host-published Investigation Team qualification. Process-local
-    /// until durable snapshot/report identity is finished.
+    /// Bounded, redacted Investigation Team qualification history.
     investigation_team_qualification:
         Mutex<investigation_team_qualification_host::InvestigationTeamQualificationStore>,
+    /// Secret-free history beside the other host qualification evidence.
+    investigation_team_qualification_store_path: PathBuf,
     /// One-shot exact Log Explorer navigation targets (#698 exact-nav).
     /// Keyed by corpus id. `take` delivers once; cleared on take, discard, or window destroy.
     log_explorer_nav_targets: Mutex<LogExplorerNavTargetStore>,
@@ -8392,14 +8393,35 @@ fn get_investigation_team_qualification(
         .latest()
 }
 
-/// Clear the process-local readout. This first bridge persists nothing.
+/// Read bounded redacted history. This never contacts a provider or resolves
+/// credentials, and the renderer has no setter for these records.
 #[tauri::command]
-fn clear_investigation_team_qualification(state: State<'_, AppState>) -> bool {
+fn list_investigation_team_qualifications(
+    state: State<'_, AppState>,
+) -> Vec<investigation_team_qualification_host::InvestigationTeamQualificationDto> {
     state
         .investigation_team_qualification
         .lock()
         .expect("investigation_team_qualification")
-        .clear()
+        .history()
+}
+
+/// Clear the durable redacted history without touching provider configuration,
+/// credentials, role-qualification evidence, or investigation data.
+#[tauri::command]
+fn clear_investigation_team_qualification(state: State<'_, AppState>) -> Result<bool, String> {
+    let mut guard = state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification");
+    let mut next = guard.clone();
+    let changed = next.clear();
+    if changed {
+        next.save(&state.investigation_team_qualification_store_path)
+            .map_err(|error| format!("save investigation team qualification history: {error}"))?;
+        *guard = next;
+    }
+    Ok(changed)
 }
 
 /// Run the explicit local synthetic qualification check. This uses only
@@ -8409,12 +8431,6 @@ fn clear_investigation_team_qualification(state: State<'_, AppState>) -> bool {
 fn run_synthetic_investigation_team_qualification(
     state: State<'_, AppState>,
 ) -> Result<investigation_team_qualification_host::InvestigationTeamQualificationDto, String> {
-    // A failed rerun must not leave an earlier success looking current.
-    state
-        .investigation_team_qualification
-        .lock()
-        .expect("investigation_team_qualification")
-        .clear();
     let cfg = state.config.lock().expect("config").clone();
     let members = investigation_team_qualification_host::members_from_config(&cfg)
         .map_err(|error| error.to_string())?;
@@ -8428,10 +8444,18 @@ fn run_synthetic_investigation_team_qualification(
         .investigation_team_qualification
         .lock()
         .expect("investigation_team_qualification");
-    store.publish(result);
-    store
-        .latest()
-        .ok_or_else(|| "synthetic qualification did not publish a report".into())
+    let mut next = store.clone();
+    let dto = next
+        .publish(
+            result,
+            investigation_team_qualification_host::InvestigationTeamQualificationRunKind::Synthetic,
+            Vec::new(),
+        )
+        .map_err(|error| error.to_string())?;
+    next.save(&state.investigation_team_qualification_store_path)
+        .map_err(|error| format!("save investigation team qualification history: {error}"))?;
+    *store = next;
+    Ok(dto)
 }
 
 fn live_investigation_target(
@@ -8542,11 +8566,6 @@ fn resolve_live_investigation_targets(
 async fn run_live_investigation_team_qualification(
     state: State<'_, AppState>,
 ) -> Result<investigation_team_qualification_host::InvestigationTeamQualificationDto, String> {
-    state
-        .investigation_team_qualification
-        .lock()
-        .expect("investigation_team_qualification")
-        .clear();
     let cfg = state.config.lock().expect("config").clone();
     let targets = resolve_live_investigation_targets(&state, &cfg)?;
     let cancel = {
@@ -8582,10 +8601,18 @@ async fn run_live_investigation_team_qualification(
         .investigation_team_qualification
         .lock()
         .expect("investigation_team_qualification");
-    store.publish_live(execution);
-    store
-        .latest()
-        .ok_or_else(|| "live qualification did not publish a report".into())
+    let mut next = store.clone();
+    let dto = next
+        .publish(
+            execution.result,
+            investigation_team_qualification_host::InvestigationTeamQualificationRunKind::Measured,
+            execution.failures,
+        )
+        .map_err(|error| error.to_string())?;
+    next.save(&state.investigation_team_qualification_store_path)
+        .map_err(|error| format!("save investigation team qualification history: {error}"))?;
+    *store = next;
+    Ok(dto)
 }
 
 #[tauri::command]
@@ -15311,6 +15338,18 @@ pub fn run() {
             tracing::warn!(%error, "triage role qualification evidence could not be loaded");
             cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::default()
         });
+    let investigation_team_qualification_store_path =
+        investigation_team_qualification_host::investigation_team_qualification_store_path(
+            path.parent().expect("config directory"),
+        );
+    let investigation_team_qualification =
+        investigation_team_qualification_host::InvestigationTeamQualificationStore::load(
+            &investigation_team_qualification_store_path,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "investigation team qualification history could not be loaded");
+            investigation_team_qualification_host::InvestigationTeamQualificationStore::default()
+        });
 
     let state = AppState {
         branding,
@@ -15360,9 +15399,8 @@ pub fn run() {
         qualification_store: Mutex::new(qualification_store),
         qualification_store_path,
         triage_role_qualification_store: Mutex::new(triage_role_qualification_store),
-        investigation_team_qualification: Mutex::new(
-            investigation_team_qualification_host::InvestigationTeamQualificationStore::default(),
-        ),
+        investigation_team_qualification: Mutex::new(investigation_team_qualification),
+        investigation_team_qualification_store_path,
         log_explorer_nav_targets: Mutex::new(LogExplorerNavTargetStore::default()),
     };
     tauri::Builder::default()
@@ -15470,6 +15508,7 @@ pub fn run() {
             cancel_capability_qualification,
             clear_capability_qualification,
             get_investigation_team_qualification,
+            list_investigation_team_qualifications,
             clear_investigation_team_qualification,
             run_synthetic_investigation_team_qualification,
             run_live_investigation_team_qualification,

@@ -329,6 +329,11 @@ fn projection_matrix() -> Vec<ProjectionRow> {
                     .attempts
                     .iter()
                     .any(|row| row.status == AttemptStatus::Cancelled));
+                assert!(!report.axes.speed.contract_met);
+                assert_eq!(
+                    report.axes.speed.metrics.get("cancelled_attempts").copied(),
+                    Some(1)
+                );
             }),
         },
         ProjectionRow {
@@ -349,6 +354,7 @@ fn projection_matrix() -> Vec<ProjectionRow> {
                     report.axes.speed.metrics.get("timed_out_attempts").copied(),
                     Some(1)
                 );
+                assert!(!report.axes.speed.contract_met);
             }),
         },
         ProjectionRow {

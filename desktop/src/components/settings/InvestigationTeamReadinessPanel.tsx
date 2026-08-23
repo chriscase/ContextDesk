@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   hostGetInvestigationTeamQualification,
+  hostListInvestigationTeamQualifications,
   hostGetMultiModelSettings,
   hostCancelLiveInvestigationTeamQualification,
   hostRunLiveInvestigationTeamQualification,
@@ -48,6 +49,23 @@ function stateLabel(state: RoleState): string {
       return "Measured — did not qualify";
     default:
       return "Not measured yet";
+  }
+}
+
+function failureReasonLabel(reason: string): string {
+  switch (reason) {
+    case "provider_attempt_cancelled":
+      return "The provider attempt was cancelled.";
+    case "provider_request_failed":
+      return "The provider request failed.";
+    case "unknown_evidence_citation":
+      return "The response cited evidence outside the qualification packet.";
+    case "response_contract_failed":
+      return "The response did not match the required qualification format.";
+    case "cancelled_before_dispatch":
+      return "The attempt was cancelled before it was sent.";
+    default:
+      return "The role did not complete its qualification attempt.";
   }
 }
 
@@ -177,6 +195,7 @@ export function InvestigationTeamReadinessPanel() {
   const [settings, setSettings] = useState<MultiModelSettingsDto | null>(null);
   const [qualification, setQualification] =
     useState<InvestigationTeamQualificationDto | null>(null);
+  const [history, setHistory] = useState<InvestigationTeamQualificationDto[]>([]);
   const [syntheticPhase, setSyntheticPhase] = useState<"idle" | "running" | "error">(
     "idle",
   );
@@ -190,17 +209,20 @@ export function InvestigationTeamReadinessPanel() {
   const load = useCallback(async () => {
     setPhase("loading");
     try {
-      const [next, report] = await Promise.all([
+      const [next, report, reports] = await Promise.all([
         hostGetMultiModelSettings(),
         hostGetInvestigationTeamQualification(),
+        hostListInvestigationTeamQualifications(),
       ]);
       if (next) {
         setSettings(next);
         setQualification(report);
+        setHistory(reports);
         setPhase("ready");
       } else {
         setSettings(null);
         setQualification(null);
+        setHistory([]);
         setPhase("absent");
       }
     } catch {
@@ -218,9 +240,13 @@ export function InvestigationTeamReadinessPanel() {
     try {
       const report = await hostRunSyntheticInvestigationTeamQualification();
       setQualification(report);
+      setHistory((current) => [report, ...current.filter(
+        (entry) => entry.fingerprint_digest !== report.fingerprint_digest ||
+          entry.scoring_digest !== report.scoring_digest ||
+          entry.run_kind !== report.run_kind,
+      )]);
       setSyntheticPhase("idle");
     } catch (error) {
-      setQualification(null);
       setSyntheticPhase("error");
       setSyntheticError(
         error instanceof Error
@@ -236,9 +262,13 @@ export function InvestigationTeamReadinessPanel() {
     try {
       const report = await hostRunLiveInvestigationTeamQualification();
       setQualification(report);
+      setHistory((current) => [report, ...current.filter(
+        (entry) => entry.fingerprint_digest !== report.fingerprint_digest ||
+          entry.scoring_digest !== report.scoring_digest ||
+          entry.run_kind !== report.run_kind,
+      )]);
       setLivePhase("idle");
     } catch (error) {
-      setQualification(null);
       setLivePhase("error");
       setLiveError(
         error instanceof Error
@@ -308,9 +338,15 @@ export function InvestigationTeamReadinessPanel() {
           data-status={qualification.status}
         >
           <div>
-            <strong>Host qualification report: {qualification.status}</strong>
+            <strong>
+              {qualification.run_kind === "measured"
+                ? "Measured team qualification"
+                : "Provider-free host wiring check"}: {qualification.status}
+            </strong>
             <p className="it-readiness__detail">
-              {qualification.stale
+              {qualification.run_kind !== "measured"
+                ? "This proves host wiring and redaction only; it is not model or pipeline performance evidence."
+                : qualification.stale
                 ? "Stale evidence — do not use it for a new run."
                 : qualification.incomplete_attempts
                   ? "Incomplete attempts remain; this is not a clean qualification."
@@ -414,7 +450,7 @@ export function InvestigationTeamReadinessPanel() {
               <ul>
                 {failures.map((failure) => (
                   <li key={failure.attempt_id}>
-                    <code>{failure.role}</code>: {failure.reason}
+                    <code>{failure.role}</code>: {failureReasonLabel(failure.reason)}
                   </li>
                 ))}
               </ul>
@@ -427,6 +463,40 @@ export function InvestigationTeamReadinessPanel() {
           and capability checks below must not be mistaken for a full team run.
         </p>
       )}
+
+      {history.length > 0 ? (
+        <div
+          className="it-readiness__history"
+          data-testid="investigation-team-qualification-history"
+        >
+          <strong>Qualification history</strong>
+          <p className="it-readiness__detail">
+            Each entry is bound to its exact suite and pipeline fingerprint.
+            Provider-free checks are kept visibly separate from measured runs.
+          </p>
+          <ul>
+            {history.map((entry) => (
+              <li key={`${entry.run_kind}:${entry.fingerprint_digest}:${entry.scoring_digest}`}>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  aria-pressed={
+                    qualification?.fingerprint_digest === entry.fingerprint_digest &&
+                    qualification?.scoring_digest === entry.scoring_digest &&
+                    qualification?.run_kind === entry.run_kind
+                  }
+                  onClick={() => setQualification(entry)}
+                >
+                  {entry.run_kind === "measured" ? "Measured" : "Wiring check"}
+                  {" · "}{entry.status}{" · "}
+                  {new Date(entry.observed_at * 1000).toLocaleString()}
+                  {" · "}{entry.fingerprint_digest.slice(0, 12)}…
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {rows.length > 0 ? (
         <div className="it-readiness__table" role="list" aria-label="Investigation Team roles">

@@ -224,6 +224,39 @@
   padding-left: 1.2rem;
 }
 
+.it-readiness__history {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--overlay-faint) 28%, transparent);
+}
+
+.it-readiness__history > p {
+  margin: 0;
+}
+
+.it-readiness__history ul {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.it-readiness__history button {
+  width: 100%;
+  justify-content: flex-start;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.it-readiness__history button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 @media (max-width: 560px) {
   .it-readiness__title-row,
   .it-readiness__row {

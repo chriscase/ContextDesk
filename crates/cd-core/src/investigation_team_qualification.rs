@@ -783,12 +783,15 @@ fn derive_axes(input: &QualificationInput, scores: &[AttemptScore]) -> TradeoffA
             !score.fluent_without_evidence && score.exact_citations
         }
     });
+    // A recorded timeout or cancellation is honest lifecycle evidence, but it
+    // is not positive speed evidence. Keep that distinction explicit instead
+    // of allowing the presence of an honestly-labelled timeout to satisfy the
+    // speed contract.
     let speed_ok = scores.iter().all(|score| {
-        if score.status == AttemptStatus::TimedOut {
-            !score.failure_honesty || score.status == AttemptStatus::TimedOut
-        } else {
-            true
-        }
+        !matches!(
+            score.status,
+            AttemptStatus::TimedOut | AttemptStatus::Cancelled
+        )
     }) && !scores.is_empty();
     let resource_ok = scores
         .iter()
@@ -833,6 +836,13 @@ fn derive_axes(input: &QualificationInput, scores: &[AttemptScore]) -> TradeoffA
             .filter(|s| s.status == AttemptStatus::TimedOut)
             .count() as u64,
     );
+    speed_metrics.insert(
+        "cancelled_attempts".into(),
+        scores
+            .iter()
+            .filter(|s| s.status == AttemptStatus::Cancelled)
+            .count() as u64,
+    );
     let mut resource_metrics = BTreeMap::new();
     resource_metrics.insert("budget".into(), input.resource_budget);
     resource_metrics.insert(
@@ -853,7 +863,10 @@ fn derive_axes(input: &QualificationInput, scores: &[AttemptScore]) -> TradeoffA
         speed: AxisScore {
             contract_met: speed_ok,
             metrics: speed_metrics,
-            notes: vec!["speed records latency/timeout honesty, not a fastest-model winner".into()],
+            notes: vec![
+                "speed records latency/timeout honesty, not a fastest-model winner".into(),
+                "timed-out or cancelled attempts do not satisfy the speed contract".into(),
+            ],
         },
         resource: AxisScore {
             contract_met: resource_ok && !scores.is_empty(),
@@ -1084,7 +1097,12 @@ fn axes_from_scores(scores: &[AttemptScore], resource_budget: u64) -> TradeoffAx
             !score.fluent_without_evidence && score.exact_citations
         }
     }) && !scores.is_empty();
-    let speed_ok = !scores.is_empty();
+    let speed_ok = scores.iter().all(|score| {
+        !matches!(
+            score.status,
+            AttemptStatus::TimedOut | AttemptStatus::Cancelled
+        )
+    }) && !scores.is_empty();
     let resource_ok = scores
         .iter()
         .all(|score| score.resource_units <= resource_budget)

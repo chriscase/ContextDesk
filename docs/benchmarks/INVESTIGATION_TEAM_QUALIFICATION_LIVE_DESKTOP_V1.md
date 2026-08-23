@@ -21,7 +21,26 @@ deployment fingerprint captured before the call. The host records:
 The report is produced through the shared `cd_workflow` execution seam, which
 round-trips the redacted JSON through the core parser before publication. Any
 role failure remains visible in the desktop readout and cannot be turned into
-a clean success by the renderer.
+a clean success by the renderer. Timed-out and cancelled attempts are honest
+lifecycle evidence, but neither satisfies the speed axis.
+
+## Durable history and identity
+
+The trusted host stores only the canonical redacted report plus bounded,
+host-authored failure codes. History lives beside the existing qualification
+evidence as `investigation-team-qualifications.json`; raw prompts, responses,
+endpoints, credentials, and evaluator truth are not stored there.
+
+Every reopened record is reparsed, re-rendered, and re-scored before display.
+The stored lifecycle status is not trusted independently of its report. The
+history is capped at 128 records and 8 MiB, atomically replaced, and keyed by
+run kind, exact pipeline fingerprint, and scoring digest. A report from an
+older suite is projected as stale even if it was current when originally
+recorded.
+
+Provider-free checks and measured runs are different evidence classes. The UI
+labels them **Wiring check** and **Measured**, and a newer wiring check never
+displaces the latest measured run on startup.
 
 ## Provider boundary
 
@@ -53,6 +72,16 @@ or investigator.
    host refuses the run before any provider call.
 10. Configure Contributions and confirm the host refuses the unsupported role
    topology without relabeling or silently executing it.
+11. Restart the desktop and confirm measured history reopens with the same
+    fingerprint, scoring digest, axes, and redacted exports.
+12. Run a provider-free check and confirm it is labelled **Wiring check**, is
+    retained separately, and does not replace the latest measured report.
+13. Inject a timeout or cancellation and confirm the speed axis reads
+    **Needs attention**, with the corresponding metric retained.
 
 This is a bounded qualification measurement, not a guarantee that a later
 investigation will execute successfully or that a model is universally best.
+The current measured packet validates an opaque response/citation contract;
+checked-in known-answer investigations, exact contribution-role execution,
+measured recommendations, and configured-provider packaged acceptance remain
+required before issue #726 is complete.

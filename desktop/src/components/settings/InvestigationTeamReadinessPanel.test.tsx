@@ -1,11 +1,15 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { InvestigationTeamReadinessPanel } from "./InvestigationTeamReadinessPanel";
-import type { MultiModelSettingsDto } from "../../lib/host";
+import type {
+  InvestigationTeamQualificationDto,
+  MultiModelSettingsDto,
+} from "../../lib/host";
 
 const host = vi.hoisted(() => ({
   get: vi.fn(),
   qualification: vi.fn(),
+  history: vi.fn(),
   runSynthetic: vi.fn(),
   runLive: vi.fn(),
   cancelLive: vi.fn(),
@@ -20,6 +24,8 @@ vi.mock("../../lib/host", async () => {
     hostGetMultiModelSettings: (...args: unknown[]) => host.get(...args),
     hostGetInvestigationTeamQualification: (...args: unknown[]) =>
       host.qualification(...args),
+    hostListInvestigationTeamQualifications: (...args: unknown[]) =>
+      host.history(...args),
     hostRunSyntheticInvestigationTeamQualification: (...args: unknown[]) =>
       host.runSynthetic(...args),
     hostRunLiveInvestigationTeamQualification: (...args: unknown[]) =>
@@ -56,14 +62,41 @@ function settings(over: Partial<MultiModelSettingsDto> = {}): MultiModelSettings
   };
 }
 
+function report(
+  over: Partial<InvestigationTeamQualificationDto> = {},
+): InvestigationTeamQualificationDto {
+  return {
+    run_kind: "measured",
+    status: "qualified",
+    schema_id: "contextdesk.investigation_team_qualification.v1",
+    suite_version: "contextdesk.investigation_team_qualification.suite.v1",
+    observed_at: 1_777_000_000,
+    stale: false,
+    incomplete_attempts: false,
+    fingerprint_digest: "h".repeat(64),
+    scoring_digest: "i".repeat(64),
+    capability: { contract_met: true, metrics: {}, notes: [] },
+    quality: { contract_met: true, metrics: {}, notes: [] },
+    speed: { contract_met: true, metrics: {}, notes: [] },
+    resource: { contract_met: true, metrics: {}, notes: [] },
+    members: [],
+    failures: [],
+    redacted_json: "{\"safe\":true}",
+    redacted_markdown: "safe",
+    ...over,
+  };
+}
+
 beforeEach(() => {
   host.get.mockReset();
   host.qualification.mockReset();
+  host.history.mockReset();
   host.runSynthetic.mockReset();
   host.runLive.mockReset();
   host.cancelLive.mockReset();
   host.get.mockResolvedValue(settings());
   host.qualification.mockResolvedValue(null);
+  host.history.mockResolvedValue([]);
   host.runSynthetic.mockResolvedValue(null);
   host.runLive.mockResolvedValue(null);
   host.cancelLive.mockResolvedValue(true);
@@ -90,6 +123,7 @@ describe("InvestigationTeamReadinessPanel", () => {
 
   it("shows a host-published fingerprint without exposing evaluator truth", async () => {
     host.qualification.mockResolvedValue({
+      run_kind: "measured",
       status: "partial",
       schema_id: "contextdesk.investigation_team_qualification.v1",
       suite_version: "contextdesk.investigation_team_qualification.suite.v1",
@@ -145,6 +179,7 @@ describe("InvestigationTeamReadinessPanel", () => {
 
   it("labels stale host evidence as unusable for a new run", async () => {
     host.qualification.mockResolvedValue({
+      run_kind: "measured",
       status: "stale",
       schema_id: "contextdesk.investigation_team_qualification.v1",
       suite_version: "contextdesk.investigation_team_qualification.suite.v1",
@@ -168,6 +203,31 @@ describe("InvestigationTeamReadinessPanel", () => {
     expect(report.textContent).toMatch(/stale evidence.*do not use it for a new run/i);
   });
 
+  it("keeps durable measured and provider-free history visibly distinct", async () => {
+    const measured = report();
+    const synthetic = report({
+      run_kind: "synthetic",
+      observed_at: 1_777_000_100,
+      fingerprint_digest: "j".repeat(64),
+      scoring_digest: "k".repeat(64),
+    });
+    host.qualification.mockResolvedValue(measured);
+    host.history.mockResolvedValue([synthetic, measured]);
+    render(<InvestigationTeamReadinessPanel />);
+
+    const history = await screen.findByTestId("investigation-team-qualification-history");
+    expect(history.textContent).toMatch(/wiring check/i);
+    expect(history.textContent).toMatch(/measured/i);
+    expect(
+      screen.getByTestId("investigation-team-qualification-report").textContent,
+    ).toMatch(/measured team qualification/i);
+
+    fireEvent.click(screen.getByRole("button", { name: /wiring check/i }));
+    expect(
+      screen.getByTestId("investigation-team-qualification-report").textContent,
+    ).toMatch(/not model or pipeline performance evidence/i);
+  });
+
   it("keeps browser preview absent when the host is unavailable", async () => {
     host.get.mockResolvedValue(null);
     const { container } = render(<InvestigationTeamReadinessPanel />);
@@ -176,6 +236,7 @@ describe("InvestigationTeamReadinessPanel", () => {
 
   it("runs the explicit provider-free synthetic check and refreshes the report", async () => {
     host.runSynthetic.mockResolvedValue({
+      run_kind: "synthetic",
       status: "qualified",
       schema_id: "contextdesk.investigation_team_qualification.v1",
       suite_version: "contextdesk.investigation_team_qualification.suite.v1",
@@ -220,6 +281,7 @@ describe("InvestigationTeamReadinessPanel", () => {
 
   it("shows measured role failures instead of hiding a partial result", async () => {
     host.runLive.mockResolvedValue({
+      run_kind: "measured",
       status: "partial",
       schema_id: "contextdesk.investigation_team_qualification.v1",
       suite_version: "contextdesk.investigation_team_qualification.suite.v1",
@@ -237,7 +299,7 @@ describe("InvestigationTeamReadinessPanel", () => {
         {
           attempt_id: "live-qualification-attempt-2",
           role: "reviewer",
-          reason: "provider response was not strict qualification JSON",
+          reason: "response_contract_failed",
         },
       ],
       redacted_json: "{\"safe\":true}",
@@ -250,7 +312,8 @@ describe("InvestigationTeamReadinessPanel", () => {
       "investigation-team-qualification-failures",
     );
     expect(failures.textContent).toMatch(/reviewer/i);
-    expect(failures.textContent).toMatch(/strict qualification JSON/i);
+    expect(failures.textContent).toMatch(/required qualification format/i);
+    expect(failures.textContent).not.toMatch(/response_contract_failed/i);
     expect(screen.getByTestId("investigation-team-qualification-axes").textContent).toMatch(
       /capability/i,
     );

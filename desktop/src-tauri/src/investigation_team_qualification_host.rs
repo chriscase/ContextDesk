@@ -1,9 +1,8 @@
 //! Host-owned publication/readout for Investigation Team qualification.
 //!
-//! The renderer can read the latest process-local result, but it cannot submit
+//! The renderer can read bounded redacted history, but it cannot submit
 //! evaluator truth or manufacture a qualification. Trusted execution code
-//! publishes through [`publish`], after calling the `cd_workflow` seam with a
-//! host-built input. Nothing in this store is persisted yet.
+//! publishes only after calling the `cd_workflow` seam with a host-built input.
 
 use cd_core::capability_qualification::{
     QualificationTransport, SyntheticChatRequest, SyntheticChatResponse, SyntheticMessage,
@@ -24,8 +23,24 @@ use cd_workflow::investigation_team_qualification::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+
+pub const INVESTIGATION_TEAM_QUALIFICATION_STORE_SCHEMA_V1: &str =
+    "contextdesk.investigation_team_qualification_store.v1";
+pub const MAX_INVESTIGATION_TEAM_QUALIFICATION_RECORDS: usize = 128;
+pub const MAX_INVESTIGATION_TEAM_QUALIFICATION_STORE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Distinguishes provider-free wiring evidence from measured provider runs.
+/// A synthetic result can validate the host seam, but must never be displayed
+/// as evidence that a configured model or pipeline was measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvestigationTeamQualificationRunKind {
+    Synthetic,
+    Measured,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualificationAxisDto {
@@ -36,6 +51,7 @@ pub struct QualificationAxisDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvestigationTeamQualificationDto {
+    pub run_kind: InvestigationTeamQualificationRunKind,
     pub status: QualificationStatus,
     pub schema_id: String,
     pub suite_version: String,
@@ -94,11 +110,15 @@ impl From<AxisScore> for QualificationAxisDto {
     }
 }
 
-impl From<QualificationExecutionResult> for InvestigationTeamQualificationDto {
-    fn from(result: QualificationExecutionResult) -> Self {
+impl InvestigationTeamQualificationDto {
+    fn from_execution(
+        result: QualificationExecutionResult,
+        run_kind: InvestigationTeamQualificationRunKind,
+    ) -> Self {
         let incomplete_attempts = result.has_incomplete_attempt();
         let report = result.report;
         Self {
+            run_kind,
             status: result.status,
             schema_id: report.schema_id,
             suite_version: report.fingerprint.suite_version.clone(),
@@ -124,32 +144,238 @@ impl From<QualificationExecutionResult> for InvestigationTeamQualificationDto {
     }
 }
 
-#[derive(Debug, Default)]
+impl From<QualificationExecutionResult> for InvestigationTeamQualificationDto {
+    fn from(result: QualificationExecutionResult) -> Self {
+        Self::from_execution(
+            result,
+            InvestigationTeamQualificationRunKind::Measured,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredInvestigationTeamQualification {
+    run_kind: InvestigationTeamQualificationRunKind,
+    result: QualificationExecutionResult,
+    #[serde(default)]
+    failures: Vec<InvestigationTeamAttemptFailureDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InvestigationTeamQualificationStore {
-    latest: Option<InvestigationTeamQualificationDto>,
+    schema_id: String,
+    #[serde(default)]
+    records: Vec<StoredInvestigationTeamQualification>,
+}
+
+impl Default for InvestigationTeamQualificationStore {
+    fn default() -> Self {
+        Self {
+            schema_id: INVESTIGATION_TEAM_QUALIFICATION_STORE_SCHEMA_V1.into(),
+            records: Vec::new(),
+        }
+    }
 }
 
 impl InvestigationTeamQualificationStore {
-    /// Publish only from trusted host execution code; renderer IPC has no
-    /// setter for this store.
-    pub fn publish(&mut self, result: QualificationExecutionResult) {
-        self.latest = Some(result.into());
+    fn validate(&self) -> CoreResult<()> {
+        if self.schema_id != INVESTIGATION_TEAM_QUALIFICATION_STORE_SCHEMA_V1 {
+            return Err(CoreError::Config(
+                "investigation team qualification store schema is unsupported".into(),
+            ));
+        }
+        if self.records.len() > MAX_INVESTIGATION_TEAM_QUALIFICATION_RECORDS {
+            return Err(CoreError::Config(
+                "investigation team qualification store has too many records".into(),
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        for record in &self.records {
+            validate_stored_record(record)?;
+            let id = (
+                record.result.report.fingerprint.digest.as_str(),
+                record.result.report.scoring_digest.as_str(),
+                record.run_kind,
+            );
+            if !ids.insert(id) {
+                return Err(CoreError::Config(
+                    "investigation team qualification store has a duplicate record".into(),
+                ));
+            }
+        }
+        let bytes = serde_json::to_vec(self)
+            .map_err(|error| CoreError::Config(format!("qualification store encoding: {error}")))?;
+        if bytes.len() > MAX_INVESTIGATION_TEAM_QUALIFICATION_STORE_BYTES {
+            return Err(CoreError::Config(
+                "investigation team qualification store is too large".into(),
+            ));
+        }
+        Ok(())
     }
 
-    pub fn publish_live(&mut self, execution: LiveQualificationExecutionResult) {
-        let failures = execution.failures;
-        let mut dto: InvestigationTeamQualificationDto = execution.result.into();
-        dto.failures = failures;
-        self.latest = Some(dto);
+    /// Load bounded, redacted history. Missing is a safe empty store; malformed
+    /// data is rejected instead of being presented as qualification evidence.
+    pub fn load(path: &Path) -> CoreResult<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let metadata = std::fs::metadata(path)?;
+        if !metadata.is_file()
+            || metadata.len() as usize > MAX_INVESTIGATION_TEAM_QUALIFICATION_STORE_BYTES
+        {
+            return Err(CoreError::Config(
+                "investigation team qualification store is not bounded".into(),
+            ));
+        }
+        let store: Self = serde_json::from_slice(&std::fs::read(path)?).map_err(|error| {
+            CoreError::Config(format!(
+                "investigation team qualification store is malformed: {error}"
+            ))
+        })?;
+        store.validate()?;
+        Ok(store)
+    }
+
+    /// Atomically persist the validated, redacted store.
+    pub fn save(&self, path: &Path) -> CoreResult<()> {
+        self.validate()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        std::fs::rename(tmp, path)?;
+        Ok(())
+    }
+
+    /// Publish only from trusted host execution code; renderer IPC has no
+    /// setter for this store. Exact duplicate replays replace, while distinct
+    /// observations remain in bounded history.
+    pub fn publish(
+        &mut self,
+        result: QualificationExecutionResult,
+        run_kind: InvestigationTeamQualificationRunKind,
+        failures: Vec<InvestigationTeamAttemptFailureDto>,
+    ) -> CoreResult<InvestigationTeamQualificationDto> {
+        let record = StoredInvestigationTeamQualification {
+            run_kind,
+            result,
+            failures,
+        };
+        validate_stored_record(&record)?;
+        let published = project_record(&record);
+        let fingerprint = record.result.report.fingerprint.digest.clone();
+        let scoring = record.result.report.scoring_digest.clone();
+        if let Some(existing) = self.records.iter_mut().find(|existing| {
+            existing.run_kind == record.run_kind
+                && existing.result.report.fingerprint.digest == fingerprint
+                && existing.result.report.scoring_digest == scoring
+        }) {
+            *existing = record;
+        } else {
+            self.records.push(record);
+        }
+        self.records.sort_by(|left, right| {
+            left.result
+                .report
+                .fingerprint
+                .observed_at
+                .cmp(&right.result.report.fingerprint.observed_at)
+                .then(
+                    left.result
+                        .report
+                        .fingerprint
+                        .digest
+                        .cmp(&right.result.report.fingerprint.digest),
+                )
+        });
+        if self.records.len() > MAX_INVESTIGATION_TEAM_QUALIFICATION_RECORDS {
+            let remove = self.records.len() - MAX_INVESTIGATION_TEAM_QUALIFICATION_RECORDS;
+            self.records.drain(0..remove);
+        }
+        self.validate()?;
+        Ok(published)
     }
 
     pub fn latest(&self) -> Option<InvestigationTeamQualificationDto> {
-        self.latest.clone()
+        // Prefer actual measured evidence over a newer provider-free wiring
+        // check. Synthetic history remains available but never displaces the
+        // latest measured pipeline on startup.
+        self.records
+            .iter()
+            .rev()
+            .find(|record| {
+                record.run_kind == InvestigationTeamQualificationRunKind::Measured
+            })
+            .or_else(|| self.records.last())
+            .map(project_record)
+    }
+
+    pub fn history(&self) -> Vec<InvestigationTeamQualificationDto> {
+        self.records.iter().rev().map(project_record).collect()
     }
 
     pub fn clear(&mut self) -> bool {
-        self.latest.take().is_some()
+        if self.records.is_empty() {
+            false
+        } else {
+            self.records.clear();
+            true
+        }
     }
+}
+
+pub fn investigation_team_qualification_store_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("investigation-team-qualifications.json")
+}
+
+fn project_record(
+    record: &StoredInvestigationTeamQualification,
+) -> InvestigationTeamQualificationDto {
+    let mut dto = InvestigationTeamQualificationDto::from_execution(
+        record.result.clone(),
+        record.run_kind,
+    );
+    dto.failures = record.failures.clone();
+    if dto.suite_version != SUITE_VERSION {
+        dto.status = QualificationStatus::Stale;
+        dto.stale = true;
+    }
+    dto
+}
+
+fn validate_stored_record(record: &StoredInvestigationTeamQualification) -> CoreResult<()> {
+    let parsed = cd_core::investigation_team_qualification::parse_report(
+        &record.result.redacted_json,
+    )?;
+    if parsed != record.result.report
+        || cd_core::investigation_team_qualification::render_json(&parsed)?
+            != record.result.redacted_json
+        || cd_core::investigation_team_qualification::render_markdown(&parsed)?
+            != record.result.redacted_markdown
+        || cd_workflow::investigation_team_qualification::status_for(&parsed)
+            != record.result.status
+    {
+        return Err(CoreError::Config(
+            "investigation team qualification history failed canonical validation".into(),
+        ));
+    }
+    for failure in &record.failures {
+        if failure.attempt_id.trim().is_empty()
+            || failure.attempt_id.len() > 128
+            || !is_safe_attempt_failure_reason(&failure.reason)
+            || !parsed.attempts.iter().any(|attempt| {
+                attempt.attempt_id == failure.attempt_id && attempt.role == failure.role
+            })
+        {
+            return Err(CoreError::Config(
+                "investigation team qualification failure summary is invalid".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A trusted provider-backed member target. Credentials and raw deployment
@@ -170,6 +396,17 @@ pub struct LiveQualificationExecutionResult {
 }
 
 pub const LIVE_QUALIFICATION_CANCEL_KEY: &str = "investigation_team_qualification_live";
+
+fn is_safe_attempt_failure_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "provider_attempt_cancelled"
+            | "provider_request_failed"
+            | "unknown_evidence_citation"
+            | "response_contract_failed"
+            | "cancelled_before_dispatch"
+    )
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -396,11 +633,14 @@ fn attempt_from_response(
         failure = Some(live_failure(
             attempt_id,
             role,
-            "provider attempt was cancelled",
+            "provider_attempt_cancelled",
         ));
         (AttemptStatus::Cancelled, false, Vec::new(), Vec::new())
-    } else if let Some(reason) = response.raw_error {
-        failure = Some(live_failure(attempt_id, role, reason));
+    } else if response.raw_error.is_some() {
+        // Provider diagnostics can contain endpoint or credential-adjacent
+        // bytes. Preserve the honest failure class, never the raw transport
+        // string, in renderer-visible or durable qualification history.
+        failure = Some(live_failure(attempt_id, role, "provider_request_failed"));
         (AttemptStatus::Failed, false, Vec::new(), Vec::new())
     } else {
         match serde_json::from_str::<ProviderQualificationAnswer>(&response.content) {
@@ -413,7 +653,7 @@ fn attempt_from_response(
                     failure = Some(live_failure(
                         attempt_id,
                         role,
-                        "provider cited an unknown qualification evidence id",
+                        "unknown_evidence_citation",
                     ));
                     (AttemptStatus::Failed, false, Vec::new(), Vec::new())
                 } else {
@@ -438,12 +678,8 @@ fn attempt_from_response(
                     (AttemptStatus::Completed, true, claims, citations)
                 }
             }
-            Err(error) => {
-                failure = Some(live_failure(
-                    attempt_id,
-                    role,
-                    format!("provider response was not strict qualification JSON: {error}"),
-                ));
+            Err(_) => {
+                failure = Some(live_failure(attempt_id, role, "response_contract_failed"));
                 (AttemptStatus::Failed, false, Vec::new(), Vec::new())
             }
         }
@@ -499,7 +735,7 @@ pub fn execute_live(
             failures.push(live_failure(
                 &attempt_id,
                 target.member.role,
-                "provider attempt was cancelled before dispatch",
+                "cancelled_before_dispatch",
             ));
             input.attempts.push(AttemptRecord {
                 attempt_id: attempt_id.clone(),
@@ -780,7 +1016,7 @@ mod synthetic_tests {
         assert_eq!(failed.status, AttemptStatus::Failed);
         assert_eq!(failed.latency_ms, 17);
         assert!(failed.resource_units > 0);
-        assert_eq!(failure.expect("failure").reason, "provider unavailable");
+        assert_eq!(failure.expect("failure").reason, "provider_request_failed");
 
         let (cancelled, failure) = attempt_from_response(
             &target,
@@ -818,7 +1054,7 @@ mod synthetic_tests {
         assert_eq!(attempt.status, AttemptStatus::Failed);
         assert_eq!(
             failure.expect("failure").reason,
-            "provider cited an unknown qualification evidence id"
+            "unknown_evidence_citation"
         );
     }
 }
@@ -826,6 +1062,22 @@ mod synthetic_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn measured_result(observed_at: i64) -> QualificationExecutionResult {
+        execute_synthetic(
+            vec![
+                MemberBinding::from_deployment(
+                    InvestigationTeamRole::Single,
+                    "profile-a",
+                    "model-a",
+                    "https://qualification.example.test/v1",
+                )
+                .expect("member"),
+            ],
+            observed_at,
+        )
+        .expect("result")
+    }
 
     #[test]
     fn store_is_empty_until_trusted_code_publishes() {
@@ -838,5 +1090,89 @@ mod tests {
         let mut store = InvestigationTeamQualificationStore::default();
         assert!(!store.clear());
         assert!(!store.clear());
+    }
+
+    #[test]
+    fn measured_history_survives_save_and_load_and_is_preferred_over_synthetic() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("investigation-team-qualifications.json");
+        let mut store = InvestigationTeamQualificationStore::default();
+        let measured = store
+            .publish(
+                measured_result(1_777_000_000),
+                InvestigationTeamQualificationRunKind::Measured,
+                Vec::new(),
+            )
+            .expect("measured");
+        assert_eq!(
+            measured.run_kind,
+            InvestigationTeamQualificationRunKind::Measured
+        );
+        store
+            .publish(
+                measured_result(1_777_000_100),
+                InvestigationTeamQualificationRunKind::Synthetic,
+                Vec::new(),
+            )
+            .expect("synthetic");
+        store.save(&path).expect("save");
+
+        let reopened = InvestigationTeamQualificationStore::load(&path).expect("load");
+        assert_eq!(reopened.history().len(), 2);
+        assert_eq!(
+            reopened.latest().expect("latest").run_kind,
+            InvestigationTeamQualificationRunKind::Measured,
+            "provider-free wiring evidence must not replace measured evidence",
+        );
+    }
+
+    #[test]
+    fn tampered_status_and_unsafe_failure_summary_fail_closed() {
+        let mut result = measured_result(1_777_000_000);
+        result.status = QualificationStatus::Failed;
+        let mut store = InvestigationTeamQualificationStore::default();
+        assert!(store
+            .publish(
+                result,
+                InvestigationTeamQualificationRunKind::Measured,
+                Vec::new(),
+            )
+            .is_err());
+
+        for unsafe_reason in [
+            "https://private-gateway.invalid/failure",
+            "api_key=private-value",
+            "provider request failed with private host details",
+        ] {
+            let result = measured_result(1_777_000_000);
+            let role = result.report.attempts[0].role;
+            let attempt_id = result.report.attempts[0].attempt_id.clone();
+            assert!(store
+                .publish(
+                    result,
+                    InvestigationTeamQualificationRunKind::Measured,
+                    vec![InvestigationTeamAttemptFailureDto {
+                        attempt_id,
+                        role,
+                        reason: unsafe_reason.into(),
+                    }],
+                )
+                .is_err());
+        }
+
+        let result = measured_result(1_777_000_001);
+        let role = result.report.attempts[0].role;
+        let attempt_id = result.report.attempts[0].attempt_id.clone();
+        store
+            .publish(
+                result,
+                InvestigationTeamQualificationRunKind::Measured,
+                vec![InvestigationTeamAttemptFailureDto {
+                    attempt_id,
+                    role,
+                    reason: "provider_request_failed".into(),
+                }],
+            )
+            .expect("known safe failure code");
     }
 }

@@ -115,7 +115,10 @@ pub fn execute_json(input_json: &str) -> CoreResult<QualificationExecutionResult
     execute(input)
 }
 
-fn status_for(report: &QualificationReport) -> QualificationStatus {
+/// Recompute the lifecycle status from a validated report. Hosts use this
+/// when reopening durable redacted history so a stored status can never be
+/// trusted independently of the scored report.
+pub fn status_for(report: &QualificationReport) -> QualificationStatus {
     if report.fingerprint.stale {
         return QualificationStatus::Stale;
     }
