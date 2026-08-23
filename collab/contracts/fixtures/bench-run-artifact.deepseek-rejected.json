@@ -1,0 +1,28 @@
+{
+  "schemaId": "cd-collab.bench_run_artifact.v1",
+  "privacyClass": "share_safe",
+  "packageId": "pkg-synth-bench-deepseek-rejected-v1",
+  "createdAt": "2026-08-21T00:00:00.000Z",
+  "lanes": [
+    {
+      "candidateId": "cand-deepseek",
+      "modelLabel": "DeepSeek-V3",
+      "role": "single",
+      "shareSafe": {
+        "privacy": "share_safe",
+        "bench_run_id": "run-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "sdk_run_id": "cdrun-ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "task_fingerprint": "tkf-48e82e8fa651d1ec5b7e7751710a32fa708306ad8dbec679c5ce1224d872e8f6",
+        "snapshot_fingerprint": "snf-0ddcedab95ee0d1c170a6c521290c0fcfed92565fb8faf76e4f3b8140359d683",
+        "status": "completed",
+        "usage": "unknown",
+        "cost": "unknown",
+        "answer_included": false,
+        "raw_output_included": false,
+        "accepted_evidence_ids": ["ev-demo-checkout-log"],
+        "reason_codes": [],
+        "root_cause_established": false
+      }
+    }
+  ]
+}
