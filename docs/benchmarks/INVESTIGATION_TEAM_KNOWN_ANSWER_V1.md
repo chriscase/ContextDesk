@@ -3,8 +3,10 @@
 Status: provider-neutral adapter plus trusted desktop-host execution and
 durable redacted reporting for the checked-in OPEN quality suite. The host can
 now resolve configured Investigation Team roles, contact each exact provider,
-score responses, preserve lifecycle/latency/byte evidence, and surface history
-in Settings. It does **not** recommend a universal best model.
+score responses, preserve lifecycle/latency/byte/provider-usage evidence, and
+surface history in Settings. An operator-triggered run can also retain strict
+canonical responses for private regression analysis. It does **not** recommend
+a universal best model.
 
 ## Why this boundary exists
 
@@ -134,18 +136,103 @@ For every configured V1 role, the trusted host:
    prompt-set hash, endpoint fingerprint, and orchestration-policy digest;
 3. sends scenarios serially with prompted-JSON mode and cooperative
    cancellation;
-4. stores no raw prompt, provider response, endpoint, credential, or evaluator
-   truth;
+4. records the configured model in the quality unit and the provider-reported
+   model separately on each attempted scenario; a mismatch stays visible and
+   never rewrites configuration;
 5. retains deterministic failed-dimension ids plus host-observed latency and
-   input/output byte counts; and
-6. leaves token counts and cost explicitly unknown because the current
-   qualification transport does not return usage accounting.
+   synthetic message-content and returned provider-content byte counts;
+6. carries prompt, completion, reasoning, and cached token counts plus gateway
+   cost only when the provider reports them; missing values remain `null`, and
+   aggregate values remain unknown if any attempted scenario omits that metric;
+7. validates model identities with a separate bounded grammar that preserves
+   legitimate namespaced IDs, while response prose and all provider-controlled
+   identifiers reject rather than rewrite prompt echoes, secrets, credentials,
+   absolute paths, endpoint/address/route forms, headers, evaluator markers,
+   rejected response text, and raw transport errors; and
+8. retains only strict parsed canonical responses in the private, owner-only
+   capture portion of the bounded store. A capture is not a share-safe artifact
+   and is never projected into renderer exports.
 
 The durable file is
 `investigation-team-known-answer-qualifications.json` in the ContextDesk config
-directory. It is fail-closed, atomically replaced, bounded to 128 records and 8
-MiB, and reparses each report through canonical validation. Renderer IPC has no
-publish command.
+directory. Store schema V2 reads and migrates only valid legacy V1 report-only
+stores; migration cannot discard a capture or relax evidence. A malformed,
+unsafe-permissioned, or otherwise invalid existing file places this feature in
+an explicit unavailable state. Listing, clearing, and running retry one secure
+load under the host mutex, so repair or deliberate removal can recover
+in-process without substituting an empty store for malformed bytes. A run does
+not resolve or call a provider until that reload succeeds. On Unix, every
+ancestor is opened no-follow and the retained final parent must be owned by the
+effective user with no group/other mode bits. Store, lock, and temporary files
+must have that same UID and owner-only mode. Reads, lock acquisition, temporary
+creation, replacement, cleanup, and directory fsync are all relative to the
+retained parent descriptor; its configured pathname identity is revalidated
+before replacement. Size, exact EOF, and stable file-handle metadata are checked
+on the same descriptor. A SHA-256 revision of the fully validated durable
+mapping is compared immediately before replacement while a per-store writer
+lock is held, so malformed, stale, or concurrently changed evidence cannot be
+overwritten. The owner-only lock sidecar uses an OS file lock: the sidecar may
+persist across restart, but a crash releases its lock rather than leaving the
+feature falsely busy. Writes use a unique owner-only temporary file, validate
+its bytes and directory-relative entry identity against the same open handle,
+fsync the file, and atomically replace the destination. Unix hosts then fsync
+the retained directory. If that post-commit directory sync fails, the save
+remains a committed success, live state is published to match disk, and a
+bounded durability warning is logged instead of reporting a false failure. On
+non-Unix hosts the entire persisted known-answer feature fails closed before
+provider resolution or calls until equivalent no-follow identity, owner-only
+capture retention, and atomic replace support exists. Clearing
+history removes both redacted reports and their private captures. The store
+remains bounded to 128 reports and 8 MiB and reparses each report and capture
+through canonical validation. Renderer IPC has no publish
+command.
+
+### Canonical response evidence
+
+`contextdesk.investigation_team_known_answer_capture.v1` is intentionally
+separate from the redacted score report. It contains the exact `QualityUnit`,
+role/timestamp, and an ordered list of only those responses that passed the
+strict JSON parser plus privacy and closed-vocabulary gates. Each response is
+stored as the typed canonical object with a SHA-256 digest of compact canonical
+JSON. Every executed response also carries a SHA-256 digest of its exact
+canonical redacted `AnswerScore`; only parsed responses carrying the closed
+`host_score_failed` eligibility marker may omit that score digest. The matching
+score report records a SHA-256 digest of the **complete capture**, including
+those per-response score bindings. Store validation requires exact timestamp,
+role, full `QualityUnit`, scenario set/order, provider-reported model, closed
+status-to-failure-code mapping, dispatch-byte/provider-telemetry eligibility,
+and executed-score correspondence before accepting the pair. Cancelled,
+blocked, not-scheduled, and contradictory rows cannot retain a canonical
+response. Therefore changing a response and merely
+recomputing its inline hash, or changing a report score while preserving its
+captured response, fails closed. These digests prove internal content
+consistency, not origin or authenticity: they are not signatures, and an
+attacker able to rewrite the report, capture, and every digest is outside this
+local integrity claim. This makes behavioral fixture derivation possible
+without snapshotting provider prose blindly.
+
+The capture schema has no field for prompts, URLs, headers, credentials,
+evaluator truth, raw errors, or rejected provider text. Shared secret scrubbing,
+absolute/UNC-path detection, endpoint-scheme and bare host-port detection,
+secret-assignment detection, prompt-fragment matching across conclusions,
+claims, and every citation field, and evaluator-marker checks are all
+reject-only: no accepted response is silently rewritten into something that
+looks safe. Configured and provider-reported model identities use a separate
+bounded grammar that rejects addresses, host-port values, routes, and internal
+DNS shapes while retaining legitimate slash-delimited model ids. A rejected
+response is represented only in the redacted report by one
+bounded category and its byte count:
+
+- `provider_response_parse_failed`;
+- `provider_response_privacy_rejected`;
+- `provider_response_vocabulary_rejected`; or
+- `host_score_failed` after a strict response parsed but the host scorer could
+  not complete.
+
+Capture is not a background recorder. It is produced only as part of the
+operator-triggered known-answer action. Before promoting any captured response
+into a checked-in regression fixture, review it and assert behavioral invariants
+rather than exact prose.
 
 ## Readiness UI interpretation
 
@@ -157,6 +244,15 @@ separate:
   transport and response envelope.
 - **Known-answer quality evidence:** the OPEN-v1 scenario run for an exact
   build/profile/model/endpoint/suite/prompt identity.
+
+Model ids are opaque provider catalog identities, including namespaced values
+such as `alibaba/qwen3.6-27b`, `openai/gpt-oss-120b`, and
+`mistral/ministral-14b`; they are never rewritten into display aliases. The
+configured id and provider-reported id remain separate. Capability evidence is
+also separate from quality evidence: a measured limitation such as
+`structured_output` remains visible in the exact capability-qualification
+report and is not converted into either a known-answer pass or a generic model
+failure.
 
 A historical quality report becomes `stale` when the running app build, suite,
 prompt set, or configured role/deployment no longer matches. The underlying
@@ -185,13 +281,38 @@ The focused suite proves:
   uncited claims fail;
 - crossed scenario ids and unknown fields/vocabulary fail;
 - escaped credential-shaped response values fail after JSON decoding; and
-- diagnostic truth succeeds only when joined from the host-owned envelope.
+- diagnostic truth succeeds only when joined from the host-owned envelope;
+- configured and provider-reported model ids remain distinct and mismatches
+  stay visible;
+- complete provider usage aggregates exactly while one missing value keeps the
+  aggregate unknown;
+- every telemetry value and checked aggregate fits JavaScript's exact integer
+  range, with invalid/overflowing provider values rejected instead of wrapped;
+- malformed existing stores block read, clear, run, and save instead of being
+  replaced by an empty history;
+- pre-replacement SHA-256 CAS rejects a store that becomes malformed or changes
+  after startup, while a post-rename directory-sync failure remains committed
+  success with a bounded durability warning;
+- unsupported hosts reject load, save, and execution before provider dispatch;
+  and
+- canonical response captures are deterministic, report-bound, owner-only,
+  bind each executed response to its exact score, reject
+  secret/path/endpoint/prompt/truth material, and never retain rejected raw
+  text; and
+- path-swap, symlink, exact-EOF, same-handle temporary validation, and
+  platform-specific persistence behavior fail closed within the documented
+  storage boundary.
 
 ## Non-claims and remaining work
 
 This path does not claim semantic entailment: lexical overlap is a bounded
-structural signal, not proof that prose follows from a citation. It also does
-not yet capture provider token/cost usage, execute the four blocked diagnostic
+structural signal, not proof that prose follows from a citation. Provider usage
+is present only when reported by the gateway; it is not independently audited
+against billing. Cost is rounded to the nearest micro-US-dollar for the durable
+integer report, and all exported integers stay within the exact JavaScript
+range. Canonical captures are private local regression evidence, not share-safe
+exports or cryptographically authenticated attestations. This path still does
+not execute the four blocked diagnostic
 scenarios through a full attempt/tool/role pipeline, derive measured
 recommendations, or prove a packaged configured-provider acceptance run. Those
 remain follow-up work for issue #726.
@@ -205,9 +326,12 @@ appropriate `RUSTC_WRAPPER`, `SCCACHE_DIR`, and compatibility-keyed
 ```bash
 cargo test -p cd-core --test quality_eval_live_known_answer
 cargo test -p cd-core --test quality_eval_live_known_answer_run
+cargo test -p cd-core --test quality_eval_live_known_answer_capture
+cargo test -p cd-workflow --test gateway_wire_qualification live_transport_exposes_authoritative_model_usage_and_cost_once
 cargo test -p cd-core --test quality_eval_lab
 cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib investigation_team_known_answer_host
 cargo clippy -p cd-core --all-targets -- -D warnings
 cargo fmt --all -- --check
+cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
 git diff --check
 ```

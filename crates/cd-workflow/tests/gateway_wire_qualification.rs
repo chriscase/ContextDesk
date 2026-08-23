@@ -25,7 +25,9 @@
 
 use cd_core::capability_qualification::{
     run_qualification, CapabilityKind, CapabilityStatus, ProfileCapabilityGate, QualificationKey,
+    QualificationTransport, SyntheticChatRequest, SyntheticMessage,
 };
+use cd_core::openai_chat_contract::OpenAiChatRequestMode;
 use cd_test_gateway::{MockGateway, Response, Step};
 use cd_workflow::capability_qualification::{
     qualification_key, LiveBackendKind, LiveQualificationTransport,
@@ -42,6 +44,63 @@ fn completion_with_tool_calls(calls: serde_json::Value) -> serde_json::Value {
             "message": {"role": "assistant", "content": null, "tool_calls": calls}
         }]
     })
+}
+
+#[test]
+fn live_transport_exposes_authoritative_model_usage_and_cost_once() {
+    let rt = tokio::runtime::Runtime::new().expect("gateway runtime");
+    let gateway = rt.block_on(MockGateway::start_ordered(vec![Step::respond(
+        Response::json_ok(&json!({
+            "id": "chatcmpl-telemetry",
+            "model": "reported/model-b",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "{}"}
+            }],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+                "completion_tokens_details": {"reasoning_tokens": 3},
+                "prompt_tokens_details": {"cached_tokens": 5},
+                "cost": 0.000321
+            }
+        })),
+    )]));
+    let mut transport = LiveQualificationTransport::new(
+        LiveBackendKind::OpenAiCompatible,
+        format!("{}/v1", gateway.base_url()),
+        None,
+        true,
+    );
+    let request = SyntheticChatRequest {
+        model_id: "configured/model-a".into(),
+        messages: vec![SyntheticMessage {
+            role: "user".into(),
+            content: "return json".into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }],
+        tools: Vec::new(),
+        stream: false,
+        chat_mode: OpenAiChatRequestMode::PromptedJson,
+    };
+    transport
+        .chat_complete(&request, &AtomicBool::new(false))
+        .expect("completion");
+    let telemetry = transport
+        .take_last_chat_provider_telemetry()
+        .expect("wire telemetry");
+    assert_eq!(
+        telemetry.response_model.as_deref(),
+        Some("reported/model-b")
+    );
+    assert_eq!(telemetry.prompt_tokens, Some(11));
+    assert_eq!(telemetry.completion_tokens, Some(7));
+    assert_eq!(telemetry.reasoning_tokens, Some(3));
+    assert_eq!(telemetry.cached_tokens, Some(5));
+    assert_eq!(telemetry.cost, Some(0.000321));
+    assert!(transport.take_last_chat_provider_telemetry().is_none());
 }
 
 #[test]

@@ -1652,10 +1652,12 @@ export type InvestigationTeamKnownAnswerMetricsDto = {
   cancelled_scenarios: number;
   blocked_scenarios: number;
   total_latency_ms: number;
-  total_input_bytes: number;
-  total_output_bytes: number;
+  total_message_content_bytes: number;
+  total_provider_content_bytes: number;
   input_tokens?: number | null;
   output_tokens?: number | null;
+  reasoning_tokens?: number | null;
+  cached_tokens?: number | null;
   cost_microusd?: number | null;
 };
 
@@ -1665,8 +1667,14 @@ export type InvestigationTeamKnownAnswerScenarioDto = {
   passed: boolean;
   failed_dimensions: string[];
   latency_ms: number;
-  input_bytes: number;
-  output_bytes: number;
+  message_content_bytes: number;
+  provider_content_bytes: number;
+  reported_model_id?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  reasoning_tokens?: number | null;
+  cached_tokens?: number | null;
+  cost_microusd?: number | null;
   failure_code?: string | null;
 };
 
@@ -1692,7 +1700,11 @@ export type InvestigationTeamKnownAnswerDto = {
   redacted_markdown: string;
 };
 
-/** Read durable redacted known-answer history without contacting a provider. */
+/**
+ * Read the redacted known-answer projection without contacting a provider.
+ * The host store can also contain separately protected private canonical
+ * responses, but they never cross this renderer API.
+ */
 export async function hostListInvestigationTeamKnownAnswerQualifications(): Promise<InvestigationTeamKnownAnswerDto[]> {
   if (!isTauri()) return [];
   return invoke<InvestigationTeamKnownAnswerDto[]>(
@@ -1721,7 +1733,7 @@ export async function hostCancelLiveInvestigationTeamKnownAnswerQualification():
   );
 }
 
-/** Clear only redacted known-answer history. */
+/** Clear both redacted known-answer history and its private canonical captures. */
 export async function hostClearInvestigationTeamKnownAnswerQualifications(): Promise<boolean> {
   if (!isTauri()) return false;
   return invoke<boolean>("clear_investigation_team_known_answer_qualifications");

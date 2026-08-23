@@ -1,9 +1,10 @@
 use cd_core::quality_eval::{
     live_known_answer_prompt_set_hash, load_suite, parse_live_known_answer_response,
-    prepare_live_known_answer_suite, score_live_known_answer_response,
-    serialize_live_known_answer_prompt, CandidateAnswer, LiveAnswerClaim, LiveCitation,
-    LiveKnownAnswerResponse, LoadedSuite, PreparedLiveKnownAnswerCase,
-    LIVE_KNOWN_ANSWER_RESPONSE_MAX_BYTES, LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID,
+    parse_live_known_answer_response_classified, prepare_live_known_answer_suite,
+    score_live_known_answer_response, serialize_live_known_answer_prompt, CandidateAnswer,
+    LiveAnswerClaim, LiveCitation, LiveKnownAnswerResponse, LiveKnownAnswerResponseFailure,
+    LoadedSuite, PreparedLiveKnownAnswerCase, LIVE_KNOWN_ANSWER_RESPONSE_MAX_BYTES,
+    LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID,
 };
 use std::path::PathBuf;
 
@@ -267,6 +268,13 @@ fn response_parser_is_strict_bounded_and_scenario_scoped() {
 
     let mut unknown_role = response.clone();
     unknown_role.claims[0].role = Some("persuasive_guess".into());
+    assert_eq!(
+        parse_live_known_answer_response_classified(
+            case,
+            &serde_json::to_string(&unknown_role).expect("unknown-role response")
+        ),
+        Err(LiveKnownAnswerResponseFailure::Vocabulary)
+    );
     assert!(parse_live_known_answer_response(
         case,
         &serde_json::to_string(&unknown_role).expect("unknown-role response")
@@ -287,13 +295,152 @@ fn response_parser_is_strict_bounded_and_scenario_scoped() {
         1,
     );
     assert!(!escaped_secret.contains("sk-live-secret"));
+    assert_eq!(
+        parse_live_known_answer_response_classified(case, &escaped_secret),
+        Err(LiveKnownAnswerResponseFailure::Privacy)
+    );
     assert!(parse_live_known_answer_response(case, &escaped_secret).is_err());
 
     let oversized = format!(
         "{{\"padding\":\"{}\"}}",
         "x".repeat(LIVE_KNOWN_ANSWER_RESPONSE_MAX_BYTES)
     );
+    assert_eq!(
+        parse_live_known_answer_response_classified(case, &oversized),
+        Err(LiveKnownAnswerResponseFailure::Parser)
+    );
     assert!(parse_live_known_answer_response(case, &oversized).is_err());
+}
+
+#[test]
+fn response_parser_rejects_prompt_echo_without_reclassifying_schema_or_vocabulary_failures() {
+    let suite = suite();
+    let prepared = prepare_live_known_answer_suite(&suite).expect("prepare live suite");
+    let case = &prepared[0];
+    let mut response = response_from_candidate(case, &suite.cases[0].runtime.candidates[0]);
+    response.conclusion = case.prompt().question.clone();
+    assert_eq!(
+        parse_live_known_answer_response_classified(
+            case,
+            &serde_json::to_string(&response).expect("echo response")
+        ),
+        Err(LiveKnownAnswerResponseFailure::Privacy)
+    );
+
+    for citation_field in ["evidence_id", "source_id", "time_anchor"] {
+        let mut citation_echo =
+            response_from_candidate(case, &suite.cases[0].runtime.candidates[0]);
+        let citation = &mut citation_echo.claims[0].citations[0];
+        match citation_field {
+            "evidence_id" => citation.evidence_id = case.prompt().question.clone(),
+            "source_id" => citation.source_id = case.prompt().question.clone(),
+            "time_anchor" => citation.time_anchor = case.prompt().question.clone(),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            parse_live_known_answer_response_classified(
+                case,
+                &serde_json::to_string(&citation_echo).expect("citation echo response")
+            ),
+            Err(LiveKnownAnswerResponseFailure::Privacy),
+            "{citation_field} prompt echo must fail before scoring",
+        );
+    }
+
+    let mut invalid_role = response_from_candidate(case, &suite.cases[0].runtime.candidates[0]);
+    invalid_role.claims[0].role = Some("unbounded_guess".into());
+    assert_eq!(
+        parse_live_known_answer_response_classified(
+            case,
+            &serde_json::to_string(&invalid_role).expect("vocabulary response")
+        ),
+        Err(LiveKnownAnswerResponseFailure::Vocabulary)
+    );
+}
+
+#[test]
+fn response_parser_rejects_endpoint_route_and_address_forms_without_rejecting_model_ids() {
+    let suite = suite();
+    let prepared = prepare_live_known_answer_suite(&suite).expect("prepare live suite");
+    let case = &prepared[0];
+
+    for endpoint in [
+        "10.0.0.5",
+        "172.16.10.20/v1",
+        "192.168.1.5/chat/completions",
+        "127.0.0.1",
+        "169.254.10.20",
+        "8.8.8.8/v1",
+        "203.0.113.10/chat/completions",
+        "[::1]:8443",
+        "[fd00::1]:8443",
+        "[fe80::1]/v1",
+        "[::ffff:10.0.0.5]:8443",
+        "[::ffff:192.168.1.5]/v1",
+        "gateway:8443",
+        "/v1",
+        "v1/chat/completions",
+        "api.example.com/v1",
+        "gateway.example.test",
+        "gateway.internal/v1",
+        "gateway.corp/api",
+        "backend.intranet",
+        "model-gateway.lan",
+        "service.namespace.svc.cluster.local/v1",
+        "host.docker.internal",
+    ] {
+        let mut response = response_from_candidate(case, &suite.cases[0].runtime.candidates[0]);
+        response.conclusion = format!("Connect to {endpoint}");
+        assert_eq!(
+            parse_live_known_answer_response_classified(
+                case,
+                &serde_json::to_string(&response).expect("endpoint response"),
+            ),
+            Err(LiveKnownAnswerResponseFailure::Privacy),
+            "endpoint, route, or address must be rejected: {endpoint}",
+        );
+    }
+
+    for (field, endpoint) in [
+        ("claim", "8.8.8.8/v1"),
+        ("evidence_id", "/v1"),
+        ("source_id", "gateway:8443"),
+        ("time_anchor", "v1/chat/completions"),
+    ] {
+        let mut response = response_from_candidate(case, &suite.cases[0].runtime.candidates[0]);
+        match field {
+            "claim" => response.claims[0].text = endpoint.into(),
+            "evidence_id" => response.claims[0].citations[0].evidence_id = endpoint.into(),
+            "source_id" => response.claims[0].citations[0].source_id = endpoint.into(),
+            "time_anchor" => response.claims[0].citations[0].time_anchor = endpoint.into(),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            parse_live_known_answer_response_classified(
+                case,
+                &serde_json::to_string(&response).expect("identifier endpoint response"),
+            ),
+            Err(LiveKnownAnswerResponseFailure::Privacy),
+            "provider-controlled {field} must reject endpoint form {endpoint}",
+        );
+    }
+
+    for model_id in [
+        "alibaba/qwen3.6-27b",
+        "openai/gpt-oss-120b",
+        "mistral/ministral-14b",
+    ] {
+        let mut response = response_from_candidate(case, &suite.cases[0].runtime.candidates[0]);
+        response.conclusion = format!("The configured model is {model_id}.");
+        assert!(
+            parse_live_known_answer_response_classified(
+                case,
+                &serde_json::to_string(&response).expect("model response"),
+            )
+            .is_ok(),
+            "legitimate model id must remain accepted: {model_id}",
+        );
+    }
 }
 
 #[test]

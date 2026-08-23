@@ -5,7 +5,10 @@
 //! lifecycle, deterministic dimension outcomes, latency, and byte proxies.
 
 use super::export::gate_export_text;
-use super::live_known_answer::{LIVE_KNOWN_ANSWER_PACKET_ID, LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID};
+use super::live_known_answer::{
+    validate_provider_controlled_text, validate_provider_model_identity,
+    LIVE_KNOWN_ANSWER_PACKET_ID, LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID,
+};
 use super::suite::hex_sha256;
 use super::types::{
     AnswerScore, CaseRunResult, EvidenceClassMarkers, JudgeMetadata, LaneStatus, ModelSubject,
@@ -22,6 +25,9 @@ pub const LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID: &str =
 pub const LIVE_KNOWN_ANSWER_REQUIRED_SCENARIOS: usize = 14;
 /// Bounded durable/report parser size.
 pub const LIVE_KNOWN_ANSWER_RUN_MAX_BYTES: usize = 1024 * 1024;
+/// Largest integer that can cross the desktop JSON/JavaScript boundary without
+/// losing precision. Provider telemetry outside this range fails closed.
+pub const LIVE_KNOWN_ANSWER_JS_SAFE_MAX: u64 = 9_007_199_254_740_991;
 /// Stable host orchestration policy; the digest is recorded in the quality unit.
 pub const LIVE_KNOWN_ANSWER_ORCHESTRATION_POLICY: &str =
     "contextdesk.live_known_answer.serial_per_role.v1";
@@ -66,10 +72,29 @@ pub struct LiveKnownAnswerScenarioTelemetry {
     pub status: LaneStatus,
     /// Host-observed wall-clock latency for this provider call.
     pub latency_ms: u64,
-    /// Exact serialized request byte count used as a resource proxy.
-    pub input_bytes: u64,
-    /// Exact provider response byte count used as a resource proxy.
-    pub output_bytes: u64,
+    /// Exact UTF-8 byte count of the synthetic message roles and content.
+    pub message_content_bytes: u64,
+    /// Exact UTF-8 byte count of the returned provider content field.
+    pub provider_content_bytes: u64,
+    /// Model identity reported by the provider response, separate from the
+    /// configured model in the quality unit. Missing remains unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_model_id: Option<String>,
+    /// Provider-reported prompt/input tokens, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Provider-reported completion/output tokens, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// Provider-reported reasoning tokens, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    /// Provider-reported cached prompt tokens, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
+    /// Provider-reported cost rounded to the nearest micro-US-dollar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_microusd: Option<u64>,
     /// Bounded secret-free failure class for non-executed scenarios.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
@@ -95,16 +120,24 @@ pub struct LiveKnownAnswerRunMetrics {
     pub blocked_scenarios: u32,
     /// Sum of host-observed provider-call latency.
     pub total_latency_ms: u64,
-    /// Sum of exact serialized request bytes.
-    pub total_input_bytes: u64,
-    /// Sum of exact provider response bytes.
-    pub total_output_bytes: u64,
+    /// Sum of synthetic message role/content UTF-8 bytes.
+    pub total_message_content_bytes: u64,
+    /// Sum of returned provider content-field UTF-8 bytes.
+    pub total_provider_content_bytes: u64,
     /// Provider-reported input tokens, absent when transport does not return usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
     /// Provider-reported output tokens, absent when transport does not return usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    /// Provider-reported reasoning tokens, absent when any attempted scenario
+    /// omits usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    /// Provider-reported cached tokens, absent when any attempted scenario
+    /// omits usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
     /// Provider-reported cost in millionths of a US dollar, absent when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_microusd: Option<u64>,
@@ -126,6 +159,11 @@ pub struct LiveKnownAnswerRunReport {
     pub quality_run: QualityRunRecord,
     /// Host-observed lifecycle, latency, and byte proxies per opaque scenario.
     pub telemetry: Vec<LiveKnownAnswerScenarioTelemetry>,
+    /// SHA-256 of the complete canonical capture JSON, when a private capture
+    /// accompanies this report. This binds report and capture content without
+    /// treating the digest as a signature or authenticity proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_capture_sha256: Option<String>,
     /// Recomputed aggregate quality, speed, and resource metrics.
     pub metrics: LiveKnownAnswerRunMetrics,
 }
@@ -143,9 +181,21 @@ pub struct LiveKnownAnswerScenarioObservation {
     /// Host-observed call latency.
     pub latency_ms: u64,
     /// Serialized request size.
-    pub input_bytes: u64,
+    pub message_content_bytes: u64,
     /// Provider response size.
-    pub output_bytes: u64,
+    pub provider_content_bytes: u64,
+    /// Provider-reported model identity, when present.
+    pub reported_model_id: Option<String>,
+    /// Provider-reported input tokens, when present.
+    pub input_tokens: Option<u64>,
+    /// Provider-reported output tokens, when present.
+    pub output_tokens: Option<u64>,
+    /// Provider-reported reasoning tokens, when present.
+    pub reasoning_tokens: Option<u64>,
+    /// Provider-reported cached tokens, when present.
+    pub cached_tokens: Option<u64>,
+    /// Provider-reported cost rounded to micro-US-dollars, when present.
+    pub cost_microusd: Option<u64>,
     /// Bounded secret-free failure class for a non-executed attempt.
     pub failure_code: Option<String>,
 }
@@ -244,8 +294,14 @@ pub fn build_live_known_answer_run(
             scenario_id: expected_id,
             status: observation.status,
             latency_ms: observation.latency_ms,
-            input_bytes: observation.input_bytes,
-            output_bytes: observation.output_bytes,
+            message_content_bytes: observation.message_content_bytes,
+            provider_content_bytes: observation.provider_content_bytes,
+            reported_model_id: observation.reported_model_id,
+            input_tokens: observation.input_tokens,
+            output_tokens: observation.output_tokens,
+            reasoning_tokens: observation.reasoning_tokens,
+            cached_tokens: observation.cached_tokens,
+            cost_microusd: observation.cost_microusd,
             failure_code: observation.failure_code,
         });
     }
@@ -275,7 +331,7 @@ pub fn build_live_known_answer_run(
             live_optional: true,
         },
     };
-    let metrics = derive_metrics(&quality_run.cases, &telemetry);
+    let metrics = derive_metrics(&quality_run.cases, &telemetry)?;
     let report = LiveKnownAnswerRunReport {
         schema_id: LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID.into(),
         observed_at,
@@ -283,6 +339,7 @@ pub fn build_live_known_answer_run(
         status,
         quality_run,
         telemetry,
+        canonical_capture_sha256: None,
         metrics,
     };
     validate_live_known_answer_run(&report)?;
@@ -291,10 +348,20 @@ pub fn build_live_known_answer_run(
 
 /// Validate a durable report, including recomputed status and aggregate metrics.
 pub fn validate_live_known_answer_run(report: &LiveKnownAnswerRunReport) -> CoreResult<()> {
-    if report.schema_id != LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID || report.observed_at <= 0 {
+    if report.schema_id != LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID
+        || report.observed_at <= 0
+        || report.observed_at as u64 > LIVE_KNOWN_ANSWER_JS_SAFE_MAX
+    {
         return Err(run_error("known-answer report identity is invalid"));
     }
-    validate_quality_unit(&report.quality_run)?;
+    if report
+        .canonical_capture_sha256
+        .as_deref()
+        .is_some_and(|digest| !is_sha256(digest))
+    {
+        return Err(run_error("known-answer capture digest is invalid"));
+    }
+    validate_live_known_answer_quality_unit(&report.quality_run)?;
     if report.quality_run.cases.len() != LIVE_KNOWN_ANSWER_REQUIRED_SCENARIOS
         || report.telemetry.len() != LIVE_KNOWN_ANSWER_REQUIRED_SCENARIOS
     {
@@ -319,6 +386,19 @@ pub fn validate_live_known_answer_run(report: &LiveKnownAnswerRunReport) -> Core
             ));
         }
         validate_failure_code(telemetry.status, telemetry.failure_code.as_deref())?;
+        validate_js_safe_telemetry(telemetry)?;
+        validate_dispatch_contract(telemetry)?;
+        if telemetry
+            .reported_model_id
+            .as_deref()
+            .is_some_and(|value| !is_safe_identity(value, 256))
+        {
+            return Err(run_error("reported model identity is invalid"));
+        }
+        if let Some(reported_model_id) = &telemetry.reported_model_id {
+            validate_provider_model_identity(reported_model_id)
+                .map_err(|_| run_error("reported model identity is not private-safe"))?;
+        }
         match telemetry.status {
             LaneStatus::Executed => {
                 if case.answers.len() != 1
@@ -346,7 +426,7 @@ pub fn validate_live_known_answer_run(report: &LiveKnownAnswerRunReport) -> Core
         }
     }
     let status = derive_status(&report.quality_run.cases, &report.telemetry);
-    let metrics = derive_metrics(&report.quality_run.cases, &report.telemetry);
+    let metrics = derive_metrics(&report.quality_run.cases, &report.telemetry)?;
     if report.status != status
         || report.metrics != metrics
         || report.quality_run.status
@@ -404,7 +484,10 @@ pub fn render_live_known_answer_markdown(report: &LiveKnownAnswerRunReport) -> C
         "- Profile: `{}`\n",
         unit.subject.gateway_profile_id
     ));
-    body.push_str(&format!("- Model: `{}`\n", unit.subject.model_id));
+    body.push_str(&format!(
+        "- Configured model: `{}`\n",
+        unit.subject.model_id
+    ));
     body.push_str(&format!(
         "- Endpoint fingerprint: `{}`\n",
         unit.subject.endpoint_fingerprint
@@ -416,7 +499,7 @@ pub fn render_live_known_answer_markdown(report: &LiveKnownAnswerRunReport) -> C
     body.push_str(&format!("- Prompt set: `{}`\n\n", unit.prompt_set_hash));
     body.push_str("## Measured summary\n\n");
     body.push_str(&format!(
-        "- Passed: {}/{}\n- Executed: {}\n- Failed: {}\n- Cancelled: {}\n- Blocked: {}\n- Total latency: {} ms\n- Input/output bytes: {}/{}\n- Tokens: unknown\n- Cost: unknown\n\n",
+        "- Passed: {}/{}\n- Executed: {}\n- Failed: {}\n- Cancelled: {}\n- Blocked: {}\n- Total latency: {} ms\n- Message/provider content bytes: {}/{}\n- Input/output tokens: {}/{}\n- Reasoning/cached tokens: {}/{}\n- Cost (micro-USD): {}\n\n",
         report.metrics.passed_scenarios,
         report.metrics.required_scenarios,
         report.metrics.executed_scenarios,
@@ -424,8 +507,13 @@ pub fn render_live_known_answer_markdown(report: &LiveKnownAnswerRunReport) -> C
         report.metrics.cancelled_scenarios,
         report.metrics.blocked_scenarios,
         report.metrics.total_latency_ms,
-        report.metrics.total_input_bytes,
-        report.metrics.total_output_bytes,
+        report.metrics.total_message_content_bytes,
+        report.metrics.total_provider_content_bytes,
+        optional_u64_label(report.metrics.input_tokens),
+        optional_u64_label(report.metrics.output_tokens),
+        optional_u64_label(report.metrics.reasoning_tokens),
+        optional_u64_label(report.metrics.cached_tokens),
+        optional_u64_label(report.metrics.cost_microusd),
     ));
     body.push_str("## Scenario outcomes\n\n");
     for (case, telemetry) in report.quality_run.cases.iter().zip(&report.telemetry) {
@@ -440,14 +528,22 @@ pub fn render_live_known_answer_markdown(report: &LiveKnownAnswerRunReport) -> C
         if let Some(code) = &telemetry.failure_code {
             body.push_str(&format!(" — `{code}`"));
         }
+        if let Some(reported) = &telemetry.reported_model_id {
+            body.push_str(&format!(" — provider reported `{reported}`"));
+            if reported != &unit.subject.model_id {
+                body.push_str(" (differs from configured model)");
+            }
+        }
         body.push('\n');
     }
-    body.push_str("\nThis report contains deterministic host scores and redacted execution metadata only. It does not contain prompts, provider responses, evaluator truth, credentials, token counts, cost, or a universal model recommendation.\n");
+    body.push_str("\nThis report contains deterministic host scores and redacted execution metadata only. It does not contain prompts, provider responses, evaluator truth, credentials, or a universal model recommendation. Missing provider usage and cost remain unknown.\n");
     gate_export_text(&body)?;
     Ok(body)
 }
 
-fn validate_quality_unit(record: &QualityRunRecord) -> CoreResult<()> {
+/// Validate the exact configured quality identity shared by reports and
+/// operator-controlled canonical-response captures.
+pub fn validate_live_known_answer_quality_unit(record: &QualityRunRecord) -> CoreResult<()> {
     let unit = &record.quality_unit;
     if record.schema_id != RUN_RECORD_SCHEMA_ID
         || record.schema_version != QUALITY_EVAL_SCHEMA_VERSION
@@ -476,21 +572,98 @@ fn validate_quality_unit(record: &QualityRunRecord) -> CoreResult<()> {
     {
         return Err(run_error("known-answer quality unit is invalid"));
     }
+    for configured_identity in [
+        unit.build_identity.as_str(),
+        unit.subject.gateway_profile_id.as_str(),
+    ] {
+        validate_provider_controlled_text(configured_identity)
+            .map_err(|_| run_error("configured quality identity is not private-safe"))?;
+    }
+    validate_provider_model_identity(&unit.subject.model_id)
+        .map_err(|_| run_error("configured model identity is not private-safe"))?;
     Ok(())
 }
 
 fn validate_failure_code(status: LaneStatus, code: Option<&str>) -> CoreResult<()> {
-    let code_is_safe = code.is_some_and(|value| {
-        !value.is_empty()
-            && value.len() <= 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-    });
-    if (status == LaneStatus::Executed && code.is_some())
-        || (status != LaneStatus::Executed && !code_is_safe)
-    {
+    let valid = matches!(
+        (status, code),
+        (LaneStatus::Executed, None)
+            | (
+                LaneStatus::Failed,
+                Some(
+                    "provider_request_failed"
+                        | "provider_response_parse_failed"
+                        | "provider_response_privacy_rejected"
+                        | "provider_response_vocabulary_rejected"
+                        | "host_score_failed",
+                ),
+            )
+            | (
+                LaneStatus::Cancelled,
+                Some("cancelled_before_dispatch" | "provider_attempt_cancelled"),
+            )
+            | (
+                LaneStatus::Blocked,
+                Some("host_diagnostic_pipeline_unavailable")
+            )
+    );
+    if !valid {
         return Err(run_error("known-answer failure code is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_dispatch_contract(telemetry: &LiveKnownAnswerScenarioTelemetry) -> CoreResult<()> {
+    let provider_metadata_present = telemetry.reported_model_id.is_some()
+        || telemetry.input_tokens.is_some()
+        || telemetry.output_tokens.is_some()
+        || telemetry.reasoning_tokens.is_some()
+        || telemetry.cached_tokens.is_some()
+        || telemetry.cost_microusd.is_some();
+    let code = telemetry.failure_code.as_deref();
+    let dispatched = telemetry.message_content_bytes > 0;
+    let must_be_pre_dispatch = matches!(
+        (telemetry.status, code),
+        (LaneStatus::Cancelled, Some("cancelled_before_dispatch"))
+            | (
+                LaneStatus::Blocked,
+                Some("host_diagnostic_pipeline_unavailable")
+            )
+    );
+    if must_be_pre_dispatch {
+        if dispatched
+            || telemetry.provider_content_bytes != 0
+            || telemetry.latency_ms != 0
+            || provider_metadata_present
+        {
+            return Err(run_error(
+                "pre-dispatch known-answer outcome carries attempt telemetry",
+            ));
+        }
+        return Ok(());
+    }
+    if !dispatched {
+        return Err(run_error(
+            "dispatched known-answer outcome has no message-content bytes",
+        ));
+    }
+    if matches!(telemetry.status, LaneStatus::Executed) && telemetry.provider_content_bytes == 0 {
+        return Err(run_error(
+            "executed known-answer outcome has no provider content",
+        ));
+    }
+    if matches!(
+        code,
+        Some(
+            "provider_response_privacy_rejected"
+                | "provider_response_vocabulary_rejected"
+                | "host_score_failed"
+        )
+    ) && telemetry.provider_content_bytes == 0
+    {
+        return Err(run_error(
+            "parsed provider-response outcome has no provider content",
+        ));
     }
     Ok(())
 }
@@ -532,8 +705,8 @@ fn derive_status(
 fn derive_metrics(
     cases: &[CaseRunResult],
     telemetry: &[LiveKnownAnswerScenarioTelemetry],
-) -> LiveKnownAnswerRunMetrics {
-    LiveKnownAnswerRunMetrics {
+) -> CoreResult<LiveKnownAnswerRunMetrics> {
+    let metrics = LiveKnownAnswerRunMetrics {
         required_scenarios: telemetry.len() as u32,
         executed_scenarios: telemetry
             .iter()
@@ -555,13 +728,81 @@ fn derive_metrics(
             .iter()
             .filter(|row| row.status == LaneStatus::Blocked)
             .count() as u32,
-        total_latency_ms: telemetry.iter().map(|row| row.latency_ms).sum(),
-        total_input_bytes: telemetry.iter().map(|row| row.input_bytes).sum(),
-        total_output_bytes: telemetry.iter().map(|row| row.output_bytes).sum(),
-        input_tokens: None,
-        output_tokens: None,
-        cost_microusd: None,
+        total_latency_ms: checked_sum_metric(telemetry.iter().map(|row| row.latency_ms))?,
+        total_message_content_bytes: checked_sum_metric(
+            telemetry.iter().map(|row| row.message_content_bytes),
+        )?,
+        total_provider_content_bytes: checked_sum_metric(
+            telemetry.iter().map(|row| row.provider_content_bytes),
+        )?,
+        input_tokens: sum_attempted_metric(telemetry, |row| row.input_tokens)?,
+        output_tokens: sum_attempted_metric(telemetry, |row| row.output_tokens)?,
+        reasoning_tokens: sum_attempted_metric(telemetry, |row| row.reasoning_tokens)?,
+        cached_tokens: sum_attempted_metric(telemetry, |row| row.cached_tokens)?,
+        cost_microusd: sum_attempted_metric(telemetry, |row| row.cost_microusd)?,
+    };
+    Ok(metrics)
+}
+
+fn sum_attempted_metric(
+    telemetry: &[LiveKnownAnswerScenarioTelemetry],
+    get: impl Fn(&LiveKnownAnswerScenarioTelemetry) -> Option<u64>,
+) -> CoreResult<Option<u64>> {
+    let mut attempted = telemetry
+        .iter()
+        .filter(|row| row.message_content_bytes > 0)
+        .peekable();
+    if attempted.peek().is_none() {
+        return Ok(None);
     }
+    let mut sum = 0u64;
+    for row in attempted {
+        let Some(value) = get(row) else {
+            return Ok(None);
+        };
+        sum = sum
+            .checked_add(value)
+            .filter(|value| *value <= LIVE_KNOWN_ANSWER_JS_SAFE_MAX)
+            .ok_or_else(|| run_error("provider telemetry aggregate exceeds the safe bound"))?;
+    }
+    Ok(Some(sum))
+}
+
+fn checked_sum_metric(values: impl IntoIterator<Item = u64>) -> CoreResult<u64> {
+    values.into_iter().try_fold(0u64, |sum, value| {
+        sum.checked_add(value)
+            .filter(|total| *total <= LIVE_KNOWN_ANSWER_JS_SAFE_MAX)
+            .ok_or_else(|| run_error("provider telemetry aggregate exceeds the safe bound"))
+    })
+}
+
+fn validate_js_safe_telemetry(telemetry: &LiveKnownAnswerScenarioTelemetry) -> CoreResult<()> {
+    let values = [
+        Some(telemetry.latency_ms),
+        Some(telemetry.message_content_bytes),
+        Some(telemetry.provider_content_bytes),
+        telemetry.input_tokens,
+        telemetry.output_tokens,
+        telemetry.reasoning_tokens,
+        telemetry.cached_tokens,
+        telemetry.cost_microusd,
+    ];
+    if values
+        .into_iter()
+        .flatten()
+        .any(|value| value > LIVE_KNOWN_ANSWER_JS_SAFE_MAX)
+    {
+        return Err(run_error(
+            "provider telemetry exceeds the JavaScript-safe integer bound",
+        ));
+    }
+    Ok(())
+}
+
+fn optional_u64_label(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 fn is_sha256(value: &str) -> bool {

@@ -456,7 +456,7 @@ struct AppState {
     investigation_team_qualification_store_path: PathBuf,
     /// Durable, redacted provider-backed known-answer quality history.
     investigation_team_known_answer:
-        Mutex<investigation_team_known_answer_host::InvestigationTeamKnownAnswerStore>,
+        Mutex<investigation_team_known_answer_host::InvestigationTeamKnownAnswerStoreState>,
     /// Secret-free known-answer history path.
     investigation_team_known_answer_store_path: PathBuf,
     /// One-shot exact Log Explorer navigation targets (#698 exact-nav).
@@ -8656,19 +8656,25 @@ fn investigation_team_known_answer_projection_context(
     .map_err(|error| error.to_string())
 }
 
+/// Return only the redacted renderer projection. Private canonical provider
+/// responses, when securely retained by the host, never cross this command.
 #[tauri::command]
 fn list_investigation_team_known_answer_qualifications(
     state: State<'_, AppState>,
 ) -> Result<Vec<investigation_team_known_answer_host::InvestigationTeamKnownAnswerDto>, String> {
     let context = investigation_team_known_answer_projection_context(&state)?;
-    state
+    let mut store = state
         .investigation_team_known_answer
         .lock()
-        .expect("investigation_team_known_answer")
-        .history(&context)
-        .map_err(|error| error.to_string())
+        .expect("investigation_team_known_answer");
+    let current = store
+        .reload_for_operation(&state.investigation_team_known_answer_store_path)
+        .map_err(|error| error.to_string())?;
+    current.history(&context).map_err(|error| error.to_string())
 }
 
+/// Clear both redacted known-answer reports and their separately stored private
+/// canonical response captures without changing provider configuration.
 #[tauri::command]
 fn clear_investigation_team_known_answer_qualifications(
     state: State<'_, AppState>,
@@ -8677,12 +8683,23 @@ fn clear_investigation_team_known_answer_qualifications(
         .investigation_team_known_answer
         .lock()
         .expect("investigation_team_known_answer");
-    let mut next = store.clone();
+    let next = store
+        .reload_for_operation(&state.investigation_team_known_answer_store_path)
+        .map_err(|error| error.to_string())?;
+    let expected_revision = next.revision().map_err(|error| error.to_string())?;
+    let mut next = next.clone();
     let changed = next.clear();
     if changed {
-        next.save(&state.investigation_team_known_answer_store_path)
+        let outcome = next
+            .save(
+                &state.investigation_team_known_answer_store_path,
+                &expected_revision,
+            )
             .map_err(|error| format!("save investigation team known-answer history: {error}"))?;
-        *store = next;
+        store.replace_with_committed(next);
+        if let Some(warning) = outcome.durability_warning.as_deref() {
+            tracing::warn!(%warning, revision = %outcome.revision, "known-answer history clear committed with a durability warning");
+        }
     }
     Ok(changed)
 }
@@ -8694,6 +8711,19 @@ fn clear_investigation_team_known_answer_qualifications(
 async fn run_live_investigation_team_known_answer_qualification(
     state: State<'_, AppState>,
 ) -> Result<Vec<investigation_team_known_answer_host::InvestigationTeamKnownAnswerDto>, String> {
+    investigation_team_known_answer_host::ensure_known_answer_persistence_supported()
+        .map_err(|error| error.to_string())?;
+    // Security ordering: the synchronized bounded/no-follow reload must stay
+    // ahead of config target resolution and every possible provider call.
+    {
+        let mut store = state
+            .investigation_team_known_answer
+            .lock()
+            .expect("investigation_team_known_answer");
+        store
+            .reload_for_operation(&state.investigation_team_known_answer_store_path)
+            .map_err(|error| error.to_string())?;
+    }
     let cfg = state.config.lock().expect("config").clone();
     let targets = resolve_live_investigation_targets(&state, &cfg)?;
     let current_members = targets.iter().map(|target| target.member.clone()).collect();
@@ -8742,14 +8772,27 @@ async fn run_live_investigation_team_known_answer_qualification(
         .investigation_team_known_answer
         .lock()
         .expect("investigation_team_known_answer");
-    let mut next = store.clone();
-    for report in reports {
-        next.publish(report).map_err(|error| error.to_string())?;
+    let current = store
+        .reload_for_operation(&state.investigation_team_known_answer_store_path)
+        .map_err(|error| error.to_string())?
+        .clone();
+    let expected_revision = current.revision().map_err(|error| error.to_string())?;
+    let mut next = current;
+    for evidence in reports {
+        next.publish_execution(evidence)
+            .map_err(|error| error.to_string())?;
     }
-    next.save(&state.investigation_team_known_answer_store_path)
-        .map_err(|error| format!("save investigation team known-answer history: {error}"))?;
     let published = next.history(&context).map_err(|error| error.to_string())?;
-    *store = next;
+    let outcome = next
+        .save(
+            &state.investigation_team_known_answer_store_path,
+            &expected_revision,
+        )
+        .map_err(|error| format!("save investigation team known-answer history: {error}"))?;
+    store.replace_with_committed(next);
+    if let Some(warning) = outcome.durability_warning.as_deref() {
+        tracing::warn!(%warning, revision = %outcome.revision, "known-answer history run committed with a durability warning");
+    }
     Ok(published)
 }
 
@@ -15492,14 +15535,17 @@ pub fn run() {
         investigation_team_known_answer_host::investigation_team_known_answer_store_path(
             path.parent().expect("config directory"),
         );
-    let investigation_team_known_answer =
+    let investigation_team_known_answer_load =
         investigation_team_known_answer_host::InvestigationTeamKnownAnswerStore::load(
             &investigation_team_known_answer_store_path,
-        )
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "investigation team known-answer history could not be loaded");
-            investigation_team_known_answer_host::InvestigationTeamKnownAnswerStore::default()
-        });
+        );
+    if let Err(error) = &investigation_team_known_answer_load {
+        tracing::warn!(%error, "investigation team known-answer history is unavailable");
+    }
+    let investigation_team_known_answer =
+        investigation_team_known_answer_host::InvestigationTeamKnownAnswerStoreState::from_load_result(
+            investigation_team_known_answer_load,
+        );
 
     let state = AppState {
         branding,

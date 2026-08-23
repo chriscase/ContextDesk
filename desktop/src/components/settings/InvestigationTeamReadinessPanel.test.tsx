@@ -124,10 +124,12 @@ function knownAnswerReport(
       cancelled_scenarios: 0,
       blocked_scenarios: 0,
       total_latency_ms: 1_400,
-      total_input_bytes: 14_000,
-      total_output_bytes: 7_000,
+      total_message_content_bytes: 14_000,
+      total_provider_content_bytes: 7_000,
       input_tokens: null,
       output_tokens: null,
+      reasoning_tokens: null,
+      cached_tokens: null,
       cost_microusd: null,
     },
     scenarios: Array.from({ length: 14 }, (_, index) => ({
@@ -136,8 +138,8 @@ function knownAnswerReport(
       passed: true,
       failed_dimensions: [],
       latency_ms: 100,
-      input_bytes: 1_000,
-      output_bytes: 500,
+      message_content_bytes: 1_000,
+      provider_content_bytes: 500,
       failure_code: null,
     })),
     redacted_json: "{\"known_answer\":true}",
@@ -240,6 +242,38 @@ describe("InvestigationTeamReadinessPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.getByTestId("investigation-team-readiness")).toBeTruthy());
     expect(host.get).toHaveBeenCalledTimes(2);
+  });
+
+  it("blocks providers until a repaired evidence store reloads in-process", async () => {
+    host.knownAnswerHistory.mockRejectedValueOnce(
+      new Error("existing evidence is unavailable; repair or remove the invalid owner store"),
+    );
+    render(<InvestigationTeamReadinessPanel />);
+
+    await screen.findByTestId("investigation-team-readiness");
+    const alert = screen.getByTestId("investigation-team-known-answer-error");
+    expect(alert.textContent).toMatch(/existing evidence is unavailable/i);
+    expect(
+      (screen.getByRole("button", {
+        name: /evidence store unavailable/i,
+      }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(host.runKnownAnswer).not.toHaveBeenCalled();
+    expect(alert.textContent).toMatch(/retry this secure read/i);
+    expect(alert.textContent).toMatch(/will not call a provider unless that reload succeeds/i);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /retry secure evidence store read/i }),
+    );
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", {
+          name: /run 14-scenario quality suite/i,
+        }) as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    expect(host.knownAnswerHistory).toHaveBeenCalledTimes(2);
+    expect(host.runKnownAnswer).not.toHaveBeenCalled();
   });
 
   it("labels stale host evidence as unusable for a new run", async () => {
@@ -417,7 +451,8 @@ describe("InvestigationTeamReadinessPanel", () => {
               status: "failed",
               passed: false,
               failed_dimensions: ["causal_role_contract"],
-              failure_code: "response_or_score_contract_failed",
+              reported_model_id: "provider/model-b",
+              failure_code: "provider_response_vocabulary_rejected",
             }
           : scenario,
       ),
@@ -427,7 +462,15 @@ describe("InvestigationTeamReadinessPanel", () => {
 
     const quality = await screen.findByTestId("investigation-team-known-answer-quality");
     expect(quality.textContent).toMatch(/13\/14 scenarios passed/i);
-    expect(quality.textContent).toMatch(/tokens unknown.*cost unknown/i);
+    expect(quality.textContent).toMatch(/tokens: unknown input.*cost: unknown/i);
+    expect(quality.textContent).toMatch(/not audited billing records/i);
+    expect(quality.textContent).toMatch(/private owner-only host store/i);
+    expect(quality.textContent).toMatch(/stable owner-only parent directory/i);
+    expect(quality.textContent).toMatch(/deleted together with their redacted history/i);
+    expect(quality.textContent).toMatch(/entire persisted quality feature fails closed/i);
+    expect(quality.textContent).toMatch(/before any provider call/i);
+    expect(quality.textContent).toMatch(/reloads it without restarting the app/i);
+    expect(quality.textContent).toMatch(/message-content bytes.*provider-content bytes/i);
     expect(quality.textContent).toMatch(/app build changed.*configured role or deployment changed/i);
     expect(quality.textContent).toMatch(/stale · recorded failed/i);
     expect(quality.textContent).toContain("investigator-1");
@@ -437,6 +480,9 @@ describe("InvestigationTeamReadinessPanel", () => {
     fireEvent.click(screen.getByText("Inspect 14 scenario outcomes"));
     expect(quality.textContent).toContain("scenario-005");
     expect(quality.textContent).toContain("causal_role_contract");
+    expect(quality.textContent).toMatch(/provider reported provider\/model-b/i);
+    expect(quality.textContent).toMatch(/differs from configured model/i);
+    expect(quality.textContent).toMatch(/unsupported vocabulary/i);
   });
 
   it("runs the trusted-host known-answer suite and publishes returned history", async () => {

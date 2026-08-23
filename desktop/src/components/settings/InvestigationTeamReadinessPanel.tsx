@@ -80,11 +80,21 @@ function knownAnswerFailureLabel(reason: string | null | undefined): string {
       return "cancelled";
     case "provider_request_failed":
       return "provider request failed";
-    case "response_or_score_contract_failed":
-      return "response or scoring contract failed";
+    case "provider_response_parse_failed":
+      return "provider response did not match the strict schema";
+    case "provider_response_privacy_rejected":
+      return "provider response failed the privacy gate";
+    case "provider_response_vocabulary_rejected":
+      return "provider response used unsupported vocabulary";
+    case "host_score_failed":
+      return "ContextDesk could not score the parsed response";
     default:
       return reason ? "did not produce a usable score" : "";
   }
+}
+
+function knownMetric(value: number | null | undefined, suffix = ""): string {
+  return value == null ? "unknown" : `${value}${suffix}`;
 }
 
 function staleReasonLabel(reason: string): string {
@@ -242,6 +252,7 @@ export function InvestigationTeamReadinessPanel() {
     "idle",
   );
   const [qualityError, setQualityError] = useState<string | null>(null);
+  const [qualityHistoryAvailable, setQualityHistoryAvailable] = useState(true);
   const [phase, setPhase] = useState<"loading" | "ready" | "absent" | "error">(
     "loading",
   );
@@ -249,12 +260,24 @@ export function InvestigationTeamReadinessPanel() {
   const load = useCallback(async () => {
     setPhase("loading");
     try {
-      const [next, report, reports, knownAnswerReports] = await Promise.all([
+      const [next, report, reports] = await Promise.all([
         hostGetMultiModelSettings(),
         hostGetInvestigationTeamQualification(),
         hostListInvestigationTeamQualifications(),
-        hostListInvestigationTeamKnownAnswerQualifications(),
       ]);
+      let knownAnswerReports: InvestigationTeamKnownAnswerDto[] = [];
+      try {
+        knownAnswerReports = await hostListInvestigationTeamKnownAnswerQualifications();
+        setQualityHistoryAvailable(true);
+        setQualityError(null);
+      } catch (error) {
+        setQualityHistoryAvailable(false);
+        setQualityError(
+          error instanceof Error
+            ? error.message
+            : "Existing known-answer evidence is unavailable. Repair or remove the owner store, then retry the secure read without restarting ContextDesk.",
+        );
+      }
       if (next) {
         setSettings(next);
         setQualification(report);
@@ -601,7 +624,9 @@ export function InvestigationTeamReadinessPanel() {
             <p className="it-readiness__detail">
               Runs 14 frozen, opaque triage scenarios for each exact configured
               role. The trusted host keeps evaluator truth separate, scores strict
-              citations and causal claims, and stores only redacted evidence.
+              citations and causal claims, and stores redacted reports plus
+              separate private canonical responses only where the host can
+              guarantee the complete secure persistence contract.
             </p>
           </div>
           <button
@@ -609,10 +634,12 @@ export function InvestigationTeamReadinessPanel() {
             className="btn btn--primary btn--sm"
             data-testid="investigation-team-run-known-answer"
             onClick={() => void runKnownAnswer()}
-            disabled={qualityPhase === "running"}
+            disabled={qualityPhase === "running" || !qualityHistoryAvailable}
           >
             {qualityPhase === "running"
               ? "Running quality suite…"
+              : !qualityHistoryAvailable
+                ? "Evidence store unavailable"
               : "Run 14-scenario quality suite"}
           </button>
         </div>
@@ -629,22 +656,45 @@ export function InvestigationTeamReadinessPanel() {
           </div>
         ) : null}
         {qualityError ? (
-          <p
-            className="field__error"
-            role="alert"
-            data-testid="investigation-team-known-answer-error"
-          >
-            {qualityError}
-          </p>
+          <div>
+            <p
+              className="field__error"
+              role="alert"
+              data-testid="investigation-team-known-answer-error"
+            >
+              {qualityError}
+              {!qualityHistoryAvailable
+                ? " Repair or remove the owner store, then retry this secure read. ContextDesk reloads it in-process and will not call a provider unless that reload succeeds."
+                : ""}
+            </p>
+            {!qualityHistoryAvailable ? (
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                onClick={() => void load()}
+              >
+                Retry secure evidence store read
+              </button>
+            ) : null}
+          </div>
         ) : null}
         <p className="it-readiness__detail">
           This complements the small wiring check above. It measures deterministic
-          answer quality, latency, and request/response bytes for the recorded
+          answer quality, latency, synthetic message-content bytes, and returned
+          provider-content bytes for the recorded
           build, profile, model, endpoint fingerprint, suite, and prompt set.
           Tokens and cost remain “unknown” unless the transport can report them;
+          provider-reported usage and cost are not audited billing records, and
           no report is a universal model recommendation. Scenarios that need
           unavailable host attempt, tool, or role telemetry are shown as blocked
           rather than counted as model failures.
+          Canonical responses stay in a private owner-only host
+          store beneath a stable owner-only parent directory and are deleted together with their redacted history; they are
+          not included in these share-safe redacted exports. On hosts that cannot
+          guarantee stable no-follow identity, owner-only capture retention, and
+          atomic replacement, this entire persisted quality feature fails closed
+          before any provider call. If an invalid store is repaired or removed,
+          retrying the secure read reloads it without restarting the app.
         </p>
 
         {knownAnswerHistory.length > 0 ? (
@@ -697,7 +747,7 @@ export function InvestigationTeamReadinessPanel() {
                   <div>
                     <dt>Resource proxy</dt>
                     <dd>
-                      {report.metrics.total_input_bytes} input bytes · {report.metrics.total_output_bytes} output bytes · tokens unknown · cost unknown
+                      {report.metrics.total_message_content_bytes} message-content bytes · {report.metrics.total_provider_content_bytes} provider-content bytes · tokens: {knownMetric(report.metrics.input_tokens)} input / {knownMetric(report.metrics.output_tokens)} output / {knownMetric(report.metrics.reasoning_tokens)} reasoning / {knownMetric(report.metrics.cached_tokens)} cached · cost: {knownMetric(report.metrics.cost_microusd, " μUSD")}
                     </dd>
                   </div>
                 </dl>
@@ -716,6 +766,16 @@ export function InvestigationTeamReadinessPanel() {
                         <code>{scenario.scenario_id}</code>
                         <span>{scenario.passed ? "passed" : scenario.status}</span>
                         <small>{scenario.latency_ms} ms</small>
+                        {scenario.reported_model_id ? (
+                          <small>
+                            provider reported <code>{scenario.reported_model_id}</code>
+                            {scenario.reported_model_id !== report.model_id
+                              ? " (differs from configured model)"
+                              : ""}
+                          </small>
+                        ) : (
+                          <small>provider-reported model unknown</small>
+                        )}
                         {scenario.failure_code ? (
                           <small>{knownAnswerFailureLabel(scenario.failure_code)}</small>
                         ) : null}
