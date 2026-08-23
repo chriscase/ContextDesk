@@ -24,7 +24,7 @@ pub const SUITE_VERSION: &str = "contextdesk.investigation_team_qualification.su
 pub mod failure_reason {
     /// Unknown JSON field (contract drift).
     pub const UNKNOWN_FIELD: &str = "unknown_field";
-    /// Duplicate role identity in one pipeline.
+    /// Duplicate investigation-team role in one pipeline (subject may be shared).
     pub const DUPLICATE_ROLE_IDENTITY: &str = "duplicate_role_identity";
     /// Duplicate attempt identity.
     pub const DUPLICATE_ATTEMPT_IDENTITY: &str = "duplicate_attempt_identity";
@@ -523,19 +523,12 @@ fn validate_input(input: &QualificationInput) -> CoreResult<()> {
         ));
     }
     let mut roles = BTreeSet::new();
-    let mut subjects = BTreeSet::new();
     for member in &input.members {
-        let subject = validate_member(member)?;
+        validate_member(member)?;
         if !roles.insert(member.role) {
             return Err(contract_err(
                 failure_reason::DUPLICATE_ROLE_IDENTITY,
                 member.role.as_str(),
-            ));
-        }
-        if !subjects.insert(subject.storage_id()) {
-            return Err(contract_err(
-                failure_reason::DUPLICATE_ROLE_IDENTITY,
-                "duplicate profile/model/deployment identity",
             ));
         }
     }

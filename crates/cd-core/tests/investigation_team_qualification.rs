@@ -352,6 +352,36 @@ fn projection_matrix() -> Vec<ProjectionRow> {
             }),
         },
         ProjectionRow {
+            name: "same_subject_two_roles",
+            mutate: |input| {
+                let shared = input.members[0].clone();
+                input.members[1].profile_id = shared.profile_id.clone();
+                input.members[1].model_id = shared.model_id.clone();
+                input.members[1].endpoint_fingerprint = shared.endpoint_fingerprint.clone();
+                input.members[1].deployment_url = shared.deployment_url.clone();
+                input.attempts[1].profile_id = shared.profile_id.clone();
+                input.attempts[1].model_id = shared.model_id.clone();
+                input.attempts[1].endpoint_fingerprint = shared.endpoint_fingerprint.clone();
+            },
+            expect_ok: true,
+            reason: None,
+            prove: Some(|report| {
+                assert_eq!(report.fingerprint.members.len(), 2);
+                assert_eq!(
+                    report.fingerprint.members[0].subject_storage_id,
+                    report.fingerprint.members[1].subject_storage_id
+                );
+                let roles: Vec<_> = report
+                    .fingerprint
+                    .members
+                    .iter()
+                    .map(|member| member.role)
+                    .collect();
+                assert!(roles.contains(&InvestigationTeamRole::Investigator));
+                assert!(roles.contains(&InvestigationTeamRole::Reviewer));
+            }),
+        },
+        ProjectionRow {
             name: "duplicate_role_identities",
             mutate: |input| {
                 input.members[1].role = InvestigationTeamRole::Investigator;
@@ -429,6 +459,51 @@ fn happy_path_scores_separate_axes_and_redacts_exports() {
     assert!(!provider.contains(LEAK_TRUTH));
     let round_trip = parse_report(&json).expect("parse");
     assert_eq!(round_trip, report);
+}
+
+#[test]
+fn same_model_subject_in_two_roles_qualifies_and_fingerprints_both() {
+    let mut input = opaque_input();
+    let shared = investigator();
+    let mut review = reviewer();
+    review.profile_id = shared.profile_id.clone();
+    review.model_id = shared.model_id.clone();
+    review.endpoint_fingerprint = shared.endpoint_fingerprint.clone();
+    review.deployment_url = shared.deployment_url.clone();
+    input.members = vec![shared.clone(), review];
+    input.attempts[1].profile_id = shared.profile_id.clone();
+    input.attempts[1].model_id = shared.model_id.clone();
+    input.attempts[1].endpoint_fingerprint = shared.endpoint_fingerprint.clone();
+
+    let report = qualify(input).expect("split-role pipeline may share one subject");
+    let roles: Vec<_> = report
+        .fingerprint
+        .members
+        .iter()
+        .map(|member| member.role)
+        .collect();
+    assert!(roles.contains(&InvestigationTeamRole::Investigator));
+    assert!(roles.contains(&InvestigationTeamRole::Reviewer));
+    assert_eq!(report.fingerprint.members.len(), 2);
+    assert_eq!(
+        report.fingerprint.members[0].subject_storage_id,
+        report.fingerprint.members[1].subject_storage_id
+    );
+    assert_eq!(
+        report.fingerprint.members[0].subject_storage_id,
+        shared.subject().storage_id()
+    );
+    assert_eq!(
+        report
+            .attempts
+            .iter()
+            .map(|row| row.role)
+            .collect::<Vec<_>>(),
+        vec![
+            InvestigationTeamRole::Investigator,
+            InvestigationTeamRole::Reviewer
+        ]
+    );
 }
 
 #[test]

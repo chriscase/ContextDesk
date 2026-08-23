@@ -49,6 +49,7 @@ shipped `qualify` / `parse_report` / `render_json` / `render_markdown` /
 | `partial_execution_preserved` | `qualify` | partial status remains |
 | `cancellation_preserved` | `qualify` | cancelled status remains |
 | `timeout_preserved` | `qualify` | timed_out status + speed metric |
+| `same_subject_two_roles` | `qualify` | Investigator+Reviewer may share one `ModelSubject`; both roles stay in the fingerprint |
 | `duplicate_role_identities` | `qualify` | fail closed |
 | `invalid_metrics_empty_citation` | `qualify` | fail closed |
 | `dishonest_completion` | `qualify` | fail closed |
