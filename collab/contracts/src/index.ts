@@ -124,6 +124,7 @@ export {
   SNAPSHOT_STATUSES,
   parseSnapshot,
   parseSnapshotList,
+  snapshotFairness,
   snapshotFingerprint,
 } from "./snapshot.js";
 export type {
@@ -284,6 +285,8 @@ export {
   HELPFULNESS_STATES,
   PACKAGE_GOLD_STATES,
   RUN_STATUSES,
+  SNAPSHOT_LINEAGE_CLASSES,
+  SNAPSHOT_PROOF_BASES,
   UNKNOWN_MEASUREMENT,
   parseExperimentDecision,
   parseExperimentImport,
@@ -324,6 +327,9 @@ export type {
   ShareSafeGoldReferenceV2,
   ShareSafeHelpfulnessObservationV2,
   ShareSafeRoleConflictV2,
+  ShareSafeSnapshotProofV2,
+  SnapshotLineageClass,
+  SnapshotProofBasis,
   UnknownMeasurement,
 } from "./experiment.js";
 
@@ -374,7 +380,6 @@ export {
   parseInteractionTrace,
   parseLabExport,
   parseLabExportV2,
-  parseLabImport,
   parsePlainTranscript,
   parseStrategyComparison,
   parseShareSafeInteractionTraceV2,
@@ -417,7 +422,6 @@ export type {
   ShareSafeQuestionPathV2,
   ShareSafeStrategyComparisonV2,
   ShareSafeUnknownCode,
-  LabImport,
   ObservedCostV1,
   ObservedCountV1,
   ObservedTimestampV1,
@@ -432,6 +436,29 @@ export type {
   TraceSourceKind,
   TraceShareSafeCaveat,
 } from "./trace.js";
+
+export {
+  BENCH_ARTIFACT_NO_GOLD,
+  BENCH_ARTIFACT_NO_PROVIDER,
+  BENCH_ARTIFACT_UNKNOWN_COST_USAGE,
+  BENCH_COMPARE_CLI_SCHEMA_ID,
+  BENCH_RUN_ARTIFACT_SCHEMA_ID,
+  SYNTHETIC_EMPLOYER_LANE_LABELS,
+  convertBenchArtifactImport,
+  convertBenchRunArtifactToStrategyPackage,
+  isBenchArtifactSchemaId,
+  parseBenchRunArtifact,
+  parseShareSafeRunProjection,
+  shareSafeRunToInteractionTrace,
+} from "./bench-artifact.js";
+export type {
+  BenchArtifactLaneV1,
+  BenchRunArtifactV1,
+  ShareSafeRunProjectionV1,
+} from "./bench-artifact.js";
+
+export { parseLabImport } from "./lab-import.js";
+export type { LabImport } from "./lab-import.js";
 
 export {
   LIVE_QUALIFICATION_CATALOG_SCHEMA_ID,

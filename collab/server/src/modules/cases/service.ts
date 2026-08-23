@@ -3,6 +3,7 @@ import {
   ARTIFACT_SCHEMA_ID,
   CASE_SCHEMA_ID,
   CONTRIBUTION_SCHEMA_ID,
+  snapshotFairness,
   snapshotFingerprint,
   type ArtifactKind,
   type ArtifactV1,
@@ -257,7 +258,7 @@ export class CaseService {
       evidence: selected,
       visibility,
       protocolVersion,
-      fairnessClass: "same_snapshot",
+      fairnessClass: snapshotFairness(selected),
       status: "frozen",
       createdAt: new Date().toISOString(),
       createdBy: actor.id,
@@ -290,7 +291,7 @@ export class CaseService {
     actor: Actor,
     isAdmin: boolean,
     snapshotId?: string,
-    acceptedDecision?: AcceptedDecisionBoardInput | null,
+    acceptedDecisions?: AcceptedDecisionBoardInput[],
   ) {
     if (!(await this.getCase(caseId, actor, isAdmin))) return null;
     const snapshots = await this.store.listSnapshotsByCase(caseId);
@@ -310,7 +311,7 @@ export class CaseService {
       generatedAt: new Date().toISOString(),
       artifacts,
       contributions,
-      ...(acceptedDecision === undefined ? {} : { acceptedDecision }),
+      ...(acceptedDecisions === undefined ? {} : { acceptedDecisions }),
     });
   }
 

@@ -5256,10 +5256,25 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     // while it is happening, not only after the pipeline returns.
                     if let Some(runtime) = opts.multi_model.clone() {
                         let outcome = {
+                            // The optional causal stage consumes only the
+                            // packet's host-owned structural classifications.
+                            // If packet construction fails, the final ledger
+                            // remains causal-neutral and cannot establish root.
+                            let causal_packet = build_fast_triage_packet(
+                                &brief.candidate_groups,
+                                brief.comparison_context.as_ref(),
+                                multi_stage_binding.clone(),
+                                crate::fast_triage::clock_compatibility_from_time_quality(
+                                    brief.time_quality,
+                                ),
+                                crate::fast_triage::FastTriageNeighborhoodBudget::default(),
+                            )
+                            .ok();
                             let inputs = crate::multi_model::ReviewPipelineInputs {
                                 user_text,
                                 candidates: &brief.candidate_groups,
                                 comparison_context: brief.comparison_context.as_ref(),
+                                causal_packet: causal_packet.as_ref(),
                                 binding: multi_stage_binding.clone(),
                                 budget: runtime.budget,
                                 role_ids: runtime.role_ids.clone(),

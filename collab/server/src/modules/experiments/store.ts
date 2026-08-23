@@ -8,7 +8,21 @@ import type {
   HelpfulnessObservationV1,
   InteractionEventV1,
   InteractionTraceV1,
+  SnapshotFairnessClass,
+  SnapshotLineageClass,
+  SnapshotProofBasis,
 } from "@cd-collab/contracts";
+import {
+  SNAPSHOT_FAIRNESS_CLASSES,
+  SNAPSHOT_LINEAGE_CLASSES,
+  SNAPSHOT_PROOF_BASES,
+} from "@cd-collab/contracts";
+
+export interface ExperimentSnapshotProof {
+  basis: SnapshotProofBasis;
+  fairnessClass: SnapshotFairnessClass;
+  lineageClass: SnapshotLineageClass;
+}
 
 export interface TraceAnnotationRow {
   id: string;
@@ -27,6 +41,7 @@ export interface ExperimentRow {
   sourceSchemaId: string;
   taskFingerprint: string;
   snapshotFingerprint: string;
+  snapshotProof: ExperimentSnapshotProof;
   candidates: ExperimentCandidateV1[];
   agreement: ExperimentAgreementV1;
   createdAt: string;
@@ -52,6 +67,12 @@ export interface ExperimentStore {
   insertAnnotation(row: TraceAnnotationRow): Promise<void>;
 }
 
+const UNKNOWN_SNAPSHOT_PROOF: ExperimentSnapshotProof = {
+  basis: "unknown",
+  fairnessClass: "unknown",
+  lineageClass: "unknown",
+};
+
 function cloneCandidates(candidates: ExperimentCandidateV1[]): ExperimentCandidateV1[] {
   return candidates.map((c) => ({
     ...c,
@@ -76,6 +97,84 @@ function cloneAgreement(agreement: ExperimentAgreementV1): ExperimentAgreementV1
       assignments: row.assignments.map((a) => ({ ...a })),
     })),
     notes: [...agreement.notes],
+  };
+}
+
+function cloneSnapshotProof(proof: ExperimentSnapshotProof): ExperimentSnapshotProof {
+  return parseSnapshotProof(proof);
+}
+
+function parseSnapshotProof(raw: unknown): ExperimentSnapshotProof {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("invalid stored experiment snapshot proof");
+  }
+  const proof = raw as Record<string, unknown>;
+  const keys = Object.keys(proof);
+  if (
+    keys.length !== 3 ||
+    !keys.every((key) => ["basis", "fairnessClass", "lineageClass"].includes(key))
+  ) {
+    throw new Error("invalid stored experiment snapshot proof fields");
+  }
+  if (
+    typeof proof.fairnessClass !== "string" ||
+    !(SNAPSHOT_FAIRNESS_CLASSES as readonly string[]).includes(proof.fairnessClass) ||
+    typeof proof.lineageClass !== "string" ||
+    !(SNAPSHOT_LINEAGE_CLASSES as readonly string[]).includes(proof.lineageClass) ||
+    typeof proof.basis !== "string" ||
+    !(SNAPSHOT_PROOF_BASES as readonly string[]).includes(proof.basis)
+  ) {
+    throw new Error("invalid stored experiment snapshot proof");
+  }
+  const parsed = {
+    basis: proof.basis as SnapshotProofBasis,
+    fairnessClass: proof.fairnessClass as SnapshotFairnessClass,
+    lineageClass: proof.lineageClass as SnapshotLineageClass,
+  };
+  if (
+    parsed.basis === "unknown" &&
+    (parsed.fairnessClass !== "unknown" || parsed.lineageClass !== "unknown")
+  ) {
+    throw new Error("unknown stored snapshot proof cannot claim fairness or lineage");
+  }
+  if (parsed.basis === "host_frozen_snapshot" && parsed.lineageClass === "unknown") {
+    throw new Error("host stored snapshot proof requires known lineage");
+  }
+  return parsed;
+}
+
+function storedAgreement(row: ExperimentRow): object {
+  return {
+    publicAgreement: row.agreement,
+    snapshotProof: cloneSnapshotProof(row.snapshotProof ?? UNKNOWN_SNAPSHOT_PROOF),
+  };
+}
+
+function decodeStoredAgreement(raw: unknown): {
+  agreement: ExperimentAgreementV1;
+  snapshotProof: ExperimentSnapshotProof;
+} {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const record = raw as Record<string, unknown>;
+    if ("publicAgreement" in record || "snapshotProof" in record) {
+      if (!("publicAgreement" in record) || !("snapshotProof" in record)) {
+        throw new Error("incomplete stored experiment snapshot proof envelope");
+      }
+      if (
+        Object.keys(record).length !== 2 ||
+        !Object.keys(record).every((key) => ["publicAgreement", "snapshotProof"].includes(key))
+      ) {
+        throw new Error("invalid stored experiment snapshot proof envelope fields");
+      }
+      return {
+        agreement: record.publicAgreement as ExperimentAgreementV1,
+        snapshotProof: parseSnapshotProof(record.snapshotProof),
+      };
+    }
+  }
+  return {
+    agreement: raw as ExperimentAgreementV1,
+    snapshotProof: { ...UNKNOWN_SNAPSHOT_PROOF },
   };
 }
 
@@ -126,6 +225,10 @@ export class MemoryExperimentStore implements ExperimentStore {
       ...row,
       candidates: cloneCandidates(row.candidates),
       agreement: cloneAgreement(row.agreement),
+      // Older in-memory fixtures and callers predate the host proof. Treat only
+      // a truly absent field as legacy unknown; present malformed proof still
+      // fails closed through cloneSnapshotProof.
+      snapshotProof: cloneSnapshotProof(row.snapshotProof ?? UNKNOWN_SNAPSHOT_PROOF),
     });
     this.observations.set(row.id, []);
     this.decisions.set(row.id, []);
@@ -141,6 +244,7 @@ export class MemoryExperimentStore implements ExperimentStore {
       ...row,
       candidates: cloneCandidates(row.candidates),
       agreement: cloneAgreement(row.agreement),
+      snapshotProof: cloneSnapshotProof(row.snapshotProof),
     };
   }
 
@@ -273,7 +377,7 @@ export class PgExperimentStore implements ExperimentStore {
         row.taskFingerprint,
         row.snapshotFingerprint,
         JSON.stringify(row.candidates),
-        JSON.stringify(row.agreement),
+        JSON.stringify(storedAgreement(row)),
         row.createdAt,
         row.importerId,
         row.importerUsername,
@@ -398,6 +502,7 @@ export class PgExperimentStore implements ExperimentStore {
 }
 
 function fromPgExperiment(raw: Record<string, unknown>): ExperimentRow {
+  const stored = decodeStoredAgreement(raw.agreement);
   return {
     id: String(raw.id),
     caseId: String(raw.case_id),
@@ -405,8 +510,9 @@ function fromPgExperiment(raw: Record<string, unknown>): ExperimentRow {
     sourceSchemaId: String(raw.source_schema_id),
     taskFingerprint: String(raw.task_fingerprint),
     snapshotFingerprint: String(raw.snapshot_fingerprint),
+    snapshotProof: stored.snapshotProof,
     candidates: raw.candidates as ExperimentCandidateV1[],
-    agreement: raw.agreement as ExperimentAgreementV1,
+    agreement: stored.agreement,
     createdAt: new Date(String(raw.created_at)).toISOString(),
     importerId: String(raw.importer_id),
     importerUsername: String(raw.importer_username),

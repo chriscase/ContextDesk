@@ -603,6 +603,53 @@ export async function hostGetConfig(): Promise<HostConfigDto | null> {
   return invoke<HostConfigDto>("get_config");
 }
 
+/** Non-secret reviewer candidate row: identity only, no credentials. */
+export type ReviewerCandidateDto = {
+  id: string;
+  label: string;
+  chat_model: string;
+  /** Local-only profiles cannot egress; no remote acknowledgement applies. */
+  local_only: boolean;
+};
+
+/**
+ * Measured reviewer qualification, from the host's cached JsonProposal
+ * capability verdict (a cache peek — reading settings never starts a probe).
+ * `unverified` is never qualified.
+ */
+export type ReviewerQualification =
+  | "qualified"
+  | "unqualified"
+  | "unverified"
+  | "unconfigured";
+
+export type ContributionRole =
+  | "observation_extractor"
+  | "timeline_analyst"
+  | "causal_proposer"
+  | "contradiction_checker"
+  | "evidence_gap"
+  | "reviewer";
+
+export type ContributionAssignmentDto = {
+  role: ContributionRole;
+  profile_id: string;
+  model: string | null;
+  allow_remote: boolean;
+  require_qualified: boolean;
+  qualification: ReviewerQualification | string;
+};
+
+export type ContributionPolicyDto = {
+  max_contributors: number;
+  max_parallel: number;
+  max_rounds: number;
+  max_context_chars: number;
+  max_total_provider_rounds: number;
+  max_semantic_corrections_per_stage: number;
+  max_context_chars_total: number | null;
+};
+
 /** Non-secret multi-model settings for the Settings surface. */
 export type MultiModelSettingsDto = {
   mode: "single" | "review" | "contributions" | string;
@@ -610,6 +657,13 @@ export type MultiModelSettingsDto = {
   reviewer_model: string | null;
   reviewer_allow_remote: boolean;
   reviewer_require_qualified: boolean;
+  reviewer_qualification: ReviewerQualification | string;
+  /** Active (investigator) profile id, for honest same-profile copy. */
+  active_profile_id: string | null;
+  /** Existing provider profiles the reviewer role may reference. */
+  candidate_profiles: ReviewerCandidateDto[];
+  contribution_assignments: ContributionAssignmentDto[];
+  contribution_policy: ContributionPolicyDto;
 };
 
 export async function hostGetMultiModelSettings(): Promise<MultiModelSettingsDto | null> {
@@ -622,6 +676,49 @@ export async function hostSetMultiModelMode(
 ): Promise<void> {
   if (!isTauri()) return;
   await invoke<void>("set_multi_model_mode", { mode });
+}
+
+/**
+ * Assign (or clear, via null/blank profileId) the multi-model reviewer role.
+ * Records configuration only — never starts a probe, never runs a turn. The
+ * host rejects unknown profiles and a remote acknowledgement on a local-only
+ * profile without writing anything. Measured qualification is mandatory:
+ * there is deliberately no way to relax `require_qualified` over IPC — every
+ * assigned reviewer is recorded with it `true`.
+ */
+export async function hostSetMultiModelReviewer(args: {
+  profileId: string | null;
+  model: string | null;
+  allowRemote: boolean;
+}): Promise<void> {
+  if (!isTauri()) return;
+  await invoke<void>("set_multi_model_reviewer", args);
+}
+
+/**
+ * Save the complete contribution team and its hard route budget. This records
+ * configuration only; the host still re-checks measured qualification,
+ * egress, credentials, and bounds before every linked investigation turn.
+ */
+export async function hostSetMultiModelContributors(args: {
+  assignments: Array<{
+    role: ContributionRole;
+    profileId: string;
+    model: string | null;
+    allowRemote: boolean;
+  }>;
+  policy: {
+    maxContributors: number;
+    maxParallel: number;
+    maxRounds: number;
+    maxContextChars: number;
+    maxTotalProviderRounds: number;
+    maxSemanticCorrectionsPerStage: number;
+    maxContextCharsTotal: number | null;
+  };
+}): Promise<void> {
+  if (!isTauri()) return;
+  await invoke<void>("set_multi_model_contributors", args);
 }
 
 /** Non-secret S3-compatible backup settings. Credential values never cross IPC. */
@@ -2228,6 +2325,14 @@ export type LogIngestReportDto = {
   confidence?: LogImportConfidenceDto | null;
   /** Completion/diagnostic phase breakdown (#824); optional for older hosts. */
   phaseTimings?: LogIngestPhaseTimingsDto | null;
+  /** Classified complete/partial/rejected document from current hosts. */
+  outcome?: {
+    schemaId: string;
+    schemaVersion: number;
+    class: "complete" | "partial" | "rejected";
+    published: boolean;
+    corpusId?: string | null;
+  } | null;
 };
 
 export type DemoLogInstallDto = {

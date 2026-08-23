@@ -457,6 +457,23 @@ describe("LogTroubleshootingWizard product path", () => {
     expect(outcome.composerSeed).not.toContain("peer-analysis.cdlog.zip");
   });
 
+  it("shows a readable classified rejection instead of [object Object]", async () => {
+    hostMocks.ingestPath.mockRejectedValue({
+      message: "zip open: missing end record [member=bundles/inner.zip]",
+      outcome: { class: "rejected", published: false },
+    });
+    renderWizard();
+    await reachConfirmationForRaw();
+    await acceptSoftWriteAndWaitForRun(hostMocks.ingestPath);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(
+      "Import rejected: zip open: missing end record",
+    );
+    expect(alert.textContent).not.toContain("[object Object]");
+    expect(alert.textContent).not.toContain("[member=");
+    expect(screen.queryByText("Import finished")).toBeNull();
+  });
+
   it("imports a legacy package without fabricating missing statistics", async () => {
     hostMocks.importPackage.mockResolvedValue({
       corpusId: "local-legacy-789",

@@ -71,6 +71,14 @@
   margin-top: 0.65rem;
 }
 
+.experiment-lab__file {
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 0.65rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .experiment-lab__matrix th,
 .experiment-lab__matrix td {
   border-bottom: 1px solid var(--border);
@@ -452,6 +460,25 @@
   font-size: 0.8rem;
 }
 
+.experiment-lab__signal-groups {
+  display: grid;
+  gap: 0.6rem;
+  margin-top: 0.55rem;
+}
+
+.experiment-lab__signal-group h6 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__path-kind--incomplete {
+  color: var(--warning);
+}
+
 .experiment-lab__paths {
   grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
   margin-top: 0.65rem;
@@ -608,6 +635,239 @@
   overflow: auto;
 }
 
+/* Compare → Decide scan strip: the first thing an operator reads. It restates
+   facts from the response; the styling must group, never rank. */
+.experiment-lab__scan {
+  min-width: 0;
+  margin: 0.85rem 0;
+  padding: 0.85rem;
+  border: 1px solid var(--lab-border-strong);
+  border-radius: var(--lab-radius);
+  background: var(--lab-surface-raised);
+}
+
+.experiment-lab__scan .experiment-lab__scorecards {
+  margin: 0.75rem 0 0;
+}
+
+.experiment-lab__scan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+}
+
+.experiment-lab__scan-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--bg);
+}
+
+.experiment-lab__scan-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: 0.86rem;
+}
+
+.experiment-lab__scan-list {
+  margin: 0;
+  padding-left: 1.05rem;
+}
+
+.experiment-lab__scan-list li {
+  margin: 0.3rem 0;
+  color: var(--fg);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__scan-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__scan-caveat {
+  margin: auto 0 0;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.experiment-lab__scan-decision {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.experiment-lab__scan-decision p {
+  margin: 0;
+}
+
+.experiment-lab__scan-decision-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.experiment-lab__scan-decision-text {
+  color: var(--fg);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__scan-decision-rationale {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__scan-decision-author {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.experiment-lab__badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--lab-border-strong);
+  border-radius: 999px;
+  background: var(--lab-surface-raised);
+  color: var(--accent);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__badge--accepted {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  color: var(--success);
+}
+
+.experiment-lab__badge--proposed {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--warning);
+}
+
+.experiment-lab__shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.8rem;
+  margin-top: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.76rem;
+}
+
+.experiment-lab__shortcuts span {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__shortcuts a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.experiment-lab__shortcuts a:hover {
+  text-decoration: underline;
+}
+
+.experiment-lab__shortcuts a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Anchor targets need breathing room so a jump never hides the heading. */
+.experiment-lab__heading {
+  scroll-margin-top: 1rem;
+}
+
+/* Exact candidate ids stay visible for provenance under the operator label. */
+.experiment-lab__candidate-id,
+.experiment-lab__path-id {
+  display: block;
+  max-width: 14rem;
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__decision-card {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.65rem 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--bg);
+}
+
+.experiment-lab__decision-card .experiment-lab__decision-line {
+  margin: 0;
+}
+
+.experiment-lab__decision-rationale {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__decision-author {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.experiment-lab__decision-history {
+  margin: 0.55rem 0 0;
+  padding-left: 1.15rem;
+}
+
+.experiment-lab__decision-history li {
+  margin: 0.35rem 0;
+  color: var(--fg);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__extensions {
+  color: var(--muted);
+}
+
+.experiment-lab__extensions .experiment-lab__extension-grid {
+  margin-bottom: 0.1rem;
+}
+
 .experiment-lab__tools:focus-within,
 .experiment-lab__raw-export:focus-within,
 .experiment-lab__experiments:focus-within {
@@ -629,6 +889,15 @@
     flex-wrap: wrap;
   }
 
+  .experiment-lab__scan-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .experiment-lab__candidate-id,
+  .experiment-lab__path-id {
+    max-width: 100%;
+  }
+
   .experiment-lab__presence {
     width: 100%;
   }
@@ -642,7 +911,8 @@
     grid-template-columns: 1fr;
   }
 
-  .experiment-lab__matrix-wrap {
+  .experiment-lab__matrix-wrap,
+  .experiment-lab__crossexam-wrap {
     margin-right: -0.35rem;
     padding-bottom: 0.2rem;
   }
@@ -672,5 +942,418 @@
   .experiment-lab__matrix {
     min-width: 38rem;
     font-size: 0.74rem;
+  }
+
+  .experiment-lab__scan {
+    padding: 0.7rem;
+  }
+}
+
+/* ————— Decision-readiness cockpit ————— */
+/* The cockpit groups recorded facts; nothing in this styling may rank lanes.
+   Focus mode highlights — it must never dim other lanes below legibility or
+   hide them, because the decision basis always stays fully visible. */
+
+.experiment-lab__readiness {
+  border-color: var(--lab-border-strong);
+}
+
+.experiment-lab__facets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+}
+
+.experiment-lab__facet {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--bg);
+}
+
+.experiment-lab__facet-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__facet-state {
+  margin: 0;
+  color: var(--fg);
+  font-size: 0.88rem;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__facet-queue {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.experiment-lab__facet-details {
+  margin-top: auto;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.experiment-lab__facet-details summary {
+  cursor: pointer;
+  color: var(--fg);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.experiment-lab__facet-details p {
+  margin: 0.4rem 0;
+  line-height: 1.5;
+}
+
+.experiment-lab__facet-details a,
+.experiment-lab__queue-link,
+.experiment-lab__focus-digest a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.experiment-lab__facet-details a:hover,
+.experiment-lab__queue-link:hover,
+.experiment-lab__focus-digest a:hover {
+  text-decoration: underline;
+}
+
+.experiment-lab__facet-details summary:focus-visible,
+.experiment-lab__facet-details a:focus-visible,
+.experiment-lab__queue-link:focus-visible,
+.experiment-lab__focus-digest a:focus-visible,
+.experiment-lab__focus-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Candidate focus mode */
+.experiment-lab__focus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+}
+
+.experiment-lab__focus-label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__focus-chip {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__focus-chip[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.experiment-lab__focus-status {
+  margin: 0.6rem 0 0;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--lab-border-strong);
+  border-left-width: 3px;
+  border-radius: 0.45rem;
+  background: var(--lab-surface-raised);
+  color: var(--fg);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.experiment-lab__focus-flag {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.experiment-lab__focus-digest {
+  min-width: 0;
+  margin-top: 0.7rem;
+  padding: 0.75rem;
+  border: 1px solid var(--lab-border-strong);
+  border-radius: 0.6rem;
+  background: var(--bg);
+}
+
+.experiment-lab__focus-digest-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__focus-facts {
+  margin: 0.65rem 0 0.2rem;
+}
+
+/* Human review queue */
+.experiment-lab__queue-group {
+  margin-top: 0.75rem;
+}
+
+.experiment-lab__queue-category {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.45rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__queue-count {
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.experiment-lab__queue-list {
+  margin: 0.45rem 0 0;
+  padding-left: 1.35rem;
+}
+
+.experiment-lab__queue-list li {
+  margin: 0.35rem 0;
+  padding: 0.35rem 0.45rem 0.35rem 0.55rem;
+  border-left: 2px solid var(--lab-border-strong);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__queue-text {
+  margin-right: 0.35rem;
+}
+
+.experiment-lab__queue-link {
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+/* Evidence cross-examination */
+.experiment-lab__crossexam-block {
+  margin-top: 1rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--border);
+}
+
+/* The cross-examination table deliberately does not share the
+   experiment-lab__matrix / __matrix-wrap identity: browser qualification
+   strict-locates those classes and must keep resolving to exactly one
+   candidate matrix. The shared table treatment is reproduced here, scoped. */
+.experiment-lab__crossexam-wrap {
+  overflow-x: auto;
+}
+
+.experiment-lab__crossexam {
+  width: 100%;
+  min-width: 36rem;
+  margin: 0.75rem 0 0;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.experiment-lab__crossexam caption {
+  margin-bottom: 0.45rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: left;
+}
+
+.experiment-lab__crossexam th,
+.experiment-lab__crossexam td {
+  min-width: 9.5rem;
+  padding: 0.48rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: normal;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__crossexam th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.experiment-lab__crossexam thead th {
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__crossexam tbody th {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.experiment-lab__crossexam tbody th,
+.experiment-lab__crossexam tfoot th {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 11rem;
+  background: var(--lab-surface);
+}
+
+/* No zebra striping here (unlike the matrix): the sticky first column needs
+   opaque rows, so plain row borders carry the row rhythm instead. */
+.experiment-lab__crossexam tfoot th,
+.experiment-lab__crossexam tfoot td {
+  border-top: 2px solid var(--lab-border-strong);
+  border-bottom: none;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.experiment-lab__crossexam tfoot th {
+  color: var(--fg);
+}
+
+.experiment-lab__crossexam-ref {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.74rem;
+}
+
+.experiment-lab__crossexam-badge {
+  display: inline-block;
+  margin: 0.25rem 0.3rem 0 0;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.experiment-lab__crossexam-badge--conflict {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--warning);
+}
+
+.experiment-lab__crossexam-mark {
+  color: var(--accent);
+}
+
+.experiment-lab__crossexam td small {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.experiment-lab__crossexam-col--focused {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent), inset -2px 0 0 var(--accent);
+}
+
+.experiment-lab__matrix-row--focused th,
+.experiment-lab__matrix-row--focused td {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.experiment-lab__matrix-row--focused th {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.experiment-lab__path--focused {
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Deliberately no animation anywhere in the cockpit: motion here would only
+   decorate, theme flips would repaint mid-transition, and a motionless surface
+   respects prefers-reduced-motion by construction. */
+
+@media (max-width: 720px) {
+  .experiment-lab__facets {
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  }
+
+  .experiment-lab__queue-link {
+    white-space: normal;
+  }
+}
+
+@media (max-width: 480px) {
+  .experiment-lab__facets {
+    grid-template-columns: 1fr;
+  }
+
+  .experiment-lab__crossexam {
+    min-width: 32rem;
+    font-size: 0.72rem;
+  }
+
+  .experiment-lab__crossexam th,
+  .experiment-lab__crossexam td {
+    min-width: 8rem;
+  }
+
+  .experiment-lab__crossexam tbody th,
+  .experiment-lab__crossexam tfoot th {
+    min-width: 9rem;
+  }
+
+  .experiment-lab__focus-digest {
+    padding: 0.6rem;
   }
 }

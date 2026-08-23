@@ -15,6 +15,10 @@ import {
   type CandidateGoldAlignmentV1,
   type GoldReferenceV1,
 } from "./gold.js";
+import {
+  SNAPSHOT_FAIRNESS_CLASSES,
+  type SnapshotFairnessClass,
+} from "./snapshot.js";
 
 export const EXPERIMENT_PACKAGE_SCHEMA_ID = "cd-collab.experiment_package.v1" as const;
 export const EXPERIMENT_SUMMARY_SCHEMA_ID = "cd-collab.experiment_summary.v1" as const;
@@ -32,6 +36,11 @@ export const EXPERIMENT_SHARE_SAFE_CAVEATS = [
   "gold_alignment_not_correctness",
 ] as const;
 export type ExperimentShareSafeCaveat = (typeof EXPERIMENT_SHARE_SAFE_CAVEATS)[number];
+
+export const SNAPSHOT_LINEAGE_CLASSES = ["root", "derived", "unknown"] as const;
+export type SnapshotLineageClass = (typeof SNAPSHOT_LINEAGE_CLASSES)[number];
+export const SNAPSHOT_PROOF_BASES = ["host_frozen_snapshot", "unknown"] as const;
+export type SnapshotProofBasis = (typeof SNAPSHOT_PROOF_BASES)[number];
 
 export const AGREEMENT_NOT_CORRECTNESS =
   "Agreement is not proof of correctness." as const;
@@ -294,6 +303,13 @@ export interface ShareSafeExperimentDecisionV2 {
   evidenceAliases: string[];
 }
 
+export interface ShareSafeSnapshotProofV2 {
+  basis: SnapshotProofBasis;
+  fairnessClass: SnapshotFairnessClass;
+  lineageClass: SnapshotLineageClass;
+  parentSnapshotAlias: string | null;
+}
+
 export interface ShareSafeGoldReferenceV2 {
   goldAlias: string;
   version: number;
@@ -320,6 +336,7 @@ export interface ExperimentReviewExportV2 {
   packageAlias: string;
   taskAlias: string;
   snapshotAlias: string;
+  snapshotProof: ShareSafeSnapshotProofV2;
   candidates: ShareSafeExperimentCandidateV2[];
   agreement: ShareSafeExperimentAgreementV2;
   observations: ShareSafeHelpfulnessObservationV2[];
@@ -510,6 +527,13 @@ const shareSafeDecisionShape: ObjectShape = {
   evidenceAliases: f.req(f.arr(f.str)),
 };
 
+const shareSafeSnapshotProofShape: ObjectShape = {
+  basis: f.req(f.en(...SNAPSHOT_PROOF_BASES)),
+  fairnessClass: f.req(f.en(...SNAPSHOT_FAIRNESS_CLASSES)),
+  lineageClass: f.req(f.en(...SNAPSHOT_LINEAGE_CLASSES)),
+  parentSnapshotAlias: f.nul(f.str),
+};
+
 const shareSafeRelationshipShape: ObjectShape = {
   evidenceAlias: f.req(f.str),
   roleAlias: f.req(f.str),
@@ -541,6 +565,7 @@ export const experimentReviewExportV2Shape: ObjectShape = {
   packageAlias: f.req(f.str),
   taskAlias: f.req(f.str),
   snapshotAlias: f.req(f.str),
+  snapshotProof: f.req(f.obj(shareSafeSnapshotProofShape)),
   candidates: f.req(f.arr(f.obj(shareSafeCandidateShape))),
   agreement: f.req(f.obj(shareSafeAgreementShape)),
   observations: f.req(f.arr(f.obj(shareSafeObservationShape))),
@@ -641,13 +666,98 @@ export function parseExperimentReviewExport(raw: unknown): ExperimentReviewExpor
 }
 
 function assertAliasArray(path: string, values: string[], prefix: string): void {
-  values.forEach((value, index) => assertShareSafeAlias(`${path}[${index}]`, value, prefix));
+  const seen = new Set<string>();
+  values.forEach((value, index) => {
+    const itemPath = `${path}[${index}]`;
+    assertShareSafeAlias(itemPath, value, prefix);
+    if (seen.has(value)) {
+      throw new ContractViolation(itemPath, "duplicate alias");
+    }
+    seen.add(value);
+  });
+}
+
+function assertDecisionRevisionHonesty(
+  path: string,
+  decision: ShareSafeExperimentDecisionV2,
+): void {
+  if (decision.revision < 1) {
+    throw new ContractViolation(`${path}.revision`, "must be >= 1");
+  }
+  if (decision.revision === 1) {
+    if (decision.predecessorRevision !== null) {
+      throw new ContractViolation(
+        `${path}.predecessorRevision`,
+        "revision 1 must not name a predecessor",
+      );
+    }
+    return;
+  }
+  if (decision.predecessorRevision !== decision.revision - 1) {
+    throw new ContractViolation(
+      `${path}.predecessorRevision`,
+      "must be the immediate predecessor revision",
+    );
+  }
+}
+
+function assertGoldRevisionHonesty(path: string, gold: ShareSafeGoldReferenceV2): void {
+  if (gold.version === 1 && gold.predecessorGoldAlias !== null) {
+    throw new ContractViolation(
+      `${path}.predecessorGoldAlias`,
+      "version 1 must not name a predecessor",
+    );
+  }
+  if (gold.version > 1 && !gold.predecessorGoldAlias) {
+    throw new ContractViolation(
+      `${path}.predecessorGoldAlias`,
+      "version > 1 requires a predecessor",
+    );
+  }
+  if (gold.predecessorGoldAlias === gold.goldAlias) {
+    throw new ContractViolation(`${path}.predecessorGoldAlias`, "cannot name the current gold");
+  }
 }
 
 function assertReviewV2Aliases(row: ExperimentReviewExportV2): void {
   assertShareSafeAlias("$.packageAlias", row.packageAlias, "package");
   assertShareSafeAlias("$.taskAlias", row.taskAlias, "task");
   assertShareSafeAlias("$.snapshotAlias", row.snapshotAlias, "snapshot");
+  if (row.snapshotProof.basis === "unknown") {
+    if (
+      row.snapshotProof.fairnessClass !== "unknown" ||
+      row.snapshotProof.lineageClass !== "unknown" ||
+      row.snapshotProof.parentSnapshotAlias !== null
+    ) {
+      throw new ContractViolation(
+        "$.snapshotProof",
+        "unknown proof basis cannot claim fairness or lineage",
+      );
+    }
+  } else if (row.snapshotProof.lineageClass === "unknown") {
+    throw new ContractViolation(
+      "$.snapshotProof.lineageClass",
+      "host frozen snapshot proof requires known lineage",
+    );
+  }
+  if (row.snapshotProof.lineageClass === "derived") {
+    if (!row.snapshotProof.parentSnapshotAlias) {
+      throw new ContractViolation(
+        "$.snapshotProof.parentSnapshotAlias",
+        "derived lineage requires a parent snapshot alias",
+      );
+    }
+    assertShareSafeAlias(
+      "$.snapshotProof.parentSnapshotAlias",
+      row.snapshotProof.parentSnapshotAlias,
+      "snapshot-parent",
+    );
+  } else if (row.snapshotProof.parentSnapshotAlias !== null) {
+    throw new ContractViolation(
+      "$.snapshotProof.parentSnapshotAlias",
+      "root or unknown lineage must not name a parent",
+    );
+  }
   const candidateAliases = new Set<string>();
   for (const [index, candidate] of row.candidates.entries()) {
     const path = `$.candidates[${index}]`;
@@ -692,9 +802,7 @@ function assertReviewV2Aliases(row: ExperimentReviewExportV2): void {
   if (row.decision) {
     assertShareSafeAlias("$.decision.decisionAlias", row.decision.decisionAlias, "decision");
     assertAliasArray("$.decision.evidenceAliases", row.decision.evidenceAliases, "evidence");
-    if (row.decision.revision < 1) {
-      throw new ContractViolation("$.decision.revision", "must be >= 1");
-    }
+    assertDecisionRevisionHonesty("$.decision", row.decision);
   }
   if (row.gold) {
     assertShareSafeAlias("$.gold.goldAlias", row.gold.goldAlias, "gold");
@@ -719,6 +827,7 @@ function assertReviewV2Aliases(row: ExperimentReviewExportV2): void {
     if (row.gold.version < 1 || row.gold.acceptedDecisionRevision < 1) {
       throw new ContractViolation("$.gold", "gold version and accepted revision must be >= 1");
     }
+    assertGoldRevisionHonesty("$.gold", row.gold);
   }
   for (const [index, alignment] of row.alignments.entries()) {
     const path = `$.alignments[${index}]`;

@@ -144,7 +144,145 @@ exactly what happened — entries examined, sources selected vs.
 ignored/unsupported/excluded/failed, events imported, templates, detected
 formats, timestamp provenance, whether the import was partial, any
 reviewed formats that were applied, and any sources still needing a
-timezone declaration.
+timezone declaration — plus the typed import outcome (complete, partial,
+or rejected) and its located defect ledger, documented next.
+
+### Import outcomes and the defect ledger
+
+Every `import` run ends in exactly one of three classes, stated the same
+way in operator prose and in machine output (the
+`contextdesk.import_outcome.v1` document produced by
+`cd_core::log_analysis::import_outcome`):
+
+| Class | Published? | Meaning |
+| ----- | ---------- | ------- |
+| `complete` | yes | Every discovered source intended for import was read through EOF and published. No source failed, none was excluded by policy, and no record was rejected as malformed. |
+| `partial` | yes | A corpus was published, but it does not contain everything the source offered. The defect ledger names what is missing, and why. |
+| `rejected` | no | Nothing was published. Staging was removed and the corpus library is unchanged. The ledger names the source or archive member that stopped the run. |
+
+Classification is fail-closed and decided in one place in the engine. A
+`rejected` outcome never carries a corpus id. An ingest `Err` pairs with
+`rejected`, but a failure *after* publication (for example an invalid
+configured default timezone) can return `Err` with a `complete` or
+`partial` outcome — the typed `published` bit is then what the operator
+copy must follow. Intentional filtering (directories, hidden files,
+unselected entries) is counted as *ignored* and never makes a corpus
+partial. Text output leads with the verdict — `Import complete`,
+`Import complete with defects (PARTIAL)`, or an `error:` line whose
+publication sentence is driven by `published` — followed by an
+`Import outcome:` block whenever there is a defect to explain.
+
+Defects are **located and coded**, never free-form operating-system, ZIP,
+or parser text (unstable across platforms, and the most likely place for
+a path or credential to leak):
+
+- The locator names the exact source down to the full archive-member
+  chain (`outer.zip!/inner.zip!/app.log`) and, for record-level defects,
+  the 1-based line and byte offset inside that member.
+- The bounded code set is the entire machine-readable explanation:
+  `archive_unreadable`, `nested_archive_staging_failed`,
+  `archive_depth_exceeded`, `archive_member_unstable`,
+  `member_metadata_failed`, `member_open_failed`, `member_read_failed`,
+  `member_too_large`, `member_binary`, `member_empty`, `member_symlink`,
+  `member_non_regular`, `malformed_structured_record`, `unclassified`.
+  Each renders with a constant one-line operator hint in text mode.
+- The located list is bounded (64 entries; record-level codes coalesce
+  per member, keeping the first exact location). Per-code totals in
+  `defectCounts` always stay complete, and `privacy.defectsTruncated`
+  says when the located list was capped.
+- Privacy is structural-identity-only, and the report says so itself in
+  its `privacy` block: every path component and archive container name is
+  secret-scrubbed before it reaches the report, record positions are
+  ordinals and byte offsets, and there is no field anywhere that can hold
+  a log record, parsed value, or OS error string.
+- `manifestDigest` is a deterministic digest over the classified content
+  (corpus ids and wall-clock values excluded), so two imports of the same
+  bytes agree and acceptance runs can diff verdicts across machines.
+
+With `--json`, a publishing run carries the document as `data.outcome`
+(all examples here are generic and synthetic):
+
+```json
+{
+  "schema_version": 1,
+  "ok": true,
+  "command": "import",
+  "data": {
+    "corpus_id": "<uuid>",
+    "partial": false,
+    "outcome": {
+      "schemaId": "contextdesk.import_outcome.v1",
+      "schemaVersion": 1,
+      "class": "partial",
+      "published": true,
+      "corpusId": "<uuid>",
+      "counts": { "sourcesDiscovered": 3, "sourcesImported": 3, "sourcesFailed": 0, "sourcesExcluded": 0, "sourcesIgnored": 0, "recordsImported": 10, "recordsMalformed": 2 },
+      "defects": [
+        {
+          "code": "malformed_structured_record",
+          "severity": "degraded",
+          "source": { "identity": "logs/events.jsonl", "archiveChain": [], "member": "events.jsonl", "archiveDepth": 0 },
+          "location": { "line": 2, "byteOffset": 73 },
+          "occurrences": 2
+        }
+      ],
+      "defectCounts": { "malformed_structured_record": 2 },
+      "privacy": { "redactionMode": "identity_structural_only", "policySummary": "…", "defectsTruncated": false },
+      "manifestDigest": "sha256:…"
+    }
+  }
+}
+```
+
+The legacy top-level `data.partial` bool predates this contract and stays
+for existing scripts, but it reflects **failed or policy-excluded
+sources** only — the example above is exactly the malformed-records-only
+case where `partial` stays `false` while `outcome.class` is `"partial"`.
+Gate automation on `outcome.class` (or `outcome.published`), never on the
+bare bool alone.
+
+A rejected import exits non-zero with the usual error envelope, and the
+envelope's optional `error.details` field carries the **same** typed
+document a success would — a script gets typed facts on failure instead
+of having to parse prose:
+
+```json
+{
+  "schema_version": 1,
+  "ok": false,
+  "command": "import",
+  "data": null,
+  "error": {
+    "kind": "internal",
+    "message": "zip open: invalid Zip archive\n\nfailing source: bundles/inner.zip (archive_unreadable)\nnothing was published — the library is unchanged",
+    "details": {
+      "schemaId": "contextdesk.import_outcome.v1",
+      "schemaVersion": 1,
+      "class": "rejected",
+      "published": false,
+      "counts": { "sourcesDiscovered": 0, "sourcesImported": 0, "sourcesFailed": 0, "sourcesExcluded": 0, "sourcesIgnored": 0, "recordsImported": 0, "recordsMalformed": 0 },
+      "defects": [
+        {
+          "code": "archive_unreadable",
+          "severity": "fatal",
+          "source": { "identity": "bundles/inner.zip", "archiveChain": [], "member": "inner.zip", "archiveDepth": 0 },
+          "occurrences": 1
+        }
+      ],
+      "defectCounts": { "archive_unreadable": 1 },
+      "privacy": { "redactionMode": "identity_structural_only", "policySummary": "…", "defectsTruncated": false },
+      "manifestDigest": "sha256:…"
+    }
+  }
+}
+```
+
+`details` is additive and optional: it is omitted entirely on errors that
+have no typed document, so the envelope shape is unchanged for every
+other failure. One deliberate asymmetry: a failure that occurs *after*
+the corpus is already published is not reported as `rejected` — claiming
+"nothing was published" about a corpus that exists on disk would be
+false.
 
 State shared with the desktop app (provider profiles, the configured
 default timezone, imported corpora, chat sessions) lives in the same files
@@ -723,7 +861,12 @@ renderer entirely and are byte-for-byte governed by the existing contracts.
 ```
 
 On failure, `ok` is `false`, `data` is `null`, and `error` is
-`{ "kind": "<exit-code kind>", "message": "..." }`.
+`{ "kind": "<exit-code kind>", "message": "..." }`, plus an optional
+`error.details` value carrying a typed document when the failing command
+has one (today: the import outcome — see
+[Import outcomes and the defect ledger](#import-outcomes-and-the-defect-ledger)).
+`details` is omitted entirely otherwise; readers must treat its presence
+as additive, not as an envelope change.
 
 ### Streaming lines (`--jsonl`)
 

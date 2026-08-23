@@ -7,6 +7,12 @@
     "packageAlias": "package-1",
     "taskAlias": "task-1",
     "snapshotAlias": "snapshot-1",
+    "snapshotProof": {
+      "basis": "host_frozen_snapshot",
+      "fairnessClass": "same_snapshot",
+      "lineageClass": "derived",
+      "parentSnapshotAlias": "snapshot-parent-1"
+    },
     "candidates": [
       {
         "candidateAlias": "approach-1",

@@ -20,6 +20,44 @@
     "eventAlias": { "type": "string", "pattern": "^event-[1-9][0-9]*$" },
     "taskAlias": { "type": "string", "pattern": "^task-[1-9][0-9]*$" },
     "snapshotAlias": { "type": "string", "pattern": "^snapshot-[1-9][0-9]*$" },
+    "snapshotParentAlias": { "type": "string", "pattern": "^snapshot-parent-[1-9][0-9]*$" },
+    "snapshotProof": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["basis", "fairnessClass", "lineageClass", "parentSnapshotAlias"],
+          "properties": {
+            "basis": { "const": "unknown" },
+            "fairnessClass": { "const": "unknown" },
+            "lineageClass": { "const": "unknown" },
+            "parentSnapshotAlias": { "type": "null" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["basis", "fairnessClass", "lineageClass", "parentSnapshotAlias"],
+          "properties": {
+            "basis": { "const": "host_frozen_snapshot" },
+            "fairnessClass": { "enum": ["same_snapshot", "unknown"] },
+            "lineageClass": { "const": "root" },
+            "parentSnapshotAlias": { "type": "null" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["basis", "fairnessClass", "lineageClass", "parentSnapshotAlias"],
+          "properties": {
+            "basis": { "const": "host_frozen_snapshot" },
+            "fairnessClass": { "enum": ["same_snapshot", "unknown"] },
+            "lineageClass": { "const": "derived" },
+            "parentSnapshotAlias": { "$ref": "#/$defs/snapshotParentAlias" }
+          }
+        }
+      ]
+    },
     "unknownMeasurement": {
       "type": "object",
       "additionalProperties": false,
@@ -159,6 +197,7 @@
         "packageAlias",
         "taskAlias",
         "snapshotAlias",
+        "snapshotProof",
         "candidates",
         "agreement",
         "observations",
@@ -174,6 +213,7 @@
         "packageAlias": { "$ref": "#/$defs/packageAlias" },
         "taskAlias": { "$ref": "#/$defs/taskAlias" },
         "snapshotAlias": { "$ref": "#/$defs/snapshotAlias" },
+        "snapshotProof": { "$ref": "#/$defs/snapshotProof" },
         "candidates": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/candidate" } },
         "agreement": { "$ref": "#/$defs/agreement" },
         "observations": {

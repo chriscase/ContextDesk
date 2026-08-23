@@ -47,7 +47,18 @@ import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
 import { alignExperimentCandidates, knownAgreementEvidence } from "./align.js";
 import { projectCandidateMatrix, projectExperimentLabExport } from "./project.js";
-import { MemoryExperimentStore, type ExperimentRow, type ExperimentStore } from "./store.js";
+import {
+  MemoryExperimentStore,
+  type ExperimentRow,
+  type ExperimentSnapshotProof,
+  type ExperimentStore,
+} from "./store.js";
+
+const UNKNOWN_SNAPSHOT_PROOF: ExperimentSnapshotProof = {
+  basis: "unknown",
+  fairnessClass: "unknown",
+  lineageClass: "unknown",
+};
 
 export class ExperimentConflictError extends Error {
   readonly code:
@@ -79,6 +90,7 @@ export interface ExperimentView {
   sourceSchemaId: string;
   taskFingerprint: string;
   snapshotFingerprint: string;
+  snapshotProof: ExperimentSnapshotProof;
   createdAt: string;
   importerUsername: string;
   candidates: ReturnType<typeof projectCandidateMatrix>;
@@ -370,6 +382,7 @@ export class ExperimentService {
     raw: unknown,
     origin: string,
     isAdmin: boolean,
+    hostSnapshotProof: ExperimentSnapshotProof = UNKNOWN_SNAPSHOT_PROOF,
   ): Promise<ExperimentView> {
     if (!(await this.deps.cases.getCase(caseId, actor, isAdmin))) {
       throw new ExperimentNotFoundError("case not found");
@@ -416,6 +429,7 @@ export class ExperimentService {
       sourceSchemaId: envelope.schemaId,
       taskFingerprint: envelope.taskFingerprint,
       snapshotFingerprint: envelope.snapshotFingerprint,
+      snapshotProof: { ...hostSnapshotProof },
       candidates: envelope.candidates.map((c) => ({
         ...c,
         helpfulnessState: "unreviewed",
@@ -502,6 +516,18 @@ export class ExperimentService {
     ) {
       throw new Error("pasted chat is bound to a different snapshot");
     }
+    const frozenSnapshot = (await this.deps.cases.listSnapshots(caseId, actor, isAdmin)).find(
+      (snapshot) =>
+        snapshot.id === job.snapshotId && snapshot.fingerprint === job.snapshotFingerprint,
+    );
+    const snapshotProof: ExperimentSnapshotProof =
+      frozenSnapshot && (!externalRun || externalRun.snapshotBinding === job.snapshotFingerprint)
+        ? {
+            basis: "host_frozen_snapshot",
+            fairnessClass: frozenSnapshot.fairnessClass,
+            lineageClass: frozenSnapshot.parentSnapshotId ? "derived" : "root",
+          }
+        : UNKNOWN_SNAPSHOT_PROOF;
 
     const connectedCandidates = job.candidates.map((candidate) => ({
       candidateId: candidate.candidateId,
@@ -570,6 +596,7 @@ export class ExperimentService {
       },
       origin,
       isAdmin,
+      snapshotProof,
     );
   }
 
@@ -1094,6 +1121,7 @@ export class ExperimentService {
       sourceSchemaId: row.sourceSchemaId,
       taskFingerprint: row.taskFingerprint,
       snapshotFingerprint: row.snapshotFingerprint,
+      snapshotProof: { ...row.snapshotProof },
       createdAt: row.createdAt,
       importerUsername: row.importerUsername,
       candidates: projectCandidateMatrix(candidates, Boolean(gold)),

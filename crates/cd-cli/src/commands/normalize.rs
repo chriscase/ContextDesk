@@ -248,7 +248,9 @@ fn map_normalize_error(core_error: cd_core::error::CoreError) -> CliError {
         cd_core::error::CoreError::Policy(message)
             if message.starts_with("normalized JSONL failed validation")
     );
-    let message = core_error.to_string();
+    let message =
+        cd_core::log_analysis::import_outcome::strip_member_annotation(&core_error.to_string())
+            .to_string();
     if generated_output_is_nonconforming {
         CliError::new(ExitCategory::NonConforming, message)
     } else if message.contains("overwrite")
@@ -276,5 +278,22 @@ mod tests {
         ));
         assert_eq!(error.category, ExitCategory::NonConforming);
         assert!(error.message.contains("bounds_exceeded@message"));
+    }
+
+    #[test]
+    fn normalize_error_seal_is_fail_closed() {
+        let error = map_normalize_error(cd_core::error::CoreError::Message(
+            "zip open: missing end record [member=foo [member=sk-abcdefghijklmnopqrst]]".into(),
+        ));
+        assert!(
+            !error.message.contains("[member="),
+            "normalize printed a leaky transport marker: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("zip open: missing end record"),
+            "{}",
+            error.message
+        );
     }
 }

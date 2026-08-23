@@ -1,0 +1,525 @@
+/* Guided triage workspace: orientation header, two capture paths, step rail,
+   and the step/anchor wrappers around the existing case panels. */
+
+@media (prefers-reduced-motion: no-preference) {
+  html:focus-within {
+    scroll-behavior: smooth;
+  }
+}
+
+.triage-workspace {
+  margin-top: 1.25rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 0.75rem;
+  background:
+    linear-gradient(
+      160deg,
+      color-mix(in srgb, var(--accent) 6%, transparent),
+      transparent 42%
+    ),
+    color-mix(in srgb, var(--surface) 88%, transparent);
+}
+
+.triage-workspace__title {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.triage-workspace__copy {
+  max-width: 48rem;
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.triage-workspace__paths {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.9rem;
+}
+
+.triage-workspace__path {
+  display: grid;
+  gap: 0.4rem;
+  align-content: start;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--surface-deep) 55%, transparent);
+  color: var(--fg);
+  text-decoration: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .triage-workspace__path {
+    transition: border-color 120ms ease, transform 120ms ease;
+  }
+}
+
+.triage-workspace__path:hover,
+.triage-workspace__path:focus-visible {
+  border-color: var(--accent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .triage-workspace__path:hover,
+  .triage-workspace__path:focus-visible {
+    transform: translateY(-2px);
+  }
+}
+
+.triage-workspace__path:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.triage-workspace__path-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.triage-workspace__path-head strong {
+  font-size: 0.9rem;
+}
+
+.triage-workspace__path-body {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.triage-workspace__path-cta {
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.triage-rail {
+  margin-top: 0.9rem;
+}
+
+.triage-rail__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: none;
+}
+
+.triage-rail__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.6rem 0.35rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--fg);
+  font-size: 0.75rem;
+  text-decoration: none;
+}
+
+.triage-rail__link:hover,
+.triage-rail__link:focus-visible {
+  border-color: var(--accent);
+}
+
+.triage-rail__link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.triage-rail__num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.triage-rail__name {
+  font-weight: 600;
+}
+
+.triage-rail__hint {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.triage-rail__badge {
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Step sections and panel anchors */
+
+.triage-step {
+  margin-top: 1.25rem;
+  scroll-margin-top: 0.75rem;
+}
+
+.triage-step:focus {
+  outline: none;
+}
+
+.triage-step:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 0.5rem;
+}
+
+.triage-step__banner {
+  display: flex;
+  gap: 0.65rem;
+  align-items: flex-start;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+}
+
+.triage-step__num {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.triage-step__title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.triage-step__lede {
+  max-width: 48rem;
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.triage-step__note {
+  max-width: 48rem;
+  margin: 0.75rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.triage-anchor {
+  scroll-margin-top: 0.75rem;
+}
+
+.triage-anchor:focus {
+  outline: none;
+}
+
+.triage-anchor:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 0.75rem;
+}
+
+/* Step 1: capture */
+
+.triage-capture__paths {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.9rem;
+}
+
+.triage-capture__card {
+  display: grid;
+  gap: 0.55rem;
+  align-content: start;
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+}
+
+.triage-capture__card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.triage-capture__card-head h4 {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.triage-capture__card-copy {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.triage-capture__operator {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.triage-capture__redaction {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+}
+
+.triage-capture__hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.triage-capture__hint a {
+  color: var(--accent);
+}
+
+.triage-capture__notice {
+  max-width: 46rem;
+  margin: 0.9rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px dashed var(--border);
+  border-radius: 0.45rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.triage-field {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.triage-field input,
+.triage-field select {
+  min-width: 0;
+}
+
+.triage-advanced {
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 0.45rem;
+  padding: 0.45rem 0.6rem;
+}
+
+.triage-advanced > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.triage-advanced > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.triage-advanced[open] > summary {
+  margin-bottom: 0.5rem;
+}
+
+.triage-advanced > :not(summary) {
+  margin-top: 0.45rem;
+}
+
+/* Provenance chips and legend */
+
+.triage-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-style: normal;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.triage-chip::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--chip-dot, var(--muted));
+}
+
+.triage-chip--human {
+  --chip-dot: var(--fg);
+  color: var(--fg);
+}
+
+.triage-chip--imported {
+  --chip-dot: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+}
+
+.triage-chip--model {
+  --chip-dot: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.triage-legend {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0.65rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.triage-legend li {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.triage-legend a {
+  color: var(--accent);
+}
+
+/* Captured record */
+
+.triage-record {
+  margin-top: 0.9rem;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+}
+
+.triage-record__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.triage-record__head h4 {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.triage-record__timeline {
+  margin-top: 0.75rem;
+}
+
+.triage-record__timeline > summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.triage-record__timeline > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.triage-record__scroll {
+  max-height: 22rem;
+  margin-top: 0.5rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.triage-record__scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.triage-record__scroll .timeline {
+  margin: 0;
+}
+
+/* Event payloads carry long unbroken hashes; keep them from forcing
+   horizontal scroll at phone widths. */
+.triage-record__scroll .timeline__item {
+  overflow-wrap: anywhere;
+}
+
+.triage-record__contribution {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.triage-record__imports {
+  margin-top: 0.75rem;
+}
+
+.triage-record__imports-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* Step 4: decide */
+
+.triage-decide {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  max-width: 46rem;
+}
+
+.triage-decide .composer {
+  max-width: 20rem;
+}
+
+/* Responsive */
+
+@media (max-width: 900px) {
+  .triage-capture__paths {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .triage-workspace__paths {
+    grid-template-columns: 1fr;
+  }
+
+  .triage-capture__operator {
+    grid-template-columns: 1fr;
+  }
+
+  .triage-step__banner {
+    gap: 0.5rem;
+  }
+
+  .triage-record__head {
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+}

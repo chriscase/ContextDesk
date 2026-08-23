@@ -196,6 +196,58 @@ describe("TriageRunPanel", () => {
     expect(screen.queryByText(/schemaId/)).toBeNull();
   });
 
+  it("adds an operator-picked lane by identifiers only and rejects DeepSeek", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) {
+          return response({
+            snapshots: [
+              {
+                id: "snapshot-1",
+                fingerprint: "a".repeat(64),
+                evidence: [{ evidenceId: "artifact-1" }],
+                createdBy: "lead",
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/evidence")) return response({ artifacts: [] });
+        if (url.endsWith("/imports")) return response({ runs: [] });
+        if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+        if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: false });
+        return response({ jobs: [] });
+      }),
+    );
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    expect(await screen.findByText("Add a model lane")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("New lane alias"), {
+      target: { value: "deepseek-lane" },
+    });
+    fireEvent.change(screen.getByLabelText("New lane model id"), {
+      target: { value: "qwen-3.6-27b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add lane" }));
+    expect(
+      await screen.findByText("DeepSeek lanes are not permitted in this deployment."),
+    ).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("New lane alias"), {
+      target: { value: "extra-challenger" },
+    });
+    fireEvent.change(screen.getByLabelText("New lane model id"), {
+      target: { value: "ministral-3-14b-instruct-2512" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add lane" }));
+    await waitFor(() =>
+      expect(screen.getAllByText("ministral-3-14b-instruct-2512").length).toBeGreaterThanOrEqual(2),
+    );
+    expect(screen.queryByText("DeepSeek lanes are not permitted in this deployment.")).toBeNull();
+    expect(screen.getByText(/extra-challenger · reviewer/)).toBeTruthy();
+  });
+
   it("keeps read-only history visible without launch or cancellation controls", async () => {
     vi.stubGlobal(
       "fetch",
@@ -513,5 +565,246 @@ describe("TriageRunPanel", () => {
       }),
     ));
     expect((await screen.findByRole("status")).textContent).toMatch(/Experiment .* is ready in Experiment Lab/);
+  });
+});
+
+describe("evidence snapshot cockpit", () => {
+  function cockpitJob(overrides: {
+    id: string;
+    strategyId: string;
+    status?: string;
+    snapshotId?: string;
+    snapshotFingerprint?: string;
+    sameSnapshot?: boolean | null;
+  }) {
+    return {
+      id: overrides.id,
+      snapshotId: overrides.snapshotId ?? "snapshot-1",
+      snapshotFingerprint: overrides.snapshotFingerprint ?? "a".repeat(64),
+      requestFingerprint: "b".repeat(64),
+      request: {
+        strategyId: overrides.strategyId,
+        question: "What happened?",
+        taskFingerprint: "task-1",
+        mode: "deterministic_mock" as const,
+        candidates: [],
+      },
+      status: overrides.status ?? "completed",
+      candidates: [],
+      sameSnapshot: overrides.sameSnapshot === undefined ? true : overrides.sameSnapshot,
+      agreementNotice: "Agreement is not proof of correctness.",
+      createdAt: "2026-08-20T00:00:00.000Z",
+      startedAt: "2026-08-20T00:00:00.000Z",
+      finishedAt: "2026-08-20T00:00:00.010Z",
+      cancelRequestedAt: null,
+    };
+  }
+
+  function stubCockpitFetch(options: { snapshots?: unknown[]; jobs?: unknown[] }) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/snapshots")) return response({ snapshots: options.snapshots ?? [] });
+        if (url.endsWith("/evidence")) return response({ artifacts: [] });
+        if (url.endsWith("/imports")) return response({ runs: [] });
+        if (url.endsWith("/api/triage-profiles")) return response({ profiles: [] });
+        if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: false });
+        return response({ jobs: options.jobs ?? [] });
+      }),
+    );
+  }
+
+  it("declares a controlled comparison only when both proofs and exact fingerprints agree", async () => {
+    stubCockpitFetch({
+      snapshots: [{
+        id: "snapshot-1",
+        fingerprint: "a".repeat(64),
+        evidence: [{ evidenceId: "artifact-1", verificationStatus: "verified" }],
+        createdBy: "lead",
+        createdAt: "2026-08-19T23:41:00.000Z",
+        status: "frozen",
+        visibility: "owner_only",
+        parentSnapshotId: null,
+        protocolVersion: "cd-collab.snapshot.v1",
+        fairnessClass: "same_snapshot",
+      }],
+      jobs: [
+        cockpitJob({ id: "job-alpha", strategyId: "alpha-strategy" }),
+        cockpitJob({ id: "job-beta", strategyId: "beta-strategy" }),
+      ],
+    });
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /alpha-strategy/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /beta-strategy/ }));
+
+    expect(await screen.findByText("Controlled comparison — same frozen evidence.")).toBeTruthy();
+    expect(screen.getByText(/Differences between lanes reflect the models and settings/)).toBeTruthy();
+    expect(screen.getAllByText(/same-snapshot proof recorded/)).toHaveLength(2);
+    expect(screen.getByText(/it does not make any lane's answer correct/)).toBeTruthy();
+    expect(screen.getByText("frozen")).toBeTruthy();
+    expect(screen.getByText("owner only")).toBeTruthy();
+    expect(screen.getByText("2026-08-19 23:41 UTC")).toBeTruthy();
+    expect(screen.getByText("none — root snapshot")).toBeTruthy();
+    expect(screen.getByText("cd-collab.snapshot.v1")).toBeTruthy();
+    expect(screen.getByText("1 · 1 verified")).toBeTruthy();
+    expect(screen.getByText("content equivalence established")).toBeTruthy();
+  });
+
+  it("flags an evidence mismatch, explains why it matters, and points at supported repairs", async () => {
+    stubCockpitFetch({
+      snapshots: [
+        { id: "snapshot-1", fingerprint: "a".repeat(64), evidence: [], createdBy: "lead" },
+        { id: "snapshot-2", fingerprint: "d".repeat(64), evidence: [], createdBy: "lead" },
+      ],
+      jobs: [
+        cockpitJob({ id: "job-alpha", strategyId: "alpha-strategy" }),
+        cockpitJob({
+          id: "job-beta",
+          strategyId: "beta-strategy",
+          snapshotId: "snapshot-2",
+          snapshotFingerprint: "d".repeat(64),
+          sameSnapshot: false,
+        }),
+      ],
+    });
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /alpha-strategy/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /beta-strategy/ }));
+
+    expect(await screen.findByText("Evidence mismatch — not a fair head-to-head.")).toBeTruthy();
+    expect(
+      screen.getByText(/recorded an explicit snapshot mismatch and their evidence fingerprints differ/),
+    ).toBeTruthy();
+    expect(screen.getByText(/can come from the evidence rather than the models/)).toBeTruthy();
+    expect(screen.getByText(/press “Use this setup again” on the run whose snapshot you trust/)).toBeTruthy();
+    expect(screen.getByText(/explicit mismatch recorded/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Inspect snapshot for run job-alpha" }));
+    const fingerprint = screen.getByText("a".repeat(64));
+    expect(fingerprint.className).toContain("snapshot-cockpit__fingerprint");
+  });
+
+  it("reports fairness as unknown when a selected run has no settled snapshot proof", async () => {
+    stubCockpitFetch({
+      snapshots: [{ id: "snapshot-1", fingerprint: "a".repeat(64), evidence: [], createdBy: "lead" }],
+      jobs: [
+        cockpitJob({ id: "job-alpha", strategyId: "alpha-strategy" }),
+        cockpitJob({ id: "job-beta", strategyId: "beta-strategy", status: "partial", sameSnapshot: null }),
+      ],
+    });
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /alpha-strategy/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /beta-strategy/ }));
+
+    expect(await screen.findByText("Fairness unknown — snapshot proof incomplete.")).toBeTruthy();
+    expect(screen.getByText(/this comparison stays unknown rather than fair/)).toBeTruthy();
+    expect(screen.getByText(/proof pending or unavailable/)).toBeTruthy();
+  });
+
+  it("does not call matching run fingerprints controlled when snapshot fairness is unknown", async () => {
+    stubCockpitFetch({
+      snapshots: [{
+        id: "snapshot-1",
+        fingerprint: "a".repeat(64),
+        evidence: [{ evidenceId: "artifact-1" }],
+        createdBy: "lead",
+        fairnessClass: "unknown",
+      }],
+      jobs: [
+        cockpitJob({ id: "job-alpha", strategyId: "alpha-strategy" }),
+        cockpitJob({ id: "job-beta", strategyId: "beta-strategy" }),
+      ],
+    });
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /alpha-strategy/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /beta-strategy/ }));
+
+    expect(await screen.findByText("Fairness unknown — snapshot proof incomplete.")).toBeTruthy();
+    expect(screen.getByText(/reports unknown content equivalence/)).toBeTruthy();
+    expect(screen.getAllByText(/run binding recorded · content equivalence unknown/)).toHaveLength(2);
+    expect(screen.queryByText("Controlled comparison — same frozen evidence.")).toBeNull();
+    expect(screen.queryByText("All selected runs proved the same frozen snapshot.")).toBeNull();
+    expect(screen.getByText(/run records report one snapshot fingerprint/)).toBeTruthy();
+  });
+
+  it("flags a run whose snapshot ID resolves to a different catalog fingerprint", async () => {
+    stubCockpitFetch({
+      snapshots: [{
+        id: "snapshot-1",
+        fingerprint: "c".repeat(64),
+        evidence: [],
+        createdBy: "lead",
+        fairnessClass: "same_snapshot",
+      }],
+      jobs: [
+        cockpitJob({ id: "job-alpha", strategyId: "alpha-strategy" }),
+        cockpitJob({ id: "job-beta", strategyId: "beta-strategy" }),
+      ],
+    });
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /alpha-strategy/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /beta-strategy/ }));
+
+    expect(await screen.findByText("Evidence mismatch — not a fair head-to-head.")).toBeTruthy();
+    expect(screen.getByText(/snapshot ID resolves to a different catalog fingerprint/)).toBeTruthy();
+    expect(screen.getAllByText(/snapshot ID and fingerprint conflict/)).toHaveLength(2);
+    expect(screen.queryByText("All selected runs proved the same frozen snapshot.")).toBeNull();
+  });
+
+  it("guides the operator when only one run is selected", async () => {
+    stubCockpitFetch({
+      snapshots: [{ id: "snapshot-1", fingerprint: "a".repeat(64), evidence: [], createdBy: "lead" }],
+      jobs: [
+        cockpitJob({ id: "job-alpha", strategyId: "alpha-strategy" }),
+        cockpitJob({ id: "job-beta", strategyId: "beta-strategy" }),
+      ],
+    });
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /alpha-strategy/ }));
+
+    expect(await screen.findByText("One run selected.")).toBeTruthy();
+    expect(screen.getByText(/Select a second finished run/)).toBeTruthy();
+  });
+
+  it("contains a very long fingerprint in its wrapping block and copies it on request", async () => {
+    const longFingerprint = "e".repeat(96);
+    stubCockpitFetch({
+      snapshots: [{ id: "snapshot-long", fingerprint: longFingerprint, evidence: [], createdBy: "lead" }],
+    });
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(window.navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    try {
+      render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+      const fingerprint = await screen.findByText(longFingerprint);
+      expect(fingerprint.className).toContain("snapshot-cockpit__fingerprint");
+
+      fireEvent.click(screen.getByRole("button", { name: "Copy snapshot fingerprint" }));
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(longFingerprint));
+      expect((await screen.findByRole("status")).textContent).toMatch(/Fingerprint copied/);
+    } finally {
+      Reflect.deleteProperty(window.navigator, "clipboard");
+    }
+  });
+
+  it("shows unknown for optional snapshot metadata the API response did not include", async () => {
+    stubCockpitFetch({
+      snapshots: [{
+        id: "snapshot-bare",
+        fingerprint: "a".repeat(64),
+        evidence: [{ evidenceId: "artifact-1" }],
+        createdBy: "lead",
+      }],
+    });
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    expect(await screen.findByText("Exact evidence fingerprint")).toBeTruthy();
+    // status, visibility, frozen at, parent snapshot, protocol, and fairness are absent
+    // from the payload, so each must read "unknown" — never a fabricated value.
+    expect(screen.getAllByText("unknown")).toHaveLength(5);
+    expect(screen.getByText("unknown — content equivalence not established")).toBeTruthy();
+    expect(screen.getByText("lead")).toBeTruthy();
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Cases } from "./Cases.js";
 import { Catalog } from "./Catalog.js";
 import { LoginForm } from "./LoginForm.js";
@@ -35,6 +35,123 @@ declare global {
   interface Window {
     __CONTEXTDESK_STATIC_READ_ONLY__?: boolean;
   }
+}
+
+const workflowStages = [
+  {
+    id: "capture",
+    name: "Capture",
+    kicker: "Manual evidence intake",
+    detail:
+      "Add evidence to the workspace by hand and note where each item came from. " +
+      "Nothing arrives automatically, so every source carries its provenance.",
+  },
+  {
+    id: "analyze",
+    name: "Analyze",
+    kicker: "AI-assisted normalization",
+    detail:
+      "AI assistance normalizes raw captures into structured, comparable claims and " +
+      "triages what deserves attention first. Every suggestion stays open for human review.",
+  },
+  {
+    id: "compare",
+    name: "Compare",
+    kicker: "Models side by side",
+    detail:
+      "Line up runs from different models against the same evidence. Runs are weighed on " +
+      "evidence, usefulness, and convergence with a human-accepted benchmark—not wording alone.",
+  },
+  {
+    id: "decide",
+    name: "Decide",
+    kicker: "Human call, safe export",
+    detail:
+      "A person—not a model—makes the final call on what a case concludes. Share findings " +
+      "through the share-safe export instead of copying raw case data out of the workspace.",
+  },
+] as const;
+
+function WorkflowGuide() {
+  const [stageIndex, setStageIndex] = useState(0);
+  const stageRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  function selectStage(index: number) {
+    const next = (index + workflowStages.length) % workflowStages.length;
+    setStageIndex(next);
+    stageRefs.current[next]?.focus();
+  }
+
+  function onStageKeyDown(event: React.KeyboardEvent) {
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      event.preventDefault();
+      selectStage(stageIndex + 1);
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      event.preventDefault();
+      selectStage(stageIndex - 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      selectStage(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      selectStage(workflowStages.length - 1);
+    }
+  }
+
+  const activeStage = workflowStages[stageIndex] ?? workflowStages[0];
+  return (
+    <section className="workflow" aria-labelledby="workflow-title">
+      <h2 className="workflow__title" id="workflow-title">
+        Workflow guide
+      </h2>
+      <p className="workflow__intro">
+        Casework moves through four stages, in order. Select a stage to see what
+        happens there.
+      </p>
+      <div
+        className="workflow__stages"
+        role="tablist"
+        aria-label="Workflow stages"
+        onKeyDown={onStageKeyDown}
+      >
+        {workflowStages.map((stage, index) => (
+          <button
+            key={stage.id}
+            ref={(el) => {
+              stageRefs.current[index] = el;
+            }}
+            type="button"
+            role="tab"
+            id={`workflow-tab-${stage.id}`}
+            className="workflow__stage"
+            aria-label={stage.name}
+            aria-selected={index === stageIndex}
+            aria-controls="workflow-stage-panel"
+            tabIndex={index === stageIndex ? 0 : -1}
+            onClick={() => selectStage(index)}
+          >
+            <span className="workflow__stage-step" aria-hidden="true">
+              {index + 1}
+            </span>
+            <span className="workflow__stage-name">{stage.name}</span>
+            <span className="workflow__stage-kicker">{stage.kicker}</span>
+          </button>
+        ))}
+      </div>
+      <div
+        className="workflow__panel"
+        role="tabpanel"
+        id="workflow-stage-panel"
+        aria-labelledby={`workflow-tab-${activeStage.id}`}
+      >
+        <p>{activeStage.detail}</p>
+      </div>
+      <p className="workflow__note">
+        This guide is a map of the workflow, not a progress tracker—it does not
+        mark stages complete or show live model results.
+      </p>
+    </section>
+  );
 }
 
 export function App() {
@@ -92,6 +209,7 @@ export function App() {
         Compare model outputs and investigation strategies by evidence, usefulness,
         and convergence on a human-accepted benchmark—not wording alone.
       </p>
+      <WorkflowGuide />
       <section className="shell__toolbar" aria-label="Presentation controls">
         <span className="shell__toolbar-label">Presenter controls</span>
         <label className="shell__theme">

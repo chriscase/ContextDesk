@@ -1,5 +1,7 @@
 import type { Pool } from "pg";
 import {
+  parseSnapshot,
+  SNAPSHOT_SCHEMA_ID,
   type ArtifactKind,
   type CaseSeverity,
   type CaseStatus,
@@ -219,25 +221,27 @@ export class MemoryCaseStore implements CaseStore {
   async listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]> {
     return [...this.snapshots.values()]
       .filter((row) => row.caseId === caseId)
-      .map((row) => cloneSnapshot(row))
+      .map((row) => persistedSnapshot(row))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   }
 
   async getSnapshot(snapshotId: string): Promise<SnapshotRow | null> {
     const row = this.snapshots.get(snapshotId);
-    return row ? cloneSnapshot(row) : null;
+    return row ? persistedSnapshot(row) : null;
   }
 
   async insertSnapshot(row: SnapshotRow): Promise<void> {
-    if (this.snapshots.has(row.id)) throw new Error("snapshot already exists");
+    const snapshot = persistedSnapshot(row);
+    if (this.snapshots.has(snapshot.id)) throw new Error("snapshot already exists");
     if (
       [...this.snapshots.values()].some(
-        (existing) => existing.caseId === row.caseId && existing.fingerprint === row.fingerprint,
+        (existing) =>
+          existing.caseId === snapshot.caseId && existing.fingerprint === snapshot.fingerprint,
       )
     ) {
       throw new Error("snapshot fingerprint already exists");
     }
-    this.snapshots.set(row.id, cloneSnapshot(row));
+    this.snapshots.set(snapshot.id, isolateSnapshot(snapshot));
   }
 }
 
@@ -483,23 +487,24 @@ export class PgCaseStore implements CaseStore {
   }
 
   async insertSnapshot(row: SnapshotRow): Promise<void> {
+    const snapshot = persistedSnapshot(row);
     await this.db.query(
       `INSERT INTO snapshots (
          id, case_id, fingerprint, parent_snapshot_id, evidence, visibility,
          protocol_version, fairness_class, status, created_at, created_by
        ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11)`,
       [
-        row.id,
-        row.caseId,
-        row.fingerprint,
-        row.parentSnapshotId,
-        JSON.stringify(row.evidence),
-        row.visibility,
-        row.protocolVersion,
-        row.fairnessClass,
-        row.status,
-        row.createdAt,
-        row.createdBy,
+        snapshot.id,
+        snapshot.caseId,
+        snapshot.fingerprint,
+        snapshot.parentSnapshotId,
+        JSON.stringify(snapshot.evidence),
+        snapshot.visibility,
+        snapshot.protocolVersion,
+        snapshot.fairnessClass,
+        snapshot.status,
+        snapshot.createdAt,
+        snapshot.createdBy,
       ],
     );
   }
@@ -636,43 +641,44 @@ function asArtifact(row: Record<string, unknown>): ArtifactRow {
   };
 }
 
-function cloneSnapshot(row: SnapshotRow): SnapshotRow {
+function isolateSnapshot(row: SnapshotV1): SnapshotRow {
   return {
-    ...row,
+    schemaId: row.schemaId,
+    id: row.id,
+    caseId: row.caseId,
+    fingerprint: row.fingerprint,
+    parentSnapshotId: row.parentSnapshotId,
     evidence: row.evidence.map((item) => ({ ...item })),
+    visibility: row.visibility,
+    protocolVersion: row.protocolVersion,
+    fairnessClass: row.fairnessClass,
+    status: row.status,
+    createdAt: row.createdAt,
+    createdBy: row.createdBy,
   };
 }
 
+function persistedSnapshot(input: unknown): SnapshotRow {
+  return isolateSnapshot(parseSnapshot(input));
+}
+
+function timestampColumn(value: unknown): unknown {
+  return value instanceof Date ? value.toISOString() : value;
+}
+
 function asSnapshot(row: Record<string, unknown>): SnapshotRow {
-  const evidence = Array.isArray(row.evidence)
-    ? row.evidence.map((item) => {
-        const value = item as Record<string, unknown>;
-        return {
-          evidenceId: String(value.evidenceId),
-          ordinal: Number(value.ordinal),
-          contentHash: value.contentHash === null ? null : String(value.contentHash),
-          expectedHash: value.expectedHash === null ? null : String(value.expectedHash),
-          verificationStatus:
-            value.verificationStatus === null ? null : String(value.verificationStatus),
-          privacyClass: value.privacyClass as SnapshotRow["visibility"],
-        };
-      })
-    : [];
-  return {
-    schemaId: "cd-collab.snapshot.v1",
-    id: String(row.id),
-    caseId: String(row.case_id),
-    fingerprint: String(row.fingerprint),
-    parentSnapshotId:
-      row.parent_snapshot_id === null || row.parent_snapshot_id === undefined
-        ? null
-        : String(row.parent_snapshot_id),
-    evidence,
-    visibility: row.visibility as SnapshotRow["visibility"],
-    protocolVersion: String(row.protocol_version),
-    fairnessClass: row.fairness_class as SnapshotRow["fairnessClass"],
-    status: row.status as SnapshotRow["status"],
-    createdAt: asIso(row.created_at),
-    createdBy: String(row.created_by),
-  };
+  return persistedSnapshot({
+    schemaId: SNAPSHOT_SCHEMA_ID,
+    id: row.id,
+    caseId: row.case_id,
+    fingerprint: row.fingerprint,
+    parentSnapshotId: row.parent_snapshot_id,
+    evidence: row.evidence,
+    visibility: row.visibility,
+    protocolVersion: row.protocol_version,
+    fairnessClass: row.fairness_class,
+    status: row.status,
+    createdAt: timestampColumn(row.created_at),
+    createdBy: row.created_by,
+  });
 }

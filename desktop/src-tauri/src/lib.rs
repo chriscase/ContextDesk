@@ -1869,6 +1869,45 @@ fn get_config(state: State<'_, AppState>) -> AppConfig {
     state.config.lock().expect("config lock").clone()
 }
 
+/// Non-secret reviewer candidate row for the Settings surface: identity
+/// fields only — never a credential reference, endpoint, or full profile.
+#[derive(Clone, Serialize)]
+struct ReviewerCandidateDto {
+    /// Provider profile id.
+    id: String,
+    /// Human label.
+    label: String,
+    /// The profile's default chat model.
+    chat_model: String,
+    /// Local-only profiles cannot egress, so no remote acknowledgement applies.
+    local_only: bool,
+}
+
+/// One persisted contribution-role assignment projected without credentials
+/// or provider endpoints. Qualification is a cached measured verdict only;
+/// reading Settings never starts a probe.
+#[derive(Clone, Serialize)]
+struct ContributionAssignmentDto {
+    role: String,
+    profile_id: String,
+    model: Option<String>,
+    allow_remote: bool,
+    require_qualified: bool,
+    qualification: String,
+}
+
+/// Host-owned routing and usage ceilings for the contribution route.
+#[derive(Clone, Serialize)]
+struct ContributionPolicyDto {
+    max_contributors: usize,
+    max_parallel: usize,
+    max_rounds: u8,
+    max_context_chars: usize,
+    max_total_provider_rounds: u32,
+    max_semantic_corrections_per_stage: u8,
+    max_context_chars_total: Option<u64>,
+}
+
 /// Non-secret multi-model settings for the Settings surface. The reviewer
 /// references a provider profile id; no credential ever crosses IPC.
 #[derive(Clone, Serialize)]
@@ -1883,11 +1922,89 @@ struct MultiModelSettingsDto {
     reviewer_allow_remote: bool,
     /// Whether the reviewer must be measured-qualified.
     reviewer_require_qualified: bool,
+    /// Measured JsonProposal verdict for the recorded reviewer, read from the
+    /// cached qualification store only (a peek — this never starts a probe):
+    /// `"qualified"` | `"unqualified"` | `"unverified"` | `"unconfigured"`.
+    reviewer_qualification: String,
+    /// Active (investigator) profile id, so the surface can say honestly when
+    /// the reviewer is the same profile filling a second role.
+    active_profile_id: Option<String>,
+    /// Existing provider profiles the reviewer role may reference.
+    candidate_profiles: Vec<ReviewerCandidateDto>,
+    /// Explicit contribution-role assignments in execution order.
+    contribution_assignments: Vec<ContributionAssignmentDto>,
+    /// Hard host-owned contribution route ceilings.
+    contribution_policy: ContributionPolicyDto,
 }
 
-#[tauri::command]
-fn get_multi_model_settings(state: State<'_, AppState>) -> MultiModelSettingsDto {
-    let cfg = state.config.lock().expect("config lock");
+/// Nested renderer input for one contributor assignment. The renderer may
+/// choose identity and explicitly acknowledge remote egress; it cannot relax
+/// measured qualification.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContributionAssignmentInput {
+    role: String,
+    profile_id: String,
+    model: Option<String>,
+    allow_remote: bool,
+}
+
+/// Nested renderer input for bounded contribution routing. Every value is
+/// range-checked before the cloned config can be persisted.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContributionPolicyInput {
+    max_contributors: usize,
+    max_parallel: usize,
+    max_rounds: u8,
+    max_context_chars: usize,
+    max_total_provider_rounds: u32,
+    max_semantic_corrections_per_stage: u8,
+    max_context_chars_total: Option<u64>,
+}
+
+/// Measured reviewer qualification from the cached store, as the same
+/// JsonProposal contract verdict `agent_turn` consults at turn time. Absent,
+/// stale, or inconclusive evidence is `"unverified"` — never `"qualified"` —
+/// and a reviewer pointing at a missing profile has no measurable identity,
+/// so it is `"unverified"` too.
+fn role_qualification_label(
+    cfg: &AppConfig,
+    store: &cd_core::capability_qualification::QualificationStore,
+    profile_id: &str,
+    model_override: Option<&str>,
+) -> &'static str {
+    use cd_core::capability_qualification::{
+        capability_contract_verdict, CapabilityContract, ContractVerdict, QualificationKey,
+    };
+    let Some(prof) = cfg.providers.profiles.iter().find(|p| p.id == profile_id) else {
+        return "unverified";
+    };
+    let model = model_override.unwrap_or(&prof.chat_model);
+    let key = QualificationKey::with_provider_kind(&prof.id, &prof.base_url, model, prof.kind);
+    match capability_contract_verdict(store.get(&key), CapabilityContract::JsonProposal) {
+        ContractVerdict::Qualified => "qualified",
+        ContractVerdict::Unqualified => "unqualified",
+        ContractVerdict::Inconclusive => "unverified",
+    }
+}
+
+fn reviewer_qualification_label(
+    cfg: &AppConfig,
+    store: &cd_core::capability_qualification::QualificationStore,
+) -> &'static str {
+    let Some(reviewer) = cfg.multi_model.reviewer.as_ref() else {
+        return "unconfigured";
+    };
+    role_qualification_label(cfg, store, &reviewer.profile_id, reviewer.model.as_deref())
+}
+
+/// Project the config plus cached qualification evidence into the Settings
+/// DTO. Pure read: no probe, no disk write, no host rebuild.
+fn multi_model_settings_dto(
+    cfg: &AppConfig,
+    store: &cd_core::capability_qualification::QualificationStore,
+) -> MultiModelSettingsDto {
     let mm = &cfg.multi_model;
     let mode = if cfg.contributions.enabled {
         cd_core::multi_model::MultiModelMode::Contributions
@@ -1900,12 +2017,66 @@ fn get_multi_model_settings(state: State<'_, AppState>) -> MultiModelSettingsDto
         reviewer_model: mm.reviewer.as_ref().and_then(|r| r.model.clone()),
         reviewer_allow_remote: mm.reviewer.as_ref().is_some_and(|r| r.allow_remote),
         reviewer_require_qualified: mm.reviewer.as_ref().is_none_or(|r| r.require_qualified),
+        reviewer_qualification: reviewer_qualification_label(cfg, store).to_string(),
+        active_profile_id: cfg.providers.active_id.clone(),
+        candidate_profiles: cfg
+            .providers
+            .profiles
+            .iter()
+            .map(|p| ReviewerCandidateDto {
+                id: p.id.clone(),
+                label: p.label.clone(),
+                chat_model: p.chat_model.clone(),
+                local_only: p.local_only,
+            })
+            .collect(),
+        contribution_assignments: cfg
+            .contributions
+            .roles
+            .iter()
+            .map(|assignment| ContributionAssignmentDto {
+                role: assignment.role.as_str().to_string(),
+                profile_id: assignment.profile_id.clone(),
+                model: assignment.model.clone(),
+                allow_remote: assignment.allow_remote,
+                require_qualified: assignment.require_qualified,
+                qualification: role_qualification_label(
+                    cfg,
+                    store,
+                    &assignment.profile_id,
+                    assignment.model.as_deref(),
+                )
+                .to_string(),
+            })
+            .collect(),
+        contribution_policy: ContributionPolicyDto {
+            max_contributors: cfg.contributions.policy.max_contributors,
+            max_parallel: cfg.contributions.policy.max_parallel,
+            max_rounds: cfg.contributions.policy.max_rounds,
+            max_context_chars: cfg.contributions.policy.max_context_chars,
+            max_total_provider_rounds: cfg.contributions.budget.max_total_provider_rounds,
+            max_semantic_corrections_per_stage: cfg
+                .contributions
+                .budget
+                .max_semantic_corrections_per_stage,
+            max_context_chars_total: cfg.contributions.budget.max_context_chars_total,
+        },
     }
 }
 
+#[tauri::command]
+fn get_multi_model_settings(state: State<'_, AppState>) -> MultiModelSettingsDto {
+    let cfg = state.config.lock().expect("config lock").clone();
+    let store = state
+        .qualification_store
+        .lock()
+        .expect("qualification_store");
+    multi_model_settings_dto(&cfg, &store)
+}
+
 /// Set the default multi-model mode (`single`/`review`/`contributions`). Persists and rebuilds
-/// the host. Reviewer assignment is edited via the provider config; this is
-/// the on/off toggle the composer honors by default.
+/// the host. Reviewer assignment is edited via `set_multi_model_reviewer`;
+/// this is the on/off toggle the composer honors by default.
 #[tauri::command]
 fn set_multi_model_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
     let new_mode = match mode.as_str() {
@@ -1925,6 +2096,591 @@ fn set_multi_model_mode(state: State<'_, AppState>, mode: String) -> Result<(), 
     *state.config.lock().expect("config lock") = cfg;
     let _ = ensure_host(&state);
     Ok(())
+}
+
+/// Validate and apply a reviewer assignment onto `cfg` without touching disk.
+/// `None`/blank profile clears the assignment. An unknown profile, or a
+/// remote-egress acknowledgement on a local-only profile (where it would be
+/// meaningless), fails with no change at all. Measured qualification is
+/// mandatory for this surface: every assigned reviewer is recorded with
+/// `require_qualified = true` — the renderer has no way to relax it.
+fn apply_reviewer_assignment(
+    cfg: &mut AppConfig,
+    profile_id: Option<&str>,
+    model: Option<&str>,
+    allow_remote: bool,
+) -> Result<(), String> {
+    let profile_id = profile_id.map(str::trim).filter(|s| !s.is_empty());
+    let Some(profile_id) = profile_id else {
+        cfg.multi_model.reviewer = None;
+        return Ok(());
+    };
+    let Some(profile) = cfg.providers.profiles.iter().find(|p| p.id == profile_id) else {
+        return Err(format!("unknown provider profile: {profile_id}"));
+    };
+    if profile.local_only && allow_remote {
+        return Err("remote egress acknowledgement is meaningless for a local-only profile".into());
+    }
+    let model = model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    cfg.multi_model.reviewer = Some(cd_core::config::ReviewerRoleConfig {
+        profile_id: profile_id.to_string(),
+        model,
+        require_qualified: true,
+        allow_remote,
+    });
+    Ok(())
+}
+
+/// Assign (or clear) the multi-model reviewer role. This records
+/// configuration only: it never starts a qualification probe and never runs
+/// a turn — each review turn re-checks qualification and egress itself.
+/// There is deliberately no `require_qualified` input: the untrusted
+/// renderer cannot disable measured qualification.
+#[tauri::command]
+fn set_multi_model_reviewer(
+    state: State<'_, AppState>,
+    profile_id: Option<String>,
+    model: Option<String>,
+    allow_remote: bool,
+) -> Result<(), String> {
+    let mut cfg = state.config.lock().expect("config lock").clone();
+    apply_reviewer_assignment(
+        &mut cfg,
+        profile_id.as_deref(),
+        model.as_deref(),
+        allow_remote,
+    )?;
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    *state.config.lock().expect("config lock") = cfg;
+    let _ = ensure_host(&state);
+    Ok(())
+}
+
+fn contribution_role_from_str(
+    role: &str,
+) -> Result<cd_core::multi_model::ContributionRole, String> {
+    use cd_core::multi_model::ContributionRole;
+    match role {
+        "observation_extractor" => Ok(ContributionRole::ObservationExtractor),
+        "timeline_analyst" => Ok(ContributionRole::TimelineAnalyst),
+        "causal_proposer" => Ok(ContributionRole::CausalProposer),
+        "contradiction_checker" => Ok(ContributionRole::ContradictionChecker),
+        "evidence_gap" => Ok(ContributionRole::EvidenceGap),
+        "reviewer" => Ok(ContributionRole::Reviewer),
+        other => Err(format!("unknown contribution role: {other}")),
+    }
+}
+
+/// Validate and apply a complete contribution-team configuration to a cloned
+/// AppConfig. All validation happens before mutation so an invalid identity,
+/// egress acknowledgement, role order, or budget cannot partially write.
+fn apply_contribution_team(
+    cfg: &mut AppConfig,
+    assignments: Vec<ContributionAssignmentInput>,
+    policy: ContributionPolicyInput,
+) -> Result<(), String> {
+    if !(1..=8).contains(&policy.max_contributors) {
+        return Err("max contributors must be between 1 and 8".into());
+    }
+    if policy.max_parallel == 0 || policy.max_parallel > policy.max_contributors {
+        return Err("max parallel must be between 1 and max contributors".into());
+    }
+    if !(1..=2).contains(&policy.max_rounds) {
+        return Err("contribution rounds must be 1 or 2".into());
+    }
+    if !(24_000..=2_000_000).contains(&policy.max_context_chars) {
+        return Err("context characters must be between 24000 and 2000000".into());
+    }
+    if !(1..=64).contains(&policy.max_total_provider_rounds) {
+        return Err("provider rounds must be between 1 and 64".into());
+    }
+    if policy.max_semantic_corrections_per_stage > 4 {
+        return Err("semantic corrections per stage must be between 0 and 4".into());
+    }
+    if policy
+        .max_context_chars_total
+        .is_some_and(|value| value == 0 || value > 16_000_000)
+    {
+        return Err("total model-facing characters must be between 1 and 16000000".into());
+    }
+
+    let mut roles = Vec::with_capacity(assignments.len());
+    for input in assignments {
+        let role = contribution_role_from_str(input.role.trim())?;
+        let profile_id = input.profile_id.trim();
+        if profile_id.is_empty() {
+            return Err(format!("{} requires a provider profile", role.as_str()));
+        }
+        let Some(profile) = cfg
+            .providers
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return Err(format!("unknown provider profile: {profile_id}"));
+        };
+        if profile.local_only && input.allow_remote {
+            return Err(format!(
+                "remote egress acknowledgement is meaningless for local-only profile: {profile_id}"
+            ));
+        }
+        roles.push(cd_core::config::ContributionRoleConfig {
+            role,
+            profile_id: profile_id.to_string(),
+            model: input
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_string),
+            require_qualified: true,
+            allow_remote: input.allow_remote,
+        });
+    }
+
+    let routing = cd_core::multi_model::ContributionRoutingPolicy {
+        max_contributors: policy.max_contributors,
+        max_parallel: policy.max_parallel,
+        max_rounds: policy.max_rounds,
+        max_context_chars: policy.max_context_chars,
+        reviewer_enabled: roles
+            .iter()
+            .any(|assignment| assignment.role == cd_core::multi_model::ContributionRole::Reviewer),
+    };
+    if !roles.is_empty() {
+        cd_core::multi_model::ContributionRoutingPlan::new(
+            roles.iter().map(|assignment| assignment.role).collect(),
+            routing,
+        )
+        .map_err(|error| format!("invalid contribution plan: {}", error.as_str()))?;
+    }
+
+    cfg.contributions.roles = roles;
+    cfg.contributions.policy = routing;
+    cfg.contributions.budget = cd_core::config::MultiModelBudgetConfig {
+        max_total_provider_rounds: policy.max_total_provider_rounds,
+        max_semantic_corrections_per_stage: policy.max_semantic_corrections_per_stage,
+        max_context_chars_total: policy.max_context_chars_total,
+    };
+    Ok(())
+}
+
+/// Save the complete bounded contribution team. This records configuration
+/// only: it starts no qualification probe and runs no provider. Every role is
+/// still re-admitted against measured qualification, egress, credentials, and
+/// the hard route budget at turn time.
+#[tauri::command]
+fn set_multi_model_contributors(
+    state: State<'_, AppState>,
+    assignments: Vec<ContributionAssignmentInput>,
+    policy: ContributionPolicyInput,
+) -> Result<(), String> {
+    let mut cfg = state.config.lock().expect("config lock").clone();
+    apply_contribution_team(&mut cfg, assignments, policy)?;
+    let path = config_path(&state.branding).map_err(|error| error.to_string())?;
+    save_config(&path, &cfg).map_err(|error| error.to_string())?;
+    *state.config.lock().expect("config lock") = cfg;
+    let _ = ensure_host(&state);
+    Ok(())
+}
+
+#[cfg(test)]
+mod multi_model_reviewer_assignment_tests {
+    use super::*;
+    use cd_core::capability_qualification::{
+        CapabilityCheckResult, CapabilityKind, CapabilityStatus, QualificationKey,
+        QualificationReport, QualificationStore,
+    };
+    use cd_core::config::ReviewerRoleConfig;
+    use cd_core::multi_model::ContributionRole;
+    use cd_core::openai_chat_contract::{MODE_PLAIN, MODE_PROMPTED_JSON};
+    use cd_core::providers::ProviderCapabilities;
+
+    fn profile(id: &str, local_only: bool) -> ProviderProfile {
+        ProviderProfile {
+            id: id.into(),
+            label: format!("{id} label"),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://api.example.test/v1".into(),
+            api_key_ref: Some("keychain:synthetic-reviewer-ref".into()),
+            chat_model: "profile-default-model".into(),
+            embedding_model: None,
+            embedding_base_url: None,
+            capabilities: ProviderCapabilities::default(),
+            local_only,
+            deadline_preference: ProviderDeadlinePreference::Auto,
+        }
+    }
+
+    fn config_with(profiles: Vec<ProviderProfile>) -> AppConfig {
+        AppConfig {
+            providers: ProviderConfig {
+                active_id: None,
+                profiles,
+            },
+            ..AppConfig::default()
+        }
+    }
+
+    fn assigned(profile_id: &str) -> ReviewerRoleConfig {
+        ReviewerRoleConfig {
+            profile_id: profile_id.into(),
+            model: None,
+            require_qualified: true,
+            allow_remote: false,
+        }
+    }
+
+    fn contributor(
+        role: &str,
+        profile_id: &str,
+        model: Option<&str>,
+        allow_remote: bool,
+    ) -> ContributionAssignmentInput {
+        ContributionAssignmentInput {
+            role: role.into(),
+            profile_id: profile_id.into(),
+            model: model.map(str::to_string),
+            allow_remote,
+        }
+    }
+
+    fn contribution_policy() -> ContributionPolicyInput {
+        ContributionPolicyInput {
+            max_contributors: 4,
+            max_parallel: 3,
+            max_rounds: 2,
+            max_context_chars: 120_000,
+            max_total_provider_rounds: 12,
+            max_semantic_corrections_per_stage: 1,
+            max_context_chars_total: Some(400_000),
+        }
+    }
+
+    /// A report whose evidence passes the honesty checks (exact request
+    /// modes, dialect matching the key's transport protocol).
+    fn honest_report(key: &QualificationKey, structured: CapabilityStatus) -> QualificationReport {
+        let dialect = Some(key.transport_protocol.clone());
+        QualificationReport {
+            key: key.clone(),
+            checks: vec![
+                CapabilityCheckResult {
+                    kind: CapabilityKind::BasicGeneration,
+                    status: CapabilityStatus::Pass,
+                    elapsed_ms: 1,
+                    tested_at: 1,
+                    reason: String::new(),
+                    request_mode: Some(MODE_PLAIN.to_string()),
+                    dialect: dialect.clone(),
+                    schema_strict: None,
+                    schema_probe_id: None,
+                },
+                CapabilityCheckResult {
+                    kind: CapabilityKind::StructuredOutput,
+                    status: structured,
+                    elapsed_ms: 1,
+                    tested_at: 1,
+                    reason: String::new(),
+                    request_mode: Some(MODE_PROMPTED_JSON.to_string()),
+                    dialect,
+                    schema_strict: None,
+                    schema_probe_id: None,
+                },
+            ],
+            role_hint: String::new(),
+            cancelled: false,
+            stale: false,
+            finished_at: 1,
+        }
+    }
+
+    #[test]
+    fn unknown_profile_is_rejected_without_any_write() {
+        let mut cfg = config_with(vec![profile("known", false)]);
+        cfg.multi_model.reviewer = Some(assigned("known"));
+        let before = cfg.multi_model.clone();
+
+        let err = apply_reviewer_assignment(&mut cfg, Some("missing"), None, false)
+            .expect_err("unknown profile must fail");
+        assert!(err.contains("unknown provider profile"), "err: {err}");
+        assert_eq!(cfg.multi_model, before);
+    }
+
+    #[test]
+    fn local_only_profile_rejects_remote_acknowledgement() {
+        let mut cfg = config_with(vec![profile("local", true)]);
+        let before = cfg.multi_model.clone();
+
+        let err = apply_reviewer_assignment(&mut cfg, Some("local"), None, true)
+            .expect_err("local-only + allow_remote must fail");
+        assert!(err.contains("local-only"), "err: {err}");
+        assert_eq!(cfg.multi_model, before);
+
+        // Without the meaningless acknowledgement the same profile records.
+        apply_reviewer_assignment(&mut cfg, Some("local"), None, false)
+            .expect("local profile without remote ack records");
+        assert_eq!(
+            cfg.multi_model
+                .reviewer
+                .as_ref()
+                .map(|r| r.profile_id.as_str()),
+            Some("local")
+        );
+    }
+
+    #[test]
+    fn clear_and_blank_profile_ids_clear_the_reviewer() {
+        for cleared in [None, Some(""), Some("   ")] {
+            let mut cfg = config_with(vec![profile("known", false)]);
+            cfg.multi_model.reviewer = Some(assigned("known"));
+            apply_reviewer_assignment(&mut cfg, cleared, Some("ignored"), false)
+                .expect("clearing never fails");
+            assert_eq!(cfg.multi_model.reviewer, None, "cleared via {cleared:?}");
+        }
+    }
+
+    #[test]
+    fn assignment_records_identity_and_normalizes_blank_model() {
+        let mut cfg = config_with(vec![profile("remote", false)]);
+
+        apply_reviewer_assignment(&mut cfg, Some(" remote "), Some("   "), true)
+            .expect("valid assignment");
+        let rev = cfg.multi_model.reviewer.clone().expect("recorded");
+        assert_eq!(rev.profile_id, "remote");
+        assert_eq!(rev.model, None, "blank override means profile default");
+        assert!(rev.allow_remote);
+        assert!(rev.require_qualified);
+
+        apply_reviewer_assignment(&mut cfg, Some("remote"), Some(" override-model "), false)
+            .expect("valid assignment");
+        let rev = cfg.multi_model.reviewer.clone().expect("recorded");
+        assert_eq!(rev.model.as_deref(), Some("override-model"));
+        assert!(!rev.allow_remote);
+    }
+
+    /// Regression: measured qualification is mandatory for assignment. The
+    /// apply path has no input that could record `require_qualified = false`,
+    /// and re-assigning over a hand-relaxed config restores `true`.
+    #[test]
+    fn assignment_cannot_record_optional_qualification() {
+        let mut cfg = config_with(vec![profile("remote", false)]);
+        cfg.multi_model.reviewer = Some(ReviewerRoleConfig {
+            profile_id: "remote".into(),
+            model: None,
+            require_qualified: false,
+            allow_remote: false,
+        });
+
+        apply_reviewer_assignment(&mut cfg, Some("remote"), None, false).expect("valid assignment");
+        assert!(
+            cfg.multi_model
+                .reviewer
+                .as_ref()
+                .expect("recorded")
+                .require_qualified,
+            "every assignment records mandatory qualification"
+        );
+    }
+
+    #[test]
+    fn qualification_label_reports_measured_truth_only() {
+        let mut cfg = config_with(vec![profile("rev", false)]);
+        let mut store = QualificationStore::default();
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "unconfigured");
+
+        // Recorded but never measured: unverified, never qualified.
+        cfg.multi_model.reviewer = Some(assigned("rev"));
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "unverified");
+
+        let p = cfg.providers.profiles[0].clone();
+        let key = QualificationKey::with_provider_kind(&p.id, &p.base_url, &p.chat_model, p.kind);
+        store.put(honest_report(&key, CapabilityStatus::Pass));
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "qualified");
+
+        store.put(honest_report(&key, CapabilityStatus::Fail));
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "unqualified");
+
+        // A model override reads its own cache slot, not the default model's.
+        store.put(honest_report(&key, CapabilityStatus::Pass));
+        cfg.multi_model.reviewer.as_mut().unwrap().model = Some("other-model".into());
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "unverified");
+
+        // A reviewer pointing at a deleted profile has no measurable identity.
+        cfg.multi_model.reviewer.as_mut().unwrap().model = None;
+        cfg.multi_model.reviewer.as_mut().unwrap().profile_id = "gone".into();
+        assert_eq!(reviewer_qualification_label(&cfg, &store), "unverified");
+    }
+
+    #[test]
+    fn settings_dto_exposes_candidates_without_secrets() {
+        let mut cfg = config_with(vec![profile("rev", false), profile("loc", true)]);
+        cfg.providers.active_id = Some("rev".into());
+        cfg.multi_model.reviewer = Some(assigned("rev"));
+        let store = QualificationStore::default();
+
+        let dto = multi_model_settings_dto(&cfg, &store);
+        assert_eq!(dto.candidate_profiles.len(), 2);
+        assert_eq!(dto.reviewer_qualification, "unverified");
+        assert_eq!(dto.active_profile_id.as_deref(), Some("rev"));
+        let loc = dto
+            .candidate_profiles
+            .iter()
+            .find(|c| c.id == "loc")
+            .expect("local candidate listed");
+        assert!(loc.local_only);
+        assert_eq!(loc.chat_model, "profile-default-model");
+        assert_eq!(loc.label, "loc label");
+
+        let json = serde_json::to_string(&dto).expect("serialize");
+        assert!(!json.contains("api_key_ref"), "no credential refs in DTO");
+        assert!(!json.contains("synthetic-reviewer-ref"));
+        assert!(!json.contains("base_url"), "no endpoints in DTO");
+        assert!(!json.contains("api.example.test"));
+    }
+
+    #[test]
+    fn contribution_team_records_order_identity_egress_and_hard_bounds() {
+        let mut cfg = config_with(vec![profile("local", true), profile("remote", false)]);
+        apply_contribution_team(
+            &mut cfg,
+            vec![
+                contributor("observation_extractor", " local ", Some("   "), false),
+                contributor(
+                    "contradiction_checker",
+                    "remote",
+                    Some(" remote-model "),
+                    true,
+                ),
+                contributor("reviewer", "remote", None, true),
+            ],
+            contribution_policy(),
+        )
+        .expect("valid bounded team");
+
+        assert_eq!(cfg.contributions.roles.len(), 3);
+        assert_eq!(
+            cfg.contributions
+                .roles
+                .iter()
+                .map(|assignment| assignment.role)
+                .collect::<Vec<_>>(),
+            vec![
+                ContributionRole::ObservationExtractor,
+                ContributionRole::ContradictionChecker,
+                ContributionRole::Reviewer,
+            ]
+        );
+        assert_eq!(cfg.contributions.roles[0].model, None);
+        assert_eq!(
+            cfg.contributions.roles[1].model.as_deref(),
+            Some("remote-model")
+        );
+        assert!(cfg
+            .contributions
+            .roles
+            .iter()
+            .all(|assignment| assignment.require_qualified));
+        assert!(cfg.contributions.roles[1].allow_remote);
+        assert!(cfg.contributions.policy.reviewer_enabled);
+        assert_eq!(cfg.contributions.policy.max_parallel, 3);
+        assert_eq!(cfg.contributions.budget.max_total_provider_rounds, 12);
+        assert_eq!(
+            cfg.contributions.budget.max_context_chars_total,
+            Some(400_000)
+        );
+    }
+
+    #[test]
+    fn contribution_team_rejects_identity_egress_order_and_budget_without_mutation() {
+        let mut cfg = config_with(vec![profile("local", true), profile("remote", false)]);
+        cfg.contributions.roles = vec![cd_core::config::ContributionRoleConfig {
+            role: ContributionRole::EvidenceGap,
+            profile_id: "local".into(),
+            model: None,
+            require_qualified: true,
+            allow_remote: false,
+        }];
+        let before = cfg.contributions.clone();
+
+        for (assignments, policy, expected) in [
+            (
+                vec![contributor("timeline_analyst", "missing", None, false)],
+                contribution_policy(),
+                "unknown provider profile",
+            ),
+            (
+                vec![contributor("timeline_analyst", "local", None, true)],
+                contribution_policy(),
+                "local-only profile",
+            ),
+            (
+                vec![
+                    contributor("reviewer", "remote", None, true),
+                    contributor("evidence_gap", "local", None, false),
+                ],
+                contribution_policy(),
+                "reviewer_not_final",
+            ),
+            (
+                vec![contributor("timeline_analyst", "local", None, false)],
+                ContributionPolicyInput {
+                    max_parallel: 5,
+                    ..contribution_policy()
+                },
+                "max parallel",
+            ),
+        ] {
+            let error = apply_contribution_team(&mut cfg, assignments, policy)
+                .expect_err("invalid team must fail");
+            assert!(
+                error.contains(expected),
+                "error={error}, expected={expected}"
+            );
+            assert_eq!(cfg.contributions, before, "invalid input must not mutate");
+        }
+    }
+
+    #[test]
+    fn contribution_dto_reports_cached_truth_without_secrets_or_endpoints() {
+        let mut cfg = config_with(vec![profile("remote", false)]);
+        apply_contribution_team(
+            &mut cfg,
+            vec![contributor(
+                "causal_proposer",
+                "remote",
+                Some("causal-model"),
+                true,
+            )],
+            contribution_policy(),
+        )
+        .expect("valid team");
+        let mut store = QualificationStore::default();
+        let profile = cfg.providers.profiles[0].clone();
+        let key = QualificationKey::with_provider_kind(
+            &profile.id,
+            &profile.base_url,
+            "causal-model",
+            profile.kind,
+        );
+        store.put(honest_report(&key, CapabilityStatus::Pass));
+
+        let dto = multi_model_settings_dto(&cfg, &store);
+        assert_eq!(dto.contribution_assignments.len(), 1);
+        let assignment = &dto.contribution_assignments[0];
+        assert_eq!(assignment.role, "causal_proposer");
+        assert_eq!(assignment.qualification, "qualified");
+        assert!(assignment.require_qualified);
+        assert_eq!(dto.contribution_policy.max_contributors, 4);
+        let json = serde_json::to_string(&dto).expect("serialize");
+        assert!(!json.contains("api_key_ref"));
+        assert!(!json.contains("synthetic-reviewer-ref"));
+        assert!(!json.contains("base_url"));
+        assert!(!json.contains("api.example.test"));
+    }
 }
 
 #[tauri::command]
@@ -8427,6 +9183,9 @@ struct LogIngestReportDto {
     /// Separate operation phase timings (#824). Progress chrome stays one
     /// monotonic Stream for interleaved work; completion/diagnostics list these.
     phase_timings: cd_core::log_analysis::IngestPhaseTimings,
+    /// Fail-closed import result contract. Present on every published run so
+    /// the desktop cannot read Partial as Complete from a missing field.
+    outcome: cd_core::log_analysis::ImportOutcomeReport,
 }
 
 const DEMO_LOG_IDENTITY: &str = "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1";
@@ -9515,18 +10274,200 @@ const LOG_REANALYZE_CANCEL_KEY: &str = "log_reanalyze";
 enum LogIngestRunError {
     Cancelled,
     Failed(String),
+    /// Ingest classified a rejection; the typed outcome must cross IPC.
+    Rejected {
+        message: String,
+        outcome: Box<cd_core::log_analysis::ImportOutcomeReport>,
+    },
 }
 
 impl LogIngestRunError {
     fn message(&self) -> &str {
         match self {
             Self::Cancelled => "ingest cancelled",
-            Self::Failed(message) => message,
+            Self::Failed(message) | Self::Rejected { message, .. } => message,
         }
     }
 
-    fn into_message(self) -> String {
-        self.message().to_string()
+    fn into_command_error(self) -> ImportCommandErrorDto {
+        match self {
+            Self::Cancelled => ImportCommandErrorDto {
+                message: "ingest cancelled".into(),
+                outcome: None,
+            },
+            Self::Failed(message) => ImportCommandErrorDto {
+                message,
+                outcome: None,
+            },
+            Self::Rejected { message, outcome } => ImportCommandErrorDto {
+                message,
+                outcome: Some(outcome),
+            },
+        }
+    }
+}
+
+/// Structured import-command rejection so a classified outcome is not dropped.
+///
+/// `outcome` is boxed so `Result<_, ImportCommandErrorDto>` stays under
+/// `clippy::result_large_err`. `Box<T>` serializes as `T`, so the camelCase
+/// IPC JSON is unchanged. Successful `LogIngestReportDto.outcome` stays unboxed.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportCommandErrorDto {
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<Box<cd_core::log_analysis::ImportOutcomeReport>>,
+}
+
+impl From<String> for ImportCommandErrorDto {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            outcome: None,
+        }
+    }
+}
+
+/// Project a core import failure into the string the UI shows.
+///
+/// Fail-closed: [`cd_core::log_analysis::operator_import_error`] strips any
+/// `[member=` transport frame — well-formed or not — before the string
+/// crosses IPC. A ZIP member name that itself contains the marker cannot
+/// leave leftover `[member=` in the webview.
+fn import_error_message(error: &cd_core::error::CoreError) -> String {
+    cd_core::log_analysis::operator_import_error(error)
+}
+
+#[cfg(test)]
+mod import_error_projection_tests {
+    use super::import_error_message;
+    use cd_core::error::CoreError;
+
+    /// The `[member=…]` transport marker must never reach the UI, while the
+    /// engine's own wording survives at the front and the member is still
+    /// named through the scrubbed locator.
+    #[test]
+    fn member_annotation_is_stripped_and_the_scrubbed_locator_is_named() {
+        let error =
+            CoreError::Message("zip open: invalid Zip archive [member=bundles/inner.zip]".into());
+        let shown = import_error_message(&error);
+        assert!(!shown.contains("[member="), "marker leaked: {shown}");
+        assert!(
+            shown.starts_with("zip open: invalid Zip archive"),
+            "engine wording must stay at the front: {shown}"
+        );
+        assert!(
+            shown.contains("bundles/inner.zip"),
+            "the failing member must still be named: {shown}"
+        );
+    }
+
+    /// A secret-bearing member name is scrubbed by the same redaction the
+    /// outcome report uses — the raw annotated identity must not pass
+    /// through to the UI.
+    #[test]
+    fn secret_bearing_member_names_are_scrubbed() {
+        let error = CoreError::Message(
+            "zip open: invalid Zip archive [member=bundles/sk-abcdefghijklmnopqrst.bin]".into(),
+        );
+        let shown = import_error_message(&error);
+        assert!(!shown.contains("[member="), "marker leaked: {shown}");
+        assert!(
+            !shown.contains("abcdefghijklmnopqrst"),
+            "credential-shaped member name reached the UI string: {shown}"
+        );
+    }
+
+    /// Errors without an annotation pass through byte for byte.
+    #[test]
+    fn unannotated_messages_pass_through_unchanged() {
+        let error = CoreError::Message("policy denied: plan is stale".into());
+        assert_eq!(import_error_message(&error), error.to_string());
+    }
+
+    /// The seal is fail-closed: a malformed or nested frame is cut, never
+    /// returned with leftover `[member=`.
+    #[test]
+    fn malformed_member_frames_never_reach_the_ui() {
+        for raw in [
+            "zip open: missing end record [member=]",
+            "zip open: missing end record [member=foo [member=sk-abcdefghijklmnopqrst]]",
+            "zip open: missing end record [member=x] [member=secret]",
+        ] {
+            let shown = import_error_message(&CoreError::Message(raw.into()));
+            assert!(
+                !shown.contains("[member="),
+                "fail-open seal leaked marker from {raw:?}: {shown}"
+            );
+            assert!(
+                shown.starts_with("zip open: missing end record"),
+                "engine wording must survive: {shown}"
+            );
+        }
+    }
+
+    /// A rejected ingest keeps the classified outcome on the command error
+    /// and still seals the transport marker.
+    #[test]
+    fn rejected_ingest_error_carries_the_classified_outcome() {
+        let error =
+            CoreError::Message("zip open: missing end record [member=bundles/inner.zip]".into());
+        let classified = cd_core::log_analysis::ImportOutcomeReport::rejected_from_error(&error);
+        let unboxed = serde_json::to_value(&classified).expect("unboxed outcome must serialize");
+        let boxed = serde_json::to_value(Box::new(classified.clone()))
+            .expect("boxed outcome must serialize");
+        assert_eq!(
+            boxed, unboxed,
+            "Box<ImportOutcomeReport> must serialize identically to T"
+        );
+        let dto = super::LogIngestRunError::Rejected {
+            message: import_error_message(&error),
+            outcome: Box::new(classified),
+        }
+        .into_command_error();
+        assert!(
+            !dto.message.contains("[member="),
+            "command error leaked marker: {}",
+            dto.message
+        );
+        let outcome = dto
+            .outcome
+            .as_ref()
+            .expect("rejected ingest must carry the outcome");
+        assert_eq!(
+            outcome.class,
+            cd_core::log_analysis::ImportOutcomeClass::Rejected
+        );
+        assert!(!outcome.published);
+        assert!(
+            outcome
+                .defects
+                .iter()
+                .any(|defect| defect.source.identity.contains("bundles/inner.zip")),
+            "locator missing: {outcome:?}"
+        );
+        let wire = serde_json::to_value(&dto).expect("command error must serialize");
+        assert_eq!(wire["outcome"], unboxed);
+        assert_eq!(wire["outcome"]["class"], "rejected");
+        assert_eq!(wire["outcome"]["published"], false);
+        assert!(
+            wire["message"]
+                .as_str()
+                .is_some_and(|message| !message.contains("[member=")),
+            "serialized message leaked marker: {wire}"
+        );
+        for error in [
+            super::LogIngestRunError::Cancelled,
+            super::LogIngestRunError::Failed("host configuration fault".into()),
+        ] {
+            let omitted = serde_json::to_value(error.into_command_error())
+                .expect("command error without outcome must serialize");
+            assert!(
+                omitted.get("outcome").is_none(),
+                "None outcome must be omitted, not null: {omitted}"
+            );
+        }
     }
 }
 
@@ -9655,61 +10596,28 @@ async fn run_log_ingest(
     let name_owned = name.unwrap_or_else(|| "corpus".into());
     let cancel_for_job = cancel.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        let result = match (managed_identity, selection) {
-            (Some(identity), Some(selection)) => {
-                cd_core::log_analysis::ingest_path_with_policy_selection_and_observer_managed(
-                    &cache,
-                    &selected_path,
-                    &name_owned,
-                    &policy,
-                    embed_backend,
-                    &progress,
-                    Some(&cancel_for_job),
-                    &identity,
-                    &selection,
-                )
-            }
-            (Some(identity), None) => {
-                cd_core::log_analysis::ingest_path_with_policy_and_observer_managed(
-                    &cache,
-                    &selected_path,
-                    &name_owned,
-                    &policy,
-                    embed_backend,
-                    &progress,
-                    Some(&cancel_for_job),
-                    &identity,
-                )
-            }
-            (None, Some(selection)) => {
-                cd_core::log_analysis::ingest_path_with_policy_selection_and_observer(
-                    &cache,
-                    &selected_path,
-                    &name_owned,
-                    &policy,
-                    embed_backend,
-                    &progress,
-                    Some(&cancel_for_job),
-                    &selection,
-                )
-            }
-            (None, None) => cd_core::log_analysis::ingest_path_with_policy_and_observer(
-                &cache,
-                &selected_path,
-                &name_owned,
-                &policy,
-                embed_backend,
-                &progress,
-                Some(&cancel_for_job),
-            ),
-        };
-        result.map_err(|error| match error {
-            cd_core::error::CoreError::Cancelled => LogIngestRunError::Cancelled,
-            other => LogIngestRunError::Failed(other.to_string()),
-        })
+        let (result, classified) = cd_core::log_analysis::ingest_path_with_outcome(
+            &cache,
+            &selected_path,
+            &name_owned,
+            &policy,
+            embed_backend,
+            &progress,
+            Some(&cancel_for_job),
+            selection.as_ref(),
+            managed_identity.as_deref(),
+        );
+        match result {
+            Ok(report) => Ok((report, classified)),
+            Err(cd_core::error::CoreError::Cancelled) => Err(LogIngestRunError::Cancelled),
+            Err(other) => Err(LogIngestRunError::Rejected {
+                message: import_error_message(&other),
+                outcome: Box::new(classified),
+            }),
+        }
     })
     .await;
-    let report = match outcome {
+    let (report, classified) = match outcome {
         Ok(Ok(report)) => {
             state
                 .failed_log_ingest_diagnostic
@@ -9782,6 +10690,7 @@ async fn run_log_ingest(
             .collect(),
         embedding: report.embedding,
         phase_timings: report.phase_timings,
+        outcome: classified,
     })
 }
 
@@ -9794,7 +10703,7 @@ async fn ingest_log_path(
     path: String,
     name: Option<String>,
     correlation_id: Option<String>,
-) -> Result<LogIngestReportDto, String> {
+) -> Result<LogIngestReportDto, ImportCommandErrorDto> {
     let invocation = ProcessProgressInvocation::new(correlation_id);
     let cancel_key = format!("{LOG_INGEST_CANCEL_KEY}:{}", invocation.correlation_id);
     let cancel = cd_core::process_progress::CancelFlag::new();
@@ -9824,7 +10733,7 @@ async fn ingest_log_path(
         &cancel_key,
         &cancel_registration,
     );
-    result.map_err(LogIngestRunError::into_message)
+    result.map_err(LogIngestRunError::into_command_error)
 }
 
 struct DemoLogIngestReceipt {
@@ -10063,7 +10972,9 @@ async fn install_demo_log_corpus_transaction<B: DemoLogInstallBackend>(
             backend.select_corpus(prior_active_corpus);
             return DemoLogInstallDto::cancelled();
         }
-        Err(LogIngestRunError::Failed(error)) => {
+        Err(
+            LogIngestRunError::Failed(error) | LogIngestRunError::Rejected { message: error, .. },
+        ) => {
             backend.select_corpus(prior_active_corpus);
             return DemoLogInstallDto::failed(error, true);
         }
@@ -10825,7 +11736,7 @@ async fn log_preview_import(
             std::path::Path::new(&path),
             Some(&cancel),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| import_error_message(&error))
     })
     .await
     .map_err(|error| format!("import preview task join: {error}"));
@@ -10856,7 +11767,7 @@ async fn log_run_import(
     plan_version: u32,
     selected: Vec<String>,
     correlation_id: Option<String>,
-) -> Result<LogIngestReportDto, String> {
+) -> Result<LogIngestReportDto, ImportCommandErrorDto> {
     let invocation = ProcessProgressInvocation::new(correlation_id);
     let cancel_key = format!("{LOG_INGEST_CANCEL_KEY}:{}", invocation.correlation_id);
     let cancel = cd_core::process_progress::CancelFlag::new();
@@ -10880,7 +11791,7 @@ async fn log_run_import(
             &selected,
             Some(&verify_cancel),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| import_error_message(&error))
     })
     .await
     .map_err(|error| format!("import plan verification task join: {error}"));
@@ -10892,7 +11803,7 @@ async fn log_run_import(
                 &cancel_key,
                 &cancel_registration,
             );
-            return Err(message);
+            return Err(message.into());
         }
     };
     let result = run_log_ingest(
@@ -10911,7 +11822,7 @@ async fn log_run_import(
         &cancel_key,
         &cancel_registration,
     );
-    result.map_err(LogIngestRunError::into_message)
+    result.map_err(LogIngestRunError::into_command_error)
 }
 
 /// Apply reviewed timezone declarations to one or more sources atomically
@@ -14287,6 +15198,8 @@ pub fn run() {
             save_app_config,
             get_multi_model_settings,
             set_multi_model_mode,
+            set_multi_model_reviewer,
+            set_multi_model_contributors,
             get_s3_backup_settings,
             save_s3_backup_settings,
             run_s3_workspace_backup,
@@ -15215,8 +16128,8 @@ mod log_noise_candidate_host_tests {
             "run_log_ingest must use spawn_blocking for trusted-core ingest"
         );
         assert!(
-            body.contains("ingest_path_with_policy_and_observer"),
-            "run_log_ingest must call the shipped core ingest path"
+            body.contains("ingest_path_with_outcome"),
+            "run_log_ingest must call the classified-outcome ingest path"
         );
         assert!(
             !body.contains("LogCorpus::open("),
