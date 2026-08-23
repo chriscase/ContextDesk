@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { EvidenceSnapshotCockpit } from "./EvidenceSnapshotCockpit.js";
 
+// Metadata fields beyond `id`/`fingerprint`/`evidence`/`createdBy` are already
+// part of the snapshot API response (cd-collab.snapshot.v1) but stay optional
+// here: the cockpit renders "unknown" instead of guessing when one is absent.
 interface SnapshotView {
   id: string;
   fingerprint: string;
-  evidence: { evidenceId: string }[];
+  evidence: { evidenceId: string; verificationStatus?: string | null }[];
   createdBy: string;
+  createdAt?: string;
+  status?: string;
+  visibility?: string;
+  parentSnapshotId?: string | null;
+  protocolVersion?: string;
 }
 
 interface ArtifactView {
@@ -553,6 +562,16 @@ export function TriageRunPanel(props: {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  const cockpit = snapshots.length > 0 || jobs.length > 0 ? (
+    <EvidenceSnapshotCockpit
+      snapshots={snapshots}
+      selectedRuns={comparedJobs}
+      finishedRunCount={completedJobs.length}
+      focusSnapshotId={selectedSnapshotId}
+      canAct={!props.readOnly && props.canLead}
+    />
+  ) : null;
+
   return (
     <section className="triage-runs" aria-labelledby="triage-runs-heading">
       <div className="triage-runs__header">
@@ -821,7 +840,10 @@ export function TriageRunPanel(props: {
             </section>
           ) : null}
           {jobs.length === 0 ? (
-            <p className="case-memory__empty">No triage runs yet. The first run will be bound to the selected snapshot and ready for later comparison.</p>
+            <>
+              <p className="case-memory__empty">No triage runs yet. The first run will be bound to the selected snapshot and ready for later comparison.</p>
+              {cockpit}
+            </>
           ) : (
             <>
               {completedJobs.some((job) => isReviewable(job.status)) ? (
@@ -915,6 +937,7 @@ export function TriageRunPanel(props: {
                   )}
                 </section>
               ) : null}
+              {cockpit}
               <div className="triage-runs__history" aria-live="polite">
               {jobs.map((job) => (
                 <article className="triage-runs__job" key={job.id}>
