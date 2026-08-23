@@ -9,13 +9,13 @@ use cd_core::error::{CoreError, CoreResult};
 use cd_core::investigation_team_qualification::{InvestigationTeamRole, MemberBinding};
 use cd_core::openai_chat_contract::OpenAiChatRequestMode;
 use cd_core::quality_eval::{
-    build_live_known_answer_run, live_known_answer_prompt_set_hash,
-    live_known_answer_quality_unit, load_embedded_open_v1_suite,
-    parse_live_known_answer_json, parse_live_known_answer_response, prepare_live_known_answer_suite,
-    render_live_known_answer_json, render_live_known_answer_markdown,
-    score_live_known_answer_response, serialize_live_known_answer_prompt, LaneStatus,
-    LiveKnownAnswerRunMetrics, LiveKnownAnswerRunReport, LiveKnownAnswerRunStatus,
-    LiveKnownAnswerScenarioObservation, ModelSubject,
+    build_live_known_answer_run, live_known_answer_prompt_set_hash, live_known_answer_quality_unit,
+    load_embedded_open_v1_suite, parse_live_known_answer_json, parse_live_known_answer_response,
+    prepare_live_known_answer_suite, render_live_known_answer_json,
+    render_live_known_answer_markdown, score_live_known_answer_response,
+    serialize_live_known_answer_prompt, LaneStatus, LiveKnownAnswerRunMetrics,
+    LiveKnownAnswerRunReport, LiveKnownAnswerRunStatus, LiveKnownAnswerScenarioObservation,
+    ModelSubject,
 };
 use cd_workflow::capability_qualification::LiveQualificationTransport;
 use serde::{Deserialize, Serialize};
@@ -381,12 +381,7 @@ fn execute_target(
         suite_digest,
         prompt_set_hash,
     );
-    build_live_known_answer_run(
-        observed_at,
-        target.member.role,
-        quality_unit,
-        observations,
-    )
+    build_live_known_answer_run(observed_at, target.member.role, quality_unit, observations)
 }
 
 fn live_known_answer_request(model_id: &str, prompt: &str) -> SyntheticChatRequest {
@@ -478,7 +473,13 @@ fn project(
             failed_dimensions: case
                 .answers
                 .first()
-                .map(|answer| answer.failed_ids().into_iter().map(str::to_string).collect())
+                .map(|answer| {
+                    answer
+                        .failed_ids()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_default(),
             latency_ms: telemetry.latency_ms,
             input_bytes: telemetry.input_bytes,
@@ -601,8 +602,7 @@ mod tests {
         assert_eq!(report.metrics.blocked_scenarios, 4);
         assert!(report.telemetry[8..12].iter().all(|row| {
             row.status == LaneStatus::Blocked
-                && row.failure_code.as_deref()
-                    == Some("host_diagnostic_pipeline_unavailable")
+                && row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
                 && row.latency_ms == 0
                 && row.input_bytes == 0
                 && row.output_bytes == 0
@@ -647,8 +647,8 @@ mod tests {
         assert_eq!(current_dto.status, KnownAnswerDisplayStatus::Partial);
         assert!(current_dto.stale_reasons.is_empty());
 
-        let current = current_projection_context("build-b".into(), vec![target().member])
-            .expect("context");
+        let current =
+            current_projection_context("build-b".into(), vec![target().member]).expect("context");
         let dto = loaded.history(&current).expect("history").remove(0);
         assert!(dto.stale);
         assert_eq!(dto.status, KnownAnswerDisplayStatus::Stale);

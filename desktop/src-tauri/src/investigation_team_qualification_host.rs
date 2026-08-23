@@ -146,10 +146,7 @@ impl InvestigationTeamQualificationDto {
 
 impl From<QualificationExecutionResult> for InvestigationTeamQualificationDto {
     fn from(result: QualificationExecutionResult) -> Self {
-        Self::from_execution(
-            result,
-            InvestigationTeamQualificationRunKind::Measured,
-        )
+        Self::from_execution(result, InvestigationTeamQualificationRunKind::Measured)
     }
 }
 
@@ -306,9 +303,7 @@ impl InvestigationTeamQualificationStore {
         self.records
             .iter()
             .rev()
-            .find(|record| {
-                record.run_kind == InvestigationTeamQualificationRunKind::Measured
-            })
+            .find(|record| record.run_kind == InvestigationTeamQualificationRunKind::Measured)
             .or_else(|| self.records.last())
             .map(project_record)
     }
@@ -334,10 +329,8 @@ pub fn investigation_team_qualification_store_path(config_dir: &Path) -> PathBuf
 fn project_record(
     record: &StoredInvestigationTeamQualification,
 ) -> InvestigationTeamQualificationDto {
-    let mut dto = InvestigationTeamQualificationDto::from_execution(
-        record.result.clone(),
-        record.run_kind,
-    );
+    let mut dto =
+        InvestigationTeamQualificationDto::from_execution(record.result.clone(), record.run_kind);
     dto.failures = record.failures.clone();
     if dto.suite_version != SUITE_VERSION {
         dto.status = QualificationStatus::Stale;
@@ -347,9 +340,8 @@ fn project_record(
 }
 
 fn validate_stored_record(record: &StoredInvestigationTeamQualification) -> CoreResult<()> {
-    let parsed = cd_core::investigation_team_qualification::parse_report(
-        &record.result.redacted_json,
-    )?;
+    let parsed =
+        cd_core::investigation_team_qualification::parse_report(&record.result.redacted_json)?;
     if parsed != record.result.report
         || cd_core::investigation_team_qualification::render_json(&parsed)?
             != record.result.redacted_json
@@ -630,11 +622,7 @@ fn attempt_from_response(
     let mut failure = None;
 
     let (status, completion_claimed, claims, citations) = if response.cancelled {
-        failure = Some(live_failure(
-            attempt_id,
-            role,
-            "provider_attempt_cancelled",
-        ));
+        failure = Some(live_failure(attempt_id, role, "provider_attempt_cancelled"));
         (AttemptStatus::Cancelled, false, Vec::new(), Vec::new())
     } else if response.raw_error.is_some() {
         // Provider diagnostics can contain endpoint or credential-adjacent
@@ -650,11 +638,7 @@ fn attempt_from_response(
                     .iter()
                     .any(|evidence_id| evidence_id != LIVE_EVIDENCE_ID);
                 if invalid_citation {
-                    failure = Some(live_failure(
-                        attempt_id,
-                        role,
-                        "unknown_evidence_citation",
-                    ));
+                    failure = Some(live_failure(attempt_id, role, "unknown_evidence_citation"));
                     (AttemptStatus::Failed, false, Vec::new(), Vec::new())
                 } else {
                     let claims = answer
@@ -1065,15 +1049,13 @@ mod tests {
 
     fn measured_result(observed_at: i64) -> QualificationExecutionResult {
         execute_synthetic(
-            vec![
-                MemberBinding::from_deployment(
-                    InvestigationTeamRole::Single,
-                    "profile-a",
-                    "model-a",
-                    "https://qualification.example.test/v1",
-                )
-                .expect("member"),
-            ],
+            vec![MemberBinding::from_deployment(
+                InvestigationTeamRole::Single,
+                "profile-a",
+                "model-a",
+                "https://qualification.example.test/v1",
+            )
+            .expect("member")],
             observed_at,
         )
         .expect("result")
@@ -1095,7 +1077,9 @@ mod tests {
     #[test]
     fn measured_history_survives_save_and_load_and_is_preferred_over_synthetic() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("investigation-team-qualifications.json");
+        let path = directory
+            .path()
+            .join("investigation-team-qualifications.json");
         let mut store = InvestigationTeamQualificationStore::default();
         let measured = store
             .publish(

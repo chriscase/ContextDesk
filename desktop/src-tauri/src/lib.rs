@@ -8645,13 +8645,10 @@ fn current_quality_build_identity() -> String {
 
 fn investigation_team_known_answer_projection_context(
     state: &AppState,
-) -> Result<
-    investigation_team_known_answer_host::KnownAnswerProjectionContext,
-    String,
-> {
+) -> Result<investigation_team_known_answer_host::KnownAnswerProjectionContext, String> {
     let cfg = state.config.lock().expect("config").clone();
-    let members = investigation_team_qualification_host::members_from_config(&cfg)
-        .unwrap_or_default();
+    let members =
+        investigation_team_qualification_host::members_from_config(&cfg).unwrap_or_default();
     investigation_team_known_answer_host::current_projection_context(
         current_quality_build_identity(),
         members,
@@ -8708,9 +8705,8 @@ async fn run_live_investigation_team_known_answer_qualification(
     .map_err(|error| error.to_string())?;
     let cancel = {
         let mut cancels = state.cancels.lock().expect("cancels");
-        if cancels.contains_key(
-            investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY,
-        ) {
+        if cancels.contains_key(investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY)
+        {
             return Err("Investigation Team known-answer qualification is already running".into());
         }
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -8758,13 +8754,11 @@ async fn run_live_investigation_team_known_answer_qualification(
 }
 
 #[tauri::command]
-fn cancel_live_investigation_team_known_answer_qualification(
-    state: State<'_, AppState>,
-) -> bool {
+fn cancel_live_investigation_team_known_answer_qualification(state: State<'_, AppState>) -> bool {
     let cancels = state.cancels.lock().expect("cancels");
-    if let Some(flag) = cancels.get(
-        investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY,
-    ) {
+    if let Some(flag) =
+        cancels.get(investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY)
+    {
         flag.store(true, std::sync::atomic::Ordering::SeqCst);
         true
     } else {
