@@ -17,6 +17,9 @@ export interface ContributionView {
   body: string | null;
   privacyClass: string;
   tombstoned: boolean;
+  /** The wire payload records these; older fixtures and embeddings may omit them. */
+  authorUsername?: string;
+  createdAt?: string;
 }
 
 export interface RunRow {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { CaseDiscussion } from "./CaseDiscussion.js";
 import { ExperimentLab } from "./ExperimentLab.js";
 import { ExportPanel } from "./ExportPanel.js";
 import { CaseBoardPanel } from "./CaseBoardPanel.js";
@@ -114,9 +115,12 @@ export function Cases(props: {
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [importError, setImportError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [discussionOpen, setDiscussionOpen] = useState(false);
+  const [discussionPresence, setDiscussionPresence] = useState<number | null>(null);
   const activeCaseRef = useRef<string | null>(null);
   const loadGeneration = useRef(0);
   const titleInputRef = useRef<HTMLInputElement>(null);
+  const discussionToggleRef = useRef<HTMLButtonElement>(null);
   const previousStage = useRef<StageId | null>(null);
 
   function openCase(id: string) {
@@ -132,6 +136,12 @@ export function Cases(props: {
   function exitFocus(target: "overview" | "investigations") {
     if (props.onExitFocus) props.onExitFocus(target);
     else setLocalNav({ caseId: null, stage: "situation" });
+  }
+
+  function closeDiscussion() {
+    setDiscussionOpen(false);
+    setDiscussionPresence(null);
+    discussionToggleRef.current?.focus();
   }
 
   const refresh = useCallback(async () => {
@@ -189,6 +199,8 @@ export function Cases(props: {
     setRuns([]);
     setActionError(null);
     setImportError(null);
+    setDiscussionOpen(false);
+    setDiscussionPresence(null);
     if (focusCaseId) void loadTimeline(focusCaseId, controller.signal).catch(() => undefined);
     return () => controller.abort();
   }, [focusCaseId, loadTimeline]);
@@ -543,16 +555,42 @@ export function Cases(props: {
         </ol>
       </nav>
       <header className="focus-head">
-        <h2 className="case-view__title" id="focus-case-title">
-          {current.title}
-        </h2>
-        <p className="focus-head__meta">
-          <span className={`status-pill status-pill--${current.status}`}>{current.status}</span>
-          <span className={`severity-note severity-note--${current.severity}`}>
-            {current.severity} severity
-          </span>
-          {openedLine(current) ? <span>{openedLine(current)}</span> : null}
-        </p>
+        <div className="focus-head__primary">
+          <h2 className="case-view__title" id="focus-case-title">
+            {current.title}
+          </h2>
+          <p className="focus-head__meta">
+            <span className={`status-pill status-pill--${current.status}`}>{current.status}</span>
+            <span className={`severity-note severity-note--${current.severity}`}>
+              {current.severity} severity
+            </span>
+            {openedLine(current) ? <span>{openedLine(current)}</span> : null}
+          </p>
+        </div>
+        <div className="focus-head__discussion">
+          <button
+            type="button"
+            ref={discussionToggleRef}
+            className="focus-head__discussion-toggle"
+            aria-expanded={discussionOpen}
+            aria-controls="case-discussion"
+            onClick={() => (discussionOpen ? closeDiscussion() : setDiscussionOpen(true))}
+          >
+            Discussion
+          </button>
+          {props.participant || discussionPresence !== null ? (
+            <p className="focus-head__discussion-context">
+              {[
+                props.participant ? `Signed in as ${props.participant.username}` : null,
+                discussionPresence !== null
+                  ? `${discussionPresence} active now (polled)`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
+          ) : null}
+        </div>
       </header>
       <nav className="stage-nav" aria-label="Investigation stages">
         <ul>
@@ -576,6 +614,11 @@ export function Cases(props: {
           {actionError}
         </p>
       ) : null}
+      <div
+        className={
+          discussionOpen ? "case-view__work case-view__work--discussing" : "case-view__work"
+        }
+      >
       <div className="stage-panels">
         <section
           className="stage-panel"
@@ -801,6 +844,19 @@ export function Cases(props: {
             </div>
           </TriageStepSection>
         </section>
+      </div>
+      {discussionOpen ? (
+        <CaseDiscussion
+          key={current.id}
+          caseId={current.id}
+          {...(props.participant ? { participant: props.participant } : {})}
+          canWrite={canWrite}
+          readOnly={readOnly}
+          onClose={closeDiscussion}
+          onPosted={() => void loadTimeline(current.id)}
+          onPresence={setDiscussionPresence}
+        />
+      ) : null}
       </div>
     </article>
   );
