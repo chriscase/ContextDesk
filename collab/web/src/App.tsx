@@ -1,5 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Cases, type StageId } from "./Cases.js";
+import {
+  HOME,
+  SIGN_IN,
+  historyUrl,
+  isShellLocation,
+  isSignInLocation,
+  isUnknownLocation,
+  isWorkLocation,
+  parseHashStage,
+  parsePathname,
+  restoreAfterSignIn,
+  sameLocation,
+  titleFor,
+  type AreaId,
+  type ShellLocation,
+  type WorkLocation,
+} from "./app-location.js";
+import { Cases } from "./Cases.js";
 import { Catalog } from "./Catalog.js";
 import { HelpCenter } from "./HelpCenter.js";
 import { LoginForm } from "./LoginForm.js";
@@ -45,49 +62,6 @@ declare global {
     __CONTEXTDESK_STATIC_READ_ONLY__?: boolean;
   }
 }
-
-type AreaId = "overview" | "investigations" | "sources" | "help";
-
-/** The whole navigable position of the War Room, kept in one object so the
- *  browser history can restore any point with a single popstate payload. */
-interface WarRoomLocation {
-  area: AreaId;
-  caseId: string | null;
-  stage: StageId;
-}
-
-const HOME: WarRoomLocation = { area: "overview", caseId: null, stage: "situation" };
-
-const STAGE_IDS: readonly StageId[] = ["situation", "capture", "analyze", "compare", "decide"];
-const AREA_IDS: readonly AreaId[] = ["overview", "investigations", "sources", "help"];
-
-function isWarRoomLocation(value: unknown): value is WarRoomLocation {
-  if (typeof value !== "object" || value === null) return false;
-  const row = value as Record<string, unknown>;
-  return (
-    AREA_IDS.includes(row.area as AreaId) &&
-    (row.caseId === null || typeof row.caseId === "string") &&
-    STAGE_IDS.includes(row.stage as StageId)
-  );
-}
-
-/**
- * Fragment ids that pre-shell surfaces still emit as plain `#anchor` links
- * (the TriageWorkspace rail and the Experiment Lab review queue). Each one
- * names content that now lives on a specific focused stage, so a click routes
- * to that stage instead of dying against a hidden panel.
- */
-const LEGACY_ANCHOR_STAGES: Record<string, StageId> = {
-  "triage-capture": "capture",
-  "triage-analyze": "analyze",
-  "triage-evidence-board": "analyze",
-  "triage-lane-runner": "analyze",
-  "triage-compare": "compare",
-  "triage-comparison-lab": "compare",
-  "triage-decide": "decide",
-  "decision-heading": "decide",
-  "export-heading": "decide",
-};
 
 const PRIMARY_NAV: readonly { area: AreaId; label: string }[] = [
   { area: "overview", label: "Overview" },
@@ -184,25 +158,44 @@ function AccountMenu(props: {
   );
 }
 
+function writeHistory(location: ShellLocation, mode: "push" | "replace") {
+  const url = historyUrl(location, window.location.pathname);
+  try {
+    if (mode === "replace") {
+      window.history.replaceState(location, "", url);
+    } else {
+      window.history.pushState(location, "", url);
+    }
+  } catch {
+    // History can be unavailable in embedded shells; in-app state still works.
+  }
+}
+
 export function App() {
   const syntheticDemo = import.meta.env.VITE_CONTEXTDESK_SYNTHETIC_DEMO === "1";
   const staticReadOnly = window.__CONTEXTDESK_STATIC_READ_ONLY__ === true;
   const [session, setSession] = useState<SessionView | null>(null);
   const [ready, setReady] = useState(false);
   const [theme, setTheme] = useState<ThemeName>(savedTheme);
-  // Always starts at HOME on a fresh load; history state is only replayed
-  // through popstate so browser Back works without a reload re-entering focus.
-  const [location, setLocation] = useState<WarRoomLocation>(HOME);
+  const [location, setLocation] = useState<ShellLocation>(() =>
+    parsePathname(window.location.pathname),
+  );
   const [navOpen, setNavOpen] = useState(false);
   const [startSignal, setStartSignal] = useState(0);
   const locationRef = useRef(location);
   locationRef.current = location;
+  const restoreRef = useRef<WorkLocation | null>(
+    isWorkLocation(parsePathname(window.location.pathname))
+      ? (parsePathname(window.location.pathname) as WorkLocation)
+      : null,
+  );
+  const mainRef = useRef<HTMLElement>(null);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
 
-  // index.html still carries the pre-rename title and is outside this
-  // change's file surface; the shell owns the document title instead.
   useEffect(() => {
-    document.title = "ContextDesk War Room";
-  }, []);
+    document.title = titleFor(location);
+  }, [location]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -237,33 +230,55 @@ export function App() {
     void refresh();
   }, [refresh]);
 
-  const navigate = useCallback((next: WarRoomLocation) => {
-    setLocation(next);
+  const navigate = useCallback((next: ShellLocation, mode: "push" | "replace" = "push") => {
+    setLocation((current) => {
+      if (sameLocation(current, next)) {
+        return current;
+      }
+      return next;
+    });
     setNavOpen(false);
-    try {
-      // The explicit URL drops any leftover legacy #anchor from the address.
-      window.history.pushState(next, "", window.location.pathname + window.location.search);
-    } catch {
-      // History can be unavailable in embedded shells; in-app state still works.
-    }
+    writeHistory(next, mode);
   }, []);
 
   useEffect(() => {
-    try {
-      window.history.replaceState(HOME, "");
-    } catch {
-      // Same guard as above.
+    if (!ready) {
+      return;
     }
+    if (!session) {
+      const current = locationRef.current;
+      if (isWorkLocation(current)) {
+        restoreRef.current = current;
+      } else if (isUnknownLocation(current)) {
+        restoreRef.current = null;
+      }
+      if (!isSignInLocation(current)) {
+        setLocation(SIGN_IN);
+        writeHistory(SIGN_IN, "replace");
+      }
+      return;
+    }
+    const current = locationRef.current;
+    if (isSignInLocation(current)) {
+      const next = restoreAfterSignIn(restoreRef.current);
+      restoreRef.current = null;
+      setLocation(next);
+      writeHistory(next, "replace");
+    }
+  }, [ready, session]);
+
+  useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
-      if (isWarRoomLocation(event.state)) {
-        setLocation(event.state);
-        setNavOpen(false);
+      const hashStage = parseHashStage(window.location.hash);
+      if (hashStage) {
+        // A legacy fragment link fires popstate with a null state before the
+        // hashchange event; that navigation belongs to the hashchange handler.
         return;
       }
-      // A legacy fragment link fires popstate with a null state before the
-      // hashchange event; that navigation belongs to the hashchange handler.
-      if (LEGACY_ANCHOR_STAGES[window.location.hash.replace(/^#/, "")]) return;
-      setLocation(HOME);
+      const next = isShellLocation(event.state)
+        ? event.state
+        : parsePathname(window.location.pathname);
+      setLocation(next);
       setNavOpen(false);
     };
     window.addEventListener("popstate", onPopState);
@@ -274,23 +289,38 @@ export function App() {
   // now presents their target, then hand scrolling back to the browser.
   useEffect(() => {
     const onHashChange = () => {
-      const anchor = window.location.hash.replace(/^#/, "");
-      const stage = LEGACY_ANCHOR_STAGES[anchor];
+      const stage = parseHashStage(window.location.hash);
       const current = locationRef.current;
-      if (!stage || !current.caseId) return;
-      setLocation({ area: "investigations", caseId: current.caseId, stage });
+      if (!stage || !isWorkLocation(current) || !current.caseId) return;
+      const next: WorkLocation = {
+        area: "investigations",
+        caseId: current.caseId,
+        stage,
+      };
+      setLocation(next);
       window.setTimeout(() => {
-        document.getElementById(anchor)?.scrollIntoView?.();
+        document.getElementById(window.location.hash.replace(/^#/, ""))?.scrollIntoView?.();
       }, 0);
     };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
+  function logout() {
+    restoreRef.current = null;
     setSession(null);
-    setLocation(HOME);
+    setLocation(SIGN_IN);
+    writeHistory(SIGN_IN, "replace");
+    void fetch("/api/auth/logout", { method: "POST" });
+  }
+
+  function goToArea(area: AreaId) {
+    const current = locationRef.current;
+    const caseId =
+      area === "help" && isWorkLocation(current) ? current.caseId : null;
+    const stage =
+      area === "help" && isWorkLocation(current) ? current.stage : "situation";
+    navigate({ area, caseId, stage });
   }
 
   if (!ready) {
@@ -339,7 +369,10 @@ export function App() {
     (roles.includes("case-lead") || roles.includes("admin") || roles.includes("contributor"));
   const canLeadCatalog =
     !staticReadOnly && (roles.includes("case-lead") || roles.includes("admin"));
-  const inCasesArea = location.area === "overview" || location.area === "investigations";
+  const work: WorkLocation = isWorkLocation(location) ? location : HOME;
+  const inCasesArea = work.area === "overview" || work.area === "investigations";
+  const unknown = isUnknownLocation(location);
+  const currentArea = unknown ? null : work.area;
 
   function startInvestigation() {
     navigate(HOME);
@@ -368,24 +401,19 @@ export function App() {
           <nav id="primary-nav" className="topbar__nav" aria-label="Primary">
             <ul>
               {PRIMARY_NAV.map((item) => {
-                const activeArea = item.area === location.area;
+                const activeArea = item.area === currentArea;
                 // Help keeps the focused investigation in the location so its
                 // articles can offer a real way back to that work; the Help
                 // page itself is still the exact destination.
-                const exact = activeArea && (location.caseId === null || item.area === "help");
+                const exact =
+                  activeArea && (work.caseId === null || item.area === "help") && !unknown;
                 return (
                   <li key={item.area}>
                     <button
                       type="button"
                       className="topbar__nav-link"
                       aria-current={exact ? "page" : activeArea ? "true" : undefined}
-                      onClick={() =>
-                        navigate(
-                          item.area === "help"
-                            ? { area: "help", caseId: location.caseId, stage: location.stage }
-                            : { area: item.area, caseId: null, stage: "situation" },
-                        )
-                      }
+                      onClick={() => goToArea(item.area)}
                     >
                       {item.label}
                     </button>
@@ -409,7 +437,7 @@ export function App() {
               roles={roles}
               theme={theme}
               onThemeChange={setTheme}
-              onSignOut={staticReadOnly ? null : () => void logout()}
+              onSignOut={staticReadOnly ? null : () => logout()}
             />
           </div>
         </div>
@@ -425,55 +453,78 @@ export function App() {
           gateway, or imported; local sample state may reset when its service stops.
         </p>
       ) : null}
-      <main id="war-room-main" className="app__main">
-        <section className="app__area" aria-label="Investigations" hidden={!inCasesArea}>
-          <Cases
-            roles={roles}
-            readOnly={staticReadOnly}
-            participant={{ username: session.username, roles }}
-            view={location.area === "investigations" ? "investigations" : "overview"}
-            focusCaseId={inCasesArea ? location.caseId : null}
-            stage={location.stage}
-            startSignal={startSignal}
-            onOpenCase={(id) =>
-              navigate({ area: "investigations", caseId: id, stage: "situation" })
-            }
-            onStageChange={(stage) =>
-              locationRef.current.caseId
-                ? navigate({
-                    area: "investigations",
-                    caseId: locationRef.current.caseId,
-                    stage,
-                  })
-                : undefined
-            }
-            onExitFocus={(target) =>
-              navigate({ area: target, caseId: null, stage: "situation" })
-            }
-          />
-        </section>
-        <section
-          className="app__area"
-          aria-label="Source library"
-          hidden={location.area !== "sources"}
-        >
-          <Catalog canLead={canLeadCatalog} />
-        </section>
-        <section className="app__area" aria-label="Help" hidden={location.area !== "help"}>
-          <HelpCenter
-            onOpenArea={(area) => navigate({ area, caseId: null, stage: "situation" })}
-            onOpenStage={
-              location.caseId
-                ? (stage) =>
-                    navigate({
-                      area: "investigations",
-                      caseId: locationRef.current.caseId,
-                      stage,
-                    })
-                : null
-            }
-          />
-        </section>
+      <main id="war-room-main" className="app__main" ref={mainRef} tabIndex={-1}>
+        {unknown ? (
+          <section className="not-found" aria-labelledby="not-found-title">
+            <h2 className="not-found__title" id="not-found-title">
+              This page is not in the War Room
+            </h2>
+            <p className="not-found__copy" role="status">
+              <code className="not-found__path">{location.attempted}</code> is not a page this
+              workspace serves. Nothing else was opened from that address.
+            </p>
+            <button
+              type="button"
+              className="not-found__home"
+              onClick={() => navigate(HOME)}
+            >
+              Back to overview
+            </button>
+          </section>
+        ) : (
+          <>
+            <section className="app__area" aria-label="Investigations" hidden={!inCasesArea}>
+              <Cases
+                roles={roles}
+                readOnly={staticReadOnly}
+                participant={{ username: session.username, roles }}
+                view={work.area === "investigations" ? "investigations" : "overview"}
+                focusCaseId={inCasesArea ? work.caseId : null}
+                stage={work.stage}
+                startSignal={startSignal}
+                onOpenCase={(id) =>
+                  navigate({ area: "investigations", caseId: id, stage: "situation" })
+                }
+                onStageChange={(stage) =>
+                  isWorkLocation(locationRef.current) && locationRef.current.caseId
+                    ? navigate({
+                        area: "investigations",
+                        caseId: locationRef.current.caseId,
+                        stage,
+                      })
+                    : undefined
+                }
+                onExitFocus={(target) =>
+                  navigate({ area: target, caseId: null, stage: "situation" })
+                }
+              />
+            </section>
+            <section
+              className="app__area"
+              aria-label="Source library"
+              hidden={work.area !== "sources"}
+            >
+              <Catalog canLead={canLeadCatalog} />
+            </section>
+            <section className="app__area" aria-label="Help" hidden={work.area !== "help"}>
+              <HelpCenter
+                onOpenArea={(area) => navigate({ area, caseId: null, stage: "situation" })}
+                onOpenStage={
+                  work.caseId
+                    ? (stage) =>
+                        navigate({
+                          area: "investigations",
+                          caseId: locationRef.current && isWorkLocation(locationRef.current)
+                            ? locationRef.current.caseId
+                            : work.caseId,
+                          stage,
+                        })
+                    : null
+                }
+              />
+            </section>
+          </>
+        )}
       </main>
     </div>
   );
