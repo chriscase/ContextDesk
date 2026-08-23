@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseTriageJob,
+  parseTriageJobCreateRequest,
   parseTriageJobRequest,
   parseTriageJobShareSafe,
   projectTriageJobShareSafe,
+  snapshotFingerprint,
+  triageJobRequestFingerprint,
   type TriageCandidateRunV1,
   type TriageJobV1,
 } from "@cd-collab/contracts";
@@ -66,7 +69,7 @@ async function fixture(
     { evidenceIds: [artifact.artifact.id], visibility: "share_safe" },
     "test",
   );
-  return { root, cases, service, jobs, caseId: created.id, snapshot };
+  return { root, audit, cases, service, jobs, caseId: created.id, snapshot };
 }
 
 function request(snapshotId: string) {
@@ -88,6 +91,19 @@ function request(snapshotId: string) {
         version: null,
       },
     ],
+  };
+}
+
+function rerunRequest(
+  fromJobId: string,
+  snapshotId: string,
+  mode: "deterministic_mock" | "gateway" = "deterministic_mock",
+) {
+  return {
+    schemaId: "cd-collab.triage_job_create_request.v1" as const,
+    fromJobId,
+    snapshotId,
+    mode,
   };
 }
 
@@ -191,12 +207,28 @@ async function unknownFairnessSnapshot(fx: Awaited<ReturnType<typeof fixture>>) 
   );
 }
 
+function reparentSnapshot(
+  snapshot: Awaited<ReturnType<typeof hashedFollowOnSnapshot>>,
+  parentSnapshotId: string | null,
+) {
+  const changed = { ...snapshot, parentSnapshotId };
+  return {
+    ...changed,
+    fingerprint: snapshotFingerprint({
+      parentSnapshotId,
+      evidence: changed.evidence,
+      visibility: changed.visibility,
+      protocolVersion: changed.protocolVersion,
+    }),
+  };
+}
+
 function patchListSnapshots(
   cases: CaseService,
   patch: (snapshot: Awaited<ReturnType<CaseService["listSnapshots"]>>[number]) => Awaited<
     ReturnType<CaseService["listSnapshots"]>
   >[number],
-): void {
+): () => void {
   const original = cases.listSnapshots.bind(cases);
   (cases as { listSnapshots: CaseService["listSnapshots"] }).listSnapshots = async (
     caseId,
@@ -205,6 +237,9 @@ function patchListSnapshots(
   ) => {
     const listed = await original(caseId, actorArg, isAdmin);
     return listed.map(patch);
+  };
+  return () => {
+    (cases as { listSnapshots: CaseService["listSnapshots"] }).listSnapshots = original;
   };
 }
 
@@ -215,15 +250,17 @@ async function flush(): Promise<void> {
 describe("snapshot-bound triage runs", () => {
   it("uses an exclusive durable worker lease and only exposes expired work for recovery", async () => {
     const store = new MemoryTriageJobStore();
+    const storedRequest = request("snapshot-lease");
+    const storedSnapshotFingerprint = "a".repeat(64);
     const job: TriageJobV1 = {
       schemaId: "cd-collab.triage_job.v1",
       id: "job-lease",
       caseId: "case-lease",
       snapshotId: "snapshot-lease",
-      snapshotFingerprint: "snapshot-fingerprint",
-      requestFingerprint: "request-fingerprint",
+      snapshotFingerprint: storedSnapshotFingerprint,
+      requestFingerprint: triageJobRequestFingerprint(storedSnapshotFingerprint, storedRequest),
       cancellationId: "cancel-lease",
-      request: request("snapshot-lease"),
+      request: storedRequest,
       status: "queued",
       candidates: [
         {
@@ -514,9 +551,15 @@ describe("snapshot-bound triage runs", () => {
       expect(calls).toBe(1);
       expect(observed?.snapshot.fingerprint).toBe(fx.snapshot.fingerprint);
       expect(observed?.evidence[0]?.contentBase64).toBeTruthy();
+      expect(Object.isFrozen(observed)).toBe(true);
+      expect(Object.isFrozen(observed?.snapshot)).toBe(true);
+      expect(Object.isFrozen(observed?.request)).toBe(true);
+      expect(Object.isFrozen(observed?.evidence)).toBe(true);
+      expect(Object.isFrozen(observed?.evidence[0])).toBe(true);
       expect(observed?.request.question).toBe("What caused the timeout?");
       expect(observed?.request.concurrency).toBe(2);
       expect(completed.candidates.map((candidate) => candidate.status)).toEqual(["completed", "completed"]);
+      expect(completed.sameSnapshot).toBe(true);
     } finally {
       await rm(fx.root, { recursive: true, force: true });
     }
@@ -574,11 +617,136 @@ describe("snapshot-bound triage runs", () => {
         await new Promise((resolve) => setTimeout(resolve, 2));
       }
       expect(runningJob?.candidates.map((candidate) => candidate.status)).toEqual(["running", "queued"]);
+      expect(runningJob?.sameSnapshot).toBeNull();
       release?.();
       const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
       expect(completed.candidates.map((candidate) => candidate.status)).toEqual(["completed", "completed"]);
     } finally {
       release?.();
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires exact bytes for every gateway item and verifies contentHash or expectedHash", async () => {
+    const state = { calls: 0 };
+    const fx = await fixture(undefined, completedGatewayExecutor(state));
+    try {
+      const evidenceItem = fx.snapshot.evidence[0]!;
+      const expectedOnly = {
+        ...fx.snapshot,
+        evidence: [{ ...evidenceItem, contentHash: null, expectedHash: evidenceItem.contentHash }],
+      };
+      expectedOnly.fingerprint = snapshotFingerprint({
+        parentSnapshotId: expectedOnly.parentSnapshotId,
+        evidence: expectedOnly.evidence,
+        visibility: expectedOnly.visibility,
+        protocolVersion: expectedOnly.protocolVersion,
+      });
+      const restoreSnapshots = patchListSnapshots(fx.cases, (item) =>
+        item.id === expectedOnly.id ? expectedOnly : item,
+      );
+      const expectedHashJob = await fx.service.create(
+        fx.caseId,
+        actor,
+        gatewayBody(expectedOnly.id),
+        "test",
+        false,
+      );
+      expect((await waitFor(fx.service, fx.caseId, expectedHashJob.id, "completed")).sameSnapshot)
+        .toBe(true);
+      expect(state.calls).toBe(1);
+      restoreSnapshots();
+
+      const originalBytes = fx.cases.getArtifactBytes.bind(fx.cases);
+      (fx.cases as { getArtifactBytes: CaseService["getArtifactBytes"] }).getArtifactBytes =
+        async () => null;
+      const missing = await fx.service.create(
+        fx.caseId,
+        actor,
+        gatewayBody(fx.snapshot.id),
+        "test",
+        false,
+      );
+      const missingFailed = await waitFor(fx.service, fx.caseId, missing.id, "failed");
+      expect(missingFailed.sameSnapshot).toBeNull();
+      expect(state.calls).toBe(1);
+
+      (fx.cases as { getArtifactBytes: CaseService["getArtifactBytes"] }).getArtifactBytes =
+        async () => new TextEncoder().encode("tampered bytes");
+      const mismatch = await fx.service.create(
+        fx.caseId,
+        actor,
+        gatewayBody(fx.snapshot.id),
+        "test",
+        false,
+      );
+      const mismatchFailed = await waitFor(fx.service, fx.caseId, mismatch.id, "failed");
+      expect(mismatchFailed.sameSnapshot).toBeNull();
+      expect(state.calls).toBe(1);
+      (fx.cases as { getArtifactBytes: CaseService["getArtifactBytes"] }).getArtifactBytes = originalBytes;
+
+      const emptyCase = await fx.cases.createCase(actor, { title: "Empty packet" }, "test");
+      const emptySnapshot = await fx.cases.createSnapshot(
+        emptyCase.id,
+        actor,
+        { evidenceIds: [], visibility: "owner_only" },
+        "test",
+      );
+      const empty = await fx.service.create(
+        emptyCase.id,
+        actor,
+        gatewayBody(emptySnapshot.id),
+        "test",
+        false,
+      );
+      expect((await waitFor(fx.service, emptyCase.id, empty.id, "completed")).sameSnapshot)
+        .toBe(true);
+      expect(state.calls).toBe(2);
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails before provider work when the admitted snapshot id/fingerprint changes asynchronously", async () => {
+    const executor = new CountingMockExecutor();
+    const fx = await fixture(executor);
+    const original = fx.cases.listSnapshots.bind(fx.cases);
+    let calls = 0;
+    (fx.cases as { listSnapshots: CaseService["listSnapshots"] }).listSnapshots = async (
+      caseId,
+      actorArg,
+      isAdmin,
+    ) => {
+      calls += 1;
+      const listed = await original(caseId, actorArg, isAdmin);
+      if (calls === 1) return listed;
+      return listed.map((snapshot) => {
+        if (snapshot.id !== fx.snapshot.id) return snapshot;
+        const protocolVersion = `${snapshot.protocolVersion}.changed`;
+        return {
+          ...snapshot,
+          protocolVersion,
+          fingerprint: snapshotFingerprint({
+            parentSnapshotId: snapshot.parentSnapshotId,
+            evidence: snapshot.evidence,
+            visibility: snapshot.visibility,
+            protocolVersion,
+          }),
+        };
+      });
+    };
+    try {
+      const created = await fx.service.create(
+        fx.caseId,
+        actor,
+        request(fx.snapshot.id),
+        "test",
+        false,
+      );
+      const failed = await waitFor(fx.service, fx.caseId, created.id, "failed");
+      expect(failed.stoppedReason).toBe("runner_error");
+      expect(executor.calls).toBe(0);
+    } finally {
       await rm(fx.root, { recursive: true, force: true });
     }
   });
@@ -743,20 +911,20 @@ describe("snapshot-bound triage runs", () => {
     }
   });
 
-  it("persists same-case rerun lineage and rejects a cross-case parent", async () => {
+  it("keeps lineage server-owned and rejects client-settable parentJobId", async () => {
     const fx = await fixture(new DeterministicMockTriageExecutor());
     try {
       const parent = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
-      const child = await fx.service.create(
-        fx.caseId,
-        actor,
-        { ...request(fx.snapshot.id), parentJobId: parent.id },
-        "test",
-        false,
-      );
-      expect(child.parentJobId).toBe(parent.id);
-      expect(child.request.parentJobId).toBe(parent.id);
-      expect((await fx.service.get(fx.caseId, child.id, actor, false))?.parentJobId).toBe(parent.id);
+      expect(() => parseTriageJobRequest({ ...request(fx.snapshot.id), parentJobId: parent.id })).toThrow();
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          { ...request(fx.snapshot.id), parentJobId: parent.id } as never,
+          "test",
+          false,
+        ),
+      ).rejects.toThrow(/parentJobId/);
 
       const otherCase = await fx.cases.createCase(actor, { title: "Other case" }, "test");
       const otherSnapshot = await fx.cases.createSnapshot(
@@ -769,9 +937,10 @@ describe("snapshot-bound triage runs", () => {
         fx.service.create(
           otherCase.id,
           actor,
-          { ...request(otherSnapshot.id), parentJobId: parent.id },
+          rerunRequest(parent.id, otherSnapshot.id),
           "test",
           false,
+          "cross-case-parent",
         ),
       ).rejects.toThrow("parent triage job not found for case");
     } finally {
@@ -786,12 +955,10 @@ describe("snapshot-bound triage runs", () => {
       const completed = await waitFor(fx.service, fx.caseId, created.id, "completed");
       const legacy = JSON.parse(JSON.stringify(completed)) as Record<string, unknown>;
       delete legacy.parentJobId;
-      delete (legacy.request as Record<string, unknown>).parentJobId;
 
       const parsed = parseTriageJob(legacy);
       const shareSafe = parseTriageJobShareSafe(projectTriageJobShareSafe(parsed));
       expect(parsed.parentJobId).toBeUndefined();
-      expect(parsed.request.parentJobId).toBeUndefined();
       expect(shareSafe.jobId).toBe(completed.id);
       expect(shareSafe.status).toBe("completed");
     } finally {
@@ -817,12 +984,13 @@ describe("snapshot-bound triage runs", () => {
       const child = await fx.service.create(
         fx.caseId,
         actor,
-        { fromJobId: parent.id, snapshotId: followOn.id, mode: "deterministic_mock" },
+        rerunRequest(parent.id, followOn.id),
         "test",
         false,
+        "copy-forward-once",
       );
       expect(child.parentJobId).toBe(parent.id);
-      expect(child.request.parentJobId).toBe(parent.id);
+      expect("parentJobId" in child.request).toBe(false);
       expect(child.snapshotId).toBe(followOn.id);
       expect(child.snapshotFingerprint).toBe(followOn.fingerprint);
       expect(child.request.snapshotId).toBe(followOn.id);
@@ -850,16 +1018,39 @@ describe("snapshot-bound triage runs", () => {
       expect(completedChild.sameSnapshot).toBe(true);
       expect(executor.calls).toBeGreaterThan(parentCalls);
 
+      const [retryA, retryB] = await Promise.all([
+        fx.service.create(
+          fx.caseId,
+          actor,
+          rerunRequest(parent.id, followOn.id),
+          "test",
+          false,
+          "copy-forward-once",
+        ),
+        fx.service.create(
+          fx.caseId,
+          actor,
+          rerunRequest(parent.id, followOn.id),
+          "test",
+          false,
+          "copy-forward-once",
+        ),
+      ]);
+      expect(retryA.id).toBe(child.id);
+      expect(retryB.id).toBe(child.id);
+      await flush();
+      expect(executor.calls).toBe(parentCalls + 1);
+
       const twin = await fx.service.create(
         fx.caseId,
         actor,
-        { fromJobId: parent.id, snapshotId: followOn.id, mode: "deterministic_mock" },
+        rerunRequest(parent.id, followOn.id),
         "test",
         false,
+        "copy-forward-twice",
       );
       expect(twin.id).not.toBe(child.id);
       expect(twin.requestFingerprint).toBe(child.requestFingerprint);
-      expect(twin.parentJobId).toBe(parent.id);
     } finally {
       await rm(fx.root, { recursive: true, force: true });
     }
@@ -895,18 +1086,20 @@ describe("snapshot-bound triage runs", () => {
         fx.service.create(
           fx.caseId,
           actor,
-          { fromJobId: missingParent, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          rerunRequest(missingParent, fx.snapshot.id),
           "test",
           false,
+          "missing-parent",
         ),
       ).rejects.toThrow("parent triage job not found for case");
       await expect(
         fx.service.create(
           fx.caseId,
           actor,
-          { fromJobId: otherParent.id, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          rerunRequest(otherParent.id, fx.snapshot.id),
           "test",
           false,
+          "foreign-parent",
         ),
       ).rejects.toThrow("parent triage job not found for case");
 
@@ -915,18 +1108,20 @@ describe("snapshot-bound triage runs", () => {
         fx.service.create(
           fx.caseId,
           actor,
-          { fromJobId: parent.id, snapshotId: missingSnapshot, mode: "deterministic_mock" },
+          rerunRequest(parent.id, missingSnapshot),
           "test",
           false,
+          "missing-snapshot",
         ),
       ).rejects.toThrow("snapshot not found for case");
       await expect(
         fx.service.create(
           fx.caseId,
           actor,
-          { fromJobId: parent.id, snapshotId: otherSnapshot.id, mode: "deterministic_mock" },
+          rerunRequest(parent.id, otherSnapshot.id),
           "test",
           false,
+          "foreign-snapshot",
         ),
       ).rejects.toThrow("snapshot not found for case");
 
@@ -938,7 +1133,241 @@ describe("snapshot-bound triage runs", () => {
     }
   });
 
-  it("rejects malformed, unfrozen, conflicting, DeepSeek, and dishonest live fromJobId reruns before insert", async () => {
+  it("requires a bounded idempotency key only for the versioned fromJobId branch", async () => {
+    const fx = await fixture(new DeterministicMockTriageExecutor());
+    try {
+      const parent = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      await waitFor(fx.service, fx.caseId, parent.id, "completed");
+      const target = await hashedFollowOnSnapshot(fx, "rerun target");
+      expect(() => parseTriageJobCreateRequest({ ...rerunRequest(parent.id, target.id), question: "override" })).toThrow();
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          rerunRequest(parent.id, target.id),
+          "test",
+          false,
+        ),
+      ).rejects.toThrow(/Idempotency-Key/);
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          rerunRequest(parent.id, target.id),
+          "test",
+          false,
+          "x".repeat(257),
+        ),
+      ).rejects.toThrow(/between 1 and 256 bytes/);
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          request(target.id),
+          "test",
+          false,
+          "ordinary-key",
+        ),
+      ).rejects.toThrow(/only accepted for fromJobId/);
+
+      const admitted = await fx.service.create(
+        fx.caseId,
+        actor,
+        rerunRequest(parent.id, target.id),
+        "test",
+        false,
+        "stable-binding",
+      );
+      const nextTarget = await hashedFollowOnSnapshot(fx, "different target");
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          rerunRequest(parent.id, nextTarget.id),
+          "test",
+          false,
+          "stable-binding",
+        ),
+      ).rejects.toThrow(/already bound to a different rerun/);
+      expect((await fx.service.list(fx.caseId, actor, false)).filter((job) => job.parentJobId === parent.id))
+        .toHaveLength(1);
+      expect(admitted.parentJobId).toBe(parent.id);
+
+      const otherActor = { id: "admin-2", username: "admin-2" };
+      const actorSeparated = await fx.service.create(
+        fx.caseId,
+        otherActor,
+        rerunRequest(parent.id, target.id),
+        "test",
+        true,
+        "stable-binding",
+      );
+      expect(actorSeparated.id).not.toBe(admitted.id);
+
+      const otherCase = await fx.cases.createCase(actor, { title: "Idempotency case scope" }, "test");
+      const otherParentSnapshot = await fx.cases.createSnapshot(
+        otherCase.id,
+        actor,
+        { evidenceIds: [], visibility: "owner_only" },
+        "test",
+      );
+      const otherParent = await fx.service.create(
+        otherCase.id,
+        actor,
+        request(otherParentSnapshot.id),
+        "test",
+        false,
+      );
+      const otherTarget = await fx.cases.createSnapshot(
+        otherCase.id,
+        actor,
+        { evidenceIds: [], visibility: "owner_only" },
+        "test",
+      );
+      const caseSeparated = await fx.service.create(
+        otherCase.id,
+        actor,
+        rerunRequest(otherParent.id, otherTarget.id),
+        "test",
+        false,
+        "stable-binding",
+      );
+      expect(caseSeparated.id).not.toBe(admitted.id);
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("retries safely after post-insert timeline or audit failure without duplicating work or raw keys", async () => {
+    for (const failure of ["timeline", "audit"] as const) {
+      const executor = new CountingMockExecutor();
+      const fx = await fixture(executor);
+      const rawKey = `raw-private-${failure}-key`;
+      try {
+        const parent = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+        await waitFor(fx.service, fx.caseId, parent.id, "completed");
+        const parentCalls = executor.calls;
+        const target = await hashedFollowOnSnapshot(fx, `${failure} retry target`);
+        if (failure === "timeline") {
+          const append = fx.cases.appendDomainTimeline.bind(fx.cases);
+          let fail = true;
+          (fx.cases as { appendDomainTimeline: CaseService["appendDomainTimeline"] }).appendDomainTimeline =
+            async (caseId, event) => {
+              if (fail && event.kind === "triage_job_created") {
+                fail = false;
+                throw new Error("post-insert timeline failure");
+              }
+              return append(caseId, event);
+            };
+        } else {
+          const append = fx.audit.append.bind(fx.audit);
+          let fail = true;
+          (fx.audit as { append: MemoryAuditStore["append"] }).append = async (record) => {
+            if (fail && record.action === "triage_job_create") {
+              fail = false;
+              throw new Error("post-insert audit failure");
+            }
+            return append(record);
+          };
+        }
+        await expect(
+          fx.service.create(
+            fx.caseId,
+            actor,
+            rerunRequest(parent.id, target.id),
+            "test",
+            false,
+            rawKey,
+          ),
+        ).rejects.toThrow(/post-insert/);
+        const retry = await fx.service.create(
+          fx.caseId,
+          actor,
+          rerunRequest(parent.id, target.id),
+          "test",
+          false,
+          rawKey,
+        );
+        await waitFor(fx.service, fx.caseId, retry.id, "completed");
+        expect((await fx.service.list(fx.caseId, actor, false))).toHaveLength(2);
+        expect(executor.calls).toBe(parentCalls + 1);
+        expect(JSON.stringify(await fx.jobs.listByCase(fx.caseId))).not.toContain(rawKey);
+        expect(JSON.stringify(await fx.audit.list())).not.toContain(rawKey);
+        expect(JSON.stringify(await fx.cases.listTimeline(fx.caseId))).not.toContain(rawKey);
+      } finally {
+        await rm(fx.root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("rejects same, older, unrelated, missing, cross-case, and cyclic snapshot ancestry", async () => {
+    const fx = await fixture(new DeterministicMockTriageExecutor());
+    try {
+      const parent = await fx.service.create(fx.caseId, actor, request(fx.snapshot.id), "test", false);
+      await waitFor(fx.service, fx.caseId, parent.id, "completed");
+      const first = await hashedFollowOnSnapshot(fx, "first descendant");
+      const second = await hashedFollowOnSnapshot(fx, "second descendant");
+
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          rerunRequest(parent.id, fx.snapshot.id),
+          "test",
+          false,
+          "same-target",
+        ),
+      ).rejects.toThrow(/distinct forward snapshot descendant/);
+
+      const newerParent = await fx.service.create(fx.caseId, actor, request(first.id), "test", false);
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          rerunRequest(newerParent.id, fx.snapshot.id),
+          "test",
+          false,
+          "older-target",
+        ),
+      ).rejects.toThrow(/distinct forward snapshot descendant/);
+
+      let restore = patchListSnapshots(fx.cases, (item) =>
+        item.id === second.id ? reparentSnapshot(second, null) : item,
+      );
+      await expect(
+        fx.service.create(fx.caseId, actor, rerunRequest(parent.id, second.id), "test", false, "unrelated"),
+      ).rejects.toThrow(/distinct forward snapshot descendant/);
+      restore();
+
+      restore = patchListSnapshots(fx.cases, (item) =>
+        item.id === second.id ? reparentSnapshot(second, randomUUID()) : item,
+      );
+      await expect(
+        fx.service.create(fx.caseId, actor, rerunRequest(parent.id, second.id), "test", false, "missing-link"),
+      ).rejects.toThrow(/snapshot not found for case/);
+      restore();
+
+      restore = patchListSnapshots(fx.cases, (item) =>
+        item.id === first.id ? { ...item, caseId: "foreign-case" } : item,
+      );
+      await expect(
+        fx.service.create(fx.caseId, actor, rerunRequest(parent.id, second.id), "test", false, "cross-case-link"),
+      ).rejects.toThrow(/snapshot identity mismatch/);
+      restore();
+
+      restore = patchListSnapshots(fx.cases, (item) =>
+        item.id === first.id ? reparentSnapshot(first, second.id) : item,
+      );
+      await expect(
+        fx.service.create(fx.caseId, actor, rerunRequest(parent.id, second.id), "test", false, "cycle"),
+      ).rejects.toThrow(/snapshot ancestry contains a cycle/);
+      restore();
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects malformed parents and snapshots and proves gateway fairness only after exact execution", async () => {
     const mockExecutor = new CountingMockExecutor();
     const gatewayCalls = { calls: 0 };
     const fx = await fixture(mockExecutor, completedGatewayExecutor(gatewayCalls));
@@ -950,12 +1379,11 @@ describe("snapshot-bound triage runs", () => {
       const mockCalls = mockExecutor.calls;
       const liveCalls = gatewayCalls.calls;
       const jobsBefore = (await fx.service.list(fx.caseId, actor, false)).length;
+      const target = await hashedFollowOnSnapshot(fx, "gateway follow-on");
 
       expect(() =>
-        parseTriageJobRequest({
-          fromJobId: parent.id,
-          snapshotId: fx.snapshot.id,
-          mode: "deterministic_mock",
+        parseTriageJobCreateRequest({
+          ...rerunRequest(parent.id, target.id),
           question: "override",
         }),
       ).toThrow();
@@ -963,56 +1391,93 @@ describe("snapshot-bound triage runs", () => {
         fx.service.create(
           fx.caseId,
           actor,
-          {
-            fromJobId: parent.id,
-            snapshotId: fx.snapshot.id,
-            mode: "deterministic_mock",
-            question: "override",
-          } as never,
+          { ...rerunRequest(parent.id, target.id), question: "override" } as never,
           "test",
           false,
+          "override",
         ),
-      ).rejects.toThrow("conflicting fromJobId overrides are not permitted");
+      ).rejects.toThrow(/question/);
 
       const stored = await fx.jobs.get(parent.id);
-      await fx.jobs.update({
+      const corruptedRequest = {
+        ...stored!.request,
+        candidates: stored!.request.candidates.map((candidate) => ({
+          ...candidate,
+          model: "deepseek-v3.2",
+        })),
+      };
+      const corruptedParent = {
         ...stored!,
-        request: {
-          ...stored!.request,
-          candidates: stored!.request.candidates.map((candidate) => ({
-            ...candidate,
-            model: "deepseek-v3.2",
-          })),
-        },
+        request: corruptedRequest,
+        requestFingerprint: triageJobRequestFingerprint(stored!.snapshotFingerprint, corruptedRequest),
+      };
+      const memoryJobs = (fx.jobs as unknown as { jobs: Map<string, TriageJobV1> }).jobs;
+      memoryJobs.set(parent.id, corruptedParent);
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          rerunRequest(parent.id, target.id),
+          "test",
+          false,
+          "deepseek-parent",
+        ),
+      ).rejects.toThrow(/DeepSeek lanes are not permitted/);
+      memoryJobs.set(parent.id, stored!);
+
+      const wrongParentFingerprint = "b".repeat(64);
+      memoryJobs.set(parent.id, {
+        ...stored!,
+        snapshotFingerprint: wrongParentFingerprint,
+        requestFingerprint: triageJobRequestFingerprint(wrongParentFingerprint, stored!.request),
       });
       await expect(
         fx.service.create(
           fx.caseId,
           actor,
-          { fromJobId: parent.id, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          rerunRequest(parent.id, target.id),
           "test",
           false,
+          "parent-fingerprint-mismatch",
         ),
-      ).rejects.toThrow(/DeepSeek lanes are not permitted/);
+      ).rejects.toThrow(/parent snapshot fingerprint mismatch/);
+      memoryJobs.set(parent.id, stored!);
 
-      patchListSnapshots(fx.cases, (item) =>
-        item.id === fx.snapshot.id ? { ...item, status: "unfrozen" as typeof item.status } : item,
+      const storedGatewayParent = await fx.jobs.get(gatewayParent.id);
+      memoryJobs.set(parent.id, { ...stored!, parentJobId: gatewayParent.id });
+      memoryJobs.set(gatewayParent.id, { ...storedGatewayParent!, parentJobId: parent.id });
+      await expect(
+        fx.service.create(
+          fx.caseId,
+          actor,
+          rerunRequest(parent.id, target.id),
+          "test",
+          false,
+          "cyclic-job-lineage",
+        ),
+      ).rejects.toThrow(/lineage contains a cycle/);
+      memoryJobs.set(parent.id, stored!);
+      memoryJobs.set(gatewayParent.id, storedGatewayParent!);
+
+      let restore = patchListSnapshots(fx.cases, (item) =>
+        item.id === target.id ? { ...item, status: "unfrozen" as typeof item.status } : item,
       );
       await expect(
         fx.service.create(
           fx.caseId,
           actor,
-          { fromJobId: gatewayParent.id, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          rerunRequest(gatewayParent.id, target.id),
           "test",
           false,
+          "unfrozen",
         ),
       ).rejects.toThrow("snapshot is not frozen");
+      restore();
 
-      patchListSnapshots(fx.cases, (item) =>
-        item.id === fx.snapshot.id
+      restore = patchListSnapshots(fx.cases, (item) =>
+        item.id === target.id
           ? {
               ...item,
-              status: "frozen",
               evidence: item.evidence.map((evidence) => ({ ...evidence, contentHash: "not-a-hash" })),
             }
           : item,
@@ -1021,60 +1486,65 @@ describe("snapshot-bound triage runs", () => {
         fx.service.create(
           fx.caseId,
           actor,
-          { fromJobId: gatewayParent.id, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          rerunRequest(gatewayParent.id, target.id),
           "test",
           false,
+          "malformed-snapshot",
         ),
       ).rejects.toThrow("snapshot is malformed");
+      restore();
 
-      patchListSnapshots(fx.cases, (item) =>
-        item.id === fx.snapshot.id ? { ...item, caseId: "foreign-case" } : item,
+      restore = patchListSnapshots(fx.cases, (item) =>
+        item.id === target.id ? { ...item, caseId: "foreign-case" } : item,
       );
       await expect(
         fx.service.create(
           fx.caseId,
           actor,
-          { fromJobId: gatewayParent.id, snapshotId: fx.snapshot.id, mode: "deterministic_mock" },
+          rerunRequest(gatewayParent.id, target.id),
           "test",
           false,
+          "foreign-snapshot",
         ),
       ).rejects.toThrow("snapshot identity mismatch");
+      restore();
 
-      patchListSnapshots(fx.cases, (item) => item);
       const unknown = await unknownFairnessSnapshot(fx);
       expect(unknown.fairnessClass).toBe("unknown");
       await expect(
         fx.service.create(
           fx.caseId,
           actor,
-          { fromJobId: gatewayParent.id, snapshotId: unknown.id, mode: "gateway" },
+          rerunRequest(gatewayParent.id, unknown.id, "gateway"),
           "test",
           false,
+          "unknown-fairness",
         ),
       ).rejects.toThrow("snapshot is not eligible for an honest same-snapshot comparison");
 
       const mockUnknown = await fx.service.create(
         fx.caseId,
         actor,
-        { fromJobId: gatewayParent.id, snapshotId: unknown.id, mode: "deterministic_mock" },
+        rerunRequest(gatewayParent.id, unknown.id),
         "test",
         false,
+        "unknown-synthetic",
       );
       expect(mockUnknown.sameSnapshot).toBeNull();
       const completedUnknown = await waitFor(fx.service, fx.caseId, mockUnknown.id, "completed");
       expect(completedUnknown.sameSnapshot).toBeNull();
       expect(gatewayCalls.calls).toBe(liveCalls);
 
-      const hashed = await hashedFollowOnSnapshot(fx, "gateway follow-on");
       const gatewayChild = await fx.service.create(
         fx.caseId,
         actor,
-        { fromJobId: gatewayParent.id, snapshotId: hashed.id, mode: "gateway" },
+        rerunRequest(gatewayParent.id, target.id, "gateway"),
         "test",
         false,
+        "honest-gateway",
       );
       expect(gatewayChild.parentJobId).toBe(gatewayParent.id);
-      expect(gatewayChild.snapshotFingerprint).toBe(hashed.fingerprint);
+      expect(gatewayChild.snapshotFingerprint).toBe(target.fingerprint);
       const completedGateway = await waitFor(fx.service, fx.caseId, gatewayChild.id, "completed");
       expect(completedGateway.sameSnapshot).toBe(true);
       expect(gatewayCalls.calls).toBe(liveCalls + 1);

@@ -70,9 +70,12 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     let evidenceStore: "up" | "down" = "down";
     if (deps.pool) {
       try {
-        await deps.pool.query(
-          "SELECT 1 FROM schema_migrations WHERE version = '011_triage_worker_leases'",
+        const migration = await deps.pool.query(
+          "SELECT version FROM schema_migrations WHERE version = '012_triage_job_rerun_integrity'",
         );
+        if (migration.rows[0]?.version !== "012_triage_job_rerun_integrity") {
+          throw new Error("required triage rerun integrity migration is not applied");
+        }
         database = "up";
       } catch {
         database = "down";

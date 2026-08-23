@@ -1,7 +1,9 @@
-import { checkObject, f, type ObjectShape } from "./parse.js";
+import { createHash } from "node:crypto";
+import { ContractViolation, checkObject, f, type ObjectShape } from "./parse.js";
 import { PRIVACY_CLASSES } from "./case.js";
 
 export const TRIAGE_JOB_REQUEST_SCHEMA_ID = "cd-collab.triage_job_request.v1" as const;
+export const TRIAGE_JOB_CREATE_REQUEST_SCHEMA_ID = "cd-collab.triage_job_create_request.v1" as const;
 export const TRIAGE_JOB_SCHEMA_ID = "cd-collab.triage_job.v1" as const;
 export const TRIAGE_JOB_LIST_SCHEMA_ID = "cd-collab.triage_job_list.v1" as const;
 export const TRIAGE_JOB_SHARE_SAFE_SCHEMA_ID = "cd-collab.triage_job_share_safe.v1" as const;
@@ -44,17 +46,19 @@ export interface TriageJobRequestV1 {
   taskFingerprint: string;
   /** Gateway lane concurrency; omitted means the host default (2). */
   concurrency?: number;
-  /** Optional lineage reference for an intentional rerun of a prior job. */
-  parentJobId?: string;
   candidates: TriageCandidateSpecV1[];
 }
 
 /** HTTP create body for copying execution inputs onto a new frozen snapshot. */
 export interface TriageFromJobRequestV1 {
+  schemaId: typeof TRIAGE_JOB_CREATE_REQUEST_SCHEMA_ID;
   fromJobId: string;
   snapshotId: string;
   mode: TriageJobMode;
 }
+
+/** Versioned HTTP create union. The stable job-request parser remains v1-compatible. */
+export type TriageJobCreateRequestV1 = TriageJobRequestV1 | TriageFromJobRequestV1;
 
 export interface TriageCandidateRunV1 extends TriageCandidateSpecV1 {
   status: TriageCandidateStatus;
@@ -162,11 +166,11 @@ const requestShape: ObjectShape = {
   policyFingerprint: f.nul(f.str),
   taskFingerprint: f.req(f.str),
   concurrency: f.opt(f.u64),
-  parentJobId: f.opt(f.str),
   candidates: f.req(f.arr(f.obj(candidateSpecShape))),
 };
 
 const fromJobRequestShape: ObjectShape = {
+  schemaId: f.req(f.en(TRIAGE_JOB_CREATE_REQUEST_SCHEMA_ID)),
   fromJobId: f.req(f.str),
   snapshotId: f.req(f.str),
   mode: f.req(f.en(...TRIAGE_JOB_MODES)),
@@ -196,7 +200,7 @@ const jobShape: ObjectShape = {
   snapshotFingerprint: f.req(f.str),
   requestFingerprint: f.req(f.str),
   cancellationId: f.req(f.str),
-  parentJobId: f.opt(f.str),
+  parentJobId: f.optNul(f.str),
   request: f.req(f.obj(requestShape)),
   status: f.req(f.en(...TRIAGE_JOB_STATUSES)),
   candidates: f.req(f.arr(f.obj(candidateRunShape))),
@@ -257,25 +261,93 @@ const shareSafeShape: ObjectShape = {
 };
 
 export function isTriageFromJobRequest(
-  request: TriageJobRequestV1 | TriageFromJobRequestV1,
+  request: TriageJobCreateRequestV1,
 ): request is TriageFromJobRequestV1 {
-  return Object.prototype.hasOwnProperty.call(request, "fromJobId");
+  return request.schemaId === TRIAGE_JOB_CREATE_REQUEST_SCHEMA_ID;
 }
 
-export function parseTriageJobRequest(
-  raw: unknown,
-): TriageJobRequestV1 | TriageFromJobRequestV1 {
-  if (raw && typeof raw === "object" && !Array.isArray(raw) && "fromJobId" in raw) {
-    checkObject("$", fromJobRequestShape, raw);
-    return raw as TriageFromJobRequestV1;
-  }
+export function parseTriageJobRequest(raw: unknown): TriageJobRequestV1 {
   checkObject("$", requestShape, raw);
   return raw as TriageJobRequestV1;
 }
 
+export function parseTriageJobCreateRequest(raw: unknown): TriageJobCreateRequestV1 {
+  if (
+    raw
+    && typeof raw === "object"
+    && !Array.isArray(raw)
+    && (raw as { schemaId?: unknown }).schemaId === TRIAGE_JOB_CREATE_REQUEST_SCHEMA_ID
+  ) {
+    checkObject("$", fromJobRequestShape, raw);
+    return raw as TriageFromJobRequestV1;
+  }
+  return parseTriageJobRequest(raw);
+}
+
+export function triageJobRequestFingerprint(
+  snapshotFingerprint: string,
+  request: TriageJobRequestV1,
+): string {
+  const candidates = [...request.candidates]
+    .sort((a, b) => a.candidateId.localeCompare(b.candidateId))
+    .map((candidate) => ({ ...candidate }));
+  return createHash("sha256").update(
+    JSON.stringify({
+      snapshotFingerprint,
+      mode: request.mode,
+      concurrency: request.concurrency ?? null,
+      strategyId: request.strategyId,
+      question: request.question,
+      policyFingerprint: request.policyFingerprint,
+      taskFingerprint: request.taskFingerprint,
+      candidates: candidates.map((candidate) => ({ ...candidate, profileId: candidate.profileId })),
+    }),
+    "utf8",
+  ).digest("hex");
+}
+
 export function parseTriageJob(raw: unknown): TriageJobV1 {
   checkObject("$", jobShape, raw);
-  return raw as TriageJobV1;
+  const job = raw as TriageJobV1;
+  parseTriageJobRequest(job.request);
+  const sha256Hex = /^[a-f0-9]{64}$/;
+  if (!sha256Hex.test(job.snapshotFingerprint)) {
+    throw new ContractViolation(
+      "$.snapshotFingerprint",
+      "expected a lowercase SHA-256 hex digest",
+    );
+  }
+  if (!sha256Hex.test(job.requestFingerprint)) {
+    throw new ContractViolation(
+      "$.requestFingerprint",
+      "expected a lowercase SHA-256 hex digest",
+    );
+  }
+  if (job.request.snapshotId !== job.snapshotId) {
+    throw new ContractViolation(
+      "$.request.snapshotId",
+      "must match the persisted job snapshotId",
+    );
+  }
+  const expectedRequestFingerprint = triageJobRequestFingerprint(
+    job.snapshotFingerprint,
+    job.request,
+  );
+  if (job.requestFingerprint !== expectedRequestFingerprint) {
+    throw new ContractViolation(
+      "$.requestFingerprint",
+      "must match the canonical triage request fingerprint",
+    );
+  }
+  if (typeof job.parentJobId === "string") {
+    if (!job.parentJobId.trim()) {
+      throw new ContractViolation("$.parentJobId", "must not be empty when present");
+    }
+    if (job.parentJobId === job.id) {
+      throw new ContractViolation("$.parentJobId", "must not reference the job itself");
+    }
+  }
+  return job;
 }
 
 export function parseTriageJobList(raw: unknown): TriageJobListV1 {
