@@ -3,6 +3,7 @@
 //! Given already-resolved role backends and a plan, this runs:
 //!   stage 2 — one typed candidate finding per separately scoped evidence group;
 //!   stage 3 — one typed review of those findings (optional; degrades);
+//!   stage 4 — one host-topology-bounded causal proposal (optional authority);
 //!   stage 5 — the final answer, validated by the existing
 //!             [`crate::investigation_answer::validate_model_answer`].
 //!
@@ -23,7 +24,8 @@ use super::causal_synthesis::{
     CAUSAL_SYNTHESIS_SCHEMA_V1,
 };
 use super::causal_topology::{
-    derive_host_causal_topology, HostCausalTopologyInput, HostEvidenceClassV1,
+    derive_host_causal_topology, CausalTopologyDeriveError, HostCausalTopologyInput,
+    HostEvidenceClassV1,
 };
 use super::contracts::{
     render_review_markdown, validate_candidate_finding, validate_review_report, CandidateFindingV1,
@@ -651,6 +653,31 @@ fn causal_topology(
         recovery_evidence_ids: &recovery_evidence_ids,
         classifications: &classifications,
     })
+}
+
+fn record_causal_stage_without_call(
+    inputs: &ReviewPipelineInputs<'_>,
+    stages: &mut Vec<StageTelemetry>,
+    on_stage: &mut (dyn FnMut(StageProgressEvent) + Send),
+    outcome: StageOutcomeKind,
+    detail: String,
+) {
+    stages.push(StageTelemetry {
+        role: InvestigationRole::CausalSynthesizer,
+        profile_id: inputs.role_ids.synthesizer_profile.clone(),
+        model: inputs.role_ids.synthesizer_model.clone(),
+        provider_rounds: 0,
+        semantic_corrections: 0,
+        context_chars_sent: 0,
+        outcome,
+    });
+    on_stage(StageProgressEvent {
+        role: InvestigationRole::CausalSynthesizer,
+        started: false,
+        outcome: Some(outcome),
+        candidate_id: None,
+        detail,
+    });
 }
 
 /// Produce the only ledger the final answer may validate against. Existing
@@ -1430,29 +1457,81 @@ pub async fn run_review_pipeline(
     // Derivation can honestly abstain when the host cannot prove both a trigger
     // and symptom slot. In that case the final ledger remains causal-neutral,
     // so the ordinary answer validator cannot establish a root cause.
-    let topology = inputs
-        .causal_packet
-        .and_then(|packet| causal_topology(packet, &ledger, &findings, review.as_ref()).ok());
+    let topology = match inputs.causal_packet {
+        None => {
+            record_causal_stage_without_call(
+                &inputs,
+                &mut stages,
+                on_stage,
+                StageOutcomeKind::Skipped,
+                "causal packet unavailable; final answer remains causal-neutral".into(),
+            );
+            None
+        }
+        Some(packet) => match causal_topology(packet, &ledger, &findings, review.as_ref()) {
+            Ok(topology) => Some(topology),
+            Err(error) => {
+                let outcome = if error == CausalTopologyDeriveError::InsufficientHostProof {
+                    StageOutcomeKind::Skipped
+                } else {
+                    StageOutcomeKind::SemanticInvalid
+                };
+                record_causal_stage_without_call(
+                    &inputs,
+                    &mut stages,
+                    on_stage,
+                    outcome,
+                    format!(
+                        "causal topology withheld ({}); final answer remains causal-neutral",
+                        error.as_str()
+                    ),
+                );
+                None
+            }
+        },
+    };
     let mut causal_synthesis: Option<CausalSynthesisV1> = None;
     if let Some(topology) = topology.as_ref() {
         let causal_rounds_here = stage_budget(used_rounds, 1);
-        if causal_rounds_here == 0 {
-            stages.push(StageTelemetry {
-                role: InvestigationRole::CausalSynthesizer,
-                profile_id: inputs.role_ids.synthesizer_profile.clone(),
-                model: inputs.role_ids.synthesizer_model.clone(),
-                provider_rounds: 0,
-                semantic_corrections: 0,
-                context_chars_sent: 0,
-                outcome: StageOutcomeKind::Skipped,
-            });
-            on_stage(StageProgressEvent {
-                role: InvestigationRole::CausalSynthesizer,
-                started: false,
-                outcome: Some(StageOutcomeKind::Skipped),
-                candidate_id: None,
-                detail: "causal validation skipped to preserve final-answer budget".into(),
-            });
+        // The causal proposal is optional authority. Reserve the exact
+        // model-facing characters needed by the mandatory final synthesis
+        // before allowing it to spend from a whole-turn character ceiling.
+        // The final ledger changes roles only; its prompt-visible ids,
+        // findings, review, sources, and locators are identical to `ledger`.
+        let synthesis_char_reserve = message_chars(&synthesizer_messages(
+            inputs.user_text,
+            &findings,
+            review.as_ref(),
+            &ledger,
+            &candidate_ids,
+            false,
+        ));
+        let causal_char_allowance =
+            remaining_turn_chars(budget.max_context_chars_total, used_chars)
+                .map(|remaining| remaining.saturating_sub(synthesis_char_reserve));
+        let initial_causal_chars = message_chars(&causal_synthesis_messages(
+            inputs.user_text,
+            &findings,
+            review.as_ref(),
+            topology,
+            false,
+        ));
+        let causal_chars_fit = causal_char_allowance
+            .map(|allowance| initial_causal_chars <= allowance)
+            .unwrap_or(true);
+        if causal_rounds_here == 0 || !causal_chars_fit {
+            let detail = if causal_rounds_here == 0 {
+                "causal validation skipped to preserve final-answer round budget"
+            } else {
+                "causal validation skipped to preserve final-answer character budget"
+            };
+            record_causal_stage_without_call(
+                &inputs,
+                &mut stages,
+                on_stage,
+                StageOutcomeKind::Skipped,
+                detail.into(),
+            );
         } else {
             on_stage(StageProgressEvent {
                 role: InvestigationRole::CausalSynthesizer,
@@ -1478,7 +1557,7 @@ pub async fn run_review_pipeline(
                 max_corr,
                 causal_rounds_here,
                 packing,
-                remaining_turn_chars(budget.max_context_chars_total, used_chars),
+                causal_char_allowance,
             )
             .await;
             match result {
@@ -1584,8 +1663,34 @@ pub async fn run_review_pipeline(
                             .into(),
                     });
                 }
-                CallResult::Deadline { .. } => return Ok(MultiModelOutcome::Deadline),
-                CallResult::Cancelled { .. } => return Ok(MultiModelOutcome::Cancelled),
+                CallResult::Deadline {
+                    rounds,
+                    corrections,
+                    chars,
+                } => {
+                    return Ok(deadline_outcome(
+                        InvestigationRole::CausalSynthesizer,
+                        None,
+                        rounds,
+                        corrections,
+                        chars,
+                        on_stage,
+                    ))
+                }
+                CallResult::Cancelled {
+                    rounds,
+                    corrections,
+                    chars,
+                } => {
+                    return Ok(cancelled_outcome(
+                        InvestigationRole::CausalSynthesizer,
+                        None,
+                        rounds,
+                        corrections,
+                        chars,
+                        on_stage,
+                    ))
+                }
             }
         }
     }

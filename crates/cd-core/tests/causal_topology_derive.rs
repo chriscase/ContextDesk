@@ -457,6 +457,39 @@ fn chronology_ordinal_frequency_and_same_source_never_create_trigger_or_recovery
         relation("propagated_symptom", "k1", "c:s", "e:s"),
     ]);
     validate_causal_synthesis(&honest, &topology).expect("ordinal/frequency did not establish");
+
+    let propagation = ledger(
+        corpus,
+        vec![
+            entry("e:p", "k1", corpus, EvidenceRole::Cause),
+            entry("e:s", "k1", corpus, EvidenceRole::Symptom),
+        ],
+    );
+    let propagation_findings = vec![
+        finding(&propagation, "k1", "causal_candidates", "c:p", "e:p"),
+        finding(&propagation, "k1", "symptoms", "c:s", "e:s"),
+    ];
+    let propagation_classes = vec![
+        class(
+            "e:p",
+            FastTriageEvidenceScope::Candidate,
+            FastTriageEvidenceCategory::Propagation,
+            Some(10),
+            None,
+        ),
+        focus("e:s"),
+    ];
+    assert_eq!(
+        derive(
+            &propagation,
+            &propagation_findings,
+            &[],
+            &BTreeSet::new(),
+            &propagation_classes,
+        ),
+        Err(CausalTopologyDeriveError::InsufficientHostProof),
+        "a downstream propagation row cannot initiate the causal chain"
+    );
 }
 
 #[test]
@@ -660,7 +693,7 @@ fn duplicate_claim_pair_across_findings_fails_closed_as_duplicate_id() {
 }
 
 #[test]
-fn conflicting_disconfirmation_identity_reuse_fails_closed_as_duplicate_id() {
+fn contradiction_padding_cannot_enlarge_a_claims_evidence_identity_set() {
     let corpus = "cx";
     let built = ledger(
         corpus,
@@ -689,22 +722,34 @@ fn conflicting_disconfirmation_identity_reuse_fails_closed_as_duplicate_id() {
         ),
         focus("e:d"),
     ];
-    // e:t is already the (k1, c:t) trigger identity. Reusing it for (k1, c:s)
-    // is conflicting disconfirmation reuse in either contradiction order.
+    // e:t belongs to (k1, c:t), not (k1, c:s). A reviewer may cite it because
+    // review validation permits evidence from either named candidate, but the
+    // topology must intersect that citation with each named claim's own
+    // validated evidence set. Contradiction order cannot change the result.
     let reuse_a = contradiction(&built, &findings, "k1", "c:s", "k2", "c:d", &["e:t"]);
     let reuse_b = contradiction(&built, &findings, "k2", "c:d", "k1", "c:s", &["e:t"]);
+    let topology_a =
+        derive(&built, &findings, &[reuse_a], &BTreeSet::new(), &classes).expect("order a");
+    let topology_b =
+        derive(&built, &findings, &[reuse_b], &BTreeSet::new(), &classes).expect("order b");
+    assert_eq!(topology_a, topology_b);
+
+    let padded = proposal(&[
+        relation("initiating_trigger", "k1", "c:t", "e:t"),
+        relation("propagated_symptom", "k1", "c:s", "e:s"),
+        relation("unrelated_competing", "k2", "c:u", "e:u"),
+        relation("disconfirmation", "k1", "c:s", "e:t"),
+        relation("disconfirmation", "k2", "c:d", "e:d"),
+    ]);
     assert_eq!(
-        derive(&built, &findings, &[reuse_a], &BTreeSet::new(), &classes),
-        Err(CausalTopologyDeriveError::DuplicateId)
-    );
-    assert_eq!(
-        derive(&built, &findings, &[reuse_b], &BTreeSet::new(), &classes),
-        Err(CausalTopologyDeriveError::DuplicateId)
+        validate_causal_synthesis(&padded, &topology_a),
+        Err(CausalSynthesisError::TopologyViolation),
+        "the padded trigger id never becomes a disconfirmation identity for c:s"
     );
 
     // Same-identity reuse of e:t on (k1, c:t) still derives. Candidate-local
     // confinement holds: e:t cannot fill a k2 slot.
-    let confined = contradiction(&built, &findings, "k1", "c:t", "k2", "c:d", &["e:t"]);
+    let confined = contradiction(&built, &findings, "k1", "c:t", "k2", "c:d", &["e:t", "e:d"]);
     let topology = derive(&built, &findings, &[confined], &BTreeSet::new(), &classes)
         .expect("same-identity disconfirmation reuse stays candidate-local");
     let steal = proposal(&[
@@ -960,7 +1005,6 @@ fn host_derived_valid_topology_passes_try_new_and_validate_causal_synthesis() {
             slot(CausalRelationKind::UnrelatedCompeting, "k2", "c:k2:u"),
             slot(CausalRelationKind::Recovery, "k1", "c:k1:r"),
             slot(CausalRelationKind::Disconfirmation, "k2", "c:k2:d"),
-            slot(CausalRelationKind::Disconfirmation, "k1", "c:k1:t"),
         ],
         vec![
             CausalRelationKind::InitiatingTrigger,
