@@ -10,6 +10,7 @@ export interface CockpitSnapshot {
   visibility?: string;
   parentSnapshotId?: string | null;
   protocolVersion?: string;
+  fairnessClass?: "same_snapshot" | "unknown";
 }
 
 export interface CockpitRun {
@@ -25,8 +26,13 @@ type FairnessVerdict =
   | { kind: "none" }
   | { kind: "single" }
   | { kind: "controlled"; runCount: number }
-  | { kind: "mismatch"; explicitMismatch: boolean; distinctFingerprints: number }
-  | { kind: "pending" };
+  | {
+    kind: "mismatch";
+    explicitMismatch: boolean;
+    distinctFingerprints: number;
+    catalogMismatch: boolean;
+  }
+  | { kind: "pending"; missingSnapshot: boolean; fairnessUnknown: boolean };
 
 function shortToken(value: string | null | undefined): string {
   return value ? `${value.slice(0, 12)}…` : "not available";
@@ -42,7 +48,7 @@ function statusText(status: string): string {
  * an exact, identical fingerprint. Anything less is mismatch (on explicit
  * contrary evidence) or unknown — never assumed fair.
  */
-function fairnessVerdict(runs: CockpitRun[]): FairnessVerdict {
+function fairnessVerdict(runs: CockpitRun[], snapshots: CockpitSnapshot[]): FairnessVerdict {
   if (runs.length === 0) return { kind: "none" };
   if (runs.length === 1) return { kind: "single" };
   const explicitMismatch = runs.some((run) => run.sameSnapshot === false);
@@ -50,22 +56,59 @@ function fairnessVerdict(runs: CockpitRun[]): FairnessVerdict {
     .map((run) => run.snapshotFingerprint)
     .filter((fingerprint): fingerprint is string => typeof fingerprint === "string" && fingerprint.length > 0);
   const distinct = new Set(fingerprints).size;
-  if (explicitMismatch || distinct > 1) {
-    return { kind: "mismatch", explicitMismatch, distinctFingerprints: distinct };
+  const resolvedSnapshots = runs.map((run) =>
+    snapshots.find((snapshot) => snapshot.id === run.snapshotId),
+  );
+  const catalogMismatch = runs.some((run, index) => {
+    const snapshot = resolvedSnapshots[index];
+    return Boolean(
+      snapshot
+      && run.snapshotFingerprint
+      && snapshot.fingerprint
+      && snapshot.fingerprint !== run.snapshotFingerprint,
+    );
+  });
+  if (explicitMismatch || distinct > 1 || catalogMismatch) {
+    return {
+      kind: "mismatch",
+      explicitMismatch,
+      distinctFingerprints: distinct,
+      catalogMismatch,
+    };
   }
+  const missingSnapshot = resolvedSnapshots.some((snapshot) => !snapshot);
+  const fairnessUnknown = resolvedSnapshots.some(
+    (snapshot) => snapshot?.fairnessClass !== "same_snapshot",
+  );
   if (
     runs.every((run) => run.sameSnapshot === true)
     && fingerprints.length === runs.length
     && distinct === 1
+    && !missingSnapshot
+    && !fairnessUnknown
   ) {
     return { kind: "controlled", runCount: runs.length };
   }
-  return { kind: "pending" };
+  return { kind: "pending", missingSnapshot, fairnessUnknown };
 }
 
-function proofText(sameSnapshot: boolean | null): string {
-  if (sameSnapshot === true) return "same-snapshot proof recorded";
-  if (sameSnapshot === false) return "explicit mismatch recorded";
+function proofText(run: CockpitRun, snapshots: CockpitSnapshot[]): string {
+  if (run.sameSnapshot === false) return "explicit mismatch recorded";
+  const snapshot = snapshots.find((item) => item.id === run.snapshotId);
+  if (!snapshot) {
+    return run.sameSnapshot === true
+      ? "run binding recorded · snapshot proof unavailable"
+      : "proof pending or unavailable";
+  }
+  if (run.snapshotFingerprint && snapshot.fingerprint !== run.snapshotFingerprint) {
+    return "snapshot ID and fingerprint conflict";
+  }
+  if (run.sameSnapshot === true && snapshot.fairnessClass === "same_snapshot") {
+    return "same-snapshot proof recorded · content equivalence established";
+  }
+  if (run.sameSnapshot === true) {
+    return "run binding recorded · content equivalence unknown";
+  }
   return "proof pending or unavailable";
 }
 
@@ -77,6 +120,9 @@ function frozenAtText(createdAt: string | undefined): string {
 }
 
 function mismatchReason(verdict: Extract<FairnessVerdict, { kind: "mismatch" }>): string {
+  if (verdict.catalogMismatch) {
+    return "At least one run's recorded snapshot ID resolves to a different catalog fingerprint. The evidence binding is internally inconsistent.";
+  }
   if (verdict.explicitMismatch && verdict.distinctFingerprints > 1) {
     return "These runs recorded an explicit snapshot mismatch and their evidence fingerprints differ.";
   }
@@ -84,6 +130,19 @@ function mismatchReason(verdict: Extract<FairnessVerdict, { kind: "mismatch" }>)
     return "The selected runs carry different exact evidence fingerprints.";
   }
   return "At least one selected run recorded an explicit snapshot mismatch.";
+}
+
+function pendingReason(verdict: Extract<FairnessVerdict, { kind: "pending" }>): string {
+  if (verdict.missingSnapshot && verdict.fairnessUnknown) {
+    return "At least one selected run cannot be resolved to a visible frozen snapshot, so its snapshot-level content proof is unavailable.";
+  }
+  if (verdict.missingSnapshot) {
+    return "At least one selected run cannot be resolved to a visible frozen snapshot.";
+  }
+  if (verdict.fairnessUnknown) {
+    return "At least one selected snapshot reports unknown content equivalence because sufficient evidence hashes were not available when it was frozen.";
+  }
+  return "At least one selected run is missing a settled same-snapshot proof or an exact evidence fingerprint.";
 }
 
 export function EvidenceSnapshotCockpit(props: {
@@ -115,7 +174,7 @@ export function EvidenceSnapshotCockpit(props: {
     setCopyState("idle");
   }, [inspectedKey]);
 
-  const verdict = fairnessVerdict(selectedRuns);
+  const verdict = fairnessVerdict(selectedRuns, snapshots);
 
   function snapshotRef(snapshotId: string, fingerprint: string): string {
     const index = snapshots.findIndex((snapshot) => snapshot.id === snapshotId);
@@ -161,9 +220,10 @@ export function EvidenceSnapshotCockpit(props: {
         <p className="case-memory__note">
           Every run is bound to one frozen evidence snapshot. This cockpit shows which
           snapshot each selected run used and whether a side-by-side read is evidence-fair.
-          Evidence fairness is separate from model conclusions: identical evidence makes
-          runs comparable — it does not make any lane&apos;s answer correct, and matching
-          answers are not proof either.
+          A controlled verdict requires both an exact run binding and snapshot-level content
+          equivalence. Evidence fairness is separate from model conclusions: identical evidence
+          makes runs comparable — it does not make any lane&apos;s answer correct, and matching answers
+          are not proof either.
         </p>
       </div>
       <div aria-live="polite">
@@ -179,8 +239,9 @@ export function EvidenceSnapshotCockpit(props: {
               <strong>Controlled comparison — same frozen evidence.</strong>
               <p>
                 All {verdict.runCount} selected runs carry an explicit same-snapshot proof and
-                identical exact evidence fingerprints. Differences between lanes reflect the
-                models and settings, not what each run could see.
+                identical exact evidence fingerprints, and every resolved snapshot carries
+                sufficient hash proof for content equivalence. Differences between lanes reflect
+                the models and settings, not what each run could see.
               </p>
             </>
           ) : null}
@@ -203,9 +264,8 @@ export function EvidenceSnapshotCockpit(props: {
             <>
               <strong>Fairness unknown — snapshot proof incomplete.</strong>
               <p>
-                At least one selected run is missing a settled same-snapshot proof or an exact
-                evidence fingerprint. Until every run reports its proof, this comparison stays
-                unknown rather than fair.
+                {pendingReason(verdict)} Until every run and snapshot reports its proof, this
+                comparison stays unknown rather than fair.
               </p>
             </>
           ) : null}
@@ -246,7 +306,7 @@ export function EvidenceSnapshotCockpit(props: {
               <li className="snapshot-cockpit__run" key={run.id}>
                 <strong>{run.request.strategyId}</strong>
                 <span>
-                  {statusText(run.status)} · snapshot {snapshotRef(run.snapshotId, run.snapshotFingerprint)} · {proofText(run.sameSnapshot)}
+                  {statusText(run.status)} · snapshot {snapshotRef(run.snapshotId, run.snapshotFingerprint)} · {proofText(run, snapshots)}
                 </span>
                 {snapshots.some((snapshot) => snapshot.id === run.snapshotId) ? (
                   <button
@@ -313,6 +373,14 @@ export function EvidenceSnapshotCockpit(props: {
               <dd>
                 {inspected.evidence.length}
                 {verificationKnown.length > 0 ? ` · ${verifiedCount} verified` : ""}
+              </dd>
+            </div>
+            <div>
+              <dt>Snapshot fairness</dt>
+              <dd>
+                {inspected.fairnessClass === "same_snapshot"
+                  ? "content equivalence established"
+                  : "unknown — content equivalence not established"}
               </dd>
             </div>
             <div>

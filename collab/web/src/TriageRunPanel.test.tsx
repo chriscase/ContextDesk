@@ -627,6 +627,7 @@ describe("evidence snapshot cockpit", () => {
         visibility: "owner_only",
         parentSnapshotId: null,
         protocolVersion: "cd-collab.snapshot.v1",
+        fairnessClass: "same_snapshot",
       }],
       jobs: [
         cockpitJob({ id: "job-alpha", strategyId: "alpha-strategy" }),
@@ -647,6 +648,7 @@ describe("evidence snapshot cockpit", () => {
     expect(screen.getByText("none — root snapshot")).toBeTruthy();
     expect(screen.getByText("cd-collab.snapshot.v1")).toBeTruthy();
     expect(screen.getByText("1 · 1 verified")).toBeTruthy();
+    expect(screen.getByText("content equivalence established")).toBeTruthy();
   });
 
   it("flags an evidence mismatch, explains why it matters, and points at supported repairs", async () => {
@@ -700,6 +702,56 @@ describe("evidence snapshot cockpit", () => {
     expect(screen.getByText(/proof pending or unavailable/)).toBeTruthy();
   });
 
+  it("does not call matching run fingerprints controlled when snapshot fairness is unknown", async () => {
+    stubCockpitFetch({
+      snapshots: [{
+        id: "snapshot-1",
+        fingerprint: "a".repeat(64),
+        evidence: [{ evidenceId: "artifact-1" }],
+        createdBy: "lead",
+        fairnessClass: "unknown",
+      }],
+      jobs: [
+        cockpitJob({ id: "job-alpha", strategyId: "alpha-strategy" }),
+        cockpitJob({ id: "job-beta", strategyId: "beta-strategy" }),
+      ],
+    });
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /alpha-strategy/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /beta-strategy/ }));
+
+    expect(await screen.findByText("Fairness unknown — snapshot proof incomplete.")).toBeTruthy();
+    expect(screen.getByText(/reports unknown content equivalence/)).toBeTruthy();
+    expect(screen.getAllByText(/run binding recorded · content equivalence unknown/)).toHaveLength(2);
+    expect(screen.queryByText("Controlled comparison — same frozen evidence.")).toBeNull();
+    expect(screen.queryByText("All selected runs proved the same frozen snapshot.")).toBeNull();
+    expect(screen.getByText(/run records report one snapshot fingerprint/)).toBeTruthy();
+  });
+
+  it("flags a run whose snapshot ID resolves to a different catalog fingerprint", async () => {
+    stubCockpitFetch({
+      snapshots: [{
+        id: "snapshot-1",
+        fingerprint: "c".repeat(64),
+        evidence: [],
+        createdBy: "lead",
+        fairnessClass: "same_snapshot",
+      }],
+      jobs: [
+        cockpitJob({ id: "job-alpha", strategyId: "alpha-strategy" }),
+        cockpitJob({ id: "job-beta", strategyId: "beta-strategy" }),
+      ],
+    });
+    render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /alpha-strategy/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /beta-strategy/ }));
+
+    expect(await screen.findByText("Evidence mismatch — not a fair head-to-head.")).toBeTruthy();
+    expect(screen.getByText(/snapshot ID resolves to a different catalog fingerprint/)).toBeTruthy();
+    expect(screen.getAllByText(/snapshot ID and fingerprint conflict/)).toHaveLength(2);
+    expect(screen.queryByText("All selected runs proved the same frozen snapshot.")).toBeNull();
+  });
+
   it("guides the operator when only one run is selected", async () => {
     stubCockpitFetch({
       snapshots: [{ id: "snapshot-1", fingerprint: "a".repeat(64), evidence: [], createdBy: "lead" }],
@@ -749,9 +801,10 @@ describe("evidence snapshot cockpit", () => {
     });
     render(<TriageRunPanel caseId="case-1" canLead={false} readOnly />);
     expect(await screen.findByText("Exact evidence fingerprint")).toBeTruthy();
-    // status, visibility, frozen at, parent snapshot, and protocol are absent
+    // status, visibility, frozen at, parent snapshot, protocol, and fairness are absent
     // from the payload, so each must read "unknown" — never a fabricated value.
     expect(screen.getAllByText("unknown")).toHaveLength(5);
+    expect(screen.getByText("unknown — content equivalence not established")).toBeTruthy();
     expect(screen.getByText("lead")).toBeTruthy();
   });
 });
