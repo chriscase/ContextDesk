@@ -20,6 +20,7 @@ import {
   type HelpfulnessDimension,
   type InteractionTraceV1,
   type ObservedCountV1,
+  type ShareSafeSnapshotProofV2,
   type ShareSafeExperimentAgreementV2,
   type ShareSafeInteractionTraceV2,
   type ShareSafeStrategyComparisonV2,
@@ -31,6 +32,7 @@ export interface ReviewExportSource {
   packageId: string;
   taskFingerprint: string;
   snapshotFingerprint: string;
+  snapshotProof: Omit<ShareSafeSnapshotProofV2, "parentSnapshotAlias">;
   candidates: ExperimentCandidateV1[];
   agreement: ExperimentAgreementV1;
   observations: HelpfulnessObservationV1[];
@@ -210,6 +212,14 @@ function goldProjectionIdentity(gold: GoldReferenceV1): string {
 }
 
 function assertExportIntegrity(view: ReviewExportSource): void {
+  if (
+    !view.snapshotProof ||
+    typeof view.snapshotProof.basis !== "string" ||
+    typeof view.snapshotProof.fairnessClass !== "string" ||
+    typeof view.snapshotProof.lineageClass !== "string"
+  ) {
+    throwViolation("$.snapshotProof", "host snapshot proof is required");
+  }
   if (view.candidates.length === 0) {
     throwViolation("$.candidates", "at least one candidate is required");
   }
@@ -642,6 +652,11 @@ export function projectExperimentLabExport(view: ReviewExportSource): Experiment
       packageAlias: aliases.packageAlias,
       taskAlias: "task-1",
       snapshotAlias: "snapshot-1",
+      snapshotProof: {
+        ...view.snapshotProof,
+        parentSnapshotAlias:
+          view.snapshotProof.lineageClass === "derived" ? "snapshot-parent-1" : null,
+      },
       candidates: view.candidates.map((candidate) => ({
         candidateAlias: aliases.candidates.for(candidate.candidateId),
         role: candidate.role,

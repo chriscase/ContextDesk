@@ -328,6 +328,7 @@ function opaqueSource(): ReviewExportSource {
     packageId: IDS.pkg,
     taskFingerprint: TASK_FP,
     snapshotFingerprint: SNAP_FP,
+    snapshotProof: { basis: "unknown", fairnessClass: "unknown", lineageClass: "unknown" },
     candidates,
     agreement,
     observations: [observation()],
@@ -834,6 +835,76 @@ const TAMPER_MATRIX: TamperRow[] = [
     }),
   },
   {
+    name: "unknown_snapshot_proof_field",
+    apply: (assembled) => ({
+      ...assembled,
+      review: {
+        ...assembled.review,
+        snapshotProof: { ...assembled.review.snapshotProof, rawFingerprint: SNAP_FP },
+      },
+    }),
+  },
+  {
+    name: "unknown_basis_claims_same_snapshot",
+    apply: (assembled) => ({
+      ...assembled,
+      review: {
+        ...assembled.review,
+        snapshotProof: {
+          basis: "unknown",
+          fairnessClass: "same_snapshot",
+          lineageClass: "unknown",
+          parentSnapshotAlias: null,
+        },
+      },
+    }),
+  },
+  {
+    name: "host_basis_omits_lineage",
+    apply: (assembled) => ({
+      ...assembled,
+      review: {
+        ...assembled.review,
+        snapshotProof: {
+          basis: "host_frozen_snapshot",
+          fairnessClass: "same_snapshot",
+          lineageClass: "unknown",
+          parentSnapshotAlias: null,
+        },
+      },
+    }),
+  },
+  {
+    name: "derived_lineage_omits_parent_alias",
+    apply: (assembled) => ({
+      ...assembled,
+      review: {
+        ...assembled.review,
+        snapshotProof: {
+          basis: "host_frozen_snapshot",
+          fairnessClass: "same_snapshot",
+          lineageClass: "derived",
+          parentSnapshotAlias: null,
+        },
+      },
+    }),
+  },
+  {
+    name: "root_lineage_invents_parent_alias",
+    apply: (assembled) => ({
+      ...assembled,
+      review: {
+        ...assembled.review,
+        snapshotProof: {
+          basis: "host_frozen_snapshot",
+          fairnessClass: "same_snapshot",
+          lineageClass: "root",
+          parentSnapshotAlias: "snapshot-parent-1",
+        },
+      },
+    }),
+  },
+  {
     name: "planted_leak_string",
     apply: (assembled) => ({
       ...assembled,
@@ -865,6 +936,29 @@ describe("share-safe accepted-human-decision export adversarial lab", () => {
     expect(exported.review.decision?.predecessorRevision).toBe(1);
     expect(exported.review.gold?.version).toBe(1);
     expect(exported.review.gold?.predecessorGoldAlias).toBeNull();
+    expect(exported.review.snapshotProof).toEqual({
+      basis: "unknown",
+      fairnessClass: "unknown",
+      lineageClass: "unknown",
+      parentSnapshotAlias: null,
+    });
+  });
+
+  it("projects a host-owned derived same-snapshot proof without raw identities", () => {
+    const source = opaqueSource();
+    source.snapshotProof = {
+      basis: "host_frozen_snapshot",
+      fairnessClass: "same_snapshot",
+      lineageClass: "derived",
+    };
+    const exported = projectExperimentLabExport(source);
+    expect(exported.review.snapshotProof).toEqual({
+      basis: "host_frozen_snapshot",
+      fairnessClass: "same_snapshot",
+      lineageClass: "derived",
+      parentSnapshotAlias: "snapshot-parent-1",
+    });
+    expect(JSON.stringify(exported)).not.toContain(SNAP_FP);
   });
 
   it("does not collide identical raw ids that belong to separate experiments", () => {
