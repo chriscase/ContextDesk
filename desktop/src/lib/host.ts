@@ -1644,6 +1644,89 @@ export async function hostCancelLiveInvestigationTeamQualification(): Promise<bo
   return invoke<boolean>("cancel_live_investigation_team_qualification");
 }
 
+export type InvestigationTeamKnownAnswerMetricsDto = {
+  required_scenarios: number;
+  executed_scenarios: number;
+  passed_scenarios: number;
+  failed_scenarios: number;
+  cancelled_scenarios: number;
+  blocked_scenarios: number;
+  total_latency_ms: number;
+  total_input_bytes: number;
+  total_output_bytes: number;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cost_microusd?: number | null;
+};
+
+export type InvestigationTeamKnownAnswerScenarioDto = {
+  scenario_id: string;
+  status: "executed" | "failed" | "blocked" | "cancelled" | "not_scheduled" | string;
+  passed: boolean;
+  failed_dimensions: string[];
+  latency_ms: number;
+  input_bytes: number;
+  output_bytes: number;
+  failure_code?: string | null;
+};
+
+export type InvestigationTeamKnownAnswerDto = {
+  status: "qualified" | "failed" | "partial" | "cancelled" | "blocked" | "stale" | string;
+  reported_status: "qualified" | "failed" | "partial" | "cancelled" | "blocked" | string;
+  stale: boolean;
+  stale_reasons: string[];
+  observed_at: number;
+  role: string;
+  build_identity: string;
+  subject_storage_id: string;
+  profile_id: string;
+  model_id: string;
+  endpoint_fingerprint: string;
+  suite_id: string;
+  suite_digest: string;
+  prompt_set_hash: string;
+  orchestration_policy_fingerprint: string;
+  metrics: InvestigationTeamKnownAnswerMetricsDto;
+  scenarios: InvestigationTeamKnownAnswerScenarioDto[];
+  redacted_json: string;
+  redacted_markdown: string;
+};
+
+/** Read durable redacted known-answer history without contacting a provider. */
+export async function hostListInvestigationTeamKnownAnswerQualifications(): Promise<InvestigationTeamKnownAnswerDto[]> {
+  if (!isTauri()) return [];
+  return invoke<InvestigationTeamKnownAnswerDto[]>(
+    "list_investigation_team_known_answer_qualifications",
+  );
+}
+
+/**
+ * Run all checked-in opaque known-answer scenarios for every configured V1
+ * Investigation Team role. The trusted host owns the suite and evaluator truth.
+ */
+export async function hostRunLiveInvestigationTeamKnownAnswerQualification(): Promise<InvestigationTeamKnownAnswerDto[]> {
+  if (!isTauri()) {
+    throw new Error("Known-answer qualification requires the trusted desktop host");
+  }
+  return invoke<InvestigationTeamKnownAnswerDto[]>(
+    "run_live_investigation_team_known_answer_qualification",
+  );
+}
+
+/** Cooperatively cancel the current known-answer suite after its active call. */
+export async function hostCancelLiveInvestigationTeamKnownAnswerQualification(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>(
+    "cancel_live_investigation_team_known_answer_qualification",
+  );
+}
+
+/** Clear only redacted known-answer history. */
+export async function hostClearInvestigationTeamKnownAnswerQualifications(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("clear_investigation_team_known_answer_qualifications");
+}
+
 export async function hostGetDefaultChatModel(): Promise<string | null> {
   if (!isTauri()) return null;
   return invoke<string>("get_default_chat_model");

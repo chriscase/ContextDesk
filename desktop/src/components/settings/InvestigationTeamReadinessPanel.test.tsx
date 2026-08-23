@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { InvestigationTeamReadinessPanel } from "./InvestigationTeamReadinessPanel";
 import type {
+  InvestigationTeamKnownAnswerDto,
   InvestigationTeamQualificationDto,
   MultiModelSettingsDto,
 } from "../../lib/host";
@@ -13,6 +14,9 @@ const host = vi.hoisted(() => ({
   runSynthetic: vi.fn(),
   runLive: vi.fn(),
   cancelLive: vi.fn(),
+  knownAnswerHistory: vi.fn(),
+  runKnownAnswer: vi.fn(),
+  cancelKnownAnswer: vi.fn(),
 }));
 
 vi.mock("../../lib/host", async () => {
@@ -32,6 +36,12 @@ vi.mock("../../lib/host", async () => {
       host.runLive(...args),
     hostCancelLiveInvestigationTeamQualification: (...args: unknown[]) =>
       host.cancelLive(...args),
+    hostListInvestigationTeamKnownAnswerQualifications: (...args: unknown[]) =>
+      host.knownAnswerHistory(...args),
+    hostRunLiveInvestigationTeamKnownAnswerQualification: (...args: unknown[]) =>
+      host.runKnownAnswer(...args),
+    hostCancelLiveInvestigationTeamKnownAnswerQualification: (...args: unknown[]) =>
+      host.cancelKnownAnswer(...args),
   };
 });
 
@@ -87,6 +97,55 @@ function report(
   };
 }
 
+function knownAnswerReport(
+  over: Partial<InvestigationTeamKnownAnswerDto> = {},
+): InvestigationTeamKnownAnswerDto {
+  return {
+    status: "qualified",
+    reported_status: "qualified",
+    stale: false,
+    stale_reasons: [],
+    observed_at: 1_777_000_000,
+    role: "investigator",
+    build_identity: "build-a",
+    subject_storage_id: "subject-a",
+    profile_id: "investigator-1",
+    model_id: "model-a",
+    endpoint_fingerprint: "a".repeat(64),
+    suite_id: "open-v1",
+    suite_digest: "b".repeat(64),
+    prompt_set_hash: "c".repeat(64),
+    orchestration_policy_fingerprint: "d".repeat(64),
+    metrics: {
+      required_scenarios: 14,
+      executed_scenarios: 14,
+      passed_scenarios: 14,
+      failed_scenarios: 0,
+      cancelled_scenarios: 0,
+      blocked_scenarios: 0,
+      total_latency_ms: 1_400,
+      total_input_bytes: 14_000,
+      total_output_bytes: 7_000,
+      input_tokens: null,
+      output_tokens: null,
+      cost_microusd: null,
+    },
+    scenarios: Array.from({ length: 14 }, (_, index) => ({
+      scenario_id: `scenario-${String(index + 1).padStart(3, "0")}`,
+      status: "executed",
+      passed: true,
+      failed_dimensions: [],
+      latency_ms: 100,
+      input_bytes: 1_000,
+      output_bytes: 500,
+      failure_code: null,
+    })),
+    redacted_json: "{\"known_answer\":true}",
+    redacted_markdown: "known answer safe",
+    ...over,
+  };
+}
+
 beforeEach(() => {
   host.get.mockReset();
   host.qualification.mockReset();
@@ -94,12 +153,18 @@ beforeEach(() => {
   host.runSynthetic.mockReset();
   host.runLive.mockReset();
   host.cancelLive.mockReset();
+  host.knownAnswerHistory.mockReset();
+  host.runKnownAnswer.mockReset();
+  host.cancelKnownAnswer.mockReset();
   host.get.mockResolvedValue(settings());
   host.qualification.mockResolvedValue(null);
   host.history.mockResolvedValue([]);
   host.runSynthetic.mockResolvedValue(null);
   host.runLive.mockResolvedValue(null);
   host.cancelLive.mockResolvedValue(true);
+  host.knownAnswerHistory.mockResolvedValue([]);
+  host.runKnownAnswer.mockResolvedValue([]);
+  host.cancelKnownAnswer.mockResolvedValue(true);
 });
 
 describe("InvestigationTeamReadinessPanel", () => {
@@ -332,5 +397,69 @@ describe("InvestigationTeamReadinessPanel", () => {
       (await screen.findByTestId("investigation-team-live-error")).textContent,
     ).toContain("remote evidence egress");
     expect(screen.queryByTestId("investigation-team-qualification-report")).toBeNull();
+  });
+
+  it("shows exact known-answer identity, honest unknown usage, and stale reasons", async () => {
+    const stale = knownAnswerReport({
+      status: "stale",
+      reported_status: "failed",
+      stale: true,
+      stale_reasons: ["build_changed", "pipeline_changed"],
+      metrics: {
+        ...knownAnswerReport().metrics,
+        passed_scenarios: 13,
+        failed_scenarios: 1,
+      },
+      scenarios: knownAnswerReport().scenarios.map((scenario, index) =>
+        index === 4
+          ? {
+              ...scenario,
+              status: "failed",
+              passed: false,
+              failed_dimensions: ["causal_role_contract"],
+              failure_code: "response_or_score_contract_failed",
+            }
+          : scenario,
+      ),
+    });
+    host.knownAnswerHistory.mockResolvedValue([stale]);
+    render(<InvestigationTeamReadinessPanel />);
+
+    const quality = await screen.findByTestId("investigation-team-known-answer-quality");
+    expect(quality.textContent).toMatch(/13\/14 scenarios passed/i);
+    expect(quality.textContent).toMatch(/tokens unknown.*cost unknown/i);
+    expect(quality.textContent).toMatch(/app build changed.*configured role or deployment changed/i);
+    expect(quality.textContent).toMatch(/stale · recorded failed/i);
+    expect(quality.textContent).toContain("investigator-1");
+    expect(quality.textContent).toContain("model-a");
+    expect(quality.textContent).not.toMatch(/evaluator_truth|answer_key|sk-/i);
+
+    fireEvent.click(screen.getByText("Inspect 14 scenario outcomes"));
+    expect(quality.textContent).toContain("scenario-005");
+    expect(quality.textContent).toContain("causal_role_contract");
+  });
+
+  it("runs the trusted-host known-answer suite and publishes returned history", async () => {
+    host.runKnownAnswer.mockResolvedValue([knownAnswerReport()]);
+    render(<InvestigationTeamReadinessPanel />);
+    await screen.findByTestId("investigation-team-readiness");
+    fireEvent.click(screen.getByTestId("investigation-team-run-known-answer"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("investigation-team-known-answer-quality").textContent)
+        .toMatch(/14\/14 scenarios passed/i);
+    });
+    expect(host.runKnownAnswer).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/tokens and cost remain “unknown”/i)).toBeTruthy();
+  });
+
+  it("offers cooperative cancellation while the known-answer suite is running", async () => {
+    host.runKnownAnswer.mockReturnValue(new Promise(() => undefined));
+    render(<InvestigationTeamReadinessPanel />);
+    await screen.findByTestId("investigation-team-readiness");
+    fireEvent.click(screen.getByTestId("investigation-team-run-known-answer"));
+    const cancel = await screen.findByRole("button", { name: /cancel after active call/i });
+    fireEvent.click(cancel);
+    await waitFor(() => expect(host.cancelKnownAnswer).toHaveBeenCalledTimes(1));
   });
 });

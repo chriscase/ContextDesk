@@ -20,6 +20,7 @@ pub mod answer_score;
 pub mod diagnostic_score;
 pub mod export;
 pub mod live_known_answer;
+pub mod live_known_answer_run;
 pub mod matrix;
 pub mod metrics;
 pub mod run;
@@ -40,6 +41,14 @@ pub use live_known_answer::{
     PreparedLiveKnownAnswerCase, LIVE_KNOWN_ANSWER_PACKET_ID, LIVE_KNOWN_ANSWER_PROMPT_SCHEMA_ID,
     LIVE_KNOWN_ANSWER_RESPONSE_MAX_BYTES, LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID,
 };
+pub use live_known_answer_run::{
+    build_live_known_answer_run, live_known_answer_quality_unit, parse_live_known_answer_json,
+    render_live_known_answer_json, render_live_known_answer_markdown,
+    validate_live_known_answer_run, LiveKnownAnswerRunMetrics, LiveKnownAnswerRunReport,
+    LiveKnownAnswerRunStatus, LiveKnownAnswerScenarioObservation, LiveKnownAnswerScenarioTelemetry,
+    LIVE_KNOWN_ANSWER_ORCHESTRATION_POLICY, LIVE_KNOWN_ANSWER_REQUIRED_SCENARIOS,
+    LIVE_KNOWN_ANSWER_RUN_MAX_BYTES, LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID,
+};
 pub use matrix::{matrix_summary_lines, matrix_summary_rows};
 pub use metrics::{round6, score_retrieval, validate_ranking};
 pub use run::{
@@ -48,8 +57,9 @@ pub use run::{
 };
 pub use suite::{
     assert_suite_digest, default_suite_path_from_manifest_dir, expectation_accounting, hex_sha256,
-    known_document_ids, list_bundled_suites, load_suite, resolve_suite_path, scan_privacy_text,
-    scan_runtime_isolation, ExpectationAccounting, LoadedCase, LoadedSuite, SuiteCatalogEntry,
-    BUNDLED_OPEN_V1_RELATIVE, PRIVACY_FORBIDDEN_SUBSTRINGS, RUNTIME_FORBIDDEN_EVALUATOR_TOKENS,
+    known_document_ids, list_bundled_suites, load_embedded_open_v1_suite, load_suite,
+    resolve_suite_path, scan_privacy_text, scan_runtime_isolation, ExpectationAccounting,
+    LoadedCase, LoadedSuite, SuiteCatalogEntry, BUNDLED_OPEN_V1_RELATIVE,
+    PRIVACY_FORBIDDEN_SUBSTRINGS, RUNTIME_FORBIDDEN_EVALUATOR_TOKENS,
 };
 pub use types::*;

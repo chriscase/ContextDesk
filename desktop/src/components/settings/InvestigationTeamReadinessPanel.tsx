@@ -9,12 +9,16 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   hostGetInvestigationTeamQualification,
+  hostListInvestigationTeamKnownAnswerQualifications,
   hostListInvestigationTeamQualifications,
   hostGetMultiModelSettings,
+  hostCancelLiveInvestigationTeamKnownAnswerQualification,
   hostCancelLiveInvestigationTeamQualification,
+  hostRunLiveInvestigationTeamKnownAnswerQualification,
   hostRunLiveInvestigationTeamQualification,
   hostRunSyntheticInvestigationTeamQualification,
   type ContributionAssignmentDto,
+  type InvestigationTeamKnownAnswerDto,
   type InvestigationTeamQualificationDto,
   type MultiModelSettingsDto,
   type ReviewerCandidateDto,
@@ -66,6 +70,35 @@ function failureReasonLabel(reason: string): string {
       return "The attempt was cancelled before it was sent.";
     default:
       return "The role did not complete its qualification attempt.";
+  }
+}
+
+function knownAnswerFailureLabel(reason: string | null | undefined): string {
+  switch (reason) {
+    case "provider_attempt_cancelled":
+    case "cancelled_before_dispatch":
+      return "cancelled";
+    case "provider_request_failed":
+      return "provider request failed";
+    case "response_or_score_contract_failed":
+      return "response or scoring contract failed";
+    default:
+      return reason ? "did not produce a usable score" : "";
+  }
+}
+
+function staleReasonLabel(reason: string): string {
+  switch (reason) {
+    case "build_changed":
+      return "app build changed";
+    case "suite_changed":
+      return "known-answer suite changed";
+    case "prompt_set_changed":
+      return "provider prompt set changed";
+    case "pipeline_changed":
+      return "configured role or deployment changed";
+    default:
+      return "qualification identity changed";
   }
 }
 
@@ -196,12 +229,19 @@ export function InvestigationTeamReadinessPanel() {
   const [qualification, setQualification] =
     useState<InvestigationTeamQualificationDto | null>(null);
   const [history, setHistory] = useState<InvestigationTeamQualificationDto[]>([]);
+  const [knownAnswerHistory, setKnownAnswerHistory] = useState<
+    InvestigationTeamKnownAnswerDto[]
+  >([]);
   const [syntheticPhase, setSyntheticPhase] = useState<"idle" | "running" | "error">(
     "idle",
   );
   const [syntheticError, setSyntheticError] = useState<string | null>(null);
   const [livePhase, setLivePhase] = useState<"idle" | "running" | "error">("idle");
   const [liveError, setLiveError] = useState<string | null>(null);
+  const [qualityPhase, setQualityPhase] = useState<"idle" | "running" | "error">(
+    "idle",
+  );
+  const [qualityError, setQualityError] = useState<string | null>(null);
   const [phase, setPhase] = useState<"loading" | "ready" | "absent" | "error">(
     "loading",
   );
@@ -209,20 +249,23 @@ export function InvestigationTeamReadinessPanel() {
   const load = useCallback(async () => {
     setPhase("loading");
     try {
-      const [next, report, reports] = await Promise.all([
+      const [next, report, reports, knownAnswerReports] = await Promise.all([
         hostGetMultiModelSettings(),
         hostGetInvestigationTeamQualification(),
         hostListInvestigationTeamQualifications(),
+        hostListInvestigationTeamKnownAnswerQualifications(),
       ]);
       if (next) {
         setSettings(next);
         setQualification(report);
         setHistory(reports);
+        setKnownAnswerHistory(knownAnswerReports);
         setPhase("ready");
       } else {
         setSettings(null);
         setQualification(null);
         setHistory([]);
+        setKnownAnswerHistory([]);
         setPhase("absent");
       }
     } catch {
@@ -280,6 +323,27 @@ export function InvestigationTeamReadinessPanel() {
 
   const cancelLive = async () => {
     await hostCancelLiveInvestigationTeamQualification();
+  };
+
+  const runKnownAnswer = async () => {
+    setQualityPhase("running");
+    setQualityError(null);
+    try {
+      const reports = await hostRunLiveInvestigationTeamKnownAnswerQualification();
+      setKnownAnswerHistory(reports);
+      setQualityPhase("idle");
+    } catch (error) {
+      setQualityPhase("error");
+      setQualityError(
+        error instanceof Error
+          ? error.message
+          : "The host could not complete known-answer qualification.",
+      );
+    }
+  };
+
+  const cancelKnownAnswer = async () => {
+    await hostCancelLiveInvestigationTeamKnownAnswerQualification();
   };
 
   if (phase === "absent") return null;
@@ -522,6 +586,168 @@ export function InvestigationTeamReadinessPanel() {
           above when you want a bounded multi-model route.
         </p>
       )}
+
+      <section
+        className="it-readiness__quality"
+        data-testid="investigation-team-known-answer-quality"
+        aria-busy={qualityPhase === "running"}
+        aria-labelledby="investigation-team-known-answer-title"
+      >
+        <div className="it-readiness__quality-title">
+          <div>
+            <h5 id="investigation-team-known-answer-title">
+              Known-answer quality evidence
+            </h5>
+            <p className="it-readiness__detail">
+              Runs 14 frozen, opaque triage scenarios for each exact configured
+              role. The trusted host keeps evaluator truth separate, scores strict
+              citations and causal claims, and stores only redacted evidence.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn--primary btn--sm"
+            data-testid="investigation-team-run-known-answer"
+            onClick={() => void runKnownAnswer()}
+            disabled={qualityPhase === "running"}
+          >
+            {qualityPhase === "running"
+              ? "Running quality suite…"
+              : "Run 14-scenario quality suite"}
+          </button>
+        </div>
+        {qualityPhase === "running" ? (
+          <div className="it-readiness__quality-progress" role="status">
+            <span>Provider calls run serially for each configured role.</span>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => void cancelKnownAnswer()}
+            >
+              Cancel after active call
+            </button>
+          </div>
+        ) : null}
+        {qualityError ? (
+          <p
+            className="field__error"
+            role="alert"
+            data-testid="investigation-team-known-answer-error"
+          >
+            {qualityError}
+          </p>
+        ) : null}
+        <p className="it-readiness__detail">
+          This complements the small wiring check above. It measures deterministic
+          answer quality, latency, and request/response bytes for the recorded
+          build, profile, model, endpoint fingerprint, suite, and prompt set.
+          Tokens and cost remain “unknown” unless the transport can report them;
+          no report is a universal model recommendation.
+        </p>
+
+        {knownAnswerHistory.length > 0 ? (
+          <div className="it-readiness__quality-history">
+            {knownAnswerHistory.map((report, index) => (
+              <details
+                key={`${report.role}:${report.observed_at}:${report.subject_storage_id}`}
+                open={index === 0}
+                className="it-readiness__quality-report"
+                data-status={report.status}
+              >
+                <summary>
+                  <span>
+                    <strong>{report.role}</strong> · <code>{report.model_id}</code>
+                  </span>
+                  <span className="mm-team__qual" data-state={report.status}>
+                    {report.stale
+                      ? `stale · recorded ${report.reported_status}`
+                      : report.status}
+                  </span>
+                  <time dateTime={new Date(report.observed_at * 1000).toISOString()}>
+                    {new Date(report.observed_at * 1000).toLocaleString()}
+                  </time>
+                </summary>
+                {report.stale ? (
+                  <p className="it-readiness__quality-warning" role="note">
+                    Stale for the current pipeline: {report.stale_reasons
+                      .map(staleReasonLabel)
+                      .join(", ")}.
+                  </p>
+                ) : null}
+                <dl className="it-readiness__quality-metrics">
+                  <div>
+                    <dt>Quality</dt>
+                    <dd>
+                      {report.metrics.passed_scenarios}/
+                      {report.metrics.required_scenarios} scenarios passed
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Lifecycle</dt>
+                    <dd>
+                      {report.metrics.executed_scenarios} executed · {report.metrics.failed_scenarios} failed · {report.metrics.cancelled_scenarios} cancelled · {report.metrics.blocked_scenarios} blocked
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Speed</dt>
+                    <dd>{report.metrics.total_latency_ms} ms total host-observed latency</dd>
+                  </div>
+                  <div>
+                    <dt>Resource proxy</dt>
+                    <dd>
+                      {report.metrics.total_input_bytes} input bytes · {report.metrics.total_output_bytes} output bytes · tokens unknown · cost unknown
+                    </dd>
+                  </div>
+                </dl>
+                <dl className="it-readiness__quality-identity">
+                  <div><dt>Build</dt><dd><code>{report.build_identity}</code></dd></div>
+                  <div><dt>Profile / model</dt><dd><code>{report.profile_id}</code> / <code>{report.model_id}</code></dd></div>
+                  <div><dt>Endpoint</dt><dd><code>{report.endpoint_fingerprint}</code></dd></div>
+                  <div><dt>Suite</dt><dd><code>{report.suite_id}</code> / <code>{report.suite_digest}</code></dd></div>
+                  <div><dt>Prompt set</dt><dd><code>{report.prompt_set_hash}</code></dd></div>
+                </dl>
+                <details className="it-readiness__quality-scenarios">
+                  <summary>Inspect 14 scenario outcomes</summary>
+                  <ol>
+                    {report.scenarios.map((scenario) => (
+                      <li key={scenario.scenario_id} data-status={scenario.status}>
+                        <code>{scenario.scenario_id}</code>
+                        <span>{scenario.passed ? "passed" : scenario.status}</span>
+                        <small>{scenario.latency_ms} ms</small>
+                        {scenario.failure_code ? (
+                          <small>{knownAnswerFailureLabel(scenario.failure_code)}</small>
+                        ) : null}
+                        {scenario.failed_dimensions.length > 0 ? (
+                          <small>
+                            failed: {scenario.failed_dimensions.join(", ")}
+                          </small>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ol>
+                </details>
+                <div className="it-readiness__exports">
+                  <details>
+                    <summary>View redacted quality JSON</summary>
+                    <pre>{report.redacted_json}</pre>
+                  </details>
+                  <details>
+                    <summary>View redacted quality Markdown</summary>
+                    <pre>{report.redacted_markdown}</pre>
+                  </details>
+                </div>
+              </details>
+            ))}
+          </div>
+        ) : (
+          <p
+            className="it-readiness__detail"
+            data-testid="investigation-team-known-answer-empty"
+          >
+            No provider-backed known-answer evidence has been recorded yet.
+          </p>
+        )}
+      </section>
 
       <div
         className="it-readiness__check"

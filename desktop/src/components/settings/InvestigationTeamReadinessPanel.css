@@ -257,6 +257,159 @@
   color: var(--text);
 }
 
+.it-readiness__quality {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-soft));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+
+.it-readiness__quality-title,
+.it-readiness__quality-progress {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.it-readiness__quality-title h5 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.it-readiness__quality-title p {
+  max-width: 58rem;
+}
+
+.it-readiness__quality-progress {
+  align-items: center;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.it-readiness__quality-history {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.it-readiness__quality-report {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-raised) 72%, transparent);
+}
+
+.it-readiness__quality-report[data-status="qualified"] {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--border-soft));
+}
+
+.it-readiness__quality-report[data-status="failed"],
+.it-readiness__quality-report[data-status="partial"] {
+  border-color: color-mix(in srgb, var(--warning) 48%, var(--border-soft));
+}
+
+.it-readiness__quality-report > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-2);
+  cursor: pointer;
+  color: var(--text);
+  list-style-position: inside;
+}
+
+.it-readiness__quality-report > summary time {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+}
+
+.it-readiness__quality-report[open] > :not(summary) {
+  margin-right: var(--space-2);
+  margin-left: var(--space-2);
+}
+
+.it-readiness__quality-warning {
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--warning);
+  font-size: var(--text-xs);
+}
+
+.it-readiness__quality-metrics,
+.it-readiness__quality-identity {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.it-readiness__quality-metrics > div,
+.it-readiness__quality-identity > div {
+  min-width: 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--overlay-faint) 48%, transparent);
+}
+
+.it-readiness__quality-metrics dt,
+.it-readiness__quality-identity dt {
+  color: var(--text-faint);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.it-readiness__quality-metrics dd,
+.it-readiness__quality-identity dd {
+  margin: var(--space-1) 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+
+.it-readiness__quality-scenarios {
+  margin-top: var(--space-2);
+  margin-bottom: var(--space-2);
+  padding: var(--space-2);
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.it-readiness__quality-scenarios > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.it-readiness__quality-scenarios ol {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding-left: 1.4rem;
+}
+
+.it-readiness__quality-scenarios li {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: baseline;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.it-readiness__quality-scenarios li[data-status="executed"] span {
+  color: var(--success);
+}
+
+.it-readiness__quality-scenarios li small {
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 560px) {
   .it-readiness__title-row,
   .it-readiness__row {
@@ -278,6 +431,21 @@
 
   .it-readiness__check {
     grid-template-columns: 1fr;
+  }
+
+  .it-readiness__quality-title,
+  .it-readiness__quality-progress {
+    flex-direction: column;
+  }
+
+  .it-readiness__quality-report > summary,
+  .it-readiness__quality-metrics,
+  .it-readiness__quality-identity {
+    grid-template-columns: 1fr;
+  }
+
+  .it-readiness__quality-scenarios li {
+    grid-template-columns: 1fr auto;
   }
 }
 

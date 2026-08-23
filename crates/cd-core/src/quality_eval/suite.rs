@@ -70,6 +70,21 @@ pub fn load_suite(suite_root: &Path) -> CoreResult<LoadedSuite> {
     let manifest_path = suite_root.join("suite.json");
     let raw = fs::read_to_string(&manifest_path)
         .map_err(|e| CoreError::Config(format!("read suite.json: {e}")))?;
+    let root = suite_root.to_path_buf();
+    load_suite_documents(root.clone(), raw, move |case_dir, file_name| {
+        fs::read_to_string(root.join("cases").join(case_dir).join(file_name))
+            .map_err(|e| CoreError::Config(format!("read cases/{case_dir}/{file_name}: {e}")))
+    })
+}
+
+fn load_suite_documents<F>(
+    suite_root: PathBuf,
+    raw: String,
+    mut read_case: F,
+) -> CoreResult<LoadedSuite>
+where
+    F: FnMut(&str, &str) -> CoreResult<String>,
+{
     let manifest: SuiteManifest = serde_json::from_str(&raw)
         .map_err(|e| CoreError::Config(format!("parse suite.json: {e}")))?;
     if manifest.schema_id != SUITE_SCHEMA_ID {
@@ -107,11 +122,8 @@ pub fn load_suite(suite_root: &Path) -> CoreResult<LoadedSuite> {
                 failure_reason::INVALID_FIXTURE_CONTRACT
             )));
         }
-        let case_path = suite_root.join("cases").join(case_dir);
-        let runtime_raw = fs::read_to_string(case_path.join("runtime.json"))
-            .map_err(|e| CoreError::Config(format!("read cases/{case_dir}/runtime.json: {e}")))?;
-        let truth_raw = fs::read_to_string(case_path.join("truth.json"))
-            .map_err(|e| CoreError::Config(format!("read cases/{case_dir}/truth.json: {e}")))?;
+        let runtime_raw = read_case(case_dir, "runtime.json")?;
+        let truth_raw = read_case(case_dir, "truth.json")?;
         extend_digest_segment(&mut digest_input, case_dir.as_bytes());
         extend_digest_segment(&mut digest_input, runtime_raw.as_bytes());
         extend_digest_segment(&mut digest_input, truth_raw.as_bytes());
@@ -131,7 +143,7 @@ pub fn load_suite(suite_root: &Path) -> CoreResult<LoadedSuite> {
 
     let digest = hex_sha256(&digest_input);
     Ok(LoadedSuite {
-        suite_root: suite_root.to_path_buf(),
+        suite_root,
         manifest,
         cases,
         digest,
@@ -497,6 +509,108 @@ pub fn default_suite_path_from_manifest_dir(manifest_dir: &Path) -> PathBuf {
 
 /// Relative label for the bundled OPEN v1 suite (never an absolute path).
 pub const BUNDLED_OPEN_V1_RELATIVE: &str = "fixtures/quality-eval/open-v1";
+
+const EMBEDDED_OPEN_V1_CASES: &[(&str, &str, &str)] = &[
+    (
+        "qe01-simple-diagnosis",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe01-simple-diagnosis/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe01-simple-diagnosis/truth.json"),
+    ),
+    (
+        "qe02-symptom-versus-trigger",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe02-symptom-versus-trigger/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe02-symptom-versus-trigger/truth.json"),
+    ),
+    (
+        "qe03-loud-near-match",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe03-loud-near-match/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe03-loud-near-match/truth.json"),
+    ),
+    (
+        "qe04-independent-incidents",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe04-independent-incidents/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe04-independent-incidents/truth.json"),
+    ),
+    (
+        "qe05-trigger-and-recovery",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe05-trigger-and-recovery/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe05-trigger-and-recovery/truth.json"),
+    ),
+    (
+        "qe06-insufficient-evidence",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe06-insufficient-evidence/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe06-insufficient-evidence/truth.json"),
+    ),
+    (
+        "qe07-foreign-identity",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe07-foreign-identity/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe07-foreign-identity/truth.json"),
+    ),
+    (
+        "qe08-retrieval-ranking",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe08-retrieval-ranking/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe08-retrieval-ranking/truth.json"),
+    ),
+    (
+        "qe09-attempt-usefulness",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe09-attempt-usefulness/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe09-attempt-usefulness/truth.json"),
+    ),
+    (
+        "qe10-grounding-vs-transport",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe10-grounding-vs-transport/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe10-grounding-vs-transport/truth.json"),
+    ),
+    (
+        "qe11-tool-progress",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe11-tool-progress/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe11-tool-progress/truth.json"),
+    ),
+    (
+        "qe12-multimodel-budget",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe12-multimodel-budget/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe12-multimodel-budget/truth.json"),
+    ),
+    (
+        "qe13-chronology-contradiction",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe13-chronology-contradiction/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe13-chronology-contradiction/truth.json"),
+    ),
+    (
+        "qe14-retrieval-ablation",
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe14-retrieval-ablation/runtime.json"),
+        include_str!("../../../../fixtures/quality-eval/open-v1/cases/qe14-retrieval-ablation/truth.json"),
+    ),
+];
+
+/// Load the checked-in OPEN v1 suite from compile-time host bytes.
+///
+/// This is the packaged-desktop path: evaluator truth remains inside trusted
+/// Rust code and is never copied into Tauri's browseable resource directory or
+/// renderer IPC. The same parser, validation, and digest framing used by the
+/// filesystem loader are applied to these exact committed bytes.
+pub fn load_embedded_open_v1_suite() -> CoreResult<LoadedSuite> {
+    let manifest = include_str!("../../../../fixtures/quality-eval/open-v1/suite.json").to_string();
+    load_suite_documents(
+        PathBuf::from(BUNDLED_OPEN_V1_RELATIVE),
+        manifest,
+        |case_dir, file_name| {
+            let (_, runtime, truth) = EMBEDDED_OPEN_V1_CASES
+                .iter()
+                .find(|(known, _, _)| *known == case_dir)
+                .ok_or_else(|| {
+                    CoreError::Config(format!("embedded OPEN v1 case is missing: {case_dir}"))
+                })?;
+            match file_name {
+                "runtime.json" => Ok((*runtime).to_string()),
+                "truth.json" => Ok((*truth).to_string()),
+                _ => Err(CoreError::Config(format!(
+                    "unsupported embedded OPEN v1 document: {file_name}"
+                ))),
+            }
+        },
+    )
+}
 
 /// One catalog entry for a bundled or discovered OPEN quality-eval suite.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

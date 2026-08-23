@@ -3,6 +3,7 @@
 mod capability_qualification_host;
 mod handbook;
 mod investigation_report_export;
+mod investigation_team_known_answer_host;
 mod investigation_team_qualification_host;
 mod log_diagnostic_report;
 mod log_diagnostics;
@@ -453,6 +454,11 @@ struct AppState {
         Mutex<investigation_team_qualification_host::InvestigationTeamQualificationStore>,
     /// Secret-free history beside the other host qualification evidence.
     investigation_team_qualification_store_path: PathBuf,
+    /// Durable, redacted provider-backed known-answer quality history.
+    investigation_team_known_answer:
+        Mutex<investigation_team_known_answer_host::InvestigationTeamKnownAnswerStore>,
+    /// Secret-free known-answer history path.
+    investigation_team_known_answer_store_path: PathBuf,
     /// One-shot exact Log Explorer navigation targets (#698 exact-nav).
     /// Keyed by corpus id. `take` delivers once; cleared on take, discard, or window destroy.
     log_explorer_nav_targets: Mutex<LogExplorerNavTargetStore>,
@@ -8628,6 +8634,144 @@ fn cancel_live_investigation_team_qualification(state: State<'_, AppState>) -> b
     }
 }
 
+fn current_quality_build_identity() -> String {
+    let identity = cd_core::build_identity::current();
+    identity
+        .git_sha
+        .clone()
+        .or(identity.git_describe.clone())
+        .unwrap_or_else(|| identity.display_line())
+}
+
+fn investigation_team_known_answer_projection_context(
+    state: &AppState,
+) -> Result<
+    investigation_team_known_answer_host::KnownAnswerProjectionContext,
+    String,
+> {
+    let cfg = state.config.lock().expect("config").clone();
+    let members = investigation_team_qualification_host::members_from_config(&cfg)
+        .unwrap_or_default();
+    investigation_team_known_answer_host::current_projection_context(
+        current_quality_build_identity(),
+        members,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_investigation_team_known_answer_qualifications(
+    state: State<'_, AppState>,
+) -> Result<Vec<investigation_team_known_answer_host::InvestigationTeamKnownAnswerDto>, String> {
+    let context = investigation_team_known_answer_projection_context(&state)?;
+    state
+        .investigation_team_known_answer
+        .lock()
+        .expect("investigation_team_known_answer")
+        .history(&context)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn clear_investigation_team_known_answer_qualifications(
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let mut store = state
+        .investigation_team_known_answer
+        .lock()
+        .expect("investigation_team_known_answer");
+    let mut next = store.clone();
+    let changed = next.clear();
+    if changed {
+        next.save(&state.investigation_team_known_answer_store_path)
+            .map_err(|error| format!("save investigation team known-answer history: {error}"))?;
+        *store = next;
+    }
+    Ok(changed)
+}
+
+/// Run the full checked-in known-answer suite for every exact configured V1
+/// Investigation Team role. Renderer input cannot select a different suite,
+/// inject truth, override identities, or publish a report.
+#[tauri::command]
+async fn run_live_investigation_team_known_answer_qualification(
+    state: State<'_, AppState>,
+) -> Result<Vec<investigation_team_known_answer_host::InvestigationTeamKnownAnswerDto>, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let targets = resolve_live_investigation_targets(&state, &cfg)?;
+    let current_members = targets.iter().map(|target| target.member.clone()).collect();
+    let build_identity = current_quality_build_identity();
+    let context = investigation_team_known_answer_host::current_projection_context(
+        build_identity.clone(),
+        current_members,
+    )
+    .map_err(|error| error.to_string())?;
+    let cancel = {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        if cancels.contains_key(
+            investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY,
+        ) {
+            return Err("Investigation Team known-answer qualification is already running".into());
+        }
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cancels.insert(
+            investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY.to_string(),
+            flag.clone(),
+        );
+        flag
+    };
+    let observed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
+        .as_secs() as i64;
+    let worker_cancel = cancel.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        investigation_team_known_answer_host::execute_live_known_answer(
+            targets,
+            observed_at,
+            build_identity,
+            &worker_cancel,
+        )
+    })
+    .await;
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        cancels.remove(investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY);
+    }
+    let reports = joined
+        .map_err(|error| format!("known-answer qualification worker join: {error}"))?
+        .map_err(|error| error.to_string())?;
+
+    let mut store = state
+        .investigation_team_known_answer
+        .lock()
+        .expect("investigation_team_known_answer");
+    let mut next = store.clone();
+    for report in reports {
+        next.publish(report).map_err(|error| error.to_string())?;
+    }
+    next.save(&state.investigation_team_known_answer_store_path)
+        .map_err(|error| format!("save investigation team known-answer history: {error}"))?;
+    let published = next.history(&context).map_err(|error| error.to_string())?;
+    *store = next;
+    Ok(published)
+}
+
+#[tauri::command]
+fn cancel_live_investigation_team_known_answer_qualification(
+    state: State<'_, AppState>,
+) -> bool {
+    let cancels = state.cancels.lock().expect("cancels");
+    if let Some(flag) = cancels.get(
+        investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY,
+    ) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
+}
+
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
 ///
 /// For remote gateways, walks `expand_base_candidates` (TriageTool parity) and
@@ -15350,6 +15494,18 @@ pub fn run() {
             tracing::warn!(%error, "investigation team qualification history could not be loaded");
             investigation_team_qualification_host::InvestigationTeamQualificationStore::default()
         });
+    let investigation_team_known_answer_store_path =
+        investigation_team_known_answer_host::investigation_team_known_answer_store_path(
+            path.parent().expect("config directory"),
+        );
+    let investigation_team_known_answer =
+        investigation_team_known_answer_host::InvestigationTeamKnownAnswerStore::load(
+            &investigation_team_known_answer_store_path,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "investigation team known-answer history could not be loaded");
+            investigation_team_known_answer_host::InvestigationTeamKnownAnswerStore::default()
+        });
 
     let state = AppState {
         branding,
@@ -15401,6 +15557,8 @@ pub fn run() {
         triage_role_qualification_store: Mutex::new(triage_role_qualification_store),
         investigation_team_qualification: Mutex::new(investigation_team_qualification),
         investigation_team_qualification_store_path,
+        investigation_team_known_answer: Mutex::new(investigation_team_known_answer),
+        investigation_team_known_answer_store_path,
         log_explorer_nav_targets: Mutex::new(LogExplorerNavTargetStore::default()),
     };
     tauri::Builder::default()
@@ -15513,6 +15671,10 @@ pub fn run() {
             run_synthetic_investigation_team_qualification,
             run_live_investigation_team_qualification,
             cancel_live_investigation_team_qualification,
+            list_investigation_team_known_answer_qualifications,
+            clear_investigation_team_known_answer_qualifications,
+            run_live_investigation_team_known_answer_qualification,
+            cancel_live_investigation_team_known_answer_qualification,
             get_active_provider,
             get_turn_activity,
             get_developer_turn_activity,
