@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { InvestigationTeamReadinessPanel } from "./InvestigationTeamReadinessPanel";
 import type { MultiModelSettingsDto } from "../../lib/host";
 
-const host = vi.hoisted(() => ({ get: vi.fn(), qualification: vi.fn() }));
+const host = vi.hoisted(() => ({
+  get: vi.fn(),
+  qualification: vi.fn(),
+  runSynthetic: vi.fn(),
+}));
 
 vi.mock("../../lib/host", async () => {
   const actual = await vi.importActual<typeof import("../../lib/host")>(
@@ -14,6 +18,8 @@ vi.mock("../../lib/host", async () => {
     hostGetMultiModelSettings: (...args: unknown[]) => host.get(...args),
     hostGetInvestigationTeamQualification: (...args: unknown[]) =>
       host.qualification(...args),
+    hostRunSyntheticInvestigationTeamQualification: (...args: unknown[]) =>
+      host.runSynthetic(...args),
   };
 });
 
@@ -47,8 +53,10 @@ function settings(over: Partial<MultiModelSettingsDto> = {}): MultiModelSettings
 beforeEach(() => {
   host.get.mockReset();
   host.qualification.mockReset();
+  host.runSynthetic.mockReset();
   host.get.mockResolvedValue(settings());
   host.qualification.mockResolvedValue(null);
+  host.runSynthetic.mockResolvedValue(null);
 });
 
 describe("InvestigationTeamReadinessPanel", () => {
@@ -109,5 +117,47 @@ describe("InvestigationTeamReadinessPanel", () => {
     host.get.mockResolvedValue(null);
     const { container } = render(<InvestigationTeamReadinessPanel />);
     await waitFor(() => expect(container.firstChild).toBeNull());
+  });
+
+  it("runs the explicit provider-free synthetic check and refreshes the report", async () => {
+    host.runSynthetic.mockResolvedValue({
+      status: "qualified",
+      schema_id: "contextdesk.investigation_team_qualification.v1",
+      suite_version: "contextdesk.investigation_team_qualification.suite.v1",
+      observed_at: 1_777_000_000,
+      stale: false,
+      incomplete_attempts: false,
+      fingerprint_digest: "c".repeat(64),
+      scoring_digest: "d".repeat(64),
+      capability: { contract_met: true, metrics: {}, notes: [] },
+      quality: { contract_met: true, metrics: {}, notes: [] },
+      speed: { contract_met: true, metrics: {}, notes: [] },
+      resource: { contract_met: true, metrics: {}, notes: [] },
+      redacted_json: "{\"safe\":true}",
+      redacted_markdown: "safe",
+    });
+    render(<InvestigationTeamReadinessPanel />);
+    await screen.findByTestId("investigation-team-readiness");
+    fireEvent.click(screen.getByTestId("investigation-team-run-synthetic"));
+    await waitFor(() => {
+      expect(
+        screen
+          .getByTestId("investigation-team-qualification-report")
+          .getAttribute("data-status"),
+      ).toBe("qualified");
+    });
+    expect(host.runSynthetic).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/does not qualify a real model/i)).toBeTruthy();
+  });
+
+  it("surfaces a trusted-host synthetic check failure without claiming a report", async () => {
+    host.runSynthetic.mockRejectedValue(new Error("no active provider profile"));
+    render(<InvestigationTeamReadinessPanel />);
+    await screen.findByTestId("investigation-team-readiness");
+    fireEvent.click(screen.getByTestId("investigation-team-run-synthetic"));
+    expect(
+      (await screen.findByTestId("investigation-team-synthetic-error")).textContent,
+    ).toContain("no active provider profile");
+    expect(screen.queryByTestId("investigation-team-qualification-report")).toBeNull();
   });
 });

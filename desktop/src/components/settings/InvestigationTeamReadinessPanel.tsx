@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   hostGetInvestigationTeamQualification,
   hostGetMultiModelSettings,
+  hostRunSyntheticInvestigationTeamQualification,
   type ContributionAssignmentDto,
   type InvestigationTeamQualificationDto,
   type MultiModelSettingsDto,
@@ -175,6 +176,10 @@ export function InvestigationTeamReadinessPanel() {
   const [settings, setSettings] = useState<MultiModelSettingsDto | null>(null);
   const [qualification, setQualification] =
     useState<InvestigationTeamQualificationDto | null>(null);
+  const [syntheticPhase, setSyntheticPhase] = useState<"idle" | "running" | "error">(
+    "idle",
+  );
+  const [syntheticError, setSyntheticError] = useState<string | null>(null);
   const [phase, setPhase] = useState<"loading" | "ready" | "absent" | "error">(
     "loading",
   );
@@ -203,6 +208,24 @@ export function InvestigationTeamReadinessPanel() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const runSynthetic = async () => {
+    setSyntheticPhase("running");
+    setSyntheticError(null);
+    try {
+      const report = await hostRunSyntheticInvestigationTeamQualification();
+      setQualification(report);
+      setSyntheticPhase("idle");
+    } catch (error) {
+      setQualification(null);
+      setSyntheticPhase("error");
+      setSyntheticError(
+        error instanceof Error
+          ? error.message
+          : "The host could not run the synthetic check.",
+      );
+    }
+  };
 
   if (phase === "absent") return null;
   if (phase === "loading") {
@@ -318,6 +341,42 @@ export function InvestigationTeamReadinessPanel() {
           above when you want a bounded multi-model route.
         </p>
       )}
+
+      <div
+        className="it-readiness__synthetic"
+        aria-busy={syntheticPhase === "running"}
+      >
+        <div>
+          <strong>Local contract check</strong>
+          <p className="it-readiness__detail">
+            Runs an opaque, provider-free fixture through the trusted host. It verifies
+            wiring and redaction only; it does not qualify a real model.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="btn btn--ghost btn--sm"
+          data-testid="investigation-team-run-synthetic"
+          onClick={() => void runSynthetic()}
+          disabled={syntheticPhase === "running"}
+        >
+          {syntheticPhase === "running" ? "Running local check…" : "Run local check"}
+        </button>
+        {syntheticPhase === "running" ? (
+          <span className="it-readiness__detail" role="status">
+            No provider call is being made.
+          </span>
+        ) : null}
+        {syntheticError ? (
+          <p
+            className="field__error"
+            role="alert"
+            data-testid="investigation-team-synthetic-error"
+          >
+            {syntheticError}
+          </p>
+        ) : null}
+      </div>
 
       <p className="mm-team__honesty">
         Exact pipeline identity, evidence binding, budgets, stale reports, and

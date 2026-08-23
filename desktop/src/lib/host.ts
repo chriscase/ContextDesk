@@ -1582,6 +1582,20 @@ export async function hostClearInvestigationTeamQualification(): Promise<boolean
   }
 }
 
+/**
+ * Run the explicit local synthetic contract check. The trusted host derives
+ * members from saved settings and uses an opaque fixture; this never contacts
+ * a provider and is not evidence of real model execution.
+ */
+export async function hostRunSyntheticInvestigationTeamQualification(): Promise<InvestigationTeamQualificationDto> {
+  if (!isTauri()) {
+    throw new Error("Synthetic qualification requires the trusted desktop host");
+  }
+  return invoke<InvestigationTeamQualificationDto>(
+    "run_synthetic_investigation_team_qualification",
+  );
+}
+
 export async function hostGetDefaultChatModel(): Promise<string | null> {
   if (!isTauri()) return null;
   return invoke<string>("get_default_chat_model");

@@ -2,8 +2,8 @@
 
 mod capability_qualification_host;
 mod handbook;
-mod investigation_team_qualification_host;
 mod investigation_report_export;
+mod investigation_team_qualification_host;
 mod log_diagnostic_report;
 mod log_diagnostics;
 mod logging_quality_host;
@@ -56,7 +56,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Condvar, Mutex,
 };
-use std::time::{Duration, Instant as StdInstant};
+use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -8402,6 +8402,38 @@ fn clear_investigation_team_qualification(state: State<'_, AppState>) -> bool {
         .clear()
 }
 
+/// Run the explicit local synthetic qualification check. This uses only
+/// host-owned settings and an opaque deterministic fixture; it never resolves
+/// credentials, contacts a provider, or claims real model execution.
+#[tauri::command]
+fn run_synthetic_investigation_team_qualification(
+    state: State<'_, AppState>,
+) -> Result<investigation_team_qualification_host::InvestigationTeamQualificationDto, String> {
+    // A failed rerun must not leave an earlier success looking current.
+    state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification")
+        .clear();
+    let cfg = state.config.lock().expect("config").clone();
+    let members = investigation_team_qualification_host::members_from_config(&cfg)
+        .map_err(|error| error.to_string())?;
+    let observed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
+        .as_secs() as i64;
+    let result = investigation_team_qualification_host::execute_synthetic(members, observed_at)
+        .map_err(|error| error.to_string())?;
+    let mut store = state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification");
+    store.publish(result);
+    store
+        .latest()
+        .ok_or_else(|| "synthetic qualification did not publish a report".into())
+}
+
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
 ///
 /// For remote gateways, walks `expand_base_candidates` (TriageTool parity) and
@@ -15272,6 +15304,7 @@ pub fn run() {
             clear_capability_qualification,
             get_investigation_team_qualification,
             clear_investigation_team_qualification,
+            run_synthetic_investigation_team_qualification,
             get_active_provider,
             get_turn_activity,
             get_developer_turn_activity,
