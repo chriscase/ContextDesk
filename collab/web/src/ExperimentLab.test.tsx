@@ -773,6 +773,38 @@ describe("experiment lab", () => {
     }
   });
 
+  it("exposes a readable bench-artifact import path without making raw JSON primary", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.endsWith("/experiments")) {
+          return { ok: true, json: async () => ({ experiments: [view] }) };
+        }
+        if (url.includes("/presence")) {
+          return {
+            ok: true,
+            json: async () => ({
+              schemaId: "cd-collab.presence.v1",
+              caseId: "c1",
+              ttlSeconds: 30,
+              members: [],
+            }),
+          };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    expect(await screen.findByRole("button", { name: "Import experiment" })).toBeTruthy();
+    expect(screen.getByText("Import bench-compare / recorded artifact").tagName).toBe("SUMMARY");
+    fireEvent.click(screen.getByText("Import bench-compare / recorded artifact"));
+    expect(
+      screen.getByText(/Primary view remains the candidate table, evidence, and accepted decision/i),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Convert and import onto case" })).toBeTruthy();
+  });
+
   it("summarises agreement, difference, unknowns, and the decision before advanced tools", async () => {
     vi.stubGlobal(
       "fetch",
