@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { InvestigationTeamReadinessPanel } from "./InvestigationTeamReadinessPanel";
 import type { MultiModelSettingsDto } from "../../lib/host";
 
-const host = vi.hoisted(() => ({ get: vi.fn() }));
+const host = vi.hoisted(() => ({ get: vi.fn(), qualification: vi.fn() }));
 
 vi.mock("../../lib/host", async () => {
   const actual = await vi.importActual<typeof import("../../lib/host")>(
@@ -12,6 +12,8 @@ vi.mock("../../lib/host", async () => {
   return {
     ...actual,
     hostGetMultiModelSettings: (...args: unknown[]) => host.get(...args),
+    hostGetInvestigationTeamQualification: (...args: unknown[]) =>
+      host.qualification(...args),
   };
 });
 
@@ -44,7 +46,9 @@ function settings(over: Partial<MultiModelSettingsDto> = {}): MultiModelSettings
 
 beforeEach(() => {
   host.get.mockReset();
+  host.qualification.mockReset();
   host.get.mockResolvedValue(settings());
+  host.qualification.mockResolvedValue(null);
 });
 
 describe("InvestigationTeamReadinessPanel", () => {
@@ -64,6 +68,31 @@ describe("InvestigationTeamReadinessPanel", () => {
     const panel = await screen.findByTestId("investigation-team-readiness");
     expect(panel.textContent).toMatch(/will degrade or wait/i);
     expect(panel.textContent).toMatch(/no reviewer profile is assigned/i);
+  });
+
+  it("shows a host-published fingerprint without exposing evaluator truth", async () => {
+    host.qualification.mockResolvedValue({
+      status: "partial",
+      schema_id: "contextdesk.investigation_team_qualification.v1",
+      suite_version: "contextdesk.investigation_team_qualification.suite.v1",
+      observed_at: 1_777_000_000,
+      stale: false,
+      incomplete_attempts: true,
+      fingerprint_digest: "a".repeat(64),
+      scoring_digest: "b".repeat(64),
+      capability: { contract_met: true, metrics: {}, notes: [] },
+      quality: { contract_met: false, metrics: {}, notes: ["partial"] },
+      speed: { contract_met: true, metrics: {}, notes: [] },
+      resource: { contract_met: true, metrics: {}, notes: [] },
+      redacted_json: "{\"safe\":true}",
+      redacted_markdown: "safe",
+    });
+    render(<InvestigationTeamReadinessPanel />);
+    const report = await screen.findByTestId("investigation-team-qualification-report");
+    expect(report.getAttribute("data-status")).toBe("partial");
+    expect(report.textContent).toMatch(/incomplete attempts remain/i);
+    expect(report.textContent).toMatch(/pipeline fingerprint/i);
+    expect(report.textContent).toMatch(/evaluator truth and provider credentials are not exposed/i);
   });
 
   it("does not call the provider and can retry a host read failure", async () => {

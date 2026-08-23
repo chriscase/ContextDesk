@@ -2,6 +2,7 @@
 
 mod capability_qualification_host;
 mod handbook;
+mod investigation_team_qualification_host;
 mod investigation_report_export;
 mod log_diagnostic_report;
 mod log_diagnostics;
@@ -447,6 +448,10 @@ struct AppState {
     /// an incompatible packet/validator workflow.
     triage_role_qualification_store:
         Mutex<cd_core::triage_role_qualification::TriageRoleQualificationStoreV1>,
+    /// Latest host-published Investigation Team qualification. Process-local
+    /// until durable snapshot/report identity is finished.
+    investigation_team_qualification:
+        Mutex<investigation_team_qualification_host::InvestigationTeamQualificationStore>,
     /// One-shot exact Log Explorer navigation targets (#698 exact-nav).
     /// Keyed by corpus id. `take` delivers once; cleared on take, discard, or window destroy.
     log_explorer_nav_targets: Mutex<LogExplorerNavTargetStore>,
@@ -8374,6 +8379,29 @@ fn clear_capability_qualification(
     Ok(changed)
 }
 
+/// Read the latest qualification published by trusted host execution code.
+/// The renderer has no setter and this read never contacts a provider.
+#[tauri::command]
+fn get_investigation_team_qualification(
+    state: State<'_, AppState>,
+) -> Option<investigation_team_qualification_host::InvestigationTeamQualificationDto> {
+    state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification")
+        .latest()
+}
+
+/// Clear the process-local readout. This first bridge persists nothing.
+#[tauri::command]
+fn clear_investigation_team_qualification(state: State<'_, AppState>) -> bool {
+    state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification")
+        .clear()
+}
+
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
 ///
 /// For remote gateways, walks `expand_base_candidates` (TriageTool parity) and
@@ -15133,6 +15161,9 @@ pub fn run() {
         qualification_store: Mutex::new(qualification_store),
         qualification_store_path,
         triage_role_qualification_store: Mutex::new(triage_role_qualification_store),
+        investigation_team_qualification: Mutex::new(
+            investigation_team_qualification_host::InvestigationTeamQualificationStore::default(),
+        ),
         log_explorer_nav_targets: Mutex::new(LogExplorerNavTargetStore::default()),
     };
     tauri::Builder::default()
@@ -15239,6 +15270,8 @@ pub fn run() {
             start_capability_qualification,
             cancel_capability_qualification,
             clear_capability_qualification,
+            get_investigation_team_qualification,
+            clear_investigation_team_qualification,
             get_active_provider,
             get_turn_activity,
             get_developer_turn_activity,

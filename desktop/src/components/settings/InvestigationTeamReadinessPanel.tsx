@@ -9,8 +9,10 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import {
+  hostGetInvestigationTeamQualification,
   hostGetMultiModelSettings,
   type ContributionAssignmentDto,
+  type InvestigationTeamQualificationDto,
   type MultiModelSettingsDto,
   type ReviewerCandidateDto,
 } from "../../lib/host";
@@ -171,6 +173,8 @@ function summaryFor(settings: MultiModelSettingsDto, rows: RoleRow[]): {
 
 export function InvestigationTeamReadinessPanel() {
   const [settings, setSettings] = useState<MultiModelSettingsDto | null>(null);
+  const [qualification, setQualification] =
+    useState<InvestigationTeamQualificationDto | null>(null);
   const [phase, setPhase] = useState<"loading" | "ready" | "absent" | "error">(
     "loading",
   );
@@ -178,12 +182,17 @@ export function InvestigationTeamReadinessPanel() {
   const load = useCallback(async () => {
     setPhase("loading");
     try {
-      const next = await hostGetMultiModelSettings();
+      const [next, report] = await Promise.all([
+        hostGetMultiModelSettings(),
+        hostGetInvestigationTeamQualification(),
+      ]);
       if (next) {
         setSettings(next);
+        setQualification(report);
         setPhase("ready");
       } else {
         setSettings(null);
+        setQualification(null);
         setPhase("absent");
       }
     } catch {
@@ -242,6 +251,48 @@ export function InvestigationTeamReadinessPanel() {
       <p className="mm-team__gate" data-tone={summary.tone}>
         <strong>{summary.title}.</strong> {summary.detail}
       </p>
+
+      {qualification ? (
+        <div
+          className="it-readiness__report"
+          data-testid="investigation-team-qualification-report"
+          data-status={qualification.status}
+        >
+          <div>
+            <strong>Host qualification report: {qualification.status}</strong>
+            <p className="it-readiness__detail">
+              {qualification.stale
+                ? "Stale evidence — do not use it for a new run."
+                : qualification.incomplete_attempts
+                  ? "Incomplete attempts remain; this is not a clean qualification."
+                  : "The host validated this report and bound it to the fingerprint below."}
+            </p>
+          </div>
+          <dl className="it-readiness__report-facts">
+            <div>
+              <dt>Pipeline fingerprint</dt>
+              <dd><code>{qualification.fingerprint_digest}</code></dd>
+            </div>
+            <div>
+              <dt>Axes</dt>
+              <dd>
+                {(["capability", "quality", "speed", "resource"] as const)
+                  .map((axis) => `${axis}=${qualification[axis].contract_met ? "pass" : "fail"}`)
+                  .join(" · ")}
+              </dd>
+            </div>
+          </dl>
+          <p className="it-readiness__detail">
+            Redacted JSON and Markdown are available from the host-owned result;
+            evaluator truth and provider credentials are not exposed here.
+          </p>
+        </div>
+      ) : (
+        <p className="it-readiness__detail" data-testid="investigation-team-no-report">
+          No host-produced team qualification report is attached yet. Configuration
+          and capability checks below must not be mistaken for a full team run.
+        </p>
+      )}
 
       {rows.length > 0 ? (
         <div className="it-readiness__table" role="list" aria-label="Investigation Team roles">

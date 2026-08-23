@@ -1533,6 +1533,55 @@ export async function hostClearCapabilityQualification(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Investigation Team qualification report bridge — read-only renderer side
+// ---------------------------------------------------------------------------
+
+export type InvestigationQualificationAxisDto = {
+  contract_met: boolean;
+  metrics: Record<string, number>;
+  notes: string[];
+};
+
+export type InvestigationTeamQualificationDto = {
+  status: "qualified" | "failed" | "partial" | "stale" | string;
+  schema_id: string;
+  suite_version: string;
+  observed_at: number;
+  stale: boolean;
+  incomplete_attempts: boolean;
+  fingerprint_digest: string;
+  scoring_digest: string;
+  capability: InvestigationQualificationAxisDto;
+  quality: InvestigationQualificationAxisDto;
+  speed: InvestigationQualificationAxisDto;
+  resource: InvestigationQualificationAxisDto;
+  redacted_json: string;
+  redacted_markdown: string;
+};
+
+/** Host-published readout only; no provider call and no renderer setter. */
+export async function hostGetInvestigationTeamQualification(): Promise<InvestigationTeamQualificationDto | null> {
+  if (!isTauri()) return null;
+  try {
+    return await invoke<InvestigationTeamQualificationDto | null>(
+      "get_investigation_team_qualification",
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Clear only the process-local readout; durable evidence is untouched. */
+export async function hostClearInvestigationTeamQualification(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    return await invoke<boolean>("clear_investigation_team_qualification");
+  } catch {
+    return false;
+  }
+}
+
 export async function hostGetDefaultChatModel(): Promise<string | null> {
   if (!isTauri()) return null;
   return invoke<string>("get_default_chat_model");
