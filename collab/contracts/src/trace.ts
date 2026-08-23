@@ -1295,6 +1295,12 @@ export function parseLabExportV2(raw: unknown): ExperimentLabExportV2 {
     ) {
       throw new ContractViolation("$.review.gold", "gold must reference the exported accepted decision");
     }
+    if (review.gold.acceptedDecisionRevision !== review.decision.revision) {
+      throw new ContractViolation(
+        "$.review.gold.acceptedDecisionRevision",
+        "must match the exported accepted decision revision",
+      );
+    }
     if (
       comparison.gold.status !== "present" ||
       comparison.gold.version !== review.gold.version ||
