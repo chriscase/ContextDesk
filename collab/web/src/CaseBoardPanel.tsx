@@ -33,6 +33,7 @@ interface BoardFinding {
   contributionRefs: string[];
   agreement: string;
   confidence: string;
+  basis?: string;
 }
 
 const BUCKETS: BoardFinding["bucket"][] = [
@@ -42,6 +43,38 @@ const BUCKETS: BoardFinding["bucket"][] = [
   "disputed",
   "newly_concluded",
 ];
+
+const BUCKET_DETAILS: Record<
+  BoardFinding["bucket"],
+  { title: string; description: string; empty: string }
+> = {
+  known: {
+    title: "Known",
+    description: "Directly supported by verified evidence or a supported hypothesis.",
+    empty: "Nothing recorded yet.",
+  },
+  unknown: {
+    title: "Unknown",
+    description: "Unverified evidence and hypotheses still awaiting support.",
+    empty:
+      "No open unknowns recorded. Only recorded unknowns appear here; an empty list is not proof there are none.",
+  },
+  agreed: {
+    title: "Agreed",
+    description: "Independent hypotheses cite the same evidence. Agreement is not correctness.",
+    empty: "Nothing recorded yet.",
+  },
+  disputed: {
+    title: "Disputed",
+    description: "Contradicted hypotheses that need human adjudication.",
+    empty: "No disputes recorded.",
+  },
+  newly_concluded: {
+    title: "Newly concluded",
+    description: "Human-accepted decisions from this case's experiment reviews.",
+    empty: "No accepted decision recorded yet.",
+  },
+};
 
 function shortHash(value: string | null): string {
   return value ? `${value.slice(0, 12)}…` : "not available";
@@ -178,6 +211,8 @@ export function CaseBoardPanel(props: {
       return;
     }
 
+    const freezeAfterUpload = props.canLead && data.get("freezeAfterUpload") === "on";
+
     setError(null);
     setUploading(true);
     try {
@@ -199,6 +234,37 @@ export function CaseBoardPanel(props: {
         return;
       }
       form.reset();
+      if (freezeAfterUpload) {
+        const uploaded = (await response.json().catch(() => null)) as
+          | { artifact?: { id?: string } }
+          | null;
+        const artifactId = uploaded?.artifact?.id;
+        if (!artifactId) {
+          setError("Upload succeeded but the snapshot was not frozen: the new evidence id was unavailable. Freeze it from the evidence board.");
+          await load(null);
+          return;
+        }
+        const evidenceIds = [...new Set([...selectedEvidence, artifactId])];
+        const snapshotResponse = await fetch(`/api/cases/${props.caseId}/snapshots`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ evidenceIds }),
+        });
+        if (!snapshotResponse.ok) {
+          setError(await errorText(snapshotResponse, "Upload succeeded but the snapshot could not be frozen."));
+          await load(null);
+          return;
+        }
+        const snapshot = (await snapshotResponse.json()) as SnapshotView;
+        setSelectedEvidence([]);
+        await load(snapshot.id);
+        window.dispatchEvent(
+          new CustomEvent("contextdesk:snapshot-frozen", {
+            detail: { caseId: props.caseId, snapshotId: snapshot.id },
+          }),
+        );
+        return;
+      }
       await load(null);
     } catch (cause) {
       setError(
@@ -308,6 +374,19 @@ export function CaseBoardPanel(props: {
                       <option value="share_safe">share_safe</option>
                     </select>
                   </label>
+                  {props.canLead ? (
+                    <label className="case-memory__upload-field case-memory__freeze-toggle">
+                      <span>
+                        <input name="freezeAfterUpload" type="checkbox" /> Freeze a snapshot with
+                        this upload
+                      </span>
+                      <small>
+                        One step: the sanitized file is uploaded and a snapshot is frozen with it
+                        (plus any evidence already selected above). Upload sanitized content only;
+                        the server's media and privacy policy still applies.
+                      </small>
+                    </label>
+                  ) : null}
                   <button className="login__submit" type="submit" disabled={uploading}>
                     {uploading ? "Uploading…" : "Upload evidence"}
                   </button>
@@ -354,12 +433,22 @@ export function CaseBoardPanel(props: {
             <div className="case-memory__board-grid">
               {BUCKETS.map((bucket) => (
                 <div key={bucket} className="case-memory__bucket">
-                  <h5>{bucket.replace("_", " ")}</h5>
-                  {byBucket(bucket).length === 0 ? <p className="case-memory__empty">Nothing recorded.</p> : null}
+                  <h5>{BUCKET_DETAILS[bucket].title}</h5>
+                  <p className="case-memory__bucket-hint">{BUCKET_DETAILS[bucket].description}</p>
+                  {byBucket(bucket).length === 0 ? (
+                    <p className="case-memory__empty">{BUCKET_DETAILS[bucket].empty}</p>
+                  ) : null}
                   {byBucket(bucket).map((finding) => (
                     <article key={finding.id} className="case-memory__finding">
+                      {finding.basis === "accepted_decision" ? (
+                        <span className="case-memory__finding-tag">Accepted decision</span>
+                      ) : null}
                       <p>{finding.statement}</p>
-                      <small>{finding.agreement} agreement · {finding.confidence} confidence · {finding.evidenceRefs.length} evidence refs</small>
+                      <small>
+                        agreement {finding.agreement} · confidence {finding.confidence} ·{" "}
+                        {finding.evidenceRefs.length} evidence{" "}
+                        {finding.evidenceRefs.length === 1 ? "ref" : "refs"}
+                      </small>
                     </article>
                   ))}
                 </div>

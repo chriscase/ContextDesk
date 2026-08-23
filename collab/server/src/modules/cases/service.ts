@@ -291,7 +291,7 @@ export class CaseService {
     actor: Actor,
     isAdmin: boolean,
     snapshotId?: string,
-    acceptedDecision?: AcceptedDecisionBoardInput | null,
+    acceptedDecisions?: AcceptedDecisionBoardInput[],
   ) {
     if (!(await this.getCase(caseId, actor, isAdmin))) return null;
     const snapshots = await this.store.listSnapshotsByCase(caseId);
@@ -311,7 +311,7 @@ export class CaseService {
       generatedAt: new Date().toISOString(),
       artifacts,
       contributions,
-      ...(acceptedDecision === undefined ? {} : { acceptedDecision }),
+      ...(acceptedDecisions === undefined ? {} : { acceptedDecisions }),
     });
   }
 
