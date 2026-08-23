@@ -40,7 +40,7 @@ const KIND_META: Record<KnownKind, KindMeta> = {
     meaning:
       "A product or AI assistant used outside ContextDesk — a chat assistant, a vendor analyzer. Registering one lets people credit it when pasting its output into a case; ContextDesk never connects to the tool itself.",
     registerHint:
-      "This adds the tool to the source picker in a case's manual intake form (“Output from another AI”). No credentials are stored and no automatic access is created — bringing in output stays copy-and-paste.",
+      "This adds the tool to the source picker in a case's manual intake form (“Pasted external output”). No credentials are stored and no automatic access is created — bringing in output stays copy-and-paste.",
     namePlaceholder: "e.g. Claude chat assistant",
   },
   "internal-system": {

@@ -42,19 +42,20 @@ const sampleContributions: ContributionView[] = [
   },
 ];
 
-const sampleRuns: RunRow[] = [
-  {
-    id: "r1",
-    outputText: "The retry loop looks unbounded",
-    corroborationState: "unverified",
-    evidenceVisibility: "unknown",
-    snapshotBinding: null,
-    importerUsername: "alice",
-    operatorUsername: "alice",
-    promptText: null,
-    promptCompleteness: "unknown",
-  },
-];
+const sampleRun: RunRow = {
+  id: "r1",
+  sourceId: "s1",
+  outputText: "The retry loop looks unbounded",
+  corroborationState: "unverified",
+  evidenceVisibility: "unknown",
+  snapshotBinding: null,
+  importerUsername: "alice",
+  operatorUsername: "alice",
+  promptText: null,
+  promptCompleteness: "unknown",
+};
+
+const sampleRuns: RunRow[] = [sampleRun];
 
 function makeProps(overrides?: Partial<Parameters<typeof TriageWorkspace>[0]>) {
   return {
@@ -76,7 +77,7 @@ describe("triage workspace capture paths", () => {
   it("renders both first-class capture paths with every existing payload field", () => {
     render(<TriageWorkspace {...makeProps()} />);
     expect(screen.getByText("Your own findings")).toBeTruthy();
-    expect(screen.getByText("Output from another AI")).toBeTruthy();
+    expect(screen.getByText("Pasted external output")).toBeTruthy();
 
     const noteKind = screen.getByRole("combobox", { name: "Timeline entry kind" });
     expect((noteKind as HTMLSelectElement).value).toBe("note");
@@ -248,6 +249,59 @@ describe("triage workspace guidance and provenance", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("never rewrite your material or declare a winner");
     expect(text).toContain("unverified until a person corroborates");
+  });
+
+  it("keeps capture guidance source-neutral with no AI-universal or signature claims", () => {
+    render(<TriageWorkspace {...makeProps()} />);
+    const text = document.body.textContent ?? "";
+    expect(text).not.toContain("Output from another AI");
+    expect(text).not.toContain("signed evidence package");
+    expect(text).toContain(
+      "another AI, a diagnostic tool, an external service, a report someone curated, or material gathered by hand",
+    );
+    expect(text).toContain("content-addressed reference — not a signature");
+  });
+});
+
+describe("imported-run source attribution", () => {
+  function importedCard(): HTMLElement {
+    return document.querySelector(".imported-run") as HTMLElement;
+  }
+
+  it("shows the exact recorded source id with matched catalog name and kind", () => {
+    render(<TriageWorkspace {...makeProps()} />);
+    const card = importedCard();
+    expect(card.textContent).toContain("source s1");
+    expect(card.textContent).toContain("Fixture chat assistant");
+    expect(card.textContent).toContain("kind external-tool");
+  });
+
+  it("shows a source whose recorded kind is unknown as unknown, not a guess", () => {
+    render(
+      <TriageWorkspace
+        {...makeProps({
+          sources: [{ id: "s9", name: "Unattributed paste", kind: "unknown" }],
+          runs: [{ ...sampleRun, sourceId: "s9" }],
+        })}
+      />,
+    );
+    const card = importedCard();
+    expect(card.textContent).toContain("source s9");
+    expect(card.textContent).toContain("Unattributed paste");
+    expect(card.textContent).toContain("kind unknown");
+  });
+
+  it("renders an unmatched source id verbatim with catalog-metadata-unavailable wording", () => {
+    render(
+      <TriageWorkspace
+        {...makeProps({ runs: [{ ...sampleRun, sourceId: "src-gone-042" }] })}
+      />,
+    );
+    const card = importedCard();
+    expect(card.textContent).toContain("source src-gone-042");
+    expect(card.textContent).toContain("catalog metadata unavailable");
+    expect(card.textContent).not.toContain("Fixture chat assistant");
+    expect(card.textContent).not.toContain("kind external-tool");
   });
 });
 
