@@ -1,47 +1,453 @@
-.workbench {
-  display: grid;
-  grid-template-columns: 16rem 1fr;
-  gap: 1.25rem;
-  margin-top: 1.5rem;
-}
+/* ————— War Room overview and investigation list ————— */
 
-.case-list,
-.case-view {
-  border: 1px solid var(--border);
-  padding: 0.85rem;
-  /* Grid items default to min-width auto; without 0 wide lab content (the
-     comparison matrix) widens the page instead of scrolling in its wrapper. */
+.cases {
   min-width: 0;
 }
 
-.case-list__title,
+.overview__head {
+  margin-bottom: 1rem;
+}
+
+.overview__counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0 0 1.25rem;
+}
+
+.overview__count {
+  min-width: 6.5rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--surface);
+}
+
+.overview__count dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.overview__count dd {
+  margin: 0.15rem 0 0;
+  font-size: 1.35rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.case-list {
+  min-width: 0;
+}
+
+.case-list__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.case-list__search {
+  flex: 1 1 16rem;
+}
+
+.case-list__filter {
+  flex: 0 1 12rem;
+}
+
+.case-list__search,
+.case-list__filter {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.case-list__control-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.case-list__filter select {
+  width: 100%;
+}
+
+.case-list__empty {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.case-list__items {
+  list-style: none;
+  display: grid;
+  gap: 0.6rem;
+  margin: 0 0 1.25rem;
+  padding: 0;
+}
+
+.case-card {
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: var(--surface);
+}
+
+.case-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.75rem;
+}
+
+.case-card__open {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.case-card__open:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.case-card__open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.case-card__meta {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.status-pill {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.status-pill--open {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--accent);
+}
+
+.status-pill--monitoring {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+  color: var(--warning);
+}
+
+.status-pill--resolved {
+  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
+  color: var(--success);
+}
+
+.severity-note {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.severity-note--high,
+.severity-note--critical {
+  color: var(--danger);
+}
+
 .case-view__title {
   margin: 0 0 0.6rem;
   font-size: 1rem;
 }
 
-.case-list__items {
-  list-style: none;
-  margin: 0 0 0.75rem;
-  padding: 0;
+.case-form {
+  display: grid;
+  gap: 0.45rem;
+  max-width: 34rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px dashed var(--border);
+  border-radius: 0.65rem;
 }
 
-.case-list__items button {
-  display: block;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  color: var(--fg);
-  border: 0;
-  padding: 0.35rem 0;
-  font: inherit;
-  cursor: pointer;
+.case-form__label {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
 }
 
-.case-form,
+.case-form__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.case-form__row input {
+  flex: 1 1 14rem;
+}
+
 .composer {
   display: grid;
   gap: 0.45rem;
+}
+
+/* ————— Focused investigation view ————— */
+
+.case-view {
+  min-width: 0;
+}
+
+.crumbs ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  list-style: none;
+  font-size: 0.82rem;
+}
+
+.crumbs li + li::before {
+  content: "/";
+  margin: 0 0.35rem;
+  color: var(--muted);
+}
+
+.crumbs__link {
+  border: 0;
+  padding: 0.1rem 0.15rem;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.crumbs__link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.crumbs__link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.crumbs__link[aria-current],
+.crumbs__here {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.focus-head {
+  margin-bottom: 0.9rem;
+}
+
+.focus-head .case-view__title {
+  margin: 0 0 0.35rem;
+  font-size: 1.45rem;
+}
+
+.focus-head__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.75rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.stage-nav {
+  position: sticky;
+  top: 3.1rem;
+  z-index: 10;
+  margin: 0 0 1.1rem;
+  background: var(--bg);
+}
+
+.stage-nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+  list-style: none;
+}
+
+.stage-nav__link {
+  display: grid;
+  gap: 0.05rem;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid transparent;
+  border-radius: 0.55rem;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stage-nav__link:hover {
+  color: var(--fg);
+}
+
+.stage-nav__link[aria-current] {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.stage-nav__link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.stage-nav__name {
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.stage-nav__hint {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+/* Parked stages stay mounted — form state, stable anchors, and recorded data
+   survive stage switches — but their contents are skipped for rendering,
+   hit-testing, tab order, find-in-page, and the accessibility tree. */
+.stage-panel[hidden] {
+  display: block !important;
+  content-visibility: hidden;
+}
+
+@supports not (content-visibility: hidden) {
+  .stage-panel[hidden] {
+    display: none !important;
+  }
+}
+
+.stage-panel:focus {
+  outline: none;
+}
+
+.stage-panel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.stage-panel__intro {
+  margin-bottom: 0.9rem;
+}
+
+.stage-panel__title {
+  margin: 0 0 0.3rem;
+  font-size: 1.15rem;
+}
+
+.stage-panel__purpose {
+  margin: 0;
+  max-width: 46rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.stage-panel__note {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.situation__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.6rem;
+  margin: 0 0 1.1rem;
+}
+
+.situation__facts > div {
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--surface);
+}
+
+.situation__facts dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.situation__facts dd {
+  margin: 0.2rem 0 0;
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+}
+
+.situation__activity,
+.situation__next {
+  margin-bottom: 1.1rem;
+}
+
+.situation__activity h4,
+.situation__next h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
+}
+
+.situation__activity ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+
+.situation__links {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.situation__link {
+  display: grid;
+  gap: 0.15rem;
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.situation__link:hover {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+}
+
+.situation__link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.situation__link span {
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .timeline {
