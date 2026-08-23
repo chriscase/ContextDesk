@@ -642,7 +642,9 @@ export function InvestigationTeamReadinessPanel() {
           answer quality, latency, and request/response bytes for the recorded
           build, profile, model, endpoint fingerprint, suite, and prompt set.
           Tokens and cost remain “unknown” unless the transport can report them;
-          no report is a universal model recommendation.
+          no report is a universal model recommendation. Scenarios that need
+          unavailable host attempt, tool, or role telemetry are shown as blocked
+          rather than counted as model failures.
         </p>
 
         {knownAnswerHistory.length > 0 ? (

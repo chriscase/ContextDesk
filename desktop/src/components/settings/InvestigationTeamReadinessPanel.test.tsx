@@ -451,6 +451,7 @@ describe("InvestigationTeamReadinessPanel", () => {
     });
     expect(host.runKnownAnswer).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/tokens and cost remain “unknown”/i)).toBeTruthy();
+    expect(screen.getByText(/shown as blocked rather than counted as model failures/i)).toBeTruthy();
   });
 
   it("offers cooperative cancellation while the known-answer suite is running", async () => {

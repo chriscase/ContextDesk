@@ -165,10 +165,12 @@ rows, deterministic failed dimensions, redacted JSON, and redacted Markdown are
 inspectable rather than collapsed into a green badge.
 
 The four diagnostic-focused OPEN-v1 scenarios still require honest host-owned
-attempt/tool/role telemetry. The current serial answer runner supplies no
-invented diagnostic envelope; those dimensions therefore fail closed when the
-executed path does not produce the required telemetry. A clean 14/14 result is
-not claimed merely because model prose was returned.
+attempt/tool/role telemetry. The current serial answer runner identifies that
+requirement from host-only truth before dispatch and records those four
+scenarios as `blocked` with `host_diagnostic_pipeline_unavailable`. It does not
+send them to the provider, invent a diagnostic envelope, or count the missing
+host capability as a model failure. A clean 14/14 result is not claimed merely
+because answer-only model prose was returned.
 
 ## Security and mutation coverage
 
@@ -189,10 +191,10 @@ The focused suite proves:
 
 This path does not claim semantic entailment: lexical overlap is a bounded
 structural signal, not proof that prose follows from a citation. It also does
-not yet capture provider token/cost usage, execute the four diagnostic scenarios
-through a full attempt/tool/role pipeline, derive measured recommendations, or
-prove a packaged configured-provider acceptance run. Those remain follow-up
-work for issue #726.
+not yet capture provider token/cost usage, execute the four blocked diagnostic
+scenarios through a full attempt/tool/role pipeline, derive measured
+recommendations, or prove a packaged configured-provider acceptance run. Those
+remain follow-up work for issue #726.
 
 ## Verification
 

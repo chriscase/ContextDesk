@@ -153,6 +153,13 @@ impl PreparedLiveKnownAnswerCase {
     pub fn host_task_id(&self) -> &str {
         &self.task_id
     }
+
+    /// Whether this scenario can only be scored with host-owned attempt, tool,
+    /// or role telemetry. A direct answer-only provider runner must block these
+    /// scenarios rather than inventing an envelope or blaming the model.
+    pub fn requires_host_diagnostic(&self) -> bool {
+        self.truth.diagnostic.is_some()
+    }
 }
 
 /// Score joined to both opaque provider and host-only case identities.

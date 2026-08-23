@@ -299,6 +299,17 @@ fn execute_target(
             ));
             continue;
         }
+        if case.requires_host_diagnostic() {
+            observations.push(failed_observation(
+                scenario_id,
+                LaneStatus::Blocked,
+                "host_diagnostic_pipeline_unavailable",
+                0,
+                0,
+                0,
+            ));
+            continue;
+        }
         let prompt = serialize_live_known_answer_prompt(case)?;
         let request = live_known_answer_request(&target.member.model_id, &prompt);
         let input_bytes = request
@@ -510,7 +521,10 @@ mod tests {
     use cd_workflow::capability_qualification::LiveBackendKind;
     use tempfile::tempdir;
 
-    struct FailedTransport;
+    #[derive(Default)]
+    struct FailedTransport {
+        calls: usize,
+    }
 
     impl QualificationTransport for FailedTransport {
         fn chat_complete(
@@ -518,6 +532,7 @@ mod tests {
             _req: &SyntheticChatRequest,
             _cancel: &AtomicBool,
         ) -> Result<SyntheticChatResponse, TransportError> {
+            self.calls += 1;
             Err(TransportError {
                 reason: "secret-bearing transport detail must not persist".into(),
             })
@@ -567,7 +582,7 @@ mod tests {
         let suite = load_embedded_open_v1_suite().expect("suite");
         let prepared = prepare_live_known_answer_suite(&suite).expect("prepared");
         let prompt_hash = live_known_answer_prompt_set_hash(&prepared).expect("hash");
-        let mut transport = FailedTransport;
+        let mut transport = FailedTransport::default();
         let report = execute_target(
             &target(),
             &prepared,
@@ -580,8 +595,18 @@ mod tests {
             &mut transport,
         )
         .expect("report");
-        assert_eq!(report.status, LiveKnownAnswerRunStatus::Failed);
-        assert_eq!(report.metrics.failed_scenarios, 14);
+        assert_eq!(transport.calls, 10);
+        assert_eq!(report.status, LiveKnownAnswerRunStatus::Partial);
+        assert_eq!(report.metrics.failed_scenarios, 10);
+        assert_eq!(report.metrics.blocked_scenarios, 4);
+        assert!(report.telemetry[8..12].iter().all(|row| {
+            row.status == LaneStatus::Blocked
+                && row.failure_code.as_deref()
+                    == Some("host_diagnostic_pipeline_unavailable")
+                && row.latency_ms == 0
+                && row.input_bytes == 0
+                && row.output_bytes == 0
+        }));
         let json = render_live_known_answer_json(&report).expect("json");
         assert!(!json.contains("secret-bearing"));
         assert!(!json.contains("x-secret"));
@@ -593,7 +618,7 @@ mod tests {
         let suite = load_embedded_open_v1_suite().expect("suite");
         let prepared = prepare_live_known_answer_suite(&suite).expect("prepared");
         let prompt_hash = live_known_answer_prompt_set_hash(&prepared).expect("hash");
-        let mut transport = FailedTransport;
+        let mut transport = FailedTransport::default();
         let report = execute_target(
             &target(),
             &prepared,
@@ -619,7 +644,7 @@ mod tests {
             .expect("current history")
             .remove(0);
         assert!(!current_dto.stale);
-        assert_eq!(current_dto.status, KnownAnswerDisplayStatus::Failed);
+        assert_eq!(current_dto.status, KnownAnswerDisplayStatus::Partial);
         assert!(current_dto.stale_reasons.is_empty());
 
         let current = current_projection_context("build-b".into(), vec![target().member])

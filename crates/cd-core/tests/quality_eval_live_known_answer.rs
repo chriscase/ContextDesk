@@ -98,6 +98,20 @@ fn prepares_all_fourteen_cases_in_manifest_order_with_opaque_ids() {
         assert_eq!(case.host_task_id(), "t1");
         assert!(!case.prompt().evidence.is_empty());
     }
+    assert_eq!(
+        prepared
+            .iter()
+            .filter(|case| case.requires_host_diagnostic())
+            .count(),
+        4
+    );
+    assert!(prepared[8..12]
+        .iter()
+        .all(PreparedLiveKnownAnswerCase::requires_host_diagnostic));
+    assert!(prepared[..8]
+        .iter()
+        .chain(&prepared[12..])
+        .all(|case| !case.requires_host_diagnostic()));
 }
 
 #[test]
