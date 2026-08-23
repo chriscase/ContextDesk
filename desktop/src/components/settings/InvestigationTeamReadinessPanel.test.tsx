@@ -1,0 +1,84 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { InvestigationTeamReadinessPanel } from "./InvestigationTeamReadinessPanel";
+import type { MultiModelSettingsDto } from "../../lib/host";
+
+const host = vi.hoisted(() => ({ get: vi.fn() }));
+
+vi.mock("../../lib/host", async () => {
+  const actual = await vi.importActual<typeof import("../../lib/host")>(
+    "../../lib/host",
+  );
+  return {
+    ...actual,
+    hostGetMultiModelSettings: (...args: unknown[]) => host.get(...args),
+  };
+});
+
+function settings(over: Partial<MultiModelSettingsDto> = {}): MultiModelSettingsDto {
+  return {
+    mode: "review",
+    reviewer_profile_id: "reviewer-1",
+    reviewer_model: null,
+    reviewer_allow_remote: false,
+    reviewer_require_qualified: true,
+    reviewer_qualification: "qualified",
+    active_profile_id: "investigator-1",
+    candidate_profiles: [
+      { id: "investigator-1", label: "Investigator", chat_model: "model-a", local_only: true },
+      { id: "reviewer-1", label: "Reviewer", chat_model: "model-b", local_only: true },
+    ],
+    contribution_assignments: [],
+    contribution_policy: {
+      max_contributors: 4,
+      max_parallel: 3,
+      max_rounds: 2,
+      max_context_chars: 120_000,
+      max_total_provider_rounds: 12,
+      max_semantic_corrections_per_stage: 1,
+      max_context_chars_total: null,
+    },
+    ...over,
+  };
+}
+
+beforeEach(() => {
+  host.get.mockReset();
+  host.get.mockResolvedValue(settings());
+});
+
+describe("InvestigationTeamReadinessPanel", () => {
+  it("separates configured investigator from measured reviewer readiness", async () => {
+    render(<InvestigationTeamReadinessPanel />);
+    const panel = await screen.findByTestId("investigation-team-readiness");
+    expect(panel.textContent).toMatch(/configured; team qualification evidence is not attached/i);
+    expect(panel.textContent).toMatch(/measured qualified/i);
+    expect(panel.textContent).toMatch(/never claims that a configured role actually ran/i);
+  });
+
+  it("shows honest degradation when the reviewer is unconfigured", async () => {
+    host.get.mockResolvedValue(
+      settings({ reviewer_profile_id: "", reviewer_qualification: "unconfigured" }),
+    );
+    render(<InvestigationTeamReadinessPanel />);
+    const panel = await screen.findByTestId("investigation-team-readiness");
+    expect(panel.textContent).toMatch(/will degrade or wait/i);
+    expect(panel.textContent).toMatch(/no reviewer profile is assigned/i);
+  });
+
+  it("does not call the provider and can retry a host read failure", async () => {
+    host.get.mockRejectedValueOnce(new Error("ipc down"));
+    render(<InvestigationTeamReadinessPanel />);
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    host.get.mockResolvedValue(settings({ mode: "single", reviewer_profile_id: null }));
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getByTestId("investigation-team-readiness")).toBeTruthy());
+    expect(host.get).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps browser preview absent when the host is unavailable", async () => {
+    host.get.mockResolvedValue(null);
+    const { container } = render(<InvestigationTeamReadinessPanel />);
+    await waitFor(() => expect(container.firstChild).toBeNull());
+  });
+});

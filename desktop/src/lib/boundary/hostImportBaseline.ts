@@ -47,6 +47,10 @@ export const HOST_IMPORT_BASELINE: readonly string[] = [
   "src/components/settings/CapabilityQualificationPanel.tsx",
   "src/components/settings/ConnectorsSection.tsx",
   "src/components/settings/GeneralSection.tsx",
+  // Review decision (investigation-team-readiness): the Settings readiness
+  // matrix reads host-owned role assignments and measured status only; it
+  // never calls providers or reaches the Tauri API directly.
+  "src/components/settings/InvestigationTeamReadinessPanel.tsx",
   "src/components/settings/ModulesSection.tsx",
   "src/components/settings/MultiModelReviewToggle.tsx",
   "src/components/settings/PreflightSection.tsx",
