@@ -20,6 +20,12 @@ pub mod fast_triage;
 pub mod import;
 /// Host-neutral execution and honest status projection for Investigation Team qualification.
 pub mod investigation_team_qualification;
+/// Deterministic synthetic Investigation Team qualification runner.
+///
+/// Acceptance tool only: never contacts a provider, never claims live quality,
+/// and always calls the shipped [`investigation_team_qualification::execute`]
+/// seam.
+pub mod investigation_team_qualification_synthetic;
 pub mod logging_quality;
 pub mod multi_model;
 pub mod normalize;
