@@ -9545,19 +9545,23 @@ impl LogIngestRunError {
             },
             Self::Rejected { message, outcome } => ImportCommandErrorDto {
                 message,
-                outcome: Some(*outcome),
+                outcome: Some(outcome),
             },
         }
     }
 }
 
 /// Structured import-command rejection so a classified outcome is not dropped.
+///
+/// `outcome` is boxed so `Result<_, ImportCommandErrorDto>` stays under
+/// `clippy::result_large_err`. `Box<T>` serializes as `T`, so the camelCase
+/// IPC JSON is unchanged. Successful `LogIngestReportDto.outcome` stays unboxed.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImportCommandErrorDto {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    outcome: Option<cd_core::log_analysis::ImportOutcomeReport>,
+    outcome: Option<Box<cd_core::log_analysis::ImportOutcomeReport>>,
 }
 
 impl From<String> for ImportCommandErrorDto {
@@ -9654,6 +9658,13 @@ mod import_error_projection_tests {
         let error =
             CoreError::Message("zip open: missing end record [member=bundles/inner.zip]".into());
         let classified = cd_core::log_analysis::ImportOutcomeReport::rejected_from_error(&error);
+        let unboxed = serde_json::to_value(&classified).expect("unboxed outcome must serialize");
+        let boxed = serde_json::to_value(Box::new(classified.clone()))
+            .expect("boxed outcome must serialize");
+        assert_eq!(
+            boxed, unboxed,
+            "Box<ImportOutcomeReport> must serialize identically to T"
+        );
         let dto = super::LogIngestRunError::Rejected {
             message: import_error_message(&error),
             outcome: Box::new(classified),
@@ -9681,6 +9692,7 @@ mod import_error_projection_tests {
             "locator missing: {outcome:?}"
         );
         let wire = serde_json::to_value(&dto).expect("command error must serialize");
+        assert_eq!(wire["outcome"], unboxed);
         assert_eq!(wire["outcome"]["class"], "rejected");
         assert_eq!(wire["outcome"]["published"], false);
         assert!(
@@ -9689,6 +9701,17 @@ mod import_error_projection_tests {
                 .is_some_and(|message| !message.contains("[member=")),
             "serialized message leaked marker: {wire}"
         );
+        for error in [
+            super::LogIngestRunError::Cancelled,
+            super::LogIngestRunError::Failed("host configuration fault".into()),
+        ] {
+            let omitted = serde_json::to_value(error.into_command_error())
+                .expect("command error without outcome must serialize");
+            assert!(
+                omitted.get("outcome").is_none(),
+                "None outcome must be omitted, not null: {omitted}"
+            );
+        }
     }
 }
 
