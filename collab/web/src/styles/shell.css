@@ -944,3 +944,68 @@
     scroll-behavior: auto !important;
   }
 }
+
+
+.app,
+.shell {
+  overflow-x: hidden;
+}
+
+.topbar__title,
+.account__name,
+.not-found__path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.not-found {
+  max-width: 36rem;
+  padding: 1.5rem 0.25rem 3rem;
+}
+
+.not-found__title {
+  margin: 0 0 0.6rem;
+  font-size: 1.35rem;
+}
+
+.not-found__copy {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.not-found__path {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: bottom;
+  color: var(--fg);
+}
+
+.not-found__home {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  background: var(--accent-soft);
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.not-found__home:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 390px) {
+  .topbar {
+    padding: 0.5rem 0.7rem;
+    gap: 0.5rem;
+  }
+
+  .topbar__title {
+    max-width: 11rem;
+  }
+}

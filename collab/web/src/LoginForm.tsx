@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 /**
  * What the operator is told after a failed sign-in.
@@ -95,6 +95,10 @@ export function LoginForm(props: {
   const errorId = useId();
   const statusId = useId();
 
+  useEffect(() => {
+    usernameRef.current?.focus();
+  }, []);
+
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (inFlight.current) return;
@@ -143,6 +147,9 @@ export function LoginForm(props: {
           ref={usernameRef}
           name="username"
           autoComplete="username"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
           defaultValue={props.defaults?.username}
           aria-describedby={failure ? errorId : undefined}
           aria-invalid={failure?.refocus ? true : undefined}

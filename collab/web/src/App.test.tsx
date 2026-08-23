@@ -1,6 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App.js";
+import { parsePathname, pathFor } from "./app-location.js";
 
 afterEach(() => {
   cleanup();
@@ -11,7 +13,7 @@ afterEach(() => {
   if (typeof window.localStorage?.removeItem === "function") {
     window.localStorage.removeItem("cd-theme");
   }
-  window.history.replaceState(null, "", window.location.pathname);
+  window.history.replaceState(null, "", "/");
 });
 
 type FetchStub = ReturnType<typeof vi.fn>;
@@ -314,3 +316,227 @@ function within_nav(nav: HTMLElement, label: string): HTMLElement | null {
     ) ?? null
   );
 }
+
+
+describe("pathname parsing", () => {
+  it("maps canonical area and investigation paths and rejects open redirects", () => {
+    expect(parsePathname("/")).toEqual({
+      area: "overview",
+      caseId: null,
+      stage: "situation",
+    });
+    expect(parsePathname("/sources")).toEqual({
+      area: "sources",
+      caseId: null,
+      stage: "situation",
+    });
+    expect(parsePathname("/signin")).toEqual({ kind: "sign-in" });
+    expect(parsePathname("/sign-in")).toEqual({ kind: "sign-in" });
+    const uuid = "11111111-1111-4111-8111-111111111111";
+    expect(parsePathname(`/investigations/${uuid}/analyze`)).toEqual({
+      area: "investigations",
+      caseId: uuid,
+      stage: "analyze",
+    });
+    expect(parsePathname("//evil.example/phish")).toMatchObject({ kind: "unknown" });
+    expect(parsePathname("/investigations/../sources")).toMatchObject({ kind: "unknown" });
+    expect(parsePathname("https://evil.example")).toMatchObject({ kind: "unknown" });
+    expect(pathFor({ kind: "sign-in" })).toBe("/signin");
+    expect(pathFor({ kind: "unknown", attempted: "/nope" })).toBe("/not-found");
+  });
+});
+
+describe("pathname shell routing", () => {
+  it("restores a direct area pathname after a signed-in load", async () => {
+    window.history.replaceState(null, "", "/sources");
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Source & provenance library" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/sources");
+    expect(
+      screen.getByRole("navigation", { name: "Primary" }).querySelector('[aria-current="page"]')
+        ?.textContent,
+    ).toBe("Sources");
+  });
+
+  it("keeps browser Back and Forward in sync with area pathnames", async () => {
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+    expect(window.location.pathname).toBe("/sources");
+    fireEvent.click(screen.getByRole("button", { name: "Help" }));
+    expect(window.location.pathname).toBe("/help");
+    expect(screen.getByRole("heading", { name: "Help Center" })).toBeTruthy();
+    window.history.back();
+    await waitFor(() => expect(window.location.pathname).toBe("/sources"));
+    expect(screen.getByRole("heading", { name: "Source & provenance library" })).toBeTruthy();
+    window.history.forward();
+    await waitFor(() => expect(window.location.pathname).toBe("/help"));
+    expect(screen.getByRole("heading", { name: "Help Center" })).toBeTruthy();
+  });
+
+  it("shows a bounded not-found page for unknown pathnames", async () => {
+    window.history.replaceState(null, "", "/definitely-not-a-route");
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
+    render(<App />);
+    expect(
+      await screen.findByRole("heading", { name: "This page is not in the War Room" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("/definitely-not-a-route");
+    expect(screen.queryByRole("heading", { name: "Operating picture" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back to overview" }));
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/");
+  });
+
+  it("opens the shell after a successful sign-in and does not keep the form visible", async () => {
+    let signedIn = false;
+    const stub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/auth/me") {
+        if (!signedIn) return { ok: false, json: async () => ({}) };
+        return {
+          ok: true,
+          json: async () => ({ identity: { username: "dave" }, roles: ["case-lead"] }),
+        };
+      }
+      if (url === "/api/auth/login") {
+        expect(init?.method).toBe("POST");
+        signedIn = true;
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      if (url === "/api/cases") return { ok: true, json: async () => ({ cases: [] }) };
+      if (url === "/api/catalog/sources") return { ok: true, json: async () => ({ sources: [] }) };
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", stub);
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("Username"), { target: { value: "dave" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    expect(screen.queryByLabelText("Username")).toBeNull();
+    expect(window.location.pathname).toBe("/");
+  });
+
+  it("returns to the dedicated sign-in route immediately on sign-out, without a stale shell flash", async () => {
+    let release: (value: { ok: boolean; json: () => Promise<unknown> }) => void = () => {};
+    const gate = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((resolve) => {
+      release = resolve;
+    });
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+      if (url === "/api/auth/logout") return gate as Promise<Response>;
+      return null;
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Signed in as dave" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Operating picture" })).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "Primary" })).toBeNull();
+    expect(window.location.pathname).toBe("/signin");
+    release({ ok: true, json: async () => ({}) });
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
+  });
+
+  it("does not paint the shell for a deep link until the session is known", async () => {
+    let release: (value: unknown) => void = () => {};
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        if (String(input) === "/api/auth/me") {
+          await gate;
+          return {
+            ok: true,
+            json: async () => ({ identity: { username: "dave" }, roles: ["case-lead"] }),
+          };
+        }
+        if (String(input) === "/api/catalog/sources") {
+          return { ok: true, json: async () => ({ sources: [] }) };
+        }
+        if (String(input) === "/api/cases") {
+          return { ok: true, json: async () => ({ cases: [] }) };
+        }
+        return { ok: false, json: async () => ({}) };
+      }),
+    );
+    window.history.replaceState(null, "", "/sources");
+    render(<App />);
+    expect(screen.getByText(/Checking your session/)).toBeTruthy();
+    expect(screen.queryByRole("navigation")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Source & provenance library" })).toBeNull();
+    release(undefined);
+    expect(await screen.findByRole("heading", { name: "Source & provenance library" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/sources");
+  });
+
+  it("restores a UUID investigation pathname on load", async () => {
+    const uuid = "22222222-2222-4222-8222-222222222222";
+    window.history.replaceState(null, "", `/investigations/${uuid}/analyze`);
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+      if (url === "/api/cases") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            cases: [{ id: uuid, title: "Checkout timeouts", status: "open", severity: "high" }],
+          }),
+        } as Response);
+      }
+      if (url.endsWith("/timeline") || url.endsWith("/imports")) {
+        return Promise.resolve({ ok: true, json: async () => ({ events: [], runs: [] }) } as Response);
+      }
+      if (url.endsWith("/contributions") || url.endsWith("/experiments")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ contributions: [], experiments: [] }),
+        } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Checkout timeouts" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Analyze" })).toBeTruthy();
+    expect(window.location.pathname).toBe(`/investigations/${uuid}/analyze`);
+  });
+
+  it("keeps in-app case focus off the pathname so a reload returns to the list", async () => {
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+      if (url === "/api/cases") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            cases: [{ id: "c1", title: "Checkout timeouts", status: "open", severity: "high" }],
+          }),
+        } as Response);
+      }
+      if (url.endsWith("/timeline") || url.endsWith("/imports")) {
+        return Promise.resolve({ ok: true, json: async () => ({ events: [], runs: [] }) } as Response);
+      }
+      if (url.endsWith("/contributions") || url.endsWith("/experiments")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ contributions: [], experiments: [] }),
+        } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Checkout timeouts" }));
+    expect(await screen.findByRole("heading", { name: "Situation" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/");
+  });
+
+  it("renders without crashing under StrictMode", async () => {
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+    expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Primary" })).toBeTruthy();
+  });
+});
