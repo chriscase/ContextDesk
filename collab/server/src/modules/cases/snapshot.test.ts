@@ -46,9 +46,32 @@ describe("case snapshots", () => {
         "test",
       );
       expect(first.status).toBe("frozen");
+      expect(first.fairnessClass).toBe("same_snapshot");
       expect(first.evidence[0]?.evidenceId).toBe(uploaded.artifact.id);
       expect(second.parentSnapshotId).toBe(first.id);
       expect(second.fingerprint).not.toBe(first.fingerprint);
+      expect(second.fairnessClass).toBe("same_snapshot");
+
+      const unhashed = await service.addEvidence(
+        created.id,
+        actor,
+        {
+          kind: "file_server_ref",
+          uri: "s3://example.invalid/unhashed.log",
+          summary: "Reference has no recorded content or expected hash.",
+          privacyClass: "owner_only",
+        },
+        "test",
+      );
+      const unknownFairness = await service.createSnapshot(
+        created.id,
+        actor,
+        { evidenceIds: [unhashed.artifact.id], visibility: "owner_only" },
+        "test",
+      );
+      expect(unknownFairness.evidence[0]?.contentHash).toBeNull();
+      expect(unknownFairness.evidence[0]?.expectedHash).toBeNull();
+      expect(unknownFairness.fairnessClass).toBe("unknown");
       const board = await service.getCaseBoard(created.id, actor, false, first.id);
       expect(board?.snapshotId).toBe(first.id);
       expect(board?.findings.some((finding) => finding.bucket === "known")).toBe(true);
