@@ -100,9 +100,10 @@ describe("authenticated application shell", () => {
       await screen.findByRole("heading", { level: 1, name: "ContextDesk War Room" }),
     ).toBeTruthy();
     const nav = screen.getByRole("navigation", { name: "Primary" });
-    for (const label of ["Overview", "Investigations", "Sources", "How it works"]) {
+    for (const label of ["Overview", "Investigations", "Sources", "Help"]) {
       expect(within_nav(nav, label)).toBeTruthy();
     }
+    expect(within_nav(nav, "How it works")).toBeNull();
     expect(screen.getByRole("button", { name: "Start investigation" })).toBeTruthy();
     expect(
       screen
@@ -128,7 +129,7 @@ describe("authenticated application shell", () => {
     expect(await screen.findByRole("button", { name: "Sign in" })).toBeTruthy();
   });
 
-  it("routes Sources and How it works to real destinations and back", async () => {
+  it("routes Sources and Help to real destinations and back", async () => {
     stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
@@ -136,9 +137,10 @@ describe("authenticated application shell", () => {
       screen.getByRole("heading", { name: "Source & provenance library" }),
     ).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Operating picture" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "How it works" }));
-    expect(screen.getByRole("tablist", { name: "Workflow stages" })).toBeTruthy();
-    expect(screen.getByText(/not a progress tracker/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Help" }));
+    expect(screen.getByRole("heading", { name: "Help Center" })).toBeTruthy();
+    expect(screen.getByLabelText("Search help")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Source & provenance library" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
   });
@@ -246,38 +248,62 @@ describe("theme default and naming", () => {
   });
 });
 
-describe("workflow guide help surface", () => {
-  it("moves between stages with the keyboard", async () => {
+describe("help center in the shell", () => {
+  it("keeps help search and topic state while visiting another area", async () => {
     stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "How it works" }));
-
-    const capture = screen.getByRole("tab", { name: "Capture" });
-    expect(capture.getAttribute("tabindex")).toBe("0");
-
-    fireEvent.keyDown(capture, { key: "ArrowRight" });
-    const analyze = screen.getByRole("tab", { name: "Analyze" });
-    expect(analyze.getAttribute("aria-selected")).toBe("true");
-    expect(analyze.getAttribute("tabindex")).toBe("0");
-    expect(capture.getAttribute("tabindex")).toBe("-1");
-
-    fireEvent.keyDown(analyze, { key: "End" });
-    const decide = screen.getByRole("tab", { name: "Decide" });
-    expect(decide.getAttribute("aria-selected")).toBe("true");
-
-    fireEvent.keyDown(decide, { key: "ArrowRight" });
-    expect(capture.getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(await screen.findByRole("button", { name: "Help" }));
+    const search = screen.getByLabelText("Search help") as HTMLInputElement;
+    fireEvent.change(search, { target: { value: "snapshot" } });
+    expect(screen.getByRole("status").textContent).toMatch(/result/);
+    fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+    expect(screen.queryByRole("heading", { name: "Help Center" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Help" }));
+    expect((screen.getByLabelText("Search help") as HTMLInputElement).value).toBe("snapshot");
+    expect(screen.getByRole("status").textContent).toMatch(/result/);
   });
 
-  it("explains each stage in the panel when selected", async () => {
+  it("offers no investigation-stage shortcuts when no investigation is in focus", async () => {
     stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "How it works" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Help" }));
+    expect(screen.getByRole("heading", { name: "Help Center" })).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Return to your investigation" })).toBeNull();
+  });
 
-    const panel = screen.getByRole("tabpanel");
-    expect(panel.textContent).toMatch(/provenance/);
-    fireEvent.click(screen.getByRole("tab", { name: "Decide" }));
-    expect(panel.textContent).toMatch(/share-safe export/);
+  it("returns to the focused investigation's stage through a real help shortcut", async () => {
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+      if (url === "/api/cases") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            cases: [{ id: "c1", title: "Checkout timeouts", status: "open", severity: "high" }],
+          }),
+        } as Response);
+      }
+      if (url.endsWith("/timeline") || url.endsWith("/imports")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ events: [], runs: [] }),
+        } as Response);
+      }
+      if (url.endsWith("/contributions") || url.endsWith("/experiments")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ contributions: [], experiments: [] }),
+        } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Checkout timeouts" }));
+    expect(await screen.findByRole("heading", { name: "Situation" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Help" }));
+    const shortcuts = screen.getByRole("group", { name: "Return to your investigation" });
+    expect(shortcuts).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Analyze" }));
+    expect(await screen.findByRole("heading", { name: "Analyze" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Help Center" })).toBeNull();
   });
 });
 

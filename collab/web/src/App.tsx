@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Cases, type StageId } from "./Cases.js";
 import { Catalog } from "./Catalog.js";
+import { HelpCenter } from "./HelpCenter.js";
 import { LoginForm } from "./LoginForm.js";
 
 interface SessionView {
@@ -45,124 +46,7 @@ declare global {
   }
 }
 
-const workflowStages = [
-  {
-    id: "capture",
-    name: "Capture",
-    kicker: "Manual evidence intake",
-    detail:
-      "Add evidence to the workspace by hand and note where each item came from. " +
-      "Nothing arrives automatically, so every source carries its provenance.",
-  },
-  {
-    id: "analyze",
-    name: "Analyze",
-    kicker: "AI-assisted normalization",
-    detail:
-      "AI assistance normalizes raw captures into structured, comparable claims and " +
-      "triages what deserves attention first. Every suggestion stays open for human review.",
-  },
-  {
-    id: "compare",
-    name: "Compare",
-    kicker: "Models side by side",
-    detail:
-      "Line up runs from different models against the same evidence. Runs are weighed on " +
-      "evidence, usefulness, and convergence with a human-accepted benchmark—not wording alone.",
-  },
-  {
-    id: "decide",
-    name: "Decide",
-    kicker: "Human call, safe export",
-    detail:
-      "A person—not a model—makes the final call on what a case concludes. Share findings " +
-      "through the share-safe export instead of copying raw case data out of the workspace.",
-  },
-] as const;
-
-function WorkflowGuide() {
-  const [stageIndex, setStageIndex] = useState(0);
-  const stageRefs = useRef<Array<HTMLButtonElement | null>>([]);
-
-  function selectStage(index: number) {
-    const next = (index + workflowStages.length) % workflowStages.length;
-    setStageIndex(next);
-    stageRefs.current[next]?.focus();
-  }
-
-  function onStageKeyDown(event: React.KeyboardEvent) {
-    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-      event.preventDefault();
-      selectStage(stageIndex + 1);
-    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-      event.preventDefault();
-      selectStage(stageIndex - 1);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      selectStage(0);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      selectStage(workflowStages.length - 1);
-    }
-  }
-
-  const activeStage = workflowStages[stageIndex] ?? workflowStages[0];
-  return (
-    <section className="workflow" aria-labelledby="workflow-title">
-      <h3 className="workflow__title" id="workflow-title">
-        Workflow guide
-      </h3>
-      <p className="workflow__intro">
-        Casework moves through four stages, in order. Select a stage to see what
-        happens there.
-      </p>
-      <div
-        className="workflow__stages"
-        role="tablist"
-        aria-label="Workflow stages"
-        onKeyDown={onStageKeyDown}
-      >
-        {workflowStages.map((stage, index) => (
-          <button
-            key={stage.id}
-            ref={(el) => {
-              stageRefs.current[index] = el;
-            }}
-            type="button"
-            role="tab"
-            id={`workflow-tab-${stage.id}`}
-            className="workflow__stage"
-            aria-label={stage.name}
-            aria-selected={index === stageIndex}
-            aria-controls="workflow-stage-panel"
-            tabIndex={index === stageIndex ? 0 : -1}
-            onClick={() => selectStage(index)}
-          >
-            <span className="workflow__stage-step" aria-hidden="true">
-              {index + 1}
-            </span>
-            <span className="workflow__stage-name">{stage.name}</span>
-            <span className="workflow__stage-kicker">{stage.kicker}</span>
-          </button>
-        ))}
-      </div>
-      <div
-        className="workflow__panel"
-        role="tabpanel"
-        id="workflow-stage-panel"
-        aria-labelledby={`workflow-tab-${activeStage.id}`}
-      >
-        <p>{activeStage.detail}</p>
-      </div>
-      <p className="workflow__note">
-        This guide is a map of the workflow, not a progress tracker—it does not
-        mark stages complete or show live model results.
-      </p>
-    </section>
-  );
-}
-
-type AreaId = "overview" | "investigations" | "sources" | "how-it-works";
+type AreaId = "overview" | "investigations" | "sources" | "help";
 
 /** The whole navigable position of the War Room, kept in one object so the
  *  browser history can restore any point with a single popstate payload. */
@@ -175,7 +59,7 @@ interface WarRoomLocation {
 const HOME: WarRoomLocation = { area: "overview", caseId: null, stage: "situation" };
 
 const STAGE_IDS: readonly StageId[] = ["situation", "capture", "analyze", "compare", "decide"];
-const AREA_IDS: readonly AreaId[] = ["overview", "investigations", "sources", "how-it-works"];
+const AREA_IDS: readonly AreaId[] = ["overview", "investigations", "sources", "help"];
 
 function isWarRoomLocation(value: unknown): value is WarRoomLocation {
   if (typeof value !== "object" || value === null) return false;
@@ -209,7 +93,7 @@ const PRIMARY_NAV: readonly { area: AreaId; label: string }[] = [
   { area: "overview", label: "Overview" },
   { area: "investigations", label: "Investigations" },
   { area: "sources", label: "Sources" },
-  { area: "how-it-works", label: "How it works" },
+  { area: "help", label: "Help" },
 ];
 
 function AccountMenu(props: {
@@ -485,7 +369,10 @@ export function App() {
             <ul>
               {PRIMARY_NAV.map((item) => {
                 const activeArea = item.area === location.area;
-                const exact = activeArea && location.caseId === null;
+                // Help keeps the focused investigation in the location so its
+                // articles can offer a real way back to that work; the Help
+                // page itself is still the exact destination.
+                const exact = activeArea && (location.caseId === null || item.area === "help");
                 return (
                   <li key={item.area}>
                     <button
@@ -493,7 +380,11 @@ export function App() {
                       className="topbar__nav-link"
                       aria-current={exact ? "page" : activeArea ? "true" : undefined}
                       onClick={() =>
-                        navigate({ area: item.area, caseId: null, stage: "situation" })
+                        navigate(
+                          item.area === "help"
+                            ? { area: "help", caseId: location.caseId, stage: location.stage }
+                            : { area: item.area, caseId: null, stage: "situation" },
+                        )
                       }
                     >
                       {item.label}
@@ -568,19 +459,20 @@ export function App() {
         >
           <Catalog canLead={canLeadCatalog} />
         </section>
-        <section
-          className="app__area"
-          aria-label="How it works"
-          hidden={location.area !== "how-it-works"}
-        >
-          <div className="how-it-works">
-            <h2 className="app__area-title">How it works</h2>
-            <p className="app__area-copy">
-              Every investigation moves through the same four work stages. This guide is the map;
-              each investigation&rsquo;s focused view carries the actual work surfaces.
-            </p>
-            <WorkflowGuide />
-          </div>
+        <section className="app__area" aria-label="Help" hidden={location.area !== "help"}>
+          <HelpCenter
+            onOpenArea={(area) => navigate({ area, caseId: null, stage: "situation" })}
+            onOpenStage={
+              location.caseId
+                ? (stage) =>
+                    navigate({
+                      area: "investigations",
+                      caseId: locationRef.current.caseId,
+                      stage,
+                    })
+                : null
+            }
+          />
         </section>
       </main>
     </div>
