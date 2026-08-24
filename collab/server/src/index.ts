@@ -37,7 +37,9 @@ import {
 import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
 import {
   loadPortableInstallationId,
+  memoryApplyBoundary,
   PortableInvestigationService,
+  withPgApplyTransaction,
 } from "./modules/portable-investigations/index.js";
 
 interface StorageRuntime {
@@ -138,6 +140,17 @@ async function main(): Promise<void> {
     audit,
     privacy: loadExportPrivacyConfig(),
   });
+  const persistPorts = {
+    cases: storage.cases,
+    catalog: storage.catalog,
+    experiments: storage.experiments,
+    runs: storage.runs,
+    jobs: storage.jobs,
+    evidence: store,
+    audit,
+  };
+  const memoryBoundary =
+    storage.pool === null ? memoryApplyBoundary(persistPorts) : null;
   const portable = new PortableInvestigationService({
     installationId: await loadPortableInstallationId(
       config.evidenceRoot,
@@ -149,6 +162,13 @@ async function main(): Promise<void> {
     triageRuns,
     experiments,
     audit,
+    persist: persistPorts,
+    ...(memoryBoundary
+      ? { snapshot: memoryBoundary.snapshot, restore: memoryBoundary.restore }
+      : {
+          withTransaction: (operation) =>
+            withPgApplyTransaction(storage.pool as NonNullable<typeof storage.pool>, store, operation),
+        }),
   });
   const app = await buildApp({
     config,

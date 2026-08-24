@@ -166,8 +166,10 @@ remain attribution only and receive no destination access.
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
 
 Expected result: the dry run states that it changed no investigation, user,
-membership, role, permission, or capability. It does not offer an apply button.
-Restore/apply is not available.
+membership, role, permission, or capability. If it reports an exact
+reconstruction, type **RESTORE** and restore the investigation, then open the
+returned link. Historical people remain attribution only. Archive signatures
+are not verified.
 
 ## Optional — Inspect administration without changing access
 
@@ -192,7 +194,7 @@ portable archives are never trusted.
 - evidence-based comparison and a human-owned decision;
 - durable discussion and activity using polling;
 - selected-evidence prompt packaging;
-- complete archive export and fail-closed dry-run preflight; and
+- complete archive export, fail-closed dry-run preflight, and exact restore; and
 - bounded administration and display identity in the synthetic fixture.
 
 ## What this walkthrough does not demonstrate
@@ -203,7 +205,7 @@ The synthetic demo does not claim:
   configuration and qualification;
 - WebSocket chat, instant delivery, typing indicators, or authoritative
   presence;
-- portable archive restore/apply or atomic reconstruction;
+- Ed25519 archive authenticity verification;
 - web ZIP or directory upload;
 - a completed installation from the first-run preparation wizard (the wizard
   can claim, stage, and run bounded checks, but cannot atomically install or

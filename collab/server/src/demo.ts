@@ -17,12 +17,15 @@ import {
   defaultSessionPolicy,
 } from "./modules/auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "./modules/authz/index.js";
-import { CatalogService } from "./modules/catalog/index.js";
-import { CaseService } from "./modules/cases/index.js";
+import { CatalogService, MemoryCatalogStore } from "./modules/catalog/index.js";
+import { CaseService, MemoryCaseStore } from "./modules/cases/index.js";
 import { ExperimentService, MemoryExperimentStore } from "./modules/experiments/index.js";
 import { ExportService, testExportPrivacyConfig } from "./modules/export/index.js";
 import { ImportService, MemoryRunStore } from "./modules/import/index.js";
-import { PortableInvestigationService } from "./modules/portable-investigations/index.js";
+import {
+  memoryApplyBoundary,
+  PortableInvestigationService,
+} from "./modules/portable-investigations/index.js";
 import {
   MemoryTriageJobStore,
   loadConfiguredTriageProfileCatalog,
@@ -546,24 +549,29 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
   options.onEvidenceRootCreated?.(evidenceRoot);
   const evidence = new FilesystemEvidenceStore({ rootDir: evidenceRoot });
   const audit = new MemoryAuditStore();
-  const catalog = new CatalogService(undefined, audit);
-  const cases = new CaseService(evidence, audit, undefined, catalog);
+  const caseStore = new MemoryCaseStore();
+  const catalogStore = new MemoryCatalogStore();
+  const runStore = new MemoryRunStore();
+  const experimentStore = new MemoryExperimentStore();
+  const jobStore = new MemoryTriageJobStore();
+  const catalog = new CatalogService(catalogStore, audit);
+  const cases = new CaseService(evidence, audit, caseStore, catalog);
   const imports = new ImportService({
     evidence,
     audit,
     cases,
     catalog,
-    runs: new MemoryRunStore(),
+    runs: runStore,
   });
   const experiments = new ExperimentService({
     cases,
     audit,
-    experiments: new MemoryExperimentStore(),
+    experiments: experimentStore,
   });
   const triageRuns = new TriageRunService({
     cases,
     audit,
-    jobs: new MemoryTriageJobStore(),
+    jobs: jobStore,
     ...(options.gatewayExecutor
       ? { gatewayExecutor: options.gatewayExecutor }
       : options.gatewayRunner
@@ -584,6 +592,15 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       },
     }),
   });
+  const applyBoundary = memoryApplyBoundary({
+    cases: caseStore,
+    catalog: catalogStore,
+    experiments: experimentStore,
+    runs: runStore,
+    jobs: jobStore,
+    evidence,
+    audit,
+  });
   const portable = new PortableInvestigationService({
     installationId: "inst-syntheticdemo",
     cases,
@@ -592,6 +609,9 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
     triageRuns,
     experiments,
     audit,
+    persist: applyBoundary.persist,
+    snapshot: applyBoundary.snapshot,
+    restore: applyBoundary.restore,
   });
   const roles = new MutableGroupRoleMap(parseGroupRoleMap(demoRoleMap));
   const staticDir =

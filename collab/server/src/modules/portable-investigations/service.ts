@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
+  PORTABLE_APPLY_RESPONSE_SCHEMA_ID,
+  PORTABLE_APPLY_TYPED_CONFIRMATION,
   PORTABLE_HISTORY_CAVEAT,
   PORTABLE_OBJECT_KINDS,
   PORTABLE_PERMISSION_CAVEAT,
@@ -7,7 +10,10 @@ import {
   PORTABLE_SCHEMA_ID,
   attachPortableIntegrity,
   canonicalJson,
+  destinationCatalogDigest,
+  identityMapDigest,
   parsePortableArchive,
+  portableApplyDeepLink,
   portableSnapshotFingerprint,
   preflightPortableArchive,
   sealPortableArchive,
@@ -17,6 +23,7 @@ import {
   type CollisionPolicy,
   type DestinationCatalogV1,
   type IdentityMapEntryV1,
+  type PortableApplyResponseV1,
   type PortableArchiveV1,
   type PortableContentObjectV1,
   type PortableInvestigationUnsigned,
@@ -24,6 +31,7 @@ import {
   type PrivacyClass,
   type ProviderKind,
 } from "@cd-collab/contracts";
+import { persistPortableArchive, type PortablePersistPorts } from "./persist.js";
 import type { AuditStore, StoredAudit } from "../audit/index.js";
 import type { CatalogService } from "../catalog/index.js";
 import type { Actor, CaseService, TimelineRow } from "../cases/index.js";
@@ -33,8 +41,8 @@ import type { TriageRunService } from "../triage-runs/index.js";
 
 export const MAX_PORTABLE_ARCHIVE_BYTES = 32 * 1024 * 1024;
 export const MAX_PORTABLE_OBJECTS = 25_000;
-export const PORTABLE_APPLY_UNAVAILABLE_REASON =
-  "atomic_apply_not_proven_for_memory_and_postgresql" as const;
+export const PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE = PORTABLE_APPLY_TYPED_CONFIRMATION;
+const APPLY_TOKEN_TTL_MS = 10 * 60 * 1000;
 
 export const PORTABLE_CONTRACT_UNSUPPORTED = [
   "hypothesis_links",
@@ -53,7 +61,13 @@ export type PortableServerErrorCode =
   | "archive_size_limit"
   | "unsupported_state"
   | "integrity_failure"
-  | "archive_invalid";
+  | "archive_invalid"
+  | "apply_refused"
+  | "confirmation_invalid"
+  | "exact_reconstruction_required"
+  | "stale_destination_catalog"
+  | "identity_map_mismatch"
+  | "actor_mismatch";
 
 export class PortableServerError extends Error {
   constructor(
@@ -102,8 +116,12 @@ export interface PortablePreflightResponse {
     destinationCapabilityGranted: false;
   };
   apply: {
-    available: false;
-    reason: typeof PORTABLE_APPLY_UNAVAILABLE_REASON;
+    available: true;
+    requiresExactReconstruction: true;
+    typedConfirmation: typeof PORTABLE_APPLY_TYPED_CONFIRMATION;
+    confirmationToken: string | null;
+    expiresAt: string | null;
+    reason: string | null;
   };
 }
 
@@ -113,10 +131,26 @@ export interface PortableCapabilities {
   dryRunPreflightAvailable: true;
   maximumArchiveBytes: number;
   apply: {
-    available: false;
-    reason: typeof PORTABLE_APPLY_UNAVAILABLE_REASON;
+    available: true;
+    requiresExactReconstruction: true;
+    typedConfirmation: typeof PORTABLE_APPLY_TYPED_CONFIRMATION;
   };
 }
+
+interface ApplyIntent {
+  token: string;
+  actorId: string;
+  installationId: string;
+  transportHash: string;
+  semanticFingerprint: string;
+  destinationCatalogDigest: string;
+  identityMapDigest: string;
+  collisionPolicy: CollisionPolicy;
+  expiresAt: number;
+  appliedInvestigationId: string | null;
+}
+
+const APPLY_IDENTITY_ACTIONS = new Set(["map_existing", "preserve_historical_external"]);
 
 interface PortableDeps {
   installationId: string;
@@ -126,6 +160,10 @@ interface PortableDeps {
   triageRuns: TriageRunService;
   experiments: ExperimentService;
   audit: AuditStore;
+  persist?: PortablePersistPorts;
+  snapshot?: () => unknown | Promise<unknown>;
+  restore?: (snapshot: unknown) => void | Promise<void>;
+  withTransaction?: <T>(operation: (ports: PortablePersistPorts) => Promise<T>) => Promise<T>;
   now?: () => string;
 }
 
@@ -285,6 +323,8 @@ function privacySummary(archive: PortableArchiveV1): PortablePrivacySummary {
 
 export class PortableInvestigationService {
   private readonly now: () => string;
+  private readonly intents = new Map<string, ApplyIntent>();
+  private applyQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly deps: PortableDeps) {
     this.now = deps.now ?? (() => new Date().toISOString());
@@ -296,7 +336,11 @@ export class PortableInvestigationService {
       exportAvailable: true,
       dryRunPreflightAvailable: true,
       maximumArchiveBytes: MAX_PORTABLE_ARCHIVE_BYTES,
-      apply: { available: false, reason: PORTABLE_APPLY_UNAVAILABLE_REASON },
+      apply: {
+        available: true,
+        requiresExactReconstruction: true,
+        typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION,
+      },
     };
   }
 
@@ -822,6 +866,23 @@ export class PortableInvestigationService {
     actor: Actor,
     isAdmin: boolean,
   ): Promise<PortablePreflightResponse> {
+    const evaluated = await this.evaluateArchive(archiveRaw, input, actor, isAdmin);
+    return {
+      ...evaluated.response,
+      apply: this.mintApplyOffer(actor, evaluated.archive, evaluated.report, input),
+    };
+  }
+
+  private async evaluateArchive(
+    archiveRaw: unknown,
+    input: PortablePreflightInput,
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<{
+    archive: PortableArchiveV1;
+    report: ArchivePreflightReportV1;
+    response: Omit<PortablePreflightResponse, "apply">;
+  }> {
     let encodedBytes: number;
     try {
       encodedBytes = Buffer.byteLength(JSON.stringify(archiveRaw), "utf8");
@@ -841,37 +902,280 @@ export class PortableInvestigationService {
       throw new PortableServerError("archive_size_limit", "portable object count exceeds limit");
     }
     const catalog = await this.destinationCatalog(actor, isAdmin);
+    const catalogDigest = destinationCatalogDigest(catalog);
     let report: ArchivePreflightReportV1;
     try {
       report = preflightPortableArchive(archive, {
         mode: "dry_run",
         collisionPolicy: input.collisionPolicy,
         identityMap: input.identityMap,
-        destination: catalog,
+        destination: structuredClone(catalog),
         ...(input.suppliedBlobs ? { suppliedBlobs: input.suppliedBlobs } : {}),
       });
     } catch {
       throw new PortableServerError("archive_invalid", "portable preflight failed validation");
     }
+    report = { ...report, destinationCatalogDigest: catalogDigest };
     return {
-      schemaId: "cd-collab.portable_investigation_preflight_response.v1",
+      archive,
       report,
-      privacy: privacySummary(archive),
-      omitted: report.reconstructionReasons,
-      unsupported: PORTABLE_CONTRACT_UNSUPPORTED,
-      authorization: {
-        requiredRole: "case-lead_or_admin",
-        evaluatedRole: isAdmin ? "admin" : "case-lead",
-        actorId: actor.id,
-        destinationCatalogSource: "host_visible_catalog",
-        destinationCatalogDigest: report.destinationCatalogDigest,
-        sourceRolesTrusted: false,
+      response: {
+        schemaId: "cd-collab.portable_investigation_preflight_response.v1",
+        report,
+        privacy: privacySummary(archive),
+        omitted: report.reconstructionReasons,
+        unsupported: PORTABLE_CONTRACT_UNSUPPORTED,
+        authorization: {
+          requiredRole: "case-lead_or_admin",
+          evaluatedRole: isAdmin ? "admin" : "case-lead",
+          actorId: actor.id,
+          destinationCatalogSource: "host_visible_catalog",
+          destinationCatalogDigest: report.destinationCatalogDigest,
+          sourceRolesTrusted: false,
+          destinationMembershipGranted: false,
+          destinationRoleGranted: false,
+          destinationCapabilityGranted: false,
+        },
+      },
+    };
+  }
+
+  private identityMapAllowsApply(identityMap: IdentityMapEntryV1[]): boolean {
+    return identityMap.every((row) => APPLY_IDENTITY_ACTIONS.has(row.action));
+  }
+
+  private mintApplyOffer(
+    actor: Actor,
+    archive: PortableArchiveV1,
+    report: ArchivePreflightReportV1,
+    input: PortablePreflightInput,
+  ): PortablePreflightResponse["apply"] {
+    this.pruneIntents();
+    if (!report.exactReconstruction || !this.identityMapAllowsApply(input.identityMap)) {
+      return {
+        available: true,
+        requiresExactReconstruction: true,
+        typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION,
+        confirmationToken: null,
+        expiresAt: null,
+        reason: "exact_reconstruction_required",
+      };
+    }
+    const token = `pit1.${randomBytes(24).toString("base64url")}`;
+    const expiresAt = Date.parse(this.now()) + APPLY_TOKEN_TTL_MS;
+    this.intents.set(token, {
+      token,
+      actorId: actor.id,
+      installationId: this.deps.installationId,
+      transportHash: archive.transportHash,
+      semanticFingerprint: archive.semanticFingerprint,
+      destinationCatalogDigest: report.destinationCatalogDigest,
+      identityMapDigest: identityMapDigest(input.identityMap),
+      collisionPolicy: input.collisionPolicy,
+      expiresAt,
+      appliedInvestigationId: null,
+    });
+    return {
+      available: true,
+      requiresExactReconstruction: true,
+      typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION,
+      confirmationToken: token,
+      expiresAt: new Date(expiresAt).toISOString(),
+      reason: null,
+    };
+  }
+
+  private pruneIntents(): void {
+    const now = Date.parse(this.now());
+    for (const [token, intent] of this.intents) {
+      if (intent.expiresAt < now && !intent.appliedInvestigationId) this.intents.delete(token);
+    }
+  }
+
+  async apply(
+    archiveRaw: unknown,
+    input: {
+      confirmationToken: string;
+      typedConfirmation: string;
+      collisionPolicy: CollisionPolicy;
+      identityMap: IdentityMapEntryV1[];
+      suppliedBlobs?: ArchiveBlobInventoryEntryV1[];
+    },
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<PortableApplyResponseV1> {
+    const run = this.applyQueue.then(() => this.applyExclusive(archiveRaw, input, actor, isAdmin));
+    this.applyQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async applyExclusive(
+    archiveRaw: unknown,
+    input: {
+      confirmationToken: string;
+      typedConfirmation: string;
+      collisionPolicy: CollisionPolicy;
+      identityMap: IdentityMapEntryV1[];
+      suppliedBlobs?: ArchiveBlobInventoryEntryV1[];
+    },
+    actor: Actor,
+    isAdmin: boolean,
+  ): Promise<PortableApplyResponseV1> {
+    if (input.typedConfirmation !== PORTABLE_APPLY_TYPED_CONFIRMATION) {
+      throw new PortableServerError("confirmation_invalid", "typed confirmation is required");
+    }
+    const identityMap = input.identityMap.map((row) => ({ ...row }));
+    const collisionPolicy = input.collisionPolicy;
+    const suppliedBlobs = input.suppliedBlobs?.map((row) => ({ ...row }));
+    const intent = this.intents.get(input.confirmationToken);
+    if (!intent) {
+      throw new PortableServerError("confirmation_invalid", "confirmation token is unknown");
+    }
+    if (Date.parse(this.now()) > intent.expiresAt) {
+      throw new PortableServerError("confirmation_invalid", "confirmation token expired");
+    }
+    if (intent.actorId !== actor.id) {
+      throw new PortableServerError("actor_mismatch", "confirmation belongs to a different actor");
+    }
+    if (intent.installationId !== this.deps.installationId) {
+      throw new PortableServerError("apply_refused", "installation mismatch");
+    }
+    if (intent.collisionPolicy !== collisionPolicy) {
+      throw new PortableServerError("confirmation_invalid", "collision policy does not match intent");
+    }
+    if (identityMapDigest(identityMap) !== intent.identityMapDigest) {
+      throw new PortableServerError("identity_map_mismatch", "identity map does not match intent");
+    }
+    if (!this.identityMapAllowsApply(identityMap)) {
+      throw new PortableServerError("exact_reconstruction_required", "unresolved identities cannot be applied");
+    }
+    if (intent.appliedInvestigationId) {
+      let archive: PortableArchiveV1;
+      try {
+        archive = parsePortableArchive(archiveRaw);
+      } catch {
+        throw new PortableServerError("archive_invalid", "portable archive failed validation");
+      }
+      if (archive.transportHash !== intent.transportHash) {
+        throw new PortableServerError("archive_invalid", "transport hash does not match intent");
+      }
+      return {
+        schemaId: PORTABLE_APPLY_RESPONSE_SCHEMA_ID,
+        status: "idempotent_replay",
+        investigationId: intent.appliedInvestigationId,
+        deepLink: portableApplyDeepLink(intent.appliedInvestigationId),
+        transportHash: intent.transportHash,
+        semanticFingerprint: intent.semanticFingerprint,
+        destinationCatalogDigest: intent.destinationCatalogDigest,
+        authenticityClaim: "none",
         destinationMembershipGranted: false,
         destinationRoleGranted: false,
         destinationCapabilityGranted: false,
+      };
+    }
+    const preview = await this.evaluateArchive(
+      archiveRaw,
+      {
+        mode: "dry_run",
+        collisionPolicy,
+        identityMap,
+        ...(suppliedBlobs ? { suppliedBlobs } : {}),
       },
-      apply: { available: false, reason: PORTABLE_APPLY_UNAVAILABLE_REASON },
+      actor,
+      isAdmin,
+    );
+    if (preview.report.transportHash !== intent.transportHash) {
+      throw new PortableServerError("archive_invalid", "transport hash does not match intent");
+    }
+    if (preview.report.semanticFingerprint !== intent.semanticFingerprint) {
+      throw new PortableServerError("archive_invalid", "semantic fingerprint does not match intent");
+    }
+    if (preview.report.destinationCatalogDigest !== intent.destinationCatalogDigest) {
+      throw new PortableServerError("stale_destination_catalog", "destination catalog changed");
+    }
+    if (!preview.report.exactReconstruction) {
+      throw new PortableServerError("exact_reconstruction_required", "apply requires exact reconstruction");
+    }
+    const replay = this.appliedResponse(intent, preview.report, "idempotent_replay");
+    if (replay) return replay;
+    const existingId = await this.findAppliedByTransportHash(preview.report.transportHash);
+    if (existingId) {
+      intent.appliedInvestigationId = existingId;
+      return this.appliedResponse(intent, preview.report, "idempotent_replay") as PortableApplyResponseV1;
+    }
+    if (!this.deps.persist && !this.deps.withTransaction) {
+      throw new PortableServerError("apply_refused", "persist ports are not configured");
+    }
+    const snapshot = this.deps.snapshot ? await this.deps.snapshot() : undefined;
+    try {
+      const persistOp = (ports: PortablePersistPorts) =>
+        persistPortableArchive({
+          archive: preview.archive,
+          report: preview.report,
+          identityMap,
+          actor,
+          ports,
+          now: this.now(),
+        });
+      const investigationId = this.deps.withTransaction
+        ? await this.deps.withTransaction(persistOp)
+        : await persistOp(this.deps.persist as PortablePersistPorts);
+      const existing = await this.deps.cases.getCase(investigationId, actor, isAdmin);
+      if (!existing) {
+        throw new PortableServerError("integrity_failure", "imported investigation is not visible");
+      }
+      if (existing.participants.some((row) => row.identityId !== actor.id)) {
+        throw new PortableServerError("apply_refused", "historical people must not become members");
+      }
+      intent.appliedInvestigationId = investigationId;
+      return this.appliedResponse(intent, preview.report, "applied") as PortableApplyResponseV1;
+    } catch (error) {
+      if (snapshot !== undefined) await this.deps.restore?.(snapshot);
+      if (error instanceof PortableServerError) throw error;
+      throw new PortableServerError("apply_refused", "atomic apply rolled back");
+    }
+  }
+
+  private appliedResponse(
+    intent: ApplyIntent,
+    report: ArchivePreflightReportV1,
+    status: PortableApplyResponseV1["status"],
+  ): PortableApplyResponseV1 | null {
+    if (!intent.appliedInvestigationId) return null;
+    return {
+      schemaId: PORTABLE_APPLY_RESPONSE_SCHEMA_ID,
+      status,
+      investigationId: intent.appliedInvestigationId,
+      deepLink: portableApplyDeepLink(intent.appliedInvestigationId),
+      transportHash: report.transportHash,
+      semanticFingerprint: report.semanticFingerprint,
+      destinationCatalogDigest: report.destinationCatalogDigest,
+      authenticityClaim: "none",
+      destinationMembershipGranted: false,
+      destinationRoleGranted: false,
+      destinationCapabilityGranted: false,
     };
+  }
+
+  private async findAppliedByTransportHash(transportHash: string): Promise<string | null> {
+    if (!this.deps.persist) return null;
+    const cases = await this.deps.persist.cases.listCases();
+    for (const row of cases) {
+      const timeline = await this.deps.persist.cases.listTimeline(row.id);
+      for (const event of timeline) {
+        if (event.kind !== "portable_archive_applied") continue;
+        try {
+          const payload = JSON.parse(event.payload) as { transportHash?: unknown };
+          if (payload.transportHash === transportHash) return row.id;
+        } catch {
+          continue;
+        }
+      }
+    }
+    return null;
   }
 
   private async destinationCatalog(actor: Actor, isAdmin: boolean): Promise<DestinationCatalogV1> {

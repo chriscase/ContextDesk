@@ -169,7 +169,7 @@ War Room exposes three artifacts with deliberately different scope:
 | --- | --- | --- |
 | **Triage brief** | Readable case handoff with timeline, hypotheses, actions, and an evidence inventory | A projection of the current record, not a restorable backup |
 | **Selected-evidence prompt package** | Send only explicitly selected evidence and an optional prompt scaffold to another analysis tool | Not a full investigation; unselected and default-excluded items stay out |
-| **Complete investigation archive** | Preserve or transfer the investigation record and included evidence in a portable JSON archive | Export and dry-run preflight are available; restore/apply is not |
+| **Complete investigation archive** | Preserve or transfer the investigation record and included evidence in a portable JSON archive | Export, dry-run preflight, and exact-reconstruction restore are available; signatures are not verified |
 
 The complete archive includes the durable Situation and represented
 investigation objects, content inventory, provenance, integrity information,
@@ -180,8 +180,8 @@ summarizes privacy and omitted content, plans deterministic identifier remaps,
 and keeps historical people as attribution only.
 
 The dry run creates no investigation, user, membership, role, or capability.
-Restore/apply has no UI control because atomic rollback across supported stores
-has not yet been proven.
+An exact reconstruction can then be restored after typing RESTORE. Historical
+people remain attribution only. Archive signatures are recorded, not verified.
 
 ![Synthetic complete investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
 
@@ -229,7 +229,7 @@ No live provider or external material is required. Continue with the
 | Comparison and decision | Lane focus, evidence-backed differences, unknowns, discussion, human action and owner | Agreement is not proof and a model cannot approve the human decision |
 | Discussion | Durable records refreshed through polling | No WebSocket chat, typing indicators, instant delivery, or authoritative presence |
 | Identity and administration | LDAP-capable sign-in adapter, directory display identity, bounded directory visibility, persistent group-to-role mappings | LDAP must be configured and qualified per deployment; the console does not administer the directory itself |
-| Portable archive | Complete archive download and fail-closed dry-run preflight with deterministic ID remapping and historical identity isolation | No restore/apply or cross-store atomic reconstruction yet |
+| Portable archive | Complete archive download, fail-closed dry-run preflight, and exact-reconstruction restore with deterministic ID remapping and historical identity isolation | No Ed25519 verification; metadata-only archives cannot be applied; some traces and live discussion state remain unsupported |
 | Setup | A first-run wizard appears before sign-in when the host exposes an unconfigured setup service; it claims one owner, stages SQLite/local or PostgreSQL/LDAP configuration and optional gateway references, and runs bounded checks | It does not yet atomically commit configuration, prove external connectivity, restart the service, or complete installation |
 
 ## Continue reading

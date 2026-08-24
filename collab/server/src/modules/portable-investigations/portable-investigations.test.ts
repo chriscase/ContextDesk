@@ -3,12 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   GOLD_IS_HUMAN_BENCHMARK,
+  PORTABLE_APPLY_REQUEST_SCHEMA_ID,
   TRIAGE_JOB_REQUEST_SCHEMA_ID,
   parsePortableArchive,
+  portableApplyDeepLink,
   portableDestinationUuid,
   type PortableArchiveV1,
 } from "@cd-collab/contracts";
 import { afterEach, describe, expect, it } from "vitest";
+import { migrateUp } from "../../db/migrate.js";
+import { adminUrl, withDisposableDb } from "../../test/disposable-db.js";
 import { buildApp } from "../../app.js";
 import { testConfig } from "../../config.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
@@ -21,15 +25,21 @@ import {
   defaultSessionPolicy,
 } from "../auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
-import { CatalogService } from "../catalog/index.js";
-import { CaseService } from "../cases/index.js";
+import { CatalogService, MemoryCatalogStore } from "../catalog/index.js";
+import { CaseService, MemoryCaseStore, PgCaseStore } from "../cases/index.js";
 import { ExperimentService, MemoryExperimentStore } from "../experiments/index.js";
 import { ImportService, MemoryRunStore } from "../import/index.js";
 import { MemoryTriageJobStore, TriageRunService } from "../triage-runs/index.js";
 import { loadPortableInstallationId } from "./installation.js";
 import {
+  memoryApplyBoundary,
+  persistPortableArchive,
+  withPgApplyTransaction,
+  type MemoryApplyBoundary,
+} from "./persist.js";
+import {
   MAX_PORTABLE_ARCHIVE_BYTES,
-  PORTABLE_APPLY_UNAVAILABLE_REASON,
+  PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
   PortableInvestigationService,
   PortableServerError,
 } from "./service.js";
@@ -50,10 +60,12 @@ interface Fixture {
   audit: MemoryAuditStore;
   catalog: CatalogService;
   cases: CaseService;
+  caseStore: MemoryCaseStore;
   imports: ImportService;
   triageRuns: TriageRunService;
   experiments: ExperimentService;
   portable: PortableInvestigationService;
+  applyBoundary: MemoryApplyBoundary;
   caseId: string;
   evidenceId: string;
   evidenceHash: string;
@@ -85,19 +97,24 @@ async function fixture(): Promise<Fixture> {
   roots.push(root);
   const store = new FilesystemEvidenceStore({ rootDir: root });
   const audit = new MemoryAuditStore();
-  const catalog = new CatalogService(undefined, audit);
-  const cases = new CaseService(store, audit, undefined, catalog);
+  const caseStore = new MemoryCaseStore();
+  const catalogStore = new MemoryCatalogStore();
+  const runStore = new MemoryRunStore();
+  const experimentStore = new MemoryExperimentStore();
+  const jobStore = new MemoryTriageJobStore();
+  const catalog = new CatalogService(catalogStore, audit);
+  const cases = new CaseService(store, audit, caseStore, catalog);
   const imports = new ImportService({
     evidence: store,
     audit,
     cases,
     catalog,
-    runs: new MemoryRunStore(),
+    runs: runStore,
   });
   const triageRuns = new TriageRunService({
     cases,
     audit,
-    jobs: new MemoryTriageJobStore(),
+    jobs: jobStore,
     profiles: [
       { id: "profile-qwen", label: "Synthetic Qwen", provider: "openai-compatible" },
       { id: "profile-oss", label: "Synthetic OSS", provider: "openai-compatible" },
@@ -106,7 +123,16 @@ async function fixture(): Promise<Fixture> {
   const experiments = new ExperimentService({
     cases,
     audit,
-    experiments: new MemoryExperimentStore(),
+    experiments: experimentStore,
+  });
+  const applyBoundary = memoryApplyBoundary({
+    cases: caseStore,
+    catalog: catalogStore,
+    experiments: experimentStore,
+    runs: runStore,
+    jobs: jobStore,
+    evidence: store,
+    audit,
   });
   const portable = new PortableInvestigationService({
     installationId: "inst-syntheticnorth",
@@ -116,6 +142,9 @@ async function fixture(): Promise<Fixture> {
     triageRuns,
     experiments,
     audit,
+    persist: applyBoundary.persist,
+    snapshot: applyBoundary.snapshot,
+    restore: applyBoundary.restore,
     now: () => "2042-03-04T12:00:00.000Z",
   });
 
@@ -130,6 +159,12 @@ async function fixture(): Promise<Fixture> {
       scope: "One fictional worker pool.",
       openQuestions: ["Which synthetic signal precedes the stall?"],
     },
+    "fixture",
+  );
+  await cases.addParticipant(
+    caseRow.id,
+    ACTOR,
+    { identityId: "actor-historical-reviewer", username: "historical-reviewer" },
     "fixture",
   );
   await cases.addContribution(
@@ -286,10 +321,12 @@ async function fixture(): Promise<Fixture> {
     audit,
     catalog,
     cases,
+    caseStore,
     imports,
     triageRuns,
     experiments,
     portable,
+    applyBoundary,
     caseId: caseRow.id,
     evidenceId: uploaded.artifact.id,
     evidenceHash: uploaded.artifact.contentHash as string,
@@ -314,7 +351,31 @@ function users() {
         groups: ["cn=viewers,ou=groups,dc=example,dc=test"],
       },
     ],
+    [
+      "reviewer-west",
+      {
+        password: "fixture-reviewer-secret",
+        identity: { id: "actor-reviewer", username: "reviewer-west", displayName: "Reviewer West" },
+        groups: ["cn=leads,ou=groups,dc=example,dc=test"],
+      },
+    ],
   ]);
+}
+
+function identityMapFor(archive: PortableArchiveV1) {
+  return archive.investigation.actors.map((source) =>
+    source.sourceActorId === ACTOR.id
+      ? {
+          sourceActorId: source.sourceActorId,
+          action: "map_existing" as const,
+          destinationActorId: ACTOR.id,
+        }
+      : {
+          sourceActorId: source.sourceActorId,
+          action: "preserve_historical_external" as const,
+          destinationActorId: null,
+        },
+  );
 }
 
 async function login(
@@ -405,7 +466,7 @@ describe("portable investigation service", () => {
       .toBe(true);
   });
 
-  it("returns host-owned identity/collision/privacy facts and never authorizes apply", async () => {
+  it("returns host-owned identity/collision/privacy facts and mints apply only for exact reconstruction", async () => {
     const row = await fixture();
     const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
     const response = await row.portable.preflight(
@@ -413,19 +474,7 @@ describe("portable investigation service", () => {
       {
         mode: "dry_run",
         collisionPolicy: "remap_deterministic",
-        identityMap: archive.investigation.actors.map((source) =>
-          source.sourceActorId === ACTOR.id
-            ? {
-                sourceActorId: source.sourceActorId,
-                action: "map_existing" as const,
-                destinationActorId: ACTOR.id,
-              }
-            : {
-                sourceActorId: source.sourceActorId,
-                action: "preserve_historical_external" as const,
-                destinationActorId: null,
-              },
-        ),
+        identityMap: identityMapFor(archive),
       },
       ACTOR,
       false,
@@ -437,10 +486,16 @@ describe("portable investigation service", () => {
     expect(response.authorization.destinationCatalogSource).toBe("host_visible_catalog");
     expect(response.authorization.sourceRolesTrusted).toBe(false);
     expect(response.authorization.destinationMembershipGranted).toBe(false);
-    expect(response.apply).toEqual({
-      available: false,
-      reason: PORTABLE_APPLY_UNAVAILABLE_REASON,
-    });
+    expect(response.apply.available).toBe(true);
+    expect(response.apply.requiresExactReconstruction).toBe(true);
+    expect(response.apply.typedConfirmation).toBe(PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE);
+    if (response.report.exactReconstruction) {
+      expect(response.apply.confirmationToken).toMatch(/^pit1\./);
+      expect(response.apply.reason).toBeNull();
+    } else {
+      expect(response.apply.confirmationToken).toBeNull();
+      expect(response.apply.reason).toBe("exact_reconstruction_required");
+    }
     expect(response.report.applyAuthorized).toBe(false);
     expect(response.unsupported).not.toContain("investigation_situation_fields");
     expect(response.unsupported).toContain("imported_content_privacy_is_not_contract_bound");
@@ -607,17 +662,13 @@ describe("portable investigation routes", () => {
     }
   });
 
-  it("preflights with a host catalog, rejects client destination authority, and exposes no apply route", async () => {
+  it("preflights with a host catalog, rejects client destination authority, and exposes apply", async () => {
     const row = await fixture();
     const app = await appFor(row);
     try {
       const lead = await login(app, "operator-north", "fixture-operator-secret");
       const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
-      const identityMap = archive.investigation.actors.map((source) => ({
-        sourceActorId: source.sourceActorId,
-        action: source.sourceActorId === ACTOR.id ? ("map_existing" as const) : ("preserve_historical_external" as const),
-        destinationActorId: source.sourceActorId === ACTOR.id ? ACTOR.id : null,
-      }));
+      const identityMap = identityMapFor(archive);
       const response = await app.inject({
         method: "POST",
         url: "/api/portable-investigations/preflight",
@@ -626,16 +677,14 @@ describe("portable investigation routes", () => {
       });
       expect(response.statusCode).toBe(200);
       const parsed = JSON.parse(response.body) as {
-        report: { applyAuthorized: boolean };
+        report: { applyAuthorized: boolean; exactReconstruction: boolean };
         authorization: { sourceRolesTrusted: boolean };
-        apply: { available: boolean; reason: string };
+        apply: { available: boolean; confirmationToken: string | null; typedConfirmation: string };
       };
       expect(parsed.report.applyAuthorized).toBe(false);
       expect(parsed.authorization.sourceRolesTrusted).toBe(false);
-      expect(parsed.apply).toEqual({
-        available: false,
-        reason: PORTABLE_APPLY_UNAVAILABLE_REASON,
-      });
+      expect(parsed.apply.available).toBe(true);
+      expect(parsed.apply.typedConfirmation).toBe(PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE);
 
       const plantedDestination = await app.inject({
         method: "POST",
@@ -655,13 +704,21 @@ describe("portable investigation routes", () => {
       });
       expect(plantedDestination.statusCode).toBe(400);
 
-      const apply = await app.inject({
+      const plantedApplyDestination = await app.inject({
         method: "POST",
         url: "/api/portable-investigations/apply",
         headers: { cookie: lead },
-        payload: {},
+        payload: {
+          schemaId: "cd-collab.portable_investigation_apply_request.v1",
+          confirmationToken: "pit1.forged",
+          typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
+          collisionPolicy: "remap_deterministic",
+          identityMap,
+          archive,
+          destination: { identities: [], objectIds: {}, knownProfileIds: [] },
+        },
       });
-      expect(apply.statusCode).toBe(404);
+      expect(plantedApplyDestination.statusCode).toBe(400);
 
       const capabilities = await app.inject({
         method: "GET",
@@ -671,7 +728,11 @@ describe("portable investigation routes", () => {
       expect(capabilities.statusCode).toBe(200);
       expect(JSON.parse(capabilities.body)).toMatchObject({
         maximumArchiveBytes: MAX_PORTABLE_ARCHIVE_BYTES,
-        apply: { available: false, reason: PORTABLE_APPLY_UNAVAILABLE_REASON },
+        apply: {
+          available: true,
+          requiresExactReconstruction: true,
+          typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
+        },
       });
     } finally {
       await app.close();
@@ -726,5 +787,307 @@ describe("portable investigation routes", () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe("portable investigation apply", () => {
+  it("applies an exact reconstruction once, preserves attribution-only people, and replays", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    expect(preview.report.exactReconstruction).toBe(true);
+    expect(preview.apply.confirmationToken).toMatch(/^pit1\./);
+
+    const applied = await row.portable.apply(
+      archive,
+      {
+        confirmationToken: preview.apply.confirmationToken as string,
+        typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
+        collisionPolicy: "remap_deterministic",
+        identityMap,
+      },
+      ACTOR,
+      false,
+    );
+    expect(applied.status).toBe("applied");
+    expect(applied.authenticityClaim).toBe("none");
+    expect(applied.destinationMembershipGranted).toBe(false);
+    expect(applied.deepLink).toBe(portableApplyDeepLink(applied.investigationId));
+    const imported = await row.cases.getCase(applied.investigationId, ACTOR, false);
+    expect(imported?.title).toBe("Synthetic queue stall");
+    expect(imported?.problemStatement).toBe("Synthetic workers stop draining a bounded queue.");
+    expect(imported?.participants).toEqual([{ identityId: ACTOR.id, username: ACTOR.username }]);
+    expect(imported?.participants.some((item) => item.identityId === "actor-historical-reviewer")).toBe(
+      false,
+    );
+
+    const replay = await row.portable.apply(
+      archive,
+      {
+        confirmationToken: preview.apply.confirmationToken as string,
+        typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
+        collisionPolicy: "remap_deterministic",
+        identityMap,
+      },
+      ACTOR,
+      false,
+    );
+    expect(replay.status).toBe("idempotent_replay");
+    expect(replay.investigationId).toBe(applied.investigationId);
+    const listed = (await row.cases.listCases(ACTOR, true)).filter(
+      (item) => item.title === "Synthetic queue stall",
+    );
+    expect(listed).toHaveLength(2);
+  });
+
+  it("refuses metadata-only, unresolved identities, tamper, stale catalogs, and substituted maps before mutation", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const identityMap = identityMapFor(archive);
+    const before = (await row.cases.listCases(ACTOR, true)).length;
+
+    const unresolved = await row.portable.preflight(
+      archive,
+      {
+        mode: "dry_run",
+        collisionPolicy: "remap_deterministic",
+        identityMap: identityMap.map((item) => ({
+          ...item,
+          action: "leave_unresolved" as const,
+          destinationActorId: null,
+        })),
+      },
+      ACTOR,
+      false,
+    );
+    expect(unresolved.apply.confirmationToken).toBeNull();
+
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const token = preview.apply.confirmationToken as string;
+
+    const planted = JSON.parse(JSON.stringify(archive)) as PortableArchiveV1;
+    planted.investigation.investigation.title = "PLANTED-ARCHIVE-CONTENT";
+    await expect(
+      row.portable.apply(
+        planted,
+        {
+          confirmationToken: token,
+          typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
+          collisionPolicy: "remap_deterministic",
+          identityMap,
+        },
+        ACTOR,
+        false,
+      ),
+    ).rejects.toMatchObject({ code: "archive_invalid" });
+
+    await expect(
+      row.portable.apply(
+        archive,
+        {
+          confirmationToken: token,
+          typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
+          collisionPolicy: "remap_deterministic",
+          identityMap: identityMap.map((item) =>
+            item.sourceActorId === ACTOR.id
+              ? { ...item, action: "preserve_historical_external" as const, destinationActorId: null }
+              : item,
+          ),
+        },
+        ACTOR,
+        false,
+      ),
+    ).rejects.toMatchObject({ code: "identity_map_mismatch" });
+
+    await row.cases.createCase(
+      ACTOR,
+      { title: "Synthetic catalog mutation", severity: "low" },
+      "fixture",
+    );
+    await expect(
+      row.portable.apply(
+        archive,
+        {
+          confirmationToken: token,
+          typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
+          collisionPolicy: "remap_deterministic",
+          identityMap,
+        },
+        ACTOR,
+        false,
+      ),
+    ).rejects.toMatchObject({ code: "stale_destination_catalog" });
+
+    expect((await row.cases.listCases(ACTOR, true)).length).toBe(before + 1);
+  });
+
+  it("binds confirmation to the minting actor and lead authorization", async () => {
+    const row = await fixture();
+    const app = await appFor(row);
+    try {
+      const lead = await login(app, "operator-north", "fixture-operator-secret");
+      const otherLead = await login(app, "reviewer-west", "fixture-reviewer-secret");
+      const viewer = await login(app, "viewer-west", "fixture-viewer-secret");
+      const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+      const identityMap = identityMapFor(archive);
+      const preview = await app.inject({
+        method: "POST",
+        url: "/api/portable-investigations/preflight",
+        headers: { cookie: lead },
+        payload: { archive, mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      });
+      const token = (JSON.parse(preview.body) as { apply: { confirmationToken: string } }).apply
+        .confirmationToken;
+      const body = {
+        schemaId: PORTABLE_APPLY_REQUEST_SCHEMA_ID,
+        confirmationToken: token,
+        typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
+        collisionPolicy: "remap_deterministic",
+        identityMap,
+        archive,
+      };
+      const denied = await app.inject({
+        method: "POST",
+        url: "/api/portable-investigations/apply",
+        headers: { cookie: viewer },
+        payload: body,
+      });
+      expect(denied.statusCode).toBe(403);
+      const mismatched = await app.inject({
+        method: "POST",
+        url: "/api/portable-investigations/apply",
+        headers: { cookie: otherLead },
+        payload: body,
+      });
+      expect(mismatched.statusCode).toBe(409);
+      expect(JSON.parse(mismatched.body)).toEqual({ error: "actor_mismatch" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rolls back memory stores when a later write fails and isolates snapshots", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const before = await row.caseStore.listCases();
+    const snapshot = await row.applyBoundary.snapshot();
+    await expect(
+      persistPortableArchive({
+        archive,
+        report: preview.report,
+        identityMap,
+        actor: ACTOR,
+        ports: {
+          ...row.applyBoundary.persist,
+          cases: new Proxy(row.caseStore, {
+            get(target, property, receiver) {
+              if (property === "insertSnapshot") {
+                return async () => {
+                  throw new Error("synthetic snapshot write failure");
+                };
+              }
+              const value = Reflect.get(target, property, receiver) as unknown;
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          }),
+        },
+        now: "2042-03-04T12:00:00.000Z",
+      }),
+    ).rejects.toThrow(/synthetic snapshot write failure/);
+    await row.applyBoundary.restore(snapshot);
+    expect((await row.caseStore.listCases()).map((item) => item.id).sort()).toEqual(
+      before.map((item) => item.id).sort(),
+    );
+
+    const isolated = row.caseStore.capture();
+    await row.caseStore.insertCase({
+      ...before[0],
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      title: "must-not-leak-into-snapshot",
+    });
+    row.caseStore.restore(isolated);
+    expect(await row.caseStore.getCase("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")).toBeNull();
+  });
+
+  it("applies concurrently as one write plus an idempotent replay", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    const input = {
+      confirmationToken: preview.apply.confirmationToken as string,
+      typedConfirmation: PORTABLE_APPLY_TYPED_CONFIRMATION_VALUE,
+      collisionPolicy: "remap_deterministic" as const,
+      identityMap,
+    };
+    const [first, second] = await Promise.all([
+      row.portable.apply(archive, input, ACTOR, false),
+      row.portable.apply(archive, input, ACTOR, false),
+    ]);
+    const statuses = [first.status, second.status].sort();
+    expect(statuses).toEqual(["applied", "idempotent_replay"]);
+    expect(first.investigationId).toBe(second.investigationId);
+  });
+});
+
+describe.skipIf(!adminUrl())("portable investigation apply postgres rollback", () => {
+  it("rolls back a partial PostgreSQL apply", async () => {
+    const row = await fixture();
+    const archive = await row.portable.exportArchive(row.caseId, ACTOR, false);
+    const identityMap = identityMapFor(archive);
+    const preview = await row.portable.preflight(
+      archive,
+      { mode: "dry_run", collisionPolicy: "remap_deterministic", identityMap },
+      ACTOR,
+      false,
+    );
+    await withDisposableDb(async (client) => {
+      await migrateUp(client);
+      const cases = new PgCaseStore(client);
+      await expect(
+        withPgApplyTransaction(client, row.store, async (ports) =>
+          persistPortableArchive({
+            archive,
+            report: preview.report,
+            identityMap,
+            actor: ACTOR,
+            ports: {
+              ...ports,
+              audit: {
+                append: async () => {
+                  throw new Error("synthetic audit write failure");
+                },
+                list: async () => [],
+              },
+            },
+            now: "2042-03-04T12:00:00.000Z",
+          }),
+        ),
+      ).rejects.toThrow(/synthetic audit write failure/);
+      expect(await cases.listCases()).toEqual([]);
+    });
   });
 });

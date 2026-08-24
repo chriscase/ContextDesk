@@ -149,7 +149,10 @@ describe("help search", () => {
       screen.getByText(/current brief and selected-evidence package/, { exact: false }),
     ).toBeTruthy();
     expect(
-      screen.getByText(/no full-investigation archive download/, { exact: false }),
+      screen.getByText(/Exact reconstructions can be restored/, { exact: false }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/Ed25519 metadata is recorded, not verified/, { exact: false }),
     ).toBeTruthy();
   });
 

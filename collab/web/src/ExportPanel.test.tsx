@@ -49,7 +49,11 @@ const PORTABLE_CAPABILITIES = {
   exportAvailable: true,
   dryRunPreflightAvailable: true,
   maximumArchiveBytes: 1024 * 1024,
-  apply: { available: false, reason: "atomic_apply_not_proven_for_memory_and_postgresql" },
+  apply: {
+    available: true,
+    requiresExactReconstruction: true,
+    typedConfirmation: "RESTORE",
+  },
 };
 
 const SYNTHETIC_ARCHIVE = {
@@ -378,8 +382,8 @@ describe("export panel", () => {
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:portable-archive");
     expect(screen.getByText(/Unlike the selected-evidence package above/)).toBeTruthy();
-    expect(screen.getByText(/Restore\/apply is unavailable/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /apply|restore/i })).toBeNull();
+    expect(screen.getByText(/Restore requires an exact reconstruction/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Restore investigation" })).toBeNull();
   });
 
   it("preflights an archive with attribution-only identities and deterministic remaps", async () => {
@@ -403,6 +407,16 @@ describe("export panel", () => {
             idRemap: [{ namespace: "investigation" }, { namespace: "evidence" }],
             reconstructionStatus: "metadata_only",
             exactReconstruction: false,
+            identityResolutions: [
+              {
+                sourceActorId: "historical-operator",
+                action: "preserve_historical_external",
+                destinationActorId: null,
+              },
+            ],
+            transportHash: "aa".repeat(32),
+            semanticFingerprint: "bb".repeat(32),
+            destinationCatalogDigest: "cc".repeat(32),
           },
           privacy: {
             classification: "contains_owner_only",
@@ -421,7 +435,14 @@ describe("export panel", () => {
             destinationRoleGranted: false,
             destinationCapabilityGranted: false,
           },
-          apply: { available: false, reason: "atomic_apply_not_proven" },
+          apply: {
+            available: true,
+            requiresExactReconstruction: true,
+            typedConfirmation: "RESTORE",
+            confirmationToken: null,
+            expiresAt: null,
+            reason: "exact_reconstruction_required",
+          },
         });
       }
       return jsonResponse(false, {});
@@ -440,6 +461,8 @@ describe("export panel", () => {
     expect(screen.getByText("Deterministic ID remaps").parentElement?.textContent).toContain("2");
     expect(screen.getByText(/2 states are not represented/)).toBeTruthy();
     expect(screen.getByText(/No investigation, user, membership, role, or permission was created/)).toBeTruthy();
+    expect(screen.getByText(/not an exact reconstruction/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Restore investigation" })).toBeNull();
     expect(bodies).toEqual([
       {
         archive: SYNTHETIC_ARCHIVE,
@@ -529,6 +552,103 @@ describe("export panel", () => {
     );
     expect(preflightCalls).toBe(1);
     expect(screen.queryByRole("region", { name: "Archive readiness summary" })).toBeNull();
+  });
+
+  it("confirms an exact reconstruction with typed RESTORE and opens the restored investigation", async () => {
+    const applyBodies: unknown[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/cases/c1/export/inventory") {
+        return jsonResponse(true, { items: [] });
+      }
+      if (url === "/api/portable-investigations/capabilities") {
+        return jsonResponse(true, PORTABLE_CAPABILITIES);
+      }
+      if (url === "/api/portable-investigations/preflight") {
+        return jsonResponse(true, {
+          report: {
+            counts: { create: 4, update: 0, conflict: 0, blocked: 0 },
+            collisionPolicy: "remap_deterministic",
+            warnings: [],
+            referentialIntegrityFailures: [],
+            idRemap: [{ namespace: "investigation" }],
+            identityResolutions: [
+              {
+                sourceActorId: "historical-operator",
+                action: "preserve_historical_external",
+                destinationActorId: null,
+              },
+            ],
+            reconstructionStatus: "exact",
+            exactReconstruction: true,
+            transportHash: "aa".repeat(32),
+            semanticFingerprint: "bb".repeat(32),
+            destinationCatalogDigest: "cc".repeat(32),
+          },
+          privacy: {
+            classification: "share_safe_only",
+            ownerOnlyEvidence: 0,
+            shareSafeEvidence: 1,
+            inlineBlobCount: 1,
+            omittedBlobCount: 0,
+            privateBlobCount: 0,
+            redactedBlobCount: 0,
+          },
+          omitted: [],
+          unsupported: ["synthetic_state_one"],
+          authorization: {
+            sourceRolesTrusted: false,
+            destinationMembershipGranted: false,
+            destinationRoleGranted: false,
+            destinationCapabilityGranted: false,
+          },
+          apply: {
+            available: true,
+            requiresExactReconstruction: true,
+            typedConfirmation: "RESTORE",
+            confirmationToken: "pit1.synthetic-token",
+            expiresAt: "2042-03-04T12:10:00.000Z",
+            reason: null,
+          },
+        });
+      }
+      if (url === "/api/portable-investigations/apply") {
+        applyBodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse(true, {
+          schemaId: "cd-collab.portable_investigation_apply_response.v1",
+          status: "applied",
+          investigationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          deepLink: "/investigations/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/situation",
+          authenticityClaim: "none",
+          destinationMembershipGranted: false,
+          destinationRoleGranted: false,
+          destinationCapabilityGranted: false,
+        });
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExportPanel caseId="c1" canWrite canLead />);
+    const input = await screen.findByLabelText("Portable investigation JSON");
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
+    fireEvent.change(input, { target: { files: [jsonFile(SYNTHETIC_ARCHIVE)] } });
+    fireEvent.click(await screen.findByRole("button", { name: "Run dry-run check" }));
+    expect(await screen.findByText(/exact reconstruction and can be restored/)).toBeTruthy();
+    expect(screen.getByText("Keep as historical attribution")).toBeTruthy();
+    const restore = screen.getByRole("button", { name: "Restore investigation" }) as HTMLButtonElement;
+    expect(restore.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Typed confirmation"), { target: { value: "RESTORE" } });
+    expect(restore.disabled).toBe(false);
+    fireEvent.click(restore);
+    const link = await screen.findByRole("link", { name: "Open restored investigation" });
+    expect(link.getAttribute("href")).toBe(
+      "/investigations/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/situation",
+    );
+    expect(applyBodies).toHaveLength(1);
+    expect((applyBodies[0] as { typedConfirmation: string }).typedConfirmation).toBe("RESTORE");
+    expect((applyBodies[0] as { confirmationToken: string }).confirmationToken).toBe(
+      "pit1.synthetic-token",
+    );
   });
 
   it("keeps archive controls lead-only without hiding the explanation", async () => {

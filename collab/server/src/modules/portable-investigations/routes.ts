@@ -1,6 +1,7 @@
 import {
   AUTH_ERROR_SCHEMA_ID,
   COLLISION_POLICIES,
+  parsePortableApplyRequest,
   type ArchiveBlobInventoryEntryV1,
   type AuthErrorV1,
   type CollisionPolicy,
@@ -192,6 +193,74 @@ export async function registerPortableInvestigationRoutes(
       }
     },
   );
+
+  app.post(
+    "/api/portable-investigations/apply",
+    { bodyLimit: MAX_PORTABLE_ARCHIVE_BYTES },
+    async (request, reply) => {
+      const ctx = await sessionOf(request);
+      if (!ctx) {
+        void reply.code(401);
+        return authError("unauthenticated");
+      }
+      if (!ctx.canLead) {
+        await deps.audit.append({
+          identity: ctx.actor.id,
+          action: "portable_archive_apply",
+          target: null,
+          origin: request.ip,
+          outcome: "denied",
+        });
+        void reply.code(403);
+        return authError("forbidden");
+      }
+      if (Buffer.byteLength(JSON.stringify(request.body ?? {}), "utf8") > MAX_PORTABLE_ARCHIVE_BYTES) {
+        void reply.code(413);
+        return { error: "portable_archive_size_limit" };
+      }
+      let parsed;
+      try {
+        parsed = parsePortableApplyRequest(request.body);
+      } catch {
+        void reply.code(400);
+        return { error: "portable_apply_request_invalid" };
+      }
+      try {
+        const result = await deps.portable.apply(
+          parsed.archive,
+          {
+            confirmationToken: parsed.confirmationToken,
+            typedConfirmation: parsed.typedConfirmation,
+            collisionPolicy: parsed.collisionPolicy,
+            identityMap: parsed.identityMap,
+            ...(parsed.suppliedBlobs
+              ? { suppliedBlobs: parsed.suppliedBlobs as ArchiveBlobInventoryEntryV1[] }
+              : {}),
+          },
+          ctx.actor,
+          ctx.isAdmin,
+        );
+        await deps.audit.append({
+          identity: ctx.actor.id,
+          action: "portable_archive_apply",
+          target: result.investigationId,
+          origin: request.ip,
+          outcome: "success",
+        });
+        void reply.header("cache-control", "no-store");
+        return result;
+      } catch (error) {
+        await deps.audit.append({
+          identity: ctx.actor.id,
+          action: "portable_archive_apply",
+          target: null,
+          origin: request.ip,
+          outcome: "failure",
+        });
+        return portableError(reply, error);
+      }
+    },
+  );
 }
 
 function portableError(
@@ -209,6 +278,19 @@ function portableError(
   if (error.code === "archive_size_limit") {
     void reply.code(413);
     return { error: "portable_archive_size_limit" };
+  }
+  if (error.code === "confirmation_invalid" || error.code === "actor_mismatch") {
+    void reply.code(409);
+    return { error: error.code };
+  }
+  if (
+    error.code === "stale_destination_catalog" ||
+    error.code === "identity_map_mismatch" ||
+    error.code === "exact_reconstruction_required" ||
+    error.code === "apply_refused"
+  ) {
+    void reply.code(409);
+    return { error: error.code };
   }
   void reply.code(422);
   return { error: error.code };

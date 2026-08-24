@@ -1,10 +1,15 @@
 # Portable investigation archive apply-readiness v1
 
-Status: **contract + dry-run only**. This note records the versioned archive
-projection in `collab/contracts/src/investigation-portable-archive.ts`
-(schema `collab/contracts/schemas/investigation-portable-archive.v1.json`).
-It does **not** ship archive I/O, Ed25519 signing or verification, persistence
-apply, an authorization route, or UI.
+Status: **exact-reconstruction apply shipped**. This note records the versioned
+archive projection in `collab/contracts/src/investigation-portable-archive.ts`
+(schema `collab/contracts/schemas/investigation-portable-archive.v1.json`)
+and the fail-closed apply contract in
+`collab/contracts/src/investigation-portable-apply.ts`.
+
+Shipped: complete archive download, parse/integrity, host destination-catalog
+preflight, server-minted confirmation tokens, lead/admin apply, one atomic
+persist with rollback, attribution-only historical people, and a War Room
+confirmation screen. It does **not** ship Ed25519 signing or verification.
 
 V1 portable parse/preflight remain in `investigation-portable.ts`. The package
 barrel (`collab/contracts/src/index.ts`) re-exports both modules.
@@ -94,13 +99,17 @@ fingerprint, `signedManifestHash`, and a hash inventory.
 `authenticityClaim` is `none`. This slice does not verify signatures or assert
 source trust.
 
-## Remaining server / archive / apply / UI work
+## Remaining residuals
 
-Not in this child (explicit residuals):
+Not claimed by this apply V1:
 
-- writing or reading archive bytes on disk
-- Ed25519 key management, signing, or verification
-- PostgreSQL persistence apply of remapped UUID rows
-- authorization routes or capability probes
-- War Room import/export UI
-- host catalog revalidation at apply time
+- Ed25519 key management, signing, or verification (`authenticityClaim` stays
+  `none`; signature metadata remains `unverified` or `unsigned`)
+- applying metadata-only, blocked, omitted, private, or redacted required
+  content
+- interaction traces, experiment agreement, live discussion presence, and
+  file-reference location verification
+- deleting content-addressed evidence bytes after a rolled-back metadata write
+- treating a client-supplied destination catalog as authorization
+  (`destinationCatalogMustRevalidate` remains true; apply recomputes the host
+  catalog)

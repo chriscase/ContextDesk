@@ -24,7 +24,11 @@ interface PortableCapabilities {
   exportAvailable: boolean;
   dryRunPreflightAvailable: boolean;
   maximumArchiveBytes: number;
-  apply: { available: false; reason: string };
+  apply: {
+    available: boolean;
+    requiresExactReconstruction?: boolean;
+    typedConfirmation?: string;
+  };
 }
 
 interface PortableActor {
@@ -36,6 +40,18 @@ interface PortableSelection {
   actorIds: string[];
 }
 
+interface PortableIdentityResolution {
+  sourceActorId: string;
+  action: string;
+  destinationActorId: string | null;
+}
+
+interface PortableApplyResult {
+  status: "applied" | "idempotent_replay";
+  investigationId: string;
+  deepLink: string;
+}
+
 interface PortablePreflightResult {
   report: {
     counts: { create: number; update: number; conflict: number; blocked: number };
@@ -43,8 +59,12 @@ interface PortablePreflightResult {
     warnings: unknown[];
     referentialIntegrityFailures: unknown[];
     idRemap: unknown[];
+    identityResolutions?: PortableIdentityResolution[];
     reconstructionStatus: string;
     exactReconstruction: boolean;
+    transportHash?: string;
+    destinationCatalogDigest?: string;
+    semanticFingerprint?: string;
   };
   privacy: {
     classification: string;
@@ -63,7 +83,14 @@ interface PortablePreflightResult {
     destinationRoleGranted: false;
     destinationCapabilityGranted: false;
   };
-  apply: { available: false; reason: string };
+  apply: {
+    available: boolean;
+    requiresExactReconstruction: boolean;
+    typedConfirmation: string;
+    confirmationToken: string | null;
+    expiresAt: string | null;
+    reason: string | null;
+  };
 }
 
 function safeFinding(finding: ScanFinding): ScanFinding {
@@ -121,6 +148,35 @@ function portableErrorMessage(status: number): string {
   return "This archive could not be checked. It may be malformed, incomplete, or incompatible.";
 }
 
+function applyErrorMessage(status: number, code: string | null): string {
+  if (status === 401 || status === 403) {
+    return "Your current account is not authorized to restore this archive.";
+  }
+  if (code === "stale_destination_catalog") {
+    return "The destination catalog changed after the dry-run check. Run the check again.";
+  }
+  if (code === "exact_reconstruction_required") {
+    return "This archive is not an exact reconstruction and cannot be restored.";
+  }
+  if (
+    code === "identity_map_mismatch" ||
+    code === "actor_mismatch" ||
+    code === "confirmation_invalid"
+  ) {
+    return "This restore confirmation is no longer valid. Run the dry-run check again.";
+  }
+  if (code === "apply_refused") {
+    return "The restore was refused and nothing was kept.";
+  }
+  return "This archive could not be restored. Nothing was kept.";
+}
+
+function readableAction(value: string): string {
+  if (value === "preserve_historical_external") return "Keep as historical attribution";
+  if (value === "map_existing") return "Map to an existing destination person";
+  return value.replaceAll("_", " ");
+}
+
 function readablePrivacy(value: string): string {
   return value.replaceAll("_", " ");
 }
@@ -143,10 +199,14 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
     null,
   );
   const [portableSelection, setPortableSelection] = useState<PortableSelection | null>(null);
-  const [portablePending, setPortablePending] = useState<"download" | "preflight" | null>(null);
+  const [portablePending, setPortablePending] = useState<
+    "download" | "preflight" | "apply" | null
+  >(null);
   const [portableMessage, setPortableMessage] = useState<string | null>(null);
   const [portableError, setPortableError] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<PortablePreflightResult | null>(null);
+  const [typedConfirmation, setTypedConfirmation] = useState("");
+  const [applyResult, setApplyResult] = useState<PortableApplyResult | null>(null);
   const inFlight = useRef(false);
 
   useEffect(() => {
@@ -190,7 +250,9 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           body.dryRunPreflightAvailable !== true ||
           !Number.isSafeInteger(body.maximumArchiveBytes) ||
           body.maximumArchiveBytes <= 0 ||
-          body.apply?.available !== false
+          body.apply?.available !== true ||
+          body.apply.requiresExactReconstruction !== true ||
+          body.apply.typedConfirmation !== "RESTORE"
         ) {
           setPortableStatus("unavailable");
           return;
@@ -313,6 +375,8 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
   async function selectPortableArchive(event: ChangeEvent<HTMLInputElement>) {
     setPortableSelection(null);
     setPreflight(null);
+    setApplyResult(null);
+    setTypedConfirmation("");
     setPortableMessage(null);
     setPortableError(null);
     const file = event.target.files?.[0];
@@ -346,6 +410,8 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
     setPortableError(null);
     setPortableMessage(null);
     setPreflight(null);
+    setApplyResult(null);
+    setTypedConfirmation("");
     try {
       const response = await protectedApiFetch("/api/portable-investigations/preflight", {
         method: "POST",
@@ -369,6 +435,71 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
       setPreflight(result);
       setPortableMessage(
         "Dry-run check complete. No investigation, user, membership, role, or permission was created or changed.",
+      );
+    } catch {
+      setPortableError(PORTABLE_NETWORK_ERROR);
+    } finally {
+      setPortablePending(null);
+    }
+  }
+
+  async function applyPortableArchive() {
+    if (
+      !props.canLead ||
+      !portableSelection ||
+      !preflight?.apply.confirmationToken ||
+      !preflight.report.exactReconstruction ||
+      typedConfirmation !== "RESTORE" ||
+      portablePending
+    ) {
+      return;
+    }
+    setPortablePending("apply");
+    setPortableError(null);
+    setPortableMessage(null);
+    setApplyResult(null);
+    try {
+      const response = await protectedApiFetch("/api/portable-investigations/apply", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          schemaId: "cd-collab.portable_investigation_apply_request.v1",
+          confirmationToken: preflight.apply.confirmationToken,
+          typedConfirmation: "RESTORE",
+          collisionPolicy: "remap_deterministic",
+          identityMap: portableSelection.actorIds.map((sourceActorId) => ({
+            sourceActorId,
+            action: "preserve_historical_external",
+            destinationActorId: null,
+          })),
+          archive: portableSelection.archive,
+        }),
+      });
+      const body = asRecord(await response.json());
+      if (!response.ok) {
+        const code = typeof body?.error === "string" ? body.error : null;
+        setPortableError(applyErrorMessage(response.status, code));
+        return;
+      }
+      if (
+        !body ||
+        (body.status !== "applied" && body.status !== "idempotent_replay") ||
+        typeof body.investigationId !== "string" ||
+        typeof body.deepLink !== "string" ||
+        !body.deepLink.startsWith("/investigations/")
+      ) {
+        setPortableError(applyErrorMessage(response.status, "apply_refused"));
+        return;
+      }
+      setApplyResult({
+        status: body.status,
+        investigationId: body.investigationId,
+        deepLink: body.deepLink,
+      });
+      setPortableMessage(
+        body.status === "idempotent_replay"
+          ? "This archive was already restored. Nothing new was created."
+          : "Restore complete. Historical people remain attribution only and received no destination access.",
       );
     } catch {
       setPortableError(PORTABLE_NETWORK_ERROR);
@@ -627,9 +758,9 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           become destination users, members, leads, administrators, or capability holders.
         </p>
         <p className="export__portable-warning">
-          Restore/apply is unavailable. This War Room can export and safely inspect an archive, but
-          it cannot yet reconstruct that archive on another installation with proven atomic
-          rollback. No apply control is provided.
+          Restore requires an exact reconstruction, a case lead or administrator, and typing{" "}
+          <strong>RESTORE</strong> after the dry-run check. Historical people stay attribution
+          only. Archive signatures are recorded, not verified.
         </p>
         <div className="export__portable-status" aria-live="polite" aria-atomic="true">
           {portableMessage ? <p>{portableMessage}</p> : null}
@@ -701,9 +832,111 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
                 {preflight.report.referentialIntegrityFailures.length} broken reference
                 {preflight.report.referentialIntegrityFailures.length === 1 ? "" : "s"}.
               </li>
-              <li>Restore/apply remains unavailable after this check.</li>
+              <li>
+                {preflight.report.exactReconstruction
+                  ? "This archive is an exact reconstruction and can be restored after typed confirmation."
+                  : "This archive is not an exact reconstruction. Metadata-only, blocked, omitted, private, or redacted required content cannot be restored."}
+              </li>
             </ul>
+            {(preflight.report.identityResolutions ?? []).length > 0 ? (
+              <ul className="export__preflight-notes" aria-label="Identity mappings">
+                {(preflight.report.identityResolutions ?? []).map((row) => (
+                  <li key={row.sourceActorId}>{readableAction(row.action)}</li>
+                ))}
+              </ul>
+            ) : null}
+            <p className="export__copy">
+              Collision policy: deterministic remaps.{" "}
+              {preflight.report.counts.conflict} collision
+              {preflight.report.counts.conflict === 1 ? "" : "s"} will receive new destination
+              identifiers instead of overwriting existing records.
+            </p>
+            <details className="export__tech">
+              <summary>Technical details</summary>
+              <dl className="export__summary-grid">
+                <div>
+                  <dt>Transport hash</dt>
+                  <dd>
+                    <code className="imported-run__text">
+                      {preflight.report.transportHash ?? "unavailable"}
+                    </code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Semantic fingerprint</dt>
+                  <dd>
+                    <code className="imported-run__text">
+                      {preflight.report.semanticFingerprint ?? "unavailable"}
+                    </code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Destination catalog digest</dt>
+                  <dd>
+                    <code className="imported-run__text">
+                      {preflight.report.destinationCatalogDigest ?? "unavailable"}
+                    </code>
+                  </dd>
+                </div>
+              </dl>
+            </details>
+            {preflight.report.exactReconstruction && preflight.apply.confirmationToken ? (
+              <form
+                className="export__confirm"
+                aria-labelledby="portable-confirm-heading"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void applyPortableArchive();
+                }}
+              >
+                <h6 id="portable-confirm-heading">Confirm exact restore</h6>
+                <p>
+                  Type <strong>RESTORE</strong> to reconstruct this investigation. Failure rolls
+                  back the whole import. Historical identities do not become members, roles, or
+                  capability holders.
+                </p>
+                <label className="export__typed">
+                  Typed confirmation
+                  <input
+                    className="login__input"
+                    value={typedConfirmation}
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={portablePending !== null || applyResult !== null}
+                    onChange={(event) => setTypedConfirmation(event.target.value)}
+                  />
+                </label>
+                <button
+                  className="login__submit"
+                  type="submit"
+                  disabled={
+                    typedConfirmation !== "RESTORE" ||
+                    portablePending !== null ||
+                    applyResult !== null
+                  }
+                >
+                  {portablePending === "apply" ? "Restoring investigation…" : "Restore investigation"}
+                </button>
+              </form>
+            ) : (
+              <p className="case-memory__note">
+                Restore stays unavailable until the dry-run reports an exact reconstruction.
+              </p>
+            )}
           </section>
+        ) : null}
+        {portablePending === "apply" ? (
+          <p className="case-memory__note" role="status">
+            Restoring investigation… This stays on one atomic import until it finishes or rolls
+            back.
+          </p>
+        ) : null}
+        {applyResult ? (
+          <p className="export__copy" role="status">
+            <a className="export__success-link" href={applyResult.deepLink}>
+              Open restored investigation
+            </a>
+          </p>
         ) : null}
       </section>
     </section>

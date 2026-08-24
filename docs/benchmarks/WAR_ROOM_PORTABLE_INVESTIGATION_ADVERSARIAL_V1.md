@@ -71,15 +71,16 @@ The same synthetic lab still drives `parsePortableInvestigation`,
 | Caller-owned inputs | parse / preflight still do not mutate caller objects |
 | Historical roles | `applyAuthorized` remains false; no destination membership/role/capability grant |
 
-Archive apply-readiness lives in
-`collab/contracts/src/investigation-portable-archive.ts` and
+Archive apply-readiness and exact-reconstruction apply live in
+`collab/contracts/src/investigation-portable-archive.ts`,
+`collab/contracts/src/investigation-portable-apply.ts`, and
 `docs/benchmarks/WAR_ROOM_PORTABLE_INVESTIGATION_ARCHIVE_APPLY_READINESS_V1.md`.
-That module is still contract + dry-run only.
+The preflight report's `applyAuthorized` field remains false: apply is a
+separate token-bound route, not a catalog grant.
 
 ## Non-claims / future work
 
-Import apply, persistence, destination authorization, archive I/O, Ed25519
-verification, host catalog revalidation at apply time, and UI remain future
-work. This lab does not call a live provider and does not invent gold, cost, or
-usage. SHA-256 fingerprints are integrity, not authenticity. Fixtures are fully
-synthetic.
+Ed25519 verification, metadata-only apply, interaction traces, and live
+discussion presence remain residual. This lab does not call a live provider and
+does not invent gold, cost, or usage. SHA-256 fingerprints are integrity, not
+authenticity. Fixtures are fully synthetic.

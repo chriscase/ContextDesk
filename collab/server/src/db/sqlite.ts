@@ -250,7 +250,7 @@ export function createSqliteRuntime(
 ): SqliteRuntime {
   const state = new SqliteState(path);
   const rawAudit = new MemoryAuditStore();
-  const audit = persistentMemoryStore(state, "audit", rawAudit, new Set(["append"]));
+  const audit = persistentMemoryStore(state, "audit", rawAudit, new Set(["append", "restore"]));
   const rawCases: MemoryCaseStore = new MemoryCaseStore((operation) =>
     state.transaction(
       [
@@ -276,6 +276,7 @@ export function createSqliteRuntime(
       "insertRevision",
       "insertArtifact",
       "insertSnapshot",
+      "restore",
     ]),
   );
   return {
@@ -293,14 +294,14 @@ export function createSqliteRuntime(
       state,
       "catalog",
       new MemoryCatalogStore(),
-      new Set(["insert", "updateMeta", "setLifecycle"]),
+      new Set(["insert", "updateMeta", "setLifecycle", "restore"]),
     ),
     cases,
     runs: persistentMemoryStore(
       state,
       "runs",
       new MemoryRunStore(),
-      new Set(["insert", "appendCorroboration"]),
+      new Set(["insert", "appendCorroboration", "restore"]),
     ),
     experiments: persistentMemoryStore(
       state,
@@ -313,13 +314,14 @@ export function createSqliteRuntime(
         "insertGold",
         "insertTrace",
         "insertAnnotation",
+        "restore",
       ]),
     ),
     jobs: persistentMemoryStore(
       state,
       "jobs",
       new MemoryTriageJobStore(),
-      new Set(["insert", "claimQueued", "renewLease", "recoverStale", "update"]),
+      new Set(["insert", "claimQueued", "renewLease", "recoverStale", "update", "restore"]),
     ),
   };
 }

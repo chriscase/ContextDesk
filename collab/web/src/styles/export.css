@@ -205,6 +205,49 @@
   padding-left: 1.1rem;
 }
 
+.export__confirm {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 0.45rem;
+}
+
+.export__confirm h6 {
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.export__confirm p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.export__typed {
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.export__tech {
+  margin-top: 0.55rem;
+}
+
+.export__tech summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.export__success-link {
+  color: var(--accent);
+  font-weight: 650;
+}
+
 @media (max-width: 760px) {
   .export__portable-grid,
   .export__summary-grid {

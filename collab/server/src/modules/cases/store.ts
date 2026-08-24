@@ -283,6 +283,36 @@ export class MemoryCaseStore implements CaseStore {
     this.atomicBoundary = serializedAtomicBoundary(boundary);
   }
 
+  capture(): unknown {
+    return structuredClone({
+      cases: [...this.cases.entries()],
+      timeline: [...this.timeline.entries()],
+      revisions: [...this.revisions.entries()],
+      artifacts: [...this.artifacts.entries()],
+      snapshots: [...this.snapshots.entries()],
+    });
+  }
+
+  restore(snapshot: unknown): void {
+    const row = structuredClone(snapshot) as {
+      cases: [string, CaseRow][];
+      timeline: [string, TimelineRow[]][];
+      revisions: [string, RevisionRow[]][];
+      artifacts: [string, ArtifactRow][];
+      snapshots: [string, SnapshotRow][];
+    };
+    this.cases.clear();
+    this.timeline.clear();
+    this.revisions.clear();
+    this.artifacts.clear();
+    this.snapshots.clear();
+    for (const [id, value] of row.cases) this.cases.set(id, value);
+    for (const [id, value] of row.timeline) this.timeline.set(id, value);
+    for (const [id, value] of row.revisions) this.revisions.set(id, value);
+    for (const [id, value] of row.artifacts) this.artifacts.set(id, value);
+    for (const [id, value] of row.snapshots) this.snapshots.set(id, value);
+  }
+
   async listCases(): Promise<CaseRow[]> {
     return [...this.cases.values()].map((row) => cloneCase(row));
   }
