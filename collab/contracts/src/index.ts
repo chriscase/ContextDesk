@@ -28,6 +28,33 @@ export type {
 } from "./health.js";
 
 export {
+  COMPONENT_HEALTH_COMPONENT_IDS,
+  COMPONENT_HEALTH_NOTICES,
+  COMPONENT_HEALTH_SCHEMA_ID,
+  parseComponentHealthResponse,
+  projectComponentHealth,
+} from "./component-health.js";
+export type {
+  ComponentHealthCompatibilityScope,
+  ComponentHealthCompatibilityStatus,
+  ComponentHealthCompatibilityV1,
+  ComponentHealthComponentId,
+  ComponentHealthComponentV1,
+  ComponentHealthDataMode,
+  ComponentHealthNotice,
+  ComponentHealthObservationV1,
+  ComponentHealthProjectorInputV1,
+  ComponentHealthProtocolV1,
+  ComponentHealthReportStatus,
+  ComponentHealthResponseV1,
+  ComponentHealthSource,
+  ComponentHealthStorageMigrationState,
+  ComponentHealthStorageMigrationV1,
+  ComponentHealthUpdateState,
+  ComponentHealthUpdateV1,
+} from "./component-health.js";
+
+export {
   APP_ROLES,
   AUTH_ERROR_SCHEMA_ID,
   SESSION_SCHEMA_ID,

@@ -33,6 +33,8 @@ import {
   type RustBridgeTriageExecutorOptions,
 } from "./modules/triage-runs/index.js";
 import { PresenceService } from "./modules/presence/index.js";
+import { syntheticComponentHealth } from "./modules/component-health/index.js";
+import type { ComponentHealthProjectorInputV1 } from "@cd-collab/contracts";
 import type { SetupService } from "./modules/setup/index.js";
 
 export const DEMO_USERNAME = "demo";
@@ -63,6 +65,7 @@ interface DemoAppOptions {
   onEvidenceRootCreated?: (root: string) => void;
   /** Explicit setup host seam for first-run UI qualification. */
   setup?: SetupService;
+  componentHealth?: ComponentHealthProjectorInputV1;
 }
 
 function demoUsers() {
@@ -619,6 +622,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       exporter,
       portable,
       ...(options.setup ? { setup: options.setup } : {}),
+      componentHealth: () => options.componentHealth ?? syntheticComponentHealth(),
       serveStatic: staticDir !== null,
       security: {
         auth: {
