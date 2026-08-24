@@ -261,12 +261,19 @@ rows, deterministic failed dimensions, redacted JSON, and redacted Markdown are
 inspectable rather than collapsed into a green badge.
 
 The four diagnostic-focused OPEN-v1 scenarios still require honest host-owned
-attempt/tool/role telemetry. The current serial answer runner identifies that
-requirement from host-only truth before dispatch and records those four
-scenarios as `blocked` with `host_diagnostic_pipeline_unavailable`. It does not
-send them to the provider, invent a diagnostic envelope, or count the missing
-host capability as a model failure. A clean 14/14 result is not claimed merely
-because answer-only model prose was returned.
+attempt/tool/role telemetry. The serial answer runner no longer treats all four
+as an unconditional pre-dispatch block:
+
+| Scenario | Host seam | Decision |
+| --- | --- | --- |
+| `qe09-attempt-usefulness` | `QualificationTransport` chat complete/cancel/error + host-authored export sample | **Execute** and join a host-built `ScriptedDiagnostic` (never fixture `candidates[].diagnostic`) |
+| `qe10-grounding-vs-transport` | classify timeout/auth/transport from host/transport errors; never `host_grounding` | **Execute** the same way |
+| `qe11-tool-progress` | host-executed tool loop (not provider `tool_calls`) | **Blocked** `host_diagnostic_pipeline_unavailable`, zero dispatch bytes |
+| `qe12-multimodel-budget` | investigator/reviewer/synthesizer budget pipeline | **Blocked** `host_diagnostic_pipeline_unavailable`, zero dispatch bytes |
+
+Unsupported host capabilities stay blocked and are never blamed on the model.
+A fluent parsed answer cannot drop host-recorded failed/partial diagnostic rows.
+A clean 14/14 result is not claimed.
 
 ## Security and mutation coverage
 
@@ -281,7 +288,11 @@ The focused suite proves:
   uncited claims fail;
 - crossed scenario ids and unknown fields/vocabulary fail;
 - escaped credential-shaped response values fail after JSON decoding; and
-- diagnostic truth succeeds only when joined from the host-owned envelope;
+- diagnostic truth succeeds only when joined from a host-built envelope (not fixture candidate diagnostics);
+- timeout/auth/transport is not classified as host-grounding;
+- zero-cite tool progress and non-progress without withdrawal fail;
+- silent role dropout and budget-exhausted+useful fail;
+- qe11/qe12 remain pre-dispatch blocked while qe09/qe10 dispatch;
 - configured and provider-reported model ids remain distinct and mismatches
   stay visible;
 - complete provider usage aggregates exactly while one missing value keeps the
@@ -311,11 +322,11 @@ is present only when reported by the gateway; it is not independently audited
 against billing. Cost is rounded to the nearest micro-US-dollar for the durable
 integer report, and all exported integers stay within the exact JavaScript
 range. Canonical captures are private local regression evidence, not share-safe
-exports or cryptographically authenticated attestations. This path still does
-not execute the four blocked diagnostic
-scenarios through a full attempt/tool/role pipeline, derive measured
-recommendations, or prove a packaged configured-provider acceptance run. Those
-remain follow-up work for issue #726.
+exports or cryptographically authenticated attestations. This path still does not execute qe11 tool-progress or qe12 three-role budget
+scenarios through a host tool loop / multi-stage budget pipeline, derive
+measured recommendations, or prove a packaged configured-provider acceptance
+run. Those remain follow-up work for issue #726. It does not manufacture a
+green 14/14.
 
 ## Verification
 

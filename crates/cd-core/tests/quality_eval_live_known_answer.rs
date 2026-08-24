@@ -1,10 +1,15 @@
+use cd_core::investigation_team_qualification::InvestigationTeamRole;
+use cd_core::quality_eval::live_known_answer::{
+    scripted_diagnostic_from_host_attempts, scripted_diagnostic_from_parsed_response,
+    HostAttemptClass, HostAttemptObservation,
+};
 use cd_core::quality_eval::{
     live_known_answer_prompt_set_hash, load_suite, parse_live_known_answer_response,
     parse_live_known_answer_response_classified, prepare_live_known_answer_suite,
     score_live_known_answer_response, serialize_live_known_answer_prompt, CandidateAnswer,
     LiveAnswerClaim, LiveCitation, LiveKnownAnswerResponse, LiveKnownAnswerResponseFailure,
-    LoadedSuite, PreparedLiveKnownAnswerCase, LIVE_KNOWN_ANSWER_RESPONSE_MAX_BYTES,
-    LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID,
+    LoadedSuite, PreparedLiveKnownAnswerCase, ScriptedRoleOutcome, ScriptedToolStep,
+    LIVE_KNOWN_ANSWER_RESPONSE_MAX_BYTES, LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID,
 };
 use std::path::PathBuf;
 
@@ -113,6 +118,14 @@ fn prepares_all_fourteen_cases_in_manifest_order_with_opaque_ids() {
         .iter()
         .chain(&prepared[12..])
         .all(|case| !case.requires_host_diagnostic()));
+    assert!(prepared[8].host_can_observe_diagnostic());
+    assert!(prepared[9].host_can_observe_diagnostic());
+    assert!(!prepared[10].host_can_observe_diagnostic());
+    assert!(!prepared[11].host_can_observe_diagnostic());
+    assert!(prepared[10].blocks_diagnostic_before_dispatch());
+    assert!(prepared[11].blocks_diagnostic_before_dispatch());
+    assert!(!prepared[8].blocks_diagnostic_before_dispatch());
+    assert!(!prepared[9].blocks_diagnostic_before_dispatch());
 }
 
 #[test]
@@ -449,8 +462,8 @@ fn diagnostic_truth_uses_host_owned_envelope_not_provider_json() {
     let prepared = prepare_live_known_answer_suite(&suite).expect("prepare live suite");
     let case_id = "qe09-attempt-usefulness";
     let case = prepared_index(&prepared, case_id);
-    let scripted = candidate(&suite, case_id, "good_mixed_accounted");
-    let response = response_from_candidate(case, scripted);
+    let response =
+        response_from_candidate(case, candidate(&suite, case_id, "good_mixed_accounted"));
 
     let missing_host_facts = score_response(case, &response, None);
     assert!(!missing_host_facts.answer.passed);
@@ -459,10 +472,268 @@ fn diagnostic_truth_uses_host_owned_envelope_not_provider_json() {
         .failed_ids()
         .contains(&"diagnostic_envelope_present"));
 
-    let host_joined = score_response(case, &response, scripted.diagnostic.clone());
+    let host_diag = scripted_diagnostic_from_host_attempts(
+        &[
+            HostAttemptObservation {
+                attempt_id: "host-transport".into(),
+                class: HostAttemptClass::Transport,
+                citeable_evidence: false,
+            },
+            HostAttemptObservation {
+                attempt_id: "host-success".into(),
+                class: HostAttemptClass::Success,
+                citeable_evidence: true,
+            },
+        ],
+        InvestigationTeamRole::Single,
+    );
+    assert_eq!(host_diag.reported_category, "mixed_attempts_accounted");
+    let host_joined = score_response(case, &response, Some(host_diag.clone()));
     assert!(
         host_joined.answer.passed,
         "{:?}",
         host_joined.answer.failed_ids()
+    );
+    assert!(!host_joined.answer.failed_ids().iter().any(|id| {
+        matches!(
+            id,
+            &"diagnostic_envelope_present" | &"attempt_usefulness" | &"share_safe_export"
+        )
+    }));
+}
+
+#[test]
+fn host_diagnostic_honesty_matrix_drives_shipped_scorer() {
+    let suite = suite();
+    let prepared = prepare_live_known_answer_suite(&suite).expect("prepare live suite");
+    let qe09 = prepared_index(&prepared, "qe09-attempt-usefulness");
+    let qe10 = prepared_index(&prepared, "qe10-grounding-vs-transport");
+    let qe11 = prepared_index(&prepared, "qe11-tool-progress");
+    let qe12 = prepared_index(&prepared, "qe12-multimodel-budget");
+    let response_09 = response_from_candidate(
+        qe09,
+        candidate(&suite, "qe09-attempt-usefulness", "good_mixed_accounted"),
+    );
+    let response_10 = response_from_candidate(
+        qe10,
+        candidate(
+            &suite,
+            "qe10-grounding-vs-transport",
+            "good_timeout_classified",
+        ),
+    );
+    let response_11 = response_from_candidate(
+        qe11,
+        candidate(
+            &suite,
+            "qe11-tool-progress",
+            "good_withdraw_after_non_progress",
+        ),
+    );
+    let response_12 = response_from_candidate(
+        qe12,
+        candidate(&suite, "qe12-multimodel-budget", "good_roles_complete"),
+    );
+
+    let timeout_as_timeout = scripted_diagnostic_from_host_attempts(
+        &[HostAttemptObservation {
+            attempt_id: "host-timeout".into(),
+            class: HostAttemptClass::Timeout,
+            citeable_evidence: false,
+        }],
+        InvestigationTeamRole::Single,
+    );
+    assert_eq!(timeout_as_timeout.reported_category, "timeout");
+    assert_ne!(
+        timeout_as_timeout.reported_category,
+        "host_grounding_refusal"
+    );
+    let timeout_score = score_response(qe10, &response_10, Some(timeout_as_timeout));
+    assert!(!timeout_score
+        .answer
+        .failed_ids()
+        .contains(&"transport_versus_grounding"));
+
+    let mut timeout_as_grounding = scripted_diagnostic_from_host_attempts(
+        &[HostAttemptObservation {
+            attempt_id: "host-timeout".into(),
+            class: HostAttemptClass::Timeout,
+            citeable_evidence: false,
+        }],
+        InvestigationTeamRole::Single,
+    );
+    timeout_as_grounding.reported_category = "host_grounding_refusal".into();
+    let mislabeled = score_response(qe10, &response_10, Some(timeout_as_grounding));
+    assert!(mislabeled
+        .answer
+        .failed_ids()
+        .contains(&"transport_versus_grounding"));
+
+    let mut dishonest_useful = scripted_diagnostic_from_host_attempts(
+        &[
+            HostAttemptObservation {
+                attempt_id: "host-a".into(),
+                class: HostAttemptClass::Timeout,
+                citeable_evidence: false,
+            },
+            HostAttemptObservation {
+                attempt_id: "host-b".into(),
+                class: HostAttemptClass::Auth,
+                citeable_evidence: false,
+            },
+        ],
+        InvestigationTeamRole::Single,
+    );
+    dishonest_useful.claims_useful = true;
+    dishonest_useful.usefulness_policy = "all_failed".into();
+    let useful_when_failed = score_response(qe09, &response_09, Some(dishonest_useful));
+    assert!(useful_when_failed
+        .answer
+        .failed_ids()
+        .contains(&"attempt_usefulness"));
+
+    let mut zero_cite =
+        scripted_diagnostic_from_parsed_response(&response_11, InvestigationTeamRole::Single);
+    zero_cite.tool_steps = vec![ScriptedToolStep {
+        step_id: "host-search".into(),
+        kind: "search".into(),
+        citeable_hits: 0,
+        progress: true,
+        withdrawn: false,
+    }];
+    let zero_cite_score = score_response(qe11, &response_11, Some(zero_cite));
+    assert!(zero_cite_score
+        .answer
+        .failed_ids()
+        .contains(&"tool_citeable_evidence"));
+
+    let mut no_withdraw =
+        scripted_diagnostic_from_parsed_response(&response_11, InvestigationTeamRole::Single);
+    no_withdraw.tool_steps = vec![
+        ScriptedToolStep {
+            step_id: "host-search-1".into(),
+            kind: "search".into(),
+            citeable_hits: 0,
+            progress: false,
+            withdrawn: false,
+        },
+        ScriptedToolStep {
+            step_id: "host-search-2".into(),
+            kind: "search".into(),
+            citeable_hits: 0,
+            progress: false,
+            withdrawn: false,
+        },
+    ];
+    let no_withdraw_score = score_response(qe11, &response_11, Some(no_withdraw));
+    assert!(no_withdraw_score
+        .answer
+        .failed_ids()
+        .contains(&"tool_non_progress_withdrawal"));
+
+    let mut dropout =
+        scripted_diagnostic_from_parsed_response(&response_12, InvestigationTeamRole::Investigator);
+    dropout.roles = vec![
+        ScriptedRoleOutcome {
+            role: "investigator".into(),
+            status: "completed".into(),
+        },
+        ScriptedRoleOutcome {
+            role: "reviewer".into(),
+            status: "dropped".into(),
+        },
+    ];
+    dropout.host_budget_exhausted = false;
+    let dropout_score = score_response(qe12, &response_12, Some(dropout));
+    assert!(dropout_score
+        .answer
+        .failed_ids()
+        .contains(&"multi_model_role_coverage"));
+
+    let mut budget_useful =
+        scripted_diagnostic_from_parsed_response(&response_12, InvestigationTeamRole::Investigator);
+    budget_useful.host_budget_exhausted = true;
+    budget_useful.claims_useful = true;
+    budget_useful.roles = vec![
+        ScriptedRoleOutcome {
+            role: "investigator".into(),
+            status: "completed".into(),
+        },
+        ScriptedRoleOutcome {
+            role: "reviewer".into(),
+            status: "budget_exhausted".into(),
+        },
+        ScriptedRoleOutcome {
+            role: "synthesizer".into(),
+            status: "budget_exhausted".into(),
+        },
+    ];
+    let budget_score = score_response(qe12, &response_12, Some(budget_useful));
+    assert!(budget_score
+        .answer
+        .failed_ids()
+        .contains(&"host_budget_honesty"));
+
+    let fluent = response_09.clone();
+    let failed_partial = scripted_diagnostic_from_host_attempts(
+        &[
+            HostAttemptObservation {
+                attempt_id: "host-failed".into(),
+                class: HostAttemptClass::Transport,
+                citeable_evidence: false,
+            },
+            HostAttemptObservation {
+                attempt_id: "host-fluent".into(),
+                class: HostAttemptClass::Success,
+                citeable_evidence: true,
+            },
+        ],
+        InvestigationTeamRole::Single,
+    );
+    let fluent_score = score_response(qe09, &fluent, Some(failed_partial.clone()));
+    assert!(failed_partial.attempts.iter().any(|row| !row.succeeded));
+    assert_eq!(
+        fluent_score.answer.passed,
+        fluent_score.answer.dimensions.iter().all(|d| d.passed)
+    );
+    assert!(
+        fluent_score
+            .answer
+            .dimensions
+            .iter()
+            .any(|d| d.id == "attempt_usefulness"),
+        "failed/partial host attempts remain on the score"
+    );
+}
+
+#[test]
+fn transport_classifier_never_emits_host_grounding() {
+    for reason in [
+        "timeout after 30s",
+        "deadline exceeded",
+        "401 unauthorized",
+        "403 forbidden",
+        "connection reset",
+    ] {
+        let class = HostAttemptClass::from_transport_reason(reason);
+        assert_ne!(class.as_str(), "host_grounding");
+        let diag = scripted_diagnostic_from_host_attempts(
+            &[HostAttemptObservation {
+                attempt_id: "host-1".into(),
+                class,
+                citeable_evidence: false,
+            }],
+            InvestigationTeamRole::Single,
+        );
+        assert_ne!(diag.reported_category, "host_grounding_refusal");
+        assert!(!diag.reported_category.contains("grounding"));
+    }
+    assert_eq!(
+        HostAttemptClass::from_chat_outcome(true, None, false, false).as_str(),
+        "timeout"
+    );
+    assert_eq!(
+        HostAttemptClass::from_chat_outcome(false, Some("connection reset"), false, false).as_str(),
+        "transport"
     );
 }

@@ -10,9 +10,10 @@ use super::suite::{
 };
 use super::types::{
     failure_reason, AnswerClaim, AnswerDimension, AnswerScore, AnswerTruth, CandidateAnswer,
-    EvidencePacket, LaneStatus, ScriptedDiagnostic,
+    EvidencePacket, LaneStatus, ScriptedAttempt, ScriptedDiagnostic, ScriptedRoleOutcome,
 };
 use crate::error::{CoreError, CoreResult};
+use crate::investigation_team_qualification::InvestigationTeamRole;
 use crate::redact::scrub_secrets;
 use crate::turn_trace::opaque_absolute_paths;
 use serde::{Deserialize, Serialize};
@@ -503,6 +504,201 @@ impl PreparedLiveKnownAnswerCase {
     pub fn requires_host_diagnostic(&self) -> bool {
         self.truth.diagnostic.is_some()
     }
+
+    /// Whether the serial answer runner can honestly observe the diagnostic
+    /// facts this scenario requires.
+    ///
+    /// Tool-progress/withdrawal and three-role budget coverage need host seams
+    /// this runner does not have. Those stay pre-dispatch blocked.
+    pub fn host_can_observe_diagnostic(&self) -> bool {
+        match &self.truth.diagnostic {
+            None => true,
+            Some(diagnostic) => {
+                !diagnostic.require_citeable_on_tool_progress
+                    && !diagnostic.require_tool_withdrawal_after_non_progress
+                    && diagnostic.required_roles.is_empty()
+            }
+        }
+    }
+
+    /// Pre-dispatch block: diagnostic required but unobservable on this runner.
+    pub fn blocks_diagnostic_before_dispatch(&self) -> bool {
+        self.requires_host_diagnostic() && !self.host_can_observe_diagnostic()
+    }
+}
+
+/// Host-owned classification of one observed chat attempt.
+/// Never derived from provider JSON `diagnostic` fields or fixture truth labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostAttemptClass {
+    /// Parsed a bounded evaluable answer.
+    Success,
+    /// Transport/connect/protocol failure.
+    Transport,
+    /// Authentication/authorization failure.
+    Auth,
+    /// Deadline or timeout.
+    Timeout,
+    /// Parsed but empty of evaluable claims.
+    Empty,
+    /// Host withheld grounding (not produced by this runner).
+    Analysis,
+}
+
+impl HostAttemptClass {
+    /// Stable ScriptedAttempt failure_class label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Transport => "transport",
+            Self::Auth => "auth",
+            Self::Timeout => "timeout",
+            Self::Empty => "empty",
+            Self::Analysis => "analysis",
+        }
+    }
+
+    /// Whether the attempt produced evaluable analysis.
+    pub fn succeeded(self) -> bool {
+        matches!(self, Self::Success)
+    }
+
+    /// Classify a host/transport error string. Never `host_grounding`.
+    pub fn from_transport_reason(reason: &str) -> Self {
+        let lower = reason.to_ascii_lowercase();
+        if lower.contains("timeout") || lower.contains("timed out") || lower.contains("deadline") {
+            Self::Timeout
+        } else if lower.contains("unauthorized")
+            || lower.contains("forbidden")
+            || lower.contains("401")
+            || lower.contains("403")
+            || (lower.contains("auth") && !lower.contains("author"))
+        {
+            Self::Auth
+        } else {
+            Self::Transport
+        }
+    }
+
+    /// Classify one chat_complete outcome from host-observed flags only.
+    pub fn from_chat_outcome(
+        cancelled: bool,
+        raw_error: Option<&str>,
+        parsed_ok: bool,
+        empty_content: bool,
+    ) -> Self {
+        if cancelled {
+            return Self::Timeout;
+        }
+        if let Some(reason) = raw_error {
+            return Self::from_transport_reason(reason);
+        }
+        if parsed_ok {
+            return Self::Success;
+        }
+        if empty_content {
+            return Self::Empty;
+        }
+        Self::Analysis
+    }
+}
+
+/// One host-observed attempt. Tests and the trusted runner construct this from
+/// transport/cancel/parse facts, never from fixture candidate diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostAttemptObservation {
+    /// Stable attempt id assigned by the host.
+    pub attempt_id: String,
+    /// Host classification.
+    pub class: HostAttemptClass,
+    /// Whether the host observed citeable citations on a parsed answer.
+    pub citeable_evidence: bool,
+}
+
+/// Build a `ScriptedDiagnostic` from host-observed attempts only.
+///
+/// Category, usefulness, and export sample are derived from those rows.
+/// Tool steps stay empty: this runner does not execute tools.
+pub fn scripted_diagnostic_from_host_attempts(
+    attempts: &[HostAttemptObservation],
+    configured_role: InvestigationTeamRole,
+) -> ScriptedDiagnostic {
+    let any_success = attempts.iter().any(|row| row.class.succeeded());
+    let any_fail = attempts.iter().any(|row| !row.class.succeeded());
+    let all_fail = !attempts.is_empty() && attempts.iter().all(|row| !row.class.succeeded());
+    let timeout = attempts
+        .iter()
+        .any(|row| row.class == HostAttemptClass::Timeout && !row.class.succeeded());
+    let auth = attempts
+        .iter()
+        .any(|row| row.class == HostAttemptClass::Auth && !row.class.succeeded());
+    let transport = attempts
+        .iter()
+        .any(|row| row.class == HostAttemptClass::Transport && !row.class.succeeded());
+    let (reported_category, usefulness_policy, claims_useful) = if timeout && !any_success {
+        ("timeout", "all_failed", false)
+    } else if auth && !any_success {
+        ("auth_failure", "all_failed", false)
+    } else if transport && !any_success {
+        ("transport_failure", "all_failed", false)
+    } else if any_success && any_fail {
+        ("mixed_attempts_accounted", "mixed_accounted", true)
+    } else if all_fail {
+        ("all_attempts_failed", "all_failed", false)
+    } else if any_success {
+        ("compatible_success", "all_succeeded", true)
+    } else {
+        ("empty_terminal_answer", "none", false)
+    };
+    let succeeded = attempts.iter().filter(|row| row.class.succeeded()).count();
+    let failed = attempts.len().saturating_sub(succeeded);
+    let export_text = format!(
+        "attempts={} succeeded={} failed={} category={}",
+        attempts.len(),
+        succeeded,
+        failed,
+        reported_category
+    );
+    ScriptedDiagnostic {
+        attempts: attempts
+            .iter()
+            .map(|row| ScriptedAttempt {
+                attempt_id: row.attempt_id.clone(),
+                failure_class: row.class.as_str().into(),
+                succeeded: row.class.succeeded(),
+                citeable_evidence: row.citeable_evidence,
+            })
+            .collect(),
+        tool_steps: Vec::new(),
+        roles: vec![ScriptedRoleOutcome {
+            role: configured_role.as_str().into(),
+            status: "completed".into(),
+        }],
+        host_budget_exhausted: false,
+        reported_category: reported_category.into(),
+        claims_useful,
+        usefulness_policy: usefulness_policy.into(),
+        export_text,
+    }
+}
+
+/// Host diagnostic for one parsed live response (single observed attempt).
+pub fn scripted_diagnostic_from_parsed_response(
+    response: &LiveKnownAnswerResponse,
+    configured_role: InvestigationTeamRole,
+) -> ScriptedDiagnostic {
+    let citeable_evidence = response
+        .claims
+        .iter()
+        .any(|claim| !claim.citations.is_empty());
+    scripted_diagnostic_from_host_attempts(
+        &[HostAttemptObservation {
+            attempt_id: "host-1".into(),
+            class: HostAttemptClass::Success,
+            citeable_evidence,
+        }],
+        configured_role,
+    )
 }
 
 /// Score joined to both opaque provider and host-only case identities.
