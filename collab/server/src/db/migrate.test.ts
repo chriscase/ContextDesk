@@ -19,6 +19,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("010_presence");
       expect(up.applied).toContain("011_triage_worker_leases");
       expect(up.applied).toContain("012_case_situation");
+      expect(up.applied).toContain("013_corpus_intake");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
@@ -38,6 +39,45 @@ describe.skipIf(!adminUrl())("migrations", () => {
          FROM pg_constraint WHERE conname = 'cases_open_questions_array_check'`,
       );
       expect(constraint.rows[0]?.definition).toContain("jsonb_path_exists");
+      const intakeConstraint = await client.query<{ definition: string }>(
+        `SELECT pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint WHERE conname = 'evidence_artifacts_intake_batch_fk'`,
+      );
+      expect(intakeConstraint.rows[0]?.definition).toContain(
+        "FOREIGN KEY (case_id, intake_batch_id)",
+      );
+      expect(intakeConstraint.rows[0]?.definition).toContain("DEFERRABLE INITIALLY DEFERRED");
+      await client.query(`
+        INSERT INTO cases (id, title, severity, status, created_by, created_by_username)
+        VALUES (
+          '11111111-1111-4111-8111-111111111111',
+          'synthetic referential fixture',
+          'low',
+          'open',
+          'synthetic-actor',
+          'synthetic-actor'
+        )
+      `);
+      await expect(client.query(`
+        INSERT INTO evidence_artifacts (
+          id, case_id, kind, filename, privacy_class, uploader_id, uploader_username,
+          intake_batch_id
+        ) VALUES (
+          '22222222-2222-4222-8222-222222222222',
+          '11111111-1111-4111-8111-111111111111',
+          'log',
+          'synthetic.log',
+          'owner_only',
+          'synthetic-actor',
+          'synthetic-actor',
+          '33333333-3333-4333-8333-333333333333'
+        )
+      `)).rejects.toThrow(/evidence_artifacts_intake_batch_fk/);
+      expect((await migrateDown(client)).rolledBack).toBe("013_corpus_intake");
+      const intakeTable = await client.query<{ to_regclass: string | null }>(
+        `SELECT to_regclass('public.evidence_intake_batches') AS to_regclass`,
+      );
+      expect(intakeTable.rows[0]?.to_regclass).toBeNull();
       expect((await migrateDown(client)).rolledBack).toBe("012_case_situation");
       const rolledBackColumns = await client.query<{ column_name: string }>(
         `SELECT column_name FROM information_schema.columns
@@ -81,6 +121,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("010_presence");
       expect(dry.pending).toContain("011_triage_worker_leases");
       expect(dry.pending).toContain("012_case_situation");
+      expect(dry.pending).toContain("013_corpus_intake");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

@@ -60,7 +60,7 @@ describe("health and readiness", () => {
     const app = await buildApp({
       config: testConfig({ evidenceRoot: root }),
       pool: {
-        query: async () => ({ rows: [{ "?column?": 1 }] }),
+        query: async () => ({ rows: [{ "?column?": 1 }], rowCount: 1 }),
       },
       store,
     });
@@ -69,6 +69,26 @@ describe("health and readiness", () => {
     const body = parseReadyResponse(JSON.parse(res.body));
     expect(body.status).toBe("ready");
     expect(body.database).toBe("up");
+    expect(body.evidenceStore).toBe("up");
+    await app.close();
+  });
+
+  it("reports not_ready when migration 013 is not applied", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cd-collab-ready-migration-"));
+    dirs.push(root);
+    const store = new FilesystemEvidenceStore({ rootDir: root });
+    const app = await buildApp({
+      config: testConfig({ evidenceRoot: root }),
+      pool: {
+        query: async () => ({ rows: [], rowCount: 0 }),
+      },
+      store,
+    });
+    const res = await app.inject({ method: "GET", url: "/ready" });
+    expect(res.statusCode).toBe(503);
+    const body = parseReadyResponse(JSON.parse(res.body));
+    expect(body.status).toBe("not_ready");
+    expect(body.database).toBe("down");
     expect(body.evidenceStore).toBe("up");
     await app.close();
   });

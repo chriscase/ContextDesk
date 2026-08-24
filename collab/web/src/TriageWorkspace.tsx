@@ -1,6 +1,7 @@
 import type { FormEvent, ReactNode } from "react";
 import { ImportedRun } from "./ImportedRun.js";
 import type { WorkFocus } from "./app-location.js";
+import { CorpusIntakePanel } from "./CorpusIntakePanel.js";
 import { useRouteFocus } from "./route-focus.js";
 
 export interface TimelineEvent {
@@ -177,6 +178,7 @@ const RAIL_STEPS = [
 ] as const;
 
 export function TriageWorkspace(props: {
+  caseId?: string;
   canWrite: boolean;
   readOnly: boolean;
   sources: SourceOption[];
@@ -478,6 +480,14 @@ export function TriageWorkspace(props: {
             contributor access.
           </p>
         )}
+        {props.caseId ? (
+          <CorpusIntakePanel
+            caseId={props.caseId}
+            canWrite={props.canWrite}
+            readOnly={props.readOnly}
+            {...(props.routeFocus ? { routeFocus: props.routeFocus } : {})}
+          />
+        ) : null}
         <section className="triage-record" aria-labelledby="triage-record-title">
           <header className="triage-record__head">
             <h4 id="triage-record-title">The case record so far</h4>

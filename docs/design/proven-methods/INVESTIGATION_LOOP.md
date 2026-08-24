@@ -48,6 +48,7 @@ view state.
 | Linked-chat `log_nav` proposal                       | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs), [`logNav.ts`](../../../desktop/src/lib/logExplorer/logNav.ts)                                         | It is navigation intent, not a durable finding proposal  |
 | Model/detector proposal review queue (findings + report sections) | **Partial** | [`proposed.rs`](../../../crates/cd-core/src/investigations/proposed.rs) and [`report.rs`](../../../crates/cd-core/src/investigations/report.rs)                                       | Ranking, walkthrough, and deeper-analysis requests remain #646 |
 | Accepted-state report projection + Markdown export   | **Partial** | [`report.rs`](../../../crates/cd-core/src/investigations/report.rs) `assemble_investigation_report`                                                                                  | Fuller #532 vocabulary, patches/undo, claim detection, HTML/PDF, evidence appendix |
+| War Room investigation-scoped file/ZIP/directory intake | **Local integration** | Collab contract `investigation-corpus-intake.ts`, module `collab/server/src/modules/corpus-intake/`, Capture UI `CorpusIntakePanel.tsx` | Parallel portable-investigation restore lane is out of scope here. PostgreSQL `withAtomic` now binds store queries to the transaction via async-local storage; filesystem blob orphans after a failed commit remain content-addressed residue. |
 
 ## 3. Reusable method
 

@@ -38,6 +38,37 @@ describe("FilesystemEvidenceStore", () => {
     });
   });
 
+  it("keeps staged bytes invisible and removes a committed stage on rollback", async () => {
+    await withStore(async (store) => {
+      const bytes = new TextEncoder().encode("staged-synthetic-line\n");
+      const stage = await store.stage(bytes, { contentType: "text/plain" });
+      try {
+        expect(await store.head(stage.meta.hash)).toBeNull();
+        await stage.commit();
+        expect(await store.verify(stage.meta.hash)).toBe(true);
+        await stage.rollback();
+        expect(await store.head(stage.meta.hash)).toBeNull();
+      } finally {
+        stage.release();
+      }
+    });
+  });
+
+  it("does not remove pre-existing deduplicated bytes when a later stage rolls back", async () => {
+    await withStore(async (store) => {
+      const bytes = new TextEncoder().encode("shared-synthetic-line\n");
+      const first = await store.put(bytes, { contentType: "text/plain" });
+      const stage = await store.stage(bytes, { contentType: "text/x-log" });
+      try {
+        await stage.commit();
+        await stage.rollback();
+      } finally {
+        stage.release();
+      }
+      expect(await store.verify(first.hash)).toBe(true);
+    });
+  });
+
   it("detects a mutated blob and fails closed", async () => {
     await withStore(async (store) => {
       const bytes = new TextEncoder().encode("original-bytes");

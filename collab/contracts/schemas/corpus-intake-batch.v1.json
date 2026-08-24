@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/corpus-intake-batch.v1.json",
+  "title": "cd-collab Corpus Intake Batch v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "id",
+    "caseId",
+    "origin",
+    "sourceLabel",
+    "privacyClass",
+    "idempotencyKey",
+    "requestDigest",
+    "replayed",
+    "createdAt",
+    "createdBy",
+    "items",
+    "rejected"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.corpus_intake_batch.v1" },
+    "id": { "type": "string" },
+    "caseId": { "type": "string" },
+    "origin": { "type": "string", "enum": ["files", "zip", "directory"] },
+    "sourceLabel": { "type": "string" },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "idempotencyKey": { "type": "string" },
+    "requestDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "replayed": { "type": "boolean" },
+    "createdAt": { "type": "string" },
+    "createdBy": { "type": "string" },
+    "items": { "type": "array" },
+    "rejected": { "type": "array" }
+  }
+}

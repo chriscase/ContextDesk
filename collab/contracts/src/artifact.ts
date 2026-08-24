@@ -22,6 +22,8 @@ export interface ArtifactV1 {
   summaryContributionId: string | null;
   uploaderId: string;
   sourceId: string;
+  relativePath?: string | null;
+  intakeBatchId?: string | null;
 }
 
 const artifactShape: ObjectShape = {
@@ -40,6 +42,8 @@ const artifactShape: ObjectShape = {
   summaryContributionId: f.nul(f.str),
   uploaderId: f.req(f.str),
   sourceId: f.req(f.str),
+  relativePath: f.optNul(f.str),
+  intakeBatchId: f.optNul(f.str),
 };
 
 export function parseArtifact(raw: unknown): ArtifactV1 {

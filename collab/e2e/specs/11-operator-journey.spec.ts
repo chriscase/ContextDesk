@@ -119,7 +119,7 @@ test.describe("complete war-room operator journey", () => {
     });
     await page.getByLabel("Summary").fill("Shared timeout log pasted from the worker host.");
     await page.getByLabel("Artifact kind").selectOption("log");
-    await page.getByLabel("Privacy class").selectOption("share_safe");
+    await page.locator(".case-memory__upload-form").getByLabel("Privacy class").selectOption("share_safe");
     const [sharedPosted] = await Promise.all([
       page.waitForResponse(
         (res) =>
@@ -140,7 +140,7 @@ test.describe("complete war-room operator journey", () => {
     });
     await page.getByLabel("Summary").fill("Owner-only worker log kept off the share-safe snapshot.");
     await page.getByLabel("Artifact kind").selectOption("log");
-    await page.getByLabel("Privacy class").selectOption("owner_only");
+    await page.locator(".case-memory__upload-form").getByLabel("Privacy class").selectOption("owner_only");
     const [uniquePosted] = await Promise.all([
       page.waitForResponse(
         (res) =>

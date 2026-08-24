@@ -1976,3 +1976,53 @@
     max-height: 20rem;
   }
 }
+
+.case-memory__inspect {
+  margin-top: 0.25rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.75rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.log-viewer {
+  margin-top: 0.45rem;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, var(--surface-deep, var(--surface)) 80%, transparent);
+}
+
+.log-viewer__name {
+  margin: 0 0 0.3rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.log-viewer__lines {
+  margin: 0;
+  padding: 0 0 0 2.4rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  overflow-x: auto;
+}
+
+.log-viewer__lines li {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.log-viewer details {
+  margin-top: 0.35rem;
+}
+
+.log-viewer summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.72rem;
+}

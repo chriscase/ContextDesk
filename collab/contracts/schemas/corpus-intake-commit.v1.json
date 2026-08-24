@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/corpus-intake-commit.v1.json",
+  "title": "cd-collab Corpus Intake Commit Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "origin",
+    "sourceLabel",
+    "privacyClass",
+    "idempotencyKey",
+    "previewToken",
+    "files",
+    "archiveBase64"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.corpus_intake_commit.v1" },
+    "origin": { "type": "string", "enum": ["files", "zip", "directory"] },
+    "sourceLabel": { "type": "string", "minLength": 1, "maxLength": 240 },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "idempotencyKey": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" },
+    "previewToken": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "files": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["relativePath", "mediaType", "contentBase64"],
+        "properties": {
+          "relativePath": { "type": "string", "maxLength": 240 },
+          "mediaType": { "type": "string", "maxLength": 128 },
+          "contentBase64": { "type": "string" }
+        }
+      }
+    },
+    "archiveBase64": { "type": ["string", "null"] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "origin": { "const": "zip" } }, "required": ["origin"] },
+      "then": {
+        "properties": {
+          "files": { "type": "array", "maxItems": 0 },
+          "archiveBase64": { "type": "string", "minLength": 1 }
+        }
+      },
+      "else": {
+        "properties": {
+          "files": { "type": "array", "minItems": 1 },
+          "archiveBase64": { "type": "null" }
+        }
+      }
+    }
+  ]
+}

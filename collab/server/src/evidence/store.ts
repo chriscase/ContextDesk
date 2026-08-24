@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   FILE_SERVER_REF_SCHEMA_ID,
@@ -26,6 +26,10 @@ export interface EvidenceStore {
     bytes: Uint8Array,
     opts?: { contentType?: string },
   ): Promise<BlobMetaV1>;
+  stage(
+    bytes: Uint8Array,
+    opts?: { contentType?: string },
+  ): Promise<EvidenceStage>;
   get(hash: ContentHash): Promise<Uint8Array | null>;
   head(hash: ContentHash): Promise<BlobMetaV1 | null>;
   /** Re-hash on-disk bytes; returns false (fail closed) on missing or mutated blob. */
@@ -49,6 +53,16 @@ export interface EvidenceStore {
 
   /** Readiness probe for the byte backend. */
   ping(): Promise<void>;
+}
+
+export interface EvidenceStage {
+  readonly meta: BlobMetaV1;
+  /** Make staged bytes visible at their immutable content address. */
+  commit(): Promise<void>;
+  /** Remove staging state and any final object created by this stage. */
+  rollback(): Promise<void>;
+  /** Release the per-digest lifecycle lock after the surrounding transaction settles. */
+  release(): void;
 }
 
 export function sha256Hex(bytes: Uint8Array): ContentHash {
@@ -81,6 +95,7 @@ export interface FilesystemEvidenceStoreOptions {
  */
 export class FilesystemEvidenceStore implements EvidenceStore {
   readonly rootDir: string;
+  private readonly stageTails = new Map<string, Promise<void>>();
 
   constructor(opts: FilesystemEvidenceStoreOptions) {
     this.rootDir = opts.rootDir;
@@ -95,27 +110,116 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     bytes: Uint8Array,
     opts?: { contentType?: string },
   ): Promise<BlobMetaV1> {
+    const stage = await this.stage(bytes, opts);
+    try {
+      await stage.commit();
+      return stage.meta;
+    } catch (error) {
+      await stage.rollback();
+      throw error;
+    } finally {
+      stage.release();
+    }
+  }
+
+  async stage(
+    bytes: Uint8Array,
+    opts?: { contentType?: string },
+  ): Promise<EvidenceStage> {
     await this.ping();
     const hash = sha256Hex(bytes);
+    const releaseLock = await this.acquireStageLock(hash);
     const path = blobPath(this.rootDir, hash);
+    const metadataPath = metaPath(this.rootDir, hash);
     const meta: BlobMetaV1 = {
       hash,
       byteLength: bytes.byteLength,
       contentType: opts?.contentType ?? null,
     };
+    let existing = false;
     try {
       await stat(path);
-      // Immutable: existing content-addressed object is a no-op.
-      return meta;
-    } catch {
-      // continue to write
+      existing = true;
+      if (!(await this.verify(hash))) {
+        throw new Error("existing content-addressed evidence failed verification");
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("failed verification")) {
+        releaseLock();
+        throw error;
+      }
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        releaseLock();
+        throw error;
+      }
     }
-    await mkdir(dirname(path), { recursive: true });
-    const tmp = `${path}.tmp-${randomUUID()}`;
-    await writeFile(tmp, bytes);
-    await rename(tmp, path);
-    await writeFile(metaPath(this.rootDir, hash), JSON.stringify(meta), "utf8");
-    return meta;
+    const stagingDir = join(this.rootDir, "staging");
+    await mkdir(stagingDir, { recursive: true });
+    const stageId = randomUUID();
+    const temporaryPath = existing ? null : join(stagingDir, `${hash}.${stageId}.blob`);
+    const temporaryMetaPath = existing ? null : join(stagingDir, `${hash}.${stageId}.meta.json`);
+    try {
+      if (temporaryPath && temporaryMetaPath) {
+        await writeFile(temporaryPath, bytes);
+        await writeFile(temporaryMetaPath, JSON.stringify(meta), "utf8");
+      }
+    } catch (error) {
+      if (temporaryPath) await rm(temporaryPath, { force: true });
+      if (temporaryMetaPath) await rm(temporaryMetaPath, { force: true });
+      releaseLock();
+      throw error;
+    }
+    let committed = existing;
+    let created = false;
+    let released = false;
+    return {
+      meta,
+      commit: async () => {
+        if (committed) return;
+        if (!temporaryPath || !temporaryMetaPath) throw new Error("evidence stage is unavailable");
+        await mkdir(dirname(path), { recursive: true });
+        await rename(temporaryPath, path);
+        created = true;
+        try {
+          await rename(temporaryMetaPath, metadataPath);
+          committed = true;
+        } catch (error) {
+          await rm(path, { force: true });
+          created = false;
+          throw error;
+        }
+      },
+      rollback: async () => {
+        if (temporaryPath) await rm(temporaryPath, { force: true });
+        if (temporaryMetaPath) await rm(temporaryMetaPath, { force: true });
+        if (created) {
+          await rm(path, { force: true });
+          await rm(metadataPath, { force: true });
+          committed = false;
+          created = false;
+        }
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        releaseLock();
+      },
+    };
+  }
+
+  private async acquireStageLock(hash: string): Promise<() => void> {
+    const previous = this.stageTails.get(hash) ?? Promise.resolve();
+    let unlock = (): void => undefined;
+    const current = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    const queued = previous.then(() => current);
+    this.stageTails.set(hash, queued);
+    await previous;
+    return () => {
+      unlock();
+      if (this.stageTails.get(hash) === queued) this.stageTails.delete(hash);
+    };
   }
 
   async get(hash: ContentHash): Promise<Uint8Array | null> {

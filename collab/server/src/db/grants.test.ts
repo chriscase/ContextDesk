@@ -69,6 +69,25 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
           app.query(`UPDATE timeline_events SET kind = 'tamper'`),
         ).rejects.toThrow(/insert-only|permission denied/);
         await app.query(
+          `INSERT INTO evidence_intake_batches (
+             id, case_id, idempotency_key, request_digest, origin, source_label,
+             privacy_class, created_by, payload_json
+           ) VALUES ($1, $2, $3, $4, 'files', 'synthetic source', 'owner_only', $5, '{}')`,
+          [
+            "22222222-2222-4222-8222-222222222222",
+            "11111111-1111-1111-1111-111111111111",
+            "batch-synthetic-grant",
+            "a".repeat(64),
+            "uid=alice,ou=people,dc=example,dc=test",
+          ],
+        );
+        await expect(
+          app.query(`UPDATE evidence_intake_batches SET source_label = 'tamper'`),
+        ).rejects.toThrow(/insert-only|permission denied/);
+        await expect(app.query(`DELETE FROM evidence_intake_batches`)).rejects.toThrow(
+          /insert-only|permission denied/,
+        );
+        await app.query(
           `INSERT INTO authz_group_role_map (group_dn, role, updated_by)
            VALUES ($1, $2, $3)`,
           ["cn=temporary,ou=groups,dc=example,dc=test", "viewer", "collab_app"],

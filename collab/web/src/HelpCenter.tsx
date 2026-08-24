@@ -171,9 +171,9 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Register files on the evidence board with a summary, kind, and privacy class; each upload is hashed on arrival.",
         keywords: ["evidence", "file", "upload", "artifact", "log", "email", "attachment", "hash", "verification"],
         what:
-          "Evidence files live on the Analyze stage's evidence board. Each upload takes a file (1 MB or smaller), a required summary, an artifact kind (log, email, attachment, or file_server_ref), and a privacy class. The board lists every artifact with its kind, verification status, uploader, and content hash.",
+          "Single-file uploads still live on the Analyze stage's evidence board. Each upload takes a file (1 MB or smaller), a required summary, an artifact kind (log, email, attachment, or file_server_ref), and a privacy class. The board lists every artifact with its kind, verification status, uploader, and content hash. ZIP archives and directories belong on Capture — see Add logs from files, ZIP, or a directory.",
         when:
-          "Upload evidence before freezing a snapshot, so AI lanes and human review can cite exactly what the team collected.",
+          "Upload a single sanitized file before freezing a snapshot, so AI lanes and human review can cite exactly what the team collected.",
         steps: [
           "Open the investigation's Analyze stage and find Upload evidence on the evidence board.",
           "Choose the file, write a short summary, and pick the artifact kind and privacy class.",
@@ -184,6 +184,42 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         limits:
           "Files larger than 1 MB are rejected. Upload sanitized content only — the privacy class controls export eligibility, but it does not scrub the file for you.",
         actions: [{ label: "Open the Analyze stage", go: { stage: "analyze" } }],
+      },
+      {
+        id: "corpus-intake",
+        title: "Add logs from files, ZIP, or a directory",
+        summary:
+          "Intake stays on the selected investigation: preview a file batch, a ZIP, or a browser directory, then commit bounded evidence that freeze and triage can select.",
+        keywords: [
+          "zip",
+          "directory",
+          "folder",
+          "corpus",
+          "intake",
+          "logs",
+          "batch",
+          "preview",
+          "redaction",
+          "privacy",
+          "size limit",
+          "triage",
+        ],
+        what:
+          "The Capture stage's Logs and files panel adds evidence to the open investigation only. You can choose individual files, a ZIP archive, or a directory (the browser supplies relative paths). Preview lists accepted and rejected files before anything is stored. Commit stages accepted bytes, then records evidence, provenance, timeline, batch, and success audit as one operation; a failure rolls all of them back. The global Sources catalog stays for reusable connector definitions — ordinary one-investigation uploads do not go through it.",
+        when:
+          "Use it when an operator has a folder or ZIP of logs for one investigation and needs them on the evidence board without a separate conversion step.",
+        steps: [
+          "Open the investigation's Capture stage and find Logs and files for this investigation.",
+          "Choose Files, ZIP archive, or Directory, set a source label and privacy class, and select the payload.",
+          "Preview. Read the accepted and rejected lists — rejected bytes are never shown as text.",
+          "Commit. Retry after a disconnect reuses the same idempotency key and will not duplicate committed evidence.",
+          "On Analyze, inspect logs in the expandable viewer, freeze selected evidence, and run the existing qwen-3.6-27b, gpt-oss-120b, and ministral comparison lanes against that snapshot.",
+        ],
+        recorded:
+          "Each accepted file gets its own evidence identity and records relative path, media type, digest, byte length, privacy class, uploader identity, import time, source attribution, and intake batch id. Equal digests reuse the same content-addressed bytes without collapsing those distinct evidence records. Deep links exist for the batch on Capture and each evidence item on Analyze.",
+        limits:
+          "Archives are capped at 8 MiB, expanded bytes at 12 MiB, 64 files, path depth 8, path length 240, 1 MB per file, compression ratio 20, and 5 seconds of processing. ZIP extraction rejects absolute paths, traversal, drive/UNC paths, symlinks/hardlinks, device entries, duplicate normalized paths, nested archives, encrypted archives, ZIP64, and malformed central-directory metadata. Allowlisted extensions are .log, .txt, .json, .csv, .xml, .eml, and .md; declared media must match and JSON must parse. Binary, unknown, and invalid UTF-8 content is rejected. share_safe accepts plain text, logs, CSV, Markdown, and valid JSON only, and scans structured JSON plus path and source metadata before commit; XML and email require owner_only. Marking share_safe does not scrub the file. The global source catalog is not the intake path for these uploads.",
+        actions: [{ label: "Open the Capture stage", go: { stage: "capture" } }],
       },
     ],
   },
@@ -604,6 +640,11 @@ const GLOSSARY: readonly GlossaryEntry[] = [
     term: "host profile",
     definition:
       "The profile selected per gateway lane in the launcher, drawn from the host's configured catalog. Choosing one tells the host bridge which provider configuration to use — nothing more.",
+  },
+  {
+    term: "corpus intake",
+    definition:
+      "Investigation-scoped file, ZIP, or directory import on Capture. Accepted files become ordinary evidence with relative path, digest, privacy class, and provenance; freeze and triage select them without conversion.",
   },
   {
     term: "gold reference",

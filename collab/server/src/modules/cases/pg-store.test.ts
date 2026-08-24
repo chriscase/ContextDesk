@@ -2,19 +2,29 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CORPUS_INTAKE_COMMIT_SCHEMA_ID,
   SNAPSHOT_SCHEMA_ID,
+  parseCorpusIntakeBatch,
   snapshotFingerprint,
   type SnapshotEvidenceV1,
   type SnapshotV1,
 } from "@cd-collab/contracts";
+import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { migrateUp } from "../../db/migrate.js";
 import { FilesystemEvidenceStore } from "../../evidence/store.js";
 import { adminUrl, withDisposableDb } from "../../test/disposable-db.js";
 import { MemoryAuditStore, PgAuditStore, type AuditStore } from "../audit/index.js";
 import { CatalogService, PgCatalogStore } from "../catalog/index.js";
+import { corpusIntakeRequestDigest } from "../corpus-intake/index.js";
 import { CaseService } from "./service.js";
-import { MemoryCaseStore, PgCaseStore, type CaseRow, type SnapshotRow } from "./store.js";
+import {
+  MemoryCaseStore,
+  PgCaseStore,
+  type ArtifactRow,
+  type CaseRow,
+  type SnapshotRow,
+} from "./store.js";
 
 const CASE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const SNAPSHOT_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -288,6 +298,84 @@ async function insertSqlSnapshot(
 }
 
 describe.skipIf(!adminUrl())("pg-backed case memory", () => {
+  it("serializes concurrent corpus idempotency and commits one batch, artifact, and audit", async () => {
+    await withDisposableDb(async (client, url) => {
+      await migrateUp(client);
+      const pool = new Pool({ connectionString: url, max: 4 });
+      const root = await mkdtemp(join(tmpdir(), "cd-collab-pg-corpus-"));
+      const evidence = new FilesystemEvidenceStore({ rootDir: root });
+      const audit = new PgAuditStore(pool);
+      const catalog = new CatalogService(new PgCatalogStore(pool), audit);
+      const cases = new CaseService(evidence, audit, new PgCaseStore(pool), catalog);
+      const actor = { id: "uid=alice,ou=people,dc=example,dc=test", username: "alice" };
+      try {
+        const created = await cases.createCase(actor, { title: "Concurrent corpus fixture" }, "test");
+        const bytes = new TextEncoder().encode("2026-08-24T00:00:00Z synthetic timeout\n");
+        const files = [{ relativePath: "mailer/concurrent.log", mediaType: "text/plain", bytes }];
+        const seed = {
+          schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+          origin: "files" as const,
+          sourceLabel: "synthetic concurrent source",
+          privacyClass: "owner_only" as const,
+          idempotencyKey: "batch-synthetic-concurrent-1",
+          files: [{
+            relativePath: files[0]!.relativePath,
+            mediaType: files[0]!.mediaType,
+            contentBase64: Buffer.from(bytes).toString("base64"),
+          }],
+          archiveBase64: null,
+        };
+        const request = {
+          ...seed,
+          previewToken: corpusIntakeRequestDigest({
+            caseId: created.id,
+            actorId: actor.id,
+            origin: seed.origin,
+            sourceLabel: seed.sourceLabel,
+            privacyClass: seed.privacyClass,
+            idempotencyKey: seed.idempotencyKey,
+            files,
+            archive: null,
+          }),
+        };
+        const batches = await Promise.all([
+          cases.commitCorpusIntake(created.id, actor, request, "test"),
+          cases.commitCorpusIntake(created.id, actor, request, "test"),
+        ]);
+        expect(batches.map((batch) => parseCorpusIntakeBatch(batch).replayed).sort()).toEqual([
+          false,
+          true,
+        ]);
+        expect(new Set(batches.map((batch) => batch.id)).size).toBe(1);
+        expect(new Set(batches.map((batch) => batch.items[0]?.artifactId)).size).toBe(1);
+        expect((await pool.query("SELECT id FROM evidence_intake_batches")).rows).toHaveLength(1);
+        expect((await pool.query("SELECT id FROM evidence_artifacts")).rows).toHaveLength(1);
+        expect(await audit.list({ action: "corpus_intake_commit" })).toHaveLength(1);
+
+        const changedSource = "changed synthetic concurrent source";
+        const changed = {
+          ...seed,
+          sourceLabel: changedSource,
+          previewToken: corpusIntakeRequestDigest({
+            caseId: created.id,
+            actorId: actor.id,
+            origin: seed.origin,
+            sourceLabel: changedSource,
+            privacyClass: seed.privacyClass,
+            idempotencyKey: seed.idempotencyKey,
+            files,
+            archive: null,
+          }),
+        };
+        await expect(cases.commitCorpusIntake(created.id, actor, changed, "test"))
+          .rejects.toThrow(/idempotency key already belongs/);
+      } finally {
+        await pool.end();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("survives a new CaseService on the same database", async () => {
     await withDisposableDb(async (client) => {
       await migrateUp(client);
@@ -393,6 +481,49 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
 });
 
 describe("memory snapshot persistence", () => {
+  it("enforces intake-batch case ownership like PostgreSQL", async () => {
+    const store = new MemoryCaseStore();
+    const otherCaseId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const batchId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    await store.insertCase(caseRow());
+    await store.insertCase(caseRow(otherCaseId));
+    await store.insertIntakeBatch({
+      id: batchId,
+      caseId: CASE_ID,
+      idempotencyKey: "batch-synthetic-memory-fk",
+      requestDigest: "a".repeat(64),
+      origin: "files",
+      sourceLabel: "synthetic source",
+      privacyClass: "owner_only",
+      createdAt: CREATED_AT,
+      createdBy: "synthetic-actor",
+      payloadJson: "{}",
+    });
+    const artifact: ArtifactRow = {
+      id: "99999999-9999-4999-8999-999999999999",
+      caseId: otherCaseId,
+      kind: "log",
+      filename: "synthetic.log",
+      uri: null,
+      mediaType: "text/plain",
+      byteLength: 10,
+      contentHash: "b".repeat(64),
+      expectedHash: "b".repeat(64),
+      verificationStatus: "verified",
+      refId: null,
+      privacyClass: "owner_only",
+      summaryContributionId: null,
+      uploaderId: "synthetic-actor",
+      uploaderUsername: "synthetic-actor",
+      sourceId: "00000000-0000-0000-0000-000000000001",
+      relativePath: "synthetic.log",
+      intakeBatchId: batchId,
+    };
+    await expect(store.insertArtifact(artifact)).rejects.toThrow(/does not belong/);
+    await store.insertArtifact({ ...artifact, caseId: CASE_ID });
+    expect((await store.getArtifact(artifact.id))?.intakeBatchId).toBe(batchId);
+  });
+
   it("normalizes Situation fields missing from a legacy memory or SQLite case", async () => {
     const store = new MemoryCaseStore();
     const legacy = { ...caseRow() } as unknown as Record<string, unknown>;
