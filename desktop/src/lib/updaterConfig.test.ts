@@ -42,9 +42,14 @@ describe("opt-in signed updater (#173)", () => {
     const yml = readFileSync(join(repo, ".github/workflows/release.yml"), "utf8");
     expect(yml).toMatch(/TAURI_SIGNING_PRIVATE_KEY/);
     expect(yml).toMatch(/includeUpdaterJson/);
+    expect(yml).toMatch(/signed_updater:/);
+    expect(yml).toMatch(/CONTEXTDESK_SIGNED_UPDATER/);
+    expect(yml).toMatch(/createUpdaterArtifacts=false/);
     expect(yml).not.toMatch(/BEGIN.*PRIVATE/);
     expect(yml).toMatch(/libayatana-appindicator3-dev/);
     expect(yml).not.toMatch(/\blibappindicator3-dev\b/);
+    expect(yml).toMatch(/platform: ubuntu-24\.04/);
+    expect(yml).not.toMatch(/platform: ubuntu-22\.04/);
   });
 
   it("host check/install helpers exist and docs cover trust boundary", () => {

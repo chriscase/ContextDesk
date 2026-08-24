@@ -35,8 +35,8 @@ Workflow: `.github/workflows/release.yml` (#172).
 
 | Trigger | Behavior |
 |---------|----------|
-| Push tag `v*` (e.g. `v0.1.0`) | Matrix build macOS / Ubuntu 22.04 / Windows → **draft** GitHub Release with installers |
-| `workflow_dispatch` | Same, using the provided tag name input |
+| Push tag `v*` (e.g. `v0.1.0`) | Matrix build macOS / Ubuntu 24.04 / Windows → **draft** GitHub Release with installers |
+| `workflow_dispatch` | Same, using the provided tag name input. Draft smoke builds default to unsigned installers; set `signed_updater: true` only when the updater signing secret is valid. |
 
 **Not** run on every PR or push to `main` (saves runner minutes). Day-to-day CI is `.github/workflows/ci.yml` (fmt/clippy/tests/frontend/Tauri host compile).
 
@@ -50,7 +50,7 @@ Workflow: `.github/workflows/release.yml` (#172).
 4. Wait for the **release** workflow; open the **draft** GitHub Release; smoke-test one installer per OS.
 5. Publish the release when ready.
 6. **Signing / notarization** (Apple, Windows Authenticode) remains operator-owned — no secrets in the repo. Wire secrets only via GitHub Actions settings if you add signing later.
-7. Auto-updater / `latest.json` is **#173**. Requires repo secret `TAURI_SIGNING_PRIVATE_KEY` for updater signing. **Local** `tauri build`: unsigned installers may already exist under `bundle/` even when the final updater-signing step fails without the private key — see “Unsigned local bundle” above. **CI** matrix success without that secret may still fail at updater-artifact signing; do not claim multi-OS CI artifacts until a green run lists them.
+7. Auto-updater / `latest.json` is **#173**. Requires repo secret `TAURI_SIGNING_PRIVATE_KEY` for updater signing. **Local** `tauri build`: unsigned installers may already exist under `bundle/` even when the final updater-signing step fails without the private key — see “Unsigned local bundle” above. Manual CI runs default to unsigned draft installers and omit updater metadata; set `signed_updater: true` only to require signed updater artifacts. Tag-triggered builds require signing. Do not claim multi-OS or updater artifacts until a green run lists the exact assets.
 
 #### Honesty: CLAIMS “Proven multi-OS installers”
 

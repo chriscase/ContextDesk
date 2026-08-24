@@ -11,6 +11,11 @@ on:
         description: "Tag name for the draft release (e.g. v0.1.0-rc1)"
         required: true
         type: string
+      signed_updater:
+        description: "Require signed updater artifacts (needs a valid TAURI_SIGNING_PRIVATE_KEY)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -23,7 +28,10 @@ jobs:
         include:
           - platform: macos-latest
             args: ""
-          - platform: ubuntu-22.04
+          # Keep the packaged Linux host aligned with gui-accept. The shipped
+          # ort-sys prebuilts require glibc >= 2.38 (__isoc23_* symbols), so
+          # Ubuntu 22.04 cannot link the production desktop binary.
+          - platform: ubuntu-24.04
             args: ""
           - platform: windows-latest
             args: ""
@@ -63,8 +71,11 @@ jobs:
 
       - name: Build frontend + generate tauri conf
         working-directory: desktop
+        env:
+          CONTEXTDESK_SIGNED_UPDATER: ${{ (github.ref_type == 'tag' || inputs.signed_updater) && 'true' || 'false' }}
         run: |
           node scripts/gen-tauri-conf.mjs
+          node -e "const fs=require('node:fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));if(process.env.CONTEXTDESK_SIGNED_UPDATER!=='true'){c.bundle.createUpdaterArtifacts=false;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n')}"
           npm run build
 
       - name: Bundle desktop (tauri-action)
@@ -74,14 +85,14 @@ jobs:
           # Ed25519 minisign private key for updater artifacts (#173).
           # Set repo secrets TAURI_SIGNING_PRIVATE_KEY (+ optional PASSWORD).
           # Public key is committed in desktop/src-tauri/tauri.conf.json plugins.updater.pubkey.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ (github.ref_type == 'tag' || inputs.signed_updater) && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ (github.ref_type == 'tag' || inputs.signed_updater) && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         with:
           projectPath: desktop
           # Draft so operators can smoke-test before publishing.
           releaseDraft: true
           # Attach latest.json + signatures when createUpdaterArtifacts is true (#173).
-          includeUpdaterJson: true
+          includeUpdaterJson: ${{ github.ref_type == 'tag' || inputs.signed_updater }}
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
           releaseName: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
           releaseBody: |
@@ -89,5 +100,5 @@ jobs:
 
             Built by `.github/workflows/release.yml` (#172 + #173 updater artifacts).
             Code signing / notarization is operator-owned (see docs/PACKAGING.md).
-            In-app updates: Settings → General → Check for updates (opt-in, signed).
+            Signed updater metadata is attached only when explicitly enabled with a valid operator key.
           args: ${{ matrix.args }}
