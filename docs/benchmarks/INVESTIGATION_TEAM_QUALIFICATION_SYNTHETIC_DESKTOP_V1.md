@@ -17,11 +17,12 @@ the V1-supported reviewer path, the configured reviewer identity. It then:
 2. binds the configured roles to exact profile, model, and deployment fingerprints;
 3. runs the shipped `cd_workflow` qualification seam;
 4. round-trips the redacted JSON report through the contract parser; and
-5. publishes the result to the process-local trusted readout.
+5. publishes the result to the durable, bounded redacted history.
 
 The UI displays the resulting status, four separate axes, and the pipeline
 fingerprint. The report never contains deployment URLs, evaluator truth, or
-evidence excerpts.
+evidence excerpts. Durable history is host-owned; malformed or unavailable
+history fails closed rather than being replaced by a clean empty state.
 
 ## Honest limits
 

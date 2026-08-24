@@ -37,17 +37,20 @@ host-built QualificationInput
 cd_workflow::investigation_team_qualification::execute
         │  score + redact + round-trip parse
         ▼
-host-published process-local result
+host-published durable redacted history
         │
         ▼
 read-only Tauri DTO → Settings readiness panel
 ```
 
 The webview has no setter for the qualification store. It can read or clear
-the process-local readout, but it cannot submit evaluator truth, provider
-credentials, or a fabricated `QualificationInput`. A future trusted runner
+bounded redacted history, but it cannot submit evaluator truth, provider
+credentials, or a fabricated `QualificationInput`. Every trusted publisher
 must publish only after it has assembled the exact role bindings, evidence
 packet, policy/budget identity, attempt observations, and endpoint fingerprints.
+The desktop now provides both an explicit provider-free contract check and an
+explicit measured provider check. The latter sends one bounded opaque fixture
+per configured V1 role; it does not send workspace evidence.
 
 ## Status semantics
 
@@ -61,12 +64,17 @@ packet, policy/budget identity, attempt observations, and endpoint fingerprints.
 The axes stay separate. A faster model is not automatically better, and a
 capable model with unsupported claims is not a quality pass.
 
-## Current limitation and next slice
+## Durable history and current limits
 
-The current bridge is process-local and read-only from the renderer. It does
-not yet persist reports or invoke providers. The next production slice should
-build a trusted runner from the existing bounded investigation pipeline, bind
-each attempt to the exact snapshot/evidence identity, publish the resulting
-redacted report, and add a synthetic end-to-end acceptance journey. Until then,
-the Settings panel intentionally says when no host-produced team report is
-attached.
+The host persists a bounded, owner-only, redacted history and reloads it before
+each operation. Malformed or unavailable history fails closed and the UI shows
+that the history cannot be trusted; a newer provider-free wiring check does not
+displace measured provider evidence. Writes use atomic replacement and
+compare-and-swap safeguards on supported hosts.
+
+The measured check qualifies the exact configured role bindings against an
+opaque fixture. It is still a preflight, not proof that a team executed a real
+investigation successfully. Exact snapshot/evidence identity, budgets, stale
+reports, and actual role admission remain runtime checks on each investigation.
+Contribution-role topology is not represented by the V1 measured runner and
+fails closed instead of being relabeled.
