@@ -231,7 +231,9 @@ pub fn aggregate_provider_telemetry_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cd_core::provider_telemetry::{ObservedRoute, ProviderTransportTelemetry};
+    use cd_core::provider_telemetry::{
+        ModelIdentityStatus, ObservedRoute, ProviderTransportTelemetry,
+    };
     use cd_core::turn_trace::{TracedCall, TracedMessage, TracedOutcome};
 
     fn call_with_transport(
@@ -285,6 +287,7 @@ mod tests {
     ) -> ProviderTransportTelemetry {
         ProviderTransportTelemetry {
             response_model: Some(model.into()),
+            model_identity_status: ModelIdentityStatus::Reported,
             provider_request_id: Some(req.into()),
             observed_route: ObservedRoute::Reported {
                 value: "anthropic".into(),

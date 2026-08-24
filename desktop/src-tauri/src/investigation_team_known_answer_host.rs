@@ -8,14 +8,14 @@ use cd_core::capability_qualification::{
 use cd_core::error::{CoreError, CoreResult};
 use cd_core::investigation_team_qualification::{InvestigationTeamRole, MemberBinding};
 use cd_core::openai_chat_contract::OpenAiChatRequestMode;
-use cd_core::provider_telemetry::ProviderTransportTelemetry;
+use cd_core::provider_telemetry::{ModelIdentityStatus, ProviderTransportTelemetry};
 use cd_core::quality_eval::live_known_answer::{
     host_attempt_from_chat, host_diagnostic_for_observed_attempts, HostAttemptObservation,
 };
 #[cfg(unix)]
 use cd_core::quality_eval::LiveKnownAnswerOwnerDirectory;
 use cd_core::quality_eval::{
-    build_live_known_answer_capture, build_live_known_answer_run,
+    build_live_known_answer_capture_v2, build_live_known_answer_run_v2,
     live_known_answer_answer_score_sha256, live_known_answer_capture_sha256,
     live_known_answer_prompt_set_hash, live_known_answer_quality_unit, load_embedded_open_v1_suite,
     parse_live_known_answer_capture_json, parse_live_known_answer_json,
@@ -23,7 +23,7 @@ use cd_core::quality_eval::{
     render_live_known_answer_capture_json, render_live_known_answer_json,
     render_live_known_answer_markdown, score_live_known_answer_response,
     serialize_live_known_answer_prompt, validate_live_known_answer_run, LaneStatus,
-    LiveKnownAnswerCanonicalCapture, LiveKnownAnswerCanonicalScenarioInput,
+    LiveKnownAnswerCanonicalCapture, LiveKnownAnswerCanonicalScenarioInput, LiveKnownAnswerRunId,
     LiveKnownAnswerRunMetrics, LiveKnownAnswerRunReport, LiveKnownAnswerRunStatus,
     LiveKnownAnswerScenarioObservation, ModelSubject, LIVE_KNOWN_ANSWER_JS_SAFE_MAX,
 };
@@ -40,13 +40,14 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-#[cfg(unix)]
 use uuid::Uuid;
 
 pub const INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V1: &str =
     "contextdesk.investigation_team_known_answer_store.v1";
 pub const INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V2: &str =
     "contextdesk.investigation_team_known_answer_store.v2";
+pub const INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V3: &str =
+    "contextdesk.investigation_team_known_answer_store.v3";
 pub const MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_RECORDS: usize = 128;
 pub const MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_BYTES: usize = 8 * 1024 * 1024;
 pub const LIVE_KNOWN_ANSWER_CANCEL_KEY: &str = "investigation_team_known_answer_live";
@@ -97,6 +98,13 @@ pub enum KnownAnswerDisplayStatus {
     Stale,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnownAnswerRunIdProvenance {
+    HostMinted,
+    LegacyUnidentified,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnownAnswerScenarioDto {
     pub scenario_id: String,
@@ -117,6 +125,8 @@ pub struct KnownAnswerScenarioDto {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InvestigationTeamKnownAnswerDto {
+    pub run_id: Option<String>,
+    pub run_id_provenance: KnownAnswerRunIdProvenance,
     pub status: KnownAnswerDisplayStatus,
     pub reported_status: LiveKnownAnswerRunStatus,
     pub stale: bool,
@@ -159,7 +169,7 @@ pub struct InvestigationTeamKnownAnswerStore {
 impl Default for InvestigationTeamKnownAnswerStore {
     fn default() -> Self {
         Self {
-            schema_id: INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V2.into(),
+            schema_id: INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V3.into(),
             records: Vec::new(),
             captures: Vec::new(),
         }
@@ -214,7 +224,7 @@ impl InvestigationTeamKnownAnswerStoreState {
 
 impl InvestigationTeamKnownAnswerStore {
     fn validate(&self) -> CoreResult<()> {
-        if self.schema_id != INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V2 {
+        if self.schema_id != INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V3 {
             return Err(store_error("store schema is unsupported"));
         }
         if self.records.len() > MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_RECORDS {
@@ -226,7 +236,7 @@ impl InvestigationTeamKnownAnswerStore {
             if parse_live_known_answer_json(&canonical)? != *report {
                 return Err(store_error("record failed canonical validation"));
             }
-            let identity = report_identity(report);
+            let identity = report_identity(report)?;
             if !identities.insert(identity) {
                 return Err(store_error("store has a duplicate report"));
             }
@@ -237,25 +247,30 @@ impl InvestigationTeamKnownAnswerStore {
             if parse_live_known_answer_capture_json(&canonical)? != *capture {
                 return Err(store_error("capture failed canonical validation"));
             }
-            let identity = capture_identity(capture);
+            let identity = capture_identity(capture)?;
             if !capture_identities.insert(identity.clone()) {
                 return Err(store_error("store has a duplicate capture"));
             }
-            let Some(report) = self
-                .records
-                .iter()
-                .find(|report| report_identity(report) == identity)
-            else {
+            let mut matching_report = None;
+            for report in &self.records {
+                if report_identity(report)? == identity {
+                    matching_report = Some(report);
+                    break;
+                }
+            }
+            let Some(report) = matching_report else {
                 return Err(store_error("capture has no matching score report"));
             };
             validate_report_capture_correspondence(report, capture)?;
         }
         for report in &self.records {
-            let matching = self
-                .captures
-                .iter()
-                .filter(|capture| capture_identity(capture) == report_identity(report))
-                .collect::<Vec<_>>();
+            let report_identity = report_identity(report)?;
+            let mut matching = Vec::new();
+            for capture in &self.captures {
+                if capture_identity(capture)? == report_identity {
+                    matching.push(capture);
+                }
+            }
             match (
                 report.canonical_capture_sha256.as_ref(),
                 matching.as_slice(),
@@ -320,10 +335,14 @@ impl InvestigationTeamKnownAnswerStore {
     fn decode(bytes: &[u8]) -> CoreResult<Self> {
         let mut store: Self = serde_json::from_slice(bytes)
             .map_err(|error| store_error(&format!("store is malformed: {error}")))?;
-        if store.schema_id == INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V1
-            && store.captures.is_empty()
-        {
-            store.schema_id = INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V2.into();
+        match store.schema_id.as_str() {
+            INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V1 if store.captures.is_empty() => {
+                store.schema_id = INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V3.into();
+            }
+            INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V2 => {
+                store.schema_id = INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V3.into();
+            }
+            _ => {}
         }
         store.validate()?;
         Ok(store)
@@ -429,10 +448,16 @@ impl InvestigationTeamKnownAnswerStore {
         &mut self,
         evidence: LiveKnownAnswerExecutionEvidence,
     ) -> CoreResult<()> {
+        self.validate()?;
         let report = evidence.report;
         let canonical = render_live_known_answer_json(&report)?;
         let report = parse_live_known_answer_json(&canonical)?;
-        let identity = report_identity(&report);
+        let identity = report_identity(&report)?;
+        if !matches!(&identity, KnownAnswerEvidenceIdentity::HostMinted(_)) {
+            return Err(store_error(
+                "new known-answer evidence requires a host-minted run identity",
+            ));
+        }
         let capture = evidence
             .capture
             .map(|capture| {
@@ -445,21 +470,23 @@ impl InvestigationTeamKnownAnswerStore {
             None if report.canonical_capture_sha256.is_none() => {}
             None => return Err(store_error("report capture is unavailable")),
         }
-        if let Some(existing) = self
-            .records
-            .iter_mut()
-            .find(|existing| report_identity(existing) == identity)
-        {
-            *existing = report;
-        } else {
-            self.records.push(report);
+        if let Some(index) = report_index_for_identity(&self.records, &identity)? {
+            let existing_capture = capture_index_for_identity(&self.captures, &identity)?
+                .map(|capture_index| &self.captures[capture_index]);
+            if self.records[index] == report && existing_capture == capture.as_ref() {
+                return Ok(());
+            }
+            return Err(store_error(
+                "host-minted run identity was reused for different evidence",
+            ));
         }
-        self.captures
-            .retain(|existing| capture_identity(existing) != identity);
+
+        let mut staged = self.clone();
+        staged.records.push(report);
         if let Some(capture) = capture {
-            self.captures.push(capture);
+            staged.captures.push(capture);
         }
-        self.records.sort_by(|left, right| {
+        staged.records.sort_by(|left, right| {
             left.observed_at
                 .cmp(&right.observed_at)
                 .then(left.role.cmp(&right.role))
@@ -469,23 +496,28 @@ impl InvestigationTeamKnownAnswerStore {
                         .storage_id()
                         .cmp(&right.quality_run.quality_unit.storage_id()),
                 )
+                .then(left.run_id.cmp(&right.run_id))
         });
-        if self.records.len() > MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_RECORDS {
-            let remove = self.records.len() - MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_RECORDS;
-            for report in self.records.drain(0..remove) {
-                let removed = report_identity(&report);
-                self.captures
-                    .retain(|capture| capture_identity(capture) != removed);
+        if staged.records.len() > MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_RECORDS {
+            let remove = staged.records.len() - MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_RECORDS;
+            for report in staged.records.drain(0..remove) {
+                let removed = report_identity(&report)?;
+                if let Some(index) = capture_index_for_identity(&staged.captures, &removed)? {
+                    staged.captures.remove(index);
+                }
             }
         }
-        while serde_json::to_vec(self)?.len() > MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_BYTES
-            && self.records.len() > 1
+        while serde_json::to_vec(&staged)?.len() > MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_BYTES
+            && staged.records.len() > 1
         {
-            let removed = report_identity(&self.records.remove(0));
-            self.captures
-                .retain(|capture| capture_identity(capture) != removed);
+            let removed = report_identity(&staged.records.remove(0))?;
+            if let Some(index) = capture_index_for_identity(&staged.captures, &removed)? {
+                staged.captures.remove(index);
+            }
         }
-        self.validate()
+        staged.validate()?;
+        *self = staged;
+        Ok(())
     }
 
     pub fn history(
@@ -586,6 +618,7 @@ fn execute_target(
     cancel: &AtomicBool,
     transport: &mut dyn QualificationTransport,
 ) -> CoreResult<LiveKnownAnswerExecutionEvidence> {
+    let run_id = LiveKnownAnswerRunId::parse(format!("lkar_{}", Uuid::new_v4().simple()))?;
     let mut observations = Vec::with_capacity(prepared.len());
     let mut captures = Vec::new();
     for case in prepared {
@@ -643,7 +676,8 @@ fn execute_target(
         suite_digest,
         prompt_set_hash,
     );
-    let mut report = build_live_known_answer_run(
+    let mut report = build_live_known_answer_run_v2(
+        run_id.clone(),
         observed_at,
         target.member.role,
         quality_unit.clone(),
@@ -679,7 +713,8 @@ fn execute_target(
     let capture = if captures.is_empty() {
         None
     } else {
-        Some(build_live_known_answer_capture(
+        Some(build_live_known_answer_capture_v2(
+            run_id,
             observed_at,
             target.member.role,
             quality_unit,
@@ -748,6 +783,18 @@ fn record_answer_only_observation(
         latency_ms,
         message_content_bytes,
     } = dispatched;
+    if telemetry.model_identity_rejected {
+        observations.push(failed_observation(
+            scenario_id,
+            LaneStatus::Failed,
+            "provider_response_privacy_rejected",
+            latency_ms,
+            message_content_bytes,
+            provider_content_bytes,
+            telemetry,
+        ));
+        return;
+    }
     if response.cancelled {
         observations.push(failed_observation(
             scenario_id,
@@ -837,12 +884,14 @@ fn execute_diagnostic_case(
     let mut total_latency = 0;
     let mut total_message_bytes = 0;
     let mut total_provider_bytes = 0;
+    let mut any_model_identity_rejected = false;
 
     loop {
         let dispatched = dispatch_known_answer_chat(target, case, cancel, transport)?;
         total_latency += dispatched.latency_ms;
         total_message_bytes += dispatched.message_content_bytes;
         total_provider_bytes += dispatched.response.content.len() as u64;
+        any_model_identity_rejected |= dispatched.telemetry.model_identity_rejected;
         let parsed = if dispatched.response.content.is_empty() {
             None
         } else {
@@ -883,6 +932,20 @@ fn execute_diagnostic_case(
 
     let dispatched = last_dispatched;
     let telemetry = dispatched.telemetry;
+    if any_model_identity_rejected {
+        return Ok((
+            failed_observation(
+                scenario_id,
+                LaneStatus::Failed,
+                "provider_response_privacy_rejected",
+                total_latency,
+                total_message_bytes,
+                total_provider_bytes,
+                telemetry,
+            ),
+            None,
+        ));
+    }
     if dispatched.response.cancelled {
         return Ok((
             failed_observation(
@@ -1029,6 +1092,7 @@ fn failed_observation(
 #[derive(Debug, Clone, Default)]
 struct KnownAnswerProviderTelemetry {
     reported_model_id: Option<String>,
+    model_identity_rejected: bool,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     reasoning_tokens: Option<u64>,
@@ -1062,8 +1126,20 @@ fn project_provider_telemetry(
             })
         })
         .transpose()?;
+    let (reported_model_id, model_identity_rejected) =
+        match (telemetry.model_identity_status, telemetry.response_model) {
+            (ModelIdentityStatus::Absent, None) => (None, false),
+            (ModelIdentityStatus::Reported, Some(model)) => (Some(model), false),
+            (ModelIdentityStatus::Rejected, None) => (None, true),
+            _ => {
+                return Err(store_error(
+                    "provider model identity telemetry is internally inconsistent",
+                ));
+            }
+        };
     Ok(KnownAnswerProviderTelemetry {
-        reported_model_id: telemetry.response_model,
+        reported_model_id,
+        model_identity_rejected,
         input_tokens: telemetry.prompt_tokens,
         output_tokens: telemetry.completion_tokens,
         reasoning_tokens: telemetry.reasoning_tokens,
@@ -1086,6 +1162,13 @@ fn project(
     context: &KnownAnswerProjectionContext,
 ) -> CoreResult<InvestigationTeamKnownAnswerDto> {
     let unit = &report.quality_run.quality_unit;
+    let (run_id, run_id_provenance) = match &report.run_id {
+        Some(run_id) => (
+            Some(run_id.as_str().to_string()),
+            KnownAnswerRunIdProvenance::HostMinted,
+        ),
+        None => (None, KnownAnswerRunIdProvenance::LegacyUnidentified),
+    };
     let mut stale_reasons = Vec::new();
     if unit.build_identity != context.build_identity {
         stale_reasons.push("build_changed".into());
@@ -1149,6 +1232,8 @@ fn project(
         })
         .collect();
     Ok(InvestigationTeamKnownAnswerDto {
+        run_id,
+        run_id_provenance,
         status,
         reported_status: report.status,
         stale,
@@ -1271,31 +1356,73 @@ fn store_unavailable_error() -> CoreError {
     )
 }
 
-type KnownAnswerEvidenceIdentity = (i64, InvestigationTeamRole, String, String);
-
-fn report_identity(report: &LiveKnownAnswerRunReport) -> KnownAnswerEvidenceIdentity {
-    (
-        report.observed_at,
-        report.role,
-        report.quality_run.quality_unit.storage_id(),
-        report.quality_run.quality_unit.suite_id.clone(),
-    )
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum KnownAnswerEvidenceIdentity {
+    HostMinted(LiveKnownAnswerRunId),
+    Legacy {
+        observed_at: i64,
+        role: InvestigationTeamRole,
+        subject_storage_id: String,
+        suite_id: String,
+    },
 }
 
-fn capture_identity(capture: &LiveKnownAnswerCanonicalCapture) -> KnownAnswerEvidenceIdentity {
-    (
-        capture.observed_at,
-        capture.role,
-        capture.quality_unit.storage_id(),
-        capture.quality_unit.suite_id.clone(),
-    )
+fn report_identity(report: &LiveKnownAnswerRunReport) -> CoreResult<KnownAnswerEvidenceIdentity> {
+    Ok(match &report.run_id {
+        Some(run_id) => KnownAnswerEvidenceIdentity::HostMinted(run_id.clone()),
+        None => KnownAnswerEvidenceIdentity::Legacy {
+            observed_at: report.observed_at,
+            role: report.role,
+            subject_storage_id: report.quality_run.quality_unit.storage_id(),
+            suite_id: report.quality_run.quality_unit.suite_id.clone(),
+        },
+    })
+}
+
+fn capture_identity(
+    capture: &LiveKnownAnswerCanonicalCapture,
+) -> CoreResult<KnownAnswerEvidenceIdentity> {
+    Ok(match &capture.run_id {
+        Some(run_id) => KnownAnswerEvidenceIdentity::HostMinted(run_id.clone()),
+        None => KnownAnswerEvidenceIdentity::Legacy {
+            observed_at: capture.observed_at,
+            role: capture.role,
+            subject_storage_id: capture.quality_unit.storage_id(),
+            suite_id: capture.quality_unit.suite_id.clone(),
+        },
+    })
+}
+
+fn report_index_for_identity(
+    records: &[LiveKnownAnswerRunReport],
+    identity: &KnownAnswerEvidenceIdentity,
+) -> CoreResult<Option<usize>> {
+    for (index, report) in records.iter().enumerate() {
+        if &report_identity(report)? == identity {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+fn capture_index_for_identity(
+    captures: &[LiveKnownAnswerCanonicalCapture],
+    identity: &KnownAnswerEvidenceIdentity,
+) -> CoreResult<Option<usize>> {
+    for (index, capture) in captures.iter().enumerate() {
+        if &capture_identity(capture)? == identity {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
 }
 
 fn validate_report_capture_correspondence(
     report: &LiveKnownAnswerRunReport,
     capture: &LiveKnownAnswerCanonicalCapture,
 ) -> CoreResult<()> {
-    if report.observed_at != capture.observed_at
+    if report_identity(report)? != capture_identity(capture)?
+        || report.observed_at != capture.observed_at
         || report.role != capture.role
         || report.quality_run.quality_unit != capture.quality_unit
     {
@@ -1489,6 +1616,7 @@ mod tests {
             self.calls += 1;
             self.last = Some(ProviderTransportTelemetry {
                 response_model: Some("reported/model-b".into()),
+                model_identity_status: ModelIdentityStatus::Reported,
                 prompt_tokens: Some(100),
                 completion_tokens: Some(20),
                 reasoning_tokens: Some(5),
@@ -1618,23 +1746,6 @@ mod tests {
         let path = dir.path().join("known.json");
         store.save(&path, &empty_store_revision()).expect("save");
         let loaded = InvestigationTeamKnownAnswerStore::load(&path).expect("load");
-
-        let mut legacy: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).expect("read store"))
-                .expect("parse store json");
-        legacy["schema_id"] =
-            serde_json::Value::String(INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V1.into());
-        std::fs::write(
-            &path,
-            serde_json::to_vec_pretty(&legacy).expect("render legacy store"),
-        )
-        .expect("write legacy store");
-        let migrated = InvestigationTeamKnownAnswerStore::load(&path).expect("migrate V1 store");
-        assert_eq!(
-            migrated.schema_id,
-            INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V2
-        );
-        assert!(migrated.captures.is_empty());
 
         let matching = current_projection_context("build-a".into(), vec![target().member])
             .expect("matching context");
@@ -1780,6 +1891,7 @@ mod tests {
             self.calls += 1;
             self.last = Some(ProviderTransportTelemetry {
                 response_model: Some("reported/model-b".into()),
+                model_identity_status: ModelIdentityStatus::Reported,
                 prompt_tokens: Some(100),
                 completion_tokens: Some(20),
                 reasoning_tokens: Some(5),
@@ -1973,6 +2085,252 @@ mod tests {
             &mut AnsweringTransport::default(),
         )
         .expect("evidence")
+    }
+
+    fn evidence_with_run_id(
+        mut evidence: LiveKnownAnswerExecutionEvidence,
+        run_id: &str,
+        observed_at: i64,
+    ) -> LiveKnownAnswerExecutionEvidence {
+        let run_id = LiveKnownAnswerRunId::parse(run_id).expect("run id");
+        evidence.report.run_id = Some(run_id.clone());
+        evidence.report.observed_at = observed_at;
+        if let Some(capture) = &mut evidence.capture {
+            capture.run_id = Some(run_id);
+            capture.observed_at = observed_at;
+            evidence.report.canonical_capture_sha256 =
+                Some(live_known_answer_capture_sha256(capture).expect("capture digest"));
+        }
+        evidence
+    }
+
+    fn legacy_evidence(
+        mut evidence: LiveKnownAnswerExecutionEvidence,
+        include_capture: bool,
+    ) -> LiveKnownAnswerExecutionEvidence {
+        evidence.report.schema_id =
+            cd_core::quality_eval::LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V1.into();
+        evidence.report.run_id = None;
+        if include_capture {
+            let capture = evidence.capture.as_mut().expect("capture");
+            capture.schema_id =
+                cd_core::quality_eval::LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V1.into();
+            capture.run_id = None;
+            evidence.report.canonical_capture_sha256 =
+                Some(live_known_answer_capture_sha256(capture).expect("capture digest"));
+        } else {
+            evidence.capture = None;
+            evidence.report.canonical_capture_sha256 = None;
+        }
+        evidence
+    }
+
+    fn encoded_store(schema_id: &str, evidence: LiveKnownAnswerExecutionEvidence) -> Vec<u8> {
+        serde_json::to_vec(&InvestigationTeamKnownAnswerStore {
+            schema_id: schema_id.into(),
+            records: vec![evidence.report],
+            captures: evidence.capture.into_iter().collect(),
+        })
+        .expect("store json")
+    }
+
+    #[test]
+    fn legacy_v1_and_v2_stores_migrate_without_synthesizing_run_ids() {
+        let base = captured_evidence();
+        let v1 = legacy_evidence(base.clone(), false);
+        let migrated_v1 = InvestigationTeamKnownAnswerStore::decode(&encoded_store(
+            INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V1,
+            v1,
+        ))
+        .expect("migrate V1");
+        assert_eq!(
+            migrated_v1.schema_id,
+            INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V3
+        );
+        assert_eq!(migrated_v1.records[0].run_id, None);
+        assert!(migrated_v1.captures.is_empty());
+
+        let v2 = legacy_evidence(base, true);
+        let migrated_v2 = InvestigationTeamKnownAnswerStore::decode(&encoded_store(
+            INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V2,
+            v2,
+        ))
+        .expect("migrate V2");
+        assert_eq!(
+            migrated_v2.schema_id,
+            INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V3
+        );
+        assert_eq!(migrated_v2.records[0].run_id, None);
+        assert_eq!(migrated_v2.captures[0].run_id, None);
+    }
+
+    #[test]
+    fn legacy_and_host_minted_history_coexist_across_save_reload() {
+        let legacy = legacy_evidence(captured_evidence(), true);
+        let mut store = InvestigationTeamKnownAnswerStore::decode(&encoded_store(
+            INVESTIGATION_TEAM_KNOWN_ANSWER_STORE_SCHEMA_V2,
+            legacy,
+        ))
+        .expect("migrate legacy store");
+        let host = evidence_with_run_id(
+            captured_evidence(),
+            "lkar_00000000000040008000000000000001",
+            1_777_000_000,
+        );
+        store.publish_execution(host).expect("publish host run");
+
+        let dir = owner_tempdir();
+        let path = dir.path().join("known.json");
+        store.save(&path, &empty_store_revision()).expect("save");
+        let loaded = InvestigationTeamKnownAnswerStore::load(&path).expect("reload");
+        assert_eq!(loaded.records.len(), 2);
+        assert_eq!(loaded.captures.len(), 2);
+        let context =
+            current_projection_context("build-a".into(), vec![target().member]).expect("context");
+        let history = loaded.history(&context).expect("history");
+        assert!(history.iter().any(|row| {
+            row.run_id.is_none()
+                && row.run_id_provenance == KnownAnswerRunIdProvenance::LegacyUnidentified
+        }));
+        assert!(history.iter().any(|row| {
+            row.run_id.as_deref() == Some("lkar_00000000000040008000000000000001")
+                && row.run_id_provenance == KnownAnswerRunIdProvenance::HostMinted
+        }));
+    }
+
+    #[test]
+    fn same_second_runs_remain_distinct_and_round_trip_by_host_id() {
+        let base = captured_evidence();
+        let mut store = InvestigationTeamKnownAnswerStore::default();
+        for run_id in [
+            "lkar_00000000000040008000000000000001",
+            "lkar_00000000000040008000000000000002",
+        ] {
+            store
+                .publish_execution(evidence_with_run_id(base.clone(), run_id, 1_777_000_000))
+                .expect("publish distinct run");
+        }
+        let dir = owner_tempdir();
+        let path = dir.path().join("known.json");
+        store.save(&path, &empty_store_revision()).expect("save");
+        let loaded = InvestigationTeamKnownAnswerStore::load(&path).expect("reload");
+        assert_eq!(loaded.records.len(), 2);
+        assert_eq!(loaded.captures.len(), 2);
+        assert_ne!(loaded.records[0].run_id, loaded.records[1].run_id);
+    }
+
+    #[test]
+    fn report_capture_run_mismatch_fails_closed() {
+        let mut evidence = evidence_with_run_id(
+            captured_evidence(),
+            "lkar_00000000000040008000000000000001",
+            1_777_000_000,
+        );
+        let capture = evidence.capture.as_mut().expect("capture");
+        capture.run_id = Some(
+            LiveKnownAnswerRunId::parse("lkar_00000000000040008000000000000002")
+                .expect("second run id"),
+        );
+        evidence.report.canonical_capture_sha256 =
+            Some(live_known_answer_capture_sha256(capture).expect("capture digest"));
+        let error = InvestigationTeamKnownAnswerStore::default()
+            .publish_execution(evidence)
+            .expect_err("run mismatch");
+        assert!(error.to_string().contains("exact quality identity"));
+    }
+
+    #[test]
+    fn host_run_id_is_idempotent_but_never_overwrites_changed_evidence() {
+        let evidence = evidence_with_run_id(
+            captured_evidence(),
+            "lkar_00000000000040008000000000000001",
+            1_777_000_000,
+        );
+        let mut store = InvestigationTeamKnownAnswerStore::default();
+        store
+            .publish_execution(evidence.clone())
+            .expect("first publish");
+        let committed = store.clone();
+        store
+            .publish_execution(evidence.clone())
+            .expect("identical retry");
+        assert_eq!(store, committed);
+
+        let changed = evidence_with_run_id(
+            evidence.clone(),
+            "lkar_00000000000040008000000000000001",
+            1_777_000_001,
+        );
+        assert!(store
+            .publish_execution(changed)
+            .expect_err("changed same-id evidence")
+            .to_string()
+            .contains("reused for different evidence"));
+        assert_eq!(store, committed);
+
+        let mut missing_capture = evidence;
+        missing_capture.capture = None;
+        missing_capture.report.canonical_capture_sha256 = None;
+        assert!(store
+            .publish_execution(missing_capture)
+            .expect_err("same id cannot remove capture")
+            .to_string()
+            .contains("reused for different evidence"));
+        assert_eq!(store, committed);
+    }
+
+    #[test]
+    fn new_legacy_evidence_is_rejected_without_mutating_history() {
+        let mut store = InvestigationTeamKnownAnswerStore::default();
+        let before = store.clone();
+        assert!(store
+            .publish_execution(legacy_evidence(captured_evidence(), true))
+            .expect_err("legacy publish")
+            .to_string()
+            .contains("host-minted run identity"));
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn bounded_pruning_removes_only_the_evicted_run_capture() {
+        let base = captured_evidence();
+        let mut store = InvestigationTeamKnownAnswerStore::default();
+        for index in 1..=MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_RECORDS {
+            let run_id = format!("lkar_00000000000040008000{index:012x}");
+            let evidence =
+                evidence_with_run_id(base.clone(), &run_id, 1_777_000_000 + index as i64);
+            store.records.push(evidence.report);
+            store.captures.push(evidence.capture.expect("capture"));
+        }
+        store.validate().expect("seeded bounded store");
+        let newest = MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_RECORDS + 1;
+        let newest_id = format!("lkar_00000000000040008000{newest:012x}");
+        store
+            .publish_execution(evidence_with_run_id(
+                base,
+                &newest_id,
+                1_777_000_000 + newest as i64,
+            ))
+            .expect("publish evicting run");
+        assert_eq!(
+            store.records.len(),
+            MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_RECORDS
+        );
+        assert_eq!(
+            store.captures.len(),
+            MAX_INVESTIGATION_TEAM_KNOWN_ANSWER_RECORDS
+        );
+        let evicted = LiveKnownAnswerRunId::parse("lkar_00000000000040008000000000000001")
+            .expect("evicted id");
+        assert!(store
+            .records
+            .iter()
+            .all(|row| row.run_id.as_ref() != Some(&evicted)));
+        assert!(store
+            .captures
+            .iter()
+            .all(|row| row.run_id.as_ref() != Some(&evicted)));
+        store.validate().expect("pruned store remains valid");
     }
 
     #[test]
