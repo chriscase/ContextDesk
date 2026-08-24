@@ -205,6 +205,11 @@ fn config_migration_preserves_unrelated_fields_and_defaults_omit() {
     let mut value = serde_json::to_value(&cfg).unwrap();
     value.as_object_mut().unwrap().remove("reasoning_effort");
     std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
 
     let loaded = load_config(&path).unwrap();
     assert!(loaded.reasoning_effort.is_omit());

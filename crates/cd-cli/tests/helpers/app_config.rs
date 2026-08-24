@@ -3,6 +3,10 @@
 //! Durable persistence is Unix-only. Tests that need a file `load_config` can
 //! read must write pretty JSON themselves. Production `save_config` stays
 //! fail-closed off Unix and is exercised by dedicated refusal tests.
+//!
+//! On Unix the planted file is owner-only (`0o600`) so a later production
+//! save in a mutating test is not rejected for unsafe mode. That mode is a
+//! destination check, not a claim that this helper performed a durable save.
 
 use cd_core::config::AppConfig;
 use std::path::Path;
@@ -13,4 +17,10 @@ pub fn plant_app_config(path: &Path, cfg: &AppConfig) {
     }
     let raw = serde_json::to_string_pretty(cfg).expect("serialize AppConfig fixture");
     std::fs::write(path, raw).expect("plant AppConfig fixture without claiming durable save");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .expect("plant owner-only mode so production save can replace the fixture");
+    }
 }
