@@ -1561,8 +1561,12 @@ describe("decision readiness cockpit", () => {
 
     const chip = screen.getByRole("button", { name: "programmatic-agent" });
     fireEvent.click(chip);
-    expect(chip.getAttribute("aria-pressed")).toBe("true");
-    expect(allLanes.getAttribute("aria-pressed")).toBe("false");
+    expect(
+      screen.getByRole("button", { name: "programmatic-agent" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
+      "false",
+    );
     expect(screen.getByText(/Inspecting programmatic-agent\. This quick digest changes in place/)).toBeTruthy();
     expect(window.location.search).toContain("lane=cand-programmatic-agent");
 
@@ -1595,7 +1599,9 @@ describe("decision readiness cockpit", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Close lane inspection" }));
     expect(screen.queryByText(/Inspecting programmatic-agent/)).toBeNull();
-    expect(allLanes.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
   });
 
   it("clears focus when the operator switches historical artifacts", async () => {
