@@ -61,6 +61,53 @@ impl ObservedRoute {
     }
 }
 
+/// A provider-returned model identity that passed reject-only certification.
+///
+/// The inner bytes are private and the only constructor is fallible, so an
+/// invalid provider value cannot be retained, cloned, debugged, or serialized
+/// through this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedModelIdentity(String);
+
+impl CertifiedModelIdentity {
+    /// Exact certified bytes; certification never rewrites the value.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::ops::Deref for CertifiedModelIdentity {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for CertifiedModelIdentity {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl TryFrom<String> for CertifiedModelIdentity {
+    type Error = ModelIdentityRejected;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        certify_provider_model_identity(&raw)?;
+        Ok(Self(raw))
+    }
+}
+
+impl TryFrom<&str> for CertifiedModelIdentity {
+    type Error = ModelIdentityRejected;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        certify_provider_model_identity(raw)?;
+        Ok(Self(raw.to_string()))
+    }
+}
+
 /// Closed provider-returned model identity.
 ///
 /// Successful identities are [`Self::Certified`] with the exact accepted
@@ -74,9 +121,24 @@ pub enum ResponseModelIdentity {
     /// A provider-reported model passed [`certify_provider_model_identity`].
     Certified {
         /// Exact accepted identity bytes; never rewritten.
-        value: String,
+        value: CertifiedModelIdentity,
     },
     /// A provider-reported model was present and rejected without retaining bytes.
+    Rejected,
+}
+
+/// Closed identity state stored when a response contained a `model` field.
+///
+/// Absence is represented by `None` on [`ProviderTransportTelemetry`]. Invalid
+/// provider bytes cannot inhabit either variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresentResponseModelIdentity {
+    /// Certified exact model identity.
+    Certified {
+        /// Exact accepted identity bytes; never rewritten.
+        value: CertifiedModelIdentity,
+    },
+    /// A model field was present but rejected; no raw bytes are retained.
     Rejected,
 }
 
@@ -101,21 +163,18 @@ impl ResponseModelIdentity {
     fn from_status_and_value(status: ModelIdentityStatus, value: Option<String>) -> Self {
         match status {
             ModelIdentityStatus::Rejected => Self::Rejected,
-            ModelIdentityStatus::Absent => Self::Absent,
+            ModelIdentityStatus::Absent => match value {
+                None => Self::Absent,
+                Some(raw) => CertifiedModelIdentity::try_from(raw)
+                    .map(|value| Self::Certified { value })
+                    .unwrap_or(Self::Rejected),
+            },
             ModelIdentityStatus::Certified => match value {
-                Some(raw) if certify_provider_model_identity(&raw).is_ok() => {
-                    Self::Certified { value: raw }
-                }
+                Some(raw) => CertifiedModelIdentity::try_from(raw)
+                    .map(|value| Self::Certified { value })
+                    .unwrap_or(Self::Rejected),
                 _ => Self::Rejected,
             },
-        }
-    }
-
-    fn into_status_and_value(self) -> (ModelIdentityStatus, Option<String>) {
-        match self {
-            Self::Absent => (ModelIdentityStatus::Absent, None),
-            Self::Rejected => (ModelIdentityStatus::Rejected, None),
-            Self::Certified { value } => (ModelIdentityStatus::Certified, Some(value)),
         }
     }
 }
@@ -160,10 +219,10 @@ impl std::error::Error for ModelIdentityRejected {}
 /// zero. A genuine zero (e.g. free/BYOK `usage.cost = 0.0`) is retained as
 /// `Some(0.0)` and is distinct from missing.
 ///
-/// `response_model` is a projection of [`ResponseModelIdentity`]: it is
-/// `Some` only for [`ResponseModelIdentity::Certified`]. Serde refuses to
-/// emit or retain [`ModelIdentityStatus::Rejected`] / [`ModelIdentityStatus::Absent`]
-/// with a `responseModel` value.
+/// `response_model` is a closed present-state projection of
+/// [`ResponseModelIdentity`]. It can contain only certified bytes or a
+/// byte-free rejection marker; absence is `None`. Serde refuses to emit or
+/// retain rejected provider bytes.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(
     rename_all = "camelCase",
@@ -171,13 +230,9 @@ impl std::error::Error for ModelIdentityRejected {}
     into = "ProviderTransportTelemetryWire"
 )]
 pub struct ProviderTransportTelemetry {
-    /// Model id reported in the response body (`model`), when certified.
+    /// Closed model identity when a `model` field was present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_model: Option<String>,
-    /// Distinct from [`Self::response_model`]: rejected identities stay
-    /// [`ModelIdentityStatus::Rejected`] with no retained raw bytes.
-    #[serde(default, skip_serializing_if = "model_identity_status_is_absent")]
-    pub model_identity_status: ModelIdentityStatus,
+    pub response_model: Option<PresentResponseModelIdentity>,
     /// Safe provider/gateway request identifier when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,
@@ -253,10 +308,15 @@ impl From<ProviderTransportTelemetryWire> for ProviderTransportTelemetry {
             wire.model_identity_status,
             wire.response_model,
         );
-        let (model_identity_status, response_model) = identity.into_status_and_value();
+        let response_model = match identity {
+            ResponseModelIdentity::Absent => None,
+            ResponseModelIdentity::Certified { value } => {
+                Some(PresentResponseModelIdentity::Certified { value })
+            }
+            ResponseModelIdentity::Rejected => Some(PresentResponseModelIdentity::Rejected),
+        };
         Self {
             response_model,
-            model_identity_status,
             provider_request_id: wire.provider_request_id,
             observed_route: wire.observed_route,
             prompt_tokens: wire.prompt_tokens,
@@ -274,11 +334,9 @@ impl From<ProviderTransportTelemetryWire> for ProviderTransportTelemetry {
 
 impl From<ProviderTransportTelemetry> for ProviderTransportTelemetryWire {
     fn from(value: ProviderTransportTelemetry) -> Self {
-        let identity = ResponseModelIdentity::from_status_and_value(
-            value.model_identity_status,
-            value.response_model,
-        );
-        let (model_identity_status, response_model) = identity.into_status_and_value();
+        let identity = value.response_model_identity();
+        let model_identity_status = identity.status();
+        let response_model = identity.certified_value().map(str::to_string);
         Self {
             response_model,
             model_identity_status,
@@ -362,13 +420,30 @@ impl ProviderTransportTelemetry {
             && self.reasoning_effort_effective.is_none()
     }
 
-    /// Closed identity for this capture. Inconsistent public fields collapse
-    /// to [`ResponseModelIdentity::Rejected`] or drop uncertified bytes.
+    /// Certified model bytes when the provider identity was accepted.
+    pub fn certified_response_model(&self) -> Option<&str> {
+        match &self.response_model {
+            Some(PresentResponseModelIdentity::Certified { value }) => Some(value.as_str()),
+            Some(PresentResponseModelIdentity::Rejected) | None => None,
+        }
+    }
+
+    /// Compatibility status derived from the closed identity state.
+    pub fn model_identity_status(&self) -> ModelIdentityStatus {
+        self.response_model_identity().status()
+    }
+
+    /// Closed identity for this capture.
     pub fn response_model_identity(&self) -> ResponseModelIdentity {
-        ResponseModelIdentity::from_status_and_value(
-            self.model_identity_status,
-            self.response_model.clone(),
-        )
+        match &self.response_model {
+            None => ResponseModelIdentity::Absent,
+            Some(PresentResponseModelIdentity::Rejected) => ResponseModelIdentity::Rejected,
+            Some(PresentResponseModelIdentity::Certified { value }) => {
+                ResponseModelIdentity::Certified {
+                    value: value.clone(),
+                }
+            }
+        }
     }
 
     /// Merge later patches without inventing values. Later `Some` wins;
@@ -376,14 +451,10 @@ impl ProviderTransportTelemetry {
     pub fn merge_from(&mut self, other: &Self) {
         match other.response_model_identity() {
             ResponseModelIdentity::Certified { value } => {
-                if let Ok(certified) = certify_provider_model_identity(&value) {
-                    self.response_model = Some(certified.to_string());
-                    self.model_identity_status = ModelIdentityStatus::Certified;
-                }
+                self.response_model = Some(PresentResponseModelIdentity::Certified { value });
             }
             ResponseModelIdentity::Rejected => {
-                self.response_model = None;
-                self.model_identity_status = ModelIdentityStatus::Rejected;
+                self.response_model = Some(PresentResponseModelIdentity::Rejected);
             }
             ResponseModelIdentity::Absent => {}
         }
@@ -493,6 +564,7 @@ pub fn certified_response_model(raw: &str) -> Option<String> {
 /// shapes. All names are synthetic fixtures.
 pub const PROVIDER_MODEL_IDENTITY_COMPATIBILITY_CASES: &[(&str, bool)] = &[
     ("qwen3", true),
+    ("qwen-3.6-27b", true),
     ("qwen2.5-coder", true),
     ("qwen2.5:7b", true),
     ("Qwen3-Reranker-0.6B", true),
@@ -502,6 +574,7 @@ pub const PROVIDER_MODEL_IDENTITY_COMPATIBILITY_CASES: &[(&str, bool)] = &[
     ("gpt-oss:20", true),
     ("openai/gpt-oss-120b", true),
     ("ministral-3b", true),
+    ("ministral-3-14b-instruct-2512", true),
     ("mistral/ministral-14b", true),
     ("deepseek-chat", true),
     ("deepseek-reasoner", true),
@@ -509,6 +582,10 @@ pub const PROVIDER_MODEL_IDENTITY_COMPATIBILITY_CASES: &[(&str, bool)] = &[
     ("accounts/fictional-gateway/models/qwen3", true),
     ("publishers/fictional/models/gpt-oss", true),
     ("org-alpha/deployments/ministral-3b", true),
+    ("vendor/model.release", true),
+    ("vendor/chat/model-v1", true),
+    ("catalog/api/responses/model-v1", true),
+    ("responses/model-v1", true),
     ("vertex:publishers:qwen3", true),
     ("qwen2.5:7", true),
     ("vertex:publishers:qwen3:revision:9", true),
@@ -538,8 +615,12 @@ pub const PROVIDER_MODEL_IDENTITY_COMPATIBILITY_CASES: &[(&str, bool)] = &[
     ("fixture.invalid:8443", false),
     ("fixture.invalid", false),
     ("alpha.internal", false),
+    ("alpha.internal/v1", false),
     ("alpha.localhost", false),
+    ("192.0.2.80/v1", false),
     ("v1/chat/completions", false),
+    ("v2/responses", false),
+    ("chat/completions", false),
     ("api/embeddings", false),
     ("qwen3/../outside", false),
     ("qwen3?x=1", false),
@@ -584,7 +665,9 @@ fn response_model_identity_is_valid(value: &str) -> bool {
                 || !segment.bytes().all(|byte| {
                     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+' | b':')
                 })
-                || identity_looks_like_network_host(segment)
+        })
+        || segments.first().is_some_and(|segment| {
+            identity_looks_like_network_host(segment)
                 || segment.parse::<std::net::IpAddr>().is_ok()
                 || identity_is_endpoint_hostport(segment)
         })
@@ -650,27 +733,30 @@ fn identity_contains_credential_assignment(value: &str) -> bool {
 }
 
 fn response_model_segments_are_route_shaped(segments: &[&str]) -> bool {
-    if segments.is_empty() {
+    if segments.len() < 2 {
         return false;
     }
-    const ROUTE_WORDS: &[&str] = &[
-        "api",
-        "chat",
-        "completions",
-        "completion",
-        "embeddings",
-        "responses",
-    ];
+    const ENDPOINT_WORDS: &[&str] = &["completions", "completion", "embeddings", "responses"];
     let first = segments[0].to_ascii_lowercase();
-    if first.strip_prefix('v').is_some_and(|version| {
+    let version_prefix = first.strip_prefix('v').is_some_and(|version| {
         !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
-    }) {
-        return true;
-    }
-    segments.iter().any(|segment| {
-        let normalized = segment.to_ascii_lowercase();
-        ROUTE_WORDS.contains(&normalized.as_str())
-    })
+    });
+    let normalized = segments
+        .iter()
+        .map(|segment| segment.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let has_endpoint = normalized
+        .iter()
+        .any(|segment| ENDPOINT_WORDS.contains(&segment.as_str()));
+
+    // Reject only complete endpoint-like paths. Catalog namespaces and model
+    // ids are allowed to contain words such as `api`, `chat`, or `responses`.
+    (version_prefix && has_endpoint)
+        || (first == "api" && has_endpoint)
+        || (first == "chat"
+            && normalized
+                .get(1)
+                .is_some_and(|segment| segment == "completions" || segment == "completion"))
 }
 
 fn identity_is_internal_hostname(host: &str) -> bool {
@@ -817,19 +903,17 @@ pub fn extract_transport_telemetry_from_value(v: &Value) -> ProviderTransportTel
     match v.get("model") {
         None => {}
         Some(model) => match model.as_str() {
-            Some(raw) => match certify_provider_model_identity(raw) {
-                Ok(id) => {
-                    out.response_model = Some(id.to_string());
-                    out.model_identity_status = ModelIdentityStatus::Certified;
+            Some(raw) => match CertifiedModelIdentity::try_from(raw) {
+                Ok(identity) => {
+                    out.response_model =
+                        Some(PresentResponseModelIdentity::Certified { value: identity });
                 }
                 Err(_) => {
-                    out.response_model = None;
-                    out.model_identity_status = ModelIdentityStatus::Rejected;
+                    out.response_model = Some(PresentResponseModelIdentity::Rejected);
                 }
             },
             None => {
-                out.response_model = None;
-                out.model_identity_status = ModelIdentityStatus::Rejected;
+                out.response_model = Some(PresentResponseModelIdentity::Rejected);
             }
         },
     }
@@ -1187,6 +1271,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn certified(raw: &str) -> CertifiedModelIdentity {
+        CertifiedModelIdentity::try_from(raw).expect("synthetic certified identity")
+    }
+
+    fn present_certified(raw: &str) -> PresentResponseModelIdentity {
+        PresentResponseModelIdentity::Certified {
+            value: certified(raw),
+        }
+    }
+
     #[test]
     fn vercel_shaped_usage_captures_cost_reasoning_cached_model_and_id() {
         let v = json!({
@@ -1209,8 +1303,8 @@ mod tests {
             }
         });
         let tel = extract_transport_telemetry_from_value(&v);
-        assert_eq!(tel.response_model.as_deref(), Some("qwen3"));
-        assert_eq!(tel.model_identity_status, ModelIdentityStatus::Certified);
+        assert_eq!(tel.certified_response_model(), Some("qwen3"));
+        assert_eq!(tel.model_identity_status(), ModelIdentityStatus::Certified);
         // Body id wins over generationId when both present.
         assert_eq!(
             tel.provider_request_id.as_deref(),
@@ -1261,7 +1355,7 @@ mod tests {
             "choices": [{"message": {"content": ""}, "finish_reason": "length"}]
         }));
         assert!(tel.response_model.is_none());
-        assert_eq!(tel.model_identity_status, ModelIdentityStatus::Absent);
+        assert_eq!(tel.model_identity_status(), ModelIdentityStatus::Absent);
         assert!(tel.provider_request_id.is_none());
         assert_eq!(tel.observed_route, ObservedRoute::Unknown);
         assert!(tel.prompt_tokens.is_none());
@@ -1276,10 +1370,10 @@ mod tests {
             "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
         }));
         assert_eq!(
-            tel.response_model.as_deref(),
+            tel.certified_response_model(),
             Some("deepseek/deepseek-chat")
         );
-        assert_eq!(tel.model_identity_status, ModelIdentityStatus::Certified);
+        assert_eq!(tel.model_identity_status(), ModelIdentityStatus::Certified);
         assert_eq!(tel.observed_route, ObservedRoute::Unknown);
         assert_eq!(tel.observed_route.as_status_str(), "unknown");
     }
@@ -1348,12 +1442,12 @@ mod tests {
                 );
                 assert_eq!(certified_response_model(model).as_deref(), Some(*model));
                 let tel = extract_transport_telemetry_from_value(&json!({ "model": model }));
-                assert_eq!(tel.response_model.as_deref(), Some(*model));
-                assert_eq!(tel.model_identity_status, ModelIdentityStatus::Certified);
+                assert_eq!(tel.certified_response_model(), Some(*model));
+                assert_eq!(tel.model_identity_status(), ModelIdentityStatus::Certified);
                 assert_eq!(
                     tel.response_model_identity(),
                     ResponseModelIdentity::Certified {
-                        value: (*model).into()
+                        value: certified(model)
                     }
                 );
             } else {
@@ -1364,8 +1458,12 @@ mod tests {
                 );
                 assert_eq!(certified_response_model(model), None);
                 let tel = extract_transport_telemetry_from_value(&json!({ "model": model }));
-                assert_eq!(tel.response_model, None, "must not retain {model:?}");
-                assert_eq!(tel.model_identity_status, ModelIdentityStatus::Rejected);
+                assert_eq!(
+                    tel.response_model,
+                    Some(PresentResponseModelIdentity::Rejected),
+                    "must retain only a byte-free rejection marker for {model:?}"
+                );
+                assert_eq!(tel.model_identity_status(), ModelIdentityStatus::Rejected);
                 let dumped = serde_json::to_string(&tel).unwrap();
                 if !model.is_empty() {
                     assert!(
@@ -1382,7 +1480,7 @@ mod tests {
         );
         assert_eq!(
             extract_transport_telemetry_from_value(&json!({ "model": overlong }))
-                .model_identity_status,
+                .model_identity_status(),
             ModelIdentityStatus::Rejected
         );
         let raw = "qwen3";
@@ -1399,15 +1497,18 @@ mod tests {
             "choices": [{"message": {"content": "x"}}]
         }));
         assert_eq!(absent.response_model, None);
-        assert_eq!(absent.model_identity_status, ModelIdentityStatus::Absent);
+        assert_eq!(absent.model_identity_status(), ModelIdentityStatus::Absent);
         assert!(absent.is_empty());
 
         let rejected = extract_transport_telemetry_from_value(&json!({
             "model": "https://fixture.invalid/v1"
         }));
-        assert_eq!(rejected.response_model, None);
         assert_eq!(
-            rejected.model_identity_status,
+            rejected.response_model,
+            Some(PresentResponseModelIdentity::Rejected)
+        );
+        assert_eq!(
+            rejected.model_identity_status(),
             ModelIdentityStatus::Rejected
         );
         assert!(!rejected.is_empty());
@@ -1416,9 +1517,12 @@ mod tests {
         assert!(dumped.contains("rejected"));
 
         let non_string = extract_transport_telemetry_from_value(&json!({ "model": 7 }));
-        assert_eq!(non_string.response_model, None);
         assert_eq!(
-            non_string.model_identity_status,
+            non_string.response_model,
+            Some(PresentResponseModelIdentity::Rejected)
+        );
+        assert_eq!(
+            non_string.model_identity_status(),
             ModelIdentityStatus::Rejected
         );
         assert!(!serde_json::to_string(&non_string).unwrap().contains("7"));
@@ -1434,8 +1538,11 @@ mod tests {
             "model": " qwen3",
             "id": "  chatcmpl-padded-1  "
         }));
-        assert_eq!(tel.response_model, None);
-        assert_eq!(tel.model_identity_status, ModelIdentityStatus::Rejected);
+        assert_eq!(
+            tel.response_model,
+            Some(PresentResponseModelIdentity::Rejected)
+        );
+        assert_eq!(tel.model_identity_status(), ModelIdentityStatus::Rejected);
         assert_eq!(
             tel.provider_request_id.as_deref(),
             Some("chatcmpl-padded-1")
@@ -1465,50 +1572,55 @@ mod tests {
     #[test]
     fn merge_from_propagates_rejected_certified_and_absent_model_identity() {
         let mut base = ProviderTransportTelemetry {
-            response_model: Some("gpt-oss-120b".into()),
-            model_identity_status: ModelIdentityStatus::Certified,
+            response_model: Some(present_certified("gpt-oss-120b")),
             provider_request_id: Some("req-1".into()),
             ..Default::default()
         };
-        let invalid_payload = ProviderTransportTelemetry {
-            response_model: Some(" sk-fixturekey00000001 ".into()),
-            model_identity_status: ModelIdentityStatus::Absent,
-            provider_request_id: Some("req-2".into()),
-            ..Default::default()
-        };
-        base.merge_from(&invalid_payload);
-        assert_eq!(base.response_model.as_deref(), Some("gpt-oss-120b"));
-        assert_eq!(base.model_identity_status, ModelIdentityStatus::Certified);
+        let absent_payload: ProviderTransportTelemetry = serde_json::from_value(json!({
+            "modelIdentityStatus": "absent",
+            "providerRequestId": "req-2"
+        }))
+        .unwrap();
+        base.merge_from(&absent_payload);
+        assert_eq!(base.certified_response_model(), Some("gpt-oss-120b"));
+        assert_eq!(base.model_identity_status(), ModelIdentityStatus::Certified);
         assert_eq!(base.provider_request_id.as_deref(), Some("req-2"));
 
         let rejected = ProviderTransportTelemetry {
-            response_model: None,
-            model_identity_status: ModelIdentityStatus::Rejected,
+            response_model: Some(PresentResponseModelIdentity::Rejected),
             ..Default::default()
         };
         base.merge_from(&rejected);
-        assert_eq!(base.response_model, None);
-        assert_eq!(base.model_identity_status, ModelIdentityStatus::Rejected);
+        assert_eq!(
+            base.response_model,
+            Some(PresentResponseModelIdentity::Rejected)
+        );
+        assert_eq!(base.model_identity_status(), ModelIdentityStatus::Rejected);
         assert!(!base.is_empty());
 
         let absent = ProviderTransportTelemetry::default();
         base.merge_from(&absent);
-        assert_eq!(base.response_model, None);
-        assert_eq!(base.model_identity_status, ModelIdentityStatus::Rejected);
+        assert_eq!(
+            base.response_model,
+            Some(PresentResponseModelIdentity::Rejected)
+        );
+        assert_eq!(base.model_identity_status(), ModelIdentityStatus::Rejected);
 
         let later_valid = ProviderTransportTelemetry {
-            response_model: Some("qwen3".into()),
-            model_identity_status: ModelIdentityStatus::Certified,
+            response_model: Some(present_certified("qwen3")),
             ..Default::default()
         };
         base.merge_from(&later_valid);
-        assert_eq!(base.response_model.as_deref(), Some("qwen3"));
-        assert_eq!(base.model_identity_status, ModelIdentityStatus::Certified);
+        assert_eq!(base.certified_response_model(), Some("qwen3"));
+        assert_eq!(base.model_identity_status(), ModelIdentityStatus::Certified);
 
         let mut empty = ProviderTransportTelemetry::default();
         empty.merge_from(&rejected);
-        assert_eq!(empty.response_model, None);
-        assert_eq!(empty.model_identity_status, ModelIdentityStatus::Rejected);
+        assert_eq!(
+            empty.response_model,
+            Some(PresentResponseModelIdentity::Rejected)
+        );
+        assert_eq!(empty.model_identity_status(), ModelIdentityStatus::Rejected);
         let dumped = serde_json::to_string(&empty).unwrap();
         assert!(!dumped.contains("fixturekey00000001"));
         assert!(!dumped.contains("sk-fixture"));
@@ -1600,10 +1712,13 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            rejected_with_bytes.model_identity_status,
+            rejected_with_bytes.model_identity_status(),
             ModelIdentityStatus::Rejected
         );
-        assert_eq!(rejected_with_bytes.response_model, None);
+        assert_eq!(
+            rejected_with_bytes.response_model,
+            Some(PresentResponseModelIdentity::Rejected)
+        );
         assert_eq!(rejected_with_bytes.prompt_tokens, Some(3));
         assert_eq!(
             rejected_with_bytes.response_model_identity(),
@@ -1613,6 +1728,13 @@ mod tests {
         assert!(!dumped.contains(adversarial));
         assert!(!dumped.contains("fixture.invalid"));
         assert!(dumped.contains("rejected"));
+        let cloned = rejected_with_bytes.clone();
+        assert_eq!(
+            cloned.response_model,
+            Some(PresentResponseModelIdentity::Rejected)
+        );
+        assert!(!format!("{cloned:?}").contains(adversarial));
+        assert!(!format!("{cloned:?}").contains("fixture.invalid"));
 
         let absent_with_bytes: ProviderTransportTelemetry = serde_json::from_value(json!({
             "modelIdentityStatus": "absent",
@@ -1620,17 +1742,34 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            absent_with_bytes.model_identity_status,
-            ModelIdentityStatus::Absent
+            absent_with_bytes.model_identity_status(),
+            ModelIdentityStatus::Rejected
         );
-        assert_eq!(absent_with_bytes.response_model, None);
+        assert_eq!(
+            absent_with_bytes.response_model,
+            Some(PresentResponseModelIdentity::Rejected)
+        );
         assert_eq!(
             absent_with_bytes.response_model_identity(),
-            ResponseModelIdentity::Absent
+            ResponseModelIdentity::Rejected
         );
         let dumped = serde_json::to_string(&absent_with_bytes).unwrap();
         assert!(!dumped.contains(adversarial));
         assert!(!dumped.contains("responseModel"));
+        assert!(dumped.contains("rejected"));
+
+        let legacy_without_status: ProviderTransportTelemetry = serde_json::from_value(json!({
+            "responseModel": "vendor/model.release"
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy_without_status.model_identity_status(),
+            ModelIdentityStatus::Certified
+        );
+        assert_eq!(
+            legacy_without_status.certified_response_model(),
+            Some("vendor/model.release")
+        );
 
         let reported_alias: ProviderTransportTelemetry = serde_json::from_value(json!({
             "modelIdentityStatus": "reported",
@@ -1638,14 +1777,14 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            reported_alias.model_identity_status,
+            reported_alias.model_identity_status(),
             ModelIdentityStatus::Certified
         );
-        assert_eq!(reported_alias.response_model.as_deref(), Some("qwen3"));
+        assert_eq!(reported_alias.certified_response_model(), Some("qwen3"));
         assert_eq!(
             reported_alias.response_model_identity(),
             ResponseModelIdentity::Certified {
-                value: "qwen3".into()
+                value: certified("qwen3")
             }
         );
 
@@ -1655,28 +1794,21 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            certified_invalid.model_identity_status,
+            certified_invalid.model_identity_status(),
             ModelIdentityStatus::Rejected
         );
-        assert_eq!(certified_invalid.response_model, None);
+        assert_eq!(
+            certified_invalid.response_model,
+            Some(PresentResponseModelIdentity::Rejected)
+        );
         assert!(!serde_json::to_string(&certified_invalid)
             .unwrap()
             .contains(adversarial));
 
-        let inconsistent = ProviderTransportTelemetry {
-            response_model: Some(adversarial.into()),
-            model_identity_status: ModelIdentityStatus::Rejected,
-            ..Default::default()
-        };
-        let dumped = serde_json::to_string(&inconsistent).unwrap();
-        assert!(!dumped.contains(adversarial));
-        assert!(!dumped.contains("fixture.invalid"));
-        let roundtrip: ProviderTransportTelemetry = serde_json::from_str(&dumped).unwrap();
-        assert_eq!(roundtrip.response_model, None);
-        assert_eq!(
-            roundtrip.model_identity_status,
-            ModelIdentityStatus::Rejected
-        );
+        let rejected = CertifiedModelIdentity::try_from(adversarial);
+        assert_eq!(rejected, Err(ModelIdentityRejected));
+        assert!(!format!("{rejected:?}").contains(adversarial));
+        assert!(!format!("{:?}", ResponseModelIdentity::Rejected).contains(adversarial));
     }
 
     #[test]

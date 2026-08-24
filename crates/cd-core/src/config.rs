@@ -1021,12 +1021,17 @@ fn store_file_name(path: &Path) -> CoreResult<std::ffi::CString> {
 thread_local! {
     static SAVE_ABORT_BEFORE_REPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SAVE_SWAP_TEMP_INODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SAVE_SWAP_TEMP_AFTER_VERIFY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SAVE_SWAP_DEST_AFTER_VERIFY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(unix)]
 struct UnlinkTempOnDrop {
     dir_fd: std::os::fd::RawFd,
     name: std::ffi::CString,
+    expected_dev: u64,
+    expected_ino: u64,
     disarm: bool,
 }
 
@@ -1034,13 +1039,190 @@ struct UnlinkTempOnDrop {
 impl Drop for UnlinkTempOnDrop {
     fn drop(&mut self) {
         if !self.disarm {
-            // SAFETY: `dir_fd` remains a live parent descriptor for the save
-            // transaction; `name` is one NUL-terminated temp component.
-            unsafe {
-                libc::unlinkat(self.dir_fd, self.name.as_ptr(), 0);
+            // Cleanup is fail-closed: never unlink a pathname that no longer
+            // names the inode created by this transaction.
+            // SAFETY: `stat` is initialized before `fstatat` writes it;
+            // `dir_fd` remains live and `name` is one NUL-terminated component.
+            let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+            let stat_rc = unsafe {
+                libc::fstatat(
+                    self.dir_fd,
+                    self.name.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if stat_rc == 0
+                && unix_stat_dev(&stat) == self.expected_dev
+                && unix_stat_ino(&stat) == self.expected_ino
+            {
+                // SAFETY: the immediately preceding no-follow stat matched the
+                // transaction-owned inode under the retained parent handle.
+                unsafe {
+                    libc::unlinkat(self.dir_fd, self.name.as_ptr(), 0);
+                }
             }
         }
     }
+}
+
+#[cfg(unix)]
+struct DirectoryTransactionLock {
+    fd: std::os::fd::RawFd,
+}
+
+#[cfg(unix)]
+impl Drop for DirectoryTransactionLock {
+    fn drop(&mut self) {
+        // SAFETY: `fd` remains owned by the parent directory handle.
+        unsafe {
+            libc::flock(self.fd, libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn lock_config_parent(parent: &std::fs::File) -> CoreResult<DirectoryTransactionLock> {
+    use std::os::fd::AsRawFd;
+
+    // Non-blocking prevents an abandoned cooperating writer from turning save
+    // into an unbounded denial of service.
+    // SAFETY: the parent descriptor is live for the returned guard's lifetime.
+    let rc = unsafe { libc::flock(parent.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return Err(store_config_error(
+            "another configuration publication transaction is active",
+        ));
+    }
+    Ok(DirectoryTransactionLock {
+        fd: parent.as_raw_fd(),
+    })
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum AtomicRenameOperation {
+    NoReplace,
+    Exchange,
+}
+
+#[cfg(unix)]
+fn atomic_renameat(
+    parent: &std::fs::File,
+    from: &std::ffi::CString,
+    to: &std::ffi::CString,
+    operation: AtomicRenameOperation,
+) -> CoreResult<()> {
+    use std::os::fd::AsRawFd;
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let rc = unsafe {
+            libc::renameat2(
+                parent.as_raw_fd(),
+                from.as_ptr(),
+                parent.as_raw_fd(),
+                to.as_ptr(),
+                match operation {
+                    AtomicRenameOperation::NoReplace => libc::RENAME_NOREPLACE,
+                    AtomicRenameOperation::Exchange => libc::RENAME_EXCHANGE,
+                },
+            )
+        };
+
+        #[cfg(target_vendor = "apple")]
+        let rc = unsafe {
+            libc::renameatx_np(
+                parent.as_raw_fd(),
+                from.as_ptr(),
+                parent.as_raw_fd(),
+                to.as_ptr(),
+                match operation {
+                    AtomicRenameOperation::NoReplace => libc::RENAME_EXCL,
+                    AtomicRenameOperation::Exchange => libc::RENAME_SWAP,
+                },
+            )
+        };
+
+        if rc != 0 {
+            return Err(store_config_error(
+                "atomic config publication could not be completed",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    {
+        let _ = (parent, from, to, operation);
+        Err(store_config_error(
+            "atomic config publication is unavailable on this Unix platform",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn same_named_inode(left: &libc::stat, right: &libc::stat) -> bool {
+    unix_stat_dev(left) == unix_stat_dev(right) && unix_stat_ino(left) == unix_stat_ino(right)
+}
+
+#[cfg(unix)]
+fn rollback_config_publication(
+    parent: &std::fs::File,
+    temp_name: &std::ffi::CString,
+    destination_name: &std::ffi::CString,
+    prior_destination_existed: bool,
+    displaced_destination: Option<&libc::stat>,
+) -> CoreResult<()> {
+    if prior_destination_existed {
+        atomic_renameat(
+            parent,
+            temp_name,
+            destination_name,
+            AtomicRenameOperation::Exchange,
+        )?;
+        let restored = fstatat_nofollow(parent, destination_name)?.ok_or_else(|| {
+            store_config_error("config rollback did not restore the prior destination")
+        })?;
+        if displaced_destination.is_some_and(|displaced| !same_named_inode(&restored, displaced)) {
+            return Err(store_config_error(
+                "config rollback restored a different destination inode",
+            ));
+        }
+    } else {
+        atomic_renameat(
+            parent,
+            destination_name,
+            temp_name,
+            AtomicRenameOperation::NoReplace,
+        )?;
+        if fstatat_nofollow(parent, destination_name)?.is_some() {
+            return Err(store_config_error(
+                "config rollback did not restore an absent destination",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unlink_named_inode_if_matches(
+    parent: &std::fs::File,
+    name: &std::ffi::CString,
+    expected: &libc::stat,
+) -> bool {
+    use std::os::fd::AsRawFd;
+
+    let Ok(Some(current)) = fstatat_nofollow(parent, name) else {
+        return false;
+    };
+    if !same_named_inode(&current, expected) {
+        return false;
+    }
+    // SAFETY: the no-follow identity check matched the transaction's displaced
+    // inode under the retained parent descriptor. A mismatch is left untouched.
+    unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) == 0 }
 }
 
 #[cfg(unix)]
@@ -1063,6 +1245,7 @@ fn save_config_unix(path: &Path, raw: &[u8]) -> CoreResult<()> {
         .metadata()
         .map_err(|_| store_config_error("cannot inspect config parent"))?;
     unix_parent_is_safe_rename_dir(&parent_meta, expected_uid)?;
+    let _transaction_lock = lock_config_parent(&parent_dir)?;
     if let Some(dest_stat) = fstatat_nofollow(&parent_dir, &dest_name)? {
         unix_destination_is_replaceable(&dest_stat, expected_uid)?;
     }
@@ -1099,9 +1282,14 @@ fn save_config_unix(path: &Path, raw: &[u8]) -> CoreResult<()> {
         }
         // SAFETY: `openat` returned a new owned descriptor.
         let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        let opened = file
+            .metadata()
+            .map_err(|_| store_config_error("cannot inspect config temporary file"))?;
         tmp_guard = Some(UnlinkTempOnDrop {
             dir_fd: parent_dir.as_raw_fd(),
             name: c_tmp.clone(),
+            expected_dev: opened.dev(),
+            expected_ino: opened.ino(),
             disarm: false,
         });
         tmp_file = Some(file);
@@ -1124,6 +1312,7 @@ fn save_config_unix(path: &Path, raw: &[u8]) -> CoreResult<()> {
         .metadata()
         .map_err(|_| store_config_error("cannot inspect config temporary file"))?;
     if !created_meta.is_file()
+        || created_meta.nlink() != 1
         || created_meta.uid() != expected_uid
         || created_meta.permissions().mode() & 0o777 != 0o600
     {
@@ -1185,28 +1374,124 @@ fn save_config_unix(path: &Path, raw: &[u8]) -> CoreResult<()> {
         store_config_error("config temporary pathname no longer resolves to the verified inode")
     })?;
     unix_named_inode_matches_open_file(&named_stat, &opened_meta, expected_uid)?;
-    if let Some(dest_stat) = fstatat_nofollow(&parent_dir, &dest_name)? {
+    let prior_destination = fstatat_nofollow(&parent_dir, &dest_name)?;
+    if let Some(dest_stat) = prior_destination.as_ref() {
         unix_destination_is_replaceable(&dest_stat, expected_uid)?;
     }
 
-    // SAFETY: both names are single components relative to the retained parent.
-    let rename_rc = unsafe {
-        libc::renameat(
-            parent_dir.as_raw_fd(),
-            c_tmp.as_ptr(),
-            parent_dir.as_raw_fd(),
-            dest_name.as_ptr(),
-        )
+    #[cfg(test)]
+    if SAVE_SWAP_TEMP_AFTER_VERIFY.with(std::cell::Cell::get) {
+        SAVE_SWAP_TEMP_AFTER_VERIFY.with(|flag| flag.set(false));
+        use std::os::unix::ffi::OsStrExt;
+        let tmp_path = parent.join(std::ffi::OsStr::from_bytes(c_tmp.as_bytes()));
+        let held = parent.join("held-verified-temp.bin");
+        let planted = parent.join("planted-after-verify.bin");
+        std::fs::rename(&tmp_path, &held)
+            .map_err(|_| store_config_error("cannot stage synthetic temp replacement"))?;
+        std::fs::write(&planted, b"SYNTHETIC-REPLACEMENT")
+            .map_err(|_| store_config_error("cannot write synthetic temp replacement"))?;
+        std::os::unix::fs::symlink(&planted, &tmp_path)
+            .map_err(|_| store_config_error("cannot install synthetic temp replacement"))?;
+    }
+
+    #[cfg(test)]
+    if SAVE_SWAP_DEST_AFTER_VERIFY.with(std::cell::Cell::get) {
+        SAVE_SWAP_DEST_AFTER_VERIFY.with(|flag| flag.set(false));
+        let held = parent.join("held-verified-destination.json");
+        std::fs::rename(path, &held)
+            .map_err(|_| store_config_error("cannot stage synthetic destination replacement"))?;
+        let replacement = serde_json::to_vec_pretty(&AppConfig::default())?;
+        std::fs::write(path, replacement)
+            .map_err(|_| store_config_error("cannot write synthetic destination replacement"))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| store_config_error("cannot secure synthetic destination replacement"))?;
+    }
+
+    atomic_renameat(
+        &parent_dir,
+        &c_tmp,
+        &dest_name,
+        if prior_destination.is_some() {
+            AtomicRenameOperation::Exchange
+        } else {
+            AtomicRenameOperation::NoReplace
+        },
+    )?;
+
+    let (published, displaced) = match (
+        fstatat_nofollow(&parent_dir, &dest_name),
+        fstatat_nofollow(&parent_dir, &c_tmp),
+    ) {
+        (Ok(published), Ok(displaced)) => (published, displaced),
+        _ => {
+            rollback_config_publication(
+                &parent_dir,
+                &c_tmp,
+                &dest_name,
+                prior_destination.is_some(),
+                prior_destination.as_ref(),
+            )?;
+            parent_dir
+                .sync_all()
+                .map_err(|_| store_config_error("cannot sync restored config parent directory"))?;
+            return Err(store_config_error(
+                "cannot verify config publication; prior destination was restored",
+            ));
+        }
     };
-    if rename_rc != 0 {
+    let published_is_verified = published.as_ref().is_some_and(|stat| {
+        unix_named_inode_matches_open_file(stat, &opened_meta, expected_uid).is_ok()
+    });
+    let displaced_is_expected = match (prior_destination.as_ref(), displaced.as_ref()) {
+        (Some(expected), Some(actual)) => same_named_inode(expected, actual),
+        (None, None) => true,
+        _ => false,
+    };
+    if !published_is_verified || !displaced_is_expected {
+        rollback_config_publication(
+            &parent_dir,
+            &c_tmp,
+            &dest_name,
+            prior_destination.is_some(),
+            displaced.as_ref(),
+        )?;
         return Err(store_config_error(
-            "cannot atomically replace the config file",
+            "config publication identity changed during the transaction",
         ));
     }
+
+    #[cfg(test)]
+    let injected_sync_failure = SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let injected_sync_failure = false;
+    #[cfg(test)]
+    SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH.with(|flag| flag.set(false));
+
+    if injected_sync_failure || parent_dir.sync_all().is_err() {
+        rollback_config_publication(
+            &parent_dir,
+            &c_tmp,
+            &dest_name,
+            prior_destination.is_some(),
+            displaced.as_ref(),
+        )?;
+        parent_dir
+            .sync_all()
+            .map_err(|_| store_config_error("cannot sync restored config parent directory"))?;
+        return Err(store_config_error(
+            "config parent sync failed; prior destination was restored",
+        ));
+    }
+
+    // The new destination mapping is now durable. From this point onward no
+    // cleanup failure is reported as a failed save. Cleanup touches the
+    // displaced pathname only while it still names the validated prior inode.
     guard.disarm = true;
-    parent_dir
-        .sync_all()
-        .map_err(|_| store_config_error("cannot sync config parent directory"))?;
+    if let Some(displaced) = displaced.as_ref() {
+        if unlink_named_inode_if_matches(&parent_dir, &c_tmp, displaced) {
+            let _ = parent_dir.sync_all();
+        }
+    }
     Ok(())
 }
 
@@ -2220,9 +2505,139 @@ mod tests {
         assert_eq!(load_config(&path).expect("preserved").theme, original.theme);
         assert!(!std::fs::read_to_string(&path).unwrap().contains("light"));
         assert!(!SAVE_SWAP_TEMP_INODE.with(std::cell::Cell::get));
+        let replacement_names = listed_names(dir.path())
+            .into_iter()
+            .filter(|name| name.starts_with(".cd-w-"))
+            .collect::<Vec<_>>();
+        assert_eq!(replacement_names.len(), 1);
+        assert!(dir
+            .path()
+            .join(&replacement_names[0])
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_rolls_back_temp_replacement_after_final_verification() {
+        let dir = store_tempdir();
+        let path = dir.path().join("config.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &original).expect("seed");
+        let before = std::fs::read(&path).unwrap();
+
+        SAVE_SWAP_TEMP_AFTER_VERIFY.with(|flag| flag.set(true));
+        let attempted = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+        let err = save_config(&path, &attempted).expect_err("post-verify temp swap");
+        assert!(err.to_string().contains("identity changed"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(load_config(&path).expect("preserved").theme, "dark");
+        assert!(dir.path().join("held-verified-temp.bin").exists());
+        assert!(!SAVE_SWAP_TEMP_AFTER_VERIFY.with(std::cell::Cell::get));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_detects_destination_cas_change_and_preserves_concurrent_value() {
+        let dir = store_tempdir();
+        let path = dir.path().join("config.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &original).expect("seed");
+
+        SAVE_SWAP_DEST_AFTER_VERIFY.with(|flag| flag.set(true));
+        let attempted = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+        let err = save_config(&path, &attempted).expect_err("destination CAS change");
+        assert!(err.to_string().contains("identity changed"));
+        assert_eq!(
+            load_config(&path).expect("concurrent value").theme,
+            AppConfig::default().theme
+        );
+        assert!(dir.path().join("held-verified-destination.json").exists());
+        assert!(!SAVE_SWAP_DEST_AFTER_VERIFY.with(std::cell::Cell::get));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_sync_failure_rolls_back_existing_and_absent_destinations() {
+        let dir = store_tempdir();
+        let existing = dir.path().join("existing.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&existing, &original).expect("seed");
+        let before = std::fs::read(&existing).unwrap();
+
+        SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH.with(|flag| flag.set(true));
+        let attempted = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+        let err = save_config(&existing, &attempted).expect_err("synthetic directory sync");
+        assert!(err.to_string().contains("prior destination was restored"));
+        assert_eq!(std::fs::read(&existing).unwrap(), before);
+
+        let absent = dir.path().join("absent.json");
+        SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH.with(|flag| flag.set(true));
+        let err = save_config(&absent, &attempted).expect_err("synthetic absent sync");
+        assert!(err.to_string().contains("prior destination was restored"));
+        assert!(!absent.exists());
         assert!(listed_names(dir.path())
             .iter()
             .all(|name| !name.starts_with(".cd-w-")));
+        assert!(!SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH.with(std::cell::Cell::get));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_lock_contention_fails_without_waiting_or_changing_destination() {
+        use std::os::fd::AsRawFd;
+
+        let dir = store_tempdir();
+        let path = dir.path().join("config.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &original).expect("seed");
+        let before = std::fs::read(&path).unwrap();
+
+        let parent = std::fs::File::open(dir.path()).expect("open synthetic parent");
+        // SAFETY: `parent` is live for the duration of the lock and unlock.
+        assert_eq!(
+            unsafe { libc::flock(parent.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let started = std::time::Instant::now();
+        let attempted = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+        let err = save_config(&path, &attempted).expect_err("contended publication lock");
+        let elapsed = started.elapsed();
+        // SAFETY: this releases only the lock acquired on `parent` above.
+        unsafe {
+            libc::flock(parent.as_raw_fd(), libc::LOCK_UN);
+        }
+
+        assert!(err.to_string().contains("transaction is active"));
+        assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(load_config(&path).expect("preserved").theme, "dark");
     }
 
     #[test]
