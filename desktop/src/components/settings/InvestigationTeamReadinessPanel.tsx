@@ -88,6 +88,8 @@ function knownAnswerFailureLabel(reason: string | null | undefined): string {
       return "provider response used unsupported vocabulary";
     case "host_score_failed":
       return "ContextDesk could not score the parsed response";
+    case "host_diagnostic_pipeline_unavailable":
+      return "required host diagnostic execution is not available";
     default:
       return reason ? "did not produce a usable score" : "";
   }
@@ -622,11 +624,14 @@ export function InvestigationTeamReadinessPanel() {
               Known-answer quality evidence
             </h5>
             <p className="it-readiness__detail">
-              Runs 14 frozen, opaque triage scenarios for each exact configured
-              role. The trusted host keeps evaluator truth separate, scores strict
-              citations and causal claims, and stores redacted reports plus
-              separate private canonical responses only where the host can
-              guarantee the complete secure persistence contract.
+              Assesses 14 frozen, opaque triage scenarios for each exact configured
+              role. The trusted host dispatches only work it can execute and observe
+              honestly; scenarios requiring unavailable attempt, tool, or role
+              telemetry remain visibly blocked. Evaluator truth stays separate,
+              strict citations and causal claims are scored deterministically, and
+              redacted reports plus separate private canonical responses are stored
+              only where the host can guarantee the complete secure persistence
+              contract.
             </p>
           </div>
           <button
@@ -637,15 +642,18 @@ export function InvestigationTeamReadinessPanel() {
             disabled={qualityPhase === "running" || !qualityHistoryAvailable}
           >
             {qualityPhase === "running"
-              ? "Running quality suite…"
+              ? "Assessing quality suite…"
               : !qualityHistoryAvailable
                 ? "Evidence store unavailable"
-              : "Run 14-scenario quality suite"}
+              : "Assess 14-scenario suite"}
           </button>
         </div>
         {qualityPhase === "running" ? (
           <div className="it-readiness__quality-progress" role="status">
-            <span>Provider calls run serially for each configured role.</span>
+            <span>
+              Provider calls and supported host diagnostic work run serially for
+              each configured role.
+            </span>
             <button
               type="button"
               className="btn btn--ghost btn--sm"

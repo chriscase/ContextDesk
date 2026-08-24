@@ -268,7 +268,7 @@ describe("InvestigationTeamReadinessPanel", () => {
     await waitFor(() =>
       expect(
         (screen.getByRole("button", {
-          name: /run 14-scenario quality suite/i,
+          name: /assess 14-scenario suite/i,
         }) as HTMLButtonElement).disabled,
       ).toBe(false),
     );
@@ -498,6 +498,42 @@ describe("InvestigationTeamReadinessPanel", () => {
     expect(host.runKnownAnswer).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/tokens and cost remain “unknown”/i)).toBeTruthy();
     expect(screen.getByText(/shown as blocked rather than counted as model failures/i)).toBeTruthy();
+  });
+
+  it("names unavailable host diagnostics and does not imply all scenarios dispatch", async () => {
+    const blocked = knownAnswerReport({
+      status: "partial",
+      reported_status: "partial",
+      metrics: {
+        ...knownAnswerReport().metrics,
+        passed_scenarios: 10,
+        executed_scenarios: 10,
+        blocked_scenarios: 4,
+      },
+      scenarios: knownAnswerReport().scenarios.map((scenario, index) =>
+        index >= 10
+          ? {
+              ...scenario,
+              status: "blocked",
+              passed: false,
+              failure_code: "host_diagnostic_pipeline_unavailable",
+            }
+          : scenario,
+      ),
+    });
+    host.knownAnswerHistory.mockResolvedValue([blocked]);
+    render(<InvestigationTeamReadinessPanel />);
+
+    const quality = await screen.findByTestId("investigation-team-known-answer-quality");
+    expect(
+      screen.getByRole("button", { name: /assess 14-scenario suite/i }),
+    ).toBeTruthy();
+    expect(quality.textContent).toMatch(/dispatches only work it can execute and observe honestly/i);
+    expect(quality.textContent).toMatch(/4 blocked/i);
+
+    fireEvent.click(screen.getByText("Inspect 14 scenario outcomes"));
+    expect(quality.textContent).toMatch(/required host diagnostic execution is not available/i);
+    expect(quality.textContent).not.toMatch(/did not produce a usable score/i);
   });
 
   it("offers cooperative cancellation while the known-answer suite is running", async () => {
