@@ -22,6 +22,13 @@ export function fixtureBytes(...parts: string[]): Buffer {
 
 export type StageName = "Situation" | "Capture" | "Analyze" | "Compare" | "Decide";
 
+function accessSummary(roles: FixtureUser["expectedRoles"]): string {
+  const labels = roles.map((role) =>
+    role === "case-lead" ? "Case lead" : role[0]?.toUpperCase() + role.slice(1),
+  );
+  return `Access: ${labels.join(", ") || "None"}`;
+}
+
 /**
  * On narrow viewports the primary nav and account menu collapse behind the
  * Menu toggle. Returns a closer so flows leave the shell as they found it.
@@ -60,9 +67,7 @@ export async function loginAs(page: Page, user: FixtureUser): Promise<void> {
     const sameUser = page.getByRole("button", { name: `Signed in as ${user.username}` });
     if (await sameUser.isVisible()) {
       await sameUser.click();
-      await expect(
-        page.getByText(`Roles: ${user.expectedRoles.join(", ")}`),
-      ).toBeVisible();
+      await expect(page.getByText(accessSummary(user.expectedRoles))).toBeVisible();
       await sameUser.click();
       await closeTopbar();
       return;
@@ -83,7 +88,7 @@ export async function loginAs(page: Page, user: FixtureUser): Promise<void> {
   const accountTrigger = page.getByRole("button", { name: `Signed in as ${user.username}` });
   await expect(accountTrigger).toBeVisible();
   await accountTrigger.click();
-  await expect(page.getByText(`Roles: ${user.expectedRoles.join(", ")}`)).toBeVisible();
+  await expect(page.getByText(accessSummary(user.expectedRoles))).toBeVisible();
   await accountTrigger.click();
   await closeTopbar();
 }
