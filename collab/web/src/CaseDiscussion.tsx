@@ -261,13 +261,11 @@ export function CaseDiscussion(props: {
     }
   }
 
-  const participantLine = props.participant
-    ? `Signed in as ${props.participant.username}${
+  const composerIdentity = props.participant
+    ? `Posting as ${props.participant.username}${
         props.participant.roles.length ? ` (${props.participant.roles.join(", ")})` : ""
       }`
-    : props.readOnly
-      ? "Static read-only view"
-      : "Authenticated participant";
+    : "Authenticated participant";
 
   return (
     <aside
@@ -283,7 +281,6 @@ export function CaseDiscussion(props: {
           <h3 id="case-discussion-title" className="discussion__title">
             Discussion
           </h3>
-          <p className="discussion__context">{participantLine}</p>
         </div>
         <button type="button" className="discussion__close" onClick={requestClose}>
           Close discussion
@@ -392,8 +389,12 @@ export function CaseDiscussion(props: {
         <form
           className="discussion__composer"
           aria-label="Post a discussion message"
+          aria-describedby="case-discussion-composer-identity"
           onSubmit={(e) => void postMessage(e)}
         >
+          <p id="case-discussion-composer-identity" className="sr-only">
+            {composerIdentity}
+          </p>
           <label className="triage-field">
             Message
             <textarea

@@ -697,6 +697,51 @@ describe("case discussion panel", () => {
     ]);
   });
 
+  it("does not repeat signed-in chrome; authors and composer permissions stay explicit", async () => {
+    stubCaseFetch({
+      onRequest: (url, init) => {
+        if (url === "/api/cases/c1/contributions" && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              contributions: [
+                {
+                  id: "m1",
+                  kind: "message",
+                  body: "Kickoff from the scene",
+                  privacyClass: "owner_only",
+                  tombstoned: false,
+                  authorUsername: "erin",
+                  createdAt: "2026-08-19T08:00:00.000Z",
+                },
+              ],
+            }),
+          });
+        }
+        return null;
+      },
+    });
+    render(
+      <Cases
+        roles={["case-lead"]}
+        participant={{ username: "demo", roles: ["case-lead"] }}
+      />,
+    );
+    const panel = await openDiscussion();
+    expect(await within(panel).findByText("Kickoff from the scene")).toBeTruthy();
+    expect(within(panel).getByText("erin")).toBeTruthy();
+    expect(within(panel).queryByText(/Signed in as/)).toBeNull();
+    expect(panel.querySelector(".discussion__context")).toBeNull();
+    const form = within(panel).getByRole("form", { name: "Post a discussion message" });
+    expect(form.getAttribute("aria-label")).toBe("Post a discussion message");
+    const identity = within(form).getByText("Posting as demo (case-lead)");
+    expect(identity.classList.contains("sr-only")).toBe(true);
+    expect(within(form).getByRole("textbox", { name: "Message" })).toBeTruthy();
+    expect(within(form).getByRole("combobox", { name: "Message visibility" })).toBeTruthy();
+    expect(within(form).getByRole("button", { name: "Post to discussion" })).toBeTruthy();
+    expect(within(panel).queryByText(/posting is unavailable/)).toBeNull();
+  });
+
   it("posts kind=message with the chosen visibility and shows it only after the server confirms", async () => {
     let posted: unknown = null;
     let saved = false;
@@ -894,6 +939,17 @@ describe("case discussion panel", () => {
     expect(screen.getByText(/2 active on this case now/)).toBeTruthy();
     expect(screen.getByText(/live refresh by polling/)).toBeTruthy();
     expect(screen.getByText(/not realtime chat/)).toBeTruthy();
+    expect(screen.queryByText(/Signed in as/)).toBeNull();
+    expect(
+      within(screen.getByRole("region", { name: "Discussion messages" })).getByText("dave"),
+    ).toBeTruthy();
+    const composer = screen.getByRole("form", { name: "Post a discussion message" });
+    expect(within(composer).getByText("Posting as alice (contributor)").classList.contains("sr-only")).toBe(
+      true,
+    );
+    expect(within(composer).getByRole("textbox", { name: "Message" })).toBeTruthy();
+    expect(within(composer).getByRole("combobox", { name: "Message visibility" })).toBeTruthy();
+    expect(within(composer).getByRole("button", { name: "Post to discussion" })).toBeTruthy();
     // The panel only reads presence — it never announces a surface of its own.
     const writes = stub.mock.calls.filter(
       (call) => ((call[1] as RequestInit | undefined)?.method ?? "GET") !== "GET",
@@ -932,19 +988,36 @@ describe("case discussion panel", () => {
         return null;
       },
     });
-    render(<Cases roles={["case-lead"]} readOnly />);
+    render(
+      <Cases
+        roles={["case-lead"]}
+        readOnly
+        participant={{ username: "demo", roles: ["case-lead"] }}
+      />,
+    );
     const panel = await openDiscussion();
     expect(await within(panel).findByText("Recorded during the incident")).toBeTruthy();
+    expect(within(panel).getByText("alice")).toBeTruthy();
+    expect(within(panel).queryByText(/Signed in as/)).toBeNull();
+    expect(panel.querySelector(".discussion__context")).toBeNull();
     expect(within(panel).queryByRole("textbox")).toBeNull();
+    expect(within(panel).queryByRole("form")).toBeNull();
     expect(within(panel).queryByRole("button", { name: "Post to discussion" })).toBeNull();
     expect(within(panel).getByText(/posting is unavailable/)).toBeTruthy();
   });
 
   it("tells a read-limited role how to get posting access", async () => {
     stubCaseFetch();
-    render(<Cases roles={["viewer"]} />);
+    render(
+      <Cases
+        roles={["viewer"]}
+        participant={{ username: "demo", roles: ["viewer"] }}
+      />,
+    );
     const panel = await openDiscussion();
     expect(within(panel).queryByRole("textbox")).toBeNull();
+    expect(within(panel).queryByRole("form")).toBeNull();
+    expect(within(panel).queryByText(/Signed in as/)).toBeNull();
     expect(
       within(panel).getByText(/Ask a case lead for contributor access/),
     ).toBeTruthy();
