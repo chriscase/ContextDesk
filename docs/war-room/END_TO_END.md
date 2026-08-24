@@ -161,6 +161,8 @@ the archive readiness summary: objects, collisions, deterministic ID remaps,
 privacy, omitted content, warnings, and broken references. Historical people
 remain attribution only and receive no destination access.
 
+![Fully synthetic complete investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
+
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
 
 Expected result: the dry run states that it changed no investigation, user,
@@ -177,6 +179,8 @@ walkthrough.
 Expected result: it is clear that a directory search result does not grant
 access. Only an explicit destination group mapping does, and source roles from
 portable archives are never trusted.
+
+![Fully synthetic Administration console](../assets/war-room/war-room-administration.png)
 
 ## What this walkthrough demonstrates
 
@@ -210,3 +214,7 @@ The synthetic demo does not claim:
 
 Continue with the [operator guide](OPERATOR_GUIDE.md), or return to the
 [War Room overview](README.md).
+
+The separate setup rehearsal begins with this bounded checklist:
+
+![Fully synthetic bounded first-run setup checklist](../assets/war-room/war-room-first-run-setup.png)

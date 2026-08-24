@@ -159,6 +159,8 @@ does not grant access. Only an explicit destination group-to-role mapping can
 grant a workspace role, and source-system roles from an imported archive are
 never trusted.
 
+![Synthetic Administration console with explicit group-to-role mappings](../assets/war-room/war-room-administration.png)
+
 ## Three different exports
 
 War Room exposes three artifacts with deliberately different scope:
@@ -181,7 +183,20 @@ The dry run creates no investigation, user, membership, role, or capability.
 Restore/apply has no UI control because atomic rollback across supported stores
 has not yet been proven.
 
+![Synthetic complete investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
+
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
+
+## Bounded first-run setup
+
+An unconfigured host can expose a pre-authentication setup checklist for
+claiming the installation, describing storage and sign-in, and optionally
+describing a model gateway. Protected values are exchanged for host-owned
+references and are not returned by setup APIs. The current wizard prepares and
+checks a bounded draft; it does not claim atomic installation, external
+connectivity proof, restart, or completion.
+
+![Synthetic bounded first-run setup checklist](../assets/war-room/war-room-first-run-setup.png)
 
 ## Five-minute synthetic start
 

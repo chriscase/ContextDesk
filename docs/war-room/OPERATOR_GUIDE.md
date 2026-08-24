@@ -238,6 +238,8 @@ configuration, and qualification against the actual directory. The account
 menu can show the LDAP display name and username after authentication, but the
 War Room admin console is not a general LDAP administration tool.
 
+![Synthetic Administration console with explicit group-to-role mappings](../assets/war-room/war-room-administration.png)
+
 ## Three different exports
 
 Choose the artifact that matches the job. These are not interchangeable.
@@ -283,6 +285,8 @@ The same archive and destination state produce the same remap plan. The dry
 run changes nothing. It does not create an investigation, user, membership,
 role, permission, or capability.
 
+![Synthetic complete investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
+
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
 
 **Restore/apply is not available.** There is no apply control because atomic
@@ -318,6 +322,8 @@ matters.
   service, or claim installation completion.
 - Configured gateway model availability, quality, cost, and usage reporting
   depend on the host and provider. Missing measurements remain unknown.
+
+![Synthetic bounded first-run setup checklist](../assets/war-room/war-room-first-run-setup.png)
 
 ## Operator closeout checklist
 
