@@ -346,6 +346,74 @@ describe("TriageRunPanel", () => {
     expect(request?.body).toContain('"concurrency":3');
   });
 
+  it("keeps distinct catalog models selectable when they share one host profile", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/snapshots")) {
+        return response({
+          snapshots: [{ id: "snapshot-1", fingerprint: "a".repeat(64), evidence: [], createdBy: "lead" }],
+        });
+      }
+      if (url.endsWith("/evidence")) return response({ artifacts: [] });
+      if (url.endsWith("/imports")) return response({ runs: [] });
+      if (url.endsWith("/api/triage-profiles")) {
+        return response({
+          profiles: [
+            {
+              id: "subject:qwen",
+              profileId: "shared-employer-gateway",
+              modelId: "qwen-3.6-27b",
+              alias: "qwen-3.6-27b",
+              label: "Qwen 3.6 27B",
+              provider: "openai-compatible",
+            },
+            {
+              id: "subject:gpt-oss",
+              profileId: "shared-employer-gateway",
+              modelId: "gpt-oss-120b",
+              alias: "gpt-oss-120b",
+              label: "GPT OSS 120B",
+              provider: "openai-compatible",
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: true });
+      if (init?.method === "POST") return response({ id: "job-1" });
+      return response({ jobs: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    await screen.findByRole("heading", { name: "Run history" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Execution mode" }), { target: { value: "gateway" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512/ }));
+
+    expect((screen.getByRole("combobox", { name: "qwen-3.6-27b host connector profile" }) as HTMLSelectElement).value)
+      .toBe("subject:qwen");
+    expect((screen.getByRole("combobox", { name: "gpt-oss-120b host connector profile" }) as HTMLSelectElement).value)
+      .toBe("subject:gpt-oss");
+
+    fireEvent.click(screen.getByRole("button", { name: "Run gateway comparison" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
+    const request = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")?.[1];
+    const body = JSON.parse(String(request?.body)) as {
+      candidates: Array<{ candidateId: string; profileId: string | null; model: string }>;
+    };
+    expect(body.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        candidateId: "qwen-reviewer",
+        profileId: "shared-employer-gateway",
+        model: "qwen-3.6-27b",
+      }),
+      expect.objectContaining({
+        candidateId: "gpt-oss-contributor",
+        profileId: "shared-employer-gateway",
+        model: "gpt-oss-120b",
+      }),
+    ]));
+  });
+
   it("restores gateway lane concurrency when reusing a run setup", async () => {
     vi.stubGlobal(
       "fetch",

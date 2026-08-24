@@ -376,7 +376,10 @@ export class TriageRunService {
       if (
         request.mode === "gateway"
         && this.deps.profiles && this.deps.profiles.length > 0
-        && !this.deps.profiles.some((profile) => profile.id === candidate.profileId)
+        && !this.deps.profiles.some((profile) =>
+          (profile.profileId ?? profile.id) === candidate.profileId
+          && (!profile.modelId || profile.modelId === candidate.model),
+        )
       ) {
         throw new TriageRunConflictError(`unknown gateway profile for candidate ${candidate.candidateId}`);
       }

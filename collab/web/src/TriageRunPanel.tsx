@@ -40,6 +40,9 @@ interface ExternalChatRunView {
 
 interface TriageProfileOption {
   id: string;
+  profileId?: string;
+  modelId?: string;
+  alias?: string;
   label: string;
   provider: string;
 }
@@ -351,7 +354,7 @@ export function TriageRunPanel(props: {
     [candidateOptions, selectedCandidates],
   );
   const gatewayProfilesReady = mode !== "gateway"
-    || selectedGatewayCandidates.every((candidate) => Boolean((laneProfiles[candidate.candidateId] ?? candidate.profileId ?? "").trim()));
+    || selectedGatewayCandidates.every((candidate) => Boolean(profileFor(candidate)));
   const gatewayAvailable = triageCapabilities?.gatewayAvailable ?? true;
 
   useEffect(() => {
@@ -360,12 +363,45 @@ export function TriageRunPanel(props: {
     }
   }, [mode, triageCapabilities]);
 
-  function profileFor(candidate: CandidateOption): string {
-    return (laneProfiles[candidate.candidateId] ?? candidate.profileId ?? "").trim();
+  function selectedProfileFor(candidate: CandidateOption): TriageProfileOption | undefined {
+    const selected = (laneProfiles[candidate.candidateId] ?? candidate.profileId ?? "").trim();
+    const exactSelection = gatewayProfiles.find((profile) => profile.id === selected);
+    if (exactSelection) return exactSelection;
+
+    const hostProfileId = selected || candidate.profileId || "";
+    return gatewayProfiles.find((profile) =>
+      (profile.profileId ?? profile.id) === hostProfileId
+      && (profile.modelId === candidate.model || profile.alias === candidate.model),
+    ) ?? gatewayProfiles.find((profile) =>
+      profile.modelId === candidate.model || profile.alias === candidate.model,
+    );
   }
 
-  function providerForProfile(profileId: string, fallback: string): string {
-    return gatewayProfiles.find((profile) => profile.id === profileId)?.provider ?? fallback;
+  function profileFor(candidate: CandidateOption): string {
+    return selectedProfileFor(candidate)?.id
+      ?? (laneProfiles[candidate.candidateId] ?? candidate.profileId ?? "").trim();
+  }
+
+  function hostProfileFor(candidate: CandidateOption): string {
+    const profile = selectedProfileFor(candidate);
+    return (profile?.profileId ?? profile?.id ?? profileFor(candidate)).trim();
+  }
+
+  function providerFor(candidate: CandidateOption, fallback: string): string {
+    return selectedProfileFor(candidate)?.provider ?? fallback;
+  }
+
+  function modelFor(candidate: CandidateOption): string {
+    return selectedProfileFor(candidate)?.modelId ?? candidate.model;
+  }
+
+  function profileLabelFor(candidate: Pick<CandidateOption, "profileId" | "model">): string | null {
+    if (!candidate.profileId) return null;
+    const profile = gatewayProfiles.find((item) =>
+      (item.profileId ?? item.id) === candidate.profileId
+      && (!item.modelId || item.modelId === candidate.model || item.alias === candidate.model),
+    );
+    return profile?.label ?? candidate.profileId;
   }
 
   useEffect(() => {
@@ -381,13 +417,16 @@ export function TriageRunPanel(props: {
     const alias = String(data.get("laneAlias") ?? "").trim();
     const model = String(data.get("laneModel") ?? "").trim();
     const role = String(data.get("laneRole") ?? "").trim() || "single";
-    const profileId = String(data.get("laneProfile") ?? "").trim();
+    const profileSelectionId = String(data.get("laneProfile") ?? "").trim();
+    const selectedProfile = gatewayProfiles.find((profile) => profile.id === profileSelectionId);
+    const profileId = selectedProfile?.profileId ?? selectedProfile?.id ?? profileSelectionId;
+    const chosenModel = selectedProfile?.modelId ?? model;
     setLanePickerError(null);
     if (!alias || !model) {
       setLanePickerError("Lane alias and model id are required.");
       return;
     }
-    if ([alias, model, profileId].some((value) => DEEPSEEK_PATTERN.test(value))) {
+    if ([alias, chosenModel, profileId].some((value) => DEEPSEEK_PATTERN.test(value))) {
       setLanePickerError(DEEPSEEK_REJECTION);
       return;
     }
@@ -400,15 +439,15 @@ export function TriageRunPanel(props: {
       {
         candidateId: alias,
         role,
-        provider: mode === "gateway" ? providerForProfile(profileId, "openai-compatible") : "synthetic",
+        provider: mode === "gateway" ? selectedProfile?.provider ?? "openai-compatible" : "synthetic",
         profileId: profileId || null,
-        model,
+        model: chosenModel,
         version: null,
       },
     ]);
     setSelectedCandidates((current) => [...current, alias]);
-    if (profileId) {
-      setLaneProfiles((current) => ({ ...current, [alias]: profileId }));
+    if (profileSelectionId) {
+      setLaneProfiles((current) => ({ ...current, [alias]: profileSelectionId }));
     }
     form.reset();
   }
@@ -445,8 +484,9 @@ export function TriageRunPanel(props: {
           ...(parentJobId ? { parentJobId } : {}),
           candidates: candidates.map((candidate) => ({
             ...candidate,
-            provider: mode === "gateway" ? providerForProfile(profileFor(candidate), "openai-compatible") : candidate.provider,
-            profileId: mode === "gateway" ? profileFor(candidate) : null,
+            provider: mode === "gateway" ? providerFor(candidate, "openai-compatible") : candidate.provider,
+            profileId: mode === "gateway" ? hostProfileFor(candidate) : null,
+            model: mode === "gateway" ? modelFor(candidate) : candidate.model,
           })),
         }),
       });
@@ -990,7 +1030,7 @@ export function TriageRunPanel(props: {
                                   <strong>{candidate.model}</strong>
                                   <span>{candidate.role} · {candidateLifecycleText(candidate.status)}</span>
                                 </div>
-                                {candidate.profileId ? <p className="case-memory__note">Host profile {candidate.profileId}</p> : null}
+                                {candidate.profileId ? <p className="case-memory__note">Host profile {profileLabelFor(candidate)}</p> : null}
                                 {candidate.summary ? <p>{candidate.summary}</p> : null}
                         {candidate.benchmarkRunId ? <p className="case-memory__note">Experiment Lab run {shortHash(candidate.benchmarkRunId)}</p> : null}
                         {candidate.evidenceRefs.length > 0 ? (
