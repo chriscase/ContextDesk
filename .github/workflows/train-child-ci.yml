@@ -1,0 +1,15 @@
+# Hosted rust Windows/Ubuntu shards for children targeting the operational
+# train. `ci.yml` only self-triggers on PRs to `main`, so a train-targeted
+# child otherwise gets no hosted proof. This wrapper is not a test skip: it
+# runs the same `ci.yml` jobs via `workflow_call`.
+name: CI (train child)
+
+on:
+  pull_request:
+    branches:
+      - codex/1031-operational-release-train-v1
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
