@@ -7,7 +7,7 @@
     "corpus_id": "corpus:demo:01",
     "corpus_revision": 63,
     "source_ids": [
-      "source:edm"
+      "source:synthetic-system"
     ]
   },
   "policy": {
