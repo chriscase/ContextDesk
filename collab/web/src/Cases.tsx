@@ -37,6 +37,19 @@ interface CaseRow {
   creator?: string | null;
 }
 
+interface ActivityItem {
+  caseId: string;
+  caseTitle: string;
+  caseStatus: string;
+  caseSeverity: string;
+  seq: number;
+  kind: string;
+  actorUsername: string;
+  targetId: string | null;
+  occurredAt: string;
+  details: Record<string, string | number | boolean | null>;
+}
+
 /** Statuses the server contract records, in board order. Unrecognised values
  *  from the wire still count — they are appended after these. */
 const KNOWN_STATUSES = ["open", "monitoring", "resolved", "archived"] as const;
@@ -80,6 +93,98 @@ function openedLine(row: CaseRow): string | null {
   return null;
 }
 
+function activityLabel(item: ActivityItem): string {
+  const contributionKind = typeof item.details.kind === "string" ? item.details.kind : null;
+  const labels: Record<string, string> = {
+    case_created: "opened the investigation",
+    case_status: `changed the status${typeof item.details.status === "string" ? ` to ${item.details.status}` : ""}`,
+    membership: "changed the investigation team",
+    legal_hold: "changed the legal-hold state",
+    contribution_revised: "revised a recorded contribution",
+    contribution_tombstoned: "removed a contribution from the working record",
+    hypothesis_status: "updated a working hypothesis",
+    evidence_registered: "added evidence",
+    evidence_recheck: "rechecked evidence integrity",
+    snapshot_frozen: "froze an evidence snapshot",
+    external_run_imported: "imported external analysis",
+    run_corroboration: "reviewed imported analysis",
+    triage_job_created: "queued a triage run",
+    triage_job_started: "started a triage run",
+    triage_candidate_started: "started an analysis lane",
+    triage_candidate_finished: "completed an analysis lane",
+    triage_job_finished: "finished a triage run",
+    triage_job_cancel_requested: "requested cancellation of a triage run",
+    experiment_imported: "created a strategy comparison",
+    experiment_helpfulness_recorded: "scored a strategy result",
+    experiment_decision_proposed: "proposed a decision",
+    experiment_decision_accepted: "accepted a decision",
+    experiment_trace_imported: "recorded an analysis trace",
+    experiment_gold_promoted: "recorded an accepted outcome benchmark",
+  };
+  if (item.kind === "contribution_created") {
+    if (contributionKind === "message") return "added a discussion comment";
+    if (contributionKind === "note") return "recorded an observation";
+    if (contributionKind === "hypothesis") return "proposed a working hypothesis";
+    if (contributionKind === "action") return "recorded a next action";
+    if (contributionKind === "upload") return "recorded an evidence upload";
+    return "added to the investigation record";
+  }
+  return labels[item.kind] ?? "updated the investigation";
+}
+
+function activityDestination(item: ActivityItem): { stage: StageId; focus: WorkFocus } {
+  if (item.kind === "contribution_created" && item.details.kind === "message") {
+    return {
+      stage: "situation",
+      focus: { section: "discussion", item: item.targetId, lane: null, experiment: null },
+    };
+  }
+  if (
+    item.kind.startsWith("contribution_")
+    || item.kind === "external_run_imported"
+    || item.kind === "run_corroboration"
+  ) {
+    return {
+      stage: "capture",
+      focus: { section: "triage-capture", item: item.targetId, lane: null, experiment: null },
+    };
+  }
+  if (item.kind.startsWith("triage_")) {
+    return {
+      stage: "analyze",
+      focus: { section: "triage-lane-runner", item: item.targetId, lane: null, experiment: null },
+    };
+  }
+  if (item.kind.startsWith("evidence_") || item.kind === "snapshot_frozen") {
+    return {
+      stage: "analyze",
+      focus: { section: "triage-evidence-board", item: item.targetId, lane: null, experiment: null },
+    };
+  }
+  if (item.kind === "experiment_decision_accepted" || item.kind === "experiment_gold_promoted") {
+    return {
+      stage: "decide",
+      focus: { section: "decision-heading", item: item.targetId, lane: null, experiment: item.targetId },
+    };
+  }
+  if (item.kind.startsWith("experiment_")) {
+    return {
+      stage: "compare",
+      focus: { section: "triage-comparison-lab", item: item.targetId, lane: null, experiment: item.targetId },
+    };
+  }
+  return {
+    stage: "situation",
+    focus: { section: "stage-situation", item: item.targetId, lane: null, experiment: null },
+  };
+}
+
+function activityTime(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.valueOf())) return "Time not recorded";
+  return parsed.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
 export function Cases(props: {
   roles?: string[];
   readOnly?: boolean;
@@ -92,6 +197,7 @@ export function Cases(props: {
   onOpenCase?: (id: string) => void;
   onStageChange?: (stage: StageId) => void;
   onDeepNavigate?: (stage: StageId, focus: WorkFocus) => void;
+  onActivityOpen?: (caseId: string, stage: StageId, focus: WorkFocus) => void;
   onExitFocus?: (target: "overview" | "investigations") => void;
 }) {
   const roles = props.roles ?? [];
@@ -100,6 +206,8 @@ export function Cases(props: {
   const canWrite = !readOnly && (canLead || roles.includes("contributor"));
   const [cases, setCases] = useState<CaseRow[]>([]);
   const [casesLoaded, setCasesLoaded] = useState(false);
+  const [activities, setActivities] = useState<ActivityItem[]>([]);
+  const [activitiesLoaded, setActivitiesLoaded] = useState(false);
   // Uncontrolled fallback so the component still navigates when no parent
   // shell wires the callbacks (tests, embedding). The app shell controls it.
   const [localNav, setLocalNav] = useState<{ caseId: string | null; stage: StageId }>({
@@ -155,6 +263,17 @@ export function Cases(props: {
     setCasesLoaded(true);
   }, []);
 
+  const refreshActivity = useCallback(async () => {
+    const res = await fetch("/api/activity?limit=30");
+    if (!res.ok) {
+      setActivitiesLoaded(true);
+      return;
+    }
+    const body = (await res.json()) as { activities?: ActivityItem[] };
+    setActivities(body.activities ?? []);
+    setActivitiesLoaded(true);
+  }, []);
+
   const refreshSources = useCallback(async () => {
     const res = await fetch("/api/catalog/sources");
     if (!res.ok) return;
@@ -187,11 +306,12 @@ export function Cases(props: {
 
   useEffect(() => {
     void refresh();
+    void refreshActivity();
     void refreshSources();
     const refreshCatalog = () => void refreshSources();
     window.addEventListener("contextdesk:source-catalog-changed", refreshCatalog);
     return () => window.removeEventListener("contextdesk:source-catalog-changed", refreshCatalog);
-  }, [refresh, refreshSources]);
+  }, [refresh, refreshActivity, refreshSources]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -207,6 +327,12 @@ export function Cases(props: {
     if (focusCaseId) void loadTimeline(focusCaseId, controller.signal).catch(() => undefined);
     return () => controller.abort();
   }, [focusCaseId, loadTimeline]);
+
+  useEffect(() => {
+    if (props.focus?.section === "discussion" && focusCaseId) {
+      setDiscussionOpen(true);
+    }
+  }, [focusCaseId, props.focus?.section]);
 
   useEffect(() => {
     if (!props.startSignal) return;
@@ -241,7 +367,7 @@ export function Cases(props: {
     const created = (await res.json()) as CaseRow;
     setTitle("");
     openCase(created.id);
-    await refresh();
+    await Promise.all([refresh(), refreshActivity()]);
   }
 
   async function setStatus(status: string) {
@@ -256,7 +382,7 @@ export function Cases(props: {
       setActionError("The status could not be updated. You may not have permission to change it.");
       return;
     }
-    await refresh();
+    await Promise.all([refresh(), refreshActivity()]);
   }
 
   async function importRun(event: FormEvent<HTMLFormElement>) {
@@ -287,7 +413,7 @@ export function Cases(props: {
       }
       window.dispatchEvent(new Event("contextdesk:external-run-imported"));
       form.reset();
-      await loadTimeline(focusCaseId);
+      await Promise.all([loadTimeline(focusCaseId), refreshActivity()]);
     } catch {
       setImportError("External run could not be imported. Check the connection and try again.");
     }
@@ -312,7 +438,7 @@ export function Cases(props: {
       setActionError("The imported run could not be updated. You may not have permission to corroborate it.");
       return;
     }
-    await loadTimeline(focusCaseId);
+    await Promise.all([loadTimeline(focusCaseId), refreshActivity()]);
   }
 
   async function addNote(event: FormEvent<HTMLFormElement>) {
@@ -334,7 +460,7 @@ export function Cases(props: {
       return;
     }
     form.reset();
-    await loadTimeline(focusCaseId);
+    await Promise.all([loadTimeline(focusCaseId), refreshActivity()]);
   }
 
   const current = cases.find((c) => c.id === focusCaseId);
@@ -363,6 +489,14 @@ export function Cases(props: {
       .filter((status) => !(KNOWN_STATUSES as readonly string[]).includes(status))
       .map((status): [string, number] => [status, cases.filter((c) => c.status === status).length]),
   ];
+  const attentionCases = cases
+    .filter((row) =>
+      row.status !== "resolved"
+      && row.status !== "archived"
+      && (row.severity === "critical" || row.severity === "high"),
+    )
+    .slice(0, 5);
+  const overviewActivities = activities.slice(0, 10);
 
   const createForm = canWrite ? (
     <form className="case-form" aria-label="Start a new investigation" onSubmit={(e) => void createCase(e)}>
@@ -501,10 +635,101 @@ export function Cases(props: {
                 </div>
               ))}
             </dl>
-            {investigationList}
+            <div className="overview__grid">
+              <section className="overview__activity" aria-labelledby="overview-activity-title">
+                <header className="overview__section-head">
+                  <div>
+                    <p className="overview__eyebrow">Across the War Room</p>
+                    <h3 id="overview-activity-title">Latest activity</h3>
+                    <p>What changed most recently, with a direct path to the recorded work.</p>
+                  </div>
+                </header>
+                {!activitiesLoaded ? (
+                  <p className="overview__empty" role="status">Loading recent activity…</p>
+                ) : activities.length === 0 ? (
+                  <p className="overview__empty">No activity has been recorded yet.</p>
+                ) : (
+                  <ol className="activity-feed">
+                    {overviewActivities.map((item) => {
+                      const destination = activityDestination(item);
+                      return (
+                        <li key={`${item.caseId}:${item.seq}`} className="activity-feed__item">
+                          <button
+                            type="button"
+                            className="activity-feed__open"
+                            onClick={() => {
+                              if (props.onActivityOpen) {
+                                props.onActivityOpen(item.caseId, destination.stage, destination.focus);
+                              } else {
+                                setLocalNav({ caseId: item.caseId, stage: destination.stage });
+                              }
+                            }}
+                          >
+                            <span className="activity-feed__verb">
+                              <strong>{item.actorUsername}</strong> {activityLabel(item)}
+                            </span>
+                            <span className="activity-feed__case">{item.caseTitle}</span>
+                            <span className="activity-feed__meta">
+                              <time dateTime={item.occurredAt}>{activityTime(item.occurredAt)}</time>
+                              <span className={`status-pill status-pill--${item.caseStatus}`}>
+                                {item.caseStatus}
+                              </span>
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                )}
+                {activities.length > overviewActivities.length ? (
+                  <p className="activity-feed__limit">
+                    Showing the 10 most recent of {activities.length} recorded events.
+                  </p>
+                ) : null}
+              </section>
+              <aside className="overview__attention" aria-labelledby="overview-attention-title">
+                <header className="overview__section-head">
+                  <div>
+                    <p className="overview__eyebrow">Needs attention</p>
+                    <h3 id="overview-attention-title">High-impact investigations</h3>
+                    <p>Open or monitored work recorded as high or critical severity.</p>
+                  </div>
+                </header>
+                {attentionCases.length ? (
+                  <ul className="overview__attention-list">
+                    {attentionCases.map((row) => (
+                      <li key={row.id}>
+                        <button
+                          type="button"
+                          aria-label={row.title}
+                          onClick={() => openCase(row.id)}
+                        >
+                          <strong>{row.title}</strong>
+                          <span>
+                            <span className={`severity-note severity-note--${row.severity}`}>
+                              {row.severity}
+                            </span>{" "}
+                            · {row.status}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="overview__empty">No high-impact active investigations are recorded.</p>
+                )}
+                <button
+                  type="button"
+                  className="overview__view-all"
+                  onClick={() => exitFocus("investigations")}
+                >
+                  View all investigations
+                </button>
+              </aside>
+            </div>
           </section>
         ) : (
-          <section className="overview" aria-labelledby="investigations-title">
+          <section className="case-inventory" aria-labelledby="investigations-title">
             <header className="overview__head">
               <h2 className="app__area-title" id="investigations-title">
                 Investigations

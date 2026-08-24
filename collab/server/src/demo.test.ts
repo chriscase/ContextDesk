@@ -43,6 +43,20 @@ describe("synthetic demo server", () => {
     const session = await demo.app.inject({ method: "GET", url: "/api/auth/me", headers });
     expect(session.statusCode).toBe(200);
     expect(JSON.parse(session.body).roles).toEqual(["case-lead"]);
+    const activityResponse = await demo.app.inject({
+      method: "GET",
+      url: "/api/activity?limit=30",
+      headers,
+    });
+    expect(activityResponse.statusCode).toBe(200);
+    const activity = JSON.parse(activityResponse.body) as {
+      activities: { caseId: string; caseTitle: string; targetId: string | null }[];
+    };
+    expect(activity.activities.length).toBeGreaterThan(0);
+    expect(activity.activities.every((row) => row.caseId === demo.caseId)).toBe(true);
+    expect(activity.activities.some((row) => row.caseTitle.includes("Checkout timeouts"))).toBe(
+      true,
+    );
     const unauthenticatedPresence = await demo.app.inject({
       method: "GET",
       url: `/api/cases/${demo.caseId}/presence`,

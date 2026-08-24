@@ -26,6 +26,10 @@ export interface TimelineRow {
   payload: string;
 }
 
+export interface CaseTimelineRow extends TimelineRow {
+  caseId: string;
+}
+
 export interface CaseRow {
   id: string;
   title: string;
@@ -97,6 +101,7 @@ export interface CaseStore {
     addedBy: string,
   ): Promise<void>;
   listTimeline(caseId: string): Promise<TimelineRow[]>;
+  listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]>;
   appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow>;
   listRevisions(contributionId: string): Promise<RevisionRow[]>;
   listLatestRevisions(caseId: string): Promise<RevisionRow[]>;
@@ -153,6 +158,20 @@ export class MemoryCaseStore implements CaseStore {
 
   async listTimeline(caseId: string): Promise<TimelineRow[]> {
     return [...(this.timeline.get(caseId) ?? [])];
+  }
+
+  async listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]> {
+    return caseIds
+      .flatMap((caseId) =>
+        (this.timeline.get(caseId) ?? []).map((row) => ({ ...row, caseId })),
+      )
+      .sort((left, right) => {
+        const byTime = right.serverTime.localeCompare(left.serverTime);
+        if (byTime !== 0) return byTime;
+        const byCase = left.caseId.localeCompare(right.caseId);
+        return byCase !== 0 ? byCase : right.seq - left.seq;
+      })
+      .slice(0, limit);
   }
 
   async appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
@@ -310,6 +329,23 @@ export class PgCaseStore implements CaseStore {
       [caseId],
     );
     return result.rows.map((row) => asTimeline(row as Record<string, unknown>));
+  }
+
+  async listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]> {
+    if (caseIds.length === 0) return [];
+    const result = await this.db.query(
+      `SELECT case_id, seq, kind, actor_id, actor_username, target_id,
+              client_time, server_time, payload
+       FROM timeline_events
+       WHERE case_id = ANY($1::uuid[])
+       ORDER BY server_time DESC, case_id ASC, seq DESC
+       LIMIT $2`,
+      [caseIds, limit],
+    );
+    return result.rows.map((row) => ({
+      ...asTimeline(row as Record<string, unknown>),
+      caseId: String((row as Record<string, unknown>).case_id),
+    }));
   }
 
   async appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {

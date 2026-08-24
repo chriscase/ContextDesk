@@ -645,4 +645,57 @@ describe("cases timeline evidence provenance", () => {
       expect(write.statusCode).toBe(403);
     });
   });
+
+  it("projects a bounded recent activity feed without exposing another case or contribution text", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const eve = await login(app, "eve", "fixture-eve-secret");
+      const aliceCase = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Synthetic queue investigation", severity: "high" },
+      })).body));
+      const eveCase = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: eve },
+        payload: { title: "Private synthetic investigation", severity: "low" },
+      })).body));
+      const privateBody = "Synthetic private observation must stay out of the feed";
+      await app.inject({
+        method: "POST",
+        url: `/api/cases/${aliceCase.id}/contributions`,
+        headers: { cookie: alice },
+        payload: { kind: "message", body: privateBody, privacyClass: "owner_only" },
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/activity?limit=2",
+        headers: { cookie: alice },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as {
+        schemaId: string;
+        activities: {
+          caseId: string;
+          caseTitle: string;
+          kind: string;
+          actorUsername: string;
+          details: Record<string, unknown>;
+        }[];
+      };
+      expect(body.schemaId).toBe("cd-collab.activity_feed.v1");
+      expect(body.activities).toHaveLength(2);
+      expect(body.activities.every((item) => item.caseId === aliceCase.id)).toBe(true);
+      expect(body.activities.some((item) => item.kind === "contribution_created")).toBe(true);
+      expect(body.activities.find((item) => item.kind === "contribution_created")?.details).toEqual({
+        kind: "message",
+      });
+      expect(response.body).not.toContain(privateBody);
+      expect(response.body).not.toContain(eveCase.id);
+      expect(response.body).not.toContain(eveCase.title);
+    });
+  });
 });

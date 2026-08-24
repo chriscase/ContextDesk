@@ -377,7 +377,7 @@ export function App() {
   const currentArea = unknown ? null : work.area;
 
   function startInvestigation() {
-    navigate(HOME);
+    navigate({ area: "investigations", caseId: null, stage: "situation" });
     setStartSignal((value) => value + 1);
   }
 
@@ -506,6 +506,9 @@ export function App() {
                         focus,
                       })
                     : undefined
+                }
+                onActivityOpen={(caseId, stage, focus) =>
+                  navigate({ area: "investigations", caseId, stage, focus })
                 }
                 onExitFocus={(target) =>
                   navigate({ area: target, caseId: null, stage: "situation" })

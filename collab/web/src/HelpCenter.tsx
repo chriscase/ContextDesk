@@ -53,17 +53,17 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "A shared workspace where a team records investigations and moves each one through Capture, Analyze, Compare, and Decide.",
         keywords: ["overview", "workflow", "stages", "orientation", "introduction"],
         what:
-          "The War Room is the web workspace for ContextDesk investigations. The Overview shows the operating picture — every recorded investigation with its status counts. Opening an investigation focuses it and offers five stages: Situation (the shared picture), Capture (notes and imports), Analyze (evidence and AI lanes), Compare (lanes side by side), and Decide (the human call and export).",
+          "The War Room is the web workspace for ContextDesk investigations. Overview is the command center: recorded status counts, high-impact active work, and the latest cross-investigation activity with direct links to the work that changed. Investigations is the searchable case inventory and creation entry point. Opening an investigation focuses it and offers five stages: Situation (the shared picture), Capture (notes and imports), Analyze (evidence and AI lanes), Compare (lanes side by side), and Decide (the human call and export).",
         when:
           "Read this first if the navigation is unfamiliar, or when you want to know which stage a task belongs to.",
         steps: [
-          "Open Overview to see every investigation and its recorded status counts.",
+          "Open Overview to see what is active, what needs attention, and what changed most recently across investigations.",
           "Select an investigation to focus it; the Situation stage opens first.",
           "Use the stage strip or the Situation page's work-area links to move between Capture, Analyze, Compare, and Decide.",
           "Use the breadcrumb to return to Investigations or the Overview at any time.",
         ],
         recorded:
-          "The Overview and Situation pages restate only what the case has recorded: status, severity, participants, and counts of timeline events, contributions, and imported runs.",
+          "Overview and Situation restate only recorded facts. Overview's activity feed is a human-readable projection of durable timeline events; opening an item takes you to the relevant investigation stage. It does not infer urgency or correctness from model output.",
         limits:
           "Counts and statuses reflect recorded state only — they never measure progress, completeness, or correctness, and no stage is ever marked \"done\" for you.",
         actions: [

@@ -27,6 +27,22 @@ supports it, what remains unknown, and who is responsible for the next move.
 
 ![Synthetic War Room investigation list](../assets/war-room/war-room-investigations.png)
 
+## Overview is the command center
+
+**Overview** answers “what changed, and where should I look next?” It shows
+recorded status counts, the latest activity visible to the signed-in person,
+and active high-impact investigations. Activity rows identify the actor, the
+recorded action, the investigation, and the server time. Selecting a row opens
+the relevant investigation stage and recorded item; internal identifiers stay
+out of the default presentation.
+
+The feed is intentionally bounded. It is a recent-work orientation surface,
+not a complete audit log or an inferred priority ranking. **Investigations** is
+the separate inventory for search, status filtering, creation, and resuming any
+case visible to the user.
+
+![Synthetic War Room Overview with recent activity](../assets/war-room/war-room-overview.png)
+
 ## The five stages
 
 | Stage | Operator question | Durable output |
@@ -120,7 +136,7 @@ not mean every deployment is automatically configured.
 
 | Area | Current behavior | Residual or non-claim |
 | --- | --- | --- |
-| War Room workflow | Situation, Capture, Analyze, Compare, Decide; evidence-first findings; lane attempts and history; deep links; Technical details; discussion; and human decision/export | Agreement is not proof, and model output is not a human decision |
+| War Room workflow | Command-center Overview; searchable Investigations inventory; Situation, Capture, Analyze, Compare, Decide; evidence-first findings; lane attempts and history; deep links; Technical details; discussion; and human decision/export | Recent activity is not a priority ranking, agreement is not proof, and model output is not a human decision |
 | Provenance | Synthetic, live, and imported origins remain distinguishable; missing facts can remain unknown | A live or imported label does not imply verification |
 | Discussion | Durable discussion that survives refresh and is updated through polling | Not WebSocket chat, live presence, typing indicators, or instantaneous collaboration |
 | LDAP | The LDAP adapter is production-ready only when it has been configured and tested for the deployment | No claim that LDAP works without deployment-specific configuration and qualification |

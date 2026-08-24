@@ -43,6 +43,9 @@ function stubCaseFetch(options?: {
     if (url === "/api/catalog/sources") {
       return { ok: true, json: async () => ({ sources: [] }) };
     }
+    if (url === "/api/activity?limit=30") {
+      return { ok: true, json: async () => ({ activities: [] }) };
+    }
     if (url.endsWith("/timeline")) {
       return { ok: true, json: async () => ({ events: [] }) };
     }
@@ -67,6 +70,9 @@ describe("war room overview", () => {
     render(<Cases roles={["case-lead"]} />);
     expect(await screen.findByRole("heading", { name: "Operating picture" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Fixture incident" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Latest activity" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "View all investigations" })).toBeTruthy();
+    expect(screen.queryByRole("searchbox")).toBeNull();
     expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
     const requested = stub.mock.calls.map((call) => String(call[0]));
     expect(requested).not.toContain("/api/cases/c1/timeline");
@@ -96,7 +102,7 @@ describe("war room overview", () => {
 
   it("shows recorded participants, creator, and created time — and nothing invented", async () => {
     stubCaseFetch();
-    render(<Cases roles={["case-lead"]} />);
+    render(<Cases roles={["case-lead"]} view="investigations" />);
     await screen.findByRole("button", { name: "Fixture incident" });
     const withFacts = screen.getByRole("button", { name: "Fixture incident" })
       .closest("li") as HTMLElement;
@@ -110,7 +116,7 @@ describe("war room overview", () => {
 
   it("filters by search text and by recorded status", async () => {
     stubCaseFetch();
-    render(<Cases roles={["case-lead"]} />);
+    render(<Cases roles={["case-lead"]} view="investigations" />);
     const search = await screen.findByRole("searchbox", {
       name: "Search investigations by title, ID, participant, or creator",
     });
@@ -133,7 +139,7 @@ describe("war room overview", () => {
 
   it("does not offer investigation creation to a viewer", async () => {
     stubCaseFetch();
-    render(<Cases roles={["viewer"]} />);
+    render(<Cases roles={["viewer"]} view="investigations" />);
     await screen.findByRole("button", { name: "Fixture incident" });
     expect(screen.queryByPlaceholderText("New investigation title")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create investigation" })).toBeNull();
@@ -153,7 +159,7 @@ describe("war room overview", () => {
         return null;
       },
     });
-    render(<Cases roles={["contributor"]} />);
+    render(<Cases roles={["contributor"]} view="investigations" />);
     const title = await screen.findByPlaceholderText("New investigation title");
     fireEvent.change(title, { target: { value: "Denied case" } });
     fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
@@ -162,12 +168,82 @@ describe("war room overview", () => {
     );
     expect(screen.queryByText("permission denied")).toBeNull();
   });
+
+  it("shows cross-investigation activity with a direct work-item route", async () => {
+    const onActivityOpen = vi.fn();
+    stubCaseFetch({
+      onRequest: (url) => {
+        if (url === "/api/activity?limit=30") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              activities: [
+                {
+                  caseId: "c1",
+                  caseTitle: "Fixture incident",
+                  caseStatus: "open",
+                  caseSeverity: "high",
+                  seq: 8,
+                  kind: "contribution_created",
+                  actorUsername: "alice",
+                  targetId: "message-8",
+                  occurredAt: "2026-08-24T12:00:00.000Z",
+                  details: { kind: "message" },
+                },
+              ],
+            }),
+          });
+        }
+        return null;
+      },
+    });
+    render(<Cases roles={["case-lead"]} onActivityOpen={onActivityOpen} />);
+    const activity = await screen.findByRole("button", {
+      name: /alice added a discussion comment Fixture incident/,
+    });
+    fireEvent.click(activity);
+    expect(onActivityOpen).toHaveBeenCalledWith("c1", "situation", {
+      section: "discussion",
+      item: "message-8",
+      lane: null,
+      experiment: null,
+    });
+  });
+
+  it("keeps the overview bounded when many activities are recorded", async () => {
+    stubCaseFetch({
+      onRequest: (url) => {
+        if (url !== "/api/activity?limit=30") return null;
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            activities: Array.from({ length: 12 }, (_, index) => ({
+              caseId: "c1",
+              caseTitle: "Fixture incident",
+              caseStatus: "open",
+              caseSeverity: "high",
+              seq: 12 - index,
+              kind: "contribution_created",
+              actorUsername: "alice",
+              targetId: `message-${index}`,
+              occurredAt: `2026-08-24T12:${String(index).padStart(2, "0")}:00.000Z`,
+              details: { kind: "message" },
+            })),
+          }),
+        });
+      },
+    });
+
+    render(<Cases roles={["case-lead"]} />);
+    await screen.findByText("Showing the 10 most recent of 12 recorded events.");
+    expect(document.querySelectorAll(".activity-feed__item")).toHaveLength(10);
+  });
 });
 
 describe("focused investigation view", () => {
-  it("enters Focus on the Situation picture and returns to the overview without losing filters", async () => {
+  it("enters Focus on the Situation picture and returns to the inventory without losing filters", async () => {
     stubCaseFetch();
-    render(<Cases roles={["case-lead"]} />);
+    render(<Cases roles={["case-lead"]} view="investigations" />);
     const search = await screen.findByRole("searchbox", {
       name: "Search investigations by title, ID, participant, or creator",
     });
@@ -181,7 +257,7 @@ describe("focused investigation view", () => {
     expect(screen.queryByRole("heading", { name: "Triage workspace" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Evidence and snapshots" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "War Room" }));
+    fireEvent.click(screen.getByRole("button", { name: "Investigations" }));
     const searchAgain = await screen.findByRole("searchbox", {
       name: "Search investigations by title, ID, participant, or creator",
     });
@@ -331,6 +407,23 @@ describe("focused investigation view", () => {
     const stageNav = screen.getByRole("navigation", { name: "Investigation stages" });
     fireEvent.click(within(stageNav).getByRole("button", { name: /Decide/ }));
     expect(onStageChange).toHaveBeenCalledWith("decide");
+  });
+
+  it("opens discussion when a cross-investigation activity deep link targets it", async () => {
+    stubCaseFetch();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        view="investigations"
+        focusCaseId="c1"
+        stage="situation"
+        focus={{ section: "discussion", item: "message-8", lane: null, experiment: null }}
+        onOpenCase={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("complementary", { name: "Discussion" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Situation" })).toBeTruthy();
   });
 
   it("does not render mutation controls in static read-only mode", async () => {

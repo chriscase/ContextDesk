@@ -18,10 +18,12 @@ selected theme is a local browser preference.
 
 Present the seeded investigation in this order:
 
-1. On **Operating picture**, point out the persistent navigation, signed-in
-   identity, status counts, search, status filter, and **Start investigation**.
-   Search for `checkout`, then open **Checkout timeouts — model and strategy
-   comparison**.
+1. On **Overview**, point out the persistent navigation, signed-in identity,
+   recorded status counts, bounded **Latest activity** feed, and
+   **High-impact investigations**. Open one activity to demonstrate that it
+   routes to the exact investigation stage, then use **Investigations** for the
+   searchable inventory and **Start investigation**. Search for `checkout`,
+   then open **Checkout timeouts — model and strategy comparison**.
 2. Use the breadcrumbs and five stage controls to orient the audience. On
    **Situation**, show the recorded status, severity, participants, activity,
    and work areas. These are recorded facts, not an inferred verdict.
@@ -47,7 +49,7 @@ Present the seeded investigation in this order:
    Experiment Lab review with the final privacy gate enabled. The readable
    share-safe summary comes first; open **View raw export** only when the
    audience needs the technical JSON.
-9. Reload once. The session remains signed in and returns to Operating picture.
+9. Reload once. The session remains signed in and returns to Overview.
    Reopen the investigation to show that recorded artifacts persist while this
    demo process remains running.
 

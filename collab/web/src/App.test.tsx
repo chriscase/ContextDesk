@@ -115,6 +115,16 @@ describe("authenticated application shell", () => {
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
   });
 
+  it("routes Start investigation to the inventory and focuses the title field", async () => {
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Start investigation" }));
+
+    expect(screen.getByRole("heading", { name: "Investigations" })).toBeTruthy();
+    const title = screen.getByPlaceholderText("New investigation title");
+    await waitFor(() => expect(document.activeElement).toBe(title));
+  });
+
   it("keeps identity, roles, theme, and sign-out in the account menu", async () => {
     const stub = stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
     render(<App />);

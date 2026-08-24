@@ -126,6 +126,24 @@ export async function registerCaseRoutes(
     };
   }
 
+  app.get("/api/activity", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    if (!ctx.canRead) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const rawLimit = (request.query as { limit?: unknown }).limit;
+    const parsedLimit = typeof rawLimit === "string" ? Number.parseInt(rawLimit, 10) : 30;
+    return {
+      schemaId: "cd-collab.activity_feed.v1",
+      activities: await deps.domain.listRecentActivity(ctx.actor, ctx.isAdmin, parsedLimit),
+    };
+  });
+
   app.get("/api/cases", async (request, reply) => {
     const ctx = await sessionOf(request);
     if (!ctx) {

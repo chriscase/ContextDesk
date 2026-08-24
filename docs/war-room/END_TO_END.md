@@ -25,11 +25,14 @@ If the command cannot start or the local address does not load, stop here and
 record the environment failure. Do not substitute a live system or external
 data for this walkthrough.
 
-## 0:30 — Open a synthetic investigation
+## 0:30 — Orient in Overview, then open a synthetic investigation
 
-On **Investigations**, select the prepared synthetic War Room item. Notice
-that the list gives you a resumable unit of work rather than a loose chat
-session.
+On **Overview**, read the recorded status counts and latest activity. Select an
+activity to see its exact-stage route, then return to **Investigations** and
+select the prepared synthetic War Room item. Overview answers “what changed?”;
+Investigations is the searchable, resumable inventory.
+
+![Fully synthetic War Room Overview](../assets/war-room/war-room-overview.png)
 
 ![Fully synthetic War Room investigations screen](../assets/war-room/war-room-investigations.png)
 
