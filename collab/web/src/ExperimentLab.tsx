@@ -221,16 +221,19 @@ function readableUnknown(value: string): string {
 }
 
 function ArtifactExcerpt(props: { text: string }) {
-  const text = readableTraceExcerpt(props.text);
-  const lines = text.split(/\r?\n/);
-  const isLarge = lines.length > 6 || text.length > 480;
+  const fullText = props.text;
+  const previewText = readableTraceExcerpt(fullText);
+  const fullLines = fullText.split(/\r?\n/);
+  const previewLines = previewText.split(/\r?\n/);
+  const isLarge = fullLines.length > 6 || fullText.length > 480;
   if (!isLarge) {
-    return <pre className="experiment-lab__artifact-excerpt">{text}</pre>;
+    return <pre className="experiment-lab__artifact-excerpt">{previewText}</pre>;
   }
-  const previewByLines = lines.slice(0, 6).join("\n");
+  const previewByLines = previewLines.slice(0, 6).join("\n");
   const preview = previewByLines.length > 480
     ? `${previewByLines.slice(0, 479)}…`
     : `${previewByLines}\n…`;
+  const lineCount = `${fullLines.length} line${fullLines.length === 1 ? "" : "s"}`;
   return (
     <div className="experiment-lab__artifact-collapsible">
       <pre className="experiment-lab__artifact-excerpt experiment-lab__artifact-preview">
@@ -238,14 +241,89 @@ function ArtifactExcerpt(props: { text: string }) {
       </pre>
       <details>
         <summary>
-          View full log or stack trace · {lines.length} line{lines.length === 1 ? "" : "s"}
+          <span className="experiment-lab__artifact-expand">
+            Expand log or stack trace · {lineCount}
+          </span>
+          <span className="experiment-lab__artifact-collapse">
+            Collapse log or stack trace · {lineCount}
+          </span>
         </summary>
         <pre className="experiment-lab__artifact-excerpt experiment-lab__artifact-full">
-          {text}
+          {fullText}
         </pre>
       </details>
     </div>
   );
+}
+
+const COMPARE_WORKSPACE = [
+  {
+    id: "summary",
+    label: "Summary",
+    section: "scan-heading",
+  },
+  {
+    id: "review-queue",
+    label: "Review queue",
+    section: "review-queue-heading",
+  },
+  {
+    id: "evidence",
+    label: "Evidence",
+    section: "evidence-heading",
+  },
+  {
+    id: "strategy",
+    label: "Strategy paths",
+    section: "strategy-heading",
+  },
+  {
+    id: "signals",
+    label: "Signals",
+    section: "helpfulness-heading",
+  },
+] as const;
+
+type CompareWorkspaceId = (typeof COMPARE_WORKSPACE)[number]["id"];
+
+const LEGACY_SECTION_TO_WORKSPACE: Record<string, CompareWorkspaceId> = {
+  "scan-heading": "summary",
+  "scan-findings-heading": "summary",
+  "scan-unknown-heading": "summary",
+  "scan-decided-heading": "summary",
+  "readiness-heading": "summary",
+  "focus-digest-heading": "summary",
+  "candidate-comparison-heading": "summary",
+  "review-queue-heading": "review-queue",
+  "evidence-heading": "evidence",
+  "cross-exam-heading": "evidence",
+  "strategy-heading": "strategy",
+  "helpfulness-heading": "signals",
+  "gold-alignment-heading": "signals",
+  "decision-heading": "summary",
+  "export-heading": "summary",
+};
+
+function compareWorkspaceFor(section: string | null | undefined): CompareWorkspaceId {
+  if (!section) return "summary";
+  return LEGACY_SECTION_TO_WORKSPACE[section] ?? "summary";
+}
+
+function stageForSection(section: string): "compare" | "decide" {
+  return section === "decision-heading" || section === "export-heading" ? "decide" : "compare";
+}
+
+function navigationKey(focus: WorkFocus): string {
+  return [
+    focus.section,
+    focus.item ?? "",
+    focus.experiment ?? "",
+    focus.navigation ?? "focus",
+  ].join("\u0000");
+}
+
+function isModifiedClick(event: MouseEvent<HTMLAnchorElement>): boolean {
+  return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey;
 }
 
 function traceEventMeaning(kind: string): string {
@@ -313,7 +391,7 @@ function supportingArtifact(view: ExperimentView, evidenceRef: string): Supporti
       return {
         label: `Recorded evidence cited by ${model}`,
         source: `recorded lane transcript · ${model}`,
-        excerpt: readableTraceExcerpt(event.excerpt),
+        excerpt: event.excerpt,
         context: `Trace step ${event.sequence} · ${event.kind} by ${event.authorUsername ?? event.actor}. Timestamp and component were not captured by this experiment record.`,
         technicalRef: evidenceRef,
       };
@@ -531,7 +609,7 @@ const REVIEW_QUEUE_CATEGORIES = [
 function buildReviewQueue(view: ExperimentView): ReviewQueueItem[] {
   const items: ReviewQueueItem[] = [];
   const label = (candidateId: string): string =>
-    view.candidates.find((row) => row.candidateId === candidateId)?.modelLabel ?? candidateId;
+    view.candidates.find((row) => row.candidateId === candidateId)?.modelLabel ?? "recorded lane";
   const readable = (summary: string): string =>
     view.candidates.reduce((text, row) => text.split(row.candidateId).join(row.modelLabel), summary);
   const push = (item: Omit<ReviewQueueItem, "id">) => {
@@ -966,6 +1044,24 @@ export function ExperimentLab(props: {
   const [presence, setPresence] = useState<PresenceView | null>(null);
   // Focus is URL-backed for reload/back/forward, but never filters evidence.
   const [focusedCandidateId, setFocusedCandidateId] = useState<string | null>(null);
+  const [workspaceSection, setWorkspaceSection] = useState<CompareWorkspaceId>(() =>
+    compareWorkspaceFor(props.routeFocus?.section),
+  );
+  const [workspaceItem, setWorkspaceItem] = useState<string | null>(
+    () => props.routeFocus?.item ?? null,
+  );
+  const surfaceStage = surface === "decision" ? "decide" : "compare";
+  const [navigationTarget, setNavigationTarget] = useState<WorkFocus | null>(() => {
+    const routeFocus = props.routeFocus;
+    if (!routeFocus || stageForSection(routeFocus.section) !== surfaceStage) return null;
+    return routeFocus.navigation === "preserve" ? null : routeFocus;
+  });
+  const lastNavigationKey = useRef<string | null>(
+    props.routeFocus ? navigationKey(props.routeFocus) : null,
+  );
+  const experimentsRef = useRef<ExperimentView[]>(experiments);
+  experimentsRef.current = experiments;
+  const loadedCaseId = useRef(props.caseId);
   const refreshGeneration = useRef(0);
 
   const refresh = useCallback(async (preferredId?: string) => {
@@ -1004,14 +1100,25 @@ export function ExperimentLab(props: {
   }, [refresh]);
 
   useEffect(() => {
+    const caseChanged = loadedCaseId.current !== props.caseId;
+    loadedCaseId.current = props.caseId;
+    const requestedExperiment = props.routeFocus?.experiment;
+    const alreadyLoaded = requestedExperiment
+      ? experimentsRef.current.some((row) => row.id === requestedExperiment)
+      : experimentsRef.current.length > 0;
+    if (!caseChanged && alreadyLoaded) {
+      if (requestedExperiment) setActive(requestedExperiment);
+      return;
+    }
     refreshGeneration.current += 1;
+    experimentsRef.current = [];
     setExperiments([]);
     setActive(null);
     setExported(null);
     setError(null);
     setPresence(null);
     setFocusedCandidateId(null);
-    void refresh(props.routeFocus?.experiment ?? undefined);
+    void refresh(requestedExperiment ?? undefined);
   }, [props.caseId, props.routeFocus?.experiment, refresh]);
 
   useEffect(() => {
@@ -1028,21 +1135,53 @@ export function ExperimentLab(props: {
         ? requestedLane
         : null,
     );
-    if (props.routeFocus?.section) {
-      window.setTimeout(() => {
-        const exactItem = props.routeFocus?.item
-          ? [...document.querySelectorAll<HTMLElement>("[data-route-item]")]
-              .find((element) => element.dataset.routeItem === props.routeFocus?.item)
-          : null;
-        const exactLane = props.routeFocus?.lane
-          ? [...document.querySelectorAll<HTMLElement>("[data-route-lane]")]
-              .find((element) => element.dataset.routeLane === props.routeFocus?.lane)
-          : null;
-        (exactItem ?? exactLane ?? document.getElementById(props.routeFocus?.section ?? ""))
-          ?.scrollIntoView?.({ block: "start" });
-      }, 0);
-    }
   }, [props.routeFocus, experiments, active]);
+
+  useEffect(() => {
+    setWorkspaceSection(compareWorkspaceFor(props.routeFocus?.section));
+    setWorkspaceItem(props.routeFocus?.item ?? null);
+    if (props.routeFocus) {
+      const nextNavigationKey = navigationKey(props.routeFocus);
+      if (props.routeFocus.navigation === "preserve") {
+        lastNavigationKey.current = nextNavigationKey;
+        setNavigationTarget(null);
+        return;
+      }
+      if (lastNavigationKey.current !== nextNavigationKey) {
+        lastNavigationKey.current = nextNavigationKey;
+        if (stageForSection(props.routeFocus.section) === surfaceStage) {
+          setNavigationTarget(props.routeFocus);
+        }
+      }
+    }
+  }, [props.routeFocus?.section, props.routeFocus?.item, props.routeFocus?.experiment, props.routeFocus?.navigation, surfaceStage]);
+
+  useEffect(() => {
+    // Section and item navigation moves keyboard focus to the rendered destination.
+    // Lane-only focus never updates navigationTarget, so it cannot move the viewport.
+    if (!navigationTarget) return undefined;
+    const timer = window.setTimeout(() => {
+      const exactItem = navigationTarget.item
+        ? [...document.querySelectorAll<HTMLElement>("[data-route-item]")]
+            .find((element) => element.dataset.routeItem === navigationTarget.item)
+        : null;
+      const requestedSection = document.getElementById(navigationTarget.section);
+      const workspace = COMPARE_WORKSPACE.find(
+        (item) => item.id === compareWorkspaceFor(navigationTarget.section),
+      );
+      const workspaceHeading = workspace ? document.getElementById(workspace.section) : null;
+      const destination = exactItem ?? requestedSection ?? workspaceHeading;
+      if (destination) {
+        destination.focus({ preventScroll: true });
+        destination.scrollIntoView?.({
+          block: exactItem ? "nearest" : "start",
+          inline: "nearest",
+        });
+      }
+      if (destination) setNavigationTarget(null);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [experiments, navigationTarget, workspaceSection]);
 
   useEffect(() => {
     // Unit/static consumers without an authenticated participant have no
@@ -1082,8 +1221,33 @@ export function ExperimentLab(props: {
     if (focus.item) params.set("item", focus.item);
     if (focus.lane) params.set("lane", focus.lane);
     if (focus.experiment) params.set("experiment", focus.experiment);
-    const stage = surface === "decision" ? "decide" : "compare";
+    const stage = stageForSection(focus.section);
     return `/investigations/${props.caseId}/${stage}?${params.toString()}#${encodeURIComponent(focus.section)}`;
+  };
+  const applyFocus = (focus: WorkFocus, navigateDestination: boolean) => {
+    setWorkspaceSection(compareWorkspaceFor(focus.section));
+    setWorkspaceItem(focus.item);
+    setFocusedCandidateId(focus.lane);
+    // Record the effective section/item/experiment even for lane-only changes.
+    // The parent will pass the same focus back as routeFocus; treating that first
+    // URL-backed echo as section navigation would steal focus and scroll.
+    lastNavigationKey.current = navigationKey(focus);
+    if (navigateDestination) {
+      setNavigationTarget(focus);
+    } else {
+      setNavigationTarget(null);
+    }
+  };
+  const commitFocus = (focus: WorkFocus, navigateDestination = true) => {
+    const routedFocus: WorkFocus = navigateDestination
+      ? focus
+      : { ...focus, navigation: "preserve" };
+    applyFocus(routedFocus, navigateDestination);
+    if (props.onDeepNavigate) {
+      props.onDeepNavigate(routedFocus);
+      return;
+    }
+    window.history.pushState(routedFocus, "", hrefFor(routedFocus));
   };
   const deepLink = (
     label: ReactNode,
@@ -1098,9 +1262,11 @@ export function ExperimentLab(props: {
         className={className}
         href={hrefFor(focus)}
         onClick={(event: MouseEvent<HTMLAnchorElement>) => {
-          if (!props.onDeepNavigate || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          if (isModifiedClick(event)) return;
+          const currentStage = surface === "decision" ? "decide" : "compare";
+          if (stageForSection(focus.section) !== currentStage) return;
           event.preventDefault();
-          props.onDeepNavigate(focus);
+          commitFocus(focus);
         }}
       >
         {label}
@@ -1108,7 +1274,7 @@ export function ExperimentLab(props: {
     );
   };
   const candidateLabel = (candidateId: string): string =>
-    current?.candidates.find((row) => row.candidateId === candidateId)?.modelLabel ?? candidateId;
+    current?.candidates.find((row) => row.candidateId === candidateId)?.modelLabel ?? "recorded lane";
   const readableSummary = (summary: string): string =>
     (current?.candidates ?? []).reduce(
       (text, row) => text.split(row.candidateId).join(row.modelLabel),
@@ -1143,7 +1309,7 @@ export function ExperimentLab(props: {
       row.usage.status === "unknown" ? "usage" : null,
     ].filter((item): item is string => item !== null);
     if (unknownFacts.length) {
-      scanUnknowns.push(`${row.modelLabel} — ${unknownFacts.join(", ")} unknown`);
+      scanUnknowns.push(`${row.modelLabel} — ${unknownFacts.join(" unknown; ")} unknown`);
     }
     const trace = (current?.traces ?? []).find((item) => item.candidateId === row.candidateId);
     if (!trace) {
@@ -1214,18 +1380,31 @@ export function ExperimentLab(props: {
     : 0;
 
   function selectExperiment(id: string) {
+    const currentWorkspace = COMPARE_WORKSPACE.find((item) => item.id === workspaceSection)
+      ?? COMPARE_WORKSPACE[0];
+    const focus: WorkFocus = {
+      section: currentWorkspace.section,
+      item: null,
+      lane: null,
+      experiment: id,
+    };
     setActive(id);
     setExported(null);
     setError(null);
-    setFocusedCandidateId(null);
+    commitFocus(focus);
   }
 
   function selectLaneFocus(lane: string | null) {
-    setFocusedCandidateId(lane);
-    const focus = routeFor("readiness-heading", null, lane);
-    // Lane inspection is an in-place control. Keep its state shareable without
-    // treating a selection as navigation or moving the operator's viewport.
-    window.history.replaceState(window.history.state, "", hrefFor(focus));
+    const currentWorkspace = COMPARE_WORKSPACE.find((item) => item.id === workspaceSection)
+      ?? COMPARE_WORKSPACE[0];
+    const section =
+      props.routeFocus?.section &&
+      compareWorkspaceFor(props.routeFocus.section) === workspaceSection
+        ? props.routeFocus.section
+        : currentWorkspace.section;
+    // Keep the current subsection and item. URL-backed lane focus is shareable,
+    // but it is not a jump to a distant panel.
+    commitFocus(routeFor(section, workspaceItem, lane), false);
   }
 
   async function importPackage(event: FormEvent) {
@@ -1547,9 +1726,10 @@ export function ExperimentLab(props: {
         <>
       <p className="experiment-lab__intro">
         Compare seeded, connected ContextDesk, and pasted-chat triage candidates across model and
-        strategy lanes. Agreement is not proof of correctness. A gold reference is a human
-        benchmark decision, not an infallible truth claim. Gold alignment is scored separately
-        from helpfulness.
+        strategy lanes. Agreement is not proof of correctness. Textual similarity is not a winner.
+        A gold reference is a human benchmark decision, not an infallible truth claim. Gold alignment
+        is scored separately from helpfulness. Gold alignment is not a correctness verdict. Unknown
+        cost, usage, and partial traces stay unknown.
       </p>
       <div className="experiment-lab__future-slots" aria-label="Extension slots">
         <span>Sources: seeded · ContextDesk connector · pasted chat</span>
@@ -1684,11 +1864,85 @@ export function ExperimentLab(props: {
           </details>
           {showComparison ? (
             <>
+          <nav className="experiment-lab__workspace" aria-label="Compare workspace">
+            <p className="experiment-lab__workspace-copy">
+              Open one Compare workspace at a time. Each item is a real address you can copy or
+              open in a new tab.
+            </p>
+            <ul className="experiment-lab__workspace-tabs">
+              {COMPARE_WORKSPACE.map((item) => {
+                const focus = routeFor(
+                  item.section,
+                  null,
+                  focusedCandidate?.candidateId ?? null,
+                );
+                const active = workspaceSection === item.id;
+                return (
+                  <li key={item.id}>
+                    <a
+                      className={
+                        active
+                          ? "experiment-lab__workspace-tab is-active"
+                          : "experiment-lab__workspace-tab"
+                      }
+                      href={hrefFor(focus)}
+                      aria-current={active ? "page" : undefined}
+                      onClick={(event) => {
+                        if (isModifiedClick(event)) return;
+                        event.preventDefault();
+                        commitFocus(focus);
+                      }}
+                    >
+                      {item.label}
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+            <div className="experiment-lab__focus" role="group" aria-label="Focus a lane">
+              <span className="experiment-lab__focus-label">Focus a lane</span>
+              <button
+                type="button"
+                className="experiment-lab__focus-chip"
+                aria-pressed={focusedCandidate === null}
+                onClick={() => selectLaneFocus(null)}
+              >
+                All lanes
+              </button>
+              {current.candidates.map((row) => (
+                <button
+                  key={row.candidateId}
+                  type="button"
+                  className="experiment-lab__focus-chip"
+                  aria-pressed={focusedCandidate?.candidateId === row.candidateId}
+                  onClick={() => {
+                    const lane = focusedCandidate?.candidateId === row.candidateId
+                      ? null
+                      : row.candidateId;
+                    selectLaneFocus(lane);
+                  }}
+                >
+                  {row.modelLabel}
+                </button>
+              ))}
+            </div>
+            <p className="experiment-lab__focus-legend">
+              Focus highlights one lane. It never filters the recorded decision basis.
+            </p>
+            {focusedCandidate ? (
+              <p className="experiment-lab__focus-status" role="status">
+                Focusing {focusedCandidate.modelLabel}. Other lanes stay in the comparison,
+                benchmark, and accepted decision.
+              </p>
+            ) : null}
+          </nav>
+          {workspaceSection === "summary" ? (
+            <>
           <section className="experiment-lab__scan" aria-labelledby="scan-heading">
             <div className="experiment-lab__section-heading">
               <div>
                 <p className="experiment-lab__eyebrow">Compare → Decide</p>
-                <h4 id="scan-heading" className="experiment-lab__heading">At a glance</h4>
+                <h4 id="scan-heading" className="experiment-lab__heading" tabIndex={-1}>At a glance</h4>
               </div>
               <span className="experiment-lab__section-kicker">Facts only · no winner implied</span>
             </div>
@@ -1696,8 +1950,15 @@ export function ExperimentLab(props: {
               {current.candidates.length} candidate lane{current.candidates.length === 1 ? "" : "s"}
               {" · runs: "}
               {runFactsSummary || "none recorded"}. Read what agrees, what differs, and what stays
-              unknown before the human decision. The sections below expand each signal in the same
-              order.
+              unknown before the human decision.
+              {current.agreement.notes.length
+                ? ` ${current.agreement.notes.join(" ")}`
+                : ""}
+              {current.comparison?.notes?.length
+                ? ` ${current.comparison.notes.join(" ")}`
+                : ""}
+              {" "}
+              Review queue, Evidence, Strategy paths, and Signals stay one workspace away.
             </p>
             <div className="experiment-lab__scorecards" aria-label="Experiment summary">
               <article>
@@ -1743,7 +2004,7 @@ export function ExperimentLab(props: {
                   <ol className="experiment-lab__finding-list">
                     {humanFindings.map((finding) => (
                       <li key={finding.id} className="experiment-lab__finding">
-                        <h6>{finding.headline}</h6>
+                        <h6 className="experiment-lab__finding-title">{finding.headline}</h6>
                         <p className="experiment-lab__finding-source">
                           <strong>{finding.artifact.label}</strong> · {finding.artifact.source}
                         </p>
@@ -1840,19 +2101,6 @@ export function ExperimentLab(props: {
                 </p>
               </article>
             </div>
-            <nav className="experiment-lab__shortcuts" aria-label="Section shortcuts">
-              <span>Jump to:</span>
-              {deepLink("Readiness", "readiness-heading")}
-              {deepLink("Review queue", "review-queue-heading")}
-              {deepLink("Run facts", "candidate-comparison-heading")}
-              {deepLink("Evidence", "evidence-heading")}
-              {deepLink("Cross-examination", "cross-exam-heading")}
-              {deepLink("Strategy paths", "strategy-heading")}
-              {deepLink("Helpfulness", "helpfulness-heading")}
-              {deepLink("Gold alignment", "gold-alignment-heading")}
-              {deepLink("Decision", "decision-heading")}
-              {canExport ? deepLink("Export", "export-heading") : null}
-            </nav>
           </section>
           <section
             className="experiment-lab__section experiment-lab__readiness"
@@ -1861,7 +2109,7 @@ export function ExperimentLab(props: {
             <div className="experiment-lab__section-heading">
               <div>
                 <p className="experiment-lab__eyebrow">War-room cockpit</p>
-                <h4 id="readiness-heading" className="experiment-lab__heading">
+                <h4 id="readiness-heading" className="experiment-lab__heading" tabIndex={-1}>
                   Decision readiness
                 </h4>
               </div>
@@ -1870,39 +2118,12 @@ export function ExperimentLab(props: {
             <p className="experiment-lab__section-note">
               Eight facets of the record, stated as facts. Whether the record is sufficient for a
               decision is a human judgment — this panel only shows what is recorded and what stays
-              unknown, and the review queue below lists everything that still needs human eyes.
+              unknown. The Review queue workspace lists everything that still needs human eyes.
             </p>
-            <div className="experiment-lab__focus" role="group" aria-label="Candidate focus">
-              <span className="experiment-lab__focus-label">Inspect a lane</span>
-              <button
-                type="button"
-                className="experiment-lab__focus-chip"
-                aria-pressed={focusedCandidate === null}
-                onClick={() => selectLaneFocus(null)}
-              >
-                All lanes
-              </button>
-              {current.candidates.map((row) => (
-                <button
-                  key={row.candidateId}
-                  type="button"
-                  className="experiment-lab__focus-chip"
-                  aria-pressed={focusedCandidate?.candidateId === row.candidateId}
-                  onClick={() => {
-                    const lane = focusedCandidate?.candidateId === row.candidateId
-                      ? null
-                      : row.candidateId;
-                    selectLaneFocus(lane);
-                  }}
-                >
-                  {row.modelLabel}
-                </button>
-              ))}
-            </div>
             {focusedCandidate ? (
               <p className="experiment-lab__focus-status" role="status">
-                Inspecting {focusedCandidate.modelLabel}. This quick digest changes in place; the
-                aggregate comparison and human decision remain unchanged.
+                Focusing {focusedCandidate.modelLabel}. This digest restates recorded facts for that
+                lane. Other lanes stay in the comparison, benchmark, and accepted decision.
               </p>
             ) : null}
             {focusedCandidate ? (
@@ -1913,7 +2134,7 @@ export function ExperimentLab(props: {
                 <div className="experiment-lab__section-heading">
                   <div>
                     <p className="experiment-lab__eyebrow">Focused lane digest</p>
-                    <h5 id="focus-digest-heading" className="experiment-lab__focus-digest-title">
+                    <h5 id="focus-digest-heading" className="experiment-lab__focus-digest-title" tabIndex={-1}>
                       {focusedCandidate.modelLabel}
                     </h5>
                   </div>
@@ -2111,6 +2332,9 @@ export function ExperimentLab(props: {
               ))}
             </div>
           </section>
+            </>
+          ) : null}
+          {workspaceSection === "review-queue" ? (
           <section
             className="experiment-lab__section experiment-lab__queue"
             aria-labelledby="review-queue-heading"
@@ -2118,7 +2342,7 @@ export function ExperimentLab(props: {
             <div className="experiment-lab__section-heading">
               <div>
                 <p className="experiment-lab__eyebrow">Deterministic projection</p>
-                <h4 id="review-queue-heading" className="experiment-lab__heading">
+                <h4 id="review-queue-heading" className="experiment-lab__heading" tabIndex={-1}>
                   Human review queue
                 </h4>
               </div>
@@ -2153,7 +2377,16 @@ export function ExperimentLab(props: {
                           ? item.text.split(item.evidenceRef).join("this recorded evidence")
                           : visibleQueueText(item.text));
                         return (
-                          <li key={item.id} className="experiment-lab__queue-item">
+                          <li
+                            key={item.id}
+                            className={
+                              workspaceItem === (item.evidenceRef ?? item.id)
+                                ? "experiment-lab__queue-item experiment-lab__route-target"
+                                : "experiment-lab__queue-item"
+                            }
+                            data-route-item={item.evidenceRef ?? item.id}
+                            tabIndex={-1}
+                          >
                             <h6 className="experiment-lab__queue-text">{primary}</h6>
                             {artifact ? (
                               <>
@@ -2208,18 +2441,31 @@ export function ExperimentLab(props: {
               </p>
             )}
           </section>
+          ) : null}
+          {workspaceSection === "summary" ? (
+            <>
           <section className="experiment-lab__gold" aria-label="Gold reference">
             {current.gold ? (
               <>
                 <h4 className="experiment-lab__heading">Gold reference v{current.gold.version}</h4>
-                <p className="timeline__meta">
+                <p className="timeline__meta experiment-lab__gold-summary">
                   Human benchmark from accepted decision{" "}
                   {acceptedDecision && acceptedDecision.id === current.gold.acceptedDecisionId
                     ? `“${truncateText(acceptedDecision.text)}” (r${current.gold.acceptedDecisionRevision})`
-                    : `${current.gold.acceptedDecisionId} r${current.gold.acceptedDecisionRevision}`}
+                    : `record unavailable in this view (r${current.gold.acceptedDecisionRevision})`}
                   , promoted by {current.gold.promotedByUsername}. Evidence:{" "}
-                  {current.gold.evidenceAnchors.join(", ")}.
+                  {current.gold.evidenceAnchors.length} benchmark anchor
+                  {current.gold.evidenceAnchors.length === 1 ? "" : "s"}.
                 </p>
+                <details className="experiment-lab__technical-details">
+                  <summary>Technical benchmark identity and evidence references</summary>
+                  <p><code>{current.gold.goldId}</code></p>
+                  <p>Accepted decision: <code>{current.gold.acceptedDecisionId}</code></p>
+                  <p>
+                    Evidence references:{" "}
+                    <code>{current.gold.evidenceAnchors.join(", ") || "none recorded"}</code>
+                  </p>
+                </details>
                 <p className="experiment-lab__disclaimer">
                   A gold reference is a human benchmark decision, not an infallible truth claim.
                   Gold alignment is not a correctness verdict.
@@ -2236,7 +2482,7 @@ export function ExperimentLab(props: {
             <div className="experiment-lab__section-heading">
               <div>
                 <p className="experiment-lab__eyebrow">Step 1 · Model / method lanes</p>
-                <h4 id="candidate-comparison-heading" className="experiment-lab__heading">
+                <h4 id="candidate-comparison-heading" className="experiment-lab__heading" tabIndex={-1}>
                   Candidate comparison
                 </h4>
               </div>
@@ -2265,6 +2511,7 @@ export function ExperimentLab(props: {
                 {current.candidates.map((row) => (
                   <tr
                     key={row.candidateId}
+                    data-route-lane={row.candidateId}
                     className={
                       focusedCandidate?.candidateId === row.candidateId
                         ? "experiment-lab__matrix-row--focused"
@@ -2296,11 +2543,14 @@ export function ExperimentLab(props: {
             </table>
           </div>
           </section>
+            </>
+          ) : null}
+          {workspaceSection === "evidence" ? (
           <section className="experiment-lab__section" aria-labelledby="evidence-heading">
             <div className="experiment-lab__section-heading">
               <div>
                 <p className="experiment-lab__eyebrow">Step 2 · Evidence map</p>
-                <h4 id="evidence-heading" className="experiment-lab__heading">
+                <h4 id="evidence-heading" className="experiment-lab__heading" tabIndex={-1}>
                   Shared and different evidence
                 </h4>
               </div>
@@ -2363,7 +2613,7 @@ export function ExperimentLab(props: {
               </div>
             </div>
             <div className="experiment-lab__crossexam-block">
-              <h5 id="cross-exam-heading" className="experiment-lab__subheading experiment-lab__heading">
+              <h5 id="cross-exam-heading" className="experiment-lab__subheading experiment-lab__heading" tabIndex={-1}>
                 Evidence cross-examination
               </h5>
               <p className="experiment-lab__section-note">
@@ -2436,7 +2686,8 @@ export function ExperimentLab(props: {
                         <tr
                           key={row.evidenceRef}
                           data-route-item={row.evidenceRef}
-                          className={props.routeFocus?.item === row.evidenceRef ? "experiment-lab__route-target" : undefined}
+                          tabIndex={-1}
+                          className={workspaceItem === row.evidenceRef ? "experiment-lab__route-target" : undefined}
                         >
                           <th scope="row">
                             <strong>{finding?.headline ?? artifact.label}</strong>
@@ -2550,11 +2801,14 @@ export function ExperimentLab(props: {
               )}
             </div>
           </section>
+          ) : null}
+          {workspaceSection === "strategy" ? (
+            <>
           <section className="experiment-lab__section" aria-labelledby="strategy-heading">
             <div className="experiment-lab__section-heading">
               <div>
                 <p className="experiment-lab__eyebrow">Step 3 · Strategy lanes</p>
-                <h4 id="strategy-heading" className="experiment-lab__heading">Strategy comparison</h4>
+                <h4 id="strategy-heading" className="experiment-lab__heading" tabIndex={-1}>Strategy comparison</h4>
               </div>
               <span className="experiment-lab__section-kicker">Path view</span>
             </div>
@@ -2562,16 +2816,22 @@ export function ExperimentLab(props: {
               Textual similarity is not a winner. Ambiguous transcript structure stays unknown.
               Gold alignment and helpfulness stay independent of this projection.
             </p>
-            <p className="timeline__meta">
+            <p className="timeline__meta experiment-lab__strategy-benchmark-summary">
               Gold {current.comparison?.gold.status ?? "unknown"}
               {current.comparison?.gold.acceptedDecisionId
                 ? acceptedDecision && acceptedDecision.id === current.comparison.gold.acceptedDecisionId
                   ? ` · accepted decision (r${acceptedDecision.revision}): “${truncateText(acceptedDecision.text)}”`
-                  : ` · accepted decision ${current.comparison.gold.acceptedDecisionId}`
+                  : " · accepted decision record unavailable in this view"
                 : " · no accepted gold decision"}
               {" · "}
               Helpfulness {current.candidates.map((row) => `${row.modelLabel}:${row.helpfulnessState}`).join(", ")}
             </p>
+            {current.comparison?.gold.acceptedDecisionId ? (
+              <details className="experiment-lab__technical-details">
+                <summary>Technical benchmark decision identity</summary>
+                <code>{current.comparison.gold.acceptedDecisionId}</code>
+              </details>
+            ) : null}
             <div className="experiment-lab__signal-groups">
               {(current.comparison?.questionPaths ?? []).length ? (
                 <div className="experiment-lab__signal-group">
@@ -2753,11 +3013,15 @@ export function ExperimentLab(props: {
               </form>
             </details>
           ) : null}
+            </>
+          ) : null}
+          {workspaceSection === "signals" ? (
+            <>
           <section className="experiment-lab__section" aria-labelledby="helpfulness-heading">
             <div className="experiment-lab__section-heading">
               <div>
                 <p className="experiment-lab__eyebrow">Step 4 · Reviewer signals</p>
-                <h4 id="helpfulness-heading" className="experiment-lab__heading">Helpfulness</h4>
+                <h4 id="helpfulness-heading" className="experiment-lab__heading" tabIndex={-1}>Helpfulness</h4>
               </div>
               <span className="experiment-lab__section-kicker">Separate from gold</span>
             </div>
@@ -2822,7 +3086,7 @@ export function ExperimentLab(props: {
             <div className="experiment-lab__section-heading">
               <div>
                 <p className="experiment-lab__eyebrow">Step 5 · Benchmark signal</p>
-                <h4 id="gold-alignment-heading" className="experiment-lab__heading">Gold alignment</h4>
+                <h4 id="gold-alignment-heading" className="experiment-lab__heading" tabIndex={-1}>Gold alignment</h4>
               </div>
               <span className="experiment-lab__section-kicker">Independent signal</span>
             </div>
@@ -2832,21 +3096,43 @@ export function ExperimentLab(props: {
           <ul className="timeline">
             {(current.alignments ?? []).map((row) => (
               <li key={row.candidateId} className="timeline__item">
-                {candidateLabel(row.candidateId)}: {ALIGNMENT_STATUS_LABELS[row.status] ?? row.status}
-                {row.matchedAnchors.length ? ` · matched ${row.matchedAnchors.join(", ")}` : ""}
-                {row.missingAnchors.length ? ` · missing ${row.missingAnchors.join(", ")}` : ""}
-                {row.extraAnchors.length
-                  ? ` · beyond the benchmark: ${row.extraAnchors.join(", ")}`
-                  : ""}
-                {(row.roleMismatches ?? []).length
-                  ? ` · role differs on ${(row.roleMismatches ?? [])
-                      .map((mismatch) => `${mismatch.evidenceRef} (treated as ${mismatch.role})`)
-                      .join(", ")}`
-                  : ""}
+                <span className="experiment-lab__alignment-summary">
+                  {candidateLabel(row.candidateId)}: {ALIGNMENT_STATUS_LABELS[row.status] ?? row.status}
+                  {row.matchedAnchors.length
+                    ? ` · matched ${row.matchedAnchors.length} benchmark anchor${row.matchedAnchors.length === 1 ? "" : "s"}`
+                    : ""}
+                  {row.missingAnchors.length
+                    ? ` · missing ${row.missingAnchors.length} benchmark anchor${row.missingAnchors.length === 1 ? "" : "s"}`
+                    : ""}
+                  {row.extraAnchors.length
+                    ? ` · ${row.extraAnchors.length} citation${row.extraAnchors.length === 1 ? "" : "s"} beyond the benchmark`
+                    : ""}
+                  {(row.roleMismatches ?? []).length
+                    ? ` · role differs on ${(row.roleMismatches ?? []).length} benchmark anchor${(row.roleMismatches ?? []).length === 1 ? "" : "s"}`
+                    : ""}
+                </span>
+                {row.matchedAnchors.length || row.missingAnchors.length || row.extraAnchors.length || (row.roleMismatches ?? []).length ? (
+                  <details className="experiment-lab__technical-details">
+                    <summary>Technical alignment evidence references</summary>
+                    {row.matchedAnchors.length ? <p>Matched: <code>{row.matchedAnchors.join(", ")}</code></p> : null}
+                    {row.missingAnchors.length ? <p>Missing: <code>{row.missingAnchors.join(", ")}</code></p> : null}
+                    {row.extraAnchors.length ? <p>Beyond benchmark: <code>{row.extraAnchors.join(", ")}</code></p> : null}
+                    {(row.roleMismatches ?? []).length ? (
+                      <p>
+                        Role differences:{" "}
+                        <code>{(row.roleMismatches ?? [])
+                          .map((mismatch) => `${mismatch.evidenceRef} (${mismatch.role})`)
+                          .join(", ")}</code>
+                      </p>
+                    ) : null}
+                  </details>
+                ) : null}
               </li>
             ))}
           </ul>
           </section>
+            </>
+          ) : null}
             </>
           ) : null}
           {showDecision ? (
@@ -2855,7 +3141,7 @@ export function ExperimentLab(props: {
             <div className="experiment-lab__section-heading">
               <div>
                 <p className="experiment-lab__eyebrow">Step 6 · Human adjudication</p>
-                <h4 id="decision-heading" className="experiment-lab__heading">Accepted decision</h4>
+                <h4 id="decision-heading" className="experiment-lab__heading" tabIndex={-1}>Accepted decision</h4>
               </div>
               <span className="experiment-lab__section-kicker">
                 {current.decisions.at(-1)?.status ?? "awaiting proposal"}
@@ -2963,7 +3249,7 @@ export function ExperimentLab(props: {
               <div className="experiment-lab__export-action">
                 <div>
                   <p className="experiment-lab__eyebrow">Step 7 · Share boundary</p>
-                  <h4 id="export-heading" className="experiment-lab__heading">Export review</h4>
+                  <h4 id="export-heading" className="experiment-lab__heading" tabIndex={-1}>Export review</h4>
                 </div>
                 <button className="login__submit" type="button" onClick={() => void exportReview()}>
                   Export share-safe review

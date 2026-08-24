@@ -1,8 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App.js";
-import { parsePathname, pathFor } from "./app-location.js";
+import { parsePathname, pathFor, sameLocation, type WorkLocation } from "./app-location.js";
 
 afterEach(() => {
   cleanup();
@@ -51,6 +51,88 @@ function stubSignedInFetch(
   });
   vi.stubGlobal("fetch", stub);
   return stub;
+}
+
+const routedLaneExperiment = {
+  id: "exp-route-lane",
+  packageId: "pkg-route-lane",
+  taskFingerprint: "task-route-lane",
+  snapshotFingerprint: "snapshot-route-lane",
+  candidates: [
+    {
+      candidateId: "cand-qwen-3.6-27b",
+      modelLabel: "qwen-3.6-27b",
+      role: "single",
+      runStatus: "completed",
+      observedLatency: { status: "observed", milliseconds: 4120 },
+      cost: { status: "unknown" },
+      usage: { status: "unknown" },
+      helpfulnessState: "unreviewed",
+      goldState: "unknown",
+    },
+  ],
+  agreement: {
+    sharedAnchors: [],
+    candidateSpecific: [],
+    roleConflicts: [],
+    notes: ["Agreement is not proof of correctness."],
+  },
+  observations: [],
+  decisions: [],
+  gold: null,
+  alignments: [
+    {
+      candidateId: "cand-qwen-3.6-27b",
+      status: "unknown",
+      matchedAnchors: [],
+      missingAnchors: [],
+      extraAnchors: [],
+      notes: [],
+    },
+  ],
+  traces: [],
+  comparison: {
+    questionPaths: [],
+    sharedEvidence: [],
+    uniqueEvidence: [],
+    divergence: [],
+    convergence: [],
+    efficiency: [],
+    gold: { status: "absent", version: null, acceptedDecisionId: null },
+    notes: [],
+  },
+};
+
+function stubRoutedCompare(uuid: string): FetchStub {
+  return stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+    if (url === "/api/cases") {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          cases: [{ id: uuid, title: "Routed lane focus", status: "open", severity: "high" }],
+        }),
+      } as Response);
+    }
+    if (url === `/api/cases/${uuid}/experiments`) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ experiments: [routedLaneExperiment] }),
+      } as Response);
+    }
+    if (url.endsWith("/timeline")) {
+      return Promise.resolve({ ok: true, json: async () => ({ events: [] }) } as Response);
+    }
+    if (url.endsWith("/contributions")) {
+      return Promise.resolve({ ok: true, json: async () => ({ contributions: [] }) } as Response);
+    }
+    if (url.endsWith("/imports")) {
+      return Promise.resolve({ ok: true, json: async () => ({ runs: [] }) } as Response);
+    }
+    if (url.endsWith("/presence")) {
+      return Promise.resolve({ ok: true, json: async () => ({ members: [] }) } as Response);
+    }
+    return null;
+  });
 }
 
 describe("auth boundary", () => {
@@ -367,6 +449,17 @@ describe("pathname parsing", () => {
     expect(pathFor(focused)).toBe(
       `/investigations/${uuid}/compare?section=cross-exam-heading&item=ev-synthetic-7&lane=lane-a&experiment=exp-a#cross-exam-heading`,
     );
+    const focusedWork = focused as WorkLocation;
+    const preservePosition: WorkLocation = {
+      ...focusedWork,
+      focus: { ...focusedWork.focus!, navigation: "preserve" },
+    };
+    expect(pathFor(preservePosition)).toBe(pathFor(focusedWork));
+    expect(sameLocation(focusedWork, preservePosition)).toBe(false);
+    const reparsedUrl = new URL(pathFor(preservePosition), "https://contextdesk.invalid");
+    expect(parsePathname(reparsedUrl.pathname, reparsedUrl.search, reparsedUrl.hash)).not.toMatchObject(
+      { focus: { navigation: "preserve" } },
+    );
     expect(parsePathname("//evil.example/phish")).toMatchObject({ kind: "unknown" });
     expect(parsePathname("/investigations/../sources")).toMatchObject({ kind: "unknown" });
     expect(parsePathname("https://evil.example")).toMatchObject({ kind: "unknown" });
@@ -567,6 +660,71 @@ describe("pathname shell routing", () => {
     await waitFor(() => expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(compareUrl));
     expect(await screen.findByRole("heading", { name: "Compare" })).toBeTruthy();
     expect(window.location.pathname).not.toBe("/investigations");
+  });
+
+  it("preserves position and focus when the bare routed Compare view selects a lane", async () => {
+    const uuid = "55555555-5555-4555-8555-555555555555";
+    window.history.replaceState(null, "", `/investigations/${uuid}/compare`);
+    stubRoutedCompare(uuid);
+    const scrollIntoView = vi.fn();
+    const originalScroll = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    try {
+      render(<App />);
+      const summaryHeading = await screen.findByRole("heading", { name: "At a glance" });
+      const laneButton = screen.getByRole("button", { name: "qwen-3.6-27b" });
+      laneButton.focus();
+      scrollIntoView.mockClear();
+
+      fireEvent.click(laneButton);
+
+      await waitFor(() => {
+        expect(window.location.search).toContain("section=scan-heading");
+        expect(window.location.search).toContain("lane=cand-qwen-3.6-27b");
+        expect(window.location.search).toContain("experiment=exp-route-lane");
+      });
+      await act(async () => new Promise((resolve) => window.setTimeout(resolve, 20)));
+      expect((window.history.state as WorkLocation).focus?.navigation).toBe("preserve");
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(laneButton);
+      expect(document.activeElement).not.toBe(summaryHeading);
+    } finally {
+      HTMLElement.prototype.scrollIntoView = originalScroll;
+    }
+  });
+
+  it("focuses a direct section destination after reload drops transient lane intent", async () => {
+    const uuid = "66666666-6666-4666-8666-666666666666";
+    const url = `/investigations/${uuid}/compare?section=candidate-comparison-heading&lane=cand-qwen-3.6-27b&experiment=exp-route-lane#candidate-comparison-heading`;
+    window.history.replaceState(
+      {
+        area: "investigations",
+        caseId: uuid,
+        stage: "compare",
+        focus: {
+          section: "candidate-comparison-heading",
+          item: null,
+          lane: "cand-qwen-3.6-27b",
+          experiment: "exp-route-lane",
+          navigation: "preserve",
+        },
+      } satisfies WorkLocation,
+      "",
+      url,
+    );
+    stubRoutedCompare(uuid);
+    const scrollIntoView = vi.fn();
+    const originalScroll = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    try {
+      render(<App />);
+
+      const destination = await screen.findByRole("heading", { name: "Candidate comparison" });
+      await waitFor(() => expect(document.activeElement).toBe(destination));
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "start", inline: "nearest" });
+    } finally {
+      HTMLElement.prototype.scrollIntoView = originalScroll;
+    }
   });
 
   it("keeps in-app case focus in a canonical pathname so reload does not fall back to the list", async () => {
