@@ -1253,6 +1253,41 @@ describe("decision readiness cockpit", () => {
     expect(technical.textContent).toContain("ev-demo-inventory-timeout");
   });
 
+  it("keeps large logs and stack traces bounded until the operator expands them", async () => {
+    const longExcerpt = Array.from(
+      { length: 12 },
+      (_, index) => `${String(index + 1).padStart(2, "0")} synthetic stack frame at Worker.step${index + 1} (worker.ts:${40 + index})`,
+    ).join("\n");
+    const artifactView = {
+      ...cockpitView,
+      id: "exp-artifact-large",
+      traces: cockpitView.traces.map((trace, index) => index === 0 ? {
+        ...trace,
+        events: [{
+          eventId: "trace-event-synthetic-large",
+          sequence: 1,
+          kind: "evidence_review",
+          actor: "tool",
+          excerpt: longExcerpt,
+          evidenceRefs: ["ev-demo-inventory-timeout"],
+          unknowns: [],
+        }],
+      } : trace),
+    };
+    stubExperiments([artifactView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+
+    const controls = await screen.findAllByText(/View full log or stack trace · 12 lines/);
+    expect(controls.length).toBeGreaterThan(0);
+    const expandable = controls[0]!.closest("details") as HTMLDetailsElement;
+    expect(expandable.open).toBe(false);
+    expect(expandable.querySelector(".experiment-lab__artifact-full")?.textContent).toContain(
+      "12 synthetic stack frame",
+    );
+    fireEvent.click(controls[0]!);
+    expect(expandable.open).toBe(true);
+  });
+
   it("states honestly when a supporting excerpt was not captured and gives an action", async () => {
     stubExperiments([cockpitView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
@@ -1367,6 +1402,13 @@ describe("decision readiness cockpit", () => {
     expectedOrder.forEach((expected, index) => {
       expect(items[index]).toContain(expected);
     });
+    const visibleTitles = within(queue)
+      .getAllByRole("heading", { level: 6 })
+      .map((heading) => heading.textContent ?? "");
+    expect(visibleTitles.some((title) => title.includes("ev-demo-"))).toBe(false);
+    expect(visibleTitles).toContain(
+      "Recorded question divergence — programmatic-agent and chat-operator asked different questions",
+    );
     const links = within(queue).getAllByRole("link");
     expect(links.length).toBe(expectedOrder.length);
     expect(links[0]?.getAttribute("href")).toContain("/investigations/c1/compare?section=cross-exam-heading&item=");
@@ -1498,7 +1540,7 @@ describe("decision readiness cockpit", () => {
     ).toBeTruthy();
   });
 
-  it("focuses one lane while keeping every other lane visible and unfiltered", async () => {
+  it("inspects one lane in place while keeping the aggregate decision basis unchanged", async () => {
     stubExperiments([cockpitView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
 
@@ -1510,20 +1552,24 @@ describe("decision readiness cockpit", () => {
     fireEvent.click(chip);
     expect(chip.getAttribute("aria-pressed")).toBe("true");
     expect(allLanes.getAttribute("aria-pressed")).toBe("false");
-    expect(
-      screen.getByText(/Focused on programmatic-agent\. Every other lane stays visible/),
-    ).toBeTruthy();
+    expect(screen.getByText(/Inspecting programmatic-agent\. This quick digest changes in place/)).toBeTruthy();
+    expect(window.location.search).toContain("lane=cand-programmatic-agent");
 
     const digest = screen.getByRole("article", { name: "programmatic-agent" });
+    expect(within(digest).getByText("Question or input")).toBeTruthy();
+    expect(within(digest).getByText("Evidence it used")).toBeTruthy();
+    expect(within(digest).getByText("Latest recorded conclusion")).toBeTruthy();
+    expect(within(digest).getByText("Still unknown")).toBeTruthy();
+    expect(within(digest).getByText("View full chronological lane history")).toBeTruthy();
     expect(within(digest).getByText("Run status")).toBeTruthy();
     expect(within(digest).getByText("completed")).toBeTruthy();
     expect(within(digest).getByText(/Evidence only this lane cites/)).toBeTruthy();
     expect(within(digest).getByText(/ev-demo-pool-exhaustion/)).toBeTruthy();
     expect(
-      within(digest).getByText(/Review queue entries naming this lane: 4/),
+      within(digest).getByText(/4 review queue items mention this lane/),
     ).toBeTruthy();
     expect(
-      within(digest).getByText(/the decision basis is never trimmed to the focused lane/),
+      within(digest).getByText(/never changes the aggregate comparison, benchmark, or accepted human decision/),
     ).toBeTruthy();
 
     // The other lane stays fully present everywhere.
@@ -1536,8 +1582,8 @@ describe("decision readiness cockpit", () => {
       within(queue).getAllByText(/chat-operator has no recorded human helpfulness observation/)[0],
     ).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Show all lanes equally" }));
-    expect(screen.queryByText(/Focused on programmatic-agent/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close lane inspection" }));
+    expect(screen.queryByText(/Inspecting programmatic-agent/)).toBeNull();
     expect(allLanes.getAttribute("aria-pressed")).toBe("true");
   });
 
@@ -1547,10 +1593,10 @@ describe("decision readiness cockpit", () => {
 
     await screen.findByRole("region", { name: "Decision readiness" });
     fireEvent.click(screen.getByRole("button", { name: "chat-operator" }));
-    expect(screen.getByText(/Focused on chat-operator/)).toBeTruthy();
+    expect(screen.getByText(/Inspecting chat-operator/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "pkg-synth-three-model-checkout-v1" }));
-    expect(screen.queryByText(/Focused on chat-operator/)).toBeNull();
+    expect(screen.queryByText(/Inspecting chat-operator/)).toBeNull();
     expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
       "true",
     );
@@ -1574,7 +1620,7 @@ describe("decision readiness cockpit", () => {
     );
 
     await screen.findByRole("region", { name: "Decision readiness" });
-    expect(await screen.findByText(/Focused on chat-operator/)).toBeTruthy();
+    expect(await screen.findByText(/Inspecting chat-operator/)).toBeTruthy();
     expect(screen.queryAllByRole("textbox").length).toBe(0);
     expect(screen.queryAllByRole("combobox").length).toBe(0);
     for (const name of ["Import experiment", "Record helpfulness", "Propose decision"]) {

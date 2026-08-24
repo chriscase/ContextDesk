@@ -196,6 +196,42 @@ function readableTraceExcerpt(value: string): string {
   return withoutTechnicalRefs || "This step contains only a technical evidence reference.";
 }
 
+function readableUnknown(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function ArtifactExcerpt(props: { text: string }) {
+  const text = readableTraceExcerpt(props.text);
+  const lines = text.split(/\r?\n/);
+  const isLarge = lines.length > 6 || text.length > 480;
+  if (!isLarge) {
+    return <pre className="experiment-lab__artifact-excerpt">{text}</pre>;
+  }
+  const previewByLines = lines.slice(0, 6).join("\n");
+  const preview = previewByLines.length > 480
+    ? `${previewByLines.slice(0, 479)}…`
+    : `${previewByLines}\n…`;
+  return (
+    <div className="experiment-lab__artifact-collapsible">
+      <pre className="experiment-lab__artifact-excerpt experiment-lab__artifact-preview">
+        {preview}
+      </pre>
+      <details>
+        <summary>
+          View full log or stack trace · {lines.length} line{lines.length === 1 ? "" : "s"}
+        </summary>
+        <pre className="experiment-lab__artifact-excerpt experiment-lab__artifact-full">
+          {text}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
 function traceEventMeaning(kind: string): string {
   const normalized = kind.toLowerCase();
   if (/input|prompt|question|evidence|retriev|search|tool/.test(normalized)) {
@@ -1128,6 +1164,10 @@ export function ExperimentLab(props: {
   // Cockpit projections — pure restatements of the current view (see builders).
   const crossRows = current ? buildEvidenceCrossRows(current) : [];
   const humanFindings = current ? buildHumanFindings(current, crossRows) : [];
+  const visibleQueueText = (text: string): string => crossRows.reduce(
+    (readable, row) => readable.split(row.evidenceRef).join("the recorded evidence"),
+    text,
+  );
   const traceCoverage = current ? buildTraceCoverage(current, crossRows) : [];
   const reviewQueue = current ? buildReviewQueue(current) : [];
   const readinessFacets = current ? buildReadinessFacets(current) : [];
@@ -1140,6 +1180,22 @@ export function ExperimentLab(props: {
   const focusedTrace = focusedCandidate
     ? (current?.traces ?? []).find((row) => row.candidateId === focusedCandidate.candidateId) ?? null
     : null;
+  const focusedEvents = [...(focusedTrace?.events ?? [])].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+  const focusedQuestion = focusedEvents.find(
+    (event) => event.actor === "human" && Boolean(event.excerpt?.trim()),
+  ) ?? focusedEvents.find((event) => Boolean(event.excerpt?.trim())) ?? null;
+  const focusedEvidence = focusedEvents.filter(
+    (event) => event.actor === "tool" && Boolean(event.excerpt?.trim()),
+  );
+  const focusedConclusion = [...focusedEvents].reverse().find(
+    (event) => event.actor === "assistant" && Boolean(event.excerpt?.trim()),
+  ) ?? null;
+  const focusedUnknowns = [...new Set([
+    ...(focusedTrace?.unknowns ?? []),
+    ...focusedEvents.flatMap((event) => event.unknowns),
+  ])];
   const focusedObservations = focusedCandidate
     ? (current?.observations ?? []).filter((row) => row.candidateId === focusedCandidate.candidateId)
     : [];
@@ -1152,6 +1208,14 @@ export function ExperimentLab(props: {
     setExported(null);
     setError(null);
     setFocusedCandidateId(null);
+  }
+
+  function selectLaneFocus(lane: string | null) {
+    setFocusedCandidateId(lane);
+    const focus = routeFor("readiness-heading", null, lane);
+    // Lane inspection is an in-place control. Keep its state shareable without
+    // treating a selection as navigation or moving the operator's viewport.
+    window.history.replaceState(window.history.state, "", hrefFor(focus));
   }
 
   async function importPackage(event: FormEvent) {
@@ -1665,9 +1729,7 @@ export function ExperimentLab(props: {
                           <strong>{finding.artifact.label}</strong> · {finding.artifact.source}
                         </p>
                         {finding.artifact.excerpt ? (
-                          <pre className="experiment-lab__artifact-excerpt">
-                            {finding.artifact.excerpt}
-                          </pre>
+                          <ArtifactExcerpt text={finding.artifact.excerpt} />
                         ) : (
                           <p className="experiment-lab__artifact-missing" role="note">
                             Supporting excerpt not captured. {finding.artifact.context}
@@ -1792,15 +1854,12 @@ export function ExperimentLab(props: {
               unknown, and the review queue below lists everything that still needs human eyes.
             </p>
             <div className="experiment-lab__focus" role="group" aria-label="Candidate focus">
-              <span className="experiment-lab__focus-label">Focus a lane</span>
+              <span className="experiment-lab__focus-label">Inspect a lane</span>
               <button
                 type="button"
                 className="experiment-lab__focus-chip"
                 aria-pressed={focusedCandidate === null}
-                onClick={() => {
-                  setFocusedCandidateId(null);
-                  props.onDeepNavigate?.(routeFor("readiness-heading"));
-                }}
+                onClick={() => selectLaneFocus(null)}
               >
                 All lanes
               </button>
@@ -1814,8 +1873,7 @@ export function ExperimentLab(props: {
                     const lane = focusedCandidate?.candidateId === row.candidateId
                       ? null
                       : row.candidateId;
-                    setFocusedCandidateId(lane);
-                    props.onDeepNavigate?.(routeFor("readiness-heading", null, lane));
+                    selectLaneFocus(lane);
                   }}
                 >
                   {row.modelLabel}
@@ -1824,8 +1882,8 @@ export function ExperimentLab(props: {
             </div>
             {focusedCandidate ? (
               <p className="experiment-lab__focus-status" role="status">
-                Focused on {focusedCandidate.modelLabel}. Every other lane stays visible in every
-                table and list — focus highlights, it never filters the decision basis.
+                Inspecting {focusedCandidate.modelLabel}. This quick digest changes in place; the
+                aggregate comparison and human decision remain unchanged.
               </p>
             ) : null}
             {focusedCandidate ? (
@@ -1843,14 +1901,64 @@ export function ExperimentLab(props: {
                   <button
                     type="button"
                     className="experiment-lab__focus-chip"
-                    onClick={() => {
-                      setFocusedCandidateId(null);
-                      props.onDeepNavigate?.(routeFor("readiness-heading"));
-                    }}
+                    onClick={() => selectLaneFocus(null)}
                   >
-                    Show all lanes equally
+                    Close lane inspection
                   </button>
                 </div>
+                <div className="experiment-lab__lane-digest-grid">
+                  <article>
+                    <h6>Question or input</h6>
+                    {focusedQuestion?.excerpt ? (
+                      <ArtifactExcerpt text={focusedQuestion.excerpt} />
+                    ) : (
+                      <p className="experiment-lab__artifact-missing">
+                        No question or starting input was captured for this lane.
+                      </p>
+                    )}
+                  </article>
+                  <article>
+                    <h6>Evidence it used</h6>
+                    {focusedEvidence.length ? (
+                      <ul>
+                        {focusedEvidence.slice(0, 3).map((event) => (
+                          <li key={event.eventId}>
+                            <ArtifactExcerpt text={event.excerpt ?? ""} />
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="experiment-lab__artifact-missing">
+                        No source log, stack trace, or tool output was captured for this lane.
+                      </p>
+                    )}
+                  </article>
+                  <article>
+                    <h6>Latest recorded conclusion</h6>
+                    {focusedConclusion?.excerpt ? (
+                      <ArtifactExcerpt text={focusedConclusion.excerpt} />
+                    ) : (
+                      <p className="experiment-lab__artifact-missing">
+                        No model conclusion was captured for this lane.
+                      </p>
+                    )}
+                  </article>
+                  <article>
+                    <h6>Still unknown</h6>
+                    {focusedUnknowns.length ? (
+                      <ul>
+                        {focusedUnknowns.map((unknown) => (
+                          <li key={unknown}>{readableUnknown(unknown)}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>No explicit unknowns were recorded. This is not proof that none remain.</p>
+                    )}
+                    <p>{focusQueueCount} review queue item{focusQueueCount === 1 ? "" : "s"} mention this lane.</p>
+                  </article>
+                </div>
+                <details className="experiment-lab__focus-metadata">
+                  <summary>Run measurements and benchmark state</summary>
                 <dl className="experiment-lab__export-facts experiment-lab__focus-facts">
                   <div>
                     <dt>Run status</dt>
@@ -1877,22 +1985,20 @@ export function ExperimentLab(props: {
                     <dd>{focusedCandidate.goldState}</dd>
                   </div>
                 </dl>
+                </details>
                 <section className="experiment-lab__lane-history" aria-label={`${focusedCandidate.modelLabel} lane history`}>
-                  <h6>Chronological lane history</h6>
-                  {focusedTrace?.events.length ? (
-                    <ol>
-                      {[...focusedTrace.events]
-                        .sort((left, right) => left.sequence - right.sequence)
-                        .map((event) => (
+                  <details>
+                    <summary>View full chronological lane history</summary>
+                    {focusedEvents.length ? (
+                      <ol>
+                        {focusedEvents.map((event) => (
                           <li key={event.eventId}>
                             <p className="experiment-lab__lane-step">
                               <strong>{event.sequence}. {traceEventMeaning(event.kind)}</strong>
                               {event.authorUsername ? ` · ${event.authorUsername}` : ` · ${event.actor}`}
                             </p>
                             {event.excerpt ? (
-                              <pre className="experiment-lab__artifact-excerpt">
-                                {readableTraceExcerpt(event.excerpt)}
-                              </pre>
+                              <ArtifactExcerpt text={event.excerpt} />
                             ) : (
                               <p className="experiment-lab__artifact-missing" role="note">
                                 Supporting excerpt not captured. Inspect or attach the source log,
@@ -1908,14 +2014,15 @@ export function ExperimentLab(props: {
                             </details>
                           </li>
                         ))}
-                    </ol>
-                  ) : (
-                    <p className="experiment-lab__artifact-missing" role="note">
-                      No chronological trace details were captured for this lane. Import the lane’s
-                      prompts, evidence steps, analysis result, review feedback, and decision contribution
-                      to make its history inspectable.
-                    </p>
-                  )}
+                      </ol>
+                    ) : (
+                      <p className="experiment-lab__artifact-missing" role="note">
+                        No chronological trace details were captured for this lane. Import the lane’s
+                        prompts, evidence steps, analysis result, review feedback, and decision contribution
+                        to make its history inspectable.
+                      </p>
+                    )}
+                  </details>
                   {focusedObservations.length ? (
                     <div className="experiment-lab__lane-observations">
                       <h6>Human observations</h6>
@@ -1958,8 +2065,8 @@ export function ExperimentLab(props: {
                     </p>
                   </details>
                   <p className="experiment-lab__scan-caveat">
-                    Focus restates recorded facts for one lane. The comparison above and below keeps
-                    every lane — the decision basis is never trimmed to the focused lane.
+                    Lane inspection restates recorded facts for one lane. It never changes the aggregate
+                    comparison, benchmark, or accepted human decision.
                   </p>
                 </section>
               </article>
@@ -2025,7 +2132,7 @@ export function ExperimentLab(props: {
                           : null;
                         const primary = finding?.headline ?? (item.evidenceRef
                           ? item.text.split(item.evidenceRef).join("this recorded evidence")
-                          : item.text);
+                          : visibleQueueText(item.text));
                         return (
                           <li key={item.id} className="experiment-lab__queue-item">
                             <h6 className="experiment-lab__queue-text">{primary}</h6>
@@ -2035,7 +2142,7 @@ export function ExperimentLab(props: {
                                   <strong>{artifact.label}</strong> · {artifact.source}
                                 </p>
                                 {artifact.excerpt ? (
-                                  <pre className="experiment-lab__artifact-excerpt">{artifact.excerpt}</pre>
+                                  <ArtifactExcerpt text={artifact.excerpt} />
                                 ) : (
                                   <p className="experiment-lab__artifact-missing" role="note">
                                     Supporting excerpt not captured. {artifact.context}
@@ -2316,7 +2423,7 @@ export function ExperimentLab(props: {
                             <strong>{finding?.headline ?? artifact.label}</strong>
                             <span className="experiment-lab__crossexam-source">{artifact.source}</span>
                             {artifact.excerpt ? (
-                              <pre className="experiment-lab__artifact-excerpt">{artifact.excerpt}</pre>
+                              <ArtifactExcerpt text={artifact.excerpt} />
                             ) : (
                               <span className="experiment-lab__artifact-missing">
                                 Supporting excerpt not captured. Inspect or attach the source artifact.
@@ -2566,9 +2673,7 @@ export function ExperimentLab(props: {
                         <strong>{traceEventMeaning(event.kind)}</strong>
                         <span> · {event.authorUsername ?? event.actor}</span>
                         {event.excerpt ? (
-                          <pre className="experiment-lab__artifact-excerpt">
-                            {readableTraceExcerpt(event.excerpt)}
-                          </pre>
+                          <ArtifactExcerpt text={event.excerpt} />
                         ) : (
                           <p className="experiment-lab__artifact-missing" role="note">
                             Supporting excerpt not captured. Inspect or attach the input, log context,

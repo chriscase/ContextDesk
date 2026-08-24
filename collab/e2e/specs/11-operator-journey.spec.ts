@@ -218,8 +218,7 @@ test.describe("complete war-room operator journey", () => {
       compare.locator(".experiment-lab__identity"),
     ).toContainText(`snapshot ${experimentSnapshot}`);
     await expect(compare.getByText("Agreement is not proof of correctness.").first()).toBeVisible();
-    await expect(compare.getByRole("heading", { name: "What agrees" })).toBeVisible();
-    await expect(compare.getByRole("heading", { name: "What differs" })).toBeVisible();
+    await expect(compare.getByRole("heading", { name: "Investigative findings" })).toBeVisible();
     await expect(compare.getByRole("heading", { name: "What stays unknown" })).toBeVisible();
     await expect(compare.getByText("Unknown stays unknown until evidence resolves it.")).toBeVisible();
     await expect(compare.getByText("usage unknown").first()).toBeVisible();

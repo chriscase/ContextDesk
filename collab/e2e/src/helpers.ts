@@ -109,8 +109,22 @@ export async function createCase(page: Page, title: string): Promise<void> {
 }
 
 export async function openCase(page: Page, title: string): Promise<void> {
-  await page.locator(".case-list").getByRole("button", { name: title, exact: true }).click();
-  await expect(page.locator("h2.case-view__title").filter({ hasText: title })).toBeVisible();
+  const current = page.locator("h2.case-view__title").filter({ hasText: title });
+  const onCanonicalCaseRoute = /^\/investigations\/[^/]+(?:\/|$)/.test(
+    new URL(page.url()).pathname,
+  );
+  if (onCanonicalCaseRoute) {
+    await expect(current).toBeVisible();
+  } else if (!(await current.isVisible())) {
+    const closeTopbar = await revealTopbar(page);
+    await page
+      .getByRole("navigation", { name: "Primary" })
+      .getByRole("button", { name: "Investigations", exact: true })
+      .click();
+    await closeTopbar();
+    await page.locator(".case-list").getByRole("button", { name: title, exact: true }).click();
+  }
+  await expect(current).toBeVisible();
   await gotoStage(page, "Analyze");
 }
 

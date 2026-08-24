@@ -5,6 +5,7 @@ import {
   exportPanel,
   fixtureBytes,
   loginAs,
+  openCase,
   openExportSupport,
   screenshot,
   uniqueTitle,
@@ -27,7 +28,7 @@ test.describe("share-safe export", () => {
       privacyClass: "share_safe",
     });
     await page.reload();
-    await page.locator(".case-list").getByRole("button", { name: title, exact: true }).click();
+    await openCase(page, title);
     await openExportSupport(page);
     const panel = exportPanel(page);
     await expect(panel.getByText("artifact · shared-timeout.log · share_safe")).toBeVisible();
@@ -54,7 +55,7 @@ test.describe("share-safe export", () => {
     });
     expect(planted.ok(), await planted.text()).toBeTruthy();
     await page.reload();
-    await page.locator(".case-list").getByRole("button", { name: title, exact: true }).click();
+    await openCase(page, title);
     await openExportSupport(page);
     const panel = exportPanel(page);
     await panel.locator("select").first().selectOption("share_safe");

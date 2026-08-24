@@ -66,10 +66,8 @@ test.describe("responsive layout and basic accessibility", () => {
     });
     expect(imported.ok(), await imported.text()).toBeTruthy();
     await page.reload();
-
-    // A reload lands on the overview; the investigation list is the way back in.
-    await expect(page.getByRole("heading", { name: "Operating picture" })).toBeVisible();
-    await expect(page.locator(".case-list")).toBeVisible();
+    // Canonical investigation routes survive reload; openCase also covers an
+    // overview/list entry when a future flow intentionally navigates there.
     await openCase(page, title);
     await gotoStage(page, "Compare");
 
