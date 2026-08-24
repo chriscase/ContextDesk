@@ -25,7 +25,7 @@ function stubSignedOutFetch(): FetchStub {
 }
 
 function stubSignedInFetch(
-  identity: { username: string; roles: string[] },
+  identity: { username: string; displayName?: string; roles: string[] },
   extra?: (url: string, init?: RequestInit) => Promise<Response> | null,
 ): FetchStub {
   const stub = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
@@ -35,7 +35,13 @@ function stubSignedInFetch(
     if (url === "/api/auth/me") {
       return {
         ok: true,
-        json: async () => ({ identity: { username: identity.username }, roles: identity.roles }),
+        json: async () => ({
+          identity: {
+            username: identity.username,
+            displayName: identity.displayName ?? identity.username,
+          },
+          roles: identity.roles,
+        }),
       };
     }
     if (url === "/api/auth/logout") {
@@ -295,11 +301,17 @@ describe("authenticated application shell", () => {
   });
 
   it("keeps identity, roles, theme, and sign-out in the account menu", async () => {
-    const stub = stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
+    const stub = stubSignedInFetch({
+      username: "dave",
+      displayName: "Dave Rivera",
+      roles: ["case-lead"],
+    });
     render(<App />);
-    const trigger = await screen.findByRole("button", { name: "Signed in as dave" });
+    const trigger = await screen.findByRole("button", { name: "Signed in as Dave Rivera" });
     fireEvent.click(trigger);
-    expect(screen.getByText("Roles: case-lead")).toBeTruthy();
+    expect(screen.getAllByText("Dave Rivera")).toHaveLength(2);
+    expect(screen.getByText("@dave")).toBeTruthy();
+    expect(screen.getByText("Access: Case lead")).toBeTruthy();
     const selector = screen.getByRole("combobox", { name: "Interface theme" });
     fireEvent.change(selector, { target: { value: "forest" } });
     expect(document.documentElement.dataset.theme).toBe("forest");

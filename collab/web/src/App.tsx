@@ -25,6 +25,7 @@ import { AUTH_LOST_EVENT } from "./protected-api.js";
 
 interface SessionView {
   username: string;
+  displayName: string;
   roles: string[];
 }
 
@@ -75,6 +76,7 @@ const PRIMARY_NAV: readonly { area: AreaId; label: string }[] = [
 
 function AccountMenu(props: {
   username: string;
+  displayName: string;
   roles: string[];
   theme: ThemeName;
   onThemeChange: (theme: ThemeName) => void;
@@ -117,16 +119,19 @@ function AccountMenu(props: {
         <span
           className="account__avatar"
           aria-hidden="true"
-          data-initial={props.username.slice(0, 1).toUpperCase() || "?"}
+          data-initial={props.displayName.slice(0, 1).toUpperCase() || "?"}
         />
-        <span className="account__name">{props.username}</span>
+        <span className="account__name">{props.displayName}</span>
       </button>
       {open ? (
         <div className="account__panel" id="account-panel" role="group" aria-label="Account">
           <p className="account__identity">
-            <strong>{props.username}</strong>
+            <strong>{props.displayName}</strong>
+            {props.displayName !== props.username ? <span>@{props.username}</span> : null}
           </p>
-          <p className="account__roles">Roles: {props.roles.join(", ") || "none"}</p>
+          <p className="account__roles">
+            Access: {props.roles.map((role) => role === "case-lead" ? "Case lead" : role[0]?.toUpperCase() + role.slice(1)).join(", ") || "None"}
+          </p>
           <label className="account__theme">
             Theme
             <select
@@ -234,11 +239,13 @@ export function App() {
       return;
     }
     const body = (await res.json()) as {
-      identity?: { username?: string };
+      identity?: { username?: string; displayName?: string };
       roles?: string[];
     };
+    const username = body.identity?.username ?? "";
     setSession({
-      username: body.identity?.username ?? "",
+      username,
+      displayName: body.identity?.displayName?.trim() || username,
       roles: body.roles ?? [],
     });
     setReady(true);
@@ -457,6 +464,7 @@ export function App() {
             ) : null}
             <AccountMenu
               username={session.username}
+              displayName={session.displayName}
               roles={roles}
               theme={theme}
               onThemeChange={setTheme}
