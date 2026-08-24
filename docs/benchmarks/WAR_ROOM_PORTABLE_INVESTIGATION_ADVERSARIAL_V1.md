@@ -35,7 +35,11 @@ calling:
 | Content digest / length / payload / duplicate digest | fail-closed |
 | Credential, directory-protocol, URL, path, token leakage in opaque keys and values | fail-closed |
 | Display-name / email matching never authorizes; conflicting maps fail; `applyAuthorized` stays false | hold |
-| Destination id collisions: `fail` blocks; `remap_deterministic` is stable, namespaced, order-independent, skips occupied candidates, and fails closed on bounded exhaustion | hold |
+| Destination id collisions: `fail` blocks; `remap_deterministic` is stable, RFC 4122 UUID, order-independent, skips occupied UUID candidates, and fails closed on bounded exhaustion | hold |
+| Dishonest withholding (private/omitted/redacted evidence or attachments pointing at present payloadBase64) | fail-closed |
+| Snapshot item privacyClass/contentHash rebound to exported evidence before same_snapshot | fail-closed |
+| Crossed experiment/candidate/decision/gold membership | fail-closed |
+| V1 destination remaps are RFC 4122 UUIDs (never `::` namespaced strings or `remap-*`) | hold |
 | Unicode identifier ordering across host locales / ICU data | locale-independent UTF-16 code-unit order |
 | Empty and nested ids reject controls while ordinary prose retains whitespace | fail-closed |
 | Generic provider/model metadata remains historical; usage/cost stay `unknown` | hold |
@@ -75,6 +79,7 @@ That module is still contract + dry-run only.
 ## Non-claims / future work
 
 Import apply, persistence, destination authorization, archive I/O, Ed25519
-verification, and UI remain future work. This lab does not call a live provider
-and does not invent gold, cost, or usage. SHA-256 fingerprints are integrity,
-not authenticity.
+verification, host catalog revalidation at apply time, and UI remain future
+work. This lab does not call a live provider and does not invent gold, cost, or
+usage. SHA-256 fingerprints are integrity, not authenticity. Fixtures are fully
+synthetic.

@@ -15,6 +15,7 @@ import {
   destinationCatalogDigest,
   evaluatePortableReconstruction,
   parsePortableInvestigation,
+  portableDestinationUuid,
   portableSemanticFingerprint,
   preflightPortableInvestigation,
   sha256Text,
@@ -30,6 +31,13 @@ import {
   type PreflightRequestV1,
   type PreflightWarningV1,
   type ReconstructionReasonV1,
+} from "./investigation-portable.js";
+
+export {
+  RFC4122_UUID_RE,
+  PORTABLE_REMAP_NAMESPACE_UUID,
+  isRfc4122Uuid,
+  portableDestinationUuid,
 } from "./investigation-portable.js";
 
 export const PORTABLE_ARCHIVE_SCHEMA_ID =
@@ -52,13 +60,6 @@ export type ArchiveSignatureAlgorithm = (typeof ARCHIVE_SIGNATURE_ALGORITHMS)[nu
 export const ARCHIVE_SIGNATURE_UNVERIFIED =
   "Signature metadata is recorded, not verified. This contract slice does not implement Ed25519 verification or source trust." as const;
 
-/** RFC 4122 UUID (version 1-8, variant 10xx). Acceptable as a PostgreSQL UUID. */
-export const RFC4122_UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-
-const SHA256_HEX = /^[a-f0-9]{64}$/;
-const MAX_DETERMINISTIC_REMAP_ATTEMPTS = 256;
-const RFC4122_DNS_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
 export interface ArchiveBlobInventoryEntryV1 {
   digest: string;
@@ -132,6 +133,8 @@ export interface ArchivePreflightReportV1 {
   authenticityClaim: "none";
 }
 
+
+
 const blobInventoryShape: ObjectShape = {
   digest: f.req(f.str),
   byteLength: f.req(f.u64),
@@ -202,54 +205,9 @@ const archivePreflightRequestShape: ObjectShape = {
   suppliedBlobs: f.opt(f.arr(f.obj(blobInventoryShape))),
 };
 
-function uuidBytes(uuid: string): Buffer {
-  if (!RFC4122_UUID_RE.test(uuid)) {
-    throw new ContractViolation("$", `expected RFC 4122 UUID, got ${uuid}`);
-  }
-  return Buffer.from(uuid.replace(/-/g, ""), "hex");
-}
 
-function formatUuid(bytes: Buffer): string {
-  const hex = bytes.subarray(0, 16).toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-}
-
-function uuidV5(namespaceUuid: string, name: string): string {
-  const hash = createHash("sha1")
-    .update(uuidBytes(namespaceUuid))
-    .update(name, "utf8")
-    .digest();
-  const version = hash.at(6);
-  const variant = hash.at(8);
-  if (version === undefined || variant === undefined) {
-    throw new ContractViolation("$", "SHA-1 UUID materialization failed");
-  }
-  hash[6] = (version & 0x0f) | 0x50;
-  hash[8] = (variant & 0x3f) | 0x80;
-  return formatUuid(hash);
-}
-
-export const PORTABLE_REMAP_NAMESPACE_UUID = uuidV5(
-  RFC4122_DNS_NAMESPACE,
-  "cd-collab.investigation-portable.remap.v1",
-);
-
-export function isRfc4122Uuid(value: string): boolean {
-  return RFC4122_UUID_RE.test(value);
-}
-
-export function portableDestinationUuid(
-  sourceInstallationId: string,
-  namespace: PortableObjectKind,
-  sourceId: string,
-  collisionCounter: number,
-): string {
-  return uuidV5(
-    PORTABLE_REMAP_NAMESPACE_UUID,
-    `${sourceInstallationId}:${namespace}:${sourceId}:${collisionCounter}`,
-  );
-}
-
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+const MAX_DETERMINISTIC_REMAP_ATTEMPTS = 256;
 function requireSha256(path: string, value: string): void {
   if (!SHA256_HEX.test(value)) {
     throw new ContractViolation(path, "expected a lowercase SHA-256 hex digest");
