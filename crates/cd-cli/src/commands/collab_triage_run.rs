@@ -377,7 +377,7 @@ pub async fn run(
                 status: status.into(),
                 run_id: None,
                 summary: safe_missing_summary(status),
-                error_code: Some(stopped_error.unwrap_or("live_run_stopped").into()),
+                error_code: Some(missing_candidate_error_code(stopped_error).into()),
                 output_hash: None,
                 evidence_refs: Vec::new(),
                 packet_fingerprint: None,
@@ -400,7 +400,7 @@ pub async fn run(
         candidates.push(project_candidate_result(
             candidate,
             &durable,
-            &store,
+            Some(&store),
             run.packet_fingerprint.clone(),
             run.corpus_fingerprint.clone(),
             evidence_refs,
@@ -440,9 +440,10 @@ fn emit_progress_event(
         return;
     };
     let durable = &live.recorded.bench_run;
-    let Ok(store) = cd_triage_bench::BenchStore::open(library_path) else {
-        return;
-    };
+    // A lane is already durable when this callback runs. If reopening the
+    // blob store fails, still emit the bounded durable status with the
+    // status-derived safe fallback; do not erase the entire progress event.
+    let store = cd_triage_bench::BenchStore::open(library_path).ok();
     let mut evidence_refs = durable
         .claims
         .iter()
@@ -450,7 +451,37 @@ fn emit_progress_event(
         .collect::<Vec<_>>();
     evidence_refs.sort();
     evidence_refs.dedup();
-    let event = CollabTriageProgressEvent {
+    let event = project_progress_event(
+        request,
+        candidate,
+        durable,
+        store.as_ref(),
+        live.recorded.owner_only.fingerprints.packet.clone(),
+        live.recorded.owner_only.fingerprints.corpus.clone(),
+        evidence_refs,
+    );
+    if let Some(line) = progress_event_line(&event) {
+        eprintln!("{line}");
+    }
+}
+
+fn progress_event_line(event: &CollabTriageProgressEvent) -> Option<String> {
+    serde_json::to_string(event)
+        .ok()
+        .map(|json| format!("{PROGRESS_EVENT_PREFIX}{json}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_progress_event(
+    request: &CollabTriageRunRequest,
+    candidate: &CollabCandidate,
+    durable: &cd_triage_bench::TriageRun,
+    store: Option<&cd_triage_bench::BenchStore>,
+    packet_fingerprint: String,
+    corpus_fingerprint: String,
+    evidence_refs: Vec<String>,
+) -> CollabTriageProgressEvent {
+    CollabTriageProgressEvent {
         schema_id: "cd-collab.triage_run_progress.v1",
         action: "candidate_persisted",
         job_id: request.job_id.clone(),
@@ -460,22 +491,19 @@ fn emit_progress_event(
         candidate: Some(project_candidate_result(
             candidate,
             durable,
-            &store,
-            live.recorded.owner_only.fingerprints.packet.clone(),
-            live.recorded.owner_only.fingerprints.corpus.clone(),
+            store,
+            packet_fingerprint,
+            corpus_fingerprint,
             evidence_refs,
         )),
         candidate_id: None,
-    };
-    if let Ok(json) = serde_json::to_string(&event) {
-        eprintln!("{PROGRESS_EVENT_PREFIX}{json}");
     }
 }
 
 fn project_candidate_result(
     candidate: &CollabCandidate,
     durable: &cd_triage_bench::TriageRun,
-    store: &cd_triage_bench::BenchStore,
+    store: Option<&cd_triage_bench::BenchStore>,
     packet_fingerprint: String,
     corpus_fingerprint: String,
     evidence_refs: Vec<String>,
@@ -607,11 +635,15 @@ fn stopped_error_code(reason: &str) -> &'static str {
     }
 }
 
+fn missing_candidate_error_code(stopped_error: Option<&'static str>) -> &'static str {
+    stopped_error.unwrap_or("live_run_stopped")
+}
+
 /// Extract only a small allow-listed terminal classification from the durable
 /// replay envelope. Raw answers, prompts, evidence, and provider details stay
 /// in the host-owned benchmark blob store.
 fn safe_error_code(
-    store: &cd_triage_bench::BenchStore,
+    store: Option<&cd_triage_bench::BenchStore>,
     run: &cd_triage_bench::TriageRun,
 ) -> Option<String> {
     if run.status.as_str() == "completed" {
@@ -621,6 +653,9 @@ fn safe_error_code(
         "timed_out" => "deadline_exceeded",
         "cancelled" => "cancelled",
         _ => "live_run_failed",
+    };
+    let Some(store) = store else {
+        return Some(fallback.into());
     };
     let Ok(raw) = store.get_blob_bounded(&run.raw_output.digest.hex, MAX_STATUS_BLOB_BYTES) else {
         return Some(fallback.into());
@@ -1183,6 +1218,10 @@ fn write_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cd_triage_bench::types::{
+        Completeness, FairnessClass, Observed, PromptWorkflow, RawOutput, RunStatus, SourceKind,
+        StrategyIdentity, TriageRun, RUN_SCHEMA_V2,
+    };
 
     fn request_with_evidence(bytes_base64: &str) -> CollabTriageRunRequest {
         let mut request = CollabTriageRunRequest {
@@ -1250,6 +1289,43 @@ mod tests {
         };
         request.snapshot.fingerprint = collab_snapshot_fingerprint(&request.snapshot).unwrap();
         request
+    }
+
+    fn durable_run(status: RunStatus) -> TriageRun {
+        TriageRun {
+            schema_id: RUN_SCHEMA_V2.into(),
+            run_id: "run-progress-fallback".into(),
+            privacy: PrivacyClass::OwnerOnly,
+            case_id: "case-demo".into(),
+            task_id: "task-demo".into(),
+            snapshot_id: "snapshot-demo".into(),
+            strategy: StrategyIdentity {
+                name: "test-strategy".into(),
+                version: Observed::Known("v1".into()),
+                build: Observed::Unknown,
+            },
+            source_kind: SourceKind::ContextdeskSdk,
+            prompt_workflow: PromptWorkflow {
+                completeness: Completeness::Partial,
+                prompt: Observed::Unknown,
+                workflow: Observed::Unknown,
+            },
+            raw_output: RawOutput {
+                digest: ContentDigest::of_bytes(b"owner-only provider body"),
+                byte_length: 24,
+                encoding: "utf-8".into(),
+            },
+            claims: vec![],
+            timing: Observed::Unknown,
+            cost: Observed::Unknown,
+            uncertainty: Observed::Unknown,
+            fairness: FairnessClass::SameSnapshot,
+            status,
+            operator: "test".into(),
+            importer: None,
+            created_at: "2026-08-20T00:00:00Z".into(),
+            near_duplicate_of: None,
+        }
     }
 
     #[test]
@@ -1392,6 +1468,53 @@ mod tests {
             "terminal": {"category": "provider response: secret"}
         });
         assert_eq!(safe_terminal_code(&unknown), None);
+    }
+
+    #[test]
+    fn host_fallback_codes_survive_progress_projection_without_a_reopened_store() {
+        let request = request_with_evidence(&BASE64.encode(b"evidence"));
+        let partial = durable_run(RunStatus::Partial);
+        let event = project_progress_event(
+            &request,
+            &request.candidates[0],
+            &partial,
+            None,
+            "packet-fingerprint".into(),
+            "corpus-fingerprint".into(),
+            vec![],
+        );
+        let candidate = event
+            .candidate
+            .as_ref()
+            .expect("persisted progress candidate");
+        assert_eq!(candidate.status, "partial");
+        assert_eq!(candidate.error_code.as_deref(), Some("live_run_failed"));
+        assert_eq!(candidate.usage, "unknown");
+        assert_eq!(candidate.cost, "unknown");
+
+        assert_eq!(
+            safe_error_code(None, &durable_run(RunStatus::TimedOut)).as_deref(),
+            Some("deadline_exceeded")
+        );
+        assert_eq!(
+            safe_error_code(None, &durable_run(RunStatus::Cancelled)).as_deref(),
+            Some("cancelled")
+        );
+        assert_eq!(missing_candidate_error_code(None), "live_run_stopped");
+        assert_eq!(
+            missing_candidate_error_code(Some(stopped_error_code("cancel requested"))),
+            "cancel_requested"
+        );
+        assert_eq!(
+            missing_candidate_error_code(Some(stopped_error_code("runner failed"))),
+            "gateway_runner_error"
+        );
+
+        let line = progress_event_line(&event).expect("bounded progress line");
+        assert!(line.starts_with(PROGRESS_EVENT_PREFIX));
+        assert!(line.contains("\"status\":\"partial\""));
+        assert!(line.contains("\"error_code\":\"live_run_failed\""));
+        assert!(!line.contains("owner-only provider body"));
     }
 
     #[test]
