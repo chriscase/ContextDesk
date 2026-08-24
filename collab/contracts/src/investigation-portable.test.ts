@@ -162,6 +162,7 @@ describe("portable investigation contract", () => {
   it("remaps the same raw ids in different namespaces independently", () => {
     const parsed = valid();
     parsed.contributions[0]!.id = "shared-raw";
+    parsed.timeline[0]!.targetId = "shared-raw";
     parsed.discussions[0]!.messageIds = ["shared-raw"];
     parsed.evidence[0]!.id = "shared-raw";
     parsed.snapshots[0]!.evidence[0]!.evidenceId = "shared-raw";
