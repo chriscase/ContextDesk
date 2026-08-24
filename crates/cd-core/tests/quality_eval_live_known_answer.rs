@@ -121,11 +121,11 @@ fn prepares_all_fourteen_cases_in_manifest_order_with_opaque_ids() {
         .chain(&prepared[12..])
         .all(|case| !case.requires_host_diagnostic()));
     assert!(prepared[8].host_can_observe_diagnostic());
-    assert!(prepared[9].host_can_observe_diagnostic());
+    assert!(!prepared[9].host_can_observe_diagnostic());
     assert!(!prepared[10].host_can_observe_diagnostic());
     assert!(!prepared[11].host_can_observe_diagnostic());
     assert!(!prepared[8].blocks_diagnostic_before_dispatch());
-    assert!(!prepared[9].blocks_diagnostic_before_dispatch());
+    assert!(prepared[9].blocks_diagnostic_before_dispatch());
     assert!(prepared[10].blocks_diagnostic_before_dispatch());
     assert!(prepared[11].blocks_diagnostic_before_dispatch());
     assert!(prepared[8].host_may_record_follow_up_attempt());
@@ -820,7 +820,10 @@ fn parsed_success_is_not_joined_when_its_category_is_not_allowed() {
         .answer
         .failed_ids()
         .contains(&"diagnostic_category"));
-    assert!(!qe10.blocks_diagnostic_before_dispatch());
+    assert!(
+        qe10.blocks_diagnostic_before_dispatch(),
+        "production chat Err has no parsed body, so timeout cannot be scored on execute_target"
+    );
 
     let mixed = host_diagnostic_for_observed_attempts(
         qe09,

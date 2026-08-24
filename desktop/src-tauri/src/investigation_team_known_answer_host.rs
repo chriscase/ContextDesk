@@ -1571,16 +1571,17 @@ mod tests {
         )
         .expect("report");
         let report = evidence.report;
-        assert_eq!(transport.calls, 13);
+        assert_eq!(transport.calls, 12);
         assert_eq!(report.status, LiveKnownAnswerRunStatus::Partial);
-        assert_eq!(report.metrics.failed_scenarios, 12);
-        assert_eq!(report.metrics.blocked_scenarios, 2);
-        assert!(report.telemetry[8..10].iter().all(|row| {
-            row.status == LaneStatus::Failed
-                && row.failure_code.as_deref() == Some("provider_request_failed")
-                && row.message_content_bytes > 0
-        }));
-        assert!(report.telemetry[10..12].iter().all(|row| {
+        assert_eq!(report.metrics.failed_scenarios, 11);
+        assert_eq!(report.metrics.blocked_scenarios, 3);
+        assert_eq!(report.telemetry[8].status, LaneStatus::Failed);
+        assert_eq!(
+            report.telemetry[8].failure_code.as_deref(),
+            Some("provider_request_failed")
+        );
+        assert!(report.telemetry[8].message_content_bytes > 0);
+        assert!(report.telemetry[9..12].iter().all(|row| {
             row.status == LaneStatus::Blocked
                 && row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
                 && row.latency_ms == 0
@@ -1672,7 +1673,7 @@ mod tests {
         )
         .expect("evidence");
 
-        assert_eq!(transport.calls, 12);
+        assert_eq!(transport.calls, 11);
         assert_eq!(
             evidence.report.telemetry[0].failure_code.as_deref(),
             Some("provider_response_parse_failed")
@@ -1696,14 +1697,14 @@ mod tests {
             evidence.report.quality_run.quality_unit.subject.model_id,
             "model-a"
         );
-        assert_eq!(evidence.report.metrics.input_tokens, Some(1_200));
-        assert_eq!(evidence.report.metrics.output_tokens, Some(240));
-        assert_eq!(evidence.report.metrics.reasoning_tokens, Some(60));
-        assert_eq!(evidence.report.metrics.cached_tokens, Some(84));
-        assert_eq!(evidence.report.metrics.cost_microusd, Some(1_476));
+        assert_eq!(evidence.report.metrics.input_tokens, Some(1_100));
+        assert_eq!(evidence.report.metrics.output_tokens, Some(220));
+        assert_eq!(evidence.report.metrics.reasoning_tokens, Some(55));
+        assert_eq!(evidence.report.metrics.cached_tokens, Some(77));
+        assert_eq!(evidence.report.metrics.cost_microusd, Some(1_353));
 
         let capture = evidence.capture.as_ref().expect("capture");
-        assert_eq!(capture.scenarios.len(), 9);
+        assert_eq!(capture.scenarios.len(), 8);
         assert_eq!(capture.quality_unit.subject.model_id, "model-a");
         assert!(capture
             .scenarios
@@ -1724,7 +1725,7 @@ mod tests {
                 .iter()
                 .filter(|row| row.host_score_failed)
                 .count(),
-            2
+            1
         );
         let capture_json = render_live_known_answer_capture_json(capture).expect("capture json");
         assert!(!capture_json.contains("not json"));
@@ -1787,8 +1788,8 @@ mod tests {
                 ..ProviderTransportTelemetry::default()
             });
             match prompt.scenario_id.as_str() {
-                "scenario-011" | "scenario-012" => {
-                    panic!("qe11/qe12 must stay pre-dispatch blocked")
+                "scenario-010" | "scenario-011" | "scenario-012" => {
+                    panic!("qe10–qe12 must stay pre-dispatch blocked")
                 }
                 "scenario-009" => {
                     self.qe09_calls += 1;
@@ -1803,12 +1804,6 @@ mod tests {
                         ..SyntheticChatResponse::default()
                     })
                 }
-                "scenario-010" => Ok(SyntheticChatResponse {
-                    content: bounded_live_response(prompt.scenario_id),
-                    raw_error: Some("deadline exceeded".into()),
-                    mode_transmitted: true,
-                    ..SyntheticChatResponse::default()
-                }),
                 _ => Ok(SyntheticChatResponse {
                     content: bounded_live_response(prompt.scenario_id),
                     mode_transmitted: true,
@@ -1849,7 +1844,7 @@ mod tests {
         let prepared = prepare_live_known_answer_suite(&suite).expect("prepared");
         let prompt_hash = live_known_answer_prompt_set_hash(&prepared).expect("hash");
         assert!(!prepared[8].blocks_diagnostic_before_dispatch());
-        assert!(!prepared[9].blocks_diagnostic_before_dispatch());
+        assert!(prepared[9].blocks_diagnostic_before_dispatch());
         let mut transport = AnsweringTransport::default();
         let evidence = execute_target(
             &target(),
@@ -1864,29 +1859,30 @@ mod tests {
         )
         .expect("evidence");
 
-        assert_eq!(transport.calls, 12);
+        assert_eq!(transport.calls, 11);
         assert!(transport.scenario_ids.iter().any(|id| id == "scenario-009"));
-        assert!(transport.scenario_ids.iter().any(|id| id == "scenario-010"));
         assert!(
-            !transport
-                .scenario_ids
-                .iter()
-                .any(|id| { matches!(id.as_str(), "scenario-011" | "scenario-012") }),
-            "qe11/qe12 must not be dispatched: {:?}",
+            !transport.scenario_ids.iter().any(|id| {
+                matches!(
+                    id.as_str(),
+                    "scenario-010" | "scenario-011" | "scenario-012"
+                )
+            }),
+            "qe10–qe12 must not be dispatched: {:?}",
             transport.scenario_ids
         );
-        for (index, case) in evidence.report.quality_run.cases[8..10].iter().enumerate() {
-            let telemetry = &evidence.report.telemetry[index + 8];
-            assert!(
-                case.answers.is_empty(),
-                "{} must not carry a diagnostic_category model failure",
-                case.case_id
-            );
-            assert_eq!(telemetry.status, LaneStatus::Failed);
-            assert_eq!(telemetry.failure_code.as_deref(), Some("host_score_failed"));
-            assert!(telemetry.message_content_bytes > 0);
-        }
-        assert!(evidence.report.telemetry[10..12].iter().all(|row| {
+        let qe09 = &evidence.report.quality_run.cases[8];
+        assert!(
+            qe09.answers.is_empty(),
+            "fluent qe09 must not carry a diagnostic_category model failure"
+        );
+        assert_eq!(evidence.report.telemetry[8].status, LaneStatus::Failed);
+        assert_eq!(
+            evidence.report.telemetry[8].failure_code.as_deref(),
+            Some("host_score_failed")
+        );
+        assert!(evidence.report.telemetry[8].message_content_bytes > 0);
+        assert!(evidence.report.telemetry[9..12].iter().all(|row| {
             row.status == LaneStatus::Blocked
                 && row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
                 && row.message_content_bytes == 0
@@ -1894,7 +1890,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_target_joins_mixed_and_timeout_host_diagnostics() {
+    fn execute_target_joins_mixed_host_diagnostics() {
         let suite = load_embedded_open_v1_suite().expect("suite");
         let prepared = prepare_live_known_answer_suite(&suite).expect("prepared");
         let prompt_hash = live_known_answer_prompt_set_hash(&prepared).expect("hash");
@@ -1914,11 +1910,13 @@ mod tests {
 
         assert_eq!(transport.qe09_calls, 2);
         assert!(
-            !transport
-                .scenario_ids
-                .iter()
-                .any(|id| { matches!(id.as_str(), "scenario-011" | "scenario-012") }),
-            "qe11/qe12 must stay blocked: {:?}",
+            !transport.scenario_ids.iter().any(|id| {
+                matches!(
+                    id.as_str(),
+                    "scenario-010" | "scenario-011" | "scenario-012"
+                )
+            }),
+            "qe10–qe12 must stay blocked: {:?}",
             transport.scenario_ids
         );
         assert_eq!(
@@ -1926,9 +1924,11 @@ mod tests {
             LaneStatus::Executed,
             "qe09 mixed attempts must reach the scorer"
         );
-        assert_eq!(evidence.report.telemetry[9].status, LaneStatus::Executed);
-        assert_eq!(evidence.report.telemetry[10].status, LaneStatus::Blocked);
-        assert_eq!(evidence.report.telemetry[11].status, LaneStatus::Blocked);
+        assert!(evidence.report.telemetry[9..12].iter().all(|row| {
+            row.status == LaneStatus::Blocked
+                && row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
+                && row.message_content_bytes == 0
+        }));
 
         let qe09 = evidence.report.quality_run.cases[8]
             .answers
@@ -1948,25 +1948,13 @@ mod tests {
             "qe09 must join mixed attempts, not compatible_success: {qe09_failed:?}"
         );
         assert!(!qe09_failed.contains(&"attempt_usefulness"));
-
-        let qe10 = evidence.report.quality_run.cases[9]
-            .answers
-            .first()
-            .expect("qe10 host-built score");
-        let qe10_failed = qe10.failed_ids();
-        assert!(qe10
-            .dimensions
-            .iter()
-            .any(|dimension| dimension.id == "transport_versus_grounding" && dimension.passed));
         assert!(
-            !qe10_failed.contains(&"diagnostic_category"),
-            "qe10 must join timeout, not compatible_success: {qe10_failed:?}"
+            qe09.dimensions
+                .iter()
+                .any(|dimension| { dimension.id == "attempt_usefulness" && dimension.passed }),
+            "failed first attempt must remain on the scored envelope"
         );
-        assert!(!qe10_failed.contains(&"transport_versus_grounding"));
-        assert!(qe10
-            .dimensions
-            .iter()
-            .all(|dimension| !dimension.reason.contains("host_grounding")));
+        assert!(evidence.report.quality_run.cases[9].answers.is_empty());
     }
 
     fn captured_evidence() -> LiveKnownAnswerExecutionEvidence {

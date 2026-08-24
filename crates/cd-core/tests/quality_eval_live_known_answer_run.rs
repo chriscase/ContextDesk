@@ -400,15 +400,13 @@ fn lifecycle_codes_and_dispatch_telemetry_are_closed_and_consistent() {
 fn dispatched_diagnostics_and_remaining_blocks_stay_on_the_closed_lifecycle() {
     let (_, _, unit) = identity();
     let mut rows = observations();
-    for row in rows[8..10].iter_mut() {
-        row.status = LaneStatus::Failed;
-        row.answer = None;
-        row.failure_code = Some("provider_request_failed".into());
-        row.message_content_bytes = 100;
-        row.provider_content_bytes = 0;
-        row.latency_ms = 1;
-    }
-    for row in rows[10..12].iter_mut() {
+    rows[8].status = LaneStatus::Failed;
+    rows[8].answer = None;
+    rows[8].failure_code = Some("provider_request_failed".into());
+    rows[8].message_content_bytes = 100;
+    rows[8].provider_content_bytes = 0;
+    rows[8].latency_ms = 1;
+    for row in rows[9..12].iter_mut() {
         row.status = LaneStatus::Blocked;
         row.answer = None;
         row.failure_code = Some("host_diagnostic_pipeline_unavailable".into());
@@ -420,9 +418,9 @@ fn dispatched_diagnostics_and_remaining_blocks_stay_on_the_closed_lifecycle() {
         build_live_known_answer_run(1_777_000_000, InvestigationTeamRole::Single, unit, rows)
             .expect("mixed dispatch/block report");
     assert_eq!(report.status, LiveKnownAnswerRunStatus::Partial);
-    assert_eq!(report.metrics.blocked_scenarios, 2);
-    assert_eq!(report.metrics.failed_scenarios, 2);
-    assert!(report.telemetry[10..12].iter().all(|row| {
+    assert_eq!(report.metrics.blocked_scenarios, 3);
+    assert_eq!(report.metrics.failed_scenarios, 1);
+    assert!(report.telemetry[9..12].iter().all(|row| {
         row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
             && row.message_content_bytes == 0
             && row.provider_content_bytes == 0
