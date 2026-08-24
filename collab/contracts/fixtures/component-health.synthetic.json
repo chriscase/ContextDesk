@@ -1,0 +1,80 @@
+{
+  "schemaId": "cd-collab.component-health.v1",
+  "generatedAt": "2026-08-24T12:00:00.000Z",
+  "dataMode": "synthetic_fixture",
+  "components": [
+    {
+      "id": "war_room_service",
+      "label": "War Room service",
+      "source": "synthetic_fixture",
+      "reportStatus": "reported",
+      "version": "0.0.1-fixture",
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "protocol": { "name": "cd", "version": "v1" },
+      "storageMigration": {
+        "state": "current",
+        "current": "012_case_situation",
+        "target": "012_case_situation"
+      },
+      "compatibility": {
+        "status": "compatible",
+        "scope": "component_health_contract",
+        "detail": "The fixture conforms to component-health.v1; no cross-component compatibility is claimed."
+      },
+      "update": { "state": "available", "targetVersion": "0.0.2-fixture" }
+    },
+    {
+      "id": "desktop",
+      "label": "Desktop",
+      "source": "synthetic_fixture",
+      "reportStatus": "reported",
+      "version": "0.0.1-desktop-fixture",
+      "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "protocol": { "name": "cd", "version": "v1" },
+      "storageMigration": { "state": "not_applicable", "current": null, "target": null },
+      "compatibility": {
+        "status": "not_evaluated",
+        "scope": "not_evaluated",
+        "detail": "Desktop identity is reported; no cross-component compatibility check was supplied."
+      },
+      "update": { "state": "current", "targetVersion": null }
+    },
+    {
+      "id": "cli",
+      "label": "CLI",
+      "source": "not_reported",
+      "reportStatus": "not_reported",
+      "version": null,
+      "commit": null,
+      "protocol": null,
+      "storageMigration": { "state": "not_applicable", "current": null, "target": null },
+      "compatibility": {
+        "status": "not_evaluated",
+        "scope": "not_evaluated",
+        "detail": "No CLI identity or compatibility report was supplied."
+      },
+      "update": { "state": "unknown", "targetVersion": null }
+    },
+    {
+      "id": "host_bridge",
+      "label": "Host bridge",
+      "source": "synthetic_fixture",
+      "reportStatus": "reported",
+      "version": "0.0.1-bridge-fixture",
+      "commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "protocol": { "name": "triage-bridge", "version": "v1" },
+      "storageMigration": { "state": "not_applicable", "current": null, "target": null },
+      "compatibility": {
+        "status": "not_evaluated",
+        "scope": "not_evaluated",
+        "detail": "Optional bridge identity is reported; no cross-component compatibility check was supplied."
+      },
+      "update": { "state": "not_configured", "targetVersion": null }
+    }
+  ],
+  "notices": [
+    "Compatibility is shown only when an explicit check is reported; missing peers are not treated as compatible.",
+    "Update state is informational. This panel never downloads or installs anything.",
+    "Desktop, CLI, and host bridge identity is shown only when that component reports it."
+  ]
+}

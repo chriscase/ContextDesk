@@ -3,6 +3,30 @@ export { APP_ROLES } from "./auth.js";
 export type { AppRole } from "./auth.js";
 
 export {
+  COMPONENT_HEALTH_COMPONENT_IDS,
+  COMPONENT_HEALTH_NOTICES,
+  COMPONENT_HEALTH_SCHEMA_ID,
+  parseComponentHealthResponse,
+} from "./component-health.js";
+export type {
+  ComponentHealthCompatibilityScope,
+  ComponentHealthCompatibilityStatus,
+  ComponentHealthCompatibilityV1,
+  ComponentHealthComponentId,
+  ComponentHealthComponentV1,
+  ComponentHealthDataMode,
+  ComponentHealthNotice,
+  ComponentHealthProtocolV1,
+  ComponentHealthReportStatus,
+  ComponentHealthResponseV1,
+  ComponentHealthSource,
+  ComponentHealthStorageMigrationState,
+  ComponentHealthStorageMigrationV1,
+  ComponentHealthUpdateState,
+  ComponentHealthUpdateV1,
+} from "./component-health.js";
+
+export {
   ADMIN_DIRECTORY_ERROR_SCHEMA_ID,
   ADMIN_DIRECTORY_GROUPS_SCHEMA_ID,
   ADMIN_DIRECTORY_IDENTITIES_SCHEMA_ID,

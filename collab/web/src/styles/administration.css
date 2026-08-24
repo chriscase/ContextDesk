@@ -63,6 +63,50 @@
   gap: 1rem;
 }
 
+.administration__health-mode {
+  margin: 0.8rem 0 0;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 50%, var(--border));
+  border-radius: 0.5rem;
+  color: var(--warning);
+}
+
+.administration__health-table-wrap {
+  margin-top: 0.8rem;
+  overflow-x: auto;
+}
+
+.administration__health-table {
+  min-width: 58rem;
+}
+
+.administration__health-table td,
+.administration__health-table th {
+  vertical-align: top;
+}
+
+.administration__health-table td > span,
+.administration__health-table th > span {
+  display: block;
+}
+
+.administration__health-subtle {
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.administration__health-notices {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.85rem 0 0;
+  padding-left: 1.2rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 .administration button,
 .administration select,
 .administration input,
