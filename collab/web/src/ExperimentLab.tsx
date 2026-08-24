@@ -42,6 +42,7 @@ interface ExperimentView {
     text: string;
     rationale: string;
     authorUsername?: string;
+    evidenceRefs: string[];
   }[];
   gold: {
     goldId: string;
@@ -181,6 +182,17 @@ const TRACE_COMPLETENESS_LABELS: Record<string, string> = {
   partial: "partial trace — unproven steps stay unknown",
   unknown: "trace coverage unknown",
 };
+
+function parseCommaSeparatedIds(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function goldAnchorPrefill(decision: ExperimentView["decisions"][number] | null): string {
+  return (decision?.evidenceRefs ?? []).join(", ");
+}
 
 function truncateText(value: string, max = 96): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
@@ -790,11 +802,14 @@ export function ExperimentLab(props: {
   const [payload, setPayload] = useState("");
   const [benchPayload, setBenchPayload] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [goldError, setGoldError] = useState<string | null>(null);
   const [exported, setExported] = useState<ShareSafeExport | null>(null);
   const [presence, setPresence] = useState<PresenceView | null>(null);
   // Ephemeral highlight only — focus is never persisted and never filters data.
   const [focusedCandidateId, setFocusedCandidateId] = useState<string | null>(null);
   const refreshGeneration = useRef(0);
+  const goldDetailsRef = useRef<HTMLDetailsElement>(null);
+  const goldAnchorsRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async (preferredId?: string) => {
     const generation = ++refreshGeneration.current;
@@ -837,6 +852,7 @@ export function ExperimentLab(props: {
     setActive(null);
     setExported(null);
     setError(null);
+    setGoldError(null);
     setPresence(null);
     setFocusedCandidateId(null);
     void refresh();
@@ -983,7 +999,23 @@ export function ExperimentLab(props: {
     setActive(id);
     setExported(null);
     setError(null);
+    setGoldError(null);
     setFocusedCandidateId(null);
+  }
+
+  function revealGoldBenchmarkForm() {
+    const details = goldDetailsRef.current;
+    if (details) details.open = true;
+    const focusAnchors = () => {
+      const field = goldAnchorsRef.current;
+      if (!field) return;
+      field.focus();
+      field.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    };
+    focusAnchors();
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(focusAnchors);
+    }
   }
 
   async function importPackage(event: FormEvent) {
@@ -1162,6 +1194,15 @@ export function ExperimentLab(props: {
     const form = event.currentTarget;
     const data = new FormData(form);
     const expectedGold = String(data.get("expectedGoldVersion") ?? "").trim();
+    const evidenceAnchors = parseCommaSeparatedIds(String(data.get("evidenceAnchors") ?? ""));
+    if (evidenceAnchors.length === 0) {
+      setGoldError(
+        "Add at least one gold evidence anchor (comma-separated evidence ids) before promoting the accepted decision. Promotion is not automatic.",
+      );
+      revealGoldBenchmarkForm();
+      return;
+    }
+    setGoldError(null);
     setError(null);
     try {
       const res = await fetch(`/api/cases/${props.caseId}/experiments/${current.id}/gold`, {
@@ -1171,10 +1212,7 @@ export function ExperimentLab(props: {
           decisionId: accepted.id,
           expectedRevision: accepted.revision,
           expectedGoldVersion: expectedGold ? Number(expectedGold) : current.gold?.version ?? 0,
-          evidenceAnchors: String(data.get("evidenceAnchors") ?? "")
-            .split(",")
-            .map((item) => item.trim())
-            .filter(Boolean),
+          evidenceAnchors,
           expectedRelationships: String(data.get("expectedRelationships") ?? "")
             .split(",")
             .map((item) => item.trim())
@@ -1184,20 +1222,21 @@ export function ExperimentLab(props: {
               return { evidenceRef, role };
             })
             .filter((row) => row.evidenceRef && row.role),
-          helpfulnessDimensions: String(data.get("helpfulnessDimensions") ?? "")
-            .split(",")
-            .map((item) => item.trim())
-            .filter(Boolean),
+          helpfulnessDimensions: parseCommaSeparatedIds(
+            String(data.get("helpfulnessDimensions") ?? ""),
+          ),
         }),
       });
       if (!res.ok) {
-        setError(await responseError(res, "Gold promotion failed"));
+        setGoldError(await responseError(res, "Gold promotion failed"));
+        revealGoldBenchmarkForm();
         return;
       }
       form.reset();
       await refresh();
     } catch {
-      setError("Gold promotion failed");
+      setGoldError("Gold promotion failed");
+      revealGoldBenchmarkForm();
     }
   }
 
@@ -2474,15 +2513,40 @@ export function ExperimentLab(props: {
               </button>
             </details>
           ) : null}
-          {canLead && current.decisions.some((row) => row.status === "accepted") ? (
-            <details className="experiment-lab__tools">
+          {canLead && acceptedDecision ? (
+            <details ref={goldDetailsRef} className="experiment-lab__tools">
               <summary>Version the human benchmark</summary>
-              <form className="composer" onSubmit={(event) => void promoteGold(event)}>
+              <p className="experiment-lab__section-note">
+                Anchors start from the accepted decision's evidence refs, in that order. Edit them
+                before promoting — promotion is never automatic. A gold reference is a human
+                benchmark, not a correctness verdict.
+              </p>
+              {goldError ? (
+                <p
+                  id="gold-benchmark-error"
+                  className="experiment-lab__error"
+                  role="alert"
+                  aria-live="assertive"
+                >
+                  {goldError}
+                </p>
+              ) : null}
+              <form
+                key={`${current.id}:${acceptedDecision.id}:${acceptedDecision.revision}`}
+                className="composer"
+                onSubmit={(event) => void promoteGold(event)}
+                noValidate
+              >
                 <input
+                  ref={goldAnchorsRef}
                   className="login__input"
+                  id="gold-evidence-anchors"
                   name="evidenceAnchors"
+                  aria-label="gold evidence anchors"
+                  aria-invalid={goldError ? true : undefined}
+                  aria-describedby={goldError ? "gold-benchmark-error" : undefined}
                   placeholder="gold evidence anchors, comma separated"
-                  required
+                  defaultValue={goldAnchorPrefill(acceptedDecision)}
                 />
                 <input
                   className="login__input"

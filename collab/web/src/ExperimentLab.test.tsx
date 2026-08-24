@@ -74,6 +74,7 @@ const goldView = {
       revision: 2,
       text: "Treat inventory timeout as the benchmark cause.",
       rationale: "Human benchmark, not a truth claim.",
+      evidenceRefs: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
     },
   ],
   gold: {
@@ -251,6 +252,7 @@ const cockpitView = {
       text: "Investigate the inventory timeout before checkout retries.",
       rationale: "Both lanes cite the checkout log; the timeout stays unproven.",
       authorUsername: "erin",
+      evidenceRefs: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
     },
   ],
   gold: null,
@@ -1155,6 +1157,7 @@ const readyView = {
       text: "Treat the inventory timeout as the recorded cause.",
       rationale: "Human benchmark, not a truth claim.",
       authorUsername: "erin",
+      evidenceRefs: ["ev-demo-checkout-log"],
     },
   ],
   gold: { ...goldView.gold, evidenceAnchors: ["ev-demo-checkout-log"] },
@@ -1580,5 +1583,301 @@ describe("focused surfaces", () => {
     expect(screen.queryByRole("button", { name: "Import experiment" })).toBeNull();
     // Identity truth stays visible on both surfaces.
     expect(screen.getByText(/The server remains authoritative/)).toBeTruthy();
+  });
+});
+
+const acceptedBenchmarkView = {
+  ...cockpitView,
+  id: "exp-benchmark",
+  packageId: "pkg-synth-benchmark-promote-v1",
+  decisions: [
+    {
+      id: "dec-r2",
+      status: "accepted",
+      revision: 2,
+      text: "Treat inventory timeout as the recorded cause.",
+      rationale: "Human benchmark, not a truth claim.",
+      authorUsername: "erin",
+      evidenceRefs: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+    },
+  ],
+  gold: null,
+  alignments: [
+    {
+      candidateId: "cand-programmatic-agent",
+      status: "unknown",
+      matchedAnchors: [],
+      missingAnchors: [],
+      extraAnchors: [],
+      notes: ["Gold alignment is not a correctness verdict."],
+    },
+    {
+      candidateId: "cand-chat-operator",
+      status: "unknown",
+      matchedAnchors: [],
+      missingAnchors: [],
+      extraAnchors: [],
+      notes: ["Gold alignment is not a correctness verdict."],
+    },
+  ],
+};
+
+const promotedBenchmarkView = {
+  ...acceptedBenchmarkView,
+  candidates: acceptedBenchmarkView.candidates.map((row) => ({ ...row, goldState: "present" })),
+  gold: {
+    goldId: "gold-synth-benchmark-promote-v1",
+    version: 1,
+    predecessorGoldId: null,
+    packageId: "pkg-synth-benchmark-promote-v1",
+    acceptedDecisionId: "dec-r2",
+    acceptedDecisionRevision: 2,
+    evidenceAnchors: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+    promotedByUsername: "dave",
+    notes: ["A gold reference is a human benchmark decision, not an infallible truth claim."],
+  },
+  alignments: [
+    {
+      candidateId: "cand-programmatic-agent",
+      status: "aligned",
+      matchedAnchors: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+      missingAnchors: [],
+      extraAnchors: ["ev-demo-pool-exhaustion"],
+      notes: ["Gold alignment is not a correctness verdict."],
+    },
+    {
+      candidateId: "cand-chat-operator",
+      status: "unscored",
+      matchedAnchors: [],
+      missingAnchors: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+      extraAnchors: [],
+      notes: ["Gold alignment is not a correctness verdict."],
+    },
+  ],
+  comparison: {
+    ...acceptedBenchmarkView.comparison,
+    gold: { status: "present", version: 1, acceptedDecisionId: "dec-r2" },
+  },
+};
+
+function goldPostCalls(fetchMock: ReturnType<typeof vi.fn>) {
+  return fetchMock.mock.calls.filter(
+    ([url, init]) => String(url).endsWith("/gold") && init?.method === "POST",
+  );
+}
+
+function benchmarkForm() {
+  return screen.getByText("Version the human benchmark").closest("details");
+}
+
+describe("benchmark promotion", () => {
+  it("prefills gold evidence anchors from the latest accepted decision and does not auto-promote", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      if (String(input).endsWith("/experiments")) {
+        return { ok: true, json: async () => ({ experiments: [acceptedBenchmarkView] }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    expect(await screen.findByText(/Latest decision r2 \(accepted\)/)).toBeTruthy();
+
+    const details = benchmarkForm();
+    expect(details?.open).toBe(false);
+    const field = screen.getByLabelText("gold evidence anchors") as HTMLInputElement;
+    expect(field.value).toBe("ev-demo-checkout-log, ev-demo-inventory-timeout");
+    expect(goldPostCalls(fetchMock)).toHaveLength(0);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("posts the exact gold body from the accepted decision prefill", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "POST" && url.endsWith("/gold")) {
+        return { ok: true, json: async () => promotedBenchmarkView.gold };
+      }
+      if (url.endsWith("/experiments")) {
+        return { ok: true, json: async () => ({ experiments: [acceptedBenchmarkView] }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    expect(
+      ((await screen.findByLabelText("gold evidence anchors")) as HTMLInputElement).value,
+    ).toBe("ev-demo-checkout-log, ev-demo-inventory-timeout");
+
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    await waitFor(() => expect(goldPostCalls(fetchMock)).toHaveLength(1));
+    expect(String(goldPostCalls(fetchMock)[0]?.[0])).toBe(
+      "/api/cases/c1/experiments/exp-benchmark/gold",
+    );
+    expect(JSON.parse(String(goldPostCalls(fetchMock)[0]?.[1]?.body))).toEqual({
+      decisionId: "dec-r2",
+      expectedRevision: 2,
+      expectedGoldVersion: 0,
+      evidenceAnchors: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+      expectedRelationships: [],
+      helpfulnessDimensions: [],
+    });
+  });
+
+  it("respects edited gold evidence anchors in the promote request", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "POST" && url.endsWith("/gold")) {
+        return { ok: true, json: async () => promotedBenchmarkView.gold };
+      }
+      if (url.endsWith("/experiments")) {
+        return { ok: true, json: async () => ({ experiments: [acceptedBenchmarkView] }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    const field = (await screen.findByLabelText("gold evidence anchors")) as HTMLInputElement;
+    fireEvent.change(field, {
+      target: { value: "ev-demo-inventory-timeout, ev-demo-checkout-log" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    await waitFor(() => expect(goldPostCalls(fetchMock)).toHaveLength(1));
+    expect(JSON.parse(String(goldPostCalls(fetchMock)[0]?.[1]?.body))).toEqual({
+      decisionId: "dec-r2",
+      expectedRevision: 2,
+      expectedGoldVersion: 0,
+      evidenceAnchors: ["ev-demo-inventory-timeout", "ev-demo-checkout-log"],
+      expectedRelationships: [],
+      helpfulnessDimensions: [],
+    });
+  });
+
+  it("shows a visible actionable error and skips POST when anchors are missing", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      if (String(input).endsWith("/experiments")) {
+        return { ok: true, json: async () => ({ experiments: [acceptedBenchmarkView] }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    const field = (await screen.findByLabelText("gold evidence anchors")) as HTMLInputElement;
+    const details = benchmarkForm();
+    expect(details?.open).toBe(false);
+
+    fireEvent.change(field, { target: { value: " , , " } });
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+
+    expect(goldPostCalls(fetchMock)).toHaveLength(0);
+    expect(details?.open).toBe(true);
+    const alert = within(details!).getByRole("alert");
+    expect(alert.textContent).toMatch(/at least one gold evidence anchor/i);
+    expect(alert.textContent).toMatch(/not automatic/i);
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    await waitFor(() => expect(document.activeElement).toBe(field));
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+  });
+
+  it("refreshes to gold v1 with aligned and unscored states after a successful promote", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "POST" && url.endsWith("/gold")) {
+        return { ok: true, json: async () => promotedBenchmarkView.gold };
+      }
+      if (url.endsWith("/experiments")) {
+        const promoted = goldPostCalls(fetchMock).length > 0;
+        return {
+          ok: true,
+          json: async () => ({
+            experiments: [promoted ? promotedBenchmarkView : acceptedBenchmarkView],
+          }),
+        };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    expect(await screen.findByText(/No gold reference/)).toBeTruthy();
+    expect(screen.getByLabelText("Experiment summary").textContent).toMatch(/Benchmark\s*none yet/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    expect(await screen.findByText(/Gold reference v1/)).toBeTruthy();
+    expect(goldPostCalls(fetchMock)).toHaveLength(1);
+    expect(screen.getByLabelText("Experiment summary").textContent).toMatch(/Benchmark\s*v1/);
+    expect(
+      screen.getByText(/programmatic-agent: aligned — cites every benchmark anchor/),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/chat-operator: unscored — no cited evidence to compare/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/No gold reference/)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    const alignment = screen.getByRole("heading", { name: "Gold alignment" }).closest("section");
+    expect(alignment?.textContent).not.toMatch(/\bwins?\b|\bwinner\b|\bbest candidate\b|\bmost correct\b/i);
+  });
+
+  it("keeps stale gold-version and server errors visible in the benchmark form", async () => {
+    const staleView = {
+      ...promotedBenchmarkView,
+      gold: { ...promotedBenchmarkView.gold, version: 1 },
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "POST" && url.endsWith("/gold")) {
+        const alreadyPosted = goldPostCalls(fetchMock).length > 1;
+        if (!alreadyPosted) {
+          return {
+            ok: false,
+            json: async () => ({ error: "expected gold version 2", code: "stale_gold" }),
+          };
+        }
+        return {
+          ok: false,
+          json: async () => ({ error: "unknown evidence anchor ev-bogus" }),
+        };
+      }
+      if (url.endsWith("/experiments")) {
+        return { ok: true, json: async () => ({ experiments: [staleView] }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    expect(await screen.findByLabelText("expected gold version")).toBeTruthy();
+    const details = benchmarkForm();
+    const field = screen.getByLabelText("gold evidence anchors") as HTMLInputElement;
+    const version = screen.getByLabelText("expected gold version") as HTMLInputElement;
+    expect(version.value).toBe("1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    await waitFor(() => expect(goldPostCalls(fetchMock)).toHaveLength(1));
+    expect(JSON.parse(String(goldPostCalls(fetchMock)[0]?.[1]?.body))).toEqual(
+      expect.objectContaining({
+        decisionId: "dec-r2",
+        expectedRevision: 2,
+        expectedGoldVersion: 1,
+        evidenceAnchors: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
+      }),
+    );
+    await waitFor(() =>
+      expect(within(details!).getByRole("alert").textContent).toBe("expected gold version 2"),
+    );
+    expect(details?.open).toBe(true);
+    await waitFor(() => expect(document.activeElement).toBe(field));
+
+    fireEvent.change(field, { target: { value: "ev-bogus" } });
+    fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
+    await waitFor(() => expect(goldPostCalls(fetchMock)).toHaveLength(2));
+    await waitFor(() =>
+      expect(within(details!).getByRole("alert").textContent).toBe("unknown evidence anchor ev-bogus"),
+    );
+    expect(JSON.parse(String(goldPostCalls(fetchMock)[1]?.[1]?.body))).toEqual(
+      expect.objectContaining({
+        expectedRevision: 2,
+        expectedGoldVersion: 1,
+        evidenceAnchors: ["ev-bogus"],
+      }),
+    );
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.queryByText(/Bearer|api[_-]?key|secret/i)).toBeNull();
   });
 });
