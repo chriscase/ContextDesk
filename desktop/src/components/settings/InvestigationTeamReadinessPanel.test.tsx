@@ -105,6 +105,8 @@ function knownAnswerReport(
   over: Partial<InvestigationTeamKnownAnswerDto> = {},
 ): InvestigationTeamKnownAnswerDto {
   return {
+    run_id: null,
+    run_id_provenance: "legacy_unidentified",
     status: "qualified",
     reported_status: "qualified",
     stale: false,
@@ -912,6 +914,46 @@ describe("InvestigationTeamReadinessPanel", () => {
       .toMatch(/qualified/i);
     expect(screen.getByTestId("investigation-team-known-answer-history-1").textContent)
       .toMatch(/unqualified/i);
+  });
+
+  it("renders same-second host-minted runs independently and labels legacy identity honestly", async () => {
+    const aggregate = report({
+      members: [
+        {
+          role: "investigator",
+          subject_storage_id: "subject-a",
+          profile_id: "investigator-1",
+          model_id: "model-a",
+          endpoint_fingerprint: "a".repeat(64),
+        },
+      ],
+    });
+    host.qualification.mockResolvedValue(aggregate);
+    host.history.mockResolvedValue([aggregate]);
+    host.knownAnswerHistory.mockResolvedValue([
+      knownAnswerReport({
+        run_id: "lkar_4c63aaf36da4470987f58d02cfba7e3d",
+        run_id_provenance: "host_minted",
+      }),
+      knownAnswerReport({
+        run_id: "lkar_a14d36e7c0924b0a9f30e284f8d87c61",
+        run_id_provenance: "host_minted",
+      }),
+      knownAnswerReport({
+        observed_at: 1_776_999_900,
+        run_id: null,
+        run_id_provenance: "legacy_unidentified",
+      }),
+    ]);
+
+    render(<InvestigationTeamReadinessPanel />);
+
+    const first = await screen.findByTestId("investigation-team-known-answer-history-0");
+    const second = screen.getByTestId("investigation-team-known-answer-history-1");
+    const legacy = screen.getByTestId("investigation-team-known-answer-history-2");
+    expect(first.textContent).toContain("lkar_4c63aaf36da4470987f58d02cfba7e3d");
+    expect(second.textContent).toContain("lkar_a14d36e7c0924b0a9f30e284f8d87c61");
+    expect(legacy.textContent).toMatch(/legacy record · no host-minted run id/i);
   });
 
   it("fails closed on latest-second measured aggregate ties regardless of history order", async () => {

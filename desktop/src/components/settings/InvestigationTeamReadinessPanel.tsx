@@ -115,6 +115,16 @@ function knownMetric(value: number | null | undefined, suffix = ""): string {
   return value == null ? "unknown" : `${value}${suffix}`;
 }
 
+function knownAnswerHistoryKey(
+  report: InvestigationTeamKnownAnswerDto,
+  index: number,
+): string {
+  if (report.run_id_provenance === "host_minted" && report.run_id) {
+    return `host:${report.run_id}`;
+  }
+  return `legacy:${report.role}:${report.observed_at}:${report.subject_storage_id}:${report.suite_digest}:${report.prompt_set_hash}:${report.orchestration_policy_fingerprint}:${index}`;
+}
+
 function staleReasonLabel(reason: string): string {
   switch (reason) {
     case "build_changed":
@@ -1218,7 +1228,7 @@ export function InvestigationTeamReadinessPanel() {
           <div className="it-readiness__quality-history">
             {knownAnswerHistory.map((report, index) => (
               <details
-                key={`${report.role}:${report.observed_at}:${report.subject_storage_id}:${report.suite_digest}:${report.prompt_set_hash}:${report.orchestration_policy_fingerprint}:${index}`}
+                key={knownAnswerHistoryKey(report, index)}
                 open={index === 0}
                 className="it-readiness__quality-report"
                 data-testid={`investigation-team-known-answer-history-${index}`}
@@ -1270,6 +1280,16 @@ export function InvestigationTeamReadinessPanel() {
                   </div>
                 </dl>
                 <dl className="it-readiness__quality-identity">
+                  <div>
+                    <dt>Run</dt>
+                    <dd>
+                      {report.run_id_provenance === "host_minted" && report.run_id ? (
+                        <>Host-minted <code>{report.run_id}</code></>
+                      ) : (
+                        "Legacy record · no host-minted run ID"
+                      )}
+                    </dd>
+                  </div>
                   <div><dt>Build</dt><dd><code>{report.build_identity}</code></dd></div>
                   <div><dt>Profile / model</dt><dd><code>{report.profile_id}</code> / <code>{report.model_id}</code></dd></div>
                   <div><dt>Endpoint</dt><dd><code>{report.endpoint_fingerprint}</code></dd></div>

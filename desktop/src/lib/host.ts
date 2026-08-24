@@ -1679,6 +1679,10 @@ export type InvestigationTeamKnownAnswerScenarioDto = {
 };
 
 export type InvestigationTeamKnownAnswerDto = {
+  /** Opaque host-minted execution identity; absent on legacy evidence. */
+  run_id?: string | null;
+  /** Host-derived provenance; never accepted from provider or renderer input. */
+  run_id_provenance: "host_minted" | "legacy_unidentified";
   status: "qualified" | "failed" | "partial" | "cancelled" | "blocked" | "stale" | string;
   reported_status: "qualified" | "failed" | "partial" | "cancelled" | "blocked" | string;
   stale: boolean;
