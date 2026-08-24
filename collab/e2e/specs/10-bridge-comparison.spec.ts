@@ -4,8 +4,10 @@ import {
   createCase,
   fixtureBytes,
   fixtureText,
+  gotoStage,
   importChat,
   loginAs,
+  openCase,
   uniqueTitle,
   uploadEvidence,
 } from "../src/helpers.js";
@@ -30,7 +32,7 @@ test.describe("provider-free Rust bridge comparison", () => {
     });
 
     await page.reload();
-    await page.locator(".case-list").getByRole("button", { name: title, exact: true }).click();
+    await openCase(page, title);
     const include = page.getByRole("checkbox", { name: "Include shared-timeout.log in snapshot" });
     await include.check();
     await page.getByRole("button", { name: "Freeze selected evidence (1)" }).click();
@@ -58,6 +60,8 @@ test.describe("provider-free Rust bridge comparison", () => {
       operatorUsername: dave.username,
       operatorId: dave.identityId,
     });
+    // The chat handoff controls live with the lane runner on Analyze.
+    await gotoStage(page, "Analyze");
     await page.getByRole("combobox", { name: "External chat run to compare" }).selectOption({ index: 1 });
     await page.getByRole("button", { name: "Review in Experiment Lab" }).first().click();
     await expect(page.getByRole("status")).toContainText("is ready in Experiment Lab", { timeout: 30_000 });
