@@ -261,13 +261,14 @@ export function CaseDiscussion(props: {
     }
   }
 
-  const participantLine = props.participant
-    ? `Signed in as ${props.participant.username}${
-        props.participant.roles.length ? ` (${props.participant.roles.join(", ")})` : ""
-      }`
-    : props.readOnly
-      ? "Static read-only view"
-      : "Authenticated participant";
+  // Identity is already visible in the persistent account control. Repeating
+  // the username and roles here adds noise without helping the operator
+  // understand this surface; keep the local context about attribution instead.
+  const discussionContext = props.readOnly
+    ? "Static read-only view"
+    : props.canWrite
+      ? "Messages are attributed to your account"
+      : "Authenticated case discussion";
 
   return (
     <aside
@@ -283,7 +284,7 @@ export function CaseDiscussion(props: {
           <h3 id="case-discussion-title" className="discussion__title">
             Discussion
           </h3>
-          <p className="discussion__context">{participantLine}</p>
+          <p className="discussion__context">{discussionContext}</p>
         </div>
         <button type="button" className="discussion__close" onClick={requestClose}>
           Close discussion

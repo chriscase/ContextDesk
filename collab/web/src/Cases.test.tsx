@@ -984,6 +984,8 @@ describe("case discussion panel", () => {
 
     expect(await screen.findByText(/No discussion messages yet/)).toBeTruthy();
     expect(await screen.findByText("Dave saw a retry storm")).toBeTruthy();
+    expect(screen.getByText("Messages are attributed to your account")).toBeTruthy();
+    expect(screen.queryByText(/Signed in as alice/)).toBeNull();
     expect(screen.getByText(/2 active on this case now/)).toBeTruthy();
     expect(screen.getByText(/live refresh by polling/)).toBeTruthy();
     expect(screen.getByText(/not realtime chat/)).toBeTruthy();
