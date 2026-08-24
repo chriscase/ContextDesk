@@ -1870,13 +1870,13 @@ describe("decision readiness cockpit", () => {
 
     const chip = screen.getByRole("button", { name: "programmatic-agent" });
     fireEvent.click(chip);
+    expect(await screen.findByText(/Highlighting programmatic-agent in place/)).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "programmatic-agent" }).getAttribute("aria-pressed"),
     ).toBe("true");
     expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
       "false",
     );
-    expect(screen.getByText(/Highlighting programmatic-agent in place/)).toBeTruthy();
     expect(window.location.search).toContain("lane=cand-programmatic-agent");
     expect(window.location.search).toContain("section=scan-heading");
 
