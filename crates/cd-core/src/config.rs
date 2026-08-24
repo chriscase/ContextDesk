@@ -1376,7 +1376,7 @@ fn save_config_unix(path: &Path, raw: &[u8]) -> CoreResult<()> {
     unix_named_inode_matches_open_file(&named_stat, &opened_meta, expected_uid)?;
     let prior_destination = fstatat_nofollow(&parent_dir, &dest_name)?;
     if let Some(dest_stat) = prior_destination.as_ref() {
-        unix_destination_is_replaceable(&dest_stat, expected_uid)?;
+        unix_destination_is_replaceable(dest_stat, expected_uid)?;
     }
 
     #[cfg(test)]

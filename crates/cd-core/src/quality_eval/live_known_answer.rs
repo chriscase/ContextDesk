@@ -511,11 +511,14 @@ impl PreparedLiveKnownAnswerCase {
     /// Production `QualificationTransport` is exclusive: `Ok` carries a body
     /// with `raw_error = None`, and `Err` is mapped to empty content plus a
     /// reason. The scored path therefore only emits
-    /// [`SERIAL_PARSED_ATTEMPT_CATEGORY`] or, after one follow-up on a failed
-    /// first chat, [`MIXED_ATTEMPTS_CATEGORY`]. Timeout/auth/transport can be
-    /// named from `Err` reasons but cannot be scored without a parsed body.
-    /// Tool-progress/withdrawal and three-role budget coverage need host seams
-    /// this runner does not have. Those stay pre-dispatch blocked.
+    /// [`SERIAL_PARSED_ATTEMPT_CATEGORY`], after one follow-up on a failed
+    /// first chat [`MIXED_ATTEMPTS_CATEGORY`], or, when a parsed response
+    /// asserts zero claims, [`HOST_GROUNDING_REFUSAL_CATEGORY`].
+    /// Timeout/auth/transport can be named from `Err` reasons but never carry
+    /// a parsed body, so they can only ever be a host-observed gap
+    /// (`host_score_failed`), never a scored envelope. Tool-progress/withdrawal
+    /// and three-role budget coverage need host seams this runner does not
+    /// have. Those stay pre-dispatch blocked.
     pub fn host_can_observe_diagnostic(&self) -> bool {
         match &self.truth.diagnostic {
             None => true,
@@ -530,6 +533,7 @@ impl PreparedLiveKnownAnswerCase {
                     || diagnostic.allowed_categories.iter().any(|allowed| {
                         allowed == SERIAL_PARSED_ATTEMPT_CATEGORY
                             || allowed == MIXED_ATTEMPTS_CATEGORY
+                            || allowed == HOST_GROUNDING_REFUSAL_CATEGORY
                     })
             }
         }
@@ -563,14 +567,34 @@ impl PreparedLiveKnownAnswerCase {
 
 /// Category this serial runner emits for one parsed success attempt.
 ///
-/// qe09/qe10 do not allow this label. Join mixed-attempt facts instead of
-/// this success envelope. Timeout/auth/transport labels exist on `Err`
-/// reasons but are not scored on the production chat seam.
+/// qe09/qe10 do not allow this label. Join mixed-attempt or grounding-refusal
+/// facts instead of this success envelope. Timeout/auth/transport labels
+/// exist on `Err` reasons but are not scored on the production chat seam.
 pub const SERIAL_PARSED_ATTEMPT_CATEGORY: &str = "compatible_success";
 
 /// Category emitted when host-observed attempts include both success and
 /// failure rows.
 pub const MIXED_ATTEMPTS_CATEGORY: &str = "mixed_attempts_accounted";
+
+/// Category emitted when the last parsed attempt in a grounding-vs-transport
+/// sequence asserts zero claims. This is a host-observed structural fact
+/// (`response.claims.is_empty()`), never a provider self-declared diagnostic
+/// field — the response schema has none. A genuinely grounded parsed answer
+/// (one or more claims, each contractually carrying a citation) never uses
+/// this label; it falls back to [`SERIAL_PARSED_ATTEMPT_CATEGORY`], which
+/// qe10 does not allow, so a fluent response without host-observed grounding
+/// refusal is never joined into a scored envelope on this scenario.
+///
+/// Only ever reported on a lineage with no unsucceeded transport/auth/timeout
+/// attempt: the scorer's `transport_versus_grounding` dimension rejects this
+/// label whenever an earlier attempt carries that class, and qe10's fixed
+/// `all_failed` usefulness policy requires every attempt row to report
+/// `succeeded = false`. A zero-claims attempt therefore records
+/// `failure_class = "host_grounding"` (not `"success"`) with
+/// `succeeded = false`: it transport-succeeded, but produced nothing
+/// evaluable, so it is honestly not a "successful evaluable analysis".
+pub const HOST_GROUNDING_REFUSAL_CATEGORY: &str = "host_grounding_refusal";
+const HOST_GROUNDING_FAILURE_CLASS: &str = "host_grounding";
 
 /// Host-owned classification of one observed chat attempt.
 /// Never derived from provider JSON `diagnostic` fields or fixture truth labels.
@@ -776,6 +800,140 @@ pub fn host_diagnostic_for_observed_attempts(
         return None;
     }
     let diagnostic = scripted_diagnostic_from_host_attempts(attempts, configured_role);
+    case.host_allows_reported_category(&diagnostic.reported_category)
+        .then_some(diagnostic)
+}
+
+/// Build a `ScriptedDiagnostic` for a grounding-vs-transport sequence.
+///
+/// The reported category comes from the *last* observed attempt only:
+/// a still-failing bodyless attempt names its transport/auth/timeout class
+/// (never scored, since there is no parsed body to build a candidate
+/// answer from); a successful parse with zero claims is an honest
+/// [`HOST_GROUNDING_REFUSAL_CATEGORY`] refusal; a successful parse with one
+/// or more claims (each contractually cited) is
+/// [`SERIAL_PARSED_ATTEMPT_CATEGORY`], which this scenario never allows, so
+/// a fluent but genuinely grounded response cannot be joined here either —
+/// only an honest refusal can. Earlier bodyless attempts stay in the
+/// `attempts` lineage for audit but never change the terminal category.
+///
+/// The grounding-refusal attempt row itself records
+/// `failure_class = "host_grounding"` and `succeeded = false` rather than
+/// reusing the raw transport-success classification: it transport-succeeded
+/// but produced nothing evaluable, so `attempt_usefulness`'s `all_failed`
+/// policy (every attempt honestly reports non-success) and
+/// `transport_versus_grounding` (never label a `transport`/`auth`/`timeout`
+/// class row as grounding) both hold.
+pub fn scripted_diagnostic_for_grounding_sequence(
+    attempts: &[HostAttemptObservation],
+    configured_role: InvestigationTeamRole,
+    last_parsed_zero_claims: Option<bool>,
+) -> ScriptedDiagnostic {
+    let last_index = attempts.len().checked_sub(1);
+    // A prior unsucceeded transport/auth/timeout attempt anywhere earlier in
+    // the lineage makes a grounding-refusal claim on the last attempt
+    // unverifiable honesty: the scorer's `transport_versus_grounding`
+    // dimension would reject it, and the host cannot rule out the earlier
+    // failure as the true cause. Never claimed in that case.
+    let has_prior_transport_failure = last_index
+        .map(|last_index| {
+            attempts[..last_index].iter().any(|row| {
+                !row.class.succeeded()
+                    && matches!(
+                        row.class,
+                        HostAttemptClass::Transport
+                            | HostAttemptClass::Auth
+                            | HostAttemptClass::Timeout
+                    )
+            })
+        })
+        .unwrap_or(false);
+    let grounding_refusal = !has_prior_transport_failure
+        && matches!(attempts.last(), Some(last) if last.class.succeeded())
+        && last_parsed_zero_claims == Some(true);
+    let (reported_category, usefulness_policy, claims_useful) = match attempts.last() {
+        Some(last) if last.class.succeeded() => {
+            if grounding_refusal {
+                (HOST_GROUNDING_REFUSAL_CATEGORY, "all_failed", false)
+            } else {
+                (SERIAL_PARSED_ATTEMPT_CATEGORY, "all_succeeded", true)
+            }
+        }
+        Some(last) => match last.class {
+            HostAttemptClass::Timeout => ("timeout", "all_failed", false),
+            HostAttemptClass::Auth => ("auth_failure", "all_failed", false),
+            HostAttemptClass::Transport => ("transport_failure", "all_failed", false),
+            HostAttemptClass::Empty | HostAttemptClass::Analysis | HostAttemptClass::Success => {
+                ("empty_terminal_answer", "none", false)
+            }
+        },
+        None => ("empty_terminal_answer", "none", false),
+    };
+    let scripted_attempts: Vec<ScriptedAttempt> = attempts
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            let is_grounding_row = grounding_refusal && Some(idx) == last_index;
+            ScriptedAttempt {
+                attempt_id: row.attempt_id.clone(),
+                failure_class: if is_grounding_row {
+                    HOST_GROUNDING_FAILURE_CLASS.into()
+                } else {
+                    row.class.as_str().into()
+                },
+                succeeded: if is_grounding_row {
+                    false
+                } else {
+                    row.class.succeeded()
+                },
+                citeable_evidence: row.citeable_evidence,
+            }
+        })
+        .collect();
+    let succeeded = scripted_attempts.iter().filter(|row| row.succeeded).count();
+    let failed = scripted_attempts.len().saturating_sub(succeeded);
+    let export_text = format!(
+        "attempts={} succeeded={} failed={} category={}",
+        scripted_attempts.len(),
+        succeeded,
+        failed,
+        reported_category
+    );
+    ScriptedDiagnostic {
+        attempts: scripted_attempts,
+        tool_steps: Vec::new(),
+        roles: vec![ScriptedRoleOutcome {
+            role: configured_role.as_str().into(),
+            status: "completed".into(),
+        }],
+        host_budget_exhausted: false,
+        reported_category: reported_category.into(),
+        claims_useful,
+        usefulness_policy: usefulness_policy.into(),
+        export_text,
+    }
+}
+
+/// Join a host-owned grounding-vs-transport diagnostic from observed attempts
+/// plus whether the last parsed response (if any) asserted zero claims.
+///
+/// Returns `None` when the derived category is not allow-listed — including
+/// a genuinely grounded fluent response, which has no allowed category on
+/// this scenario and therefore can never pass through this join.
+pub fn host_diagnostic_for_grounding_sequence(
+    case: &PreparedLiveKnownAnswerCase,
+    configured_role: InvestigationTeamRole,
+    attempts: &[HostAttemptObservation],
+    last_parsed_zero_claims: Option<bool>,
+) -> Option<ScriptedDiagnostic> {
+    if !case.requires_host_diagnostic() || attempts.is_empty() {
+        return None;
+    }
+    let diagnostic = scripted_diagnostic_for_grounding_sequence(
+        attempts,
+        configured_role,
+        last_parsed_zero_claims,
+    );
     case.host_allows_reported_category(&diagnostic.reported_category)
         .then_some(diagnostic)
 }
