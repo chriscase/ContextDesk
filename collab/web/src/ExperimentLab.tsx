@@ -250,6 +250,7 @@ function ArtifactExcerpt(props: { text: string }) {
     ? `${previewByLines.slice(0, 479)}…`
     : `${previewByLines}\n…`;
   const lineCount = `${fullLines.length} line${fullLines.length === 1 ? "" : "s"}`;
+  const excerptScale = `${lineCount} · ${fullText.length.toLocaleString()} characters`;
   return (
     <div className="experiment-lab__artifact-collapsible">
       <pre className="experiment-lab__artifact-excerpt experiment-lab__artifact-preview">
@@ -258,10 +259,10 @@ function ArtifactExcerpt(props: { text: string }) {
       <details>
         <summary>
           <span className="experiment-lab__artifact-expand">
-            Expand log or stack trace · {lineCount}
+            Expand complete log or stack trace · {excerptScale}
           </span>
           <span className="experiment-lab__artifact-collapse">
-            Collapse log or stack trace · {lineCount}
+            Collapse complete log or stack trace · {excerptScale}
           </span>
         </summary>
         <pre className="experiment-lab__artifact-excerpt experiment-lab__artifact-full">
@@ -2105,12 +2106,13 @@ export function ExperimentLab(props: {
               ))}
             </div>
             <p className="experiment-lab__focus-legend">
-              Focus highlights one lane. It never filters the recorded decision basis.
+              Focus stays on this section and highlights matching cards, table columns, and review
+              references in place. It never filters the other lanes or changes the decision basis.
             </p>
             {focusedCandidate ? (
               <p className="experiment-lab__focus-status" role="status">
-                Focusing {focusedCandidate.modelLabel}. Other lanes stay in the comparison,
-                benchmark, and accepted decision.
+                Highlighting {focusedCandidate.modelLabel} in place. The page will not jump; other
+                lanes stay visible in the comparison, benchmark, and accepted decision.
               </p>
             ) : null}
           </nav>
@@ -2301,12 +2303,6 @@ export function ExperimentLab(props: {
               unknown. The Review queue workspace lists everything that still needs human eyes.
             </p>
             {focusedCandidate ? (
-              <p className="experiment-lab__focus-status" role="status">
-                Focusing {focusedCandidate.modelLabel}. This digest restates recorded facts for that
-                lane. Other lanes stay in the comparison, benchmark, and accepted decision.
-              </p>
-            ) : null}
-            {focusedCandidate ? (
               <article
                 className="experiment-lab__focus-digest"
                 aria-labelledby="focus-digest-heading"
@@ -2328,7 +2324,7 @@ export function ExperimentLab(props: {
                 </div>
                 <div className="experiment-lab__lane-digest-grid">
                   <article>
-                    <h6>Question or input</h6>
+                    <h6 className="experiment-lab__card-title">Question or input</h6>
                     {focusedQuestion?.excerpt ? (
                       <ArtifactExcerpt text={focusedQuestion.excerpt} />
                     ) : (
@@ -2338,7 +2334,7 @@ export function ExperimentLab(props: {
                     )}
                   </article>
                   <article>
-                    <h6>Evidence it used</h6>
+                    <h6 className="experiment-lab__card-title">Evidence it used</h6>
                     {focusedEvidence.length ? (
                       <ul>
                         {focusedEvidence.slice(0, 3).map((event) => (
@@ -2354,7 +2350,7 @@ export function ExperimentLab(props: {
                     )}
                   </article>
                   <article>
-                    <h6>Latest recorded conclusion</h6>
+                    <h6 className="experiment-lab__card-title">Latest recorded conclusion</h6>
                     {focusedConclusion?.excerpt ? (
                       <ArtifactExcerpt text={focusedConclusion.excerpt} />
                     ) : (
@@ -2364,7 +2360,7 @@ export function ExperimentLab(props: {
                     )}
                   </article>
                   <article>
-                    <h6>Still unknown</h6>
+                    <h6 className="experiment-lab__card-title">Still unknown</h6>
                     {focusedUnknowns.length ? (
                       <ul>
                         {focusedUnknowns.map((unknown) => (
@@ -2445,7 +2441,7 @@ export function ExperimentLab(props: {
                   </details>
                   {focusedObservations.length ? (
                     <div className="experiment-lab__lane-observations">
-                      <h6>Human observations</h6>
+                      <h6 className="experiment-lab__card-title">Human observations</h6>
                       <ul>
                         {focusedObservations.map((observation) => (
                           <li key={observation.id}>
@@ -3015,7 +3011,7 @@ export function ExperimentLab(props: {
             <div className="experiment-lab__signal-groups">
               {(current.comparison?.questionPaths ?? []).length ? (
                 <div className="experiment-lab__signal-group">
-                  <h6>Questions asked</h6>
+                  <h6 className="experiment-lab__card-title">Questions asked</h6>
                   <ul className="experiment-lab__signal-list">
                     {(current.comparison?.questionPaths ?? []).map((path) => (
                       <li key={path.pathId} className="timeline__item">
@@ -3029,7 +3025,7 @@ export function ExperimentLab(props: {
               {(current.comparison?.sharedEvidence ?? []).length ||
               (current.comparison?.uniqueEvidence ?? []).some((row) => row.evidenceRefs.length) ? (
                 <div className="experiment-lab__signal-group">
-                  <h6>Evidence overlap</h6>
+                  <h6 className="experiment-lab__card-title">Evidence overlap</h6>
                   <ul className="experiment-lab__signal-list">
                     {(current.comparison?.sharedEvidence ?? []).map((row) => (
                       <li key={`shared-${row.evidenceRef}`} className="timeline__item">
@@ -3052,7 +3048,7 @@ export function ExperimentLab(props: {
               ) : null}
               {(current.comparison?.divergence ?? []).length ? (
                 <div className="experiment-lab__signal-group">
-                  <h6>Where the strategies disagree</h6>
+                  <h6 className="experiment-lab__card-title">Where the strategies disagree</h6>
                   <ul className="experiment-lab__signal-list">
                     {(current.comparison?.divergence ?? []).map((row) => (
                       <li key={`${row.kind}:${row.summary}`} className="timeline__item">
@@ -3064,7 +3060,7 @@ export function ExperimentLab(props: {
               ) : null}
               {(current.comparison?.convergence ?? []).some((row) => row.inGold) ? (
                 <div className="experiment-lab__signal-group">
-                  <h6>Convergence on the human benchmark</h6>
+                  <h6 className="experiment-lab__card-title">Convergence on the human benchmark</h6>
                   <ul className="experiment-lab__signal-list">
                     {(current.comparison?.convergence ?? [])
                       .filter((row) => row.inGold)

@@ -480,13 +480,14 @@
   margin-top: 0.55rem;
 }
 
-.experiment-lab__signal-group h6 {
+.experiment-lab__card-title,
+.experiment-lab__signal-group h6,
+.experiment-lab__lane-digest-grid h6 {
   margin: 0;
-  color: var(--muted);
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  color: var(--fg);
+  font-size: clamp(1rem, 1.25vw, 1.1rem);
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .experiment-lab__path-kind--incomplete {
@@ -1212,7 +1213,9 @@
 .experiment-lab__focus-digest-title {
   margin: 0;
   color: var(--fg);
-  font-size: 0.95rem;
+  font-size: clamp(1.1rem, 1.5vw, 1.25rem);
+  font-weight: 700;
+  line-height: 1.3;
   overflow-wrap: anywhere;
 }
 
@@ -1237,10 +1240,6 @@
 
 .experiment-lab__lane-digest-grid h6 {
   margin: 0 0 0.45rem;
-  color: var(--muted);
-  font-size: 0.68rem;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
 }
 
 .experiment-lab__lane-digest-grid ul {
@@ -1283,10 +1282,9 @@
   gap: 0.45rem;
   margin: 0;
   color: var(--muted);
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
 }
 
 .experiment-lab__queue-count {
@@ -1319,7 +1317,7 @@
 .experiment-lab__queue-text {
   margin: 0 0 0.6rem;
   color: var(--fg);
-  font-size: clamp(0.98rem, 1.15vw, 1.08rem);
+  font-size: clamp(1.05rem, 1.4vw, 1.18rem);
   font-weight: 700;
   line-height: 1.3;
 }
@@ -1504,6 +1502,7 @@
   font: 0.76rem/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  user-select: text;
 }
 
 .experiment-lab__artifact-collapsible {
@@ -1515,10 +1514,22 @@
 }
 
 .experiment-lab__artifact-collapsible > details > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.25rem;
   cursor: pointer;
   color: var(--accent);
   font-size: 0.78rem;
   font-weight: 600;
+}
+
+.experiment-lab__artifact-preview {
+  max-height: 10rem;
+  overflow: hidden;
+}
+
+.experiment-lab__artifact-collapsible:has(> details[open]) > .experiment-lab__artifact-preview {
+  display: none;
 }
 
 .experiment-lab__artifact-full {

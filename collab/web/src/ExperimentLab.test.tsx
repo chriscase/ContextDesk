@@ -1543,15 +1543,53 @@ describe("decision readiness cockpit", () => {
     stubExperiments([artifactView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
 
-    const controls = await screen.findAllByText(/Expand log or stack trace · 12 lines/);
+    const controls = await screen.findAllByText(/Expand complete log or stack trace · 12 lines/);
     expect(controls.length).toBeGreaterThan(0);
+    expect(controls[0]?.textContent).toMatch(/12 lines · [\d,]+ characters/);
     const expandable = controls[0]!.closest("details") as HTMLDetailsElement;
     expect(expandable.open).toBe(false);
+    expect(expandable.previousElementSibling?.classList.contains("experiment-lab__artifact-preview")).toBe(true);
     expect(expandable.querySelector(".experiment-lab__artifact-full")?.textContent).toContain(
       "12 synthetic stack frame",
     );
     fireEvent.click(controls[0]!);
     expect(expandable.open).toBe(true);
+  });
+
+  it("keeps internal artifact, evidence, and lane identities inside closed technical disclosures", async () => {
+    stubExperiments([cockpitView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+
+    const scan = await screen.findByRole("region", { name: "At a glance" });
+    expect(within(scan).getAllByText(/Supporting evidence needs inspection/).length).toBeGreaterThan(0);
+    expect(within(scan).getByRole("heading", {
+      name: "Models assign different meaning to the same evidence",
+    })).toBeTruthy();
+
+    const textParentsContaining = (value: string): HTMLElement[] => {
+      const walker = document.createTreeWalker(document.body, 4);
+      const parents: HTMLElement[] = [];
+      let node = walker.nextNode();
+      while (node) {
+        if (node.nodeValue?.includes(value) && node.parentElement) parents.push(node.parentElement);
+        node = walker.nextNode();
+      }
+      return parents;
+    };
+
+    for (const internalIdentity of [
+      "pkg-synth-cockpit-v1",
+      "task-162aec8",
+      "ev-demo-inventory-timeout",
+      "cand-programmatic-agent",
+    ]) {
+      const occurrences = textParentsContaining(internalIdentity);
+      expect(occurrences.length).toBeGreaterThan(0);
+      expect(occurrences.every((element) => {
+        const disclosure = element.closest("details");
+        return disclosure !== null && disclosure.hasAttribute("open") === false;
+      })).toBe(true);
+    }
   });
 
   it("states honestly when a supporting excerpt was not captured and gives an action", async () => {
@@ -1838,7 +1876,7 @@ describe("decision readiness cockpit", () => {
     expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
       "false",
     );
-    expect(screen.getByText(/Focusing programmatic-agent\. This digest restates recorded facts/)).toBeTruthy();
+    expect(screen.getByText(/Highlighting programmatic-agent in place/)).toBeTruthy();
     expect(window.location.search).toContain("lane=cand-programmatic-agent");
     expect(window.location.search).toContain("section=scan-heading");
 
@@ -1875,7 +1913,7 @@ describe("decision readiness cockpit", () => {
     ).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "All lanes" }));
-    expect(screen.queryByText(/Focusing programmatic-agent/)).toBeNull();
+    expect(screen.queryByText(/Highlighting programmatic-agent/)).toBeNull();
     expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
       "true",
     );
@@ -1887,10 +1925,10 @@ describe("decision readiness cockpit", () => {
 
     await screen.findByRole("region", { name: "Decision readiness" });
     fireEvent.click(screen.getByRole("button", { name: "chat-operator" }));
-    expect(screen.getByText(/Focusing chat-operator\. This digest restates recorded facts/)).toBeTruthy();
+    expect(screen.getByText(/Highlighting chat-operator in place/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /Comparison 2/ }));
-    expect(screen.queryByText(/Focusing chat-operator/)).toBeNull();
+    expect(screen.queryByText(/Highlighting chat-operator/)).toBeNull();
     expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
       "true",
     );
@@ -1914,7 +1952,7 @@ describe("decision readiness cockpit", () => {
     );
 
     await screen.findByRole("region", { name: "Decision readiness" });
-    expect(await screen.findByText(/Focusing chat-operator\. This digest restates recorded facts/)).toBeTruthy();
+    expect(await screen.findByText(/Highlighting chat-operator in place/)).toBeTruthy();
     expect(screen.queryAllByRole("textbox").length).toBe(0);
     expect(screen.queryAllByRole("combobox").length).toBe(0);
     for (const name of ["Import experiment", "Record helpfulness", "Propose decision"]) {
@@ -2098,11 +2136,11 @@ describe("focused Compare workspace", () => {
     const routedItem = document.querySelector("[data-route-item='ev-demo-inventory-timeout']");
     expect(routedItem).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(routedItem));
-    expect(await screen.findByText(/Focusing programmatic-agent/)).toBeTruthy();
+    expect(await screen.findByText(/Highlighting programmatic-agent/)).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "programmatic-agent" }).getAttribute("aria-pressed"),
     ).toBe("true");
-    expect(screen.getByText(/Focus highlights one lane/)).toBeTruthy();
+    expect(screen.getByText(/highlights matching cards, table columns, and review references in place/)).toBeTruthy();
   });
 
   it("fails unknown section ids to the useful summary instead of a blank screen", async () => {
@@ -2404,13 +2442,13 @@ describe("focused Compare workspace", () => {
     stubExperiments([artifactView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
 
-    const expand = await screen.findByText(/Expand log or stack trace · 12 lines/);
+    const expand = await screen.findByText(/Expand complete log or stack trace · 12 lines/);
     const details = expand.closest("details") as HTMLDetailsElement;
     expect(details.open).toBe(false);
     expect(details.previousElementSibling?.textContent).not.toContain("ev-private-anchor");
     fireEvent.click(expand);
     expect(details.open).toBe(true);
-    expect(screen.getByText(/Collapse log or stack trace · 12 lines/)).toBeTruthy();
+    expect(screen.getByText(/Collapse complete log or stack trace · 12 lines/)).toBeTruthy();
     expect(details.querySelector(".experiment-lab__artifact-full")?.textContent).toBe(longExcerpt);
 
     openCompareWorkspace("Evidence");
