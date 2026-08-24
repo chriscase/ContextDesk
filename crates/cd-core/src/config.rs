@@ -1583,6 +1583,7 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
 /// of claiming durability.
 pub fn save_config(path: &Path, cfg: &AppConfig) -> CoreResult<()> {
     refuse_raw_secret_refs(cfg)?;
+    #[cfg(unix)]
     let raw = serde_json::to_string_pretty(cfg)?;
     #[cfg(unix)]
     {
