@@ -261,13 +261,23 @@ rows, deterministic failed dimensions, redacted JSON, and redacted Markdown are
 inspectable rather than collapsed into a green badge.
 
 The four diagnostic-focused OPEN-v1 scenarios still require honest host-owned
-attempt/tool/role telemetry. The serial answer runner no longer treats all four
-as an unconditional pre-dispatch block:
+attempt/tool/role telemetry. The serial answer runner no longer treats them as
+an undifferentiated diagnostic block: each is blocked only when this runner
+cannot join observed facts into an allow-listed `ScriptedDiagnostic`.
+
+A scored live envelope requires a structurally valid parsed response.
+This runner's parsed path only emits `compatible_success`. Timeout/auth/transport
+classifiers exist (`HostAttemptClass::from_chat_outcome` /
+`from_transport_reason`) and never emit `host_grounding`, but those outcomes
+have no parsed body to score (`Executed` requires provider content plus an
+`AnswerScore`). Joining a fluent 1-shot success would fail `diagnostic_category`
+and look like a model failure; that is a host gap, so those scenarios stay
+pre-dispatch `Blocked`.
 
 | Scenario | Host seam | Decision |
 | --- | --- | --- |
-| `qe09-attempt-usefulness` | `QualificationTransport` chat complete/cancel/error + host-authored export sample | **Execute** and join a host-built `ScriptedDiagnostic` (never fixture `candidates[].diagnostic`) |
-| `qe10-grounding-vs-transport` | classify timeout/auth/transport from host/transport errors; never `host_grounding` | **Execute** the same way |
+| `qe09-attempt-usefulness` | mixed/all-failed attempts + host-authored export sample | **Blocked** `host_diagnostic_pipeline_unavailable`, zero dispatch bytes: allow-list is `mixed_attempts_accounted` \| `all_attempts_failed`; one parsed chat cannot produce either as a scored envelope |
+| `qe10-grounding-vs-transport` | classify timeout/auth/transport from host/transport errors; never `host_grounding` | **Blocked** `host_diagnostic_pipeline_unavailable`, zero dispatch bytes: allow-list is timeout/auth/transport/host-grounding; error/cancel paths have no parsed body to score |
 | `qe11-tool-progress` | host-executed tool loop (not provider `tool_calls`) | **Blocked** `host_diagnostic_pipeline_unavailable`, zero dispatch bytes |
 | `qe12-multimodel-budget` | investigator/reviewer/synthesizer budget pipeline | **Blocked** `host_diagnostic_pipeline_unavailable`, zero dispatch bytes |
 
@@ -292,7 +302,9 @@ The focused suite proves:
 - timeout/auth/transport is not classified as host-grounding;
 - zero-cite tool progress and non-progress without withdrawal fail;
 - silent role dropout and budget-exhausted+useful fail;
-- qe11/qe12 remain pre-dispatch blocked while qe09/qe10 dispatch;
+- qe09–qe12 remain pre-dispatch blocked until a host can join an allow-listed
+  category into the scored envelope (1-shot parsed `compatible_success` is not
+  in the qe09/qe10 allow-lists; qe11/qe12 still need a tool host / budget pipeline);
 - configured and provider-reported model ids remain distinct and mismatches
   stay visible;
 - complete provider usage aggregates exactly while one missing value keeps the
@@ -322,11 +334,12 @@ is present only when reported by the gateway; it is not independently audited
 against billing. Cost is rounded to the nearest micro-US-dollar for the durable
 integer report, and all exported integers stay within the exact JavaScript
 range. Canonical captures are private local regression evidence, not share-safe
-exports or cryptographically authenticated attestations. This path still does not execute qe11 tool-progress or qe12 three-role budget
-scenarios through a host tool loop / multi-stage budget pipeline, derive
-measured recommendations, or prove a packaged configured-provider acceptance
-run. Those remain follow-up work for issue #726. It does not manufacture a
-green 14/14.
+exports or cryptographically authenticated attestations. This path still does not execute qe09 mixed-attempt usefulness, qe10
+transport-versus-grounding, qe11 tool-progress, or qe12 three-role budget
+scenarios through a multi-attempt / error-scoring / tool-host / multi-stage
+budget pipeline, derive measured recommendations, or prove a packaged
+configured-provider acceptance run. Those remain follow-up work for issue
+#726. It does not manufacture a green 14/14.
 
 ## Verification
 

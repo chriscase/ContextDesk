@@ -9,7 +9,7 @@ use cd_core::error::{CoreError, CoreResult};
 use cd_core::investigation_team_qualification::{InvestigationTeamRole, MemberBinding};
 use cd_core::openai_chat_contract::OpenAiChatRequestMode;
 use cd_core::provider_telemetry::ProviderTransportTelemetry;
-use cd_core::quality_eval::live_known_answer::scripted_diagnostic_from_parsed_response;
+use cd_core::quality_eval::live_known_answer::host_diagnostic_for_observed_chat;
 #[cfg(unix)]
 use cd_core::quality_eval::LiveKnownAnswerOwnerDirectory;
 use cd_core::quality_eval::{
@@ -664,9 +664,25 @@ fn execute_target(
                         answer_score: None,
                         host_score_failed: false,
                     });
-                    let host_diagnostic = case.requires_host_diagnostic().then(|| {
-                        scripted_diagnostic_from_parsed_response(&parsed, target.member.role)
-                    });
+                    let host_diagnostic = host_diagnostic_for_observed_chat(
+                        case,
+                        target.member.role,
+                        response.cancelled,
+                        response.raw_error.as_deref(),
+                        Some(&parsed),
+                    );
+                    if case.requires_host_diagnostic() && host_diagnostic.is_none() {
+                        observations.push(failed_observation(
+                            scenario_id,
+                            LaneStatus::Failed,
+                            "host_score_failed",
+                            latency_ms,
+                            message_content_bytes,
+                            provider_content_bytes,
+                            provider_telemetry,
+                        ));
+                        continue;
+                    }
                     match score_live_known_answer_response(case, &parsed, host_diagnostic) {
                         Ok(score) => observations.push(LiveKnownAnswerScenarioObservation {
                             scenario_id,
@@ -1237,6 +1253,7 @@ mod tests {
     struct AnsweringTransport {
         calls: usize,
         last: Option<ProviderTransportTelemetry>,
+        scenario_ids: Vec<String>,
     }
 
     impl QualificationTransport for AnsweringTransport {
@@ -1247,6 +1264,7 @@ mod tests {
         ) -> Result<SyntheticChatResponse, TransportError> {
             let prompt: cd_core::quality_eval::LiveKnownAnswerPrompt =
                 serde_json::from_str(&req.messages[1].content).expect("prompt");
+            self.scenario_ids.push(prompt.scenario_id.clone());
             let content = match self.calls {
                 0 => "not json".into(),
                 1 => serde_json::json!({
@@ -1360,16 +1378,11 @@ mod tests {
         )
         .expect("report");
         let report = evidence.report;
-        assert_eq!(transport.calls, 12);
+        assert_eq!(transport.calls, 10);
         assert_eq!(report.status, LiveKnownAnswerRunStatus::Partial);
-        assert_eq!(report.metrics.failed_scenarios, 12);
-        assert_eq!(report.metrics.blocked_scenarios, 2);
-        assert!(report.telemetry[8..10].iter().all(|row| {
-            row.status == LaneStatus::Failed
-                && row.failure_code.as_deref() == Some("provider_request_failed")
-                && row.message_content_bytes > 0
-        }));
-        assert!(report.telemetry[10..12].iter().all(|row| {
+        assert_eq!(report.metrics.failed_scenarios, 10);
+        assert_eq!(report.metrics.blocked_scenarios, 4);
+        assert!(report.telemetry[8..12].iter().all(|row| {
             row.status == LaneStatus::Blocked
                 && row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
                 && row.latency_ms == 0
@@ -1461,7 +1474,7 @@ mod tests {
         )
         .expect("evidence");
 
-        assert_eq!(transport.calls, 12);
+        assert_eq!(transport.calls, 10);
         assert_eq!(
             evidence.report.telemetry[0].failure_code.as_deref(),
             Some("provider_response_parse_failed")
@@ -1485,14 +1498,14 @@ mod tests {
             evidence.report.quality_run.quality_unit.subject.model_id,
             "model-a"
         );
-        assert_eq!(evidence.report.metrics.input_tokens, Some(1_200));
-        assert_eq!(evidence.report.metrics.output_tokens, Some(240));
-        assert_eq!(evidence.report.metrics.reasoning_tokens, Some(60));
-        assert_eq!(evidence.report.metrics.cached_tokens, Some(84));
-        assert_eq!(evidence.report.metrics.cost_microusd, Some(1_476));
+        assert_eq!(evidence.report.metrics.input_tokens, Some(1_000));
+        assert_eq!(evidence.report.metrics.output_tokens, Some(200));
+        assert_eq!(evidence.report.metrics.reasoning_tokens, Some(50));
+        assert_eq!(evidence.report.metrics.cached_tokens, Some(70));
+        assert_eq!(evidence.report.metrics.cost_microusd, Some(1_230));
 
         let capture = evidence.capture.as_ref().expect("capture");
-        assert_eq!(capture.scenarios.len(), 9);
+        assert_eq!(capture.scenarios.len(), 7);
         assert_eq!(capture.quality_unit.subject.model_id, "model-a");
         assert!(capture
             .scenarios
@@ -1521,6 +1534,59 @@ mod tests {
         assert!(!serialized.contains("not json"));
         assert!(!serialized.contains("sk-private"));
         assert!(!serialized.contains("https://gateway"));
+    }
+
+    #[test]
+    fn execute_target_keeps_unjoinable_diagnostics_blocked_not_category_failed() {
+        let suite = load_embedded_open_v1_suite().expect("suite");
+        let prepared = prepare_live_known_answer_suite(&suite).expect("prepared");
+        let prompt_hash = live_known_answer_prompt_set_hash(&prepared).expect("hash");
+        assert!(prepared[8].blocks_diagnostic_before_dispatch());
+        assert!(prepared[9].blocks_diagnostic_before_dispatch());
+        let mut transport = AnsweringTransport::default();
+        let evidence = execute_target(
+            &target(),
+            &prepared,
+            &suite.manifest.suite_id,
+            &suite.digest,
+            &prompt_hash,
+            1_777_000_000,
+            "build-a",
+            &AtomicBool::new(false),
+            &mut transport,
+        )
+        .expect("evidence");
+
+        assert_eq!(transport.calls, 10);
+        assert!(
+            !transport.scenario_ids.iter().any(|id| {
+                matches!(
+                    id.as_str(),
+                    "scenario-009" | "scenario-010" | "scenario-011" | "scenario-012"
+                )
+            }),
+            "qe09–qe12 must not be dispatched: {:?}",
+            transport.scenario_ids
+        );
+        for (index, case) in evidence.report.quality_run.cases[8..12].iter().enumerate() {
+            let telemetry = &evidence.report.telemetry[index + 8];
+            assert_eq!(case.status, LaneStatus::Blocked, "{}", case.case_id);
+            assert!(
+                case.answers.is_empty(),
+                "{} must not carry a diagnostic_category model failure",
+                case.case_id
+            );
+            assert_eq!(telemetry.status, LaneStatus::Blocked);
+            assert_eq!(
+                telemetry.failure_code.as_deref(),
+                Some("host_diagnostic_pipeline_unavailable")
+            );
+            assert_eq!(telemetry.message_content_bytes, 0);
+            assert_eq!(telemetry.provider_content_bytes, 0);
+            assert_eq!(telemetry.latency_ms, 0);
+        }
+        assert!(evidence.report.telemetry[0].message_content_bytes > 0);
+        assert!(evidence.report.telemetry[12].message_content_bytes > 0);
     }
 
     fn captured_evidence() -> LiveKnownAnswerExecutionEvidence {
