@@ -43,12 +43,22 @@ async fn run(mut cli: Cli, invocation: InvocationMode) -> i32 {
     if let Some(code) = run_state_free(&mut cli).await {
         return code;
     }
+    // Path/config discovery can fail before the layered configuration is
+    // available, but explicit CLI output flags are already authoritative.
+    // Preserve that machine-readable contract even for early startup errors.
+    let startup_format = if cli.global.json {
+        Some(OutputFormat::Json)
+    } else if cli.global.jsonl {
+        Some(OutputFormat::Jsonl)
+    } else {
+        cli.global.format
+    };
     let paths = match adapters::Paths::resolve(
         cli.global.data_dir.as_deref(),
         cli.global.app_config.as_deref(),
     ) {
         Ok(p) => p,
-        Err(e) => return emit_bare_error(&e),
+        Err(e) => return emit_startup_error(startup_format, e),
     };
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -60,11 +70,11 @@ async fn run(mut cli: Cli, invocation: InvocationMode) -> i32 {
 
     let global_layer = match config::load_layer(&config::global_config_path(&paths.config_dir)) {
         Ok(l) => l,
-        Err(e) => return emit_bare_error(&e),
+        Err(e) => return emit_startup_error(startup_format, e),
     };
     let project_layer = match config::load_layer(&project_path) {
         Ok(l) => l,
-        Err(e) => return emit_bare_error(&e),
+        Err(e) => return emit_startup_error(startup_format, e),
     };
 
     let format_override = if cli.global.json {
@@ -745,12 +755,16 @@ fn emit_error(format: OutputFormat, command: &'static str, error: CliError) -> i
     error.category.code()
 }
 
-/// Startup failed before any output-format resolution was possible (e.g.
-/// the config directory itself could not be created) — fall back to plain
-/// stderr text since we cannot know whether the caller wanted JSON.
-fn emit_bare_error(error: &CliError) -> i32 {
-    eprintln!("error: {error}");
-    error.category.code()
+/// Startup failed before layered output-format resolution. Explicit CLI
+/// format flags still apply; only the absence of one falls back to text.
+fn emit_startup_error(format: Option<OutputFormat>, error: CliError) -> i32 {
+    match format {
+        Some(format) => emit_error(format, "startup", error),
+        None => {
+            eprintln!("error: {error}");
+            error.category.code()
+        }
+    }
 }
 
 #[cfg(test)]
