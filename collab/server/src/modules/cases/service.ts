@@ -3,6 +3,8 @@ import {
   ARTIFACT_SCHEMA_ID,
   CASE_SCHEMA_ID,
   CONTRIBUTION_SCHEMA_ID,
+  OVERVIEW_ACTIVITY_CAP,
+  OVERVIEW_OPEN_CASE_CAP,
   snapshotFairness,
   snapshotFingerprint,
   type ArtifactKind,
@@ -32,13 +34,65 @@ import {
   type Actor,
   type ArtifactRow,
   type CaseStore,
+  type OverviewActivityRow,
+  type OverviewCounts,
+  type OverviewOpenCaseRow,
+  type OverviewScope,
   type RevisionRow,
   type SnapshotRow,
   type TimelineInsert,
   type TimelineRow,
 } from "./store.js";
 
-export type { Actor, TimelineRow } from "./store.js";
+export type { Actor, CaseTimelineRow, OverviewActivityRow, OverviewCounts, OverviewOpenCaseRow, OverviewScope, TimelineRow } from "./store.js";
+
+const ACTIVITY_DETAIL_KEYS = new Set([
+  "kind",
+  "status",
+  "revision",
+  "candidateCount",
+  "evidenceCount",
+  "mode",
+  "dimension",
+  "verificationStatus",
+  "legalHold",
+]);
+
+function activityDetails(payload: string): Record<string, string | number | boolean | null> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const details: Record<string, string | number | boolean | null> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (
+      ACTIVITY_DETAIL_KEYS.has(key)
+      && (typeof value === "string"
+        || typeof value === "number"
+        || typeof value === "boolean"
+        || value === null)
+    ) {
+      details[key] = value;
+    }
+  }
+  return details;
+}
+
+export interface CaseActivityItem {
+  caseId: string;
+  caseTitle: string;
+  caseStatus: CaseStatus;
+  caseSeverity: CaseSeverity;
+  seq: number;
+  kind: string;
+  actorUsername: string;
+  targetId: string | null;
+  occurredAt: string;
+  details: Record<string, string | number | boolean | null>;
+}
 
 export class CaseService {
   constructor(
@@ -56,6 +110,70 @@ export class CaseService {
   async listCases(actor: Actor, isAdmin: boolean): Promise<CaseV1[]> {
     const rows = await this.store.listCases();
     return rows.filter((c) => isAdmin || this.isMember(c, actor.id)).map((c) => this.toCase(c));
+  }
+
+  async listRecentActivity(
+    actor: Actor,
+    isAdmin: boolean,
+    requestedLimit = 30,
+  ): Promise<CaseActivityItem[]> {
+    const limit = Math.min(100, Math.max(1, Math.trunc(requestedLimit) || 30));
+    const cases = (await this.store.listCases()).filter(
+      (row) => isAdmin || this.isMember(row, actor.id),
+    );
+    const byId = new Map(cases.map((row) => [row.id, row]));
+    const events = await this.store.listRecentTimeline([...byId.keys()], limit);
+    return events.flatMap((event): CaseActivityItem[] => {
+      const row = byId.get(event.caseId);
+      if (!row) return [];
+      return [{
+        caseId: row.id,
+        caseTitle: row.title,
+        caseStatus: row.status,
+        caseSeverity: row.severity,
+        seq: event.seq,
+        kind: event.kind,
+        actorUsername: event.actorUsername,
+        targetId: event.targetId,
+        occurredAt: event.serverTime,
+        details: activityDetails(event.payload),
+      }];
+    });
+  }
+
+  async listOverviewCounts(scope: OverviewScope): Promise<OverviewCounts> {
+    return this.store.overviewCounts(scope);
+  }
+
+  async listOverviewOpenCases(
+    scope: OverviewScope,
+    requestedLimit = OVERVIEW_OPEN_CASE_CAP,
+  ): Promise<OverviewOpenCaseRow[]> {
+    const limit = Math.min(
+      OVERVIEW_OPEN_CASE_CAP,
+      Math.max(0, Math.trunc(requestedLimit) || OVERVIEW_OPEN_CASE_CAP),
+    );
+    if (limit === 0) return [];
+    return this.store.listOverviewOpenCases(scope, limit);
+  }
+
+  async listOverviewActivity(
+    scope: OverviewScope,
+    requestedLimit = OVERVIEW_ACTIVITY_CAP,
+  ): Promise<OverviewActivityRow[]> {
+    const limit = Math.min(
+      OVERVIEW_ACTIVITY_CAP,
+      Math.max(0, Math.trunc(requestedLimit) || OVERVIEW_ACTIVITY_CAP),
+    );
+    if (limit === 0) return [];
+    return this.store.listOverviewActivity(scope, limit);
+  }
+
+  async overviewVisibleTitle(caseId: string, scope: OverviewScope): Promise<string | null> {
+    const row = await this.store.getCase(caseId);
+    if (!row) return null;
+    if (!scope.isAdmin && !this.isMember(row, scope.actorId)) return null;
+    return row.title;
   }
 
   async getCase(id: string, actor: Actor, isAdmin: boolean): Promise<CaseV1 | null> {

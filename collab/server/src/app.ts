@@ -30,6 +30,7 @@ import {
   registerExperimentRoutes,
   type ExperimentService,
 } from "./modules/experiments/index.js";
+import { registerOverviewRoutes } from "./modules/overview/index.js";
 
 export interface SecurityDeps {
   auth: AuthRouteDeps;
@@ -167,6 +168,16 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         experiments: deps.experiments,
         ...(deps.imports ? { imports: deps.imports } : {}),
         ...(deps.triageRuns ? { triageRuns: deps.triageRuns } : {}),
+      });
+    }
+    if (deps.domain && deps.experiments && deps.triageRuns && deps.presence) {
+      await registerOverviewRoutes(app, {
+        auth: security.auth,
+        roles: security.roles,
+        cases: deps.domain,
+        experiments: deps.experiments,
+        triageRuns: deps.triageRuns,
+        presence: deps.presence,
       });
     }
     if (deps.exporter) {

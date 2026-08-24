@@ -36,7 +36,11 @@ fn s3_settings_ipc_rejects_credential_fields() {
 #[test]
 fn restart_roundtrip_persists_refs_not_credentials() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.json");
+    // macOS exposes the default temporary root through `/var`, which is a
+    // symlink to `/private/var`. Exercise the hardened store through the real
+    // directory chain so this test does not ask production code to weaken its
+    // no-symlink-ancestor guarantee.
+    let path = dir.path().canonicalize().unwrap().join("config.json");
     let app = AppConfig {
         s3_backup: Some(config()),
         ..AppConfig::default()

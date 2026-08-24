@@ -4,9 +4,20 @@
   padding-top: 0.85rem;
 }
 
+/* The decision surface sits inside the Decide page, which already carries the
+   step banner; it should read as one journal, not a second stacked lab. */
+.experiment-lab--decision {
+  margin-top: 0.5rem;
+  border-top: 0;
+  padding-top: 0;
+}
+
 .experiment-lab__heading {
   margin: 0.85rem 0 0.35rem;
-  font-size: 0.95rem;
+  color: var(--fg);
+  font-size: clamp(1.05rem, 1.5vw, 1.22rem);
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .experiment-lab__error {
@@ -345,8 +356,9 @@
 .experiment-lab__heading {
   margin: 0;
   color: var(--fg);
-  font-size: 1rem;
-  line-height: 1.25;
+  font-size: clamp(1.08rem, 1.6vw, 1.25rem);
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .experiment-lab__section-note,
@@ -418,7 +430,9 @@
 .experiment-lab__subheading {
   margin: 0;
   color: var(--fg);
-  font-size: 0.86rem;
+  font-size: clamp(1.02rem, 1.3vw, 1.12rem);
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .experiment-lab__subheading {
@@ -495,7 +509,9 @@
   margin: 0;
   overflow-wrap: anywhere;
   color: var(--fg);
-  font-size: 0.9rem;
+  font-size: clamp(1.05rem, 1.4vw, 1.18rem);
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .experiment-lab__path-kind {
@@ -671,7 +687,9 @@
 .experiment-lab__scan-title {
   margin: 0;
   color: var(--fg);
-  font-size: 0.86rem;
+  font-size: clamp(1.05rem, 1.4vw, 1.18rem);
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .experiment-lab__scan-list {
@@ -766,37 +784,90 @@
   color: var(--warning);
 }
 
-.experiment-lab__shortcuts {
+.experiment-lab__workspace {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  min-width: 0;
+  margin: 0.85rem 0 0.35rem;
+  padding: 0.75rem;
+  border: 1px solid var(--lab-border-strong);
+  border-radius: var(--lab-radius);
+  background: var(--bg);
+}
+
+.experiment-lab__workspace-copy,
+.experiment-lab__focus-legend {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.experiment-lab__workspace-tabs {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.3rem 0.8rem;
-  margin-top: 0.75rem;
-  padding-top: 0.6rem;
-  border-top: 1px solid var(--border);
-  font-size: 0.76rem;
+  gap: 0.4rem;
+  margin: 0.65rem 0 0;
+  padding: 0;
+  list-style: none;
 }
 
-.experiment-lab__shortcuts span {
-  color: var(--muted);
-  font-size: 0.7rem;
+.experiment-lab__workspace-tab {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.1rem;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--lab-surface);
+  color: var(--fg);
+  font-size: 0.92rem;
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.experiment-lab__shortcuts a {
-  color: var(--accent);
+  line-height: 1.2;
   text-decoration: none;
 }
 
-.experiment-lab__shortcuts a:hover {
-  text-decoration: underline;
+.experiment-lab__workspace-tab:hover {
+  border-color: var(--lab-border-strong);
 }
 
-.experiment-lab__shortcuts a:focus-visible {
+.experiment-lab__workspace-tab:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
+}
+
+.experiment-lab__workspace-tab.is-active,
+.experiment-lab__workspace-tab[aria-current="page"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.experiment-lab__workspace .experiment-lab__focus {
+  margin-top: 0.7rem;
+}
+
+.experiment-lab__focus-legend {
+  margin-top: 0.45rem;
+}
+
+.experiment-lab__artifact-expand,
+.experiment-lab__artifact-collapse {
+  font-weight: 700;
+}
+
+.experiment-lab__artifact-collapsible details:not([open]) .experiment-lab__artifact-collapse,
+.experiment-lab__artifact-collapsible details[open] .experiment-lab__artifact-expand {
+  display: none;
+}
+
+.experiment-lab__finding-title {
+  margin: 0 0 0.45rem;
+  color: var(--fg);
+  font-size: clamp(1.05rem, 1.4vw, 1.18rem);
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 /* Anchor targets need breathing room so a jump never hides the heading. */
@@ -978,11 +1049,10 @@
 
 .experiment-lab__facet-title {
   margin: 0;
-  color: var(--muted);
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  color: var(--fg);
+  font-size: clamp(1rem, 1.2vw, 1.08rem);
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .experiment-lab__facet-state {
@@ -1126,6 +1196,57 @@
   margin: 0.65rem 0 0.2rem;
 }
 
+.experiment-lab__lane-digest-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin-top: 0.65rem;
+}
+
+.experiment-lab__lane-digest-grid > article {
+  min-width: 0;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--lab-surface-raised);
+}
+
+.experiment-lab__lane-digest-grid h6 {
+  margin: 0 0 0.45rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.experiment-lab__lane-digest-grid ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.experiment-lab__lane-digest-grid .experiment-lab__artifact-excerpt {
+  margin: 0;
+}
+
+.experiment-lab__focus-metadata,
+.experiment-lab__lane-history > details {
+  margin-top: 0.65rem;
+  border-top: 1px dashed var(--border);
+  padding-top: 0.55rem;
+}
+
+.experiment-lab__focus-metadata > summary,
+.experiment-lab__lane-history > details > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .experiment-lab__lane-digest-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Human review queue */
 .experiment-lab__queue-group {
   margin-top: 0.75rem;
@@ -1166,13 +1287,17 @@
   border-left: 2px solid var(--lab-border-strong);
   background: var(--bg);
   color: var(--fg);
-  font-size: 0.8rem;
+  font-size: 0.86rem;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
 .experiment-lab__queue-text {
-  margin-right: 0.35rem;
+  margin: 0 0 0.6rem;
+  color: var(--fg);
+  font-size: clamp(0.98rem, 1.15vw, 1.08rem);
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .experiment-lab__queue-link {
@@ -1319,6 +1444,77 @@
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+.experiment-lab__finding-list,
+.experiment-lab__lane-history,
+.experiment-lab__path-events {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.experiment-lab__finding,
+.experiment-lab__queue-item,
+.experiment-lab__lane-history li,
+.experiment-lab__path-events li {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--lab-surface) 94%, var(--accent) 6%);
+}
+
+.experiment-lab__finding-source,
+.experiment-lab__crossexam-source {
+  display: block;
+  margin: 0.3rem 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.experiment-lab__artifact-excerpt {
+  max-width: 100%;
+  margin: 0.45rem 0;
+  padding: 0.65rem;
+  overflow: auto;
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--bg) 88%, var(--accent) 12%);
+  color: var(--fg);
+  font: 0.76rem/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__artifact-collapsible {
+  min-width: 0;
+}
+
+.experiment-lab__artifact-collapsible > details {
+  margin-top: 0.35rem;
+}
+
+.experiment-lab__artifact-collapsible > details > summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.experiment-lab__artifact-full {
+  max-height: 32rem;
+  overscroll-behavior: contain;
+}
+
+.experiment-lab__artifact-missing {
+  display: block;
+  margin: 0.45rem 0;
+  padding: 0.55rem;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+}
+
+.experiment-lab__route-target {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* Deliberately no animation anywhere in the cockpit: motion here would only
    decorate, theme flips would repaint mid-transition, and a motionless surface
    respects prefers-reduced-motion by construction. */
@@ -1334,6 +1530,23 @@
 }
 
 @media (max-width: 480px) {
+  .experiment-lab,
+  .experiment-lab__workspace,
+  .experiment-lab__section,
+  .experiment-lab__scan,
+  .experiment-lab__focus-digest {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .experiment-lab__workspace {
+    position: static;
+  }
+
+  .experiment-lab__workspace-tab {
+    font-size: 0.95rem;
+  }
+
   .experiment-lab__facets {
     grid-template-columns: 1fr;
   }

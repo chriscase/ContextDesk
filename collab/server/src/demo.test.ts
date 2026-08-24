@@ -43,6 +43,20 @@ describe("synthetic demo server", () => {
     const session = await demo.app.inject({ method: "GET", url: "/api/auth/me", headers });
     expect(session.statusCode).toBe(200);
     expect(JSON.parse(session.body).roles).toEqual(["case-lead"]);
+    const activityResponse = await demo.app.inject({
+      method: "GET",
+      url: "/api/activity?limit=30",
+      headers,
+    });
+    expect(activityResponse.statusCode).toBe(200);
+    const activity = JSON.parse(activityResponse.body) as {
+      activities: { caseId: string; caseTitle: string; targetId: string | null }[];
+    };
+    expect(activity.activities.length).toBeGreaterThan(0);
+    expect(activity.activities.every((row) => row.caseId === demo.caseId)).toBe(true);
+    expect(activity.activities.some((row) => row.caseTitle.includes("Checkout timeouts"))).toBe(
+      true,
+    );
     const unauthenticatedPresence = await demo.app.inject({
       method: "GET",
       url: `/api/cases/${demo.caseId}/presence`,
@@ -115,7 +129,10 @@ describe("synthetic demo server", () => {
         id: string;
         packageId: string;
         candidates: unknown[];
-        traces: unknown[];
+        traces: {
+          candidateId: string;
+          events: { excerpt: string | null; evidenceRefs: string[] }[];
+        }[];
         observations: unknown[];
         decisions: { status: string }[];
         gold: { version: number } | null;
@@ -126,6 +143,16 @@ describe("synthetic demo server", () => {
       "pkg-synth-strategy-paths-v1",
     ]);
     expect(body.experiments[0]?.candidates).toHaveLength(3);
+    expect(body.experiments[0]?.traces).toHaveLength(3);
+    expect(
+      body.experiments[0]?.traces.some((trace) =>
+        trace.events.some(
+          (event) =>
+            event.evidenceRefs.includes("ev-demo-inventory-timeout") &&
+            event.excerpt?.includes("TimeoutError"),
+        ),
+      ),
+    ).toBe(true);
     expect(body.experiments[0]?.observations).toHaveLength(3);
     expect(body.experiments[1]?.traces).toHaveLength(2);
     expect(body.experiments.every((row) => row.decisions.at(-1)?.status === "accepted")).toBe(

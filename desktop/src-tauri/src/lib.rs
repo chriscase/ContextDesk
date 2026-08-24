@@ -3,6 +3,8 @@
 mod capability_qualification_host;
 mod handbook;
 mod investigation_report_export;
+mod investigation_team_known_answer_host;
+mod investigation_team_qualification_host;
 mod log_diagnostic_report;
 mod log_diagnostics;
 mod logging_quality_host;
@@ -55,7 +57,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Condvar, Mutex,
 };
-use std::time::{Duration, Instant as StdInstant};
+use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -447,6 +449,16 @@ struct AppState {
     /// an incompatible packet/validator workflow.
     triage_role_qualification_store:
         Mutex<cd_core::triage_role_qualification::TriageRoleQualificationStoreV1>,
+    /// Bounded, redacted Investigation Team qualification history.
+    investigation_team_qualification:
+        Mutex<investigation_team_qualification_host::InvestigationTeamQualificationStoreState>,
+    /// Secret-free history beside the other host qualification evidence.
+    investigation_team_qualification_store_path: PathBuf,
+    /// Durable, redacted provider-backed known-answer quality history.
+    investigation_team_known_answer:
+        Mutex<investigation_team_known_answer_host::InvestigationTeamKnownAnswerStoreState>,
+    /// Secret-free known-answer history path.
+    investigation_team_known_answer_store_path: PathBuf,
     /// One-shot exact Log Explorer navigation targets (#698 exact-nav).
     /// Keyed by corpus id. `take` delivers once; cleared on take, discard, or window destroy.
     log_explorer_nav_targets: Mutex<LogExplorerNavTargetStore>,
@@ -8374,6 +8386,454 @@ fn clear_capability_qualification(
     Ok(changed)
 }
 
+/// Read the latest qualification published by trusted host execution code.
+/// The renderer has no setter and this read never contacts a provider.
+#[tauri::command]
+fn get_investigation_team_qualification(
+    state: State<'_, AppState>,
+) -> Result<Option<investigation_team_qualification_host::InvestigationTeamQualificationDto>, String>
+{
+    let mut guard = state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification");
+    let store = guard
+        .reload_for_operation(&state.investigation_team_qualification_store_path)
+        .map_err(|error| error.to_string())?;
+    Ok(store.latest())
+}
+
+/// Read bounded redacted history. This never contacts a provider or resolves
+/// credentials, and the renderer has no setter for these records.
+#[tauri::command]
+fn list_investigation_team_qualifications(
+    state: State<'_, AppState>,
+) -> Result<Vec<investigation_team_qualification_host::InvestigationTeamQualificationDto>, String> {
+    let mut guard = state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification");
+    let store = guard
+        .reload_for_operation(&state.investigation_team_qualification_store_path)
+        .map_err(|error| error.to_string())?;
+    Ok(store.history())
+}
+
+/// Clear the durable redacted history without touching provider configuration,
+/// credentials, role-qualification evidence, or investigation data.
+#[tauri::command]
+fn clear_investigation_team_qualification(state: State<'_, AppState>) -> Result<bool, String> {
+    let mut guard = state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification");
+    let mut next = guard
+        .reload_for_operation(&state.investigation_team_qualification_store_path)
+        .map_err(|error| error.to_string())?
+        .clone();
+    let changed = next.clear();
+    if changed {
+        next.save(&state.investigation_team_qualification_store_path)
+            .map_err(|error| format!("save investigation team qualification history: {error}"))?;
+        guard.replace_with_committed(next);
+    }
+    Ok(changed)
+}
+
+/// Run the explicit local synthetic qualification check. This uses only
+/// host-owned settings and an opaque deterministic fixture; it never resolves
+/// credentials, contacts a provider, or claims real model execution.
+#[tauri::command]
+fn run_synthetic_investigation_team_qualification(
+    state: State<'_, AppState>,
+) -> Result<investigation_team_qualification_host::InvestigationTeamQualificationDto, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let members = investigation_team_qualification_host::members_from_config(&cfg)
+        .map_err(|error| error.to_string())?;
+    let observed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
+        .as_secs() as i64;
+    let result = investigation_team_qualification_host::execute_synthetic(members, observed_at)
+        .map_err(|error| error.to_string())?;
+    let mut store = state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification");
+    let mut next = store
+        .reload_for_operation(&state.investigation_team_qualification_store_path)
+        .map_err(|error| error.to_string())?
+        .clone();
+    let dto = next
+        .publish(
+            result,
+            investigation_team_qualification_host::InvestigationTeamQualificationRunKind::Synthetic,
+            Vec::new(),
+        )
+        .map_err(|error| error.to_string())?;
+    next.save(&state.investigation_team_qualification_store_path)
+        .map_err(|error| format!("save investigation team qualification history: {error}"))?;
+    store.replace_with_committed(next);
+    Ok(dto)
+}
+
+fn live_investigation_target(
+    state: &AppState,
+    profile_id: &str,
+    model_override: Option<&str>,
+    role: cd_core::investigation_team_qualification::InvestigationTeamRole,
+) -> Result<investigation_team_qualification_host::LiveQualificationTarget, String> {
+    let req = QualificationSelectReq {
+        profile_id: Some(profile_id.to_string()),
+        model_id: model_override.map(str::to_string),
+        base_url: None,
+        api_key: None,
+    };
+    let (profile, model, api_key) = resolve_qualification_target(state, &req)?;
+    let extra_headers = if matches!(profile.kind, ProviderKind::XaiGrokBuild) {
+        cd_core::grok_auth::assert_grok_base_allowed(&profile.base_url)
+            .map_err(|error| error.to_string())?;
+        cd_core::grok_auth::load_grok_session_credentials()
+            .map_err(|error| format!("Grok session required: {error}"))?
+            .request_headers()
+    } else {
+        Vec::new()
+    };
+    let member = cd_core::investigation_team_qualification::MemberBinding::from_deployment(
+        role,
+        &profile.id,
+        &model,
+        &profile.base_url,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(
+        investigation_team_qualification_host::LiveQualificationTarget {
+            member,
+            backend: cd_workflow::capability_qualification::backend_for_provider(profile.kind),
+            base_url: profile.base_url,
+            api_key,
+            extra_headers,
+            local_only: profile.local_only,
+        },
+    )
+}
+
+fn resolve_live_investigation_targets(
+    state: &AppState,
+    cfg: &AppConfig,
+) -> Result<Vec<investigation_team_qualification_host::LiveQualificationTarget>, String> {
+    let mode = if cfg.contributions.enabled {
+        cd_core::multi_model::MultiModelMode::Contributions
+    } else {
+        cfg.multi_model.mode
+    };
+    let active = cfg
+        .providers
+        .active()
+        .ok_or_else(|| "no active provider profile is configured".to_string())?;
+    let investigator_role = if matches!(mode, cd_core::multi_model::MultiModelMode::Single) {
+        cd_core::investigation_team_qualification::InvestigationTeamRole::Single
+    } else {
+        cd_core::investigation_team_qualification::InvestigationTeamRole::Investigator
+    };
+    let mut targets = vec![live_investigation_target(
+        state,
+        &active.id,
+        None,
+        investigator_role,
+    )?];
+
+    match mode {
+        cd_core::multi_model::MultiModelMode::Single => {}
+        cd_core::multi_model::MultiModelMode::Review => {
+            let reviewer = cfg
+                .multi_model
+                .reviewer
+                .as_ref()
+                .ok_or_else(|| "review mode has no configured reviewer profile".to_string())?;
+            let profile = cfg
+                .providers
+                .profiles
+                .iter()
+                .find(|candidate| candidate.id == reviewer.profile_id)
+                .ok_or_else(|| {
+                    format!("reviewer profile is not present: {}", reviewer.profile_id)
+                })?;
+            if !profile.local_only && !reviewer.allow_remote {
+                return Err("reviewer remote evidence egress is not acknowledged".into());
+            }
+            targets.push(live_investigation_target(
+                state,
+                &reviewer.profile_id,
+                reviewer.model.as_deref(),
+                cd_core::investigation_team_qualification::InvestigationTeamRole::Reviewer,
+            )?);
+        }
+        cd_core::multi_model::MultiModelMode::Contributions => {
+            return Err(
+                "live qualification V1 does not yet represent contribution-role topology; it fails closed instead of relabeling roles".into(),
+            );
+        }
+    }
+    Ok(targets)
+}
+
+/// Run one explicit provider-backed qualification check. The host resolves
+/// credentials and exact role identity; the renderer supplies no evaluator
+/// truth and cannot publish a result.
+#[tauri::command]
+async fn run_live_investigation_team_qualification(
+    state: State<'_, AppState>,
+) -> Result<investigation_team_qualification_host::InvestigationTeamQualificationDto, String> {
+    {
+        let mut store = state
+            .investigation_team_qualification
+            .lock()
+            .expect("investigation_team_qualification");
+        store
+            .reload_for_operation(&state.investigation_team_qualification_store_path)
+            .map_err(|error| error.to_string())?;
+    }
+    let cfg = state.config.lock().expect("config").clone();
+    let targets = resolve_live_investigation_targets(&state, &cfg)?;
+    let cancel = {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        if cancels
+            .contains_key(investigation_team_qualification_host::LIVE_QUALIFICATION_CANCEL_KEY)
+        {
+            return Err("Investigation Team qualification is already running".into());
+        }
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cancels.insert(
+            investigation_team_qualification_host::LIVE_QUALIFICATION_CANCEL_KEY.to_string(),
+            flag.clone(),
+        );
+        flag
+    };
+    let observed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
+        .as_secs() as i64;
+    let worker_cancel = cancel.clone();
+    let execution = tokio::task::spawn_blocking(move || {
+        investigation_team_qualification_host::execute_live(targets, observed_at, &worker_cancel)
+    })
+    .await
+    .map_err(|error| format!("live qualification worker join: {error}"))?;
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        cancels.remove(investigation_team_qualification_host::LIVE_QUALIFICATION_CANCEL_KEY);
+    }
+    let execution = execution.map_err(|error| error.to_string())?;
+    let mut store = state
+        .investigation_team_qualification
+        .lock()
+        .expect("investigation_team_qualification");
+    let mut next = store
+        .reload_for_operation(&state.investigation_team_qualification_store_path)
+        .map_err(|error| error.to_string())?
+        .clone();
+    let dto = next
+        .publish(
+            execution.result,
+            investigation_team_qualification_host::InvestigationTeamQualificationRunKind::Measured,
+            execution.failures,
+        )
+        .map_err(|error| error.to_string())?;
+    next.save(&state.investigation_team_qualification_store_path)
+        .map_err(|error| format!("save investigation team qualification history: {error}"))?;
+    store.replace_with_committed(next);
+    Ok(dto)
+}
+
+#[tauri::command]
+fn cancel_live_investigation_team_qualification(state: State<'_, AppState>) -> bool {
+    let cancels = state.cancels.lock().expect("cancels");
+    if let Some(flag) =
+        cancels.get(investigation_team_qualification_host::LIVE_QUALIFICATION_CANCEL_KEY)
+    {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
+}
+
+fn current_quality_build_identity() -> String {
+    let identity = cd_core::build_identity::current();
+    identity
+        .git_sha
+        .clone()
+        .or(identity.git_describe.clone())
+        .unwrap_or_else(|| identity.display_line())
+}
+
+fn investigation_team_known_answer_projection_context(
+    state: &AppState,
+) -> Result<investigation_team_known_answer_host::KnownAnswerProjectionContext, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let members =
+        investigation_team_qualification_host::members_from_config(&cfg).unwrap_or_default();
+    investigation_team_known_answer_host::current_projection_context(
+        current_quality_build_identity(),
+        members,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Return only the redacted renderer projection. Private canonical provider
+/// responses, when securely retained by the host, never cross this command.
+#[tauri::command]
+fn list_investigation_team_known_answer_qualifications(
+    state: State<'_, AppState>,
+) -> Result<Vec<investigation_team_known_answer_host::InvestigationTeamKnownAnswerDto>, String> {
+    let context = investigation_team_known_answer_projection_context(&state)?;
+    let mut store = state
+        .investigation_team_known_answer
+        .lock()
+        .expect("investigation_team_known_answer");
+    let current = store
+        .reload_for_operation(&state.investigation_team_known_answer_store_path)
+        .map_err(|error| error.to_string())?;
+    current.history(&context).map_err(|error| error.to_string())
+}
+
+/// Clear both redacted known-answer reports and their separately stored private
+/// canonical response captures without changing provider configuration.
+#[tauri::command]
+fn clear_investigation_team_known_answer_qualifications(
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let mut store = state
+        .investigation_team_known_answer
+        .lock()
+        .expect("investigation_team_known_answer");
+    let next = store
+        .reload_for_operation(&state.investigation_team_known_answer_store_path)
+        .map_err(|error| error.to_string())?;
+    let expected_revision = next.revision().map_err(|error| error.to_string())?;
+    let mut next = next.clone();
+    let changed = next.clear();
+    if changed {
+        let outcome = next
+            .save(
+                &state.investigation_team_known_answer_store_path,
+                &expected_revision,
+            )
+            .map_err(|error| format!("save investigation team known-answer history: {error}"))?;
+        store.replace_with_committed(next);
+        if let Some(warning) = outcome.durability_warning.as_deref() {
+            tracing::warn!(%warning, revision = %outcome.revision, "known-answer history clear committed with a durability warning");
+        }
+    }
+    Ok(changed)
+}
+
+/// Run the full checked-in known-answer suite for every exact configured V1
+/// Investigation Team role. Renderer input cannot select a different suite,
+/// inject truth, override identities, or publish a report.
+#[tauri::command]
+async fn run_live_investigation_team_known_answer_qualification(
+    state: State<'_, AppState>,
+) -> Result<Vec<investigation_team_known_answer_host::InvestigationTeamKnownAnswerDto>, String> {
+    investigation_team_known_answer_host::ensure_known_answer_persistence_supported()
+        .map_err(|error| error.to_string())?;
+    // Security ordering: the synchronized bounded/no-follow reload must stay
+    // ahead of config target resolution and every possible provider call.
+    {
+        let mut store = state
+            .investigation_team_known_answer
+            .lock()
+            .expect("investigation_team_known_answer");
+        store
+            .reload_for_operation(&state.investigation_team_known_answer_store_path)
+            .map_err(|error| error.to_string())?;
+    }
+    let cfg = state.config.lock().expect("config").clone();
+    let targets = resolve_live_investigation_targets(&state, &cfg)?;
+    let current_members = targets.iter().map(|target| target.member.clone()).collect();
+    let build_identity = current_quality_build_identity();
+    let context = investigation_team_known_answer_host::current_projection_context(
+        build_identity.clone(),
+        current_members,
+    )
+    .map_err(|error| error.to_string())?;
+    let cancel = {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        if cancels.contains_key(investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY)
+        {
+            return Err("Investigation Team known-answer qualification is already running".into());
+        }
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cancels.insert(
+            investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY.to_string(),
+            flag.clone(),
+        );
+        flag
+    };
+    let observed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
+        .as_secs() as i64;
+    let worker_cancel = cancel.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        investigation_team_known_answer_host::execute_live_known_answer(
+            targets,
+            observed_at,
+            build_identity,
+            &worker_cancel,
+        )
+    })
+    .await;
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        cancels.remove(investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY);
+    }
+    let reports = joined
+        .map_err(|error| format!("known-answer qualification worker join: {error}"))?
+        .map_err(|error| error.to_string())?;
+
+    let mut store = state
+        .investigation_team_known_answer
+        .lock()
+        .expect("investigation_team_known_answer");
+    let current = store
+        .reload_for_operation(&state.investigation_team_known_answer_store_path)
+        .map_err(|error| error.to_string())?
+        .clone();
+    let expected_revision = current.revision().map_err(|error| error.to_string())?;
+    let mut next = current;
+    for evidence in reports {
+        next.publish_execution(evidence)
+            .map_err(|error| error.to_string())?;
+    }
+    let published = next.history(&context).map_err(|error| error.to_string())?;
+    let outcome = next
+        .save(
+            &state.investigation_team_known_answer_store_path,
+            &expected_revision,
+        )
+        .map_err(|error| format!("save investigation team known-answer history: {error}"))?;
+    store.replace_with_committed(next);
+    if let Some(warning) = outcome.durability_warning.as_deref() {
+        tracing::warn!(%warning, revision = %outcome.revision, "known-answer history run committed with a durability warning");
+    }
+    Ok(published)
+}
+
+#[tauri::command]
+fn cancel_live_investigation_team_known_answer_qualification(state: State<'_, AppState>) -> bool {
+    let cancels = state.cancels.lock().expect("cancels");
+    if let Some(flag) =
+        cancels.get(investigation_team_known_answer_host::LIVE_KNOWN_ANSWER_CANCEL_KEY)
+    {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
+}
+
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
 ///
 /// For remote gateways, walks `expand_base_candidates` (TriageTool parity) and
@@ -15084,6 +15544,36 @@ pub fn run() {
             tracing::warn!(%error, "triage role qualification evidence could not be loaded");
             cd_core::triage_role_qualification::TriageRoleQualificationStoreV1::default()
         });
+    let investigation_team_qualification_store_path =
+        investigation_team_qualification_host::investigation_team_qualification_store_path(
+            path.parent().expect("config directory"),
+        );
+    let investigation_team_qualification_load =
+        investigation_team_qualification_host::InvestigationTeamQualificationStore::load(
+            &investigation_team_qualification_store_path,
+        );
+    if let Err(error) = &investigation_team_qualification_load {
+        tracing::warn!(%error, "investigation team qualification history is unavailable");
+    }
+    let investigation_team_qualification =
+        investigation_team_qualification_host::InvestigationTeamQualificationStoreState::from_load_result(
+            investigation_team_qualification_load,
+        );
+    let investigation_team_known_answer_store_path =
+        investigation_team_known_answer_host::investigation_team_known_answer_store_path(
+            path.parent().expect("config directory"),
+        );
+    let investigation_team_known_answer_load =
+        investigation_team_known_answer_host::InvestigationTeamKnownAnswerStore::load(
+            &investigation_team_known_answer_store_path,
+        );
+    if let Err(error) = &investigation_team_known_answer_load {
+        tracing::warn!(%error, "investigation team known-answer history is unavailable");
+    }
+    let investigation_team_known_answer =
+        investigation_team_known_answer_host::InvestigationTeamKnownAnswerStoreState::from_load_result(
+            investigation_team_known_answer_load,
+        );
 
     let state = AppState {
         branding,
@@ -15133,6 +15623,10 @@ pub fn run() {
         qualification_store: Mutex::new(qualification_store),
         qualification_store_path,
         triage_role_qualification_store: Mutex::new(triage_role_qualification_store),
+        investigation_team_qualification: Mutex::new(investigation_team_qualification),
+        investigation_team_qualification_store_path,
+        investigation_team_known_answer: Mutex::new(investigation_team_known_answer),
+        investigation_team_known_answer_store_path,
         log_explorer_nav_targets: Mutex::new(LogExplorerNavTargetStore::default()),
     };
     tauri::Builder::default()
@@ -15239,6 +15733,16 @@ pub fn run() {
             start_capability_qualification,
             cancel_capability_qualification,
             clear_capability_qualification,
+            get_investigation_team_qualification,
+            list_investigation_team_qualifications,
+            clear_investigation_team_qualification,
+            run_synthetic_investigation_team_qualification,
+            run_live_investigation_team_qualification,
+            cancel_live_investigation_team_qualification,
+            list_investigation_team_known_answer_qualifications,
+            clear_investigation_team_known_answer_qualifications,
+            run_live_investigation_team_known_answer_qualification,
+            cancel_live_investigation_team_known_answer_qualification,
             get_active_provider,
             get_turn_activity,
             get_developer_turn_activity,

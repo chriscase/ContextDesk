@@ -23,6 +23,7 @@ use cd_core::embed::{
 use cd_core::openai_chat_contract::{
     dialect_supports_mode, unsupported_mode_reason, ChatBackendDialect,
 };
+use cd_core::provider_telemetry::ProviderTransportTelemetry;
 use cd_core::providers::{ProviderKind, ProviderProfile};
 use cd_core::rerank::{RerankBackend, VercelV4RerankBackend};
 use cd_core::ssrf::SsrfPolicy;
@@ -264,6 +265,9 @@ pub struct LiveQualificationTransport {
     local_only: bool,
     /// Last inert tool execution (proves host validation path).
     pub last_inert_tool_result: Option<Result<String, String>>,
+    /// Authoritative wire telemetry from the most recent chat call. It is
+    /// drained by the requesting host and cleared before every new call.
+    last_chat_telemetry: std::sync::Mutex<Option<ProviderTransportTelemetry>>,
 }
 
 impl LiveQualificationTransport {
@@ -281,6 +285,7 @@ impl LiveQualificationTransport {
             extra_headers: Vec::new(),
             local_only,
             last_inert_tool_result: None,
+            last_chat_telemetry: std::sync::Mutex::new(None),
         }
     }
 
@@ -401,13 +406,23 @@ impl LiveQualificationTransport {
     }
 
     fn map_completion(
-        content: String,
-        tool_calls: Vec<ToolCallMsg>,
+        &self,
+        completion: cd_core::chat::ChatCompletion,
         streamed: bool,
         cancelled: bool,
         dialect: ChatBackendDialect,
         mode_transmitted: bool,
     ) -> SyntheticChatResponse {
+        let cd_core::chat::ChatCompletion {
+            content,
+            tool_calls,
+            telemetry,
+            ..
+        } = completion;
+        *self
+            .last_chat_telemetry
+            .lock()
+            .expect("last_chat_telemetry") = Some(telemetry);
         SyntheticChatResponse {
             content,
             tool_calls: tool_calls
@@ -495,9 +510,8 @@ impl LiveQualificationTransport {
                 )
                 .await;
             match result {
-                Ok(comp) => Ok(Self::map_completion(
-                    comp.content,
-                    comp.tool_calls,
+                Ok(comp) => Ok(self.map_completion(
+                    comp,
                     true,
                     cancel.load(Ordering::SeqCst),
                     dialect,
@@ -535,9 +549,8 @@ impl LiveQualificationTransport {
                     mode_transmitted: true,
                     ..Default::default()
                 }),
-                Ok(Ok(comp)) => Ok(Self::map_completion(
-                    comp.content,
-                    comp.tool_calls,
+                Ok(Ok(comp)) => Ok(self.map_completion(
+                    comp,
                     false,
                     cancel.load(Ordering::SeqCst),
                     dialect,
@@ -587,9 +600,8 @@ impl LiveQualificationTransport {
                 mode_transmitted: true,
                 ..Default::default()
             }),
-            Ok(Ok(comp)) => Ok(Self::map_completion(
-                comp.content,
-                comp.tool_calls,
+            Ok(Ok(comp)) => Ok(self.map_completion(
+                comp,
                 false,
                 cancel.load(Ordering::SeqCst),
                 dialect,
@@ -637,9 +649,8 @@ impl LiveQualificationTransport {
                 .complete_stream_cb(&messages, tools, |_| {}, Some(cancel))
                 .await
             {
-                Ok(comp) => Ok(Self::map_completion(
-                    comp.content,
-                    comp.tool_calls,
+                Ok(comp) => Ok(self.map_completion(
+                    comp,
                     true,
                     cancel.load(Ordering::SeqCst),
                     dialect,
@@ -670,9 +681,8 @@ impl LiveQualificationTransport {
                     mode_transmitted: true,
                     ..Default::default()
                 }),
-                Ok(Ok(comp)) => Ok(Self::map_completion(
-                    comp.content,
-                    comp.tool_calls,
+                Ok(Ok(comp)) => Ok(self.map_completion(
+                    comp,
                     false,
                     cancel.load(Ordering::SeqCst),
                     dialect,
@@ -692,6 +702,10 @@ impl QualificationTransport for LiveQualificationTransport {
         req: &SyntheticChatRequest,
         cancel: &AtomicBool,
     ) -> Result<SyntheticChatResponse, TransportError> {
+        *self
+            .last_chat_telemetry
+            .lock()
+            .expect("last_chat_telemetry") = None;
         // Host validates inert tools before any model-visible result continues.
         for tc in req.messages.iter().flat_map(|m| m.tool_calls.iter()) {
             if tc.name == INERT_PROBE_TOOL_NAME {
@@ -716,6 +730,13 @@ impl QualificationTransport for LiveQualificationTransport {
                 LiveBackendKind::Anthropic => self.chat_anthropic(req, cancel).await,
             }
         })
+    }
+
+    fn take_last_chat_provider_telemetry(&mut self) -> Option<ProviderTransportTelemetry> {
+        self.last_chat_telemetry
+            .lock()
+            .expect("last_chat_telemetry")
+            .take()
     }
 
     fn embed(

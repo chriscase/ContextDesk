@@ -57,6 +57,8 @@ pub mod index_watch;
 pub mod injection;
 /// Strict host-validated typed investigation answers.
 pub mod investigation_answer;
+/// Provider-neutral Investigation Team qualification core (issue #726 slice).
+pub mod investigation_team_qualification;
 pub mod investigations;
 /// Keychain / in-memory credential store (module name avoids gitignore `*secret*`).
 pub mod keychain_store;

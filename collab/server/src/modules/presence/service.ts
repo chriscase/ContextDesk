@@ -1,9 +1,11 @@
 import {
+  OVERVIEW_PRESENCE_CAP,
   PRESENCE_SCHEMA_ID,
   type CasePresenceV1,
   type PresenceSurface,
 } from "@cd-collab/contracts";
 import type { Pool } from "pg";
+import { overviewVisiblePredicate, type OverviewScope } from "../cases/index.js";
 
 const PRESENCE_TTL_MS = 45_000;
 const PRESENCE_TTL_SECONDS = Math.floor(PRESENCE_TTL_MS / 1_000);
@@ -20,9 +22,20 @@ export interface PresenceRecord {
   lastSeenAt: number;
 }
 
+export interface CasePresenceRecord extends PresenceRecord {
+  caseId: string;
+}
+
+export interface OverviewPresenceQuery extends OverviewScope {
+  limit: number;
+  visibleCaseTitle: (caseId: string) => Promise<string | null>;
+  now?: number;
+}
+
 export interface PresenceBackend {
   touch(caseId: string, actor: PresenceActor, surface: PresenceSurface): Promise<void>;
   list(caseId: string, now?: number): Promise<PresenceRecord[]>;
+  listOverviewPresence(query: OverviewPresenceQuery): Promise<CasePresenceRecord[]>;
 }
 
 export class MemoryPresenceBackend implements PresenceBackend {
@@ -51,6 +64,32 @@ export class MemoryPresenceBackend implements PresenceBackend {
       if (members.size === 0) this.cases.delete(caseId);
     }
     return fresh;
+  }
+
+  async listOverviewPresence(query: OverviewPresenceQuery): Promise<CasePresenceRecord[]> {
+    const cap = Math.min(
+      OVERVIEW_PRESENCE_CAP,
+      Math.max(0, Math.trunc(query.limit) || OVERVIEW_PRESENCE_CAP),
+    );
+    if (cap === 0) return [];
+    const now = query.now ?? Date.now();
+    const rows: CasePresenceRecord[] = [];
+    for (const [caseId, members] of this.cases.entries()) {
+      const caseTitle = await query.visibleCaseTitle(caseId);
+      if (!caseTitle) continue;
+      for (const member of members.values()) {
+        if (now - member.lastSeenAt > PRESENCE_TTL_MS) continue;
+        rows.push({ ...member, caseId });
+      }
+    }
+    return rows
+      .sort((a, b) => {
+        const bySeen = b.lastSeenAt - a.lastSeenAt;
+        if (bySeen !== 0) return bySeen;
+        const byCase = a.caseId.localeCompare(b.caseId);
+        return byCase !== 0 ? byCase : a.identityId.localeCompare(b.identityId);
+      })
+      .slice(0, cap);
   }
 }
 
@@ -104,6 +143,39 @@ export class PgPresenceBackend implements PresenceBackend {
         : Date.parse(row.last_seen_at),
     })).filter((row) => now - row.lastSeenAt <= PRESENCE_TTL_MS);
   }
+
+  async listOverviewPresence(query: OverviewPresenceQuery): Promise<CasePresenceRecord[]> {
+    const cap = Math.min(
+      OVERVIEW_PRESENCE_CAP,
+      Math.max(0, Math.trunc(query.limit) || OVERVIEW_PRESENCE_CAP),
+    );
+    if (cap === 0) return [];
+    const fresh = await this.pool.query<{
+      case_id: string;
+      identity_id: string;
+      username: string;
+      surface: PresenceSurface;
+      last_seen_at: Date | string;
+    }>(
+      `SELECT cp.case_id, cp.identity_id, cp.username, cp.surface, cp.last_seen_at
+       FROM case_presence cp
+       WHERE cp.last_seen_at >= now() - interval '45 seconds'
+         AND ${overviewVisiblePredicate("cp.case_id", "$1", "$2")}
+       ORDER BY cp.last_seen_at DESC, cp.case_id ASC, cp.identity_id ASC
+       LIMIT $3`,
+      [query.isAdmin, query.actorId, cap],
+    );
+    const now = query.now ?? Date.now();
+    return fresh.rows.map((row) => ({
+      caseId: row.case_id,
+      identityId: row.identity_id,
+      username: row.username,
+      surface: row.surface,
+      lastSeenAt: row.last_seen_at instanceof Date
+        ? row.last_seen_at.getTime()
+        : Date.parse(row.last_seen_at),
+    })).filter((row) => now - row.lastSeenAt <= PRESENCE_TTL_MS);
+  }
 }
 
 /**
@@ -131,6 +203,18 @@ export class PresenceService {
         lastSeenAt: new Date(member.lastSeenAt).toISOString(),
       })),
     };
+  }
+
+  async listOverviewPresence(
+    query: Omit<OverviewPresenceQuery, "visibleCaseTitle"> & {
+      visibleCaseTitle: OverviewPresenceQuery["visibleCaseTitle"];
+    },
+  ): Promise<CasePresenceRecord[]> {
+    return this.backend.listOverviewPresence(query);
+  }
+
+  ttlSeconds(): number {
+    return PRESENCE_TTL_SECONDS;
   }
 }
 

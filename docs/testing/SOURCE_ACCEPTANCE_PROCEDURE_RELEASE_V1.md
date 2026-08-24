@@ -60,8 +60,8 @@ exact SHA above. Keep the output local; it contains no credential value.
 ## 3. Preserve and inspect local state
 
 Reuse the existing data directory, imported corpus, provider profile, and
-configuration. Confirm the corpus and timezone read-only. The existing EDM
-Server corpus is intentionally `Asia/Tokyo`; do not change it. Do not reimport.
+configuration. Confirm the corpus and timezone read-only. If the acceptance
+corpus uses a non-UTC timezone, preserve that recorded setting. Do not reimport.
 
 Use the configured protected-file credential reference when available. Do not
 paste a key into chat, print it, log it, or put it in an artifact. A

@@ -109,7 +109,9 @@ describe("triage workspace capture paths", () => {
 
   it("keeps advanced provenance fields behind closed disclosure and required fields outside it", () => {
     render(<TriageWorkspace {...makeProps()} />);
-    const advanced = document.querySelectorAll<HTMLDetailsElement>(".triage-advanced");
+    const advanced = document.querySelectorAll<HTMLDetailsElement>(
+      ".triage-capture__paths form .triage-advanced",
+    );
     expect(advanced.length).toBe(2);
     for (const details of advanced) expect(details.open).toBe(false);
 
@@ -171,6 +173,20 @@ describe("triage workspace capture paths", () => {
 });
 
 describe("triage workspace guidance and provenance", () => {
+  it("renders a human-readable activity narrative and keeps raw audit identities closed", () => {
+    render(<TriageWorkspace {...makeProps()} />);
+    expect(screen.getByRole("heading", { name: "The investigation was opened" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "A human note was recorded" })).toBeTruthy();
+    expect(screen.getAllByText(/by alice/).length).toBe(2);
+    expect(screen.getByText(/adds human-attributed context to the shared investigation record/)).toBeTruthy();
+    const auditDetails = screen.getAllByText("Raw audit details").map((summary) =>
+      summary.closest("details") as HTMLDetailsElement,
+    );
+    expect(auditDetails.every((details) => details.open === false)).toBe(true);
+    expect(auditDetails[1]?.textContent).toContain("n1");
+    expect(auditDetails[1]?.textContent).toContain("contribution_created");
+  });
+
   it("renders the step rail with anchors for all four steps", () => {
     render(<TriageWorkspace {...makeProps()} />);
     const rail = screen.getByRole("navigation", { name: "Triage steps" });
@@ -268,12 +284,15 @@ describe("imported-run source attribution", () => {
     return document.querySelector(".imported-run") as HTMLElement;
   }
 
-  it("shows the exact recorded source id with matched catalog name and kind", () => {
+  it("shows recognizable source metadata and keeps the exact id in technical details", () => {
     render(<TriageWorkspace {...makeProps()} />);
     const card = importedCard();
-    expect(card.textContent).toContain("source s1");
-    expect(card.textContent).toContain("Fixture chat assistant");
-    expect(card.textContent).toContain("kind external-tool");
+    const primary = card.querySelector(":scope > .catalog__meta") as HTMLElement;
+    expect(primary.textContent).toContain("Source: Fixture chat assistant · external-tool");
+    expect(primary.textContent).not.toContain("s1");
+    const technical = card.querySelector("details") as HTMLDetailsElement;
+    expect(technical.open).toBe(false);
+    expect(technical.textContent).toContain("Recorded source ID: s1");
   });
 
   it("shows a source whose recorded kind is unknown as unknown, not a guess", () => {
@@ -286,9 +305,10 @@ describe("imported-run source attribution", () => {
       />,
     );
     const card = importedCard();
-    expect(card.textContent).toContain("source s9");
-    expect(card.textContent).toContain("Unattributed paste");
-    expect(card.textContent).toContain("kind unknown");
+    const primary = card.querySelector(":scope > .catalog__meta") as HTMLElement;
+    expect(primary.textContent).toContain("Source: Unattributed paste · unknown");
+    expect(primary.textContent).not.toContain("s9");
+    expect(card.querySelector("details")?.textContent).toContain("Recorded source ID: s9");
   });
 
   it("renders an unmatched source id verbatim with catalog-metadata-unavailable wording", () => {
@@ -298,10 +318,11 @@ describe("imported-run source attribution", () => {
       />,
     );
     const card = importedCard();
-    expect(card.textContent).toContain("source src-gone-042");
-    expect(card.textContent).toContain("catalog metadata unavailable");
-    expect(card.textContent).not.toContain("Fixture chat assistant");
-    expect(card.textContent).not.toContain("kind external-tool");
+    const primary = card.querySelector(":scope > .catalog__meta") as HTMLElement;
+    expect(primary.textContent).toContain("Recorded source metadata unavailable");
+    expect(primary.textContent).not.toContain("src-gone-042");
+    expect(primary.textContent).not.toContain("Fixture chat assistant");
+    expect(card.querySelector("details")?.textContent).toContain("Recorded source ID: src-gone-042");
   });
 });
 
@@ -352,10 +373,11 @@ describe("retired-source-safe manual intake", () => {
       />,
     );
     const card = document.querySelector(".imported-run") as HTMLElement;
-    expect(card.textContent).toContain("source s2");
-    expect(card.textContent).toContain("Legacy scanner");
-    expect(card.textContent).toContain("kind external-tool");
-    expect(card.textContent).not.toContain("catalog metadata unavailable");
+    const primary = card.querySelector(":scope > .catalog__meta") as HTMLElement;
+    expect(primary.textContent).toContain("Source: Legacy scanner · external-tool");
+    expect(primary.textContent).not.toContain("s2");
+    expect(card.querySelector("details")?.textContent).toContain("Recorded source ID: s2");
+    expect(card.textContent).not.toContain("Recorded source metadata unavailable");
     expect(screen.queryByRole("option", { name: "Legacy scanner (external-tool)" })).toBeNull();
   });
 

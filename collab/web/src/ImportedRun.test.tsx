@@ -49,4 +49,43 @@ describe("imported run rendering", () => {
     expect(screen.getByText("Contradicted")).toBeTruthy();
     expect(container.querySelector(".imported-run--contradicted")).toBeTruthy();
   });
+
+  it("keeps opaque source and snapshot identities behind technical details", () => {
+    const { container } = render(
+      <ImportedRun
+        canCorroborate={false}
+        run={{
+          id: "r3",
+          sourceId: "9d063475-e154-44f1-84ef-acde6ebbbac2",
+          outputText: "Recorded synthetic finding",
+          corroborationState: "unverified",
+          evidenceVisibility: "share_safe",
+          snapshotBinding: "snap-0123456789abcdef",
+          importerUsername: "alice",
+          operatorUsername: "operator",
+          promptText: null,
+          promptCompleteness: "unknown",
+        }}
+        source={{
+          id: "9d063475-e154-44f1-84ef-acde6ebbbac2",
+          name: "Synthetic diagnostic export",
+          kind: "external-tool",
+        }}
+        onCorroborate={vi.fn()}
+      />,
+    );
+
+    const primaryMeta = Array.from(container.querySelectorAll(":scope > article > p"))
+      .map((node) => node.textContent ?? "")
+      .join(" ");
+    expect(primaryMeta).toContain("bound to a frozen evidence snapshot");
+    expect(primaryMeta).toContain("Source: Synthetic diagnostic export · external-tool");
+    expect(primaryMeta).not.toContain("9d063475-e154-44f1-84ef-acde6ebbbac2");
+    expect(primaryMeta).not.toContain("snap-0123456789abcdef");
+
+    const technical = screen.getByText("Technical details").closest("details") as HTMLDetailsElement;
+    expect(technical.open).toBe(false);
+    expect(technical.textContent).toContain("9d063475-e154-44f1-84ef-acde6ebbbac2");
+    expect(technical.textContent).toContain("snap-0123456789abcdef");
+  });
 });

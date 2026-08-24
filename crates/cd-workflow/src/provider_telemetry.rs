@@ -34,8 +34,8 @@ use cd_core::context_budgeting::ContextBudgetTelemetry;
 use cd_core::events::StreamEvent;
 use cd_core::provider_telemetry::{
     finish_reason_is_length, sanitize_configured_identity, sum_reported_f64_all,
-    sum_reported_u64_all, ApplicationRetryReason, ObservedRoute, ProviderRoundTelemetry,
-    ProviderTurnTelemetry,
+    sum_reported_u64_all, ApplicationRetryReason, ModelIdentityStatus, ObservedRoute,
+    ProviderRoundTelemetry, ProviderTurnTelemetry, ResponseModelIdentity,
 };
 use cd_core::turn_trace::{TracedCall, TracedOutcome};
 
@@ -104,12 +104,24 @@ fn round_from_call(call: &TracedCall) -> ProviderRoundTelemetry {
     }
 }
 
-/// Last non-empty identity from the chronologically last round that reported it.
-fn last_response_model(rounds: &[ProviderRoundTelemetry]) -> Option<String> {
-    rounds
-        .iter()
-        .rev()
-        .find_map(|r| r.transport.response_model.clone())
+/// Last authoritative identity outcome. A rejection is authoritative and must
+/// not fall back to an older certified value; absence is not authoritative.
+fn last_response_model_identity(
+    rounds: &[ProviderRoundTelemetry],
+) -> (Option<String>, ModelIdentityStatus) {
+    for round in rounds.iter().rev() {
+        match round.transport.response_model_identity() {
+            ResponseModelIdentity::Certified { value } => {
+                return (
+                    Some(value.as_str().to_owned()),
+                    ModelIdentityStatus::Certified,
+                );
+            }
+            ResponseModelIdentity::Rejected => return (None, ModelIdentityStatus::Rejected),
+            ResponseModelIdentity::Absent => {}
+        }
+    }
+    (None, ModelIdentityStatus::Absent)
 }
 
 fn last_provider_request_id(rounds: &[ProviderRoundTelemetry]) -> Option<String> {
@@ -183,11 +195,13 @@ pub fn aggregate_provider_turn_telemetry(
     } else {
         Some(rounds.iter().filter_map(|r| r.latency_ms).sum())
     };
+    let (response_model, model_identity_status) = last_response_model_identity(&rounds);
 
     ProviderTurnTelemetry {
         configured_profile_id: sanitize_configured_identity(input.configured_profile_id),
         configured_model: sanitize_configured_identity(input.configured_model),
-        response_model: last_response_model(&rounds),
+        response_model,
+        model_identity_status,
         provider_request_id: last_provider_request_id(&rounds),
         observed_route: last_observed_route(&rounds),
         prompt_tokens: sum_reported_u64_all(&rounds, |r| r.transport.prompt_tokens),
@@ -231,7 +245,10 @@ pub fn aggregate_provider_telemetry_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cd_core::provider_telemetry::{ObservedRoute, ProviderTransportTelemetry};
+    use cd_core::provider_telemetry::{
+        CertifiedModelIdentity, ModelIdentityStatus, ObservedRoute, PresentResponseModelIdentity,
+        ProviderTransportTelemetry,
+    };
     use cd_core::turn_trace::{TracedCall, TracedMessage, TracedOutcome};
 
     fn call_with_transport(
@@ -284,7 +301,7 @@ mod tests {
         req: &str,
     ) -> ProviderTransportTelemetry {
         ProviderTransportTelemetry {
-            response_model: Some(model.into()),
+            response_model: Some(certified_response_model(model)),
             provider_request_id: Some(req.into()),
             observed_route: ObservedRoute::Reported {
                 value: "anthropic".into(),
@@ -301,10 +318,17 @@ mod tests {
         }
     }
 
+    fn certified_response_model(model: &str) -> PresentResponseModelIdentity {
+        PresentResponseModelIdentity::Certified {
+            value: CertifiedModelIdentity::try_from(model)
+                .expect("synthetic provider model identity must certify"),
+        }
+    }
+
     #[test]
     fn configured_model_never_becomes_observed_route() {
         let transport = ProviderTransportTelemetry {
-            response_model: Some("anthropic/claude-sonnet-4".into()),
+            response_model: Some(certified_response_model("anthropic/claude-sonnet-4")),
             ..Default::default()
         };
         let calls = vec![call_with_transport(0, transport, "stop", false)];
@@ -448,6 +472,82 @@ mod tests {
             Some("req-a")
         );
         assert!(tel.application_retry_reasons.is_empty());
+    }
+
+    #[test]
+    fn later_rejected_identity_blocks_fallback_to_older_certified_value() {
+        let rejected = ProviderTransportTelemetry {
+            response_model: Some(PresentResponseModelIdentity::Rejected),
+            ..Default::default()
+        };
+        let calls = vec![
+            call_with_transport(
+                0,
+                full_transport(1, 1, 0, 0, 2, 0.01, "model-a", "req-a"),
+                "tool_calls",
+                false,
+            ),
+            call_with_transport(1, rejected, "stop", false),
+        ];
+        let telemetry = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "configured",
+            calls: &calls,
+            events: &[],
+        });
+        assert_eq!(telemetry.response_model, None);
+        assert_eq!(
+            telemetry.model_identity_status,
+            ModelIdentityStatus::Rejected
+        );
+    }
+
+    #[test]
+    fn later_absence_preserves_the_last_authoritative_identity_outcome() {
+        let certified_then_absent = vec![
+            call_with_transport(
+                0,
+                full_transport(1, 1, 0, 0, 2, 0.01, "model-a", "req-a"),
+                "tool_calls",
+                false,
+            ),
+            call_with_transport(1, ProviderTransportTelemetry::default(), "stop", false),
+        ];
+        let certified = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "configured",
+            calls: &certified_then_absent,
+            events: &[],
+        });
+        assert_eq!(certified.response_model.as_deref(), Some("model-a"));
+        assert_eq!(
+            certified.model_identity_status,
+            ModelIdentityStatus::Certified
+        );
+
+        let rejected_then_absent = vec![
+            call_with_transport(
+                0,
+                ProviderTransportTelemetry {
+                    response_model: Some(PresentResponseModelIdentity::Rejected),
+                    ..Default::default()
+                },
+                "tool_calls",
+                false,
+            ),
+            call_with_transport(1, ProviderTransportTelemetry::default(), "stop", false),
+        ];
+        let rejected = aggregate_provider_turn_telemetry(ProviderTelemetryAggregateInput {
+            configured_profile_id: "p",
+            configured_model: "configured",
+            calls: &rejected_then_absent,
+            events: &[],
+        });
+        assert_eq!(rejected.response_model, None);
+        assert_eq!(
+            rejected.model_identity_status,
+            ModelIdentityStatus::Rejected
+        );
     }
 
     #[test]
@@ -614,11 +714,11 @@ mod tests {
             events: &events,
         });
         assert_eq!(
-            tel.rounds[0].transport.response_model.as_deref(),
+            tel.rounds[0].transport.certified_response_model(),
             Some("first")
         );
         assert_eq!(
-            tel.rounds[1].transport.response_model.as_deref(),
+            tel.rounds[1].transport.certified_response_model(),
             Some("second")
         );
         assert_eq!(tel.rounds[0].transport.cost, Some(0.01));
@@ -782,7 +882,7 @@ mod tests {
             ..Default::default()
         };
         let second = ProviderTransportTelemetry::default();
-        first.response_model = Some("deepseek/deepseek-v4-flash".into());
+        first.response_model = Some(certified_response_model("deepseek/deepseek-v4-flash"));
         let calls = vec![
             call_with_transport(0, first, "tool_calls", false),
             call_with_transport(1, second, "stop", false),

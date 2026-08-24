@@ -1,0 +1,44 @@
+{
+  "schemaId": "cd-collab.overview.v1",
+  "generatedAt": "2026-08-24T12:00:00.000Z",
+  "viewer": {
+    "identity": {
+      "id": "uid=fixture-lead,ou=people,dc=example,dc=test",
+      "username": "fixture-lead",
+      "displayName": "Fixture lead"
+    },
+    "roles": ["case-lead"]
+  },
+  "statusCounts": {
+    "open": 0,
+    "monitoring": 0,
+    "resolved": 0,
+    "archived": 0
+  },
+  "severityCounts": {
+    "low": 0,
+    "medium": 0,
+    "high": 0,
+    "critical": 0
+  },
+  "openCases": [],
+  "recentActivity": [],
+  "queuedAndRunningJobs": [],
+  "recentTerminalJobs": [],
+  "presence": {
+    "available": true,
+    "reason": "ephemeral_live",
+    "ttlSeconds": 45,
+    "members": []
+  },
+  "attention": [],
+  "notices": [
+    "Recorded counts are not progress or completeness.",
+    "Overview is not the full investigation inventory.",
+    "Presence is ephemeral and is not evidence.",
+    "Agreement is not proof of correctness, and cost and usage may remain unknown.",
+    "No blocked or stale investigation state exists unless it is recorded.",
+    "Attention names only an accept-eligible proposed decision the current lead or admin did not author, or the current actor's own still-open proposal."
+  ],
+  "inventedHealth": true
+}

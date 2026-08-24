@@ -2,11 +2,17 @@ import type { Pool } from "pg";
 import {
   parseSnapshot,
   SNAPSHOT_SCHEMA_ID,
+  CASE_SEVERITIES,
+  CASE_STATUSES,
+  OVERVIEW_OPEN_STATUSES,
   type ArtifactKind,
   type CaseSeverity,
   type CaseStatus,
   type ContributionKind,
   type HypothesisStatus,
+  type OverviewOpenStatus,
+  type OverviewSeverityCountsV1,
+  type OverviewStatusCountsV1,
   type PrivacyClass,
   type SnapshotV1,
 } from "@cd-collab/contracts";
@@ -24,6 +30,10 @@ export interface TimelineRow {
   clientTime: string | null;
   serverTime: string;
   payload: string;
+}
+
+export interface CaseTimelineRow extends TimelineRow {
+  caseId: string;
 }
 
 export interface CaseRow {
@@ -86,6 +96,67 @@ export interface TimelineInsert {
   payload: unknown;
 }
 
+export interface OverviewScope {
+  actorId: string;
+  isAdmin: boolean;
+}
+
+export interface OverviewActivityRow {
+  caseId: string;
+  title: string;
+  kind: string;
+  actor: string;
+  serverTime: string;
+  seq: number;
+}
+
+export interface OverviewOpenCaseRow {
+  id: string;
+  title: string;
+  status: OverviewOpenStatus;
+  severity: CaseSeverity;
+  createdAt: string;
+}
+
+export interface OverviewCounts {
+  status: OverviewStatusCountsV1;
+  severity: OverviewSeverityCountsV1;
+}
+
+export function overviewVisiblePredicate(
+  caseIdExpr: string,
+  adminParam: string,
+  actorParam: string,
+): string {
+  return `(${adminParam}::boolean OR EXISTS (
+    SELECT 1 FROM case_participants p
+    WHERE p.case_id = ${caseIdExpr} AND p.identity_id = ${actorParam}
+  ))`;
+}
+
+export function isOverviewVisibleCase(
+  row: { participants: { identityId: string }[] },
+  scope: OverviewScope,
+): boolean {
+  return scope.isAdmin || row.participants.some((participant) => participant.identityId === scope.actorId);
+}
+
+function emptyOverviewCounts(): OverviewCounts {
+  return {
+    status: { open: 0, monitoring: 0, resolved: 0, archived: 0 },
+    severity: { low: 0, medium: 0, high: 0, critical: 0 },
+  };
+}
+
+function isOverviewOpenStatus(status: string): status is OverviewOpenStatus {
+  return (OVERVIEW_OPEN_STATUSES as readonly string[]).includes(status);
+}
+
+function compareOverviewOpenCases(left: OverviewOpenCaseRow, right: OverviewOpenCaseRow): number {
+  const byCreated = right.createdAt.localeCompare(left.createdAt);
+  return byCreated !== 0 ? byCreated : left.id.localeCompare(right.id);
+}
+
 export interface CaseStore {
   listCases(): Promise<CaseRow[]>;
   getCase(id: string): Promise<CaseRow | null>;
@@ -97,6 +168,10 @@ export interface CaseStore {
     addedBy: string,
   ): Promise<void>;
   listTimeline(caseId: string): Promise<TimelineRow[]>;
+  listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]>;
+  overviewCounts(scope: OverviewScope): Promise<OverviewCounts>;
+  listOverviewOpenCases(scope: OverviewScope, limit: number): Promise<OverviewOpenCaseRow[]>;
+  listOverviewActivity(scope: OverviewScope, limit: number): Promise<OverviewActivityRow[]>;
   appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow>;
   listRevisions(contributionId: string): Promise<RevisionRow[]>;
   listLatestRevisions(caseId: string): Promise<RevisionRow[]>;
@@ -153,6 +228,79 @@ export class MemoryCaseStore implements CaseStore {
 
   async listTimeline(caseId: string): Promise<TimelineRow[]> {
     return [...(this.timeline.get(caseId) ?? [])];
+  }
+
+  async listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]> {
+    return caseIds
+      .flatMap((caseId) =>
+        (this.timeline.get(caseId) ?? []).map((row) => ({ ...row, caseId })),
+      )
+      .sort((left, right) => {
+        const byTime = right.serverTime.localeCompare(left.serverTime);
+        if (byTime !== 0) return byTime;
+        const byCase = left.caseId.localeCompare(right.caseId);
+        return byCase !== 0 ? byCase : right.seq - left.seq;
+      })
+      .slice(0, limit);
+  }
+
+  async overviewCounts(scope: OverviewScope): Promise<OverviewCounts> {
+    const counts = emptyOverviewCounts();
+    for (const row of this.cases.values()) {
+      if (!isOverviewVisibleCase(row, scope)) continue;
+      if ((CASE_STATUSES as readonly string[]).includes(row.status)) {
+        counts.status[row.status] += 1;
+      }
+      if ((CASE_SEVERITIES as readonly string[]).includes(row.severity)) {
+        counts.severity[row.severity] += 1;
+      }
+    }
+    return counts;
+  }
+
+  async listOverviewOpenCases(scope: OverviewScope, limit: number): Promise<OverviewOpenCaseRow[]> {
+    const cap = Math.max(0, Math.trunc(limit) || 0);
+    if (cap === 0) return [];
+    return [...this.cases.values()]
+      .flatMap((row): OverviewOpenCaseRow[] => {
+        if (!isOverviewVisibleCase(row, scope) || !isOverviewOpenStatus(row.status)) return [];
+        return [{
+          id: row.id,
+          title: row.title,
+          status: row.status,
+          severity: row.severity,
+          createdAt: row.createdAt,
+        }];
+      })
+      .sort(compareOverviewOpenCases)
+      .slice(0, cap);
+  }
+
+  async listOverviewActivity(scope: OverviewScope, limit: number): Promise<OverviewActivityRow[]> {
+    const cap = Math.max(0, Math.trunc(limit) || 0);
+    if (cap === 0) return [];
+    const rows: OverviewActivityRow[] = [];
+    for (const row of this.cases.values()) {
+      if (!isOverviewVisibleCase(row, scope)) continue;
+      for (const event of this.timeline.get(row.id) ?? []) {
+        rows.push({
+          caseId: row.id,
+          title: row.title,
+          kind: event.kind,
+          actor: event.actorUsername,
+          serverTime: event.serverTime,
+          seq: event.seq,
+        });
+      }
+    }
+    return rows
+      .sort((left, right) => {
+        const byTime = right.serverTime.localeCompare(left.serverTime);
+        if (byTime !== 0) return byTime;
+        const byCase = left.caseId.localeCompare(right.caseId);
+        return byCase !== 0 ? byCase : right.seq - left.seq;
+      })
+      .slice(0, cap);
   }
 
   async appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
@@ -310,6 +458,90 @@ export class PgCaseStore implements CaseStore {
       [caseId],
     );
     return result.rows.map((row) => asTimeline(row as Record<string, unknown>));
+  }
+
+  async listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]> {
+    if (caseIds.length === 0) return [];
+    const result = await this.db.query(
+      `SELECT case_id, seq, kind, actor_id, actor_username, target_id,
+              client_time, server_time, payload
+       FROM timeline_events
+       WHERE case_id = ANY($1::uuid[])
+       ORDER BY server_time DESC, case_id ASC, seq DESC
+       LIMIT $2`,
+      [caseIds, limit],
+    );
+    return result.rows.map((row) => ({
+      ...asTimeline(row as Record<string, unknown>),
+      caseId: String((row as Record<string, unknown>).case_id),
+    }));
+  }
+
+  async overviewCounts(scope: OverviewScope): Promise<OverviewCounts> {
+    const counts = emptyOverviewCounts();
+    const result = await this.db.query(
+      `SELECT c.status, c.severity, COUNT(*)::int AS n
+       FROM cases c
+       WHERE ${overviewVisiblePredicate("c.id", "$1", "$2")}
+       GROUP BY c.status, c.severity`,
+      [scope.isAdmin, scope.actorId],
+    );
+    for (const row of result.rows as { status: string; severity: string; n: number }[]) {
+      if ((CASE_STATUSES as readonly string[]).includes(row.status)) {
+        counts.status[row.status as CaseStatus] += Number(row.n);
+      }
+      if ((CASE_SEVERITIES as readonly string[]).includes(row.severity)) {
+        counts.severity[row.severity as CaseSeverity] += Number(row.n);
+      }
+    }
+    return counts;
+  }
+
+  async listOverviewOpenCases(scope: OverviewScope, limit: number): Promise<OverviewOpenCaseRow[]> {
+    const cap = Math.max(0, Math.trunc(limit) || 0);
+    if (cap === 0) return [];
+    const result = await this.db.query(
+      `SELECT c.id, c.title, c.status, c.severity, c.created_at
+       FROM cases c
+       WHERE c.status = ANY($3::text[])
+         AND ${overviewVisiblePredicate("c.id", "$1", "$2")}
+       ORDER BY c.created_at DESC, c.id ASC
+       LIMIT $4`,
+      [scope.isAdmin, scope.actorId, [...OVERVIEW_OPEN_STATUSES], cap],
+    );
+    return (result.rows as Record<string, unknown>[]).flatMap((row): OverviewOpenCaseRow[] => {
+      const status = String(row.status);
+      if (!isOverviewOpenStatus(status)) return [];
+      return [{
+        id: String(row.id),
+        title: String(row.title),
+        status,
+        severity: row.severity as CaseSeverity,
+        createdAt: asIso(row.created_at),
+      }];
+    });
+  }
+
+  async listOverviewActivity(scope: OverviewScope, limit: number): Promise<OverviewActivityRow[]> {
+    const cap = Math.max(0, Math.trunc(limit) || 0);
+    if (cap === 0) return [];
+    const result = await this.db.query(
+      `SELECT e.case_id, c.title, e.kind, e.actor_username, e.server_time, e.seq
+       FROM timeline_events e
+       INNER JOIN cases c ON c.id = e.case_id
+       WHERE ${overviewVisiblePredicate("c.id", "$1", "$2")}
+       ORDER BY e.server_time DESC, e.case_id ASC, e.seq DESC
+       LIMIT $3`,
+      [scope.isAdmin, scope.actorId, cap],
+    );
+    return (result.rows as Record<string, unknown>[]).map((row) => ({
+      caseId: String(row.case_id),
+      title: String(row.title),
+      kind: String(row.kind),
+      actor: String(row.actor_username),
+      serverTime: asIso(row.server_time),
+      seq: Number(row.seq),
+    }));
   }
 
   async appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {

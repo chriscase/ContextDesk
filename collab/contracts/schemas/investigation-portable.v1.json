@@ -1,0 +1,660 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/investigation-portable.v1.json",
+  "title": "cd-collab portable investigation bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "protocolVersion",
+    "sourceInstallationId",
+    "exportedAt",
+    "bundleFingerprint",
+    "permissionCaveat",
+    "historyCaveat",
+    "objectHashes",
+    "investigation",
+    "actors",
+    "participants",
+    "contributions",
+    "evidence",
+    "contentObjects",
+    "sources",
+    "importedAiRuns",
+    "snapshots",
+    "triageJobs",
+    "experiments",
+    "helpfulnessObservations",
+    "decisions",
+    "gold",
+    "alignments",
+    "discussions",
+    "timeline",
+    "auditRefs",
+    "attachments"
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^(?:[a-z][a-z0-9_-]{0,31}-)?[a-f0-9]{64}$"
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "privacy": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "inclusion": {
+      "type": "string",
+      "enum": ["present", "omitted", "private", "redacted"]
+    },
+    "providerKind": {
+      "type": "string",
+      "enum": ["openai_compatible", "ollama", "xai_grok_build", "anthropic", "unknown"]
+    },
+    "unknownStatus": { "type": "string", "const": "unknown" },
+    "opaquePayloadJson": {
+      "description": "Canonical JSON object text. Unknown keys are preserved only here.",
+      "anyOf": [{ "type": "string", "minLength": 2 }, { "type": "null" }]
+    },
+    "objectHash": { "$ref": "#/$defs/sha256" },
+    "hashEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "hash"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "investigation",
+            "actor",
+            "contribution",
+            "evidence",
+            "content",
+            "source",
+            "imported_ai_run",
+            "snapshot",
+            "triage_job",
+            "experiment",
+            "helpfulness",
+            "decision",
+            "gold",
+            "alignment",
+            "discussion",
+            "timeline",
+            "audit",
+            "attachment"
+          ]
+        },
+        "id": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.investigation_portable.v1" },
+    "protocolVersion": { "type": "string", "const": "cd.v1" },
+    "sourceInstallationId": {
+      "type": "string",
+      "pattern": "^inst-[a-z0-9]{8,64}$"
+    },
+    "exportedAt": { "$ref": "#/$defs/timestamp" },
+    "bundleFingerprint": { "$ref": "#/$defs/fingerprint" },
+    "permissionCaveat": {
+      "type": "string",
+      "const": "Imported membership and roles are historical snapshots only. Destination permissions must be newly authorized and audited."
+    },
+    "historyCaveat": {
+      "type": "string",
+      "const": "Imported history is immutable. Destination identity is never inferred from display name or email."
+    },
+    "objectHashes": { "type": "array", "items": { "$ref": "#/$defs/hashEntry" } },
+    "investigation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "status",
+        "severity",
+        "legalHold",
+        "retentionClass",
+        "privacyClass",
+        "createdAt",
+        "createdBy",
+        "objectHash"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["open", "monitoring", "resolved", "archived"] },
+        "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+        "legalHold": { "type": "boolean" },
+        "retentionClass": { "type": "string", "minLength": 1 },
+        "privacyClass": { "$ref": "#/$defs/privacy" },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "createdBy": { "type": "string", "minLength": 1 },
+        "objectHash": { "$ref": "#/$defs/objectHash" }
+      }
+    },
+    "actors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceActorId",
+          "username",
+          "displayName",
+          "email",
+          "roleNote",
+          "objectHash"
+        ],
+        "properties": {
+          "sourceActorId": { "type": "string", "minLength": 1 },
+          "username": { "type": "string", "minLength": 1 },
+          "displayName": { "type": "string", "minLength": 1 },
+          "email": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "roleNote": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceActorId", "role"],
+        "properties": {
+          "sourceActorId": { "type": "string", "minLength": 1 },
+          "role": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "contributions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "revision",
+          "predecessorRevision",
+          "body",
+          "contentHash",
+          "privacyClass",
+          "tombstoned",
+          "authorId",
+          "sourceId",
+          "createdAt",
+          "hypothesisStatus",
+          "objectHash"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "kind": {
+            "type": "string",
+            "enum": ["message", "note", "hypothesis", "action", "upload", "external_run"]
+          },
+          "revision": { "type": "integer", "minimum": 0 },
+          "predecessorRevision": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+          "body": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "contentHash": { "$ref": "#/$defs/sha256" },
+          "privacyClass": { "$ref": "#/$defs/privacy" },
+          "tombstoned": { "type": "boolean" },
+          "authorId": { "type": "string", "minLength": 1 },
+          "sourceId": { "type": "string", "minLength": 1 },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "hypothesisStatus": {
+            "anyOf": [
+              { "type": "string", "enum": ["proposed", "supported", "contradicted", "superseded"] },
+              { "type": "null" }
+            ]
+          },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "privacyClass",
+          "digest",
+          "inclusion",
+          "contentType",
+          "byteLength",
+          "createdBy",
+          "createdAt",
+          "objectHash"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "privacyClass": { "$ref": "#/$defs/privacy" },
+          "digest": { "$ref": "#/$defs/sha256" },
+          "inclusion": { "$ref": "#/$defs/inclusion" },
+          "contentType": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "byteLength": { "type": "integer", "minimum": 0 },
+          "createdBy": { "type": "string", "minLength": 1 },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "contentObjects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["digest", "byteLength", "contentType", "inclusion", "payloadBase64", "objectHash"],
+        "properties": {
+          "digest": { "$ref": "#/$defs/sha256" },
+          "byteLength": { "type": "integer", "minimum": 0 },
+          "contentType": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "inclusion": { "$ref": "#/$defs/inclusion" },
+          "payloadBase64": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "kind", "lifecycle", "identityId", "createdAt", "createdBy", "objectHash"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "kind": {
+            "type": "string",
+            "enum": ["human", "external-tool", "internal-system", "contextdesk", "unknown"]
+          },
+          "lifecycle": { "type": "string", "enum": ["active", "retired"] },
+          "identityId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "createdBy": { "type": "string", "minLength": 1 },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "importedAiRuns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "sourceId",
+          "importedAt",
+          "providerKind",
+          "model",
+          "version",
+          "profileId",
+          "usageStatus",
+          "costStatus",
+          "outputDigest",
+          "opaquePayloadJson",
+          "objectHash"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "sourceId": { "type": "string", "minLength": 1 },
+          "importedAt": { "$ref": "#/$defs/timestamp" },
+          "providerKind": { "$ref": "#/$defs/providerKind" },
+          "model": { "type": "string", "minLength": 1 },
+          "version": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "profileId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "usageStatus": { "$ref": "#/$defs/unknownStatus" },
+          "costStatus": { "$ref": "#/$defs/unknownStatus" },
+          "outputDigest": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+          "opaquePayloadJson": { "$ref": "#/$defs/opaquePayloadJson" },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "snapshots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "fingerprint",
+          "parentSnapshotId",
+          "fairnessClass",
+          "lineageClass",
+          "visibility",
+          "protocolVersion",
+          "evidence",
+          "createdAt",
+          "createdBy",
+          "objectHash"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "fingerprint": { "$ref": "#/$defs/fingerprint" },
+          "parentSnapshotId": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+          "fairnessClass": { "type": "string", "enum": ["same_snapshot", "unknown"] },
+          "lineageClass": { "type": "string", "enum": ["root", "derived", "unknown"] },
+          "visibility": { "$ref": "#/$defs/privacy" },
+          "protocolVersion": { "type": "string", "minLength": 1 },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["evidenceId", "ordinal", "contentHash", "privacyClass"],
+              "properties": {
+                "evidenceId": { "type": "string", "minLength": 1 },
+                "ordinal": { "type": "integer", "minimum": 0 },
+                "contentHash": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+                "privacyClass": { "$ref": "#/$defs/privacy" }
+              }
+            }
+          },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "createdBy": { "type": "string", "minLength": 1 },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "triageJobs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "snapshotId",
+          "snapshotFingerprint",
+          "strategyId",
+          "status",
+          "parentJobId",
+          "requestFingerprint",
+          "candidates",
+          "requestedBy",
+          "createdAt",
+          "objectHash"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "snapshotId": { "type": "string", "minLength": 1 },
+          "snapshotFingerprint": { "$ref": "#/$defs/fingerprint" },
+          "strategyId": { "type": "string", "minLength": 1 },
+          "status": {
+            "type": "string",
+            "enum": ["queued", "running", "completed", "partial", "failed", "timed_out", "cancelled"]
+          },
+          "parentJobId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "requestFingerprint": { "$ref": "#/$defs/fingerprint" },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "candidateId",
+                "role",
+                "providerKind",
+                "profileId",
+                "model",
+                "version",
+                "usageStatus",
+                "costStatus",
+                "outputHash",
+                "evidenceRefs"
+              ],
+              "properties": {
+                "candidateId": { "type": "string", "minLength": 1 },
+                "role": { "type": "string", "minLength": 1 },
+                "providerKind": { "$ref": "#/$defs/providerKind" },
+                "profileId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                "model": { "type": "string", "minLength": 1 },
+                "version": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+                "usageStatus": { "$ref": "#/$defs/unknownStatus" },
+                "costStatus": { "$ref": "#/$defs/unknownStatus" },
+                "outputHash": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+                "evidenceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+              }
+            }
+          },
+          "requestedBy": { "type": "string", "minLength": 1 },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "experiments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "packageId",
+          "snapshotFingerprint",
+          "taskFingerprint",
+          "candidateIds",
+          "createdAt",
+          "objectHash"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "packageId": { "type": "string", "minLength": 1 },
+          "snapshotFingerprint": { "$ref": "#/$defs/fingerprint" },
+          "taskFingerprint": { "$ref": "#/$defs/fingerprint" },
+          "candidateIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "helpfulnessObservations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "experimentId",
+          "candidateId",
+          "dimension",
+          "score",
+          "rationale",
+          "evidenceRefs",
+          "reviewerId",
+          "createdAt",
+          "objectHash"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "experimentId": { "type": "string", "minLength": 1 },
+          "candidateId": { "type": "string", "minLength": 1 },
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "evidence_support",
+              "actionability",
+              "uncertainty_calibration",
+              "unsafe_unsupported_claims"
+            ]
+          },
+          "score": { "type": "integer", "minimum": 0 },
+          "rationale": { "type": "string" },
+          "evidenceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "reviewerId": { "type": "string", "minLength": 1 },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "experimentId",
+          "status",
+          "revision",
+          "predecessorRevision",
+          "text",
+          "rationale",
+          "evidenceRefs",
+          "authorId",
+          "createdAt",
+          "objectHash"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "experimentId": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["proposed", "accepted"] },
+          "revision": { "type": "integer", "minimum": 0 },
+          "predecessorRevision": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] },
+          "text": { "type": "string" },
+          "rationale": { "type": "string" },
+          "evidenceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "authorId": { "type": "string", "minLength": 1 },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "gold": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "goldId",
+          "version",
+          "predecessorGoldId",
+          "experimentId",
+          "acceptedDecisionId",
+          "acceptedDecisionRevision",
+          "evidenceAnchors",
+          "notes",
+          "promotedById",
+          "createdAt",
+          "objectHash"
+        ],
+        "properties": {
+          "goldId": { "type": "string", "minLength": 1 },
+          "version": { "type": "integer", "minimum": 0 },
+          "predecessorGoldId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "experimentId": { "type": "string", "minLength": 1 },
+          "acceptedDecisionId": { "type": "string", "minLength": 1 },
+          "acceptedDecisionRevision": { "type": "integer", "minimum": 0 },
+          "evidenceAnchors": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "notes": { "type": "array", "items": { "type": "string" } },
+          "promotedById": { "type": "string", "minLength": 1 },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "alignments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "goldId",
+          "candidateId",
+          "status",
+          "matchedAnchors",
+          "missingAnchors",
+          "extraAnchors",
+          "notes",
+          "objectHash"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "goldId": { "type": "string", "minLength": 1 },
+          "candidateId": { "type": "string", "minLength": 1 },
+          "status": {
+            "type": "string",
+            "enum": ["aligned", "partial", "divergent", "unscored", "unknown", "absent"]
+          },
+          "matchedAnchors": { "type": "array", "items": { "type": "string" } },
+          "missingAnchors": { "type": "array", "items": { "type": "string" } },
+          "extraAnchors": { "type": "array", "items": { "type": "string" } },
+          "notes": { "type": "array", "items": { "type": "string" } },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "discussions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "authorId", "createdAt", "messageIds", "objectHash"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "authorId": { "type": "string", "minLength": 1 },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "messageIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "timeline": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["seq", "kind", "actorId", "targetId", "targetNamespace", "serverTime", "objectHash"],
+        "properties": {
+          "seq": { "type": "integer", "minimum": 0 },
+          "kind": { "type": "string", "minLength": 1 },
+          "actorId": { "type": "string", "minLength": 1 },
+          "targetId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "targetNamespace": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "serverTime": { "$ref": "#/$defs/timestamp" },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "auditRefs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "actorId", "createdAt", "summaryHash", "objectHash"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "minLength": 1 },
+          "actorId": { "type": "string", "minLength": 1 },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "summaryHash": { "$ref": "#/$defs/sha256" },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "discussionId", "evidenceId", "digest", "inclusion", "objectHash"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "discussionId": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+          "evidenceId": { "type": "string", "minLength": 1 },
+          "digest": { "$ref": "#/$defs/sha256" },
+          "inclusion": { "$ref": "#/$defs/inclusion" },
+          "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    }
+  }
+}

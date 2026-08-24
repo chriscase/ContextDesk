@@ -52,6 +52,7 @@ export const LIVE_QUALIFICATION_ERROR_CODES = [
   "provider_rate_limited",
   "provider_call_budget_exhausted",
   "malformed_output",
+  "root_cause_not_established",
 ] as const;
 export type LiveQualificationErrorCode = (typeof LIVE_QUALIFICATION_ERROR_CODES)[number];
 

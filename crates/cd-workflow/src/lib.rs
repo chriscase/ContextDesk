@@ -18,6 +18,8 @@ pub mod chat;
 /// Workflow-layer resolution of the host-grounded fast-triage runtime.
 pub mod fast_triage;
 pub mod import;
+/// Host-neutral execution and honest status projection for Investigation Team qualification.
+pub mod investigation_team_qualification;
 pub mod logging_quality;
 pub mod multi_model;
 pub mod normalize;

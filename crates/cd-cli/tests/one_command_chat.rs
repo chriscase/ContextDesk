@@ -130,6 +130,13 @@ async fn blank_questions_close_each_output_contract_without_provider_calls() {
         .unwrap()
         .contains("question cannot be blank"));
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(&app_config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     let mut profile = ProviderProfile::ollama_local();
     profile.kind = ProviderKind::OpenAiCompatible;
     profile.base_url = server.uri();

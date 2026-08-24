@@ -195,6 +195,15 @@ Future policy (non-binding design):
 
 ## Attaching later live experiments
 
+The provider-neutral, truth-isolated request/response boundary for the checked-in
+known-answer cases is specified in
+[`INVESTIGATION_TEAM_KNOWN_ANSWER_V1.md`](INVESTIGATION_TEAM_KNOWN_ANSWER_V1.md).
+The trusted desktop host executes that boundary for exact configured
+Investigation Team roles, persists canonical redacted history, and exposes
+quality/lifecycle/latency/byte evidence in Settings without packaging evaluator
+truth as a browseable resource. It deliberately makes no universal
+recommendation claim.
+
 Live DeepSeek / Grok / Vercel / embedding / rerank runners should:
 
 1. Produce `RetrievalRanking` and/or `CandidateAnswer` records with the same schemas.

@@ -17,6 +17,9 @@ export interface ContributionView {
   body: string | null;
   privacyClass: string;
   tombstoned: boolean;
+  /** The wire payload records these; older fixtures and embeddings may omit them. */
+  authorUsername?: string;
+  createdAt?: string;
 }
 
 export interface RunRow {
@@ -58,24 +61,67 @@ function contributionChip(kind: string): { className: string; label: string } | 
   return null;
 }
 
-function timelinePayload(payload: string): string {
+function parsedTimelinePayload(payload: string): Record<string, unknown> | null {
   try {
     const value: unknown = JSON.parse(payload);
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return String(value);
-    return Object.entries(value as Record<string, unknown>)
-      .map(([key, item]) => {
-        const label = key.replaceAll(/([a-z])([A-Z])/g, "$1 $2");
-        const rendered = Array.isArray(item)
-          ? item.join(", ")
-          : typeof item === "object" && item !== null
-            ? JSON.stringify(item)
-            : String(item);
-        return `${label}: ${rendered}`;
-      })
-      .join(" · ");
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
   } catch {
-    return payload;
+    return null;
   }
+}
+
+function timelineTitle(event: TimelineEvent, contribution?: ContributionView): string {
+  if (contribution?.tombstoned) return "A case entry was removed";
+  if (contribution) {
+    const labels: Record<string, string> = {
+      note: "A human note was recorded",
+      hypothesis: "A working hypothesis was recorded",
+      action: "A next action was recorded",
+      message: "A human observation was recorded",
+      upload: "An evidence upload was recorded",
+      external_run: "External analysis was imported",
+    };
+    return labels[contribution.kind] ?? "The case record was updated";
+  }
+  const kind = event.kind.toLowerCase();
+  if (kind.includes("case_created")) return "The investigation was opened";
+  if (kind.includes("status")) return "The investigation status changed";
+  if (kind.includes("snapshot")) return "Evidence was frozen for repeatable analysis";
+  if (kind.includes("experiment") || kind.includes("run")) return "An analysis run was recorded";
+  if (kind.includes("decision")) return "A human decision was recorded";
+  if (kind.includes("discussion") || kind.includes("comment")) return "A collaborator added context";
+  return "Case activity was recorded";
+}
+
+function timelineMeaning(event: TimelineEvent, contribution?: ContributionView): string {
+  if (contribution?.tombstoned) return "The audit history is preserved, but this entry is no longer part of the current working record.";
+  if (contribution?.kind === "hypothesis") return "This is a possibility to test, not an established cause.";
+  if (contribution?.kind === "action") return "This records work someone can perform and report back on.";
+  if (contribution?.kind === "external_run") return "Imported output remains unverified until a person corroborates or contradicts it.";
+  if (contribution) return "This adds human-attributed context to the shared investigation record.";
+  const kind = event.kind.toLowerCase();
+  if (kind.includes("snapshot")) return "Later model comparisons can be checked against the same bounded evidence state.";
+  if (kind.includes("decision")) return "This captures human judgment without presenting model agreement as proof.";
+  if (kind.includes("status")) return "This changes how collaborators understand the investigation’s current phase.";
+  return "This event is retained for provenance; no more specific human-readable meaning was captured.";
+}
+
+function timelineTime(event: TimelineEvent): string {
+  const value = event.serverTime || event.clientTime;
+  if (!value) return "time not recorded";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.valueOf()) ? "time not recorded" : parsed.toLocaleString();
+}
+
+function payloadSummary(payload: Record<string, unknown> | null): string | null {
+  if (!payload) return null;
+  for (const key of ["summary", "title", "status", "message", "reason"]) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
 }
 
 /**
@@ -475,12 +521,12 @@ export function TriageWorkspace(props: {
                       ? props.contributions.find((item) => item.id === event.targetId)
                       : undefined;
                     const chip = contribution ? contributionChip(contribution.kind) : null;
+                    const payload = parsedTimelinePayload(event.payload);
+                    const summary = payloadSummary(payload);
                     return (
                       <li key={event.seq} className="timeline__item">
-                        <div className="timeline__meta">
-                          #{event.seq} {event.kind} · {event.actorUsername}
-                          {event.targetId ? ` · target ${event.targetId}` : ""}
-                        </div>
+                        <h5 className="triage-record__event-title">{timelineTitle(event, contribution)}</h5>
+                        <p className="timeline__meta">by {event.actorUsername} · {timelineTime(event)}</p>
                         {contribution?.body && !contribution.tombstoned ? (
                           <div className="triage-record__contribution">
                             <span className="timeline__meta">
@@ -493,9 +539,22 @@ export function TriageWorkspace(props: {
                             </span>
                             <div>{contribution.body}</div>
                           </div>
-                        ) : (
-                          <div>{timelinePayload(event.payload)}</div>
-                        )}
+                        ) : summary ? <p>{summary}</p> : null}
+                        <p className="triage-record__meaning">
+                          <strong>Why it matters:</strong> {timelineMeaning(event, contribution)}
+                        </p>
+                        <details className="triage-record__audit">
+                          <summary>Raw audit details</summary>
+                          <dl>
+                            <dt>Sequence</dt><dd>{event.seq}</dd>
+                            <dt>Event kind</dt><dd>{event.kind}</dd>
+                            <dt>Actor</dt><dd>{event.actorUsername}</dd>
+                            <dt>Target</dt><dd>{event.targetId ?? "none"}</dd>
+                            <dt>Client time</dt><dd>{event.clientTime ?? "not recorded"}</dd>
+                            <dt>Server time</dt><dd>{event.serverTime}</dd>
+                            <dt>Payload</dt><dd><code>{event.payload}</code></dd>
+                          </dl>
+                        </details>
                       </li>
                     );
                   })}
