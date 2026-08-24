@@ -93,6 +93,89 @@ function requireNonEmpty(path: string, value: string, detail = "must not be empt
   return value;
 }
 
+const DISALLOWED_IDENTIFIER_CODE_POINT_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x0000, 0x001f],
+  [0x007f, 0x009f],
+  [0x00ad, 0x00ad],
+  [0x034f, 0x034f],
+  [0x061c, 0x061c],
+  [0x115f, 0x1160],
+  [0x17b4, 0x17b5],
+  [0x180b, 0x180f],
+  [0x200b, 0x200f],
+  [0x202a, 0x202e],
+  [0x2060, 0x206f],
+  [0x3164, 0x3164],
+  [0xfe00, 0xfe0f],
+  [0xfeff, 0xfeff],
+  [0xffa0, 0xffa0],
+  [0xe0100, 0xe01ef],
+];
+
+function hasDisallowedIdentifierCodePoint(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint !== undefined &&
+      DISALLOWED_IDENTIFIER_CODE_POINT_RANGES.some(
+        ([start, end]) => codePoint >= start && codePoint <= end,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function requireSafeIdentifier(path: string, value: string): string {
+  requireNonEmpty(path, value, "identifier must not be empty");
+  if (hasDisallowedIdentifierCodePoint(value)) {
+    throw new ContractViolation(path, "control or zero-width character in identifier");
+  }
+  return value;
+}
+
+/**
+ * Locale-independent lexicographic ordering over ECMAScript UTF-16 code units.
+ * Do not replace with localeCompare: portable fingerprints and remap reports
+ * must not depend on the source or destination host's locale/ICU data.
+ */
+function compareCodeUnits(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+function assertSafeIdentifiers(value: unknown, path = "$."): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, i) => assertSafeIdentifiers(item, `${path}[${i}]`));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const childPath = path === "$." ? `$.${key}` : `${path}.${key}`;
+    if (typeof child === "string" && /id$/i.test(key)) {
+      requireSafeIdentifier(childPath, child);
+    } else if (
+      Array.isArray(child) &&
+      /(?:ids|refs|anchors)$/i.test(key) &&
+      child.every((item) => typeof item === "string")
+    ) {
+      child.forEach((item, i) => requireSafeIdentifier(`${childPath}[${i}]`, item as string));
+    } else if (key === "objectIds" && child && typeof child === "object") {
+      for (const [namespace, ids] of Object.entries(child as Record<string, unknown>)) {
+        if (Array.isArray(ids)) {
+          ids.forEach((id, i) => {
+            if (typeof id === "string") {
+              requireSafeIdentifier(`${childPath}.${namespace}[${i}]`, id);
+            }
+          });
+        }
+      }
+    }
+    assertSafeIdentifiers(child, childPath);
+  }
+}
+
 function requireSha256(path: string, value: string): void {
   if (!SHA256_HEX.test(value)) {
     throw new ContractViolation(path, "expected a lowercase SHA-256 hex digest");
@@ -104,7 +187,7 @@ function canonicalValue(value: unknown): unknown {
   if (value && typeof value === "object") {
     const row = value as Record<string, unknown>;
     const out: Record<string, unknown> = {};
-    for (const key of Object.keys(row).sort()) {
+    for (const key of Object.keys(row).sort(compareCodeUnits)) {
       out[key] = canonicalValue(row[key]);
     }
     return out;
@@ -128,7 +211,38 @@ function parseOpaquePayloadJson(path: string, raw: string | null): string | null
     throw new ContractViolation(path, "opaquePayloadJson must encode a JSON object");
   }
   assertNoCredentialLeakage(parsed, path);
+  assertOpaqueTransportSafety(parsed, path);
   return canonicalJson(parsed);
+}
+
+function assertOpaqueTransportSafety(value: unknown, path: string): void {
+  if (typeof value === "string") {
+    if (
+      /\b[a-z][a-z0-9+.-]*:\/\//i.test(value) ||
+      /(?:^|[\s"'`(=:[\]{},])\/\/[a-z0-9._~-]+(?:[/:?#]|$)/i.test(value)
+    ) {
+      throw new ContractViolation(path, "opaque payload must not contain a live endpoint or URL");
+    }
+    if (
+      /(?:^|[\s"'`(=:[\]{},])(?:\.\.?[\\/])+[^\s"'`<>]+/.test(value) ||
+      /(?:^|[\s"'`(=:[\]{},])~[\\/][^\s"'`<>]+/.test(value) ||
+      /(?:^|[\s"'`(=:[\]{},])\/(?!\/)[a-z0-9._~-]+(?:[\\/][^\s"'`<>]+)*/i.test(value) ||
+      /\b[a-z]:[\\/][^\s"'`<>]*/i.test(value) ||
+      /\\\\[a-z0-9._-]+\\/i.test(value)
+    ) {
+      throw new ContractViolation(path, "opaque payload must not contain a filesystem path");
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, i) => assertOpaqueTransportSafety(item, `${path}[${i}]`));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    assertOpaqueTransportSafety(key, `${path}.${key}`);
+    assertOpaqueTransportSafety(child, `${path}.${key}`);
+  }
 }
 
 function normalizedKey(key: string): string {
@@ -171,7 +285,7 @@ export function assertNoCredentialLeakage(value: unknown, path = "$"): void {
 function uniqueIds(path: string, ids: string[]): void {
   const seen = new Set<string>();
   for (const [i, id] of ids.entries()) {
-    requireNonEmpty(`${path}[${i}]`, id);
+    requireSafeIdentifier(`${path}[${i}]`, id);
     if (seen.has(id)) {
       throw new ContractViolation(`${path}[${i}]`, "duplicate id");
     }
@@ -180,7 +294,7 @@ function uniqueIds(path: string, ids: string[]): void {
 }
 
 function sortBy<T>(rows: readonly T[], key: (row: T) => string): T[] {
-  return [...rows].sort((a, b) => key(a).localeCompare(key(b)));
+  return [...rows].sort((a, b) => compareCodeUnits(key(a), key(b)));
 }
 
 function byId<T extends { id: string }>(rows: readonly T[]): Map<string, T> {
@@ -1097,9 +1211,126 @@ function validateContent(bundle: PortableInvestigationV1): void {
   }
 }
 
+function portableNamespaceIds(
+  bundle: PortableInvestigationV1,
+): Record<PortableObjectKind, Set<string>> {
+  return {
+    investigation: new Set([bundle.investigation.id]),
+    actor: new Set(bundle.actors.map((row) => row.sourceActorId)),
+    contribution: new Set(bundle.contributions.map((row) => row.id)),
+    evidence: new Set(bundle.evidence.map((row) => row.id)),
+    content: new Set(bundle.contentObjects.map((row) => row.digest)),
+    source: new Set(bundle.sources.map((row) => row.id)),
+    imported_ai_run: new Set(bundle.importedAiRuns.map((row) => row.id)),
+    snapshot: new Set(bundle.snapshots.map((row) => row.id)),
+    triage_job: new Set(bundle.triageJobs.map((row) => row.id)),
+    experiment: new Set(bundle.experiments.map((row) => row.id)),
+    helpfulness: new Set(bundle.helpfulnessObservations.map((row) => row.id)),
+    decision: new Set(bundle.decisions.map((row) => row.id)),
+    gold: new Set(bundle.gold.map((row) => row.goldId)),
+    alignment: new Set(bundle.alignments.map((row) => row.id)),
+    discussion: new Set(bundle.discussions.map((row) => row.id)),
+    timeline: new Set(bundle.timeline.map((row) => String(row.seq))),
+    audit: new Set(bundle.auditRefs.map((row) => row.id)),
+    attachment: new Set(bundle.attachments.map((row) => row.id)),
+  };
+}
+
+function isPortableObjectKind(value: string): value is PortableObjectKind {
+  return (PORTABLE_OBJECT_KINDS as readonly string[]).includes(value);
+}
+
+function validateGoldLineage(rows: PortableGoldV1[]): void {
+  const byGoldId = new Map(rows.map((row) => [row.goldId, row]));
+
+  for (const [i, row] of rows.entries()) {
+    const path = `$.gold[${i}].predecessorGoldId`;
+    if (row.version < 1) {
+      throw new ContractViolation(`$.gold[${i}].version`, "version must be >= 1");
+    }
+    if (row.version === 1 && row.predecessorGoldId !== null) {
+      throw new ContractViolation(path, "corrupt version chain: version 1 must have no predecessor");
+    }
+    if (row.version > 1 && row.predecessorGoldId === null) {
+      throw new ContractViolation(path, "corrupt version chain: version > 1 requires a predecessor");
+    }
+    if (row.predecessorGoldId !== null) {
+      requireSafeIdentifier(path, row.predecessorGoldId);
+      if (row.predecessorGoldId === row.goldId) {
+        throw new ContractViolation(path, "gold predecessor self-reference");
+      }
+      if (!byGoldId.has(row.predecessorGoldId)) {
+        throw new ContractViolation(path, "dangling gold predecessor");
+      }
+    }
+  }
+
+  uniqueIds(
+    "$.gold.goldId",
+    rows.map((row) => row.goldId),
+  );
+
+  for (const [i, row] of rows.entries()) {
+    const seen = new Set<string>();
+    let cursor: PortableGoldV1 | undefined = row;
+    while (cursor) {
+      if (seen.has(cursor.goldId)) {
+        throw new ContractViolation(
+          `$.gold[${i}].predecessorGoldId`,
+          "cyclic gold predecessor lineage",
+        );
+      }
+      seen.add(cursor.goldId);
+      cursor = cursor.predecessorGoldId === null
+        ? undefined
+        : byGoldId.get(cursor.predecessorGoldId);
+    }
+  }
+
+  const successorByPredecessor = new Map<string, string>();
+  for (const [i, row] of rows.entries()) {
+    if (row.predecessorGoldId === null) continue;
+    const priorSuccessor = successorByPredecessor.get(row.predecessorGoldId);
+    if (priorSuccessor && priorSuccessor !== row.goldId) {
+      throw new ContractViolation(`$.gold[${i}].predecessorGoldId`, "gold predecessor fork");
+    }
+    successorByPredecessor.set(row.predecessorGoldId, row.goldId);
+  }
+
+  const versionsByExperiment = new Map<string, Set<number>>();
+  for (const [i, row] of rows.entries()) {
+    const versions = versionsByExperiment.get(row.experimentId) ?? new Set<number>();
+    if (versions.has(row.version)) {
+      throw new ContractViolation(
+        `$.gold[${i}].version`,
+        "corrupt version chain: duplicate version in experiment",
+      );
+    }
+    versions.add(row.version);
+    versionsByExperiment.set(row.experimentId, versions);
+
+    if (row.predecessorGoldId === null) continue;
+    const predecessor = byGoldId.get(row.predecessorGoldId);
+    if (!predecessor) continue;
+    if (predecessor.experimentId !== row.experimentId) {
+      throw new ContractViolation(
+        `$.gold[${i}].predecessorGoldId`,
+        "gold predecessor must belong to the same experiment",
+      );
+    }
+    if (predecessor.version !== row.version - 1) {
+      throw new ContractViolation(
+        `$.gold[${i}].predecessorGoldId`,
+        "corrupt version chain: predecessor version must be adjacent",
+      );
+    }
+  }
+}
+
 export function parsePortableInvestigation(raw: unknown): PortableInvestigationV1 {
   checkObject("$", bundleShape, raw);
   const bundle = raw as PortableInvestigationV1;
+  assertSafeIdentifiers(bundle);
   assertNoCredentialLeakage(bundle);
   if (!INSTALLATION_ID.test(bundle.sourceInstallationId)) {
     throw new ContractViolation(
@@ -1109,7 +1340,7 @@ export function parsePortableInvestigation(raw: unknown): PortableInvestigationV
   }
   assertShareSafeTimestamp("$.exportedAt", bundle.exportedAt);
   assertShareSafeFingerprint("$.bundleFingerprint", bundle.bundleFingerprint);
-  requireNonEmpty("$.investigation.id", bundle.investigation.id);
+  requireSafeIdentifier("$.investigation.id", bundle.investigation.id);
   requireNonEmpty("$.investigation.title", bundle.investigation.title);
   requireNonEmpty("$.investigation.retentionClass", bundle.investigation.retentionClass);
   assertShareSafeTimestamp("$.investigation.createdAt", bundle.investigation.createdAt);
@@ -1353,28 +1584,8 @@ export function parsePortableInvestigation(raw: unknown): PortableInvestigationV
     }
   }
 
-  uniqueIds(
-    "$.gold",
-    bundle.gold.map((row) => `${row.goldId}:${row.version}`),
-  );
+  validateGoldLineage(bundle.gold);
   for (const [i, row] of bundle.gold.entries()) {
-    if (row.version < 1) {
-      throw new ContractViolation(`$.gold[${i}].version`, "version must be >= 1");
-    }
-    if (row.version === 1 && row.predecessorGoldId !== null) {
-      throw new ContractViolation(`$.gold[${i}].predecessorGoldId`, "corrupt version chain");
-    }
-    if (row.version > 1) {
-      if (row.predecessorGoldId === null) {
-        throw new ContractViolation(`$.gold[${i}].predecessorGoldId`, "corrupt version chain");
-      }
-      const predecessorPresent = bundle.gold.some(
-        (other, j) => j !== i && other.goldId === row.predecessorGoldId,
-      );
-      if (!predecessorPresent) {
-        throw new ContractViolation(`$.gold[${i}].predecessorGoldId`, "dangling gold predecessor");
-      }
-    }
     if (!experiments.has(row.experimentId)) {
       throw new ContractViolation(`$.gold[${i}].experimentId`, "dangling experiment reference");
     }
@@ -1434,9 +1645,27 @@ export function parsePortableInvestigation(raw: unknown): PortableInvestigationV
     "$.timeline.seq",
     bundle.timeline.map((row) => String(row.seq)),
   );
+  const namespaceIds = portableNamespaceIds(bundle);
   for (const [i, row] of bundle.timeline.entries()) {
     requireActor(actors, row.actorId, `$.timeline[${i}].actorId`);
     assertShareSafeTimestamp(`$.timeline[${i}].serverTime`, row.serverTime);
+    if ((row.targetId === null) !== (row.targetNamespace === null)) {
+      throw new ContractViolation(
+        `$.timeline[${i}]`,
+        "timeline targetId and targetNamespace must both be null or both be set",
+      );
+    }
+    if (row.targetId === null || row.targetNamespace === null) continue;
+    requireSafeIdentifier(`$.timeline[${i}].targetNamespace`, row.targetNamespace);
+    if (!isPortableObjectKind(row.targetNamespace)) {
+      throw new ContractViolation(
+        `$.timeline[${i}].targetNamespace`,
+        "unknown timeline target namespace",
+      );
+    }
+    if (!namespaceIds[row.targetNamespace].has(row.targetId)) {
+      throw new ContractViolation(`$.timeline[${i}].targetId`, "dangling timeline target");
+    }
   }
 
   uniqueIds(
@@ -1624,9 +1853,34 @@ function deterministicRemap(
   installationId: string,
   namespace: PortableObjectKind,
   sourceId: string,
+  attempt: number,
 ): string {
-  const digest = sha256Text(`${installationId}:${namespace}:${sourceId}`);
+  const input = attempt === 0
+    ? `${installationId}:${namespace}:${sourceId}`
+    : canonicalJson([installationId, namespace, sourceId, attempt]);
+  const digest = sha256Text(input);
   return `remap-${digest.slice(0, 24)}`;
+}
+
+const MAX_DETERMINISTIC_REMAP_ATTEMPTS = 256;
+
+function chooseDeterministicRemap(
+  installationId: string,
+  namespace: PortableObjectKind,
+  sourceId: string,
+  occupied: Set<string>,
+): string {
+  for (let attempt = 0; attempt < MAX_DETERMINISTIC_REMAP_ATTEMPTS; attempt += 1) {
+    const candidate = deterministicRemap(installationId, namespace, sourceId, attempt);
+    if (!occupied.has(candidate)) {
+      occupied.add(candidate);
+      return candidate;
+    }
+  }
+  throw new ContractViolation(
+    `$.destination.objectIds.${namespace}`,
+    `deterministic remap space exhausted for ${sourceId}`,
+  );
 }
 
 export function preflightPortableInvestigation(
@@ -1644,6 +1898,7 @@ export function preflightPortableInvestigation(
   checkObject("$", preflightRequestShape, requestRaw);
   const request = requestRaw as PreflightRequestV1;
   const bundle = parsePortableInvestigation(bundleRaw);
+  assertSafeIdentifiers(request);
   assertNoCredentialLeakage(request);
 
   const warnings: PreflightWarningV1[] = [];
@@ -1758,35 +2013,24 @@ export function preflightPortableInvestigation(
   let conflict = 0;
   let blocked = referential.length;
 
-  const namespaces: Array<{ kind: PortableObjectKind; ids: string[] }> = [
-    { kind: "investigation", ids: [bundle.investigation.id] },
-    { kind: "actor", ids: bundle.actors.map((row) => row.sourceActorId) },
-    { kind: "contribution", ids: [...new Set(bundle.contributions.map((row) => row.id))] },
-    { kind: "evidence", ids: bundle.evidence.map((row) => row.id) },
-    { kind: "content", ids: bundle.contentObjects.map((row) => row.digest) },
-    { kind: "source", ids: bundle.sources.map((row) => row.id) },
-    { kind: "imported_ai_run", ids: bundle.importedAiRuns.map((row) => row.id) },
-    { kind: "snapshot", ids: bundle.snapshots.map((row) => row.id) },
-    { kind: "triage_job", ids: bundle.triageJobs.map((row) => row.id) },
-    { kind: "experiment", ids: bundle.experiments.map((row) => row.id) },
-    { kind: "helpfulness", ids: bundle.helpfulnessObservations.map((row) => row.id) },
-    { kind: "decision", ids: [...new Set(bundle.decisions.map((row) => row.id))] },
-    { kind: "gold", ids: bundle.gold.map((row) => row.goldId) },
-    { kind: "alignment", ids: bundle.alignments.map((row) => row.id) },
-    { kind: "discussion", ids: bundle.discussions.map((row) => row.id) },
-    { kind: "audit", ids: bundle.auditRefs.map((row) => row.id) },
-    { kind: "attachment", ids: bundle.attachments.map((row) => row.id) },
-  ];
+  const idsByNamespace = portableNamespaceIds(bundle);
+  const namespaces: Array<{ kind: PortableObjectKind; ids: string[] }> =
+    PORTABLE_OBJECT_KINDS.map((kind) => ({
+      kind,
+      ids: [...idsByNamespace[kind]].sort(compareCodeUnits),
+    }));
 
   for (const { kind, ids } of namespaces) {
     const existing = new Set(request.destination.objectIds[kind] ?? []);
+    const occupied = new Set(existing);
     const seenRaw = new Set<string>();
     for (const sourceId of ids) {
       if (seenRaw.has(sourceId)) continue;
       seenRaw.add(sourceId);
       const namespaced = `${bundle.sourceInstallationId}::${kind}::${sourceId}`;
-      if (!existing.has(sourceId) && !existing.has(namespaced)) {
+      if (!occupied.has(sourceId) && !occupied.has(namespaced)) {
         idRemap.push({ namespace: kind, sourceId, destinationId: namespaced });
+        occupied.add(namespaced);
         create += 1;
         continue;
       }
@@ -1800,7 +2044,12 @@ export function preflightPortableInvestigation(
           detail: "same raw id already exists at the destination",
         });
       } else {
-        const remapped = deterministicRemap(bundle.sourceInstallationId, kind, sourceId);
+        const remapped = chooseDeterministicRemap(
+          bundle.sourceInstallationId,
+          kind,
+          sourceId,
+          occupied,
+        );
         idRemap.push({ namespace: kind, sourceId, destinationId: remapped });
         create += 1;
       }
@@ -1818,7 +2067,7 @@ export function preflightPortableInvestigation(
     referentialIntegrityFailures: referential,
     idRemap,
     identityResolutions: [...mapBySource.values()].sort((a, b) =>
-      a.sourceActorId.localeCompare(b.sourceActorId),
+      compareCodeUnits(a.sourceActorId, b.sourceActorId),
     ),
     exactReconstruction: true,
     applyAuthorized: false,
