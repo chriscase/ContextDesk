@@ -19,19 +19,23 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 PLAN="$ROOT/scripts/ci_shard_plan.sh"
+CONFIG="$ROOT/scripts/ci_shard_config.sh"
 
 DIR=""
-SHARDS=${CD_SHARD_COUNT:-4}
+SHARDS=${CD_SHARD_COUNT:-}
+OS=""
 LABEL="ubuntu workspace test shards"
 
 usage() {
   cat <<'EOF'
 Usage:
-  sh scripts/ci_aggregate_shards.sh --dir DIR [--shards N] [--label TEXT]
+  sh scripts/ci_aggregate_shards.sh --dir DIR [--os OS] [--shards N] [--label TEXT]
 
   --dir DIR    directory holding the downloaded shard artifacts; status.json
                files are discovered at any depth below it
-  --shards N   number of shards that must be present (default: $CD_SHARD_COUNT, else 4)
+  --os OS       validate the shard count against canonical ubuntu/macos/windows capacity
+  --shards N   number of shards that must be present; defaults to the selected OS,
+               or canonical Ubuntu capacity when neither option is supplied
   --label TEXT label used in diagnostics and the step summary (default: ubuntu workspace test shards)
 EOF
 }
@@ -53,6 +57,11 @@ while [ $# -gt 0 ]; do
       SHARDS=$2
       shift 2
       ;;
+    --os)
+      [ $# -ge 2 ] || die "--os needs a value"
+      OS=$2
+      shift 2
+      ;;
     --label)
       [ $# -ge 2 ] || die "--label needs a value"
       LABEL=$2
@@ -70,6 +79,16 @@ done
   usage >&2
   exit 2
 }
+if [ -n "$OS" ]; then
+  if [ -n "$SHARDS" ]; then
+    sh "$CONFIG" verify "$OS" "$SHARDS" >/dev/null ||
+      die "$OS shard count does not match the canonical topology"
+  else
+    SHARDS=$(sh "$CONFIG" count "$OS")
+  fi
+elif [ -z "$SHARDS" ]; then
+  SHARDS=$(sh "$CONFIG" count ubuntu)
+fi
 case $SHARDS in '' | *[!0-9]*) die "--shards must be a positive integer" ;; esac
 [ "$SHARDS" -ge 1 ] || die "--shards must be >= 1"
 
@@ -160,7 +179,7 @@ while [ "$i" -le "$SHARDS" ]; do
   [ "$ufin" = "$utot" ] ||
     fail "shard $i/$SHARDS stopped after $ufin of $utot units"
   [ "$declared" = "$SHARDS" ] ||
-    fail "shard $i ran as 1 of $declared shards but the gate expects $SHARDS; the matrix and CD_SHARD_COUNT disagree"
+    fail "shard $i ran as 1 of $declared shards but the gate expects $SHARDS; the matrix and canonical topology disagree"
 
   jq -r '.units[]' "$file" >>"$tmp/units-seen"
   total_passed=$((total_passed + p))
