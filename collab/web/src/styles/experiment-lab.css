@@ -1327,6 +1327,57 @@
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+.experiment-lab__finding-list,
+.experiment-lab__lane-history,
+.experiment-lab__path-events {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.experiment-lab__finding,
+.experiment-lab__queue-item,
+.experiment-lab__lane-history li,
+.experiment-lab__path-events li {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--lab-surface) 94%, var(--accent) 6%);
+}
+
+.experiment-lab__finding-source,
+.experiment-lab__crossexam-source {
+  display: block;
+  margin: 0.3rem 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.experiment-lab__artifact-excerpt {
+  max-width: 100%;
+  margin: 0.45rem 0;
+  padding: 0.65rem;
+  overflow: auto;
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--bg) 88%, var(--accent) 12%);
+  color: var(--fg);
+  font: 0.76rem/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.experiment-lab__artifact-missing {
+  display: block;
+  margin: 0.45rem 0;
+  padding: 0.55rem;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+}
+
+.experiment-lab__route-target {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* Deliberately no animation anywhere in the cockpit: motion here would only
    decorate, theme flips would repaint mid-transition, and a motionless surface
    respects prefers-reduced-motion by construction. */

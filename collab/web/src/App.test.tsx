@@ -338,6 +338,25 @@ describe("pathname parsing", () => {
       caseId: uuid,
       stage: "analyze",
     });
+    const focused = parsePathname(
+      `/investigations/${uuid}/compare`,
+      "?section=cross-exam-heading&item=ev-synthetic-7&lane=lane-a&experiment=exp-a",
+      "#cross-exam-heading",
+    );
+    expect(focused).toMatchObject({
+      area: "investigations",
+      caseId: uuid,
+      stage: "compare",
+      focus: {
+        section: "cross-exam-heading",
+        item: "ev-synthetic-7",
+        lane: "lane-a",
+        experiment: "exp-a",
+      },
+    });
+    expect(pathFor(focused)).toBe(
+      `/investigations/${uuid}/compare?section=cross-exam-heading&item=ev-synthetic-7&lane=lane-a&experiment=exp-a#cross-exam-heading`,
+    );
     expect(parsePathname("//evil.example/phish")).toMatchObject({ kind: "unknown" });
     expect(parsePathname("/investigations/../sources")).toMatchObject({ kind: "unknown" });
     expect(parsePathname("https://evil.example")).toMatchObject({ kind: "unknown" });
@@ -502,13 +521,16 @@ describe("pathname shell routing", () => {
     expect(window.location.pathname).toBe(`/investigations/${uuid}/analyze`);
   });
 
-  it("keeps in-app case focus off the pathname so a reload returns to the list", async () => {
+  it("restores exact deep focus and keeps Back navigation on the same investigation", async () => {
+    const uuid = "44444444-4444-4444-8444-444444444444";
+    const compareUrl = `/investigations/${uuid}/compare?section=cross-exam-heading&item=ev-synthetic-9&lane=lane-blue&experiment=exp-blue#cross-exam-heading`;
+    window.history.replaceState(null, "", compareUrl);
     stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
       if (url === "/api/cases") {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            cases: [{ id: "c1", title: "Checkout timeouts", status: "open", severity: "high" }],
+            cases: [{ id: uuid, title: "Synthetic queue delay", status: "open", severity: "high" }],
           }),
         } as Response);
       }
@@ -524,9 +546,46 @@ describe("pathname shell routing", () => {
       return null;
     });
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Checkout timeouts" }));
+    expect(await screen.findByRole("heading", { name: "Compare" })).toBeTruthy();
+    expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(compareUrl);
+
+    const decideUrl = `/investigations/${uuid}/decide?section=decision-heading&experiment=exp-blue#decision-heading`;
+    window.history.pushState(null, "", decideUrl);
+    fireEvent(window, new PopStateEvent("popstate", { state: null }));
+    expect(await screen.findByRole("heading", { name: "Decide" })).toBeTruthy();
+    window.history.back();
+    await waitFor(() => expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(compareUrl));
+    expect(await screen.findByRole("heading", { name: "Compare" })).toBeTruthy();
+    expect(window.location.pathname).not.toBe("/investigations");
+  });
+
+  it("keeps in-app case focus in a canonical pathname so reload does not fall back to the list", async () => {
+    const uuid = "33333333-3333-4333-8333-333333333333";
+    stubSignedInFetch({ username: "dave", roles: ["case-lead"] }, (url) => {
+      if (url === "/api/cases") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            cases: [{ id: uuid, title: "Synthetic timeout", status: "open", severity: "high" }],
+          }),
+        } as Response);
+      }
+      if (url.endsWith("/timeline") || url.endsWith("/imports")) {
+        return Promise.resolve({ ok: true, json: async () => ({ events: [], runs: [] }) } as Response);
+      }
+      if (url.endsWith("/contributions") || url.endsWith("/experiments")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ contributions: [], experiments: [] }),
+        } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Synthetic timeout" }));
     expect(await screen.findByRole("heading", { name: "Situation" })).toBeTruthy();
-    expect(window.location.pathname).toBe("/");
+    expect(window.location.pathname).toBe(`/investigations/${uuid}/situation`);
+    expect(window.location.pathname).not.toBe("/investigations");
   });
 
   it("renders without crashing under StrictMode", async () => {

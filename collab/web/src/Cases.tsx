@@ -13,6 +13,7 @@ import {
   type SourceOption,
   type TimelineEvent,
 } from "./TriageWorkspace.js";
+import type { WorkFocus } from "./app-location.js";
 
 export type StageId = "situation" | "capture" | "analyze" | "compare" | "decide";
 
@@ -86,9 +87,11 @@ export function Cases(props: {
   view?: "overview" | "investigations";
   focusCaseId?: string | null;
   stage?: StageId;
+  focus?: WorkFocus;
   startSignal?: number;
   onOpenCase?: (id: string) => void;
   onStageChange?: (stage: StageId) => void;
+  onDeepNavigate?: (stage: StageId, focus: WorkFocus) => void;
   onExitFocus?: (target: "overview" | "investigations") => void;
 }) {
   const roles = props.roles ?? [];
@@ -761,6 +764,10 @@ export function Cases(props: {
                 caseTitle={current.title}
                 caseStatus={current.status}
                 caseSeverity={current.severity}
+                {...(props.focus ? { routeFocus: props.focus } : {})}
+                {...(props.onDeepNavigate
+                  ? { onDeepNavigate: (focus: WorkFocus) => props.onDeepNavigate?.("compare", focus) }
+                  : {})}
                 {...(props.participant ? { participant: props.participant } : {})}
               />
             </TriageAnchor>
@@ -801,6 +808,10 @@ export function Cases(props: {
                 caseTitle={current.title}
                 caseStatus={current.status}
                 caseSeverity={current.severity}
+                {...(props.focus ? { routeFocus: props.focus } : {})}
+                {...(props.onDeepNavigate
+                  ? { onDeepNavigate: (focus: WorkFocus) => props.onDeepNavigate?.("decide", focus) }
+                  : {})}
                 {...(props.participant ? { participant: props.participant } : {})}
               />
               {canLead ? (

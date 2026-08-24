@@ -10,10 +10,18 @@ export const STAGE_IDS = [
 ] as const;
 export type StageId = (typeof STAGE_IDS)[number];
 
+export type WorkFocus = {
+  section: string;
+  item: string | null;
+  lane: string | null;
+  experiment: string | null;
+};
+
 export type WorkLocation = {
   area: AreaId;
   caseId: string | null;
   stage: StageId;
+  focus?: WorkFocus;
 };
 
 export type SignInLocation = { kind: "sign-in" };
@@ -114,7 +122,11 @@ export function sameLocation(a: ShellLocation, b: ShellLocation): boolean {
       a.attempted === b.attempted
     );
   }
-  return a.area === b.area && a.caseId === b.caseId && a.stage === b.stage;
+  return a.area === b.area && a.caseId === b.caseId && a.stage === b.stage &&
+    (a.focus?.section ?? null) === (b.focus?.section ?? null) &&
+    (a.focus?.item ?? null) === (b.focus?.item ?? null) &&
+    (a.focus?.lane ?? null) === (b.focus?.lane ?? null) &&
+    (a.focus?.experiment ?? null) === (b.focus?.experiment ?? null);
 }
 
 export function normalizePathname(pathname: string): string {
@@ -153,7 +165,29 @@ function unknownAt(pathname: string): UnknownLocation {
   return { kind: "unknown", attempted: normalizePathname(pathname) };
 }
 
-export function parsePathname(pathname: string): ShellLocation {
+function boundedFocusValue(value: string | null): string | null {
+  if (!value || value.length > 256) return null;
+  if ([...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127;
+  })) return null;
+  return value;
+}
+
+function parseFocus(search: string, hash: string): WorkFocus | undefined {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const hashSection = boundedFocusValue(hash.replace(/^#/, ""));
+  const section = boundedFocusValue(params.get("section")) ?? hashSection;
+  if (!section) return undefined;
+  return {
+    section,
+    item: boundedFocusValue(params.get("item")),
+    lane: boundedFocusValue(params.get("lane")),
+    experiment: boundedFocusValue(params.get("experiment")),
+  };
+}
+
+export function parsePathname(pathname: string, search = "", hash = ""): ShellLocation {
   const path = normalizePathname(pathname);
   if (path === "/not-found") {
     return unknownAt(pathname);
@@ -183,10 +217,12 @@ export function parsePathname(pathname: string): ShellLocation {
     if (stagePart && !isStageId(stagePart)) {
       return unknownAt(path);
     }
+    const focus = parseFocus(search, hash);
     return {
       area: "investigations",
       caseId,
       stage: stagePart && isStageId(stagePart) ? stagePart : "situation",
+      ...(focus ? { focus } : {}),
     };
   }
   return unknownAt(path);
@@ -213,39 +249,24 @@ export function pathFor(location: ShellLocation): string {
     return "/not-found";
   }
   if (location.caseId && isCaseId(location.caseId) && location.area === "investigations") {
-    return `/investigations/${location.caseId}/${location.stage}`;
+    const base = `/investigations/${location.caseId}/${location.stage}`;
+    if (!location.focus) return base;
+    const params = new URLSearchParams({ section: location.focus.section });
+    if (location.focus.item) params.set("item", location.focus.item);
+    if (location.focus.lane) params.set("lane", location.focus.lane);
+    if (location.focus.experiment) params.set("experiment", location.focus.experiment);
+    return `${base}?${params.toString()}#${encodeURIComponent(location.focus.section)}`;
   }
   return areaPathFor(location);
 }
 
 /**
- * In-app case focus keeps the current area pathname so existing reload-to-list
- * flows stay on overview/investigations. Canonical case URLs are written when
- * the address bar already names a case, or when restoring a parsed deep link
- * after sign-in.
+ * Investigation focus is always canonical in the address bar. Reload, Back,
+ * Forward, and copied links must restore the exact investigation and stage;
+ * focused sections/items/lanes are encoded by pathFor above.
  */
-export function historyUrl(next: ShellLocation, currentPath: string): string {
-  if (!isWorkLocation(next)) {
-    return pathFor(next);
-  }
-  const current = parsePathname(currentPath);
-  if (next.caseId) {
-    if (isCaseId(next.caseId) && (isSignInLocation(current) || isUnknownLocation(current))) {
-      return pathFor(next);
-    }
-    if (
-      isCaseId(next.caseId) &&
-      isWorkLocation(current) &&
-      current.caseId !== null &&
-      isCaseId(current.caseId)
-    ) {
-      return pathFor(next);
-    }
-    if (isWorkLocation(current)) {
-      return areaPathFor({ ...current, caseId: null, stage: "situation" });
-    }
-  }
-  return areaPathFor(next);
+export function historyUrl(next: ShellLocation, _currentPath: string): string {
+  return pathFor(next);
 }
 
 export function parseHashStage(hash: string): StageId | null {

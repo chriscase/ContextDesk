@@ -399,8 +399,8 @@ describe("experiment lab", () => {
     );
     render(<ExperimentLab caseId="c1" canWrite canLead />);
     expect(await screen.findByText(/Question path: What timed out in checkout/)).toBeTruthy();
-    expect(screen.getByText(/Shared evidence ev-demo-checkout-log/)).toBeTruthy();
-    expect(screen.getByText(/Converges on gold ev-demo-checkout-log/)).toBeTruthy();
+    expect(screen.getAllByText(/Shared supporting evidence/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Models converge on supporting evidence in the human benchmark/)).toBeTruthy();
     expect(screen.getByText(/unknown: turns, tools/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import trace" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Annotate trace" })).toBeTruthy();
@@ -818,38 +818,22 @@ describe("experiment lab", () => {
     render(<ExperimentLab caseId="c1" canWrite canLead />);
 
     const scan = await screen.findByRole("region", { name: "At a glance" });
-    expect(within(scan).getByRole("heading", { name: "What agrees" })).toBeTruthy();
-    expect(within(scan).getByRole("heading", { name: "What differs" })).toBeTruthy();
+    expect(within(scan).getByRole("heading", { name: "Investigative findings" })).toBeTruthy();
     expect(within(scan).getByRole("heading", { name: "What stays unknown" })).toBeTruthy();
     expect(within(scan).getByRole("heading", { name: "What a human decided" })).toBeTruthy();
-    expect(
-      within(scan).getByText(
-        "ev-demo-checkout-log — symptom, cited by programmatic-agent, chat-operator",
-      ),
-    ).toBeTruthy();
-    expect(
-      within(scan).getByText("programmatic-agent alone cites ev-demo-pool-exhaustion"),
-    ).toBeTruthy();
-    expect(
-      within(scan).getByText(
-        "ev-demo-inventory-timeout is read differently: programmatic-agent as cause; chat-operator as symptom",
-      ),
-    ).toBeTruthy();
-    expect(
-      within(scan).getByText(
-        "question divergence — programmatic-agent and chat-operator asked different questions",
-      ),
-    ).toBeTruthy();
+    expect(within(scan).getByRole("heading", { name: "Models assign different meaning to the same evidence" })).toBeTruthy();
+    expect(within(scan).getByRole("heading", { name: "One model relies on evidence the other lanes do not cite" })).toBeTruthy();
+    expect(within(scan).getAllByText(/Supporting excerpt not captured/).length).toBeGreaterThan(0);
+    expect(within(scan).getByText(/programmatic-agent treats it as cause; chat-operator treats it as symptom/)).toBeTruthy();
+    expect(within(scan).getByText(/Resolve the role before accepting a causal conclusion/)).toBeTruthy();
     expect(
       within(scan).getByText("chat-operator — trace cannot establish tools"),
     ).toBeTruthy();
     expect(
       within(scan).getByText("Gold benchmark — none recorded for this experiment"),
     ).toBeTruthy();
-    expect(within(scan).getByText("Agreement is not proof of correctness.")).toBeTruthy();
-    expect(
-      within(scan).getByText("Differences are leads to investigate, not a ranking."),
-    ).toBeTruthy();
+    expect(within(scan).getAllByText(/Agreement is not proof of correctness/).length).toBeGreaterThan(0);
+    expect(within(scan).getByText(/Agreement is not proof of correctness; differences are leads to investigate/)).toBeTruthy();
 
     const matrix = screen.getByRole("table", { name: /Candidate comparison/ });
     expect(scan.compareDocumentPosition(matrix) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -1232,6 +1216,46 @@ function stubExperiments(experiments: unknown[]) {
 }
 
 describe("decision readiness cockpit", () => {
+  it("centers a captured synthetic artifact and keeps its opaque identity in technical details", async () => {
+    const artifactView = {
+      ...cockpitView,
+      id: "exp-artifact-present",
+      traces: cockpitView.traces.map((trace, index) => index === 0 ? {
+        ...trace,
+        events: [{
+          eventId: "trace-event-synthetic-1",
+          sequence: 1,
+          kind: "evidence_review",
+          actor: "investigator",
+          authorUsername: "analyst-one",
+          excerpt: "2026-08-15T14:02:11Z worker-pool WARN queue depth=48\n  at SyntheticWorker.reserve(worker.ts:42)",
+          evidenceRefs: ["ev-demo-inventory-timeout"],
+          unknowns: [],
+        }],
+      } : trace),
+    };
+    stubExperiments([artifactView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+
+    const scan = await screen.findByRole("region", { name: "At a glance" });
+    expect(within(scan).getByText(/worker-pool WARN queue depth=48/)).toBeTruthy();
+    expect(within(scan).getByText(/SyntheticWorker\.reserve/)).toBeTruthy();
+    expect(within(scan).getAllByText(/What the models claim/).length).toBeGreaterThan(0);
+    expect(within(scan).getAllByText(/Why this matters/).length).toBeGreaterThan(0);
+    expect(within(scan).getAllByText(/Next step/).length).toBeGreaterThan(0);
+    const technical = within(scan).getAllByText("Technical details")[0]?.closest("details") as HTMLDetailsElement;
+    expect(technical.open).toBe(false);
+    expect(technical.textContent).toContain("ev-demo-inventory-timeout");
+  });
+
+  it("states honestly when a supporting excerpt was not captured and gives an action", async () => {
+    stubExperiments([cockpitView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    const scan = await screen.findByRole("region", { name: "At a glance" });
+    expect(within(scan).getAllByText(/Supporting excerpt not captured/).length).toBeGreaterThan(0);
+    expect(within(scan).getByText(/inspect surrounding log or stack-trace context/)).toBeTruthy();
+  });
+
   it("explains the eight readiness facets with factual states and section links", async () => {
     stubExperiments([cockpitView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
@@ -1275,7 +1299,7 @@ describe("decision readiness cockpit", () => {
       within(readiness)
         .getAllByRole("link", { name: "Open cross-examination" })[0]
         ?.getAttribute("href"),
-    ).toBe("#cross-exam-heading");
+    ).toMatch(/^\/investigations\/c1\/compare\?section=cross-exam-heading/);
   });
 
   it("ties each facet to its recorded review-queue volume without ranking", async () => {
@@ -1340,8 +1364,9 @@ describe("decision readiness cockpit", () => {
     });
     const links = within(queue).getAllByRole("link");
     expect(links.length).toBe(expectedOrder.length);
-    expect(links[0]?.getAttribute("href")).toBe("#cross-exam-heading");
-    expect(links.at(-1)?.getAttribute("href")).toBe("#decision-heading");
+    expect(links[0]?.getAttribute("href")).toContain("/investigations/c1/compare?section=cross-exam-heading&item=");
+    expect(links.at(-1)?.getAttribute("href")).toContain("/investigations/c1/compare?section=decision-heading");
+    expect(links.every((link) => link.getAttribute("href") !== "/investigations")).toBe(true);
   });
 
   it("shows an honest empty queue that never certifies correctness", async () => {
@@ -1503,7 +1528,7 @@ describe("decision readiness cockpit", () => {
     const queue = screen.getByRole("region", { name: "Human review queue" });
     expect(within(queue).getAllByText("involves focused lane").length).toBe(4);
     expect(
-      within(queue).getByText(/chat-operator has no recorded human helpfulness observation/),
+      within(queue).getAllByText(/chat-operator has no recorded human helpfulness observation/)[0],
     ).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Show all lanes equally" }));
@@ -1528,11 +1553,23 @@ describe("decision readiness cockpit", () => {
 
   it("keeps the cockpit read-only safe: focus works, no new mutation controls appear", async () => {
     stubExperiments([cockpitView]);
-    render(<ExperimentLab caseId="c1" canWrite canLead readOnly />);
+    render(
+      <ExperimentLab
+        caseId="c1"
+        canWrite
+        canLead
+        readOnly
+        routeFocus={{
+          section: "readiness-heading",
+          item: null,
+          lane: "cand-chat-operator",
+          experiment: "exp-cockpit",
+        }}
+      />,
+    );
 
     await screen.findByRole("region", { name: "Decision readiness" });
-    fireEvent.click(screen.getByRole("button", { name: "chat-operator" }));
-    expect(screen.getByText(/Focused on chat-operator/)).toBeTruthy();
+    expect(await screen.findByText(/Focused on chat-operator/)).toBeTruthy();
     expect(screen.queryAllByRole("textbox").length).toBe(0);
     expect(screen.queryAllByRole("combobox").length).toBe(0);
     for (const name of ["Import experiment", "Record helpfulness", "Propose decision"]) {

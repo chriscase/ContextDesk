@@ -171,6 +171,20 @@ describe("triage workspace capture paths", () => {
 });
 
 describe("triage workspace guidance and provenance", () => {
+  it("renders a human-readable activity narrative and keeps raw audit identities closed", () => {
+    render(<TriageWorkspace {...makeProps()} />);
+    expect(screen.getByRole("heading", { name: "The investigation was opened" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "A human note was recorded" })).toBeTruthy();
+    expect(screen.getAllByText(/by alice/).length).toBe(2);
+    expect(screen.getByText(/adds human-attributed context to the shared investigation record/)).toBeTruthy();
+    const auditDetails = screen.getAllByText("Raw audit details").map((summary) =>
+      summary.closest("details") as HTMLDetailsElement,
+    );
+    expect(auditDetails.every((details) => details.open === false)).toBe(true);
+    expect(auditDetails[1]?.textContent).toContain("n1");
+    expect(auditDetails[1]?.textContent).toContain("contribution_created");
+  });
+
   it("renders the step rail with anchors for all four steps", () => {
     render(<TriageWorkspace {...makeProps()} />);
     const rail = screen.getByRole("navigation", { name: "Triage steps" });

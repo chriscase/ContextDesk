@@ -178,15 +178,15 @@ export function App() {
   const [ready, setReady] = useState(false);
   const [theme, setTheme] = useState<ThemeName>(savedTheme);
   const [location, setLocation] = useState<ShellLocation>(() =>
-    parsePathname(window.location.pathname),
+    parsePathname(window.location.pathname, window.location.search, window.location.hash),
   );
   const [navOpen, setNavOpen] = useState(false);
   const [startSignal, setStartSignal] = useState(0);
   const locationRef = useRef(location);
   locationRef.current = location;
   const restoreRef = useRef<WorkLocation | null>(
-    isWorkLocation(parsePathname(window.location.pathname))
-      ? (parsePathname(window.location.pathname) as WorkLocation)
+    isWorkLocation(parsePathname(window.location.pathname, window.location.search, window.location.hash))
+      ? (parsePathname(window.location.pathname, window.location.search, window.location.hash) as WorkLocation)
       : null,
   );
   const mainRef = useRef<HTMLElement>(null);
@@ -270,14 +270,15 @@ export function App() {
   useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
       const hashStage = parseHashStage(window.location.hash);
-      if (hashStage) {
+      const hasStructuredFocus = new URLSearchParams(window.location.search).has("section");
+      if (hashStage && !hasStructuredFocus) {
         // A legacy fragment link fires popstate with a null state before the
         // hashchange event; that navigation belongs to the hashchange handler.
         return;
       }
       const next = isShellLocation(event.state)
         ? event.state
-        : parsePathname(window.location.pathname);
+        : parsePathname(window.location.pathname, window.location.search, window.location.hash);
       setLocation(next);
       setNavOpen(false);
     };
@@ -289,6 +290,7 @@ export function App() {
   // now presents their target, then hand scrolling back to the browser.
   useEffect(() => {
     const onHashChange = () => {
+      if (new URLSearchParams(window.location.search).has("section")) return;
       const stage = parseHashStage(window.location.hash);
       const current = locationRef.current;
       if (!stage || !isWorkLocation(current) || !current.caseId) return;
@@ -481,6 +483,7 @@ export function App() {
                 view={work.area === "investigations" ? "investigations" : "overview"}
                 focusCaseId={inCasesArea ? work.caseId : null}
                 stage={work.stage}
+                {...(work.focus ? { focus: work.focus } : {})}
                 startSignal={startSignal}
                 onOpenCase={(id) =>
                   navigate({ area: "investigations", caseId: id, stage: "situation" })
@@ -491,6 +494,16 @@ export function App() {
                         area: "investigations",
                         caseId: locationRef.current.caseId,
                         stage,
+                      })
+                    : undefined
+                }
+                onDeepNavigate={(stage, focus) =>
+                  isWorkLocation(locationRef.current) && locationRef.current.caseId
+                    ? navigate({
+                        area: "investigations",
+                        caseId: locationRef.current.caseId,
+                        stage,
+                        focus,
                       })
                     : undefined
                 }
