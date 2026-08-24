@@ -25,10 +25,46 @@ import { MutableGroupRoleMap, parseGroupRoleMap } from "../authz/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { CaseService, MemoryCaseStore } from "../cases/index.js";
 import { buildTestZip } from "./zip.js";
+import { corpusIntakeRequestDigest, decodeBase64, digestOf } from "./preview.js";
 
 const ALICE = "fixture-alice-secret";
+const ALICE_ID = "uid=alice,ou=people,dc=example,dc=test";
+const CAROL_ID = "uid=carol,ou=people,dc=example,dc=test";
+const DAVE_ID = "uid=dave,ou=people,dc=example,dc=test";
 const LOG = "2026-08-15T00:00:00Z mailer timeout id=syn-1\n";
 const LOG_B64 = Buffer.from(LOG).toString("base64");
+
+interface CommitSeed {
+  schemaId: typeof CORPUS_INTAKE_COMMIT_SCHEMA_ID;
+  origin: "files" | "zip" | "directory";
+  sourceLabel: string;
+  privacyClass: "owner_only" | "share_safe";
+  idempotencyKey: string;
+  files: Array<{ relativePath: string; mediaType: string; contentBase64: string }>;
+  archiveBase64: string | null;
+}
+
+function withPreviewToken(caseId: string, payload: CommitSeed, actorId = ALICE_ID) {
+  const files = payload.files.map((file) => ({
+    relativePath: file.relativePath,
+    mediaType: file.mediaType,
+    bytes: decodeBase64(file.relativePath, file.contentBase64),
+  }));
+  const archive = payload.archiveBase64 ? decodeBase64("archive", payload.archiveBase64) : null;
+  return {
+    ...payload,
+    previewToken: corpusIntakeRequestDigest({
+      caseId,
+      actorId,
+      origin: payload.origin,
+      sourceLabel: payload.sourceLabel,
+      privacyClass: payload.privacyClass,
+      idempotencyKey: payload.idempotencyKey,
+      files,
+      archive,
+    }),
+  };
+}
 
 function users() {
   return new Map([
@@ -178,6 +214,7 @@ describe("investigation corpus intake API", () => {
           origin: "zip",
           sourceLabel: "fixture-zip",
           privacyClass: "owner_only",
+          idempotencyKey: "batch-syn-0001",
           files: [],
           archiveBase64: Buffer.from(archive).toString("base64"),
         },
@@ -197,6 +234,7 @@ describe("investigation corpus intake API", () => {
           sourceLabel: "fixture-zip",
           privacyClass: "owner_only",
           idempotencyKey: "batch-syn-0001",
+          previewToken: report.previewToken,
           files: [],
           archiveBase64: Buffer.from(archive).toString("base64"),
         },
@@ -218,6 +256,7 @@ describe("investigation corpus intake API", () => {
           sourceLabel: "fixture-zip",
           privacyClass: "owner_only",
           idempotencyKey: "batch-syn-0001",
+          previewToken: report.previewToken,
           files: [],
           archiveBase64: Buffer.from(archive).toString("base64"),
         },
@@ -255,7 +294,7 @@ describe("investigation corpus intake API", () => {
         method: "POST",
         url: `/api/cases/${caseId}/corpus-intake`,
         headers: { cookie: alice },
-        payload: {
+        payload: withPreviewToken(caseId, {
           schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
           origin: "directory",
           sourceLabel: "fixture-directory",
@@ -271,7 +310,7 @@ describe("investigation corpus intake API", () => {
             },
           ],
           archiveBase64: null,
-        },
+        }),
       });
       expect(directory.statusCode).toBe(200);
       expect(parseCorpusIntakeBatch(JSON.parse(directory.body)).items).toHaveLength(1);
@@ -286,7 +325,7 @@ describe("investigation corpus intake API", () => {
         method: "POST",
         url: `/api/cases/${caseId}/corpus-intake`,
         headers: { cookie: alice },
-        payload: {
+        payload: withPreviewToken(caseId, {
           schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
           origin: "files",
           sourceLabel: "fixture-files",
@@ -296,14 +335,14 @@ describe("investigation corpus intake API", () => {
             { relativePath: "mailer/a.log", mediaType: "text/plain", contentBase64: LOG_B64 },
           ],
           archiveBase64: null,
-        },
+        }),
       });
       const firstBatch = parseCorpusIntakeBatch(JSON.parse(first.body));
       const second = await app.inject({
         method: "POST",
         url: `/api/cases/${caseId}/corpus-intake`,
         headers: { cookie: alice },
-        payload: {
+        payload: withPreviewToken(caseId, {
           schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
           origin: "files",
           sourceLabel: "fixture-files",
@@ -313,10 +352,10 @@ describe("investigation corpus intake API", () => {
             { relativePath: "mailer/b.log", mediaType: "text/plain", contentBase64: LOG_B64 },
           ],
           archiveBase64: null,
-        },
+        }),
       });
       const secondBatch = parseCorpusIntakeBatch(JSON.parse(second.body));
-      expect(secondBatch.items[0]?.artifactId).toBe(firstBatch.items[0]?.artifactId);
+      expect(secondBatch.items[0]?.artifactId).not.toBe(firstBatch.items[0]?.artifactId);
       expect(secondBatch.items[0]?.duplicateDigest).toBe(true);
       expect(secondBatch.items[0]?.relativePath).toBe("mailer/b.log");
       const timeline = parseTimeline(
@@ -330,21 +369,50 @@ describe("investigation corpus intake API", () => {
           ).body,
         ),
       );
-      expect(timeline.events.some((event) => event.kind === "evidence_attributed")).toBe(true);
+      expect(timeline.events.filter((event) => event.kind === "evidence_registered")).toHaveLength(2);
+      const listed = JSON.parse(
+        (
+          await app.inject({
+            method: "GET",
+            url: `/api/cases/${caseId}/evidence`,
+            headers: { cookie: alice },
+          })
+        ).body,
+      ) as {
+        artifacts: Array<{
+          id: string;
+          relativePath: string | null;
+          contentHash: string | null;
+          privacyClass: string;
+          uploaderId: string;
+          sourceId: string;
+          intakeBatchId: string | null;
+        }>;
+      };
+      expect(listed.artifacts.map((row) => row.relativePath).sort()).toEqual([
+        "mailer/a.log",
+        "mailer/b.log",
+      ]);
+      expect(new Set(listed.artifacts.map((row) => row.id)).size).toBe(2);
+      expect(new Set(listed.artifacts.map((row) => row.contentHash)).size).toBe(1);
+      expect(listed.artifacts.every((row) => row.privacyClass === "owner_only")).toBe(true);
+      expect(listed.artifacts.every((row) => row.uploaderId === ALICE_ID)).toBe(true);
+      expect(new Set(listed.artifacts.map((row) => row.sourceId)).size).toBe(1);
+      expect(listed.artifacts.every((row) => row.intakeBatchId !== null)).toBe(true);
     });
   });
 
   it("rolls back the investigation record when the batch insert fails", async () => {
     const boom = new BoomStore();
     boom.boom = true;
-    await withApp(async ({ app }) => {
+    await withApp(async ({ app, store, audit }) => {
       const alice = await login(app, "alice", ALICE);
       const caseId = await openCase(app, alice);
       const failed = await app.inject({
         method: "POST",
         url: `/api/cases/${caseId}/corpus-intake`,
         headers: { cookie: alice },
-        payload: {
+        payload: withPreviewToken(caseId, {
           schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
           origin: "files",
           sourceLabel: "fixture-files",
@@ -354,7 +422,7 @@ describe("investigation corpus intake API", () => {
             { relativePath: "mailer/shared-timeout.log", mediaType: "text/plain", contentBase64: LOG_B64 },
           ],
           archiveBase64: null,
-        },
+        }),
       });
       expect(failed.statusCode).toBe(400);
       expect(JSON.parse(failed.body)).toEqual({ error: "invalid" });
@@ -368,16 +436,19 @@ describe("investigation corpus intake API", () => {
         ).body,
       ) as { artifacts: unknown[] };
       expect(listed.artifacts).toEqual([]);
+      expect(await store.head(digestOf(Buffer.from(LOG)))).toBeNull();
+      expect(await audit.list({ action: "corpus_intake_commit" })).toEqual([]);
+      expect(await audit.list({ action: "contribution_create" })).toEqual([]);
     }, boom);
   });
 
   it("rejects viewers, missing sessions, and cross-investigation batch reads", async () => {
-    await withApp(async ({ app }) => {
+    await withApp(async ({ app, audit }) => {
       const alice = await login(app, "alice", ALICE);
       const carol = await login(app, "carol", "fixture-carol-secret");
       const caseA = await openCase(app, alice);
       const caseB = await openCase(app, alice);
-      const payload = {
+      const payload = withPreviewToken(caseA, {
         schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
         origin: "files",
         sourceLabel: "fixture-files",
@@ -387,7 +458,7 @@ describe("investigation corpus intake API", () => {
           { relativePath: "mailer/shared-timeout.log", mediaType: "text/plain", contentBase64: LOG_B64 },
         ],
         archiveBase64: null,
-      };
+      });
       expect(
         (
           await app.inject({
@@ -420,6 +491,64 @@ describe("investigation corpus intake API", () => {
         headers: { cookie: alice },
       });
       expect(cross.statusCode).toBe(404);
+      const denied = await audit.list({ action: "corpus_intake_commit", identity: CAROL_ID });
+      expect(denied).toHaveLength(1);
+      expect(denied[0]?.target).toBe(caseA);
+      expect(denied[0]?.outcome).toBe("denied");
+    });
+  });
+
+  it("serializes concurrent idempotent commits and rejects key reuse for changed input", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const caseId = await openCase(app, alice);
+      const seed: CommitSeed = {
+        schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+        origin: "files",
+        sourceLabel: "fixture-concurrent",
+        privacyClass: "owner_only",
+        idempotencyKey: "batch-syn-concurrent-1",
+        files: [
+          { relativePath: "mailer/concurrent.log", mediaType: "text/plain", contentBase64: LOG_B64 },
+        ],
+        archiveBase64: null,
+      };
+      const payload = withPreviewToken(caseId, seed);
+      const responses = await Promise.all([
+        app.inject({
+          method: "POST",
+          url: `/api/cases/${caseId}/corpus-intake`,
+          headers: { cookie: alice },
+          payload,
+        }),
+        app.inject({
+          method: "POST",
+          url: `/api/cases/${caseId}/corpus-intake`,
+          headers: { cookie: alice },
+          payload,
+        }),
+      ]);
+      expect(responses.map((response) => response.statusCode)).toEqual([200, 200]);
+      const batches = responses.map((response) =>
+        parseCorpusIntakeBatch(JSON.parse(response.body))
+      );
+      expect(new Set(batches.map((batch) => batch.id)).size).toBe(1);
+      expect(new Set(batches.map((batch) => batch.items[0]?.artifactId)).size).toBe(1);
+      expect(batches.map((batch) => batch.replayed).sort()).toEqual([false, true]);
+
+      const changed = await app.inject({
+        method: "POST",
+        url: `/api/cases/${caseId}/corpus-intake`,
+        headers: { cookie: alice },
+        payload: withPreviewToken(caseId, {
+          ...seed,
+          sourceLabel: "fixture-concurrent-changed",
+        }),
+      });
+      expect(changed.statusCode).toBe(409);
+      expect(JSON.parse(changed.body)).toEqual({
+        error: "idempotency key already belongs to another request",
+      });
     });
   });
 
@@ -437,6 +566,7 @@ describe("investigation corpus intake API", () => {
           origin: "files",
           sourceLabel: "fixture-files",
           privacyClass: "share_safe",
+          idempotencyKey: "batch-syn-leak-1",
           files: [
             {
               relativePath: "mailer/leaky.log",
@@ -460,7 +590,7 @@ describe("investigation corpus intake API", () => {
               method: "POST",
               url: `/api/cases/${caseId}/corpus-intake`,
               headers: { cookie: dave },
-              payload: {
+              payload: withPreviewToken(caseId, {
                 schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
                 origin: "files",
                 sourceLabel: "fixture-files",
@@ -474,7 +604,7 @@ describe("investigation corpus intake API", () => {
                   },
                 ],
                 archiveBase64: null,
-              },
+              }, DAVE_ID),
             })
           ).body,
         ),
@@ -490,7 +620,7 @@ describe("investigation corpus intake API", () => {
         method: "POST",
         url: `/api/cases/${caseId}/corpus-intake`,
         headers: { cookie: dave },
-        payload: {
+        payload: withPreviewToken(caseId, {
           schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
           origin: "files",
           sourceLabel: "fixture-files",
@@ -504,7 +634,7 @@ describe("investigation corpus intake API", () => {
             },
           ],
           archiveBase64: null,
-        },
+        }, DAVE_ID),
       });
       const listed = await domain.listSnapshots(caseId, actor, true);
       const again = listed.find((row) => row.id === frozen.id);
@@ -523,7 +653,7 @@ describe("investigation corpus intake API", () => {
         method: "POST",
         url: `/api/cases/${caseId}/corpus-intake`,
         headers: { cookie: alice },
-        payload: {
+        payload: withPreviewToken(caseId, {
           schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
           origin: "files",
           sourceLabel: "fixture-files",
@@ -531,7 +661,7 @@ describe("investigation corpus intake API", () => {
           idempotencyKey: "batch-syn-markup-1",
           files: [{ relativePath: name, mediaType: "text/plain", contentBase64: LOG_B64 }],
           archiveBase64: null,
-        },
+        }),
       });
       const batch = parseCorpusIntakeBatch(JSON.parse(committed.body));
       expect(batch.items[0]?.relativePath).toBe(name);

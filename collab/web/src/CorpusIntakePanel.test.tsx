@@ -20,6 +20,7 @@ describe("CorpusIntakePanel", () => {
           return {
             ok: true,
             json: async () => ({
+              previewToken: "a".repeat(64),
               accepted: [
                 {
                   relativePath: "mailer/shared-timeout.log",
@@ -88,6 +89,7 @@ describe("CorpusIntakePanel", () => {
       const commits = calls.filter((row) => row.url.endsWith("/corpus-intake"));
       expect(commits).toHaveLength(2);
       expect(commits[0]?.body.idempotencyKey).toBe(commits[1]?.body.idempotencyKey);
+      expect(commits[0]?.body.previewToken).toBe("a".repeat(64));
     });
     expect(await screen.findByText("Replayed batch")).toBeTruthy();
   });
@@ -122,5 +124,55 @@ describe("CorpusIntakePanel", () => {
       expect(body.origin).toBe("directory");
       expect(body.files[0]?.relativePath).toBe("mailer/shared-timeout.log");
     });
+  });
+
+  it("invalidates preview proof and idempotency when commit-relevant metadata changes", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return {
+          ok: true,
+          json: async () => ({
+            previewToken: "b".repeat(64),
+            accepted: [
+              {
+                relativePath: "synthetic.log",
+                mediaType: "text/x-log",
+                byteLength: 10,
+                digest: "c".repeat(64),
+                duplicateDigest: false,
+              },
+            ],
+            rejected: [],
+          }),
+        };
+      }),
+    );
+    render(
+      <CorpusIntakePanel
+        caseId="11111111-1111-4111-8111-111111111111"
+        canWrite
+        readOnly={false}
+      />,
+    );
+    const file = new File(["synthetic\n"], "synthetic.log", { type: "text/plain" });
+    fireEvent.change(screen.getByLabelText("Evidence files"), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview intake" }));
+    expect(await screen.findByText("synthetic.log")).toBeTruthy();
+    const firstKey = bodies[0]?.idempotencyKey;
+
+    fireEvent.change(screen.getByLabelText("Corpus intake source label"), {
+      target: { value: "changed synthetic source" },
+    });
+    expect(screen.queryByText("synthetic.log")).toBeNull();
+    expect(
+      (screen.getByRole("button", { name: "Commit accepted files" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Preview intake" }));
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1]?.sourceLabel).toBe("changed synthetic source");
+    expect(bodies[1]?.idempotencyKey).not.toBe(firstKey);
   });
 });

@@ -41,13 +41,33 @@ function extensionOf(path: string): string {
 }
 
 function looksBinary(bytes: Uint8Array): boolean {
-  const sample = bytes.subarray(0, Math.min(bytes.byteLength, 1024));
-  if (sample.includes(0)) return true;
+  if (bytes.includes(0)) return true;
   let odd = 0;
-  for (const octet of sample) {
+  for (const octet of bytes) {
     if (octet < 9 || (octet > 13 && octet < 32)) odd += 1;
   }
-  return odd > sample.length / 5;
+  return odd > bytes.length / 5;
+}
+
+const SHARE_SAFE_MEDIA = new Set<CorpusAllowedMedia>([
+  "text/plain",
+  "text/x-log",
+  "text/csv",
+  "text/markdown",
+  "application/json",
+]);
+
+const CLAIM_ALIASES: Partial<Record<CorpusAllowedMedia, readonly string[]>> = {
+  "text/x-log": ["text/plain"],
+  "text/markdown": ["text/plain"],
+};
+
+function decodeUtf8(bytes: Uint8Array): string | null {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
 }
 
 export function digestOf(bytes: Uint8Array): string {
@@ -90,23 +110,57 @@ export function classifyBytes(
       detail: "media type is not allowlisted",
     };
   }
-  if (claimedMedia && claimedMedia !== "application/octet-stream" && claimedMedia !== media && claimedMedia !== "text/plain") {
+  if (
+    claimedMedia
+    && claimedMedia !== "application/octet-stream"
+    && claimedMedia !== media
+    && !(CLAIM_ALIASES[media] ?? []).includes(claimedMedia)
+  ) {
     return {
       relativePath: normalized.path,
       reason: "unsupported_media",
       detail: "declared media type does not match allowlist",
     };
   }
-  if (looksBinary(bytes) && media !== "message/rfc822") {
+  if (looksBinary(bytes)) {
     return {
       relativePath: normalized.path,
       reason: "binary_or_unknown",
       detail: "bytes are not treated as text",
     };
   }
+  const text = decodeUtf8(bytes);
+  if (text === null) {
+    return {
+      relativePath: normalized.path,
+      reason: "binary_or_unknown",
+      detail: "bytes are not valid UTF-8 text",
+    };
+  }
+  let structuredContent: unknown = text;
+  if (media === "application/json") {
+    try {
+      structuredContent = JSON.parse(text);
+    } catch {
+      return {
+        relativePath: normalized.path,
+        reason: "unsupported_media",
+        detail: "JSON content must be valid JSON",
+      };
+    }
+  }
   if (privacyClass === "share_safe") {
-    const text = Buffer.from(bytes).toString("utf8");
-    const findings = scanShareSafePrivacy(text);
+    if (!SHARE_SAFE_MEDIA.has(media)) {
+      return {
+        relativePath: normalized.path,
+        reason: "redaction_failed",
+        detail: "media type is not supported by the share-safe privacy gate",
+      };
+    }
+    const findings = scanShareSafePrivacy({
+      relativePath: normalized.path,
+      content: structuredContent,
+    });
     if (findings.length > 0) {
       return {
         relativePath: normalized.path,

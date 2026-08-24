@@ -17,7 +17,7 @@ import {
   type PrivacyClass,
   type SnapshotV1,
 } from "@cd-collab/contracts";
-import type { EvidenceStore } from "../../evidence/store.js";
+import type { EvidenceStage, EvidenceStore } from "../../evidence/store.js";
 import type { AuditStore } from "../audit/index.js";
 import { CatalogService } from "../catalog/index.js";
 import {
@@ -29,6 +29,7 @@ import {
 import { assertFilenameAllowed, assertUploadAllowed } from "../evidence/index.js";
 import {
   decodeBase64,
+  corpusIntakeRequestDigest,
   previewCorpusBytes,
 } from "../corpus-intake/index.js";
 import {
@@ -120,6 +121,8 @@ export class SituationConflictError extends Error {
     super("situation conflict");
   }
 }
+
+export class CorpusIntakeConflictError extends Error {}
 
 const SITUATION_TEXT_LIMIT = 12_000;
 const SITUATION_QUESTION_LIMIT = 2_000;
@@ -952,8 +955,11 @@ export class CaseService {
       : null;
     return previewCorpusBytes({
       caseId,
+      actorId: actor.id,
       origin: request.origin,
       privacyClass: request.privacyClass,
+      sourceLabel: request.sourceLabel,
+      idempotencyKey: request.idempotencyKey,
       files,
       archive,
       knownDigests,
@@ -968,10 +974,6 @@ export class CaseService {
   ): Promise<CorpusIntakeBatchV1> {
     await this.requireCase(caseId);
     const request = parseCorpusIntakeCommitRequest(raw);
-    const existing = await this.store.getIntakeBatchByIdempotency(caseId, request.idempotencyKey);
-    if (existing) {
-      return { ...parseCorpusIntakeBatch(JSON.parse(existing.payloadJson)), replayed: true };
-    }
     const artifacts = await this.store.listArtifactsByCase(caseId);
     const knownDigests = new Set(
       artifacts.map((row) => row.contentHash).filter((hash): hash is string => Boolean(hash)),
@@ -986,153 +988,170 @@ export class CaseService {
       : null;
     const preview = previewCorpusBytes({
       caseId,
+      actorId: actor.id,
       origin: request.origin,
       privacyClass: request.privacyClass,
+      sourceLabel: request.sourceLabel,
+      idempotencyKey: request.idempotencyKey,
       files,
       archive,
       knownDigests,
     });
+    const requestDigest = corpusIntakeRequestDigest({
+      caseId,
+      actorId: actor.id,
+      origin: request.origin,
+      privacyClass: request.privacyClass,
+      sourceLabel: request.sourceLabel,
+      idempotencyKey: request.idempotencyKey,
+      files,
+      archive,
+    });
+    if (request.previewToken !== requestDigest || preview.report.previewToken !== requestDigest) {
+      throw new CorpusIntakeConflictError("preview token does not match commit input");
+    }
     const sourceId = await this.resolveSourceId(actor);
     const batchId = randomUUID();
     const createdAt = new Date().toISOString();
-    const items: CorpusIntakeBatchV1["items"] = [];
+    const stages: EvidenceStage[] = [];
+    try {
+      return await this.store.withAtomic(async () => {
+        await this.store.lockIntakeIdempotency(caseId, request.idempotencyKey);
+        const replay = await this.store.getIntakeBatchByIdempotency(caseId, request.idempotencyKey);
+        if (replay) {
+          if (replay.requestDigest !== requestDigest) {
+            throw new CorpusIntakeConflictError("idempotency key already belongs to another request");
+          }
+          return { ...parseCorpusIntakeBatch(JSON.parse(replay.payloadJson)), replayed: true };
+        }
 
-    return this.store.withAtomic(async () => {
-      const replay = await this.store.getIntakeBatchByIdempotency(caseId, request.idempotencyKey);
-      if (replay) {
-        return { ...parseCorpusIntakeBatch(JSON.parse(replay.payloadJson)), replayed: true };
-      }
-      for (const file of preview.classified) {
-        const already = (await this.store.listArtifactsByCase(caseId)).find(
-          (row) => row.contentHash === file.digest,
-        );
-        if (already) {
-          await this.store.appendTimeline(caseId, {
-            kind: "evidence_attributed",
-            actor,
-            targetId: already.id,
-            clientTime: null,
-            payload: {
-              relativePath: file.relativePath,
-              contentHash: file.digest,
-              intakeBatchId: batchId,
-              duplicateDigest: true,
-            },
-          });
-          items.push({
-            artifactId: already.id,
-            relativePath: file.relativePath,
-            digest: file.digest,
-            byteLength: file.bytes.byteLength,
-            mediaType: file.mediaType,
-            privacyClass: request.privacyClass,
-            sourceId: already.sourceId,
-            duplicateDigest: true,
-          });
-          continue;
+        const stageByDigest = new Map<string, EvidenceStage>();
+        const uniqueFiles = [...new Map(
+          preview.classified.map((file) => [file.digest, file]),
+        ).values()].sort((left, right) => left.digest.localeCompare(right.digest));
+        for (const file of uniqueFiles) {
+          await this.store.lockEvidenceDigest(file.digest);
+          const stage = await this.evidence.stage(file.bytes, { contentType: file.mediaType });
+          stageByDigest.set(file.digest, stage);
+          stages.push(stage);
         }
-        const meta = await this.evidence.put(file.bytes, { contentType: file.mediaType });
-        if (!(await this.evidence.verify(meta.hash))) {
-          throw new Error("hash verification failed after storage");
-        }
-        const summary = await this.addContribution(
-          caseId,
-          actor,
-          {
-            kind: "upload",
-            body: `Corpus intake ${file.relativePath}`,
-            privacyClass: request.privacyClass,
-            sourceId,
-          },
-          origin,
-        );
-        const artifactId = randomUUID();
-        await this.store.insertArtifact({
-          id: artifactId,
-          caseId,
-          kind: file.artifactKind,
-          filename: file.relativePath,
-          uri: null,
-          mediaType: file.mediaType,
-          byteLength: meta.byteLength,
-          contentHash: meta.hash,
-          expectedHash: meta.hash,
-          verificationStatus: "verified",
-          refId: null,
-          privacyClass: request.privacyClass,
-          summaryContributionId: summary.id,
-          uploaderId: actor.id,
-          uploaderUsername: actor.username,
-          sourceId,
+        const items: CorpusIntakeBatchV1["items"] = preview.classified.map((file, index) => ({
+          artifactId: randomUUID(),
           relativePath: file.relativePath,
-          intakeBatchId: batchId,
+          digest: file.digest,
+          byteLength: file.bytes.byteLength,
+          mediaType: file.mediaType,
+          privacyClass: request.privacyClass,
+          sourceId,
+          duplicateDigest: preview.report.accepted[index]?.duplicateDigest ?? false,
+        }));
+        const batch: CorpusIntakeBatchV1 = {
+          schemaId: CORPUS_INTAKE_BATCH_SCHEMA_ID,
+          id: batchId,
+          caseId,
+          origin: request.origin,
+          sourceLabel: request.sourceLabel,
+          privacyClass: request.privacyClass,
+          idempotencyKey: request.idempotencyKey,
+          requestDigest,
+          replayed: false,
+          createdAt,
+          createdBy: actor.id,
+          items,
+          rejected: preview.report.rejected,
+        };
+        await this.store.insertIntakeBatch({
+          id: batchId,
+          caseId,
+          idempotencyKey: request.idempotencyKey,
+          requestDigest,
+          origin: request.origin,
+          sourceLabel: request.sourceLabel,
+          privacyClass: request.privacyClass,
+          createdAt,
+          createdBy: actor.id,
+          payloadJson: JSON.stringify(batch),
         });
-        await this.store.appendTimeline(caseId, {
-          kind: "evidence_registered",
-          actor,
-          targetId: artifactId,
-          clientTime: null,
-          payload: {
-            artifactKind: file.artifactKind,
-            contentHash: meta.hash,
+
+        for (const [index, file] of preview.classified.entries()) {
+          const item = items[index];
+          if (!item) throw new Error("intake item materialization failed");
+          const stage = stageByDigest.get(file.digest);
+          if (!stage) throw new Error("evidence stage is missing");
+          const summary = await this.addContribution(
+            caseId,
+            actor,
+            {
+              kind: "upload",
+              body: `Corpus intake ${file.relativePath}`,
+              privacyClass: request.privacyClass,
+              sourceId,
+            },
+            origin,
+          );
+          await this.store.insertArtifact({
+            id: item.artifactId,
+            caseId,
+            kind: file.artifactKind,
+            filename: file.relativePath,
+            uri: null,
+            mediaType: file.mediaType,
+            byteLength: stage.meta.byteLength,
+            contentHash: stage.meta.hash,
+            expectedHash: stage.meta.hash,
+            verificationStatus: "verified",
+            refId: null,
             privacyClass: request.privacyClass,
-            summaryId: summary.id,
+            summaryContributionId: summary.id,
+            uploaderId: actor.id,
+            uploaderUsername: actor.username,
+            sourceId,
             relativePath: file.relativePath,
             intakeBatchId: batchId,
-          },
+          });
+          await this.store.appendTimeline(caseId, {
+            kind: "evidence_registered",
+            actor,
+            targetId: item.artifactId,
+            clientTime: null,
+            payload: {
+              artifactKind: file.artifactKind,
+              contentHash: stage.meta.hash,
+              privacyClass: request.privacyClass,
+              summaryId: summary.id,
+              relativePath: file.relativePath,
+              intakeBatchId: batchId,
+            },
+          });
+        }
+        for (const stage of stages) {
+          await stage.commit();
+          if (!(await this.evidence.verify(stage.meta.hash))) {
+            throw new Error("hash verification failed after storage");
+          }
+        }
+        await this.store.appendTimeline(caseId, {
+          kind: "corpus_intake_committed",
+          actor,
+          targetId: batchId,
+          clientTime: null,
+          payload: { accepted: items.length, rejected: preview.report.rejected.length, origin: request.origin },
         });
-        items.push({
-          artifactId,
-          relativePath: file.relativePath,
-          digest: meta.hash,
-          byteLength: meta.byteLength,
-          mediaType: file.mediaType,
-          privacyClass: request.privacyClass,
-          sourceId,
-          duplicateDigest: false,
+        await this.audit.append({
+          identity: actor.id,
+          action: "corpus_intake_commit",
+          target: batchId,
+          origin,
+          outcome: "success",
         });
-      }
-      const batch: CorpusIntakeBatchV1 = {
-        schemaId: CORPUS_INTAKE_BATCH_SCHEMA_ID,
-        id: batchId,
-        caseId,
-        origin: request.origin,
-        sourceLabel: request.sourceLabel,
-        privacyClass: request.privacyClass,
-        idempotencyKey: request.idempotencyKey,
-        replayed: false,
-        createdAt,
-        createdBy: actor.id,
-        items,
-        rejected: preview.report.rejected,
-      };
-      await this.store.insertIntakeBatch({
-        id: batchId,
-        caseId,
-        idempotencyKey: request.idempotencyKey,
-        origin: request.origin,
-        sourceLabel: request.sourceLabel,
-        privacyClass: request.privacyClass,
-        createdAt,
-        createdBy: actor.id,
-        payloadJson: JSON.stringify(batch),
-      });
-      await this.store.appendTimeline(caseId, {
-        kind: "corpus_intake_committed",
-        actor,
-        targetId: batchId,
-        clientTime: null,
-        payload: { accepted: items.length, rejected: preview.report.rejected.length, origin: request.origin },
-      });
-      await this.audit.append({
-        identity: actor.id,
-        action: "corpus_intake_commit",
-        target: batchId,
-        origin,
-        outcome: "success",
-      });
-      return batch;
-    });
+        return batch;
+      }, this.audit);
+    } catch (error) {
+      await Promise.allSettled(stages.map((stage) => stage.rollback()));
+      throw error;
+    } finally {
+      for (const stage of stages) stage.release();
+    }
   }
 
   async getCorpusIntakeBatch(caseId: string, batchId: string): Promise<CorpusIntakeBatchV1 | null> {
@@ -1297,6 +1316,8 @@ export class CaseService {
       summaryContributionId: row.summaryContributionId,
       uploaderId: row.uploaderId,
       sourceId: row.sourceId,
+      relativePath: row.relativePath ?? row.filename,
+      intakeBatchId: row.intakeBatchId ?? null,
     };
   }
 

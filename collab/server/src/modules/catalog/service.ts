@@ -106,16 +106,23 @@ export class CatalogService {
   async ensureHumanSource(actor: CatalogActor): Promise<SourceV1> {
     const existing = await this.store.findByIdentity(actor.id);
     if (existing) return toSourceV1(existing);
-    return this.create(
-      actor,
-      {
-        name: actor.username,
-        kind: "human",
-        description: "Directory identity",
-        identityId: actor.id,
-      },
-      "system",
-    );
+    try {
+      return await this.create(
+        actor,
+        {
+          name: actor.username,
+          kind: "human",
+          description: "Directory identity",
+          identityId: actor.id,
+        },
+        "system",
+      );
+    } catch (error) {
+      // Concurrent first use may have won the identity uniqueness race.
+      const concurrent = await this.store.findByIdentity(actor.id);
+      if (concurrent) return toSourceV1(concurrent);
+      throw error;
+    }
   }
 
   // Resolves a source for new attributions (imports). Retired sources stay

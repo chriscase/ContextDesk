@@ -35,6 +35,7 @@ function previewBody(overrides: Record<string, unknown> = {}): Record<string, un
     origin: "files",
     sourceLabel: "fixture-operator-upload",
     privacyClass: "owner_only",
+    idempotencyKey: "batch-syn-0001",
     files: [
       {
         relativePath: "mailer/shared-timeout.log",
@@ -53,7 +54,7 @@ function commitBody(overrides: Record<string, unknown> = {}): Record<string, unk
   return {
     ...previewBody(),
     schemaId: CORPUS_INTAKE_COMMIT_SCHEMA_ID,
-    idempotencyKey: "batch-syn-0001",
+    previewToken: "c".repeat(64),
     ...overrides,
   };
 }
@@ -63,6 +64,7 @@ function reportBody(overrides: Record<string, unknown> = {}): Record<string, unk
     schemaId: CORPUS_INTAKE_REPORT_SCHEMA_ID,
     caseId: "11111111-1111-4111-8111-111111111111",
     origin: "files",
+    previewToken: "d".repeat(64),
     accepted: [
       {
         relativePath: "mailer/shared-timeout.log",
@@ -88,6 +90,7 @@ function batchBody(overrides: Record<string, unknown> = {}): Record<string, unkn
     sourceLabel: "fixture-zip",
     privacyClass: "share_safe",
     idempotencyKey: "batch-syn-0001",
+    requestDigest: "e".repeat(64),
     replayed: false,
     createdAt: "2026-08-15T00:00:00.000Z",
     createdBy: "uid=alice,ou=people,dc=example,dc=test",
@@ -154,6 +157,14 @@ describe("corpus intake contract", () => {
     expect(() =>
       parseCorpusIntakePreviewRequest(previewBody({ origin: "zip", files: [], archiveBase64: null })),
     ).toThrow(/archiveBase64/);
+    expect(() =>
+      parseCorpusIntakePreviewRequest(
+        previewBody({ origin: "zip", files: previewBody().files, archiveBase64: "UEs=" }),
+      ),
+    ).toThrow(/does not accept direct files/);
+    expect(() =>
+      parseCorpusIntakePreviewRequest(previewBody({ archiveBase64: "UEs=" })),
+    ).toThrow(/requires a null archive/);
   });
 
   it("requires a bounded idempotency key on commit", () => {

@@ -4,11 +4,12 @@
   "title": "cd-collab Corpus Intake Preview Report v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaId", "caseId", "origin", "accepted", "rejected", "limits"],
+  "required": ["schemaId", "caseId", "origin", "previewToken", "accepted", "rejected", "limits"],
   "properties": {
     "schemaId": { "type": "string", "const": "cd-collab.corpus_intake_report.v1" },
     "caseId": { "type": "string" },
     "origin": { "type": "string", "enum": ["files", "zip", "directory"] },
+    "previewToken": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "accepted": { "type": "array" },
     "rejected": { "type": "array" },
     "limits": {

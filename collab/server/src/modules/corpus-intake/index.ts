@@ -5,6 +5,6 @@ export { extractZip, buildTestZip, isNestedArchive, normalizeIntakePath, ZipErro
 export type { ZipExtractResult, ZipMember, ZipRejection } from "./zip.js";
 export { classifyBytes, digestOf } from "./classify.js";
 export type { ClassifiedFile, ClassifiedRejection } from "./classify.js";
-export { previewCorpusBytes, decodeBase64 } from "./preview.js";
+export { previewCorpusBytes, corpusIntakeRequestDigest, decodeBase64 } from "./preview.js";
 export { registerCorpusIntakeRoutes } from "./routes.js";
 export type { CorpusIntakeRouteDeps } from "./routes.js";

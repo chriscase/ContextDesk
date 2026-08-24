@@ -80,9 +80,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     let evidenceStore: "up" | "down" = "down";
     if (deps.pool) {
       try {
-        await deps.pool.query(
-          "SELECT 1 FROM schema_migrations WHERE version = '012_case_situation'",
+        const migrated = await deps.pool.query(
+          "SELECT 1 FROM schema_migrations WHERE version = '013_corpus_intake'",
         );
+        if (migrated.rowCount !== 1) throw new Error("required migration is not applied");
         database = "up";
       } catch {
         database = "down";
@@ -149,6 +150,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       await registerCorpusIntakeRoutes(app, {
         auth: security.auth,
         roles: security.roles,
+        audit: security.audit,
         domain: deps.domain,
       });
     }

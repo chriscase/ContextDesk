@@ -3,12 +3,14 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ActiveSessionDeps } from "../auth/index.js";
 import { resolveActiveSession } from "../auth/index.js";
 import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
-import type { Actor, CaseService } from "../cases/index.js";
+import { CorpusIntakeConflictError, type Actor, type CaseService } from "../cases/index.js";
+import type { AuditStore } from "../audit/index.js";
 import { ZipError } from "./zip.js";
 
 function publicIntakeError(err: unknown): string {
   if (err instanceof ContractViolation) return err.message;
   if (err instanceof ZipError) return err.message;
+  if (err instanceof CorpusIntakeConflictError) return err.message;
   if (err instanceof Error) {
     const message = err.message.trim();
     if (
@@ -30,6 +32,7 @@ function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
 export interface CorpusIntakeRouteDeps {
   auth: ActiveSessionDeps;
   roles: MutableGroupRoleMap;
+  audit: AuditStore;
   domain: Pick<
     CaseService,
     | "previewCorpusIntake"
@@ -63,12 +66,32 @@ export async function registerCorpusIntakeRoutes(
     ctx: { actor: Actor; isAdmin: boolean; canRead: boolean },
     caseId: string,
     reply: { code: (status: number) => unknown },
+    deniedAction?: "corpus_intake_preview" | "corpus_intake_commit",
+    deniedOrigin?: string,
   ): Promise<boolean> => {
     if (!ctx.canRead) {
+      if (deniedAction) {
+        await deps.audit.append({
+          identity: ctx.actor.id,
+          action: deniedAction,
+          target: caseId,
+          origin: deniedOrigin ?? null,
+          outcome: "denied",
+        });
+      }
       void reply.code(403);
       return false;
     }
     if (!(await deps.domain.getCase(caseId, ctx.actor, ctx.isAdmin))) {
+      if (deniedAction) {
+        await deps.audit.append({
+          identity: ctx.actor.id,
+          action: deniedAction,
+          target: caseId,
+          origin: deniedOrigin ?? null,
+          outcome: "denied",
+        });
+      }
       void reply.code(404);
       return false;
     }
@@ -79,23 +102,30 @@ export async function registerCorpusIntakeRoutes(
     "/api/cases/:id/corpus-intake/preview",
     { bodyLimit: 12 * 1024 * 1024 },
     async (request, reply) => {
+      const id = (request.params as { id: string }).id;
       const ctx = await sessionOf(request);
       if (!ctx) {
         void reply.code(401);
         return authError("unauthenticated");
       }
       if (!ctx.canWrite) {
+        await deps.audit.append({
+          identity: ctx.actor.id,
+          action: "corpus_intake_preview",
+          target: id,
+          origin: request.ip,
+          outcome: "denied",
+        });
         void reply.code(403);
         return authError("forbidden");
       }
-      const id = (request.params as { id: string }).id;
-      if (!(await requireAccess(ctx, id, reply))) {
+      if (!(await requireAccess(ctx, id, reply, "corpus_intake_preview", request.ip))) {
         return { error: "not_found" };
       }
       try {
         return await deps.domain.previewCorpusIntake(id, ctx.actor, request.body);
       } catch (err) {
-        void reply.code(400);
+        void reply.code(err instanceof CorpusIntakeConflictError ? 409 : 400);
         return { error: publicIntakeError(err) };
       }
     },
@@ -105,23 +135,30 @@ export async function registerCorpusIntakeRoutes(
     "/api/cases/:id/corpus-intake",
     { bodyLimit: 12 * 1024 * 1024 },
     async (request, reply) => {
+      const id = (request.params as { id: string }).id;
       const ctx = await sessionOf(request);
       if (!ctx) {
         void reply.code(401);
         return authError("unauthenticated");
       }
       if (!ctx.canWrite) {
+        await deps.audit.append({
+          identity: ctx.actor.id,
+          action: "corpus_intake_commit",
+          target: id,
+          origin: request.ip,
+          outcome: "denied",
+        });
         void reply.code(403);
         return authError("forbidden");
       }
-      const id = (request.params as { id: string }).id;
-      if (!(await requireAccess(ctx, id, reply))) {
+      if (!(await requireAccess(ctx, id, reply, "corpus_intake_commit", request.ip))) {
         return { error: "not_found" };
       }
       try {
         return await deps.domain.commitCorpusIntake(id, ctx.actor, request.body, request.ip);
       } catch (err) {
-        void reply.code(400);
+        void reply.code(err instanceof CorpusIntakeConflictError ? 409 : 400);
         return { error: publicIntakeError(err) };
       }
     },

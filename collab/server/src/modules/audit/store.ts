@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Pool } from "pg";
 
 export type AuditOutcome = "success" | "denied" | "failure";
@@ -38,6 +39,17 @@ export class MemoryAuditStore implements AuditStore {
   private readonly rows: StoredAudit[] = [];
   private nextId = 1;
 
+  capture(): unknown {
+    return { rows: this.rows.map((row) => ({ ...row })), nextId: this.nextId };
+  }
+
+  restore(snapshot: unknown): void {
+    const state = snapshot as { rows: StoredAudit[]; nextId: number };
+    this.rows.length = 0;
+    this.rows.push(...state.rows.map((row) => ({ ...row, at: new Date(row.at) })));
+    this.nextId = state.nextId;
+  }
+
   async append(record: AuditRecord): Promise<StoredAudit> {
     const stored: StoredAudit = { ...record, id: this.nextId, at: new Date() };
     this.nextId += 1;
@@ -57,6 +69,10 @@ export class MemoryAuditStore implements AuditStore {
 export class PgAuditStore implements AuditStore {
   constructor(private readonly pool: AuditQueryable) {}
 
+  private get db(): AuditQueryable {
+    return pgAuditTx.getStore() ?? this.pool;
+  }
+
   isBoundTo(queryable: AuditQueryable): boolean {
     return this.pool === queryable;
   }
@@ -66,7 +82,11 @@ export class PgAuditStore implements AuditStore {
   }
 
   async append(record: AuditRecord): Promise<StoredAudit> {
-    return appendPgAudit(this.pool, record);
+    return appendPgAudit(this.db, record);
+  }
+
+  async withTransaction<T>(queryable: AuditQueryable, operation: () => Promise<T>): Promise<T> {
+    return pgAuditTx.run(queryable, operation);
   }
 
   async list(filter?: { action?: string; identity?: string }): Promise<StoredAudit[]> {
@@ -81,6 +101,8 @@ export class PgAuditStore implements AuditStore {
     return result.rows.map((r) => asRow(r as Record<string, unknown>));
   }
 }
+
+const pgAuditTx = new AsyncLocalStorage<AuditQueryable>();
 
 async function appendPgAudit(
   queryable: AuditQueryable,

@@ -72,10 +72,13 @@ test.describe("investigation-scoped corpus intake", () => {
 
     await gotoStage(page, "Analyze");
     const analyze = page.locator("#stage-analyze");
-    await expect(analyze.getByText("mailer/shared-timeout.log", { exact: true })).toBeVisible();
-    await expect(analyze.getByText("workers/unique-worker.log", { exact: true })).toBeVisible();
-    await analyze.getByRole("button", { name: "Inspect log" }).first().click();
-    await expect(analyze.getByText(/Expand complete log or stack trace|mailer timeout id=syn-1/)).toBeVisible();
+    const mailerEvidence = analyze.locator(".case-memory__list > li").filter({
+      hasText: "mailer/shared-timeout.log",
+    });
+    await expect(mailerEvidence.getByText("mailer/shared-timeout.log", { exact: true })).toBeVisible();
+    await expect(analyze.locator(".case-memory__list").getByText("workers/unique-worker.log", { exact: true })).toBeVisible();
+    await mailerEvidence.getByRole("button", { name: "Inspect log" }).click();
+    await expect(mailerEvidence.getByText(/mailer timeout id=syn-1/)).toBeVisible();
 
     await analyze.getByRole("checkbox", { name: "Include mailer/shared-timeout.log in snapshot" }).check();
     await analyze.getByRole("button", { name: "Freeze selected evidence (1)" }).click();
@@ -99,7 +102,9 @@ test.describe("investigation-scoped corpus intake", () => {
     await page.goto(
       `/investigations/${caseId}/analyze?section=triage-evidence-board&item=${batch.items[0]?.artifactId}&kind=evidence#triage-evidence-board`,
     );
-    await expect(page.locator("#stage-analyze").getByText("mailer/shared-timeout.log", { exact: true })).toBeVisible();
+    await expect(
+      page.locator("#stage-analyze .case-memory__list").getByText("mailer/shared-timeout.log", { exact: true }),
+    ).toBeVisible();
     await screenshot(page, "13-corpus-intake");
     await openCase(page, title);
   });

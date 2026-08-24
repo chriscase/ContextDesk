@@ -16,6 +16,8 @@ interface ArtifactView {
   verificationStatus: string | null;
   privacyClass: string;
   uploaderId: string;
+  relativePath?: string | null;
+  intakeBatchId?: string | null;
 }
 
 interface SnapshotView {

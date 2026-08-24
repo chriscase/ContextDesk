@@ -18,6 +18,7 @@ import {
   type SnapshotV1,
 } from "@cd-collab/contracts";
 import {
+  MemoryAuditStore,
   PgAuditStore,
   type AuditRecord,
   type AuditStore,
@@ -104,6 +105,7 @@ export interface IntakeBatchRow {
   id: string;
   caseId: string;
   idempotencyKey: string;
+  requestDigest: string;
   origin: string;
   sourceLabel: string;
   privacyClass: PrivacyClass;
@@ -255,7 +257,9 @@ export interface CaseStore {
   getArtifact(artifactId: string): Promise<ArtifactRow | null>;
   listArtifactsByCase(caseId: string): Promise<ArtifactRow[]>;
   insertArtifact(row: ArtifactRow): Promise<void>;
-  withAtomic<T>(operation: () => Promise<T>): Promise<T>;
+  withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T>;
+  lockIntakeIdempotency(caseId: string, key: string): Promise<void>;
+  lockEvidenceDigest(digest: string): Promise<void>;
   getIntakeBatchByIdempotency(caseId: string, key: string): Promise<IntakeBatchRow | null>;
   getIntakeBatch(caseId: string, batchId: string): Promise<IntakeBatchRow | null>;
   insertIntakeBatch(row: IntakeBatchRow): Promise<void>;
@@ -497,10 +501,16 @@ export class MemoryCaseStore implements CaseStore {
   }
 
   async insertArtifact(row: ArtifactRow): Promise<void> {
+    if (row.intakeBatchId) {
+      const batch = this.intakeBatches.get(row.intakeBatchId);
+      if (!batch || batch.caseId !== row.caseId) {
+        throw new Error("artifact intake batch does not belong to the case");
+      }
+    }
     this.artifacts.set(row.id, { ...row });
   }
 
-  async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
+  async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
     return this.atomicBoundary(async () => {
       const artifacts = new Map(this.artifacts);
       const revisions = new Map(
@@ -510,6 +520,7 @@ export class MemoryCaseStore implements CaseStore {
         [...this.timeline.entries()].map(([key, events]) => [key, events.map((row) => ({ ...row }))]),
       );
       const batches = new Map(this.intakeBatches);
+      const auditSnapshot = audit instanceof MemoryAuditStore ? audit.capture() : null;
       try {
         return await operation();
       } catch (error) {
@@ -521,9 +532,18 @@ export class MemoryCaseStore implements CaseStore {
         for (const [key, value] of timeline) this.timeline.set(key, value);
         this.intakeBatches.clear();
         for (const [key, value] of batches) this.intakeBatches.set(key, value);
+        if (audit instanceof MemoryAuditStore && auditSnapshot) audit.restore(auditSnapshot);
         throw error;
       }
     });
+  }
+
+  async lockIntakeIdempotency(_caseId: string, _key: string): Promise<void> {
+    // Memory transactions are serialized by atomicBoundary.
+  }
+
+  async lockEvidenceDigest(_digest: string): Promise<void> {
+    // Memory transactions are serialized by atomicBoundary.
   }
 
   async getIntakeBatchByIdempotency(caseId: string, key: string): Promise<IntakeBatchRow | null> {
@@ -921,8 +941,31 @@ export class PgCaseStore implements CaseStore {
     );
   }
 
-  async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
-    return withPgTransaction(this.pool, (transaction) => pgCaseTx.run(transaction, operation));
+  async withAtomic<T>(operation: () => Promise<T>, audit?: AuditStore): Promise<T> {
+    if (audit && (!(audit instanceof PgAuditStore) || !audit.isBoundTo(this.pool))) {
+      throw new Error("PostgreSQL case and audit stores must share one connection source");
+    }
+    return withPgTransaction(this.pool, (transaction) =>
+      pgCaseTx.run(transaction, () =>
+        audit instanceof PgAuditStore
+          ? audit.withTransaction(transaction, operation)
+          : operation(),
+      ),
+    );
+  }
+
+  async lockIntakeIdempotency(caseId: string, key: string): Promise<void> {
+    await this.db.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [`${caseId}:${key}`],
+    );
+  }
+
+  async lockEvidenceDigest(digest: string): Promise<void> {
+    await this.db.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [`evidence:${digest}`],
+    );
   }
 
   async getIntakeBatchByIdempotency(caseId: string, key: string): Promise<IntakeBatchRow | null> {
@@ -946,13 +989,14 @@ export class PgCaseStore implements CaseStore {
   async insertIntakeBatch(row: IntakeBatchRow): Promise<void> {
     await this.db.query(
       `INSERT INTO evidence_intake_batches (
-         id, case_id, idempotency_key, origin, source_label, privacy_class,
+         id, case_id, idempotency_key, request_digest, origin, source_label, privacy_class,
          created_at, created_by, payload_json
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         row.id,
         row.caseId,
         row.idempotencyKey,
+        row.requestDigest,
         row.origin,
         row.sourceLabel,
         row.privacyClass,
@@ -1266,6 +1310,7 @@ function asIntakeBatch(row: Record<string, unknown>): IntakeBatchRow {
     id: String(row.id),
     caseId: String(row.case_id),
     idempotencyKey: String(row.idempotency_key),
+    requestDigest: String(row.request_digest),
     origin: String(row.origin),
     sourceLabel: String(row.source_label),
     privacyClass: row.privacy_class as PrivacyClass,

@@ -10,6 +10,7 @@ const MAX_FILE_COUNT = 64;
 const ALLOWED_EXTENSIONS = [".log", ".txt", ".json", ".csv", ".xml", ".eml", ".md"];
 
 interface PreviewReport {
+  previewToken: string;
   accepted: Array<{
     relativePath: string;
     mediaType: string;
@@ -100,6 +101,7 @@ export function CorpusIntakePanel(props: {
   const [busy, setBusy] = useState<"preview" | "commit" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const idempotencyKey = useRef(newIdempotencyKey());
+  const inputVersion = useRef(0);
   const directoryRef = useRef<HTMLInputElement | null>(null);
   useRouteFocus(props.routeFocus, true);
 
@@ -124,7 +126,15 @@ export function CorpusIntakePanel(props: {
     [files],
   );
 
-  async function buildBody(schemaId: string, withKey: boolean) {
+  function invalidatePreview(): void {
+    inputVersion.current += 1;
+    idempotencyKey.current = newIdempotencyKey();
+    setPreview(null);
+    setBatch(null);
+    setError(null);
+  }
+
+  async function buildBody(schemaId: string, previewToken?: string) {
     if (origin === "zip") {
       const archive = files[0];
       if (!archive) throw new Error("Choose a ZIP archive.");
@@ -134,7 +144,8 @@ export function CorpusIntakePanel(props: {
         origin,
         sourceLabel: sourceLabel.trim() || "investigation upload",
         privacyClass,
-        ...(withKey ? { idempotencyKey: idempotencyKey.current } : {}),
+        idempotencyKey: idempotencyKey.current,
+        ...(previewToken ? { previewToken } : {}),
         files: [],
         archiveBase64: await toBase64(archive),
       };
@@ -157,7 +168,8 @@ export function CorpusIntakePanel(props: {
       origin,
       sourceLabel: sourceLabel.trim() || "investigation upload",
       privacyClass,
-      ...(withKey ? { idempotencyKey: idempotencyKey.current } : {}),
+      idempotencyKey: idempotencyKey.current,
+      ...(previewToken ? { previewToken } : {}),
       files: encoded,
       archiveBase64: null,
     };
@@ -168,8 +180,9 @@ export function CorpusIntakePanel(props: {
     setError(null);
     setBatch(null);
     setBusy("preview");
+    const version = inputVersion.current;
     try {
-      const body = await buildBody("cd-collab.corpus_intake_preview.v1", false);
+      const body = await buildBody("cd-collab.corpus_intake_preview.v1");
       const response = await protectedApiFetch(`/api/cases/${props.caseId}/corpus-intake/preview`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -179,7 +192,8 @@ export function CorpusIntakePanel(props: {
         setError(await errorText(response, "Preview could not be created."));
         return;
       }
-      setPreview((await response.json()) as PreviewReport);
+      const report = (await response.json()) as PreviewReport;
+      if (inputVersion.current === version) setPreview(report);
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -192,11 +206,12 @@ export function CorpusIntakePanel(props: {
   }
 
   async function runCommit() {
-    if (props.readOnly || !props.canWrite || busy) return;
+    if (props.readOnly || !props.canWrite || busy || !preview) return;
     setError(null);
     setBusy("commit");
+    const version = inputVersion.current;
     try {
-      const body = await buildBody("cd-collab.corpus_intake_commit.v1", true);
+      const body = await buildBody("cd-collab.corpus_intake_commit.v1", preview.previewToken);
       const response = await protectedApiFetch(`/api/cases/${props.caseId}/corpus-intake`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -207,7 +222,7 @@ export function CorpusIntakePanel(props: {
         return;
       }
       const committed = (await response.json()) as CommittedBatch;
-      setBatch(committed);
+      if (inputVersion.current === version) setBatch(committed);
       window.dispatchEvent(
         new CustomEvent("contextdesk:corpus-intake-committed", {
           detail: { caseId: props.caseId, batchId: committed.id },
@@ -225,6 +240,7 @@ export function CorpusIntakePanel(props: {
   }
 
   function resetSelection(next: File[]) {
+    inputVersion.current += 1;
     idempotencyKey.current = newIdempotencyKey();
     setFiles(next);
     setPreview(null);
@@ -262,7 +278,7 @@ export function CorpusIntakePanel(props: {
                 >
                   {item.relativePath}
                 </a>
-                {item.duplicateDigest ? " · attributed existing digest" : ""}
+                {item.duplicateDigest ? " · reused stored bytes" : ""}
               </li>
             ))}
           </ul>
@@ -331,7 +347,10 @@ export function CorpusIntakePanel(props: {
         <input
           className="login__input"
           value={sourceLabel}
-          onChange={(event) => setSourceLabel(event.target.value)}
+          onChange={(event) => {
+            setSourceLabel(event.target.value);
+            invalidatePreview();
+          }}
           aria-label="Corpus intake source label"
         />
       </label>
@@ -340,7 +359,10 @@ export function CorpusIntakePanel(props: {
         <select
           className="login__input"
           value={privacyClass}
-          onChange={(event) => setPrivacyClass(event.target.value as "owner_only" | "share_safe")}
+          onChange={(event) => {
+            setPrivacyClass(event.target.value as "owner_only" | "share_safe");
+            invalidatePreview();
+          }}
           aria-label="Corpus intake privacy class"
         >
           <option value="owner_only">owner_only</option>

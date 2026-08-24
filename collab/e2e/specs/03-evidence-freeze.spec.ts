@@ -113,7 +113,7 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
     });
     await page.getByLabel("Summary").fill("Uploaded through the war-room form");
     await page.getByLabel("Artifact kind").selectOption("log");
-    await page.getByLabel("Privacy class").selectOption("share_safe");
+    await page.locator(".case-memory__upload-form").getByLabel("Privacy class").selectOption("share_safe");
     const [posted] = await Promise.all([
       page.waitForResponse(
         (res) => res.url().includes("/api/cases/") && res.url().endsWith("/evidence") && res.request().method() === "POST",

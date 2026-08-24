@@ -7,13 +7,18 @@ import {
   type CorpusRejectedFileV1,
   type PrivacyClass,
 } from "@cd-collab/contracts";
+import { createHash } from "node:crypto";
+import { scanShareSafePrivacy } from "@cd-collab/contracts";
 import { classifyBytes, digestOf, type ClassifiedFile } from "./classify.js";
 import { ZipError, extractZip } from "./zip.js";
 
 export interface PreviewInput {
   caseId: string;
+  actorId: string;
   origin: CorpusIntakeOrigin;
   privacyClass: PrivacyClass;
+  sourceLabel: string;
+  idempotencyKey: string;
   files: Array<{ relativePath: string; mediaType?: string; bytes: Uint8Array }>;
   archive?: Uint8Array | null;
   knownDigests?: Set<string>;
@@ -23,6 +28,35 @@ export interface PreviewInput {
 export interface PreviewOutcome {
   report: CorpusIntakePreviewReportV1;
   classified: ClassifiedFile[];
+}
+
+function framed(hash: ReturnType<typeof createHash>, value: string | Uint8Array): void {
+  const bytes = typeof value === "string" ? Buffer.from(value, "utf8") : value;
+  hash.update(String(bytes.byteLength));
+  hash.update(":");
+  hash.update(bytes);
+  hash.update(";");
+}
+
+export function corpusIntakeRequestDigest(input: PreviewInput): string {
+  const hash = createHash("sha256");
+  for (const value of [
+    input.caseId,
+    input.actorId,
+    input.origin,
+    input.sourceLabel,
+    input.privacyClass,
+    input.idempotencyKey,
+  ]) {
+    framed(hash, value);
+  }
+  framed(hash, input.archive ?? new Uint8Array());
+  for (const file of input.files) {
+    framed(hash, file.relativePath);
+    framed(hash, file.mediaType ?? "");
+    framed(hash, file.bytes);
+  }
+  return hash.digest("hex");
 }
 
 function decodeArchive(archive: Uint8Array, startedAt: number): {
@@ -48,6 +82,7 @@ function decodeArchive(archive: Uint8Array, startedAt: number): {
 
 export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
   const startedAt = input.startedAt ?? Date.now();
+  const previewToken = corpusIntakeRequestDigest(input);
   const rejected: CorpusRejectedFileV1[] = [];
   const incoming: Array<{ relativePath: string; mediaType?: string; bytes: Uint8Array }> = [];
   if (input.archive && input.archive.byteLength > 0) {
@@ -65,6 +100,28 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
   }
   incoming.push(...input.files);
 
+  if (
+    input.privacyClass === "share_safe"
+    && scanShareSafePrivacy({ sourceLabel: input.sourceLabel }).length > 0
+  ) {
+    return {
+      classified: [],
+      report: {
+        schemaId: CORPUS_INTAKE_REPORT_SCHEMA_ID,
+        caseId: input.caseId,
+        origin: input.origin,
+        previewToken,
+        accepted: [],
+        rejected: [{
+          relativePath: "",
+          reason: "redaction_failed",
+          detail: "share-safe privacy gate rejected intake metadata",
+        }],
+        limits: CORPUS_INTAKE_LIMITS,
+      },
+    };
+  }
+
   const classified: ClassifiedFile[] = [];
   const seenPath = new Set<string>();
   const known = input.knownDigests ?? new Set<string>();
@@ -77,6 +134,7 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
         schemaId: CORPUS_INTAKE_REPORT_SCHEMA_ID,
         caseId: input.caseId,
         origin: input.origin,
+        previewToken,
         accepted: [],
         rejected: [
           {
@@ -138,6 +196,7 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
       schemaId: CORPUS_INTAKE_REPORT_SCHEMA_ID,
       caseId: input.caseId,
       origin: input.origin,
+      previewToken,
       accepted,
       rejected,
       limits: CORPUS_INTAKE_LIMITS,
@@ -146,11 +205,15 @@ export function previewCorpusBytes(input: PreviewInput): PreviewOutcome {
 }
 
 export function decodeBase64(path: string, raw: string): Uint8Array {
-  try {
-    return Uint8Array.from(Buffer.from(raw, "base64"));
-  } catch {
+  const canonical = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+  if (raw.length % 4 !== 0 || !canonical.test(raw)) {
     throw new Error(`${path} is not valid base64`);
   }
+  const decoded = Buffer.from(raw, "base64");
+  if (decoded.toString("base64") !== raw) {
+    throw new Error(`${path} is not valid base64`);
+  }
+  return Uint8Array.from(decoded);
 }
 
 export { digestOf };

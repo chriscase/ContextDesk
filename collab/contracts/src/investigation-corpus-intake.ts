@@ -89,6 +89,7 @@ const previewRequestShape: ObjectShape = {
   origin: f.req(f.en(...CORPUS_INTAKE_ORIGINS)),
   sourceLabel: f.req(f.str),
   privacyClass: f.req(f.en(...PRIVACY_CLASSES)),
+  idempotencyKey: f.req(f.str),
   files: f.req(f.arr(f.obj(fileEntryShape))),
   archiveBase64: f.nul(f.str),
 };
@@ -99,6 +100,7 @@ const commitRequestShape: ObjectShape = {
   sourceLabel: f.req(f.str),
   privacyClass: f.req(f.en(...PRIVACY_CLASSES)),
   idempotencyKey: f.req(f.str),
+  previewToken: f.req(f.str),
   files: f.req(f.arr(f.obj(fileEntryShape))),
   archiveBase64: f.nul(f.str),
 };
@@ -114,6 +116,7 @@ export interface CorpusIntakePreviewRequestV1 {
   origin: CorpusIntakeOrigin;
   sourceLabel: string;
   privacyClass: PrivacyClass;
+  idempotencyKey: string;
   files: CorpusIntakeFileEntryV1[];
   archiveBase64: string | null;
 }
@@ -124,6 +127,7 @@ export interface CorpusIntakeCommitRequestV1 {
   sourceLabel: string;
   privacyClass: PrivacyClass;
   idempotencyKey: string;
+  previewToken: string;
   files: CorpusIntakeFileEntryV1[];
   archiveBase64: string | null;
 }
@@ -147,6 +151,7 @@ export interface CorpusIntakePreviewReportV1 {
   schemaId: typeof CORPUS_INTAKE_REPORT_SCHEMA_ID;
   caseId: string;
   origin: CorpusIntakeOrigin;
+  previewToken: string;
   accepted: CorpusAcceptedFileV1[];
   rejected: CorpusRejectedFileV1[];
   limits: typeof CORPUS_INTAKE_LIMITS;
@@ -171,6 +176,7 @@ export interface CorpusIntakeBatchV1 {
   sourceLabel: string;
   privacyClass: PrivacyClass;
   idempotencyKey: string;
+  requestDigest: string;
   replayed: boolean;
   createdAt: string;
   createdBy: string;
@@ -180,6 +186,9 @@ export interface CorpusIntakeBatchV1 {
 
 function requireNonEmpty(path: string, value: string): string {
   if (!value.trim()) throw new ContractViolation(path, "must not be empty");
+  if (value.length > CORPUS_INTAKE_LIMITS.maxPathLength) {
+    throw new ContractViolation(path, "is too long");
+  }
   return value;
 }
 
@@ -189,16 +198,41 @@ function requireKey(path: string, value: string): void {
   }
 }
 
+function requireDigest(path: string, value: string): void {
+  if (!/^[a-f0-9]{64}$/.test(value)) {
+    throw new ContractViolation(path, "must be a lowercase SHA-256 digest");
+  }
+}
+
+function assertOriginRepresentation(
+  body: Pick<CorpusIntakePreviewRequestV1, "origin" | "files" | "archiveBase64">,
+): void {
+  if (body.origin === "zip") {
+    if (!body.archiveBase64) {
+      throw new ContractViolation("$.archiveBase64", "zip origin requires archiveBase64");
+    }
+    if (body.files.length !== 0) {
+      throw new ContractViolation("$.files", "zip origin does not accept direct files");
+    }
+    return;
+  }
+  if (body.archiveBase64 !== null) {
+    throw new ContractViolation("$.archiveBase64", "non-zip origin requires a null archive");
+  }
+  if (body.files.length === 0) {
+    throw new ContractViolation("$.files", "at least one file is required");
+  }
+  if (body.files.length > CORPUS_INTAKE_LIMITS.maxFileCount) {
+    throw new ContractViolation("$.files", "file count exceeds cap");
+  }
+}
+
 export function parseCorpusIntakePreviewRequest(raw: unknown): CorpusIntakePreviewRequestV1 {
   checkObject("$", previewRequestShape, raw);
   const body = raw as CorpusIntakePreviewRequestV1;
   requireNonEmpty("$.sourceLabel", body.sourceLabel);
-  if (body.origin === "zip" && !body.archiveBase64) {
-    throw new ContractViolation("$.archiveBase64", "zip origin requires archiveBase64");
-  }
-  if (body.origin !== "zip" && body.files.length === 0) {
-    throw new ContractViolation("$.files", "at least one file is required");
-  }
+  requireKey("$.idempotencyKey", body.idempotencyKey);
+  assertOriginRepresentation(body);
   return body;
 }
 
@@ -207,12 +241,8 @@ export function parseCorpusIntakeCommitRequest(raw: unknown): CorpusIntakeCommit
   const body = raw as CorpusIntakeCommitRequestV1;
   requireNonEmpty("$.sourceLabel", body.sourceLabel);
   requireKey("$.idempotencyKey", body.idempotencyKey);
-  if (body.origin === "zip" && !body.archiveBase64) {
-    throw new ContractViolation("$.archiveBase64", "zip origin requires archiveBase64");
-  }
-  if (body.origin !== "zip" && body.files.length === 0) {
-    throw new ContractViolation("$.files", "at least one file is required");
-  }
+  requireDigest("$.previewToken", body.previewToken);
+  assertOriginRepresentation(body);
   return body;
 }
 
@@ -246,6 +276,7 @@ const previewReportShape: ObjectShape = {
   schemaId: f.req(f.en(CORPUS_INTAKE_REPORT_SCHEMA_ID)),
   caseId: f.req(f.str),
   origin: f.req(f.en(...CORPUS_INTAKE_ORIGINS)),
+  previewToken: f.req(f.str),
   accepted: f.req(f.arr(f.obj(acceptedShape))),
   rejected: f.req(f.arr(f.obj(rejectedShape))),
   limits: f.req(f.obj(limitsShape)),
@@ -270,6 +301,7 @@ const batchShape: ObjectShape = {
   sourceLabel: f.req(f.str),
   privacyClass: f.req(f.en(...PRIVACY_CLASSES)),
   idempotencyKey: f.req(f.str),
+  requestDigest: f.req(f.str),
   replayed: f.req(f.bool),
   createdAt: f.req(f.str),
   createdBy: f.req(f.str),
@@ -279,7 +311,9 @@ const batchShape: ObjectShape = {
 
 export function parseCorpusIntakePreviewReport(raw: unknown): CorpusIntakePreviewReportV1 {
   checkObject("$", previewReportShape, raw);
-  return raw as CorpusIntakePreviewReportV1;
+  const body = raw as CorpusIntakePreviewReportV1;
+  requireDigest("$.previewToken", body.previewToken);
+  return body;
 }
 
 export function parseCorpusIntakeBatch(raw: unknown): CorpusIntakeBatchV1 {
@@ -287,5 +321,6 @@ export function parseCorpusIntakeBatch(raw: unknown): CorpusIntakeBatchV1 {
   const body = raw as CorpusIntakeBatchV1;
   requireNonEmpty("$.sourceLabel", body.sourceLabel);
   requireKey("$.idempotencyKey", body.idempotencyKey);
+  requireDigest("$.requestDigest", body.requestDigest);
   return body;
 }
