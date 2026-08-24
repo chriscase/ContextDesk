@@ -402,6 +402,56 @@ fn a_successful_init_leaves_no_tmp_files_behind() {
     }
 }
 
+/// macOS spells its ordinary temporary roots through root-owned aliases
+/// (`/tmp` and `/var`). The durable app-config writer must accept the exact
+/// caller spelling after verifying that system alias, while continuing to
+/// report that spelling and writing nowhere outside the corresponding
+/// canonical directory.
+#[test]
+#[cfg(target_os = "macos")]
+fn uncanonicalized_macos_tmp_data_dir_initializes_safely() {
+    let canonical_dir = tempfile::Builder::new()
+        .prefix("cd-cli-macos-tmp-alias-")
+        .tempdir_in("/private/tmp")
+        .expect("create canonical macOS tmp fixture");
+    let leaf = canonical_dir
+        .path()
+        .strip_prefix("/private/tmp")
+        .expect("fixture beneath /private/tmp");
+    let alias_dir = Path::new("/tmp").join(leaf);
+
+    let output = cli()
+        .args([
+            "--data-dir",
+            alias_dir.to_str().unwrap(),
+            "--json",
+            "config",
+            "init",
+            "--non-interactive",
+            "--skip-provider",
+            "--default-timezone",
+            "America/Chicago",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "uncanonicalized /tmp data dir must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_envelope(&output.stdout);
+    assert!(envelope["ok"].as_bool().unwrap());
+    assert_eq!(
+        envelope["data"]["data_dir"].as_str().unwrap(),
+        alias_dir.to_str().unwrap()
+    );
+    assert!(alias_dir.join("config.json").is_file());
+    assert!(alias_dir.join("cli.toml").is_file());
+    assert!(canonical_dir.path().join("config.json").is_file());
+    assert!(canonical_dir.path().join("cli.toml").is_file());
+}
+
 /// A process with no controlling terminal (exactly what `assert_cmd` spawns
 /// — and exactly what a script or CI job looks like) must default to
 /// non-interactive and terminate on its own, never block waiting for input
