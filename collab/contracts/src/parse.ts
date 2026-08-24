@@ -17,6 +17,7 @@ export type FieldMode = "required" | "nullable" | "optional" | "optional_nullabl
 
 export type FieldType =
   | { kind: "string" }
+  | { kind: "nstr" }
   | { kind: "bool" }
   | { kind: "u64" }
   | { kind: "enum"; values: readonly string[] }
@@ -42,6 +43,12 @@ export function checkValue(path: string, type: FieldType, v: unknown): void {
     case "string":
       if (typeof v !== "string")
         throw new ContractViolation(path, `expected string, got ${describe(v)}`);
+      return;
+    case "nstr":
+      if (typeof v !== "string")
+        throw new ContractViolation(path, `expected string, got ${describe(v)}`);
+      if (v.length < 1)
+        throw new ContractViolation(path, "expected non-empty string");
       return;
     case "bool":
       if (typeof v !== "boolean")
@@ -111,6 +118,8 @@ export const f = {
   opt: (type: FieldType) => ({ mode: "optional" as const, type }),
   optNul: (type: FieldType) => ({ mode: "optional_nullable" as const, type }),
   str: { kind: "string" } as FieldType,
+  /** Non-empty string; matches JSON Schema `minLength: 1`. */
+  nstr: { kind: "nstr" } as FieldType,
   bool: { kind: "bool" } as FieldType,
   u64: { kind: "u64" } as FieldType,
   en: (...values: string[]): FieldType => ({ kind: "enum", values }),

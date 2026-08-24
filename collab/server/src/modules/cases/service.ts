@@ -3,6 +3,8 @@ import {
   ARTIFACT_SCHEMA_ID,
   CASE_SCHEMA_ID,
   CONTRIBUTION_SCHEMA_ID,
+  OVERVIEW_ACTIVITY_CAP,
+  OVERVIEW_OPEN_CASE_CAP,
   snapshotFairness,
   snapshotFingerprint,
   type ArtifactKind,
@@ -32,13 +34,17 @@ import {
   type Actor,
   type ArtifactRow,
   type CaseStore,
+  type OverviewActivityRow,
+  type OverviewCounts,
+  type OverviewOpenCaseRow,
+  type OverviewScope,
   type RevisionRow,
   type SnapshotRow,
   type TimelineInsert,
   type TimelineRow,
 } from "./store.js";
 
-export type { Actor, TimelineRow } from "./store.js";
+export type { Actor, CaseTimelineRow, OverviewActivityRow, OverviewCounts, OverviewOpenCaseRow, OverviewScope, TimelineRow } from "./store.js";
 
 const ACTIVITY_DETAIL_KEYS = new Set([
   "kind",
@@ -133,6 +139,41 @@ export class CaseService {
         details: activityDetails(event.payload),
       }];
     });
+  }
+
+  async listOverviewCounts(scope: OverviewScope): Promise<OverviewCounts> {
+    return this.store.overviewCounts(scope);
+  }
+
+  async listOverviewOpenCases(
+    scope: OverviewScope,
+    requestedLimit = OVERVIEW_OPEN_CASE_CAP,
+  ): Promise<OverviewOpenCaseRow[]> {
+    const limit = Math.min(
+      OVERVIEW_OPEN_CASE_CAP,
+      Math.max(0, Math.trunc(requestedLimit) || OVERVIEW_OPEN_CASE_CAP),
+    );
+    if (limit === 0) return [];
+    return this.store.listOverviewOpenCases(scope, limit);
+  }
+
+  async listOverviewActivity(
+    scope: OverviewScope,
+    requestedLimit = OVERVIEW_ACTIVITY_CAP,
+  ): Promise<OverviewActivityRow[]> {
+    const limit = Math.min(
+      OVERVIEW_ACTIVITY_CAP,
+      Math.max(0, Math.trunc(requestedLimit) || OVERVIEW_ACTIVITY_CAP),
+    );
+    if (limit === 0) return [];
+    return this.store.listOverviewActivity(scope, limit);
+  }
+
+  async overviewVisibleTitle(caseId: string, scope: OverviewScope): Promise<string | null> {
+    const row = await this.store.getCase(caseId);
+    if (!row) return null;
+    if (!scope.isAdmin && !this.isMember(row, scope.actorId)) return null;
+    return row.title;
   }
 
   async getCase(id: string, actor: Actor, isAdmin: boolean): Promise<CaseV1 | null> {

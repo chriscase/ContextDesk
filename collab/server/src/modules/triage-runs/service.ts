@@ -14,7 +14,7 @@ import {
 } from "@cd-collab/contracts";
 import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
-import type { TriageJobStore } from "./store.js";
+import type { OverviewListedJob, TriageJobStore } from "./store.js";
 import type { TriageProfileOption } from "./profiles.js";
 
 const MAX_CANDIDATES = 16;
@@ -248,6 +248,20 @@ export class TriageRunService {
   async list(caseId: string, actor: Actor, isAdmin: boolean): Promise<TriageJobV1[]> {
     if (!(await this.deps.cases.getCase(caseId, actor, isAdmin))) return [];
     return this.deps.jobs.listByCase(caseId);
+  }
+
+  async listOverviewJobs(
+    scope: { actorId: string; isAdmin: boolean },
+    statuses: TriageJobStatus[],
+    limit: number,
+  ): Promise<OverviewListedJob[]> {
+    return this.deps.jobs.listOverviewJobs({
+      actorId: scope.actorId,
+      isAdmin: scope.isAdmin,
+      statuses,
+      limit,
+      visibleCaseTitle: (caseId) => this.deps.cases.overviewVisibleTitle(caseId, scope),
+    });
   }
 
   async get(
