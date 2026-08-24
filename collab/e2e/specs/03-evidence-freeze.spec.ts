@@ -98,7 +98,7 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
     await loginAs(page, FIXTURE_USERS.dave);
     await createCase(page, uniqueTitle("Upload widget"));
     await expect(page.getByRole("heading", { name: "Upload evidence" })).toBeVisible();
-    await expect(page.locator('input[type="file"]')).toHaveCount(1);
+    await expect(page.locator("#case-evidence-file")).toHaveCount(1);
     await expect(page.getByRole("button", { name: "Upload evidence" })).toBeVisible();
   });
 
