@@ -1228,7 +1228,7 @@ describe("decision readiness cockpit", () => {
           kind: "evidence_review",
           actor: "investigator",
           authorUsername: "analyst-one",
-          excerpt: "2026-08-15T14:02:11Z worker-pool WARN queue depth=48\n  at SyntheticWorker.reserve(worker.ts:42)",
+          excerpt: "2026-08-15T14:02:11Z worker-pool WARN queue depth=48\n  at SyntheticWorker.reserve(worker.ts:42); evidence ev-demo-inventory-timeout",
           evidenceRefs: ["ev-demo-inventory-timeout"],
           unknowns: [],
         }],
@@ -1240,6 +1240,11 @@ describe("decision readiness cockpit", () => {
     const scan = await screen.findByRole("region", { name: "At a glance" });
     expect(within(scan).getByText(/worker-pool WARN queue depth=48/)).toBeTruthy();
     expect(within(scan).getByText(/SyntheticWorker\.reserve/)).toBeTruthy();
+    expect(
+      [...scan.querySelectorAll(".experiment-lab__artifact-excerpt")].every(
+        (excerpt) => !excerpt.textContent?.includes("ev-demo-inventory-timeout"),
+      ),
+    ).toBe(true);
     expect(within(scan).getAllByText(/What the models claim/).length).toBeGreaterThan(0);
     expect(within(scan).getAllByText(/Why this matters/).length).toBeGreaterThan(0);
     expect(within(scan).getAllByText(/Next step/).length).toBeGreaterThan(0);

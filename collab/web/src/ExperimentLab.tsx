@@ -188,6 +188,14 @@ function truncateText(value: string, max = 96): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
+function readableTraceExcerpt(value: string): string {
+  const withoutTechnicalRefs = value
+    .replace(/(?:;\s*)?evidence\s+ev-[a-z0-9][a-z0-9-]*/gi, "")
+    .replace(/\s+([,.;:])/g, "$1")
+    .trim();
+  return withoutTechnicalRefs || "This step contains only a technical evidence reference.";
+}
+
 function traceEventMeaning(kind: string): string {
   const normalized = kind.toLowerCase();
   if (/input|prompt|question|evidence|retriev|search|tool/.test(normalized)) {
@@ -252,8 +260,8 @@ function supportingArtifact(view: ExperimentView, evidenceRef: string): Supporti
         "recorded lane";
       return {
         label: `Recorded evidence cited by ${model}`,
-        source: `${TRACE_SOURCE_LABELS[trace.sourceKind] ?? trace.sourceKind} · ${model}`,
-        excerpt: event.excerpt,
+        source: `recorded lane transcript · ${model}`,
+        excerpt: readableTraceExcerpt(event.excerpt),
         context: `Trace step ${event.sequence} · ${event.kind} by ${event.authorUsername ?? event.actor}. Timestamp and component were not captured by this experiment record.`,
         technicalRef: evidenceRef,
       };
@@ -1882,7 +1890,9 @@ export function ExperimentLab(props: {
                               {event.authorUsername ? ` · ${event.authorUsername}` : ` · ${event.actor}`}
                             </p>
                             {event.excerpt ? (
-                              <pre className="experiment-lab__artifact-excerpt">{event.excerpt}</pre>
+                              <pre className="experiment-lab__artifact-excerpt">
+                                {readableTraceExcerpt(event.excerpt)}
+                              </pre>
                             ) : (
                               <p className="experiment-lab__artifact-missing" role="note">
                                 Supporting excerpt not captured. Inspect or attach the source log,
@@ -2556,7 +2566,9 @@ export function ExperimentLab(props: {
                         <strong>{traceEventMeaning(event.kind)}</strong>
                         <span> · {event.authorUsername ?? event.actor}</span>
                         {event.excerpt ? (
-                          <pre className="experiment-lab__artifact-excerpt">{event.excerpt}</pre>
+                          <pre className="experiment-lab__artifact-excerpt">
+                            {readableTraceExcerpt(event.excerpt)}
+                          </pre>
                         ) : (
                           <p className="experiment-lab__artifact-missing" role="note">
                             Supporting excerpt not captured. Inspect or attach the input, log context,
