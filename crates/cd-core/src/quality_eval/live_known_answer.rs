@@ -506,19 +506,31 @@ impl PreparedLiveKnownAnswerCase {
     }
 
     /// Whether the serial answer runner can honestly observe the diagnostic
-    /// facts this scenario requires.
+    /// facts this scenario requires *and* join them into a scored envelope.
     ///
-    /// Chat complete/cancel/error plus a follow-up attempt after a failed first
-    /// call cover mixed usefulness and timeout/auth/transport classification.
+    /// Production `QualificationTransport` is exclusive: `Ok` carries a body
+    /// with `raw_error = None`, and `Err` is mapped to empty content plus a
+    /// reason. The scored path therefore only emits
+    /// [`SERIAL_PARSED_ATTEMPT_CATEGORY`] or, after one follow-up on a failed
+    /// first chat, [`MIXED_ATTEMPTS_CATEGORY`]. Timeout/auth/transport can be
+    /// named from `Err` reasons but cannot be scored without a parsed body.
     /// Tool-progress/withdrawal and three-role budget coverage need host seams
     /// this runner does not have. Those stay pre-dispatch blocked.
     pub fn host_can_observe_diagnostic(&self) -> bool {
         match &self.truth.diagnostic {
             None => true,
             Some(diagnostic) => {
-                !diagnostic.require_citeable_on_tool_progress
-                    && !diagnostic.require_tool_withdrawal_after_non_progress
-                    && diagnostic.required_roles.is_empty()
+                if diagnostic.require_citeable_on_tool_progress
+                    || diagnostic.require_tool_withdrawal_after_non_progress
+                    || !diagnostic.required_roles.is_empty()
+                {
+                    return false;
+                }
+                diagnostic.allowed_categories.is_empty()
+                    || diagnostic.allowed_categories.iter().any(|allowed| {
+                        allowed == SERIAL_PARSED_ATTEMPT_CATEGORY
+                            || allowed == MIXED_ATTEMPTS_CATEGORY
+                    })
             }
         }
     }
@@ -551,8 +563,9 @@ impl PreparedLiveKnownAnswerCase {
 
 /// Category this serial runner emits for one parsed success attempt.
 ///
-/// qe09/qe10 do not allow this label. Join mixed-attempt or
-/// timeout/auth/transport facts instead of this success envelope.
+/// qe09/qe10 do not allow this label. Join mixed-attempt facts instead of
+/// this success envelope. Timeout/auth/transport labels exist on `Err`
+/// reasons but are not scored on the production chat seam.
 pub const SERIAL_PARSED_ATTEMPT_CATEGORY: &str = "compatible_success";
 
 /// Category emitted when host-observed attempts include both success and
