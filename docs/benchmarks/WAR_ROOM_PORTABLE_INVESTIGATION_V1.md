@@ -9,8 +9,13 @@ gold, cost, or usage.
 Shipped module: `collab/contracts/src/investigation-portable.ts`
 Schema: `collab/contracts/schemas/investigation-portable.v1.json`
 
-The package barrel (`src/index.ts`) does not re-export this module in this
-change. Consumers import the compiled file path directly.
+The package barrel (`collab/contracts/src/index.ts`) re-exports this module.
+Consumers import `@cd-collab/contracts`.
+
+Apply-readiness hardening lives in `collab/contracts/src/investigation-portable-archive.ts`
+(schema `investigation-portable-archive.v1.json`). That layer is still **contract +
+dry-run only**: no archive I/O, signing implementation, persistence apply,
+authorization route, or UI.
 
 ## Scope
 
@@ -77,7 +82,12 @@ The report includes:
   under `fail`)
 - deterministic ID remapping: `${sourceInstallationId}::${namespace}::${rawId}`
   or `remap-<digest>` when the collision policy remaps
-- `exactReconstruction: true` when the bundle parsed and hashes matched
+- typed `reconstructionStatus`: `exact` | `metadata_only` | `blocked` (no longer
+  unconditional `exactReconstruction: true`)
+- `semanticFingerprint` independent of `exportedAt` and inline payload layout
+- `destinationCatalogDigest` bound into the report; catalogs are host-authored
+  inputs and **never authorization**. A later server must load and revalidate them.
+- historical participants/roles remain attribution snapshots only (`historicalParticipantsAreAttributionOnly`)
 
 Same raw ids in different namespaces remap independently.
 
@@ -91,16 +101,30 @@ Parse or preflight refuses:
 - dangling references
 - illegal privacy claims (share-safe surfaces carrying private/owner-only
   evidence; tombstoned owner-only bodies left in place)
-- missing required content (`inclusion: present` without payload)
+- missing required content (`inclusion: present` without payload) in the default
+  V1 self-contained parse; archive parse may accept digest-committed detached bytes
 - self or cyclic snapshot lineage
 - corrupt contribution / decision / gold version chains
 - identity-map ambiguity
 - credential, token, secret, LDAP, or live-endpoint keys/values
 
+## Semantic vs transport identity
+
+`portableSemanticFingerprint` hashes the investigation graph after stripping
+`exportedAt`, `bundleFingerprint`, `objectHashes`, per-object `objectHash`, and
+`payloadBase64`. Two exports of the same logical investigation at different
+`exportedAt` values share a semantic fingerprint. Evidence bytes are committed by
+digest, byte length, and content type; inline payload is transport, not identity.
+
+`portableBundleFingerprint` remains the V1 transport/integrity hash and **does**
+change when export time or inline bytes change. SHA-256 here is integrity, not
+authenticity.
+
 ## What this does not prove
 
-- A running importer, database apply, or War Room UI
-- Cryptographic signatures beyond SHA-256 canonical fingerprints
+- A running importer, database apply, archive I/O, or War Room UI
+- Ed25519 verification or source trust (signature metadata is recorded, not verified)
 - That gold is truth, or that agreement is correctness
 - Destination capability probes, live gateways, or LDAP
 - Persistence of remapped ids after a real apply (apply is not shipped)
+- That a client-supplied destination catalog grants authority

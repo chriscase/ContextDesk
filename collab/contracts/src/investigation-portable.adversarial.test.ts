@@ -404,7 +404,8 @@ describe("portable investigation adversarial lab", () => {
     expect(canonical.bundleFingerprint).toBe(sealed.bundleFingerprint);
     const report = preflightPortableInvestigation(parsed, dryRun(parsed));
     expect(report.applyAuthorized).toBe(false);
-    expect(report.exactReconstruction).toBe(true);
+    expect(report.exactReconstruction).toBe(false);
+    expect(report.reconstructionStatus).toBe("metadata_only");
     expect(report.bundleFingerprint).toBe(sealed.bundleFingerprint);
     expect(report.counts.update).toBe(0);
   });
@@ -921,6 +922,8 @@ describe("portable investigation adversarial lab", () => {
     expect(failed.referentialIntegrityFailures.some((row) => row.code === "id_collision")).toBe(
       true,
     );
+    expect(failed.reconstructionStatus).toBe("blocked");
+    expect(failed.reconstructionReasons.some((row) => row.code === "id_collision")).toBe(true);
 
     const remapReq = dryRun(sealed, {
       collisionPolicy: "remap_deterministic",
@@ -983,7 +986,8 @@ describe("portable investigation adversarial lab", () => {
     expect(second.idRemap).toEqual(first.idRemap);
     expect(first.counts.blocked).toBe(0);
     expect(first.counts.conflict).toBe(0);
-    expect(first.exactReconstruction).toBe(true);
+    expect(first.exactReconstruction).toBe(false);
+    expect(first.reconstructionStatus).toBe("metadata_only");
 
     const exhausted = dryRun(sealed, {
       collisionPolicy: "remap_deterministic",

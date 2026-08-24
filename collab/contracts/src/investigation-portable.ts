@@ -41,6 +41,38 @@ export type CollisionPolicy = (typeof COLLISION_POLICIES)[number];
 export const CONTENT_INCLUSIONS = ["present", "omitted", "private", "redacted"] as const;
 export type ContentInclusion = (typeof CONTENT_INCLUSIONS)[number];
 
+export const RECONSTRUCTION_STATUSES = ["exact", "metadata_only", "blocked"] as const;
+export type ReconstructionStatus = (typeof RECONSTRUCTION_STATUSES)[number];
+
+export const RECONSTRUCTION_REASON_CODES = [
+  "content_omitted",
+  "content_private",
+  "content_redacted",
+  "missing_user",
+  "id_collision",
+  "declared_present_bytes_missing",
+  "declared_present_digest_mismatch",
+  "declared_present_length_mismatch",
+  "blocking_identity_action",
+] as const;
+export type ReconstructionReasonCode = (typeof RECONSTRUCTION_REASON_CODES)[number];
+
+export interface ReconstructionReasonV1 {
+  code: ReconstructionReasonCode;
+  path: string;
+  detail: string;
+}
+
+/** SHA-256 over canonical bytes is integrity, not authenticity or source trust. */
+export const PORTABLE_INTEGRITY_NOT_AUTHENTICITY =
+  "SHA-256 canonical fingerprints prove integrity of contract bytes, not authenticity of a source." as const;
+
+export const PORTABLE_DESTINATION_CATALOG_NOT_AUTHORIZATION =
+  "Destination identity and object catalogs are host-authored inputs. They are never authorization. A later server must load and revalidate them; client-supplied catalogs cannot grant authority." as const;
+
+export const PORTABLE_HISTORICAL_PARTICIPANTS_ATTRIBUTION_ONLY =
+  "Historical participants and roles are attribution snapshots only. They never become destination membership, role, or capability grants." as const;
+
 export const PROVIDER_KINDS = [
   "openai_compatible",
   "ollama",
@@ -82,7 +114,7 @@ const FORBIDDEN_KEY_RE =
 const FORBIDDEN_VALUE_RE =
   /(?:ldap[s]?:\/\/|bearer\s+\S+|sk-[a-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----|\b(?:api[_-]?key|password|secret|token)\s*[:=])/i;
 
-function sha256Text(text: string): string {
+export function sha256Text(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
@@ -1162,7 +1194,10 @@ function requireActor(
   }
 }
 
-function validateContent(bundle: PortableInvestigationV1): void {
+function validateContent(
+  bundle: PortableInvestigationV1,
+  options: ParsePortableInvestigationOptions = {},
+): void {
   const contents = new Map(bundle.contentObjects.map((row) => [row.digest, row]));
   uniqueIds(
     "$.contentObjects.digest",
@@ -1173,11 +1208,13 @@ function validateContent(bundle: PortableInvestigationV1): void {
     requireSha256(`$.contentObjects[${i}].objectHash`, row.objectHash);
     if (row.inclusion === "present") {
       if (row.payloadBase64 === null) {
-        throw new ContractViolation(
-          `$.contentObjects[${i}].payloadBase64`,
-          "missing required content",
-        );
-      }
+        if (options.requireInlinePresentPayload !== false) {
+          throw new ContractViolation(
+            `$.contentObjects[${i}].payloadBase64`,
+            "missing required content",
+          );
+        }
+      } else {
       const bytes = Buffer.from(row.payloadBase64, "base64");
       if (bytes.byteLength !== row.byteLength) {
         throw new ContractViolation(`$.contentObjects[${i}].byteLength`, "payload length mismatch");
@@ -1185,6 +1222,7 @@ function validateContent(bundle: PortableInvestigationV1): void {
       const digest = createHash("sha256").update(bytes).digest("hex");
       if (digest !== row.digest) {
         throw new ContractViolation(`$.contentObjects[${i}].digest`, "hash/fingerprint mismatch");
+      }
       }
     } else if (row.payloadBase64 !== null) {
       throw new ContractViolation(
@@ -1333,7 +1371,15 @@ function validateGoldLineage(rows: PortableGoldV1[]): void {
   }
 }
 
-export function parsePortableInvestigation(raw: unknown): PortableInvestigationV1 {
+export interface ParsePortableInvestigationOptions {
+  /** Default true. V1 self-contained bundles require inline bytes for inclusion=present. */
+  requireInlinePresentPayload?: boolean;
+}
+
+export function parsePortableInvestigation(
+  raw: unknown,
+  options: ParsePortableInvestigationOptions = {},
+): PortableInvestigationV1 {
   checkObject("$", bundleShape, raw);
   const bundle = raw as PortableInvestigationV1;
   assertSafeIdentifiers(bundle);
@@ -1414,7 +1460,7 @@ export function parsePortableInvestigation(raw: unknown): PortableInvestigationV
     requireActor(actors, row.createdBy, `$.evidence[${i}].createdBy`);
     assertShareSafeTimestamp(`$.evidence[${i}].createdAt`, row.createdAt);
   }
-  validateContent(bundle);
+  validateContent(bundle, options);
 
   uniqueIds(
     "$.importedAiRuns.id",
@@ -1832,6 +1878,7 @@ export interface PreflightReportV1 {
   schemaId: typeof PORTABLE_PREFLIGHT_SCHEMA_ID;
   mode: "dry_run";
   bundleFingerprint: string;
+  semanticFingerprint: string;
   sourceInstallationId: string;
   counts: { create: number; update: number; conflict: number; blocked: number };
   collisionPolicy: CollisionPolicy;
@@ -1839,8 +1886,17 @@ export interface PreflightReportV1 {
   referentialIntegrityFailures: PreflightWarningV1[];
   idRemap: PreflightIdRemapV1[];
   identityResolutions: IdentityMapEntryV1[];
-  exactReconstruction: true;
+  reconstructionStatus: ReconstructionStatus;
+  reconstructionReasons: ReconstructionReasonV1[];
+  exactReconstruction: boolean;
   applyAuthorized: false;
+  destinationCatalogDigest: string;
+  destinationCatalogIsAuthorization: false;
+  destinationCatalogMustRevalidate: true;
+  historicalParticipantsAreAttributionOnly: true;
+  destinationMembershipGranted: false;
+  destinationRoleGranted: false;
+  destinationCapabilityGranted: false;
 }
 
 const identityMapEntryShape: ObjectShape = {
@@ -1909,9 +1965,215 @@ function chooseDeterministicRemap(
   );
 }
 
+
+export function projectSemanticInvestigation(
+  bundle: PortableInvestigationV1 | PortableInvestigationUnsigned,
+): unknown {
+  const sorted = sortPortableBags(bundle);
+  const stripRow = <T extends { objectHash?: string }>(row: T): Omit<T, "objectHash"> => stripHash(row);
+  const content = sorted.contentObjects.map((row) => {
+    const { payloadBase64: _payload, objectHash: _hash, ...rest } = row;
+    return rest;
+  });
+  return {
+    schemaId: PORTABLE_SCHEMA_ID,
+    protocolVersion: PORTABLE_PROTOCOL_VERSION,
+    sourceInstallationId: sorted.sourceInstallationId,
+    permissionCaveat: sorted.permissionCaveat,
+    historyCaveat: sorted.historyCaveat,
+    investigation: stripRow(sorted.investigation),
+    actors: sorted.actors.map(stripRow),
+    participants: sorted.participants,
+    contributions: sorted.contributions.map(stripRow),
+    evidence: sorted.evidence.map(stripRow),
+    contentObjects: content,
+    sources: sorted.sources.map(stripRow),
+    importedAiRuns: sorted.importedAiRuns.map(stripRow),
+    snapshots: sorted.snapshots.map((row) => stripRow(row)),
+    triageJobs: sorted.triageJobs.map((row) => stripRow(row)),
+    experiments: sorted.experiments.map(stripRow),
+    helpfulnessObservations: sorted.helpfulnessObservations.map(stripRow),
+    decisions: sorted.decisions.map(stripRow),
+    gold: sorted.gold.map(stripRow),
+    alignments: sorted.alignments.map(stripRow),
+    discussions: sorted.discussions.map(stripRow),
+    timeline: sorted.timeline.map(stripRow),
+    auditRefs: sorted.auditRefs.map(stripRow),
+    attachments: sorted.attachments.map(stripRow),
+  };
+}
+
+export function portableSemanticFingerprint(
+  bundle: PortableInvestigationV1 | PortableInvestigationUnsigned,
+): string {
+  return sha256Text(canonicalJson(projectSemanticInvestigation(bundle)));
+}
+
+export function destinationCatalogDigest(catalog: DestinationCatalogV1): string {
+  const identities = [...catalog.identities]
+    .map((row) => ({
+      actorId: row.actorId,
+      username: row.username,
+      email: row.email,
+      displayName: row.displayName,
+    }))
+    .sort((a, b) => compareCodeUnits(a.actorId, b.actorId));
+  const objectIds: Record<string, string[]> = {};
+  for (const kind of [...PORTABLE_OBJECT_KINDS].sort(compareCodeUnits)) {
+    const ids = catalog.objectIds[kind];
+    if (!ids) continue;
+    objectIds[kind] = [...ids].sort(compareCodeUnits);
+  }
+  const knownProfileIds = [...catalog.knownProfileIds].sort(compareCodeUnits);
+  return sha256Text(canonicalJson({ identities, objectIds, knownProfileIds }));
+}
+
+function sortReconstructionReasons(rows: ReconstructionReasonV1[]): ReconstructionReasonV1[] {
+  return [...rows].sort((a, b) => {
+    const path = compareCodeUnits(a.path, b.path);
+    if (path !== 0) return path;
+    const code = compareCodeUnits(a.code, b.code);
+    if (code !== 0) return code;
+    return compareCodeUnits(a.detail, b.detail);
+  });
+}
+
+export function evaluatePortableReconstruction(input: {
+  evidence: ReadonlyArray<{ id: string; inclusion: ContentInclusion }>;
+  contentObjects: ReadonlyArray<{
+    digest: string;
+    inclusion: ContentInclusion;
+    payloadBase64?: string | null;
+    byteLength?: number;
+  }>;
+  referentialIntegrityFailures: ReadonlyArray<PreflightWarningV1>;
+  extraReasons?: readonly ReconstructionReasonV1[];
+}): {
+  reconstructionStatus: ReconstructionStatus;
+  reconstructionReasons: ReconstructionReasonV1[];
+  exactReconstruction: boolean;
+} {
+  const reasons: ReconstructionReasonV1[] = [...(input.extraReasons ?? [])];
+  for (const ev of input.evidence) {
+    if (ev.inclusion === "omitted") {
+      reasons.push({
+        code: "content_omitted",
+        path: `evidence:${ev.id}`,
+        detail: "content is omitted",
+      });
+    } else if (ev.inclusion === "private") {
+      reasons.push({
+        code: "content_private",
+        path: `evidence:${ev.id}`,
+        detail: "content is private",
+      });
+    } else if (ev.inclusion === "redacted") {
+      reasons.push({
+        code: "content_redacted",
+        path: `evidence:${ev.id}`,
+        detail: "content is redacted",
+      });
+    }
+  }
+  for (const row of input.contentObjects) {
+    if (row.inclusion === "omitted") {
+      reasons.push({
+        code: "content_omitted",
+        path: `content:${row.digest}`,
+        detail: "content is omitted",
+      });
+    } else if (row.inclusion === "private") {
+      reasons.push({
+        code: "content_private",
+        path: `content:${row.digest}`,
+        detail: "content is private",
+      });
+    } else if (row.inclusion === "redacted") {
+      reasons.push({
+        code: "content_redacted",
+        path: `content:${row.digest}`,
+        detail: "content is redacted",
+      });
+    }
+    if (row.inclusion === "present" && "payloadBase64" in row) {
+      const payload = row.payloadBase64;
+      if (payload === null || payload === undefined) {
+        reasons.push({
+          code: "declared_present_bytes_missing",
+          path: `content:${row.digest}`,
+          detail: "declared-present blob bytes are not inline and were not supplied",
+        });
+      } else {
+        const bytes = Buffer.from(payload, "base64");
+        if (row.byteLength !== undefined && bytes.byteLength !== row.byteLength) {
+          reasons.push({
+            code: "declared_present_length_mismatch",
+            path: `content:${row.digest}`,
+            detail: "declared-present blob length does not match",
+          });
+        }
+        const digest = createHash("sha256").update(bytes).digest("hex");
+        if (digest !== row.digest) {
+          reasons.push({
+            code: "declared_present_digest_mismatch",
+            path: `content:${row.digest}`,
+            detail: "declared-present blob digest does not match",
+          });
+        }
+      }
+    }
+  }
+  for (const row of input.referentialIntegrityFailures) {
+    if (row.code === "missing_user") {
+      reasons.push({
+        code: "missing_user",
+        path: row.path,
+        detail: row.detail,
+      });
+    } else if (row.code === "id_collision") {
+      reasons.push({
+        code: "id_collision",
+        path: row.path,
+        detail: row.detail,
+      });
+    } else {
+      reasons.push({
+        code: "blocking_identity_action",
+        path: row.path,
+        detail: row.detail,
+      });
+    }
+  }
+  const sorted = sortReconstructionReasons(reasons);
+  const blocked = sorted.some((row) =>
+    row.code === "missing_user" ||
+    row.code === "id_collision" ||
+    row.code === "blocking_identity_action" ||
+    row.code === "declared_present_bytes_missing" ||
+    row.code === "declared_present_digest_mismatch" ||
+    row.code === "declared_present_length_mismatch"
+  );
+  const metadata = sorted.some((row) =>
+    row.code === "content_omitted" ||
+    row.code === "content_private" ||
+    row.code === "content_redacted"
+  );
+  const reconstructionStatus: ReconstructionStatus = blocked
+    ? "blocked"
+    : metadata
+      ? "metadata_only"
+      : "exact";
+  return {
+    reconstructionStatus,
+    reconstructionReasons: sorted,
+    exactReconstruction: reconstructionStatus === "exact",
+  };
+}
+
 export function preflightPortableInvestigation(
   bundleRaw: unknown,
   requestRaw: unknown,
+  parseOptions: ParsePortableInvestigationOptions = {},
 ): PreflightReportV1 {
   if (
     typeof requestRaw === "object" &&
@@ -1923,7 +2185,7 @@ export function preflightPortableInvestigation(
   }
   checkObject("$", preflightRequestShape, requestRaw);
   const request = requestRaw as PreflightRequestV1;
-  const bundle = parsePortableInvestigation(bundleRaw);
+  const bundle = parsePortableInvestigation(bundleRaw, parseOptions);
   assertSafeIdentifiers(request);
   assertNoCredentialLeakage(request);
 
@@ -2082,8 +2344,16 @@ export function preflightPortableInvestigation(
     }
   }
 
+  const reconstruction = evaluatePortableReconstruction({
+    evidence: bundle.evidence,
+    contentObjects: bundle.contentObjects,
+    referentialIntegrityFailures: referential,
+  });
+  const catalogDigest = destinationCatalogDigest(request.destination);
+
   return {
     schemaId: PORTABLE_PREFLIGHT_SCHEMA_ID,
+    semanticFingerprint: portableSemanticFingerprint(bundle),
     mode: "dry_run",
     bundleFingerprint: bundle.bundleFingerprint,
     sourceInstallationId: bundle.sourceInstallationId,
@@ -2095,7 +2365,16 @@ export function preflightPortableInvestigation(
     identityResolutions: [...mapBySource.values()].sort((a, b) =>
       compareCodeUnits(a.sourceActorId, b.sourceActorId),
     ),
-    exactReconstruction: true,
+    reconstructionStatus: reconstruction.reconstructionStatus,
+    reconstructionReasons: reconstruction.reconstructionReasons,
+    exactReconstruction: reconstruction.exactReconstruction,
     applyAuthorized: false,
+    destinationCatalogDigest: catalogDigest,
+    destinationCatalogIsAuthorization: false,
+    destinationCatalogMustRevalidate: true,
+    historicalParticipantsAreAttributionOnly: true,
+    destinationMembershipGranted: false,
+    destinationRoleGranted: false,
+    destinationCapabilityGranted: false,
   };
 }

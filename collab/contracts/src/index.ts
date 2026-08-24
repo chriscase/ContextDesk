@@ -522,3 +522,4 @@ export type {
 } from "./live-qualification.js";
 
 export * from "./investigation-portable.js";
+export * from "./investigation-portable-archive.js";
