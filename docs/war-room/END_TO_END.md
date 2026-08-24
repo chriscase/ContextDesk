@@ -41,7 +41,7 @@ Use the main navigation to distinguish the workspace destinations:
 On Overview, follow one activity link to its recorded investigation stage,
 then return to Investigations and open the prepared synthetic item.
 
-![Fully synthetic War Room Overview](../assets/war-room/war-room-overview.png)
+![Fully synthetic War Room Overview](../media/gallery/war-room-overview.png)
 
 ![Fully synthetic War Room investigations screen](../assets/war-room/war-room-investigations.png)
 
@@ -71,6 +71,8 @@ Expected result: you can repeat the problem without naming an unproven cause.
 Move to **Capture**. Confirm that human notes remain human-authored and outside
 model or tool output remains imported and unverified. Move to **Analyze** and
 inspect the investigation-scoped synthetic logs or stack traces.
+
+![Fully synthetic Capture stage with provenance and investigation-scoped intake](../media/gallery/war-room-capture-analyze.png)
 
 The **Sources** library records who or what produced an item. The actual log,
 note, upload, or imported response belongs to this investigation.
@@ -104,6 +106,8 @@ investigation, comparison, lane, and section for authorized sharing.
 
 ![Fully synthetic focused analysis lane and history](../assets/war-room/war-room-lane-focus.png)
 
+![Fully synthetic Analyze stage with snapshot lineage and selectable model lanes](../media/gallery/war-room-analyze.png)
+
 Use **Historical artifacts** to open prior runs and comparisons. They remain
 separate records and are not silently overwritten by a rerun.
 
@@ -120,6 +124,8 @@ Review the Compare categories:
 - **Unsupported** — claims whose evidence is absent, irrelevant, or broken.
 
 ![Fully synthetic comparison of lane strategies](../assets/war-room/war-room-compare.png)
+
+![Fully synthetic Compare stage with historical artifacts and shareable workspace links](../media/gallery/war-room-compare-decide.png)
 
 Open at least one underlying finding. Confirm whether two lanes cite the same
 evidence, different evidence, or no evidence. Agreement is not presented as
@@ -142,6 +148,8 @@ approve the human decision.
 Expected result: discussion preserves review context while Decide remains the
 authoritative location for the action and owner.
 
+![Fully synthetic human decision journal with revision history](../media/gallery/war-room-decide-export.png)
+
 ## 4:20 — Choose the right export
 
 The Decide stage provides three different export jobs:
@@ -162,6 +170,8 @@ privacy, omitted content, warnings, and broken references. Historical people
 remain attribution only and receive no destination access.
 
 ![Fully synthetic portable investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
+
+![Fully synthetic Decide stage with accepted decision and share-safe export](../media/gallery/war-room-export.png)
 
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
 
@@ -206,7 +216,6 @@ The synthetic demo does not claim:
 - WebSocket chat, instant delivery, typing indicators, or authoritative
   presence;
 - Ed25519 archive authenticity verification;
-- web ZIP or directory upload;
 - a completed installation from the first-run preparation wizard (the wizard
   can claim, stage, and run bounded checks, but cannot atomically install or
   restart the deployment);

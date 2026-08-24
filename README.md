@@ -75,6 +75,19 @@ This is a CI evidence status, not a claim that the application cannot run on Ubu
 | **Architecture** | [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [PRODUCT.md](docs/PRODUCT.md) · [AGENTS.md](AGENTS.md) |
 | **Repeatable demo (GUI + CLI)** | **[Demo runbook](docs/DEMO_RUNBOOK.md)** · [Demo acceptance](docs/DEMO_ACCEPTANCE.md) |
 
+## War Room at a glance
+
+The ContextDesk War Room is a shared command center for difficult technical
+investigations: capture recognizable evidence, freeze the review basis, run
+independent strategy/model lanes, compare what they support or leave unknown,
+and record a human decision. The fully synthetic preview below shows the
+Overview activity feed and direct paths into the work. See the [full War Room
+guide](docs/war-room/README.md) for the stage-by-stage workflow, screenshots,
+desktop ContextDesk relationship, deployment boundaries, and portable archive
+behavior.
+
+![Synthetic ContextDesk War Room overview with activity feed and active investigations](docs/media/gallery/war-room-overview.png)
+
 ## CLI and log normalization
 
 **One-click path to normalize:** [Normalization guide](docs/NORMALIZATION.md) ·
