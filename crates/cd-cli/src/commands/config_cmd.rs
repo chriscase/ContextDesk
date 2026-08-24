@@ -1219,7 +1219,12 @@ mod tests {
 
     fn isolated_paths() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::resolve(Some(dir.path()), None).unwrap();
+        // macOS exposes the default temporary root through `/var`, a symlink
+        // to `/private/var`. Resolve the disposable root before exercising
+        // the production config store, whose no-symlink-ancestor policy is
+        // intentionally stricter than `tempfile`'s default spelling.
+        let root = dir.path().canonicalize().unwrap();
+        let paths = Paths::resolve(Some(&root), None).unwrap();
         assert!(paths.isolated);
         (dir, paths)
     }

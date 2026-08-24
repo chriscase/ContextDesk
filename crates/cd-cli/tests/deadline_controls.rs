@@ -48,6 +48,11 @@ fn write_minimal_app_config(data: &Path) {
         serde_json::to_vec_pretty(&cfg).unwrap(),
     )
     .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(app_config_path(data), fs::Permissions::from_mode(0o600)).unwrap();
+    }
 }
 
 #[test]
