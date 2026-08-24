@@ -450,7 +450,7 @@ describe("focused investigation view", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
     const stageNav = await screen.findByRole("navigation", { name: "Investigation stages" });
     fireEvent.click(within(stageNav).getByRole("button", { name: /Capture/ }));
-    expect(await screen.findByText(/#1 case_created.*target case-c1/)).toBeTruthy();
+    expect(await screen.findByText("The investigation was opened")).toBeTruthy();
     expect(
       await screen.findByRole("option", { name: "Fixture chat assistant (external-tool)" }),
     ).toBeTruthy();
@@ -477,7 +477,7 @@ describe("focused investigation view", () => {
       target: { value: "share_safe" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Add to timeline" }));
-    expect(await screen.findByText(/#2 contribution_created/)).toBeTruthy();
+    expect(await screen.findByText("Case activity was recorded")).toBeTruthy();
     expect(postedPrivacy).toBe("share_safe");
   });
 
