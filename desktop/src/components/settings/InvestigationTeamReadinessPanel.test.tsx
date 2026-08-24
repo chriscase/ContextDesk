@@ -264,8 +264,9 @@ describe("InvestigationTeamReadinessPanel", () => {
     expect(preflight.getAttribute("aria-live")).toBe("polite");
     expect(preflight.getAttribute("aria-atomic")).toBe("true");
     expect(preflight.textContent).toMatch(/operator review is required/i);
+    expect(preflight.getAttribute("data-tone")).toBe("neutral");
     expect(preflight.textContent).toMatch(
-      /cannot yet prove the complete attempt, tool-loop, and multi-stage role seams/i,
+      /cannot yet prove the complete attempt, tool-loop, multi-stage, and qe10 transport-classification role seams/i,
     );
     expect(preflight.textContent).toMatch(/not authorization, a model ranking/i);
 
@@ -281,47 +282,66 @@ describe("InvestigationTeamReadinessPanel", () => {
     expect(host.runKnownAnswer).not.toHaveBeenCalled();
   });
 
-  it("requires the same build, suite, prompt set, and policy across roles", async () => {
-    const aggregate = report({
-      members: [
-        {
-          role: "investigator",
-          subject_storage_id: "subject-a",
-          profile_id: "investigator-1",
-          model_id: "model-a",
-          endpoint_fingerprint: "a".repeat(64),
-        },
-        {
+  it.each([
+    ["build_identity", "build-b"],
+    ["suite_id", "closed-v1"],
+    ["suite_digest", "e".repeat(64)],
+    ["prompt_set_hash", "e".repeat(64)],
+    ["orchestration_policy_fingerprint", "e".repeat(64)],
+  ] as const)(
+    "treats a %s-only mismatch as not comparable while keeping both exact bases visible",
+    async (field, mismatchedValue) => {
+      const aggregate = report({
+        members: [
+          {
+            role: "investigator",
+            subject_storage_id: "subject-a",
+            profile_id: "investigator-1",
+            model_id: "model-a",
+            endpoint_fingerprint: "a".repeat(64),
+          },
+          {
+            role: "reviewer",
+            subject_storage_id: "subject-b",
+            profile_id: "reviewer-1",
+            model_id: "model-b",
+            endpoint_fingerprint: "b".repeat(64),
+          },
+        ],
+      });
+      const defaults = knownAnswerReport();
+      host.qualification.mockResolvedValue(aggregate);
+      host.history.mockResolvedValue([aggregate]);
+      host.knownAnswerHistory.mockResolvedValue([
+        knownAnswerReport(),
+        knownAnswerReport({
           role: "reviewer",
           subject_storage_id: "subject-b",
           profile_id: "reviewer-1",
           model_id: "model-b",
           endpoint_fingerprint: "b".repeat(64),
-        },
-      ],
-    });
-    host.qualification.mockResolvedValue(aggregate);
-    host.history.mockResolvedValue([aggregate]);
-    host.knownAnswerHistory.mockResolvedValue([
-      knownAnswerReport(),
-      knownAnswerReport({
-        role: "reviewer",
-        subject_storage_id: "subject-b",
-        profile_id: "reviewer-1",
-        model_id: "model-b",
-        endpoint_fingerprint: "b".repeat(64),
-        prompt_set_hash: "e".repeat(64),
-      }),
-    ]);
+          [field]: mismatchedValue,
+        }),
+      ]);
 
-    render(<InvestigationTeamReadinessPanel />);
-    const preflight = await screen.findByTestId("investigation-team-evidence-preflight");
-    expect(preflight.getAttribute("data-state")).toBe("refresh_required");
-    expect(preflight.textContent).toMatch(/role evidence is not directly comparable/i);
-    expect(preflight.textContent).toMatch(
-      /same app build, suite, prompt set, and orchestration policy/i,
-    );
-  });
+      render(<InvestigationTeamReadinessPanel />);
+      const preflight = await screen.findByTestId("investigation-team-evidence-preflight");
+      expect(preflight.getAttribute("data-state")).toBe("refresh_required");
+      expect(preflight.textContent).toMatch(/role evidence is not directly comparable/i);
+      expect(preflight.textContent).toMatch(
+        /same app build, suite, prompt set, and orchestration policy/i,
+      );
+      expect(preflight.getAttribute("data-state")).not.toBe("attention_required");
+
+      const investigatorBasis = screen.getByTestId(
+        "investigation-team-comparable-basis-investigator",
+      );
+      const reviewerBasis = screen.getByTestId("investigation-team-comparable-basis-reviewer");
+      expect(investigatorBasis.textContent).toContain(String(defaults[field]));
+      expect(investigatorBasis.textContent).not.toContain(mismatchedValue);
+      expect(reviewerBasis.textContent).toContain(mismatchedValue);
+    },
+  );
 
   it("shows honest degradation when the reviewer is unconfigured", async () => {
     host.get.mockResolvedValue(
@@ -733,5 +753,388 @@ describe("InvestigationTeamReadinessPanel", () => {
     const cancel = await screen.findByRole("button", { name: /cancel after active call/i });
     fireEvent.click(cancel);
     await waitFor(() => expect(host.cancelKnownAnswer).toHaveBeenCalledTimes(1));
+  });
+
+  it("renders stale 14/14 as recorded lifecycle, not current qualified 14/14", async () => {
+    const aggregate = report({
+      members: [
+        {
+          role: "investigator",
+          subject_storage_id: "subject-a",
+          profile_id: "investigator-1",
+          model_id: "model-a",
+          endpoint_fingerprint: "a".repeat(64),
+        },
+        {
+          role: "reviewer",
+          subject_storage_id: "subject-b",
+          profile_id: "reviewer-1",
+          model_id: "model-b",
+          endpoint_fingerprint: "b".repeat(64),
+        },
+      ],
+    });
+    const stale = knownAnswerReport({
+      stale: true,
+      stale_reasons: ["prompt_set_hash_mismatch"],
+      reported_status: "qualified",
+      metrics: {
+        ...knownAnswerReport().metrics,
+        failed_scenarios: 2,
+        cancelled_scenarios: 1,
+        blocked_scenarios: 1,
+      },
+    });
+    host.qualification.mockResolvedValue(aggregate);
+    host.history.mockResolvedValue([aggregate]);
+    host.knownAnswerHistory.mockResolvedValue([stale]);
+    render(<InvestigationTeamReadinessPanel />);
+
+    const lifecycle = await screen.findByTestId("investigation-team-role-lifecycle-investigator");
+    expect(lifecycle.textContent).toMatch(/stale · recorded qualified/i);
+    expect(lifecycle.textContent).not.toMatch(/qualified · 14\/14 passed/i);
+    expect(lifecycle.textContent).not.toMatch(/14\/14 passed/i);
+    expect(lifecycle.textContent).toMatch(/1 cancelled/i);
+    expect(lifecycle.textContent).toMatch(/2 failed/i);
+    expect(lifecycle.textContent).toMatch(/1 blocked/i);
+
+    const history = screen.getByTestId("investigation-team-known-answer-history-0");
+    expect(history.getAttribute("data-status")).toBe("stale");
+    expect(history.textContent).toMatch(/stale · recorded qualified/i);
+  });
+
+  it("shows both suite digests when only the digest differs on the same suite id", async () => {
+    const aggregate = report({
+      members: [
+        {
+          role: "investigator",
+          subject_storage_id: "subject-a",
+          profile_id: "investigator-1",
+          model_id: "model-a",
+          endpoint_fingerprint: "a".repeat(64),
+        },
+        {
+          role: "reviewer",
+          subject_storage_id: "subject-b",
+          profile_id: "reviewer-1",
+          model_id: "model-b",
+          endpoint_fingerprint: "b".repeat(64),
+        },
+      ],
+    });
+    const investigatorDigest = "b".repeat(64);
+    const reviewerDigest = "e".repeat(64);
+    host.qualification.mockResolvedValue(aggregate);
+    host.history.mockResolvedValue([aggregate]);
+    host.knownAnswerHistory.mockResolvedValue([
+      knownAnswerReport({ suite_id: "qe-investigation-team-v1", suite_digest: investigatorDigest }),
+      knownAnswerReport({
+        role: "reviewer",
+        subject_storage_id: "subject-b",
+        profile_id: "reviewer-1",
+        model_id: "model-b",
+        endpoint_fingerprint: "b".repeat(64),
+        suite_id: "qe-investigation-team-v1",
+        suite_digest: reviewerDigest,
+      }),
+    ]);
+    render(<InvestigationTeamReadinessPanel />);
+
+    const preflight = await screen.findByTestId("investigation-team-evidence-preflight");
+    expect(preflight.getAttribute("data-state")).toBe("refresh_required");
+    expect(preflight.textContent).toMatch(/role evidence is not directly comparable/i);
+
+    const investigatorBasis = screen.getByTestId("investigation-team-comparable-basis-investigator");
+    expect(investigatorBasis.textContent).toMatch(/qe-investigation-team-v1/);
+    expect(investigatorBasis.textContent).toContain(investigatorDigest);
+    const reviewerBasis = screen.getByTestId("investigation-team-comparable-basis-reviewer");
+    expect(reviewerBasis.textContent).toMatch(/qe-investigation-team-v1/);
+    expect(reviewerBasis.textContent).toContain(reviewerDigest);
+
+    expect(screen.getByTestId("investigation-team-known-answer-history-0").textContent)
+      .toContain(investigatorDigest);
+    expect(screen.getByTestId("investigation-team-known-answer-history-1").textContent)
+      .toContain(reviewerDigest);
+  });
+
+  it("fails closed on same-second exact-binding matches and keeps both history rows", async () => {
+    const aggregate = report({
+      members: [
+        {
+          role: "investigator",
+          subject_storage_id: "subject-a",
+          profile_id: "investigator-1",
+          model_id: "model-a",
+          endpoint_fingerprint: "a".repeat(64),
+        },
+        {
+          role: "reviewer",
+          subject_storage_id: "subject-b",
+          profile_id: "reviewer-1",
+          model_id: "model-b",
+          endpoint_fingerprint: "b".repeat(64),
+        },
+      ],
+    });
+    const observedAt = 1_777_000_000;
+    host.qualification.mockResolvedValue(aggregate);
+    host.history.mockResolvedValue([aggregate]);
+    host.knownAnswerHistory.mockResolvedValue([
+      knownAnswerReport({
+        observed_at: observedAt,
+        reported_status: "qualified",
+      }),
+      knownAnswerReport({
+        observed_at: observedAt,
+        status: "unqualified",
+        reported_status: "unqualified",
+        metrics: {
+          ...knownAnswerReport().metrics,
+          passed_scenarios: 10,
+        },
+      }),
+    ]);
+    render(<InvestigationTeamReadinessPanel />);
+
+    const preflight = await screen.findByTestId("investigation-team-evidence-preflight");
+    expect(preflight.getAttribute("data-state")).toBe("attention_required");
+    expect(preflight.getAttribute("data-tone")).toBe("warn");
+    expect(preflight.textContent).toMatch(/known-answer evidence is ambiguous/i);
+    expect(preflight.textContent).toMatch(/will not choose one/i);
+
+    const lifecycle = screen.getByTestId("investigation-team-role-lifecycle-investigator");
+    expect(lifecycle.textContent).toMatch(
+      /latest observation is ambiguous at the same recorded second/i,
+    );
+    expect(screen.queryByTestId("investigation-team-comparable-basis-investigator")).toBeNull();
+
+    expect(screen.getByTestId("investigation-team-known-answer-history-0").textContent)
+      .toMatch(/qualified/i);
+    expect(screen.getByTestId("investigation-team-known-answer-history-1").textContent)
+      .toMatch(/unqualified/i);
+  });
+
+  it("fails closed on latest-second measured aggregate ties regardless of history order", async () => {
+    const tiedAt = 1_777_000_100;
+    const investigatorA = {
+      role: "investigator",
+      subject_storage_id: "subject-a",
+      profile_id: "investigator-1",
+      model_id: "model-a",
+      endpoint_fingerprint: "a".repeat(64),
+    };
+    const reviewerB = {
+      role: "reviewer",
+      subject_storage_id: "subject-b",
+      profile_id: "reviewer-1",
+      model_id: "model-b",
+      endpoint_fingerprint: "b".repeat(64),
+    };
+    const investigatorC = {
+      ...investigatorA,
+      subject_storage_id: "subject-c",
+    };
+    const reviewerD = {
+      ...reviewerB,
+      subject_storage_id: "subject-d",
+    };
+    const alpha = report({
+      fingerprint_digest: "1".repeat(64),
+      scoring_digest: "2".repeat(64),
+      observed_at: tiedAt,
+      members: [investigatorA, reviewerB],
+    });
+    const beta = report({
+      fingerprint_digest: "3".repeat(64),
+      scoring_digest: "4".repeat(64),
+      observed_at: tiedAt,
+      members: [investigatorC, reviewerD],
+    });
+    const knownAnswers = [
+      knownAnswerReport(),
+      knownAnswerReport({
+        role: "reviewer",
+        subject_storage_id: "subject-b",
+        profile_id: "reviewer-1",
+        model_id: "model-b",
+        endpoint_fingerprint: "b".repeat(64),
+      }),
+      knownAnswerReport({
+        subject_storage_id: "subject-c",
+        metrics: {
+          ...knownAnswerReport().metrics,
+          passed_scenarios: 10,
+        },
+      }),
+      knownAnswerReport({
+        role: "reviewer",
+        subject_storage_id: "subject-d",
+        profile_id: "reviewer-1",
+        model_id: "model-b",
+        endpoint_fingerprint: "b".repeat(64),
+        metrics: {
+          ...knownAnswerReport().metrics,
+          passed_scenarios: 9,
+        },
+      }),
+    ];
+
+    const snapshots: Array<{
+      state: string | null;
+      tone: string | null;
+      text: string | null;
+      investigatorLifecycle: string | null;
+      reviewerLifecycle: string | null;
+    }> = [];
+
+    for (const historyOrder of [[alpha, beta], [beta, alpha]]) {
+      host.qualification.mockResolvedValue(alpha);
+      host.history.mockResolvedValue(historyOrder);
+      host.knownAnswerHistory.mockResolvedValue(knownAnswers);
+      const view = render(<InvestigationTeamReadinessPanel />);
+      const preflight = await screen.findByTestId("investigation-team-evidence-preflight");
+      const investigatorLifecycle = screen.getByTestId(
+        "investigation-team-role-lifecycle-investigator",
+      );
+      const reviewerLifecycle = screen.getByTestId("investigation-team-role-lifecycle-reviewer");
+      expect(preflight.getAttribute("data-state")).toBe("attention_required");
+      expect(preflight.getAttribute("data-tone")).toBe("warn");
+      expect(preflight.textContent).toMatch(/measured team evidence is ambiguous/i);
+      expect(preflight.textContent).toMatch(/will not choose one/i);
+      expect(screen.queryByTestId("investigation-team-comparable-basis-investigator")).toBeNull();
+      expect(screen.queryByTestId("investigation-team-comparable-basis-reviewer")).toBeNull();
+      expect(investigatorLifecycle.textContent).toMatch(
+        /latest measured pipeline is ambiguous at the same recorded second/i,
+      );
+      expect(investigatorLifecycle.textContent).not.toMatch(/14\/14 passed/i);
+      expect(investigatorLifecycle.textContent).not.toMatch(/10\/14 passed/i);
+      expect(reviewerLifecycle.textContent).not.toMatch(/14\/14 passed/i);
+      const history = screen.getByTestId("investigation-team-qualification-history");
+      expect(history.textContent).toContain("1".repeat(12));
+      expect(history.textContent).toContain("3".repeat(12));
+      snapshots.push({
+        state: preflight.getAttribute("data-state"),
+        tone: preflight.getAttribute("data-tone"),
+        text: preflight.textContent,
+        investigatorLifecycle: investigatorLifecycle.textContent,
+        reviewerLifecycle: reviewerLifecycle.textContent,
+      });
+      view.unmount();
+    }
+
+    expect(snapshots).toHaveLength(2);
+    expect(snapshots[0]).toEqual(snapshots[1]);
+  });
+
+  it("keeps terminal copy explicit about qe10 transport classification without a green ready tone", async () => {
+    const aggregate = report({
+      members: [
+        {
+          role: "investigator",
+          subject_storage_id: "subject-a",
+          profile_id: "investigator-1",
+          model_id: "model-a",
+          endpoint_fingerprint: "a".repeat(64),
+        },
+        {
+          role: "reviewer",
+          subject_storage_id: "subject-b",
+          profile_id: "reviewer-1",
+          model_id: "model-b",
+          endpoint_fingerprint: "b".repeat(64),
+        },
+      ],
+    });
+    host.qualification.mockResolvedValue(aggregate);
+    host.history.mockResolvedValue([aggregate]);
+    host.knownAnswerHistory.mockResolvedValue([
+      knownAnswerReport(),
+      knownAnswerReport({
+        role: "reviewer",
+        subject_storage_id: "subject-b",
+        profile_id: "reviewer-1",
+        model_id: "model-b",
+        endpoint_fingerprint: "b".repeat(64),
+      }),
+    ]);
+    render(<InvestigationTeamReadinessPanel />);
+
+    const preflight = await screen.findByTestId("investigation-team-evidence-preflight");
+    expect(preflight.getAttribute("data-tone")).toBe("neutral");
+    expect(preflight.getAttribute("data-tone")).not.toBe("ok");
+    expect(preflight.textContent).toMatch(/qe10 transport-classification/i);
+    expect(screen.getByTestId("investigation-team-known-answer-quality").textContent)
+      .toMatch(/qe10 transport-classification/i);
+  });
+
+  it("leaves unknown token and cost values unknown on a unique join", async () => {
+    const aggregate = report({
+      members: [
+        {
+          role: "investigator",
+          subject_storage_id: "subject-a",
+          profile_id: "investigator-1",
+          model_id: "model-a",
+          endpoint_fingerprint: "a".repeat(64),
+        },
+        {
+          role: "reviewer",
+          subject_storage_id: "subject-b",
+          profile_id: "reviewer-1",
+          model_id: "model-b",
+          endpoint_fingerprint: "b".repeat(64),
+        },
+      ],
+    });
+    host.qualification.mockResolvedValue(aggregate);
+    host.history.mockResolvedValue([aggregate]);
+    host.knownAnswerHistory.mockResolvedValue([
+      knownAnswerReport({
+        metrics: {
+          ...knownAnswerReport().metrics,
+          input_tokens: null,
+          output_tokens: null,
+          cost_microusd: null,
+        },
+      }),
+      knownAnswerReport({
+        role: "reviewer",
+        subject_storage_id: "subject-b",
+        profile_id: "reviewer-1",
+        model_id: "model-b",
+        endpoint_fingerprint: "b".repeat(64),
+        metrics: {
+          ...knownAnswerReport().metrics,
+          input_tokens: null,
+          cost_microusd: null,
+        },
+      }),
+    ]);
+    render(<InvestigationTeamReadinessPanel />);
+
+    const investigator = await screen.findByTestId("investigation-team-role-evidence-investigator");
+    expect(investigator.textContent).toMatch(/tokens: unknown input/i);
+    expect(investigator.textContent).toMatch(/cost: unknown/i);
+    expect(investigator.textContent).not.toMatch(/tokens: 0 input/i);
+  });
+
+  it("does not paint saved qualified labels or configuration metadata as measured readiness", async () => {
+    render(<InvestigationTeamReadinessPanel />);
+    await screen.findByTestId("investigation-team-readiness");
+
+    const configured = screen.getByTestId("investigation-team-configured-labels");
+    expect(configured.getAttribute("data-tone")).toBe("neutral");
+    expect(configured.getAttribute("data-tone")).not.toBe("ok");
+    expect(configured.textContent).toMatch(/configured role labels are present/i);
+    expect(configured.textContent).toMatch(/configuration metadata/i);
+
+    const reviewerChip = screen.getByTestId("investigation-team-role-chip-reviewer");
+    expect(reviewerChip.getAttribute("data-state")).toBe("saved");
+    expect(reviewerChip.getAttribute("data-state")).not.toBe("qualified");
+    expect(reviewerChip.textContent).toMatch(/saved label: qualified/i);
+
+    expect(screen.getByTestId("investigation-team-readiness").textContent).not.toMatch(
+      /ready for a bounded trial|\bwinner\b|best model|recommended|composed execution/i,
+    );
   });
 });

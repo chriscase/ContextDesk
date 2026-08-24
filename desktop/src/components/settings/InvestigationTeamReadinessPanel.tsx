@@ -222,15 +222,44 @@ function expectedRole(settings: MultiModelSettingsDto, row: RoleRow): string {
   return row.id === "reviewer" ? "reviewer" : row.id.replace(/-\d+$/, "");
 }
 
+type MeasuredAggregateMatch =
+  | { kind: "unique"; report: InvestigationTeamQualificationDto }
+  | { kind: "ambiguous" }
+  | { kind: "missing" };
+
+function sameQualificationIdentity(
+  left: InvestigationTeamQualificationDto,
+  right: InvestigationTeamQualificationDto,
+): boolean {
+  return left.run_kind === right.run_kind &&
+    left.fingerprint_digest === right.fingerprint_digest &&
+    left.scoring_digest === right.scoring_digest;
+}
+
 function newestMeasured(
   current: InvestigationTeamQualificationDto | null,
   history: InvestigationTeamQualificationDto[],
-): InvestigationTeamQualificationDto | null {
-  const measured = history
-    .filter((entry) => entry.run_kind === "measured")
-    .sort((left, right) => right.observed_at - left.observed_at)[0];
-  if (measured) return measured;
-  return current?.run_kind === "measured" ? current : null;
+): MeasuredAggregateMatch {
+  const measured: InvestigationTeamQualificationDto[] = [];
+  for (const entry of history) {
+    if (
+      entry.run_kind === "measured" &&
+      !measured.some((existing) => sameQualificationIdentity(existing, entry))
+    ) {
+      measured.push(entry);
+    }
+  }
+  if (
+    current?.run_kind === "measured" &&
+    !measured.some((existing) => sameQualificationIdentity(existing, current))
+  ) {
+    measured.push(current);
+  }
+  if (measured.length === 0) return { kind: "missing" };
+  const latestAt = Math.max(...measured.map((entry) => entry.observed_at));
+  const latest = measured.filter((entry) => entry.observed_at === latestAt);
+  if (latest.length !== 1) return { kind: "ambiguous" };
+  return { kind: "unique", report: latest[0] };
 }
 
 function knownAnswerIsComplete(report: InvestigationTeamKnownAnswerDto): boolean {
@@ -266,14 +295,48 @@ function sameKnownAnswerBasis(
       right.orchestration_policy_fingerprint;
 }
 
+type KnownAnswerMatch =
+  | { kind: "unique"; report: InvestigationTeamKnownAnswerDto }
+  | { kind: "ambiguous" }
+  | { kind: "missing" };
+
+function recordedCount(
+  value: number | null | undefined,
+  label: string,
+): string | null {
+  return value == null ? null : `${value} ${label}`;
+}
+
+function knownAnswerLifecycleLabel(report: InvestigationTeamKnownAnswerDto): string {
+  const status = report.stale
+    ? `stale · recorded ${report.reported_status}`
+    : report.status;
+  const extras = [
+    report.stale
+      ? null
+      : report.metrics.passed_scenarios != null &&
+          report.metrics.required_scenarios != null
+        ? `${report.metrics.passed_scenarios}/${report.metrics.required_scenarios} passed`
+        : null,
+    recordedCount(report.metrics.cancelled_scenarios, "cancelled"),
+    recordedCount(report.metrics.failed_scenarios, "failed"),
+    recordedCount(report.metrics.blocked_scenarios, "blocked"),
+  ].filter((part): part is string => part != null);
+  return extras.length > 0 ? `${status} · ${extras.join(" · ")}` : status;
+}
+
+function savedLabelChipState(state: RoleState): string {
+  return state === "qualified" || state === "unqualified" ? "saved" : state;
+}
+
 function knownAnswerForRow(
   settings: MultiModelSettingsDto,
   row: RoleRow,
   capability: QualificationReportDto | null | undefined,
   aggregate: InvestigationTeamQualificationDto | null,
   knownAnswers: InvestigationTeamKnownAnswerDto[],
-): InvestigationTeamKnownAnswerDto | null {
-  if (!capability || !aggregate) return null;
+): KnownAnswerMatch {
+  if (!capability || !aggregate) return { kind: "missing" };
   const role = expectedRole(settings, row);
   const member = (aggregate.members ?? []).find((entry) =>
     entry.role === role &&
@@ -281,23 +344,26 @@ function knownAnswerForRow(
     entry.model_id === row.model &&
     entry.endpoint_fingerprint === capability.endpoint_fingerprint
   );
-  if (!member) return null;
-  return knownAnswers
-    .filter((entry) =>
-      entry.role === role &&
-      entry.subject_storage_id === member.subject_storage_id &&
-      entry.profile_id === member.profile_id &&
-      entry.model_id === member.model_id &&
-      entry.endpoint_fingerprint === member.endpoint_fingerprint
-    )
-    .sort((left, right) => right.observed_at - left.observed_at)[0] ?? null;
+  if (!member) return { kind: "missing" };
+  const matches = knownAnswers.filter((entry) =>
+    entry.role === role &&
+    entry.subject_storage_id === member.subject_storage_id &&
+    entry.profile_id === member.profile_id &&
+    entry.model_id === member.model_id &&
+    entry.endpoint_fingerprint === member.endpoint_fingerprint
+  );
+  if (matches.length === 0) return { kind: "missing" };
+  const latestAt = Math.max(...matches.map((entry) => entry.observed_at));
+  const latest = matches.filter((entry) => entry.observed_at === latestAt);
+  if (latest.length !== 1) return { kind: "ambiguous" };
+  return { kind: "unique", report: latest[0] };
 }
 
 function evidencePreflight(
   settings: MultiModelSettingsDto,
   rows: RoleRow[],
   capabilities: Record<string, QualificationReportDto | null>,
-  aggregate: InvestigationTeamQualificationDto | null,
+  measured: MeasuredAggregateMatch,
   knownAnswers: InvestigationTeamKnownAnswerDto[],
 ): EvidencePreflight {
   if (settings.mode === "contributions") {
@@ -352,7 +418,16 @@ function evidencePreflight(
     }
   }
 
-  if (!aggregate) {
+  if (measured.kind === "ambiguous") {
+    return {
+      state: "attention_required",
+      tone: "warn",
+      title: "Measured team evidence is ambiguous",
+      detail:
+        "Multiple measured pipeline reports share the latest recorded second. ContextDesk will not choose one; review history and refresh the measurement.",
+    };
+  }
+  if (measured.kind === "missing") {
     return {
       state: "measurement_required",
       tone: "neutral",
@@ -360,6 +435,7 @@ function evidencePreflight(
       detail: "Run the measured provider check for the exact current role bindings.",
     };
   }
+  const aggregate = measured.report;
   if (aggregate.stale || aggregate.incomplete_attempts) {
     return {
       state: "refresh_required",
@@ -410,14 +486,22 @@ function evidencePreflight(
         detail: `The current ${role} binding does not match the latest measured pipeline fingerprint.`,
       };
     }
-    const evidence = knownAnswerForRow(
+    const evidenceMatch = knownAnswerForRow(
       settings,
       row,
       capability,
       aggregate,
       knownAnswers,
     );
-    if (!evidence) {
+    if (evidenceMatch.kind === "ambiguous") {
+      return {
+        state: "attention_required",
+        tone: "warn",
+        title: "Known-answer evidence is ambiguous",
+        detail: `Multiple exact ${role} observations share the latest recorded second. ContextDesk will not choose one; review history and refresh the suite.`,
+      };
+    }
+    if (evidenceMatch.kind === "missing") {
       return {
         state: "measurement_required",
         tone: "neutral",
@@ -425,6 +509,7 @@ function evidencePreflight(
         detail: `Assess the frozen suite for the exact ${role} binding.`,
       };
     }
+    const evidence = evidenceMatch.report;
     if (evidence.stale) {
       return {
         state: "refresh_required",
@@ -478,7 +563,7 @@ function evidencePreflight(
     tone: "neutral",
     title: "Evidence recorded; operator review is required",
     detail:
-      "The current host cannot yet prove the complete attempt, tool-loop, and multi-stage role seams. Treat these comparable observations as preparation for a bounded trial, not authorization, a model ranking, or proof that every role will execute.",
+      "The current host cannot yet prove the complete attempt, tool-loop, multi-stage, and qe10 transport-classification role seams. Treat these comparable observations as preparation for a bounded trial, not authorization, a model ranking, or proof that every role will execute.",
   };
 }
 
@@ -512,7 +597,7 @@ function summaryFor(settings: MultiModelSettingsDto, rows: RoleRow[]): {
     };
   }
   return {
-    tone: "ok",
+    tone: "neutral",
     title: "Configured role labels are present",
     detail:
       "Saved qualification labels are configuration metadata. Use the host evidence below to review what was actually measured.",
@@ -530,8 +615,6 @@ export function InvestigationTeamReadinessPanel() {
   const [capabilityEvidence, setCapabilityEvidence] = useState<
     Record<string, QualificationReportDto | null>
   >({});
-  const [currentMeasured, setCurrentMeasured] =
-    useState<InvestigationTeamQualificationDto | null>(null);
   const [syntheticPhase, setSyntheticPhase] = useState<"idle" | "running" | "error">(
     "idle",
   );
@@ -586,7 +669,6 @@ export function InvestigationTeamReadinessPanel() {
         setHistory(reports);
         setKnownAnswerHistory(knownAnswerReports);
         setCapabilityEvidence(Object.fromEntries(capabilityEntries));
-        setCurrentMeasured(newestMeasured(report, reports));
         setPhase("ready");
       } else {
         setSettings(null);
@@ -594,7 +676,6 @@ export function InvestigationTeamReadinessPanel() {
         setHistory([]);
         setKnownAnswerHistory([]);
         setCapabilityEvidence({});
-        setCurrentMeasured(null);
         setPhase("absent");
       }
     } catch {
@@ -634,7 +715,6 @@ export function InvestigationTeamReadinessPanel() {
     try {
       const report = await hostRunLiveInvestigationTeamQualification();
       setQualification(report);
-      setCurrentMeasured(report);
       setHistory((current) => [report, ...current.filter(
         (entry) => entry.fingerprint_digest !== report.fingerprint_digest ||
           entry.scoring_digest !== report.scoring_digest ||
@@ -699,25 +779,32 @@ export function InvestigationTeamReadinessPanel() {
 
   const rows = rowsFor(settings);
   const summary = summaryFor(settings, rows);
+  const measuredMatch = newestMeasured(qualification, history);
   const preflight = evidencePreflight(
     settings,
     rows,
     capabilityEvidence,
-    currentMeasured,
+    measuredMatch,
     knownAnswerHistory,
   );
-  const roleEvidence = rows.map((row) => ({
-    row,
-    role: expectedRole(settings, row),
-    capability: capabilityEvidence[row.id] ?? null,
-    knownAnswer: knownAnswerForRow(
-      settings,
+  const roleEvidence = rows.map((row) => {
+    const match = measuredMatch.kind === "ambiguous"
+      ? { kind: "ambiguous_aggregate" as const }
+      : knownAnswerForRow(
+        settings,
+        row,
+        capabilityEvidence[row.id],
+        measuredMatch.kind === "unique" ? measuredMatch.report : null,
+        knownAnswerHistory,
+      );
+    return {
       row,
-      capabilityEvidence[row.id],
-      currentMeasured,
-      knownAnswerHistory,
-    ),
-  }));
+      role: expectedRole(settings, row),
+      capability: capabilityEvidence[row.id] ?? null,
+      knownAnswer: match.kind === "unique" ? match.report : null,
+      knownAnswerMatch: match.kind,
+    };
+  });
   const failures = qualification?.failures ?? [];
   return (
     <section
@@ -740,7 +827,11 @@ export function InvestigationTeamReadinessPanel() {
         </span>
       </div>
 
-      <p className="mm-team__gate" data-tone={summary.tone}>
+      <p
+        className="mm-team__gate"
+        data-tone={summary.tone}
+        data-testid="investigation-team-configured-labels"
+      >
         <strong>{summary.title}.</strong> {summary.detail}
       </p>
 
@@ -932,7 +1023,11 @@ export function InvestigationTeamReadinessPanel() {
                 <p className="it-readiness__purpose">{row.purpose}</p>
               </div>
               <div className="it-readiness__facts">
-                <span className="mm-team__qual" data-state={row.state}>
+                <span
+                  className="mm-team__qual"
+                  data-state={savedLabelChipState(row.state)}
+                  data-testid={`investigation-team-role-chip-${row.id}`}
+                >
                   {stateLabel(row.state)}
                 </span>
                 <code>{row.model ?? "model not recorded"}</code>
@@ -959,7 +1054,7 @@ export function InvestigationTeamReadinessPanel() {
             These cards describe host-recorded observations. They do not rank models
             or prove that a composed Investigation Team executed.
           </p>
-          {roleEvidence.map(({ row, role, capability, knownAnswer }) => (
+          {roleEvidence.map(({ row, role, capability, knownAnswer, knownAnswerMatch }) => (
             <article
               className="it-readiness__quality-report"
               data-testid={`investigation-team-role-evidence-${role}`}
@@ -979,9 +1074,13 @@ export function InvestigationTeamReadinessPanel() {
                 </div>
                 <div>
                   <dt>Known-answer lifecycle</dt>
-                  <dd>
-                    {knownAnswer
-                      ? `${knownAnswer.reported_status} · ${knownAnswer.metrics.passed_scenarios}/${knownAnswer.metrics.required_scenarios} passed · ${knownAnswer.metrics.blocked_scenarios} blocked`
+                  <dd data-testid={`investigation-team-role-lifecycle-${role}`}>
+                    {knownAnswerMatch === "ambiguous_aggregate"
+                      ? "latest measured pipeline is ambiguous at the same recorded second; review history"
+                      : knownAnswerMatch === "ambiguous"
+                      ? "latest observation is ambiguous at the same recorded second; review history"
+                      : knownAnswer
+                      ? knownAnswerLifecycleLabel(knownAnswer)
                       : "not recorded for this exact role binding"}
                   </dd>
                 </div>
@@ -993,9 +1092,10 @@ export function InvestigationTeamReadinessPanel() {
                     </div>
                     <div>
                       <dt>Comparable basis</dt>
-                      <dd>
+                      <dd data-testid={`investigation-team-comparable-basis-${role}`}>
                         build <code>{knownAnswer.build_identity}</code> · suite{" "}
-                        <code>{knownAnswer.suite_id}</code> · prompt{" "}
+                        <code>{knownAnswer.suite_id}</code> /{" "}
+                        <code>{knownAnswer.suite_digest}</code> · prompt{" "}
                         <code>{knownAnswer.prompt_set_hash}</code> · policy{" "}
                         <code>{knownAnswer.orchestration_policy_fingerprint}</code>
                       </dd>
@@ -1035,8 +1135,8 @@ export function InvestigationTeamReadinessPanel() {
             <p className="it-readiness__detail">
               Assesses 14 frozen, opaque triage scenarios for each exact configured
               role. The trusted host dispatches only work it can execute and observe
-              honestly; scenarios requiring unavailable attempt, tool, or role
-              telemetry remain visibly blocked. Evaluator truth stays separate,
+              honestly; scenarios requiring unavailable attempt, tool, role, or
+              qe10 transport-classification telemetry remain visibly blocked. Evaluator truth stays separate,
               strict citations and causal claims are scored deterministically, and
               redacted reports plus separate private canonical responses are stored
               only where the host can guarantee the complete secure persistence
@@ -1103,8 +1203,8 @@ export function InvestigationTeamReadinessPanel() {
           Tokens and cost remain “unknown” unless the transport can report them;
           provider-reported usage and cost are not audited billing records, and
           no report is a universal model recommendation. Scenarios that need
-          unavailable host attempt, tool, or role telemetry are shown as blocked
-          rather than counted as model failures.
+          unavailable host attempt, tool, role, or qe10 transport-classification
+          telemetry are shown as blocked rather than counted as model failures.
           Canonical responses stay in a private owner-only host
           store beneath a stable owner-only parent directory and are deleted together with their redacted history; they are
           not included in these share-safe redacted exports. On hosts that cannot
@@ -1121,13 +1221,14 @@ export function InvestigationTeamReadinessPanel() {
                 key={`${report.role}:${report.observed_at}:${report.subject_storage_id}:${report.suite_digest}:${report.prompt_set_hash}:${report.orchestration_policy_fingerprint}:${index}`}
                 open={index === 0}
                 className="it-readiness__quality-report"
-                data-status={report.status}
+                data-testid={`investigation-team-known-answer-history-${index}`}
+                data-status={report.stale ? "stale" : report.status}
               >
                 <summary>
                   <span>
                     <strong>{report.role}</strong> · <code>{report.model_id}</code>
                   </span>
-                  <span className="mm-team__qual" data-state={report.status}>
+                  <span className="mm-team__qual" data-state={report.stale ? "stale" : report.status}>
                     {report.stale
                       ? `stale · recorded ${report.reported_status}`
                       : report.status}
