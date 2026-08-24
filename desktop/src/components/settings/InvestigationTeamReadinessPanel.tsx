@@ -7,7 +7,9 @@
  * separate. No check runs on mount.
  */
 import { useCallback, useEffect, useState } from "react";
+import { HelpTip } from "../HelpTip";
 import {
+  hostGetCapabilityQualification,
   hostGetInvestigationTeamQualification,
   hostListInvestigationTeamKnownAnswerQualifications,
   hostListInvestigationTeamQualifications,
@@ -21,8 +23,10 @@ import {
   type InvestigationTeamKnownAnswerDto,
   type InvestigationTeamQualificationDto,
   type MultiModelSettingsDto,
+  type QualificationReportDto,
   type ReviewerCandidateDto,
 } from "../../lib/host";
+import { HELP_INVESTIGATION_TEAM_COMPARISON } from "../../lib/helpContent";
 import "./InvestigationTeamReadinessPanel.css";
 
 type RoleState = "configured" | "qualified" | "unqualified" | "unverified";
@@ -34,6 +38,19 @@ type RoleRow = {
   profileId: string | null;
   model: string | null;
   state: RoleState;
+  detail: string;
+};
+
+type EvidencePreflight = {
+  state:
+    | "setup_required"
+    | "measurement_required"
+    | "refresh_required"
+    | "attention_required"
+    | "identity_review"
+    | "ready_for_bounded_trial";
+  tone: "ok" | "warn" | "neutral";
+  title: string;
   detail: string;
 };
 
@@ -199,6 +216,209 @@ function rowsFor(settings: MultiModelSettingsDto): RoleRow[] {
   return rows;
 }
 
+function expectedRole(settings: MultiModelSettingsDto, row: RoleRow): string {
+  if (row.id === "investigator") {
+    return settings.mode === "single" ? "single" : "investigator";
+  }
+  return row.id === "reviewer" ? "reviewer" : row.id.replace(/-\d+$/, "");
+}
+
+function newestMeasured(
+  current: InvestigationTeamQualificationDto | null,
+  history: InvestigationTeamQualificationDto[],
+): InvestigationTeamQualificationDto | null {
+  const measured = history
+    .filter((entry) => entry.run_kind === "measured")
+    .sort((left, right) => right.observed_at - left.observed_at)[0];
+  if (measured) return measured;
+  return current?.run_kind === "measured" ? current : null;
+}
+
+function knownAnswerIsComplete(report: InvestigationTeamKnownAnswerDto): boolean {
+  const metrics = report.metrics;
+  return report.status === "qualified" &&
+    !report.stale &&
+    metrics.required_scenarios > 0 &&
+    metrics.executed_scenarios === metrics.required_scenarios &&
+    metrics.passed_scenarios === metrics.required_scenarios &&
+    metrics.failed_scenarios === 0 &&
+    metrics.cancelled_scenarios === 0 &&
+    metrics.blocked_scenarios === 0;
+}
+
+function evidencePreflight(
+  settings: MultiModelSettingsDto,
+  rows: RoleRow[],
+  capabilities: Record<string, QualificationReportDto | null>,
+  aggregate: InvestigationTeamQualificationDto | null,
+  knownAnswers: InvestigationTeamKnownAnswerDto[],
+): EvidencePreflight {
+  if (settings.mode === "contributions") {
+    return {
+      state: "setup_required",
+      tone: "warn",
+      title: "Contribution-team preflight is not represented yet",
+      detail:
+        "V1 evidence covers single and Investigator/Reviewer bindings. ContextDesk will not treat a contribution topology as qualified by relabeling its roles.",
+    };
+  }
+  if (rows.length === 0 || rows.some((row) => !row.profileId || !row.model)) {
+    return {
+      state: "setup_required",
+      tone: "warn",
+      title: "Complete the role assignments",
+      detail: "Every current role needs an exact profile and model before evidence can be joined.",
+    };
+  }
+
+  for (const row of rows) {
+    const capability = capabilities[row.id];
+    if (!capability) {
+      return {
+        state: "measurement_required",
+        tone: "neutral",
+        title: "Capability evidence is required",
+        detail: `Measure the exact ${expectedRole(settings, row)} profile and model before using this preflight.`,
+      };
+    }
+    if (
+      capability.profile_id !== row.profileId ||
+      capability.model_id !== row.model ||
+      capability.stale ||
+      capability.cancelled
+    ) {
+      return {
+        state: "refresh_required",
+        tone: "warn",
+        title: "Capability evidence no longer matches",
+        detail: "Refresh stale, cancelled, or identity-mismatched capability evidence for every current role.",
+      };
+    }
+    if (capability.contracts.validated_structured_proposal !== "qualified") {
+      return {
+        state: "measurement_required",
+        tone: "warn",
+        title: "A required capability is not qualified",
+        detail: "Every role must qualify the host-validated structured proposal contract.",
+      };
+    }
+  }
+
+  if (!aggregate) {
+    return {
+      state: "measurement_required",
+      tone: "neutral",
+      title: "Measured team evidence is required",
+      detail: "Run the measured provider check for the exact current role bindings.",
+    };
+  }
+  if (aggregate.stale || aggregate.incomplete_attempts) {
+    return {
+      state: "refresh_required",
+      tone: "warn",
+      title: "Measured team evidence is stale or incomplete",
+      detail: "Refresh the current pipeline measurement before relying on this preflight.",
+    };
+  }
+  if (
+    aggregate.status !== "qualified" ||
+    !aggregate.capability.contract_met ||
+    !aggregate.quality.contract_met ||
+    !aggregate.speed.contract_met ||
+    !aggregate.resource.contract_met
+  ) {
+    return {
+      state: "attention_required",
+      tone: "warn",
+      title: "The measured team needs attention",
+      detail: "At least one capability, quality, speed, or resource contract did not pass.",
+    };
+  }
+
+  const members = aggregate.members ?? [];
+  if (members.length !== rows.length) {
+    return {
+      state: "refresh_required",
+      tone: "warn",
+      title: "The measured pipeline identity has changed",
+      detail: "The current role count does not match the latest measured pipeline.",
+    };
+  }
+
+  for (const row of rows) {
+    const role = expectedRole(settings, row);
+    const capability = capabilities[row.id]!;
+    const member = members.find((entry) =>
+      entry.role === role &&
+      entry.profile_id === row.profileId &&
+      entry.model_id === row.model &&
+      entry.endpoint_fingerprint === capability.endpoint_fingerprint
+    );
+    if (!member) {
+      return {
+        state: "refresh_required",
+        tone: "warn",
+        title: "The measured pipeline identity has changed",
+        detail: `The current ${role} binding does not match the latest measured pipeline fingerprint.`,
+      };
+    }
+    const evidence = knownAnswers
+      .filter((entry) =>
+        entry.role === role &&
+        entry.subject_storage_id === member.subject_storage_id &&
+        entry.profile_id === member.profile_id &&
+        entry.model_id === member.model_id &&
+        entry.endpoint_fingerprint === member.endpoint_fingerprint
+      )
+      .sort((left, right) => right.observed_at - left.observed_at)[0];
+    if (!evidence) {
+      return {
+        state: "measurement_required",
+        tone: "neutral",
+        title: "Known-answer evidence is required",
+        detail: `Assess the frozen suite for the exact ${role} binding.`,
+      };
+    }
+    if (evidence.stale) {
+      return {
+        state: "refresh_required",
+        tone: "warn",
+        title: "Known-answer evidence is stale",
+        detail: `Refresh the frozen-suite evidence for the exact ${role} binding.`,
+      };
+    }
+    if (
+      evidence.scenarios.some((scenario) =>
+        scenario.reported_model_id != null &&
+        scenario.reported_model_id !== evidence.model_id
+      )
+    ) {
+      return {
+        state: "identity_review",
+        tone: "warn",
+        title: "Review the provider-reported model identity",
+        detail: `At least one ${role} scenario reported a different model than the configured identity.`,
+      };
+    }
+    if (!knownAnswerIsComplete(evidence)) {
+      return {
+        state: "attention_required",
+        tone: "warn",
+        title: "Known-answer evidence needs attention",
+        detail: `The ${role} suite is partial, failed, cancelled, blocked, or otherwise incomplete.`,
+      };
+    }
+  }
+
+  return {
+    state: "ready_for_bounded_trial",
+    tone: "ok",
+    title: "Ready for a bounded Investigation Team trial",
+    detail:
+      "Current capability, measured pipeline, and per-role known-answer evidence match. This is not a universal model recommendation or proof that every role will execute in a future investigation.",
+  };
+}
+
 function summaryFor(settings: MultiModelSettingsDto, rows: RoleRow[]): {
   tone: "ok" | "warn" | "neutral";
   title: string;
@@ -244,6 +464,11 @@ export function InvestigationTeamReadinessPanel() {
   const [knownAnswerHistory, setKnownAnswerHistory] = useState<
     InvestigationTeamKnownAnswerDto[]
   >([]);
+  const [capabilityEvidence, setCapabilityEvidence] = useState<
+    Record<string, QualificationReportDto | null>
+  >({});
+  const [currentMeasured, setCurrentMeasured] =
+    useState<InvestigationTeamQualificationDto | null>(null);
   const [syntheticPhase, setSyntheticPhase] = useState<"idle" | "running" | "error">(
     "idle",
   );
@@ -281,16 +506,32 @@ export function InvestigationTeamReadinessPanel() {
         );
       }
       if (next) {
+        const capabilityRows = rowsFor(next);
+        const capabilityEntries = await Promise.all(
+          capabilityRows.map(async (row) => [
+            row.id,
+            row.profileId && row.model
+              ? await hostGetCapabilityQualification({
+                  profileId: row.profileId,
+                  modelId: row.model,
+                })
+              : null,
+          ] as const),
+        );
         setSettings(next);
         setQualification(report);
         setHistory(reports);
         setKnownAnswerHistory(knownAnswerReports);
+        setCapabilityEvidence(Object.fromEntries(capabilityEntries));
+        setCurrentMeasured(newestMeasured(report, reports));
         setPhase("ready");
       } else {
         setSettings(null);
         setQualification(null);
         setHistory([]);
         setKnownAnswerHistory([]);
+        setCapabilityEvidence({});
+        setCurrentMeasured(null);
         setPhase("absent");
       }
     } catch {
@@ -330,6 +571,7 @@ export function InvestigationTeamReadinessPanel() {
     try {
       const report = await hostRunLiveInvestigationTeamQualification();
       setQualification(report);
+      setCurrentMeasured(report);
       setHistory((current) => [report, ...current.filter(
         (entry) => entry.fingerprint_digest !== report.fingerprint_digest ||
           entry.scoring_digest !== report.scoring_digest ||
@@ -394,6 +636,13 @@ export function InvestigationTeamReadinessPanel() {
 
   const rows = rowsFor(settings);
   const summary = summaryFor(settings, rows);
+  const preflight = evidencePreflight(
+    settings,
+    rows,
+    capabilityEvidence,
+    currentMeasured,
+    knownAnswerHistory,
+  );
   const failures = qualification?.failures ?? [];
   return (
     <section
@@ -418,6 +667,15 @@ export function InvestigationTeamReadinessPanel() {
 
       <p className="mm-team__gate" data-tone={summary.tone}>
         <strong>{summary.title}.</strong> {summary.detail}
+      </p>
+
+      <p
+        className="mm-team__gate"
+        data-tone={preflight.tone}
+        data-state={preflight.state}
+        data-testid="investigation-team-evidence-preflight"
+      >
+        <strong>{preflight.title}.</strong> {preflight.detail}
       </p>
 
       {qualification ? (
@@ -621,7 +879,12 @@ export function InvestigationTeamReadinessPanel() {
         <div className="it-readiness__quality-title">
           <div>
             <h5 id="investigation-team-known-answer-title">
-              Known-answer quality evidence
+              Known-answer quality evidence{" "}
+              <HelpTip
+                label="Compare Investigation Team models fairly"
+                title="Compare Investigation Team models fairly"
+                content={HELP_INVESTIGATION_TEAM_COMPARISON}
+              />
             </h5>
             <p className="it-readiness__detail">
               Assesses 14 frozen, opaque triage scenarios for each exact configured
@@ -765,6 +1028,7 @@ export function InvestigationTeamReadinessPanel() {
                   <div><dt>Endpoint</dt><dd><code>{report.endpoint_fingerprint}</code></dd></div>
                   <div><dt>Suite</dt><dd><code>{report.suite_id}</code> / <code>{report.suite_digest}</code></dd></div>
                   <div><dt>Prompt set</dt><dd><code>{report.prompt_set_hash}</code></dd></div>
+                  <div><dt>Orchestration policy</dt><dd><code>{report.orchestration_policy_fingerprint}</code></dd></div>
                 </dl>
                 <details className="it-readiness__quality-scenarios">
                   <summary>Inspect 14 scenario outcomes</summary>

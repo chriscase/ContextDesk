@@ -5,6 +5,7 @@ import type {
   InvestigationTeamKnownAnswerDto,
   InvestigationTeamQualificationDto,
   MultiModelSettingsDto,
+  QualificationReportDto,
 } from "../../lib/host";
 
 const host = vi.hoisted(() => ({
@@ -17,6 +18,7 @@ const host = vi.hoisted(() => ({
   knownAnswerHistory: vi.fn(),
   runKnownAnswer: vi.fn(),
   cancelKnownAnswer: vi.fn(),
+  capability: vi.fn(),
 }));
 
 vi.mock("../../lib/host", async () => {
@@ -42,6 +44,8 @@ vi.mock("../../lib/host", async () => {
       host.runKnownAnswer(...args),
     hostCancelLiveInvestigationTeamKnownAnswerQualification: (...args: unknown[]) =>
       host.cancelKnownAnswer(...args),
+    hostGetCapabilityQualification: (...args: unknown[]) =>
+      host.capability(...args),
   };
 });
 
@@ -148,6 +152,35 @@ function knownAnswerReport(
   };
 }
 
+function capabilityReport(
+  over: Partial<QualificationReportDto> = {},
+): QualificationReportDto {
+  return {
+    profile_id: "investigator-1",
+    endpoint_fingerprint: "a".repeat(64),
+    model_id: "model-a",
+    schema_version: "contextdesk.capability_qualification.v1",
+    role_hint: "triage",
+    cancelled: false,
+    stale: false,
+    finished_at: 1_777_000_000,
+    readiness: {
+      role: "chat",
+      state: "verified",
+      basis: "measured",
+      tested_at: 1_777_000_000,
+      detail: "Exact structured-proposal contract qualified.",
+    },
+    contracts: {
+      host_grounded_generation: "qualified",
+      validated_structured_proposal: "qualified",
+      native_tool_loop: "qualified",
+    },
+    checks: [],
+    ...over,
+  };
+}
+
 beforeEach(() => {
   host.get.mockReset();
   host.qualification.mockReset();
@@ -158,6 +191,7 @@ beforeEach(() => {
   host.knownAnswerHistory.mockReset();
   host.runKnownAnswer.mockReset();
   host.cancelKnownAnswer.mockReset();
+  host.capability.mockReset();
   host.get.mockResolvedValue(settings());
   host.qualification.mockResolvedValue(null);
   host.history.mockResolvedValue([]);
@@ -167,6 +201,15 @@ beforeEach(() => {
   host.knownAnswerHistory.mockResolvedValue([]);
   host.runKnownAnswer.mockResolvedValue([]);
   host.cancelKnownAnswer.mockResolvedValue(true);
+  host.capability.mockImplementation((args: { profileId?: string; modelId?: string }) =>
+    Promise.resolve(capabilityReport({
+      profile_id: args.profileId ?? "",
+      model_id: args.modelId ?? "",
+      endpoint_fingerprint: args.profileId === "reviewer-1"
+        ? "b".repeat(64)
+        : "a".repeat(64),
+    })),
+  );
 });
 
 describe("InvestigationTeamReadinessPanel", () => {
@@ -176,6 +219,50 @@ describe("InvestigationTeamReadinessPanel", () => {
     expect(panel.textContent).toMatch(/configured; team qualification evidence is not attached/i);
     expect(panel.textContent).toMatch(/measured qualified/i);
     expect(panel.textContent).toMatch(/never claims that a configured role actually ran/i);
+    expect(host.capability).toHaveBeenCalledTimes(2);
+    expect(host.runLive).not.toHaveBeenCalled();
+    expect(host.runKnownAnswer).not.toHaveBeenCalled();
+  });
+
+  it("joins exact cached evidence into a bounded-trial preflight", async () => {
+    const aggregate = report({
+      members: [
+        {
+          role: "investigator",
+          subject_storage_id: "subject-a",
+          profile_id: "investigator-1",
+          model_id: "model-a",
+          endpoint_fingerprint: "a".repeat(64),
+        },
+        {
+          role: "reviewer",
+          subject_storage_id: "subject-b",
+          profile_id: "reviewer-1",
+          model_id: "model-b",
+          endpoint_fingerprint: "b".repeat(64),
+        },
+      ],
+    });
+    host.qualification.mockResolvedValue(aggregate);
+    host.history.mockResolvedValue([aggregate]);
+    host.knownAnswerHistory.mockResolvedValue([
+      knownAnswerReport(),
+      knownAnswerReport({
+        role: "reviewer",
+        subject_storage_id: "subject-b",
+        profile_id: "reviewer-1",
+        model_id: "model-b",
+        endpoint_fingerprint: "b".repeat(64),
+        observed_at: 1_777_000_001,
+      }),
+    ]);
+
+    render(<InvestigationTeamReadinessPanel />);
+    const preflight = await screen.findByTestId("investigation-team-evidence-preflight");
+    expect(preflight.getAttribute("data-state")).toBe("ready_for_bounded_trial");
+    expect(preflight.textContent).toMatch(/ready for a bounded investigation team trial/i);
+    expect(preflight.textContent).toMatch(/not a universal model recommendation/i);
+    expect(preflight.textContent).toMatch(/or proof that every role will execute/i);
   });
 
   it("shows honest degradation when the reviewer is unconfigured", async () => {
@@ -475,6 +562,8 @@ describe("InvestigationTeamReadinessPanel", () => {
     expect(quality.textContent).toMatch(/stale · recorded failed/i);
     expect(quality.textContent).toContain("investigator-1");
     expect(quality.textContent).toContain("model-a");
+    expect(quality.textContent).toContain("d".repeat(64));
+    expect(quality.textContent).toMatch(/orchestration policy/i);
     expect(quality.textContent).not.toMatch(/evaluator_truth|answer_key|sk-/i);
 
     fireEvent.click(screen.getByText("Inspect 14 scenario outcomes"));
@@ -501,9 +590,26 @@ describe("InvestigationTeamReadinessPanel", () => {
   });
 
   it("names unavailable host diagnostics and does not imply all scenarios dispatch", async () => {
+    host.get.mockResolvedValue(
+      settings({ mode: "single", reviewer_profile_id: null }),
+    );
+    const aggregate = report({
+      members: [
+        {
+          role: "single",
+          subject_storage_id: "subject-a",
+          profile_id: "investigator-1",
+          model_id: "model-a",
+          endpoint_fingerprint: "a".repeat(64),
+        },
+      ],
+    });
+    host.qualification.mockResolvedValue(aggregate);
+    host.history.mockResolvedValue([aggregate]);
     const blocked = knownAnswerReport({
       status: "partial",
       reported_status: "partial",
+      role: "single",
       metrics: {
         ...knownAnswerReport().metrics,
         passed_scenarios: 10,
@@ -526,6 +632,9 @@ describe("InvestigationTeamReadinessPanel", () => {
 
     const quality = await screen.findByTestId("investigation-team-known-answer-quality");
     expect(
+      screen.getByTestId("investigation-team-evidence-preflight").getAttribute("data-state"),
+    ).toBe("attention_required");
+    expect(
       screen.getByRole("button", { name: /assess 14-scenario suite/i }),
     ).toBeTruthy();
     expect(quality.textContent).toMatch(/dispatches only work it can execute and observe honestly/i);
@@ -534,6 +643,28 @@ describe("InvestigationTeamReadinessPanel", () => {
     fireEvent.click(screen.getByText("Inspect 14 scenario outcomes"));
     expect(quality.textContent).toMatch(/required host diagnostic execution is not available/i);
     expect(quality.textContent).not.toMatch(/did not produce a usable score/i);
+  });
+
+  it("opens the canonical fair-comparison Help location", async () => {
+    const opened = vi.fn();
+    window.addEventListener("contextdesk:help-open", opened);
+    render(<InvestigationTeamReadinessPanel />);
+    await screen.findByTestId("investigation-team-readiness");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /help: compare investigation team models fairly/i,
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /open full help/i }));
+
+    expect(opened).toHaveBeenCalledTimes(1);
+    const event = opened.mock.calls[0]?.[0] as CustomEvent;
+    expect(event.detail).toEqual({
+      pageId: "investigation-team-qualification",
+      anchor: "compare-models-fairly",
+    });
+    window.removeEventListener("contextdesk:help-open", opened);
   });
 
   it("offers cooperative cancellation while the known-answer suite is running", async () => {
