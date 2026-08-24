@@ -1,212 +1,295 @@
 # War Room operator guide
 
-This guide explains how to operate War Room as an evidence review system,
-not as a model-answer generator. The operator's job is to keep the problem
-bounded, make source material recognizable, compare attempts fairly, and
-record the human action that follows.
+This guide explains how to operate ContextDesk War Room as an evidence review
+and collaboration system, not as a model-answer generator. Keep the problem
+bounded, preserve recognizable source material, compare independent attempts
+fairly, and record the human action that follows.
 
-> Every screen and example referenced here is fully synthetic.
+> Every example and screenshot referenced here is fully synthetic.
 
-## Before you begin
+## Start with the workspace, not a giant case page
 
-Start with a question that can be improved by evidence. “Something failed” is
-too broad. A useful Situation states what was observed, the relevant time or
-scope, the operational consequence, and what is not yet known. Avoid putting a
-favored explanation into the problem statement as though it were fact.
+After sign-in, the primary navigation separates the major jobs:
 
-Overview is the entry point for resuming work: use its latest-activity links to
-return to the exact recorded change, or open **Investigations** for the complete
-searchable inventory. Use names that describe the synthetic problem, not a
-presumed cause.
+- **Overview** surfaces recent recorded activity and active investigations.
+- **Investigations** is the searchable and filterable case inventory.
+- **Sources** maintains attribution labels reused during intake.
+- **Administration** is visible only to administrators and manages destination
+  workspace access mappings.
+- **Help** provides searchable operating guidance.
+
+Select an activity link when you know what changed. Open **Investigations**
+when you need to search or resume any visible case. The URL preserves the
+investigation and stage, and more specific links can preserve a comparison,
+focused lane, section, or evidence target. A recipient must still sign in and
+have permission to read that investigation.
 
 ![Synthetic investigation list with War Room entries](../assets/war-room/war-room-investigations.png)
 
-## 1. Situation: define the problem boundary
+## Identity and attribution
 
-Situation gives every lane the same orientation. Record:
+The account menu shows the signed-in display name, username, and current
+ContextDesk access role. In a configured LDAP deployment, the display name can
+come from the directory identity. In the synthetic demo it comes from the
+fixture account.
 
-- a problem statement describing the observed symptom without assuming a cause;
-- the people or systems known to be affected;
+Display identity supports understandable attribution; it does not replace the
+durable internal identity used for authorization and audit. Never infer a
+person's role from their name or from historical data imported from another
+installation.
+
+## The investigation workflow
+
+### 1. Situation: define the problem boundary
+
+Start with a question that can be improved by evidence. “Something failed” is
+too broad, while a presumed cause narrows the investigation prematurely.
+Record:
+
+- a concise title;
+- a problem statement describing the observed symptom without assuming a
+  cause;
+- affected people, customers, services, or systems, when known;
 - the current recorded impact;
-- the bounded scope, including relevant time and system boundaries; and
-- one or more open questions that must remain unknown for now.
+- a bounded scope, including relevant time and system boundaries; and
+- explicit open questions.
 
-The creation form records this context with the title. Authorized investigation
-members can use **Edit situation** to refine it later. A blank field is displayed
-as **Not recorded**; ContextDesk does not infer or backfill missing Situation
-facts from model output.
-
-Separate observations from hypotheses. “The synthetic request returned an
-error” is an observation if captured evidence shows it. “A dependency caused
-the error” is a hypothesis until a finding can point to supporting evidence.
+Authorized investigation members can edit these durable fields later. A blank
+field appears as **Not recorded**; ContextDesk does not infer or backfill it
+from model output.
 
 ![Synthetic Situation view with bounded problem context](../assets/war-room/war-room-situation.png)
 
-Good Situation text makes it possible to tell when the investigation has
-drifted. If a lane answers a different question, keep the output in its lane
-history but do not promote it into a finding for the current decision.
+Separate observations from hypotheses. “The synthetic request returned a
+timeout” is an observation only if captured evidence shows it. “A downstream
+service caused the timeout” remains a hypothesis until evidence supports it.
 
-## 2. Capture: record people and imported output honestly
+### 2. Capture: distinguish people from imported output
 
-Capture is for human-authored messages, notes, hypotheses, and actions, plus
-output imported from an outside tool with its provenance stated honestly.
-Upload log files, stack traces, and other inspectable artifacts on
-**Analyze**, where they can be hashed, selected, and frozen into a snapshot.
-Preserve enough surrounding context to evaluate the claim. A copied phrase
-without its source, time, or neighboring lines is weak evidence.
+Capture human-authored notes, hypotheses, and actions as human contributions.
+Record pasted output from an external model, tool, report, or service as
+imported and unverified. Do not place copied model output in a human note simply
+because a person pasted it.
 
-For every item, confirm:
+Discussion is for questions and review context. It does not replace a formal
+finding or decision.
 
-- **Origin:** synthetic, live, or imported.
-- **Source identity:** where the item came from, as represented by the
-  product.
-- **Time:** observed time and event time when both are available.
-- **Integrity:** whether the item is original, transformed, excerpted, or
-  summarized.
-- **Scope:** which lane or investigation can use it.
+### 3. Analyze: select evidence, freeze a snapshot, run attempts
 
-Human notes are useful evidence about what a person observed or decided. They
-are not a safe container for pasted model output. If model output is brought
-in from another run, preserve it as **imported** so its origin remains visible.
+Upload or select the investigation's logs, stack traces, files, and other
+evidence in Analyze. Inspect the material before freezing it. A frozen snapshot
+binds a run to an exact evidence selection and fingerprint so later comparisons
+can report whether lanes saw equivalent material.
 
-### Evidence deep links
+Give each lane a distinct purpose rather than only changing wording:
 
-A finding's evidence link should open the cited item in context. Use the deep
-link to verify the exact line or frame, inspect nearby events, and return to
-the finding without rebuilding the search manually.
-
-![Synthetic finding opened through an evidence deep link](../assets/war-room/war-room-evidence-deep-link.png)
-
-If a deep link resolves to the wrong item, lacks enough context, or no longer
-resolves, treat the citation as unverified. Do not rely on the finding's prose
-alone.
-
-### Technical details
-
-Open **Technical details** when the visible summary is insufficient. Depending
-on the item, the panel provides audit-oriented metadata such as identifiers,
-timestamps, source/provenance fields, lane configuration, attempt status, and
-diagnostic payload details. It is the place to answer “exactly which item or
-attempt is this?” without crowding the primary narrative.
-
-Technical details support review; they do not turn an unsupported conclusion
-into a supported one. A finding still needs a meaningful evidence connection.
-
-## 3. Analyze: treat each lane as an attempt
-
-Analyze runs or records bounded attempts against the Situation and available
-evidence. A lane may be human-led or model-assisted. Give each lane a distinct
-purpose, then judge it by the evidence it returns.
-
-A practical small-model comparison uses strategies rather than cosmetic
-prompt variations:
-
-| Lane strategy | Question | Useful output | Common failure to watch for |
+| Strategy | Question | Useful output | Failure to watch for |
 | --- | --- | --- | --- |
 | Timeline | What happened in what order? | Ordered events with direct citations | Invented ordering where timestamps are missing |
-| Boundary | Where does observed success become failure? | The last supported success and first supported failure | Naming a cause that the boundary does not prove |
-| Skeptic | Which leading claim is weakest? | Contradicting evidence and missing tests | Disagreement for its own sake without citations |
+| Boundary | Where does observed success become failure? | Last supported success and first supported failure | Naming a cause that the boundary does not prove |
+| Skeptic | Which leading claim is weakest? | Contradicting evidence and missing tests | Unsupported disagreement for its own sake |
 
-Small models can be effective when the evidence window and role are narrow.
-Comparison should focus on citation quality, useful distinctions, and honest
-unknowns—not on which lane writes the smoothest explanation.
+Synthetic mode runs offline. When the host has a configured gateway, switch to
+**Configured gateway**, select the frozen snapshot and question, choose at
+least two lanes, and choose a **Gateway model** for each lane. The integrated
+catalog can expose Qwen 3.6 27B, GPT-OSS 120B, and Ministral 3 14B. A deployment
+may expose a different bounded catalog. Endpoint and credential details remain
+on the host.
 
-### Lane inspection and recorded history
+Record failed, partial, and superseded attempts. Before rerunning, note what
+changed: evidence, Situation, strategy, model, or configuration. If nothing
+changed, variation between answers is itself relevant evidence.
 
-After lanes are recorded, use **Inspect a lane** in Compare when you need one
-attempt's question, recognizable evidence, latest conclusion, and unknowns in
-one compact digest. Selecting a lane updates the shareable URL without moving
-the page or changing the aggregate decision basis. Open the full chronological
-trace only when you need every recorded step in that selected attempt.
+### 4. Compare: inspect findings, not votes
 
-![Synthetic focused lane with evidence-backed attempt history](../assets/war-room/war-room-lane-focus.png)
+Compare organizes recorded output into:
 
-Earlier runs and comparisons remain separately selectable under **Historical
-artifacts**. Preserve completed, failed, superseded, and partial attempts.
-Before rerunning a lane, note what changed: new evidence, a revised Situation,
-a different strategy, or a different model configuration. If nothing changed,
-a different answer is itself relevant comparison evidence, not something to
-hide by replacing the old output.
-
-## 4. Compare: inspect findings, not votes
-
-Compare organizes lane output into four useful categories:
-
-- **Agreement:** independently supported claims that point to compatible
-  evidence.
-- **Disagreement:** incompatible interpretations, boundaries, or proposed
-  causes.
-- **Unknowns:** questions the captured evidence cannot currently answer.
-- **Unsupported claims:** assertions with missing, broken, or irrelevant
-  evidence links.
+- **Agreement** — compatible claims with inspectable support;
+- **Disagreement** — competing interpretations or boundaries;
+- **Unknowns** — questions the current evidence cannot answer; and
+- **Unsupported claims** — assertions with missing, broken, or irrelevant
+  evidence connections.
 
 ![Synthetic Compare view showing agreement, disagreement, and unknowns](../assets/war-room/war-room-compare.png)
 
-Open the underlying finding before accepting a comparison summary. Two lanes
-can use similar words while citing different events. They can also cite the
-same event and draw incompatible conclusions. Neither case should be flattened
-into a consensus score.
+Use the lane control to inspect one attempt without filtering other lanes out
+of the aggregate decision basis. The focused digest shows its question,
+recognizable evidence, latest conclusion, unknowns, and chronological trace.
+The URL records that focus without sending the reader to an unrelated page.
+
+![Synthetic focused lane with evidence-backed attempt history](../assets/war-room/war-room-lane-focus.png)
+
+Use **Historical artifacts** to open earlier runs and comparisons. A historical
+artifact is a recorded analysis object, not a recommendation or a replacement
+for the current comparison.
+
+Agreement can be useful, but it is not proof. Count of lanes is not a ranking.
+Judge whether the claims are supported, whether the cited evidence is the same,
+and whether an apparent contradiction changes the recommended action.
+
+### 5. Decide: assign action and ownership
+
+A complete decision records:
+
+- the selected action;
+- a named owner or explicitly unassigned status;
+- evidence-backed rationale;
+- remaining disagreement and unknowns;
+- any completion or review condition; and
+- the human actor who approved the decision.
+
+“Capture the missing synthetic dependency interval” is a valid decision when
+that evidence would distinguish the leading explanations. “Accept the majority
+answer” is not a sufficient rationale.
+
+## Evidence, sources, and deep links
+
+### Source attribution is not evidence storage
+
+The **Sources** library stores reusable labels for who or what produced an
+item: a person, an internal system, an external tool, another ContextDesk
+record, or an unknown origin. The source record is not a connector, credential,
+global corpus, or correctness claim.
+
+Evidence is investigation-scoped. The actual note, imported response, upload,
+log, stack trace, or frozen snapshot belongs to the investigation that records
+it. A retired source remains attached to historical items but cannot be chosen
+for new intake.
+
+### Readable evidence first
+
+The default finding view should let an operator recognize the evidence:
+
+- a human-readable filename or source label;
+- the relevant log line, stack frame, or observation excerpt;
+- what the lane claims about it;
+- why the distinction matters; and
+- the recommended next review step.
+
+Large logs and stack traces can remain collapsed until the operator needs their
+surrounding context. Exact IDs, hashes, timestamps, provenance fields, lane
+configuration, and diagnostic payloads belong under **Technical details**.
+Those fields make an item auditable without forcing opaque values into every
+summary.
+
+### Follow deep links before trusting prose
+
+A finding's evidence link opens the cited item in its investigation context.
+Share the resulting URL when another authorized reviewer needs the same stage,
+comparison, lane, section, or evidence item.
+
+![Synthetic finding opened through an evidence deep link](../assets/war-room/war-room-evidence-deep-link.png)
+
+If a deep link resolves to the wrong item, has insufficient context, or no
+longer resolves, treat the citation as unverified. Do not rely on its prose.
 
 ### Evidence-first finding checklist
 
-Promote a lane observation into a finding only when a reviewer can answer:
+Before promoting a lane observation into a finding, answer:
 
 1. What exactly is being claimed?
 2. Which evidence supports or contradicts it?
 3. Does the deep link resolve to recognizable context?
 4. What is observed, and what is inferred?
-5. Which lane attempt produced it?
+5. Which attempt produced it?
 6. What remains unknown?
 
 If a claim is promising but unsupported, keep it as a hypothesis or next
-action. That is more useful than presenting it as established.
+action.
 
-## 5. Decide: assign action and ownership
+## Discussion and activity
 
-Decide converts reviewed findings into a human-owned next step. A complete
-decision records:
+Discussion records questions, review notes, and decision context. Activity
+records important investigation changes and lets authorized users return to
+the relevant stage or item. Both are durable server records attributed to the
+signed-in identity.
 
-- the selected action;
-- a named owner or explicitly unassigned status;
-- the evidence-backed rationale;
-- the disagreements and unknowns that remain;
-- any completion or review condition; and
-- the human actor who made or approved the decision.
+Discussion refreshes through bounded HTTP polling. It is not WebSocket chat or
+a presence system. Do not assume instant delivery, typing indicators, live
+cursors, or an authoritative list of viewers. Write important comments so they
+stand alone, verify that the durable update appears, and place the formal
+action and owner in Decide.
 
-“Gather one missing synthetic log interval” is a valid decision when that
-evidence would distinguish the leading explanations. “Accept the majority
-answer” is not a sufficient rationale.
+## Administration, identity, and access
 
-### Discussion
+Only administrators can open **Administration**. The console has two distinct
+responsibilities:
 
-Use discussion to record questions, review notes, and decision context around
-the investigation. Discussion is durable across refreshes and updates through
-polling. It is not WebSocket chat or a presence system: do not assume typing
-indicators, live cursors, instantaneous delivery, or an authoritative list of
-who is currently viewing the room.
+1. Search a bounded view of configured directory identities and groups.
+2. Map an exact directory group to one ContextDesk workspace role.
 
-For important changes, write self-contained comments and verify that the
-durable update appears. Put the final action and owner in Decide rather than
-leaving them only in discussion.
+The available roles are:
 
-### Human decision and export
+| Role | Workspace meaning |
+| --- | --- |
+| **Viewer** | Read investigations available to the identity |
+| **Contributor** | Add notes, evidence, imports, and discussion |
+| **Case lead** | Lead runs and decisions, export, and manage source labels |
+| **Administrator** | Manage workspace group-to-role mappings in addition to case-lead capabilities |
 
-The operator—not a lane—owns the decision. Export is the reviewable handoff of
-that human decision and its supporting record. Before exporting:
+Directory search is bounded, audited, and fail-closed. It does not display or
+accept directory credentials, create users or groups, modify the directory, or
+grant access by itself. Updates and revocations target the destination
+ContextDesk mapping and require explicit action; sensitive changes use a
+confirmation dialog.
 
-- check that evidence links resolve;
-- preserve provenance labels;
-- include material disagreement and unknowns;
-- verify the next action and owner;
-- remove nothing merely because it weakens the preferred explanation; and
-- confirm that the export scope is appropriate for its destination.
+LDAP support is deployment-specific. The adapter requires encrypted transport,
+configuration, and qualification against the actual directory. The account
+menu can show the LDAP display name and username after authentication, but the
+War Room admin console is not a general LDAP administration tool.
 
-An export records what was decided from the available evidence. It is not a
-claim that the investigation found an ultimate or permanent truth.
+## Three different exports
+
+Choose the artifact that matches the job. These are not interchangeable.
+
+### Triage brief
+
+Use the triage brief for a readable operational handoff. It can include case
+header data, timeline, hypotheses, actions, evidence inventory, attribution,
+and imported responses according to the selected owner-only or share-safe
+variant. It is a projection, not a complete backup.
+
+### Selected-evidence prompt package
+
+Use this package to send a deliberate subset of evidence to another analysis
+tool. Select at least one eligible item and optionally add a prompt scaffold.
+The package includes a manifest, hashes, provenance labels, and only the
+selected excerpts that pass its privacy rules. Default-excluded and unselected
+items remain out.
+
+This is not a complete investigation archive. It is intentionally narrower so
+an operator can control what another analysis tool receives.
+
+### Complete investigation archive
+
+A case lead or administrator can download the portable JSON archive from
+Decide. It represents the durable Situation and the investigation objects and
+included evidence supported by the current archive version. It also carries
+integrity data, privacy classifications, content inclusion state, historical
+attribution, and explicit reconstruction limitations.
+
+On another War Room, select the archive and run **Run dry-run check**. The
+preflight:
+
+- validates the archive, hashes, and represented object references;
+- inventories included, omitted, private, and redacted content;
+- compares object identities with the destination catalog;
+- computes deterministic remaps for collisions;
+- treats source roles as untrusted; and
+- keeps historical identities as attribution instead of creating destination
+  users, members, leads, administrators, or capability holders.
+
+The same archive and destination state produce the same remap plan. The dry
+run changes nothing. It does not create an investigation, user, membership,
+role, permission, or capability.
+
+![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
+
+**Restore/apply is not available.** There is no apply control because atomic
+rollback across supported storage backends has not been proven. A successful
+preflight is a reviewable plan, not a completed import.
 
 ## Provenance and honest unknowns
-
-Use provenance labels literally:
 
 | Label | Meaning | Does not mean |
 | --- | --- | --- |
@@ -214,43 +297,38 @@ Use provenance labels literally:
 | **Live** | Produced through a connected run in the current workflow | Correct, complete, or human-verified |
 | **Imported** | Added from outside the current run | Native, current, or human-authored |
 
-Never infer missing provenance from wording. Never convert an absent time,
-model identity, source, or result into a likely value. Mark it unknown and,
-when it matters, assign an action to resolve it.
+Never infer missing provenance, time, model identity, cost, usage, or result
+from wording. Preserve it as unknown and assign an action when resolving it
+matters.
 
-Useful unknowns are specific. “Cause unknown” is less actionable than “the
-captured interval does not include the synthetic dependency response, so the
-two current explanations cannot be distinguished.”
+## Current deployment boundaries
 
-## Current behavior and deployment boundaries
-
-- The LDAP adapter is production-ready only after it is configured and tested
-  for the specific deployment.
-- Discussion is durable and refresh/polling based; WebSocket chat and presence
-  are not shipped behavior.
-- Portable full import apply and persistence remain draft work and are not
-  shipped.
-- Web ZIP upload and web directory upload are not claimed.
-- A complete administration UI and complete capability-management UI are not
-  claimed.
-
-Do not work around these boundaries in a demonstration. State the current
-behavior plainly and use only the shipped path being shown.
+- LDAP display identity and directory search require deployment-specific
+  encrypted configuration and qualification.
+- Discussion and activity use polling; realtime sockets, instant delivery,
+  typing indicators, and authoritative presence are not shipped claims.
+- Complete archive export and dry-run preflight are available; restore/apply
+  and atomic reconstruction are not.
+- The selected-evidence prompt package is not a full investigation backup.
+- Web ZIP and directory upload are not claimed.
+- A first-run web setup wizard is not shipped behavior.
+- Configured gateway model availability, quality, cost, and usage reporting
+  depend on the host and provider. Missing measurements remain unknown.
 
 ## Operator closeout checklist
 
-Before closing or exporting an investigation, confirm:
-
-- [ ] Situation describes the observed problem without embedding an
-      unproven cause.
-- [ ] Important logs, stack traces, and observations have recognizable
-      context and provenance.
+- [ ] Situation describes the observed problem without embedding an unproven
+      cause.
+- [ ] Important logs, stack traces, and observations have recognizable context
+      and provenance.
 - [ ] Each retained finding has a working evidence deep link.
-- [ ] Lane history shows the attempts that informed the comparison.
+- [ ] Lane history preserves the attempts that informed the comparison.
 - [ ] Agreement, disagreement, unsupported claims, and unknowns remain
       distinguishable.
 - [ ] The next action has an owner or is explicitly unassigned.
 - [ ] The decision is attributed to a human.
-- [ ] The export retains provenance and material uncertainty.
+- [ ] Discussion contains context, but the formal decision is in Decide.
+- [ ] The chosen export matches the intended audience and transfer need.
+- [ ] A portable-archive dry run is not described as a completed restore.
 
 Next: run the [fully synthetic end-to-end walkthrough](END_TO_END.md).

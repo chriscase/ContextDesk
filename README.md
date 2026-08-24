@@ -66,7 +66,7 @@ This is a CI evidence status, not a claim that the application cannot run on Ubu
 | Need | Start here |
 | ---- | ---------- |
 | **Install / build** | [Install](#install) · [Development](#development) · [DEV.md](docs/DEV.md) · [Packaging](docs/PACKAGING.md) |
-| **War Room GUI** | **[War Room guide](docs/war-room/README.md)** · [Operator guide](docs/war-room/OPERATOR_GUIDE.md) · [Five-minute end-to-end walkthrough](docs/war-room/END_TO_END.md) |
+| **War Room GUI** | **[War Room guide](docs/war-room/README.md)** · [Operator workflow](docs/war-room/OPERATOR_GUIDE.md#the-investigation-workflow) · [Evidence and deep links](docs/war-room/OPERATOR_GUIDE.md#evidence-sources-and-deep-links) · [Administration and LDAP identity](docs/war-room/OPERATOR_GUIDE.md#administration-identity-and-access) · [Exports and portable archives](docs/war-room/OPERATOR_GUIDE.md#three-different-exports) · [Five-minute synthetic walkthrough](docs/war-room/END_TO_END.md) |
 | **Desktop GUI** | [Configure a provider](#configure-a-provider) · Help [first run](docs/help/getting-started/first-run.md) · [Log Explorer](docs/help/log-analysis/log-explorer.md) · [demo datasets](docs/help/log-analysis/demo-datasets.md) |
 | **CLI** | [CLI and log normalization](#cli-and-log-normalization) · [CLI guide](docs/CLI.md) |
 | **Normalization** | [NORMALIZATION.md](docs/NORMALIZATION.md) · [spec](docs/specs/NORMALIZED_LOG_EVENTS_V1.md) |

@@ -1,11 +1,11 @@
 # War Room end-to-end walkthrough
 
 This five-minute walkthrough uses only the shipped synthetic demo. It does not
-require a live provider, external service, or imported source material. The
-goal is to learn the War Room decision flow—not to benchmark a model or prove
-production readiness.
+require a live provider, external service, directory, or imported material.
+The goal is to understand the War Room workflow—not to benchmark a model or
+prove production deployment readiness.
 
-## 0:00 — Start the synthetic demo
+## 0:00 — Start and sign in
 
 From the repository root:
 
@@ -14,162 +14,197 @@ cd collab
 npm run demo
 ```
 
-Leave that process running. Open the local address it prints, then sign in:
+Leave the process running. Open the local address it prints, then sign in:
 
 ```text
 Username: demo
 Password: demo
 ```
 
-If the command cannot start or the local address does not load, stop here and
-record the environment failure. Do not substitute a live system or external
-data for this walkthrough.
+This is a fixture identity, not an LDAP claim. After sign-in, the account menu
+shows the synthetic display name, username, and access role.
 
-## 0:30 — Orient in Overview, then open a synthetic investigation
+If the local address does not load, stop and record the environment failure.
+Do not substitute external data for this walkthrough.
 
-On **Overview**, read the recorded status counts and latest activity. Select an
-activity to see its exact-stage route, then return to **Investigations** and
-select the prepared synthetic War Room item. Overview answers “what changed?”;
-Investigations is the searchable, resumable inventory.
+## 0:30 — Orient in the workspace
+
+Use the main navigation to distinguish the workspace destinations:
+
+- **Overview** shows recent recorded activity and active investigations.
+- **Investigations** is the searchable inventory.
+- **Sources** contains reusable attribution labels, not global evidence.
+- **Administration** is the admin-only destination for bounded directory
+  visibility and workspace group-to-role mappings.
+- **Help** contains searchable operating guidance.
+
+On Overview, follow one activity link to its recorded investigation stage,
+then return to Investigations and open the prepared synthetic item.
 
 ![Fully synthetic War Room Overview](../assets/war-room/war-room-overview.png)
 
 ![Fully synthetic War Room investigations screen](../assets/war-room/war-room-investigations.png)
 
-Expected result: the investigation opens with its existing Situation and
-workflow state. Nothing on this screen implies that the example came from a
-live environment.
+Expected result: Overview and Investigations answer different questions, and
+the investigation opens at a routed stage rather than on one undifferentiated
+page.
 
 ## 1:00 — Read Situation before choosing a cause
 
-In **Situation**, identify four things:
+In **Situation**, identify:
 
 1. the observable synthetic problem;
 2. who or what is recorded as affected;
-3. its impact and bounded scope; and
-4. the questions that are still unknown.
+3. the impact and bounded scope; and
+4. open questions that remain unknown.
 
 If you have write access, choose **Edit situation** to update those durable
-fields. Leave a field blank when it is not known; the UI will show **Not
-recorded** rather than manufacture context.
+fields. Leave a field blank when it is not known; the UI shows **Not recorded**
+instead of manufacturing context.
 
 ![Fully synthetic Situation screen](../assets/war-room/war-room-situation.png)
 
 Expected result: you can repeat the problem without naming an unproven cause.
-Situation orients the investigation; it is not the conclusion.
 
-## 1:40 — Capture provenance, then inspect recognizable evidence
+## 1:35 — Capture provenance and inspect evidence
 
-Move to **Capture** and confirm that human notes remain human-authored and that
-outside model output remains labeled imported and unverified. Move to
-**Analyze** to inspect the uploaded synthetic logs or stack traces and their
-frozen snapshot. Then open **Compare**, find an investigative finding, and
-choose **Inspect supporting artifact**. Confirm that the destination shows
-recognizable context, not just an isolated phrase.
+Move to **Capture**. Confirm that human notes remain human-authored and outside
+model or tool output remains imported and unverified. Move to **Analyze** and
+inspect the investigation-scoped synthetic logs or stack traces.
+
+The **Sources** library records who or what produced an item. The actual log,
+note, upload, or imported response belongs to this investigation.
+
+Open **Compare**, choose a finding, and follow its evidence link. Confirm the
+destination shows a readable label and relevant log, stack frame, or
+observation context rather than only an opaque identifier. Expand longer
+technical material when needed.
 
 ![Fully synthetic evidence deep-link destination](../assets/war-room/war-room-evidence-deep-link.png)
 
-Open **Technical details** and inspect the available source, time, identity,
-or diagnostic metadata. Note the provenance label:
+Open **Technical details** to inspect exact identifiers, hashes, timestamps,
+source metadata, or lane configuration. Those fields support audit but do not
+replace the readable evidence.
 
-- **Synthetic** means generated for this demonstration.
-- **Live** would mean produced through a current connected run, not verified.
-- **Imported** would mean brought in from outside the run, not native or
-  necessarily human-authored.
+Expected result: you can explain what was observed, where it came from, and
+what remains inferred or unknown.
 
-Expected result: you can explain where the item came from and what is still
-unknown. If the evidence link does not resolve to the claimed context, the
-finding is not verified by its prose.
+## 2:20 — Inspect frozen evidence and lane attempts
 
-## 2:30 — Analyze, then inspect one lane in depth
+In **Analyze**, confirm that the comparison lanes are bound to a frozen
+evidence snapshot. Synthetic mode is offline. A configured deployment can
+instead expose a **Gateway model** selector for each lane; the integrated
+catalog can include Qwen 3.6 27B, GPT-OSS 120B, and Ministral 3 14B when the
+host is configured for them.
 
-Move to **Analyze** and confirm which bounded lanes ran against the frozen
-evidence. Return to **Compare**, scroll to Decision readiness, and use
-**Inspect a lane**. The compact digest shows its question, recognizable
-evidence, latest conclusion, and unknowns without changing the aggregate
-comparison. Open the full chronological trace only when you need every
-recorded step in that selected lane; use **Historical artifacts** to open prior
-runs and comparisons.
+Return to **Compare** and focus one lane. The compact lane digest shows its
+question, evidence, latest conclusion, unknowns, and recorded trace while the
+aggregate comparison continues to show every lane. The URL retains the
+investigation, comparison, lane, and section for authorized sharing.
 
 ![Fully synthetic focused analysis lane and history](../assets/war-room/war-room-lane-focus.png)
 
-Read the lane as an attempt. A polished explanation can still be incomplete.
-A partial or failed attempt remains useful when its status and limits are
-honest.
+Use **Historical artifacts** to open prior runs and comparisons. They remain
+separate records and are not silently overwritten by a rerun.
 
-Expected result: selecting a lane does not jump the page; the URL becomes
-shareable, and you can identify what strategy the lane used, which evidence it
-cited, and whether anything changed between attempts.
+Expected result: you can identify what strategy the lane used, which evidence
+it cited, and how it differs from other attempts.
 
-## 3:15 — Compare small-model strategies
+## 3:05 — Compare evidence, not writing style
 
-Open **Compare**. The synthetic lanes use different bounded strategies, such
-as reconstructing a timeline, locating the failure boundary, and challenging
-the leading claim. Compare their evidence use rather than their writing style.
+Review the Compare categories:
+
+- **Agreement** — compatible claims with inspectable support.
+- **Disagreement** — competing interpretations or boundaries.
+- **Unknowns** — questions the captured material cannot answer.
+- **Unsupported** — claims whose evidence is absent, irrelevant, or broken.
 
 ![Fully synthetic comparison of lane strategies](../assets/war-room/war-room-compare.png)
 
-Review each category:
+Open at least one underlying finding. Confirm whether two lanes cite the same
+evidence, different evidence, or no evidence. Agreement is not presented as
+proof, and a lane count is not a winner ranking.
 
-- **Agreement:** compatible claims with inspectable support.
-- **Disagreement:** competing interpretations or boundaries.
-- **Unknowns:** questions the captured material cannot answer.
-- **Unsupported:** claims whose evidence is absent, irrelevant, or broken.
+Expected result: at least one open question can remain unknown without being
+silently completed by a model.
 
-Expected result: agreement is visible but is not presented as proof. At least
-one open question can remain unknown without being silently completed by a
-model.
+## 3:45 — Discuss and decide
 
-## 4:00 — Discuss the next action
+Read or add a short synthetic discussion note that connects the evidence to a
+next action. Discussion is durable and refreshes through polling. It is not a
+WebSocket chat channel, so do not expect instant delivery, typing indicators,
+or a live viewer roster.
 
-Add or read a short synthetic discussion note that connects the comparison to
-the next action. Discussion is durable across refresh and updates through
-polling. It is not WebSocket chat or live presence, so allow for refresh
-latency and do not expect typing indicators or a viewer roster.
+In **Decide**, confirm the human-selected next action, owner, rationale,
+remaining disagreement, and unknowns. A lane may propose an action but cannot
+approve the human decision.
 
-Expected result: discussion preserves review context, while the formal action
-and owner are recorded in Decide.
+Expected result: discussion preserves review context while Decide remains the
+authoritative location for the action and owner.
 
-## 4:30 — Decide and export
+## 4:20 — Choose the right export
 
-In **Decide**, select the next action justified by the evidence. Confirm its
-owner, rationale, unresolved disagreement, and unknowns. The human operator
-makes the decision; a lane may propose an action but cannot approve it.
+The Decide stage provides three different export jobs:
 
-Create or inspect the export. Verify that it carries:
+1. **Triage brief** — a readable owner-only or share-safe handoff.
+2. **Selected-evidence prompt package** — only the evidence explicitly chosen
+   for another analysis tool, plus an optional prompt scaffold.
+3. **Complete investigation archive** — the represented investigation record
+   and included evidence for preservation or transfer.
 
-- the Situation;
-- the evidence-backed findings and provenance;
-- material agreement, disagreement, and unknowns;
-- the chosen next action and owner; and
-- the human decision context.
+Exporting a selected-evidence package does not back up the investigation. Its
+manifest should contain only the selected eligible items.
 
-Expected result: the exported record is reviewable without pretending the
-synthetic investigation is live or that consensus guarantees correctness.
+For the complete archive, choose **Download complete investigation archive**.
+Then select that synthetic JSON archive and choose **Run dry-run check**. Read
+the archive readiness summary: objects, collisions, deterministic ID remaps,
+privacy, omitted content, warnings, and broken references. Historical people
+remain attribution only and receive no destination access.
+
+![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
+
+Expected result: the dry run states that it changed no investigation, user,
+membership, role, permission, or capability. It does not offer an apply button.
+Restore/apply is not available.
+
+## Optional — Inspect administration without changing access
+
+As the synthetic administrator, open **Administration**. Review the existing
+group-to-role mappings and the role descriptions. Directory search is bounded
+and the demo uses fixture identities. Do not change a mapping during this short
+walkthrough.
+
+Expected result: it is clear that a directory search result does not grant
+access. Only an explicit destination group mapping does, and source roles from
+portable archives are never trusted.
 
 ## What this walkthrough demonstrates
 
-The walkthrough demonstrates the shipped War Room path:
-
-**Situation** → **Capture** → **Analyze** → **Compare** → **Decide** →
-**human export**
-
-It also demonstrates evidence-first findings, deep links, Technical details,
-lane focus and history, durable discussion, small-model strategy comparison,
-provenance labels, and honest unknowns.
+- multi-page workspace navigation and five routed investigation stages;
+- durable Situation fields;
+- investigation-scoped evidence and separate source attribution labels;
+- readable logs, stack traces, observations, deep links, and Technical details;
+- snapshot-bound lane attempts, focused lane inspection, and history;
+- evidence-based comparison and a human-owned decision;
+- durable discussion and activity using polling;
+- selected-evidence prompt packaging;
+- complete archive export and fail-closed dry-run preflight; and
+- bounded administration and display identity in the synthetic fixture.
 
 ## What this walkthrough does not demonstrate
 
 The synthetic demo does not claim:
 
-- production LDAP readiness without deployment-specific configuration and
-  testing;
-- WebSocket chat, presence, typing indicators, or instant discussion updates;
-- shipped portable full import apply or persistence;
+- production LDAP readiness without deployment-specific encrypted
+  configuration and qualification;
+- WebSocket chat, instant delivery, typing indicators, or authoritative
+  presence;
+- portable archive restore/apply or atomic reconstruction;
 - web ZIP or directory upload;
-- a complete admin or capability-management UI;
-- live-provider quality, production performance, or correctness on
-  non-synthetic material.
+- a shipped first-run web setup wizard;
+- live-provider quality, production performance, or correctness on external
+  material; or
+- availability of any gateway model on an unconfigured host.
 
-For operating guidance and review criteria, continue to the
-[operator guide](OPERATOR_GUIDE.md). Return to the [War Room overview](README.md).
+Continue with the [operator guide](OPERATOR_GUIDE.md), or return to the
+[War Room overview](README.md).
