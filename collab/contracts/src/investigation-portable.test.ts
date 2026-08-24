@@ -5,6 +5,7 @@ import Ajv2020Import from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
 import { describe, expect, it } from "vitest";
 import { GOLD_ALIGNMENT_NOT_CORRECTNESS, GOLD_IS_HUMAN_BENCHMARK } from "./gold.js";
+import * as contractBarrel from "./index.js";
 import { ContractViolation } from "./parse.js";
 import {
   PORTABLE_HISTORY_CAVEAT,
@@ -68,6 +69,12 @@ function dryRun(bundle: PortableInvestigationV1, overlay: Partial<PreflightReque
 }
 
 describe("portable investigation contract", () => {
+  it("is available through the public package barrel", () => {
+    expect(contractBarrel.PORTABLE_SCHEMA_ID).toBe(PORTABLE_SCHEMA_ID);
+    expect(contractBarrel.parsePortableInvestigation).toBe(parsePortableInvestigation);
+    expect(contractBarrel.preflightPortableInvestigation).toBe(preflightPortableInvestigation);
+  });
+
   it("accepts the valid fixture and rejects unknown fields via parse and Ajv", () => {
     const parsed = parsePortableInvestigation(load("investigation-portable.valid.json"));
     expect(parsed.schemaId).toBe(PORTABLE_SCHEMA_ID);
