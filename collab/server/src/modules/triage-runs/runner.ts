@@ -43,6 +43,13 @@ const SAFE_ERROR_CODES = new Set([
   "no_authoritative_answer",
   "malformed_proposal",
   "host_validation_unconfigured",
+  // Host-owned lifecycle fallbacks emitted by collab-triage-run. These are
+  // bounded classifications, not provider text, and must survive the bridge
+  // instead of being flattened into an unrelated generic gateway failure.
+  "live_run_failed",
+  "live_run_stopped",
+  "cancel_requested",
+  "gateway_runner_error",
 ]);
 
 interface RunnerRequest {

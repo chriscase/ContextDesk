@@ -94,6 +94,12 @@ function skipLane(
 }
 
 function safeErrorCode(value: string | null): LiveQualificationLaneV1["errorCode"] {
+  // The host bridge has two narrower lifecycle fallbacks than the public
+  // qualification report contract. Preserve their meaning through the
+  // closest bounded report classifications rather than flattening both to
+  // gateway_error. Raw provider strings never enter this mapping.
+  if (value === "live_run_failed") return "runner_error";
+  if (value === "live_run_stopped") return "gateway_runner_error";
   if (value && SAFE_ERROR_CODES.has(value as NonNullable<LiveQualificationLaneV1["errorCode"]>)) {
     return value as NonNullable<LiveQualificationLaneV1["errorCode"]>;
   }
