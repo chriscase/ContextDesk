@@ -52,6 +52,8 @@ import {
   type ExperimentRow,
   type ExperimentSnapshotProof,
   type ExperimentStore,
+  type LatestProposedDecisionRow,
+  type ListOverviewProposedQuery,
 } from "./store.js";
 
 const UNKNOWN_SNAPSHOT_PROOF: ExperimentSnapshotProof = {
@@ -475,6 +477,12 @@ export class ExperimentService {
     const out: ExperimentView[] = [];
     for (const row of rows) out.push(await this.toView(row));
     return out;
+  }
+
+  async listOverviewProposed(
+    query: ListOverviewProposedQuery,
+  ): Promise<LatestProposedDecisionRow[]> {
+    return this.store.listOverviewProposed(query);
   }
 
   /**

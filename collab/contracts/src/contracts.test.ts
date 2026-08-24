@@ -28,6 +28,7 @@ import {
   parseHealthResponse,
   parseLiveQualificationCatalog,
   parseLiveQualificationReport,
+  parseOverview,
   parsePromptPackage,
   parseSource,
 } from "./index.js";
@@ -314,6 +315,23 @@ describe("JSON Schema additionalProperties: false", () => {
         JSON.parse(readFileSync(join(fixturesDir, "profile-catalog.unknown-field.json"), "utf8")),
       ),
     ).toBe(false);
+  });
+
+  it("overview schema rejects unknown fields and accepts the synthetic fixture", () => {
+    const overview = ajv.compile(loadSchema("overview.v1.json"));
+    expect(
+      overview(JSON.parse(readFileSync(join(fixturesDir, "overview.valid.json"), "utf8"))),
+    ).toBe(true);
+    expect(
+      overview(
+        JSON.parse(readFileSync(join(fixturesDir, "overview.unknown-field.json"), "utf8")),
+      ),
+    ).toBe(false);
+    expect(() =>
+      parseOverview(
+        JSON.parse(readFileSync(join(fixturesDir, "overview.unknown-field.json"), "utf8")),
+      ),
+    ).toThrow(/unknown key/);
   });
 
   it("live qualification schemas reject unknown fields and accept fixtures", () => {

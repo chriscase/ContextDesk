@@ -1,8 +1,10 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseOverview } from "@cd-collab/contracts";
 import type { FastifyInstance } from "fastify";
 import { buildDemoApp, DEMO_PASSWORD, DEMO_USERNAME } from "./demo.js";
+import { projectOverviewForStaticSnapshot } from "./modules/overview/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -167,6 +169,8 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
       session,
     ),
   };
+  const liveOverview = parseOverview(await json(app, "GET", "/api/overview", session));
+  routes["GET /api/overview"] = projectOverviewForStaticSnapshot(liveOverview);
   for (const snapshot of snapshotList.snapshots ?? []) {
     if (!snapshot.id) continue;
     const boardUrl = `/api/cases/${caseId}/board?snapshotId=${encodeURIComponent(snapshot.id)}`;
@@ -181,6 +185,13 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
     );
   }
   return routes;
+}
+
+export async function captureStaticDemoRoutes(
+  app: FastifyInstance,
+  caseId: string,
+): Promise<Record<string, unknown>> {
+  return snapshots(app, caseId);
 }
 
 function escapeScript(value: string): string {
