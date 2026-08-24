@@ -54,9 +54,9 @@ For each candidate model:
 3. Run capability qualification for that exact profile and model.
 4. Run the measured provider check.
 5. Assess the frozen known-answer suite.
-6. Save the redacted report identities: build, role, profile, model, endpoint
-   fingerprint, suite digest, prompt-set hash, and orchestration-policy
-   fingerprint.
+6. Record the redacted report identities: host-minted run id, build, role,
+   profile, model, endpoint fingerprint, suite digest, prompt-set hash, and
+   orchestration-policy fingerprint.
 7. Repeat at least three times without changing those conditions.
 8. Rotate run order—for example A → B → C, then C → B → A—to reduce warm-cache
    and transient gateway bias.
@@ -77,6 +77,12 @@ Runs are comparable only when all of the following are true:
 - no run is stale, partial, failed, blocked, cancelled, or unscheduled;
 - the provider-reported model never conflicts with the configured model; and
 - the evidence belongs to the exact measured subject and deployment.
+
+The host-minted run id keeps distinct executions separate even when they finish
+within the same recorded second. It is only a correlation identity; it is not a
+signature or a quality verdict. Older evidence without this identity remains
+visible as **Legacy record · no host-minted run ID** and is never silently
+assigned a new one.
 
 Different endpoint fingerprints may still be compared, but the conclusion then
 applies only to those exact deployments—not to the abstract model families.
@@ -122,9 +128,14 @@ tradeoffs separate. It does not silently change the configured default.
 ## Review and share evidence
 
 Each report exposes redacted JSON and Markdown for review. Those exports retain
-non-secret fingerprints and lifecycle state while omitting credentials,
-private endpoints, evaluator truth, canonical private responses, and unrelated
-model inventory.
+the opaque host run id, non-secret fingerprints, and lifecycle state while
+omitting credentials, private endpoints, evaluator truth, canonical private
+responses, and unrelated model inventory.
+
+The Settings view currently presents these redacted artifacts inline for
+inspection. It does not expose the private canonical-response capture. Treat
+copying or saving the visible text as an explicit operator action rather than
+background export.
 
 When sharing a comparison, include the number of repeats, run order, exact role,
 and every identity needed to reproduce it. Keep the private canonical response

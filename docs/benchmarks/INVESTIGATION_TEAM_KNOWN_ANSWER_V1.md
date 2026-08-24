@@ -38,12 +38,15 @@ serialization.
 
 ## Exact execution identity
 
-Two independent digests are needed:
+Two independent digests and one host-minted run identity are needed:
 
 1. `LoadedSuite::digest` binds the complete checked-in runtime **and host-only
    truth** used for scoring.
 2. `live_known_answer_prompt_set_hash` binds the exact ordered bytes visible to
    the provider.
+3. `LiveKnownAnswerRunId` identifies one host execution independently of its
+   timestamp, role, or model. It is an opaque correlation key, not a signature,
+   authorization token, semantic digest, or proof of authenticity.
 
 A trusted runner must put both values into the run's `QualityUnit`, along with
 the exact build, profile, endpoint fingerprint, model id, task mode, response
@@ -155,8 +158,13 @@ For every configured V1 role, the trusted host:
 
 The durable file is
 `investigation-team-known-answer-qualifications.json` in the ContextDesk config
-directory. Store schema V2 reads and migrates only valid legacy V1 report-only
-stores; migration cannot discard a capture or relax evidence. A malformed,
+directory. Store schema V3 reads and migrates only valid legacy V1 report-only
+and V2 report/capture stores. Migration never invents a run id for legacy
+evidence, discards a capture, or relaxes validation. Every newly published V2
+report/capture pair carries one exact host-minted run id. Identical retries for
+that id are idempotent; changed evidence, a missing capture, or a mismatched
+report/capture id fails closed instead of overwriting history. Distinct runs
+recorded during the same second remain separate. A malformed,
 unsafe-permissioned, or otherwise invalid existing file places this feature in
 an explicit unavailable state. Listing, clearing, and running retry one secure
 load under the host mutex, so repair or deliberate removal can recover
@@ -189,9 +197,10 @@ command.
 
 ### Canonical response evidence
 
-`contextdesk.investigation_team_known_answer_capture.v1` is intentionally
-separate from the redacted score report. It contains the exact `QualityUnit`,
-role/timestamp, and an ordered list of only those responses that passed the
+`contextdesk.investigation_team_known_answer_capture.v2` is intentionally
+separate from the redacted score report. It contains the same host-minted run
+id as its V2 report, the exact `QualityUnit`, role/timestamp, and an ordered list
+of only those responses that passed the
 strict JSON parser plus privacy and closed-vocabulary gates. Each response is
 stored as the typed canonical object with a SHA-256 digest of compact canonical
 JSON. Every executed response also carries a SHA-256 digest of its exact
@@ -201,15 +210,19 @@ score report records a SHA-256 digest of the **complete capture**, including
 those per-response score bindings. Store validation requires exact timestamp,
 role, full `QualityUnit`, scenario set/order, provider-reported model, closed
 status-to-failure-code mapping, dispatch-byte/provider-telemetry eligibility,
-and executed-score correspondence before accepting the pair. Cancelled,
-blocked, not-scheduled, and contradictory rows cannot retain a canonical
-response. Therefore changing a response and merely
+host-minted run id, and executed-score correspondence before accepting the
+pair. Cancelled, blocked, not-scheduled, and contradictory rows cannot retain a
+canonical response. Therefore changing a response and merely
 recomputing its inline hash, or changing a report score while preserving its
 captured response, fails closed. These digests prove internal content
 consistency, not origin or authenticity: they are not signatures, and an
 attacker able to rewrite the report, capture, and every digest is outside this
 local integrity claim. This makes behavioral fixture derivation possible
 without snapshotting provider prose blindly.
+
+Legacy V1 reports and captures remain readable without a synthesized run id and
+are labeled `legacy_unidentified` in the renderer. Newly produced evidence is
+labeled `host_minted`. New legacy-shaped evidence cannot be published.
 
 The capture schema has no field for prompts, URLs, headers, credentials,
 evaluator truth, raw errors, or rejected provider text. Shared secret scrubbing,
