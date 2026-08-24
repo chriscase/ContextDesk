@@ -10,7 +10,8 @@ use cd_core::investigation_team_qualification::{InvestigationTeamRole, MemberBin
 use cd_core::openai_chat_contract::OpenAiChatRequestMode;
 use cd_core::provider_telemetry::ProviderTransportTelemetry;
 use cd_core::quality_eval::live_known_answer::{
-    host_attempt_from_chat, host_diagnostic_for_observed_attempts, HostAttemptObservation,
+    host_attempt_from_chat, host_diagnostic_for_grounding_sequence,
+    host_diagnostic_for_observed_attempts, HostAttemptObservation,
 };
 #[cfg(unix)]
 use cd_core::quality_eval::LiveKnownAnswerOwnerDirectory;
@@ -898,8 +899,16 @@ fn execute_diagnostic_case(
         ));
     }
 
+    let last_parsed_zero_claims = last_parsed.as_ref().map(|parsed| parsed.claims.is_empty());
     let host_diagnostic =
-        host_diagnostic_for_observed_attempts(case, target.member.role, &attempts);
+        host_diagnostic_for_observed_attempts(case, target.member.role, &attempts).or_else(|| {
+            host_diagnostic_for_grounding_sequence(
+                case,
+                target.member.role,
+                &attempts,
+                last_parsed_zero_claims,
+            )
+        });
     if let Some(parsed) = last_parsed {
         let capture = LiveKnownAnswerCanonicalScenarioInput {
             scenario_id: scenario_id.clone(),
@@ -1571,17 +1580,27 @@ mod tests {
         )
         .expect("report");
         let report = evidence.report;
-        assert_eq!(transport.calls, 12);
+        assert_eq!(transport.calls, 13);
         assert_eq!(report.status, LiveKnownAnswerRunStatus::Partial);
-        assert_eq!(report.metrics.failed_scenarios, 11);
-        assert_eq!(report.metrics.blocked_scenarios, 3);
+        assert_eq!(report.metrics.failed_scenarios, 12);
+        assert_eq!(report.metrics.blocked_scenarios, 2);
         assert_eq!(report.telemetry[8].status, LaneStatus::Failed);
         assert_eq!(
             report.telemetry[8].failure_code.as_deref(),
             Some("provider_request_failed")
         );
         assert!(report.telemetry[8].message_content_bytes > 0);
-        assert!(report.telemetry[9..12].iter().all(|row| {
+        assert_eq!(
+            report.telemetry[9].status,
+            LaneStatus::Failed,
+            "qe10 dispatches and stays a bodyless host gap, never fabricated into Executed"
+        );
+        assert_eq!(
+            report.telemetry[9].failure_code.as_deref(),
+            Some("provider_request_failed")
+        );
+        assert!(report.telemetry[9].message_content_bytes > 0);
+        assert!(report.telemetry[10..12].iter().all(|row| {
             row.status == LaneStatus::Blocked
                 && row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
                 && row.latency_ms == 0
@@ -1673,7 +1692,7 @@ mod tests {
         )
         .expect("evidence");
 
-        assert_eq!(transport.calls, 11);
+        assert_eq!(transport.calls, 12);
         assert_eq!(
             evidence.report.telemetry[0].failure_code.as_deref(),
             Some("provider_response_parse_failed")
@@ -1697,14 +1716,18 @@ mod tests {
             evidence.report.quality_run.quality_unit.subject.model_id,
             "model-a"
         );
-        assert_eq!(evidence.report.metrics.input_tokens, Some(1_100));
-        assert_eq!(evidence.report.metrics.output_tokens, Some(220));
-        assert_eq!(evidence.report.metrics.reasoning_tokens, Some(55));
-        assert_eq!(evidence.report.metrics.cached_tokens, Some(77));
-        assert_eq!(evidence.report.metrics.cost_microusd, Some(1_353));
+        assert_eq!(evidence.report.metrics.input_tokens, Some(1_200));
+        assert_eq!(evidence.report.metrics.output_tokens, Some(240));
+        assert_eq!(evidence.report.metrics.reasoning_tokens, Some(60));
+        assert_eq!(evidence.report.metrics.cached_tokens, Some(84));
+        assert_eq!(evidence.report.metrics.cost_microusd, Some(1_476));
 
         let capture = evidence.capture.as_ref().expect("capture");
-        assert_eq!(capture.scenarios.len(), 8);
+        assert_eq!(
+            capture.scenarios.len(),
+            9,
+            "qe10 now also dispatches and captures its single parsed attempt"
+        );
         assert_eq!(capture.quality_unit.subject.model_id, "model-a");
         assert!(capture
             .scenarios
@@ -1764,6 +1787,7 @@ mod tests {
     struct DiagnosticSeamTransport {
         calls: usize,
         qe09_calls: usize,
+        qe10_calls: usize,
         last: Option<ProviderTransportTelemetry>,
         scenario_ids: Vec<String>,
     }
@@ -1788,8 +1812,8 @@ mod tests {
                 ..ProviderTransportTelemetry::default()
             });
             match prompt.scenario_id.as_str() {
-                "scenario-010" | "scenario-011" | "scenario-012" => {
-                    panic!("qe10–qe12 must stay pre-dispatch blocked")
+                "scenario-011" | "scenario-012" => {
+                    panic!("qe11–qe12 must stay pre-dispatch blocked")
                 }
                 "scenario-009" => {
                     self.qe09_calls += 1;
@@ -1798,6 +1822,16 @@ mod tests {
                             reason: "connection reset".into(),
                         });
                     }
+                    Ok(SyntheticChatResponse {
+                        content: bounded_live_response(prompt.scenario_id),
+                        mode_transmitted: true,
+                        ..SyntheticChatResponse::default()
+                    })
+                }
+                "scenario-010" => {
+                    self.qe10_calls += 1;
+                    // A single clean fluent attempt with zero claims: an
+                    // honest host-grounding-refusal, not a transport failure.
                     Ok(SyntheticChatResponse {
                         content: bounded_live_response(prompt.scenario_id),
                         mode_transmitted: true,
@@ -1839,12 +1873,15 @@ mod tests {
     }
 
     #[test]
-    fn execute_target_fluent_qe09_qe10_are_host_gaps_not_category_failures() {
+    fn execute_target_fluent_qe09_is_host_gap_qe10_grounding_refusal_executes() {
         let suite = load_embedded_open_v1_suite().expect("suite");
         let prepared = prepare_live_known_answer_suite(&suite).expect("prepared");
         let prompt_hash = live_known_answer_prompt_set_hash(&prepared).expect("hash");
         assert!(!prepared[8].blocks_diagnostic_before_dispatch());
-        assert!(prepared[9].blocks_diagnostic_before_dispatch());
+        assert!(
+            !prepared[9].blocks_diagnostic_before_dispatch(),
+            "qe10 can honestly observe a single-attempt grounding refusal"
+        );
         let mut transport = AnsweringTransport::default();
         let evidence = execute_target(
             &target(),
@@ -1859,16 +1896,15 @@ mod tests {
         )
         .expect("evidence");
 
-        assert_eq!(transport.calls, 11);
+        assert_eq!(transport.calls, 12);
         assert!(transport.scenario_ids.iter().any(|id| id == "scenario-009"));
+        assert!(transport.scenario_ids.iter().any(|id| id == "scenario-010"));
         assert!(
-            !transport.scenario_ids.iter().any(|id| {
-                matches!(
-                    id.as_str(),
-                    "scenario-010" | "scenario-011" | "scenario-012"
-                )
-            }),
-            "qe10–qe12 must not be dispatched: {:?}",
+            !transport
+                .scenario_ids
+                .iter()
+                .any(|id| { matches!(id.as_str(), "scenario-011" | "scenario-012") }),
+            "qe11–qe12 must not be dispatched: {:?}",
             transport.scenario_ids
         );
         let qe09 = &evidence.report.quality_run.cases[8];
@@ -1882,7 +1918,31 @@ mod tests {
             Some("host_score_failed")
         );
         assert!(evidence.report.telemetry[8].message_content_bytes > 0);
-        assert!(evidence.report.telemetry[9..12].iter().all(|row| {
+
+        assert_eq!(
+            evidence.report.telemetry[9].status,
+            LaneStatus::Executed,
+            "a single clean zero-claims attempt is an honest grounding refusal, not a host gap"
+        );
+        assert_eq!(evidence.report.telemetry[9].failure_code, None);
+        assert!(evidence.report.telemetry[9].message_content_bytes > 0);
+        let qe10 = evidence.report.quality_run.cases[9]
+            .answers
+            .first()
+            .expect("qe10 host-built score");
+        assert!(
+            !qe10.passed,
+            "a fluent response without host grounding must not pass"
+        );
+        let qe10_failed = qe10.failed_ids();
+        assert!(
+            !qe10_failed.contains(&"diagnostic_category"),
+            "qe10 must join host_grounding_refusal: {qe10_failed:?}"
+        );
+        assert!(!qe10_failed.contains(&"transport_versus_grounding"));
+        assert!(!qe10_failed.contains(&"attempt_usefulness"));
+
+        assert!(evidence.report.telemetry[10..12].iter().all(|row| {
             row.status == LaneStatus::Blocked
                 && row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
                 && row.message_content_bytes == 0
@@ -1909,14 +1969,16 @@ mod tests {
         .expect("evidence");
 
         assert_eq!(transport.qe09_calls, 2);
+        assert_eq!(
+            transport.qe10_calls, 1,
+            "qe10 dispatches exactly one attempt: no mixed-attempt category is allow-listed for it"
+        );
         assert!(
-            !transport.scenario_ids.iter().any(|id| {
-                matches!(
-                    id.as_str(),
-                    "scenario-010" | "scenario-011" | "scenario-012"
-                )
-            }),
-            "qe10–qe12 must stay blocked: {:?}",
+            !transport
+                .scenario_ids
+                .iter()
+                .any(|id| matches!(id.as_str(), "scenario-011" | "scenario-012")),
+            "qe11–qe12 must stay blocked: {:?}",
             transport.scenario_ids
         );
         assert_eq!(
@@ -1924,7 +1986,12 @@ mod tests {
             LaneStatus::Executed,
             "qe09 mixed attempts must reach the scorer"
         );
-        assert!(evidence.report.telemetry[9..12].iter().all(|row| {
+        assert_eq!(
+            evidence.report.telemetry[9].status,
+            LaneStatus::Executed,
+            "qe10 single-attempt grounding refusal must reach the scorer"
+        );
+        assert!(evidence.report.telemetry[10..12].iter().all(|row| {
             row.status == LaneStatus::Blocked
                 && row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
                 && row.message_content_bytes == 0
@@ -1953,6 +2020,210 @@ mod tests {
                 .iter()
                 .any(|dimension| { dimension.id == "attempt_usefulness" && dimension.passed }),
             "failed first attempt must remain on the scored envelope"
+        );
+
+        let qe10 = evidence.report.quality_run.cases[9]
+            .answers
+            .first()
+            .expect("qe10 host-built score");
+        let qe10_failed = qe10.failed_ids();
+        assert!(
+            !qe10_failed.contains(&"diagnostic_category"),
+            "qe10 must join host_grounding_refusal: {qe10_failed:?}"
+        );
+        assert!(!qe10_failed.contains(&"transport_versus_grounding"));
+        assert!(!qe10_failed.contains(&"attempt_usefulness"));
+        assert!(
+            !qe10.passed,
+            "a fluent response without host grounding must not pass"
+        );
+    }
+
+    fn grounded_live_response(scenario_id: String) -> String {
+        serde_json::to_string(&cd_core::quality_eval::LiveKnownAnswerResponse {
+            schema_id: cd_core::quality_eval::LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID.into(),
+            scenario_id,
+            asserts_root_cause_established: true,
+            claims: vec![cd_core::quality_eval::LiveAnswerClaim {
+                text: "genuinely grounded claim".into(),
+                citations: vec![cd_core::quality_eval::LiveCitation {
+                    evidence_id: "e1".into(),
+                    source_id: "s1".into(),
+                    time_anchor: "t1".into(),
+                }],
+                role: Some("trigger".into()),
+            }],
+            conclusion: "grounded conclusion".into(),
+            confidence: "high".into(),
+        })
+        .expect("response")
+    }
+
+    #[derive(Default)]
+    struct Qe10GroundedTransport {
+        calls: usize,
+    }
+
+    impl QualificationTransport for Qe10GroundedTransport {
+        fn chat_complete(
+            &mut self,
+            req: &SyntheticChatRequest,
+            _cancel: &AtomicBool,
+        ) -> Result<SyntheticChatResponse, TransportError> {
+            let prompt: cd_core::quality_eval::LiveKnownAnswerPrompt =
+                serde_json::from_str(&req.messages[1].content).expect("prompt");
+            self.calls += 1;
+            let content = if prompt.scenario_id == "scenario-010" {
+                grounded_live_response(prompt.scenario_id)
+            } else {
+                bounded_live_response(prompt.scenario_id)
+            };
+            Ok(SyntheticChatResponse {
+                content,
+                mode_transmitted: true,
+                ..SyntheticChatResponse::default()
+            })
+        }
+
+        fn take_last_chat_provider_telemetry(&mut self) -> Option<ProviderTransportTelemetry> {
+            None
+        }
+
+        fn embed(
+            &mut self,
+            _model_id: &str,
+            _input: &str,
+            _cancel: &AtomicBool,
+        ) -> Result<cd_core::capability_qualification::SyntheticEmbeddingResponse, TransportError>
+        {
+            unreachable!()
+        }
+
+        fn rerank(
+            &mut self,
+            _model_id: &str,
+            _query: &str,
+            _documents: &[&str],
+            _cancel: &AtomicBool,
+        ) -> Result<cd_core::capability_qualification::SyntheticRerankResponse, TransportError>
+        {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn execute_target_qe10_genuinely_grounded_fluent_response_is_host_gap_not_a_pass() {
+        let suite = load_embedded_open_v1_suite().expect("suite");
+        let prepared = prepare_live_known_answer_suite(&suite).expect("prepared");
+        let prompt_hash = live_known_answer_prompt_set_hash(&prepared).expect("hash");
+        let mut transport = Qe10GroundedTransport::default();
+        let evidence = execute_target(
+            &target(),
+            &prepared,
+            &suite.manifest.suite_id,
+            &suite.digest,
+            &prompt_hash,
+            1_777_000_000,
+            "build-a",
+            &AtomicBool::new(false),
+            &mut transport,
+        )
+        .expect("evidence");
+
+        assert_eq!(
+            evidence.report.telemetry[9].status,
+            LaneStatus::Failed,
+            "qe10 has no allowed category for a genuinely grounded fluent answer"
+        );
+        assert_eq!(
+            evidence.report.telemetry[9].failure_code.as_deref(),
+            Some("host_score_failed")
+        );
+        assert!(
+            evidence.report.quality_run.cases[9].answers.is_empty(),
+            "a genuinely grounded response must not be scored as a diagnostic pass on qe10"
+        );
+    }
+
+    #[derive(Default)]
+    struct Qe10BodylessTransport {
+        calls: usize,
+    }
+
+    impl QualificationTransport for Qe10BodylessTransport {
+        fn chat_complete(
+            &mut self,
+            req: &SyntheticChatRequest,
+            _cancel: &AtomicBool,
+        ) -> Result<SyntheticChatResponse, TransportError> {
+            let prompt: cd_core::quality_eval::LiveKnownAnswerPrompt =
+                serde_json::from_str(&req.messages[1].content).expect("prompt");
+            self.calls += 1;
+            if prompt.scenario_id == "scenario-010" {
+                return Err(TransportError {
+                    reason: "connection reset".into(),
+                });
+            }
+            Ok(SyntheticChatResponse {
+                content: bounded_live_response(prompt.scenario_id),
+                mode_transmitted: true,
+                ..SyntheticChatResponse::default()
+            })
+        }
+
+        fn take_last_chat_provider_telemetry(&mut self) -> Option<ProviderTransportTelemetry> {
+            None
+        }
+
+        fn embed(
+            &mut self,
+            _model_id: &str,
+            _input: &str,
+            _cancel: &AtomicBool,
+        ) -> Result<cd_core::capability_qualification::SyntheticEmbeddingResponse, TransportError>
+        {
+            unreachable!()
+        }
+
+        fn rerank(
+            &mut self,
+            _model_id: &str,
+            _query: &str,
+            _documents: &[&str],
+            _cancel: &AtomicBool,
+        ) -> Result<cd_core::capability_qualification::SyntheticRerankResponse, TransportError>
+        {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn execute_target_qe10_bodyless_transport_failure_stays_a_host_gap_never_executed() {
+        let suite = load_embedded_open_v1_suite().expect("suite");
+        let prepared = prepare_live_known_answer_suite(&suite).expect("prepared");
+        let prompt_hash = live_known_answer_prompt_set_hash(&prepared).expect("hash");
+        let mut transport = Qe10BodylessTransport::default();
+        let evidence = execute_target(
+            &target(),
+            &prepared,
+            &suite.manifest.suite_id,
+            &suite.digest,
+            &prompt_hash,
+            1_777_000_000,
+            "build-a",
+            &AtomicBool::new(false),
+            &mut transport,
+        )
+        .expect("evidence");
+
+        assert_eq!(
+            evidence.report.telemetry[9].status,
+            LaneStatus::Failed,
+            "a bodyless transport failure must never be invented into an Executed envelope"
+        );
+        assert_eq!(
+            evidence.report.telemetry[9].failure_code.as_deref(),
+            Some("provider_request_failed")
         );
         assert!(evidence.report.quality_run.cases[9].answers.is_empty());
     }
