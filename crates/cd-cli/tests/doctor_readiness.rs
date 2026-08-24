@@ -646,10 +646,11 @@ impl Respond for HangsOnSecondTurnProvider {
 #[tokio::test]
 async fn an_interrupt_during_the_second_turn_still_removes_the_already_saved_session() {
     let server = MockServer::start().await;
+    let provider_calls = Arc::new(AtomicUsize::new(0));
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(HangsOnSecondTurnProvider {
-            call: Arc::new(AtomicUsize::new(0)),
+            call: provider_calls.clone(),
         })
         .mount(&server)
         .await;
@@ -672,16 +673,23 @@ async fn an_interrupt_during_the_second_turn_still_removes_the_already_saved_ses
         .expect("spawn contextdesk doctor");
 
     // Wait for the two fast local checks, then for turn one to actually
-    // persist a session. A fixed 1800ms sleep after those two lines landed
-    // SIGINT in the inter-turn gap on hosted Ubuntu (no `ctrl_c` waiter
-    // armed yet), so the default disposition killed the process with
-    // `status.code() == None` instead of exit 130. The session file is the
-    // durable proof turn one finished; a short pause afterwards lets turn
-    // two start polling the process-wide cancel watcher.
+    // persist a session and for turn two's provider request to begin. The
+    // session file alone proves turn one finished, but it does not prove
+    // the child has entered turn two; a fixed pause left a scheduler race
+    // on hosted macOS. The provider call count is the exact seam this test
+    // intends to interrupt: two calls complete turn one and call three is
+    // the deliberately stalled second turn.
     let stdout = child.stdout.take().expect("piped stdout");
     let (_observed, _stdout_drain) = wait_for_n_lines(stdout, 2);
     wait_for_saved_session(data_dir.path());
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let second_turn_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while provider_calls.load(Ordering::SeqCst) < 3 {
+        assert!(
+            std::time::Instant::now() < second_turn_deadline,
+            "second turn never reached its provider request"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     let pid = child.id();
     let killed = std::process::Command::new("kill")

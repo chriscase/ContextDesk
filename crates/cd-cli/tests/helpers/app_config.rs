@@ -13,4 +13,10 @@ pub fn plant_app_config(path: &Path, cfg: &AppConfig) {
     }
     let raw = serde_json::to_string_pretty(cfg).expect("serialize AppConfig fixture");
     std::fs::write(path, raw).expect("plant AppConfig fixture without claiming durable save");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .expect("secure planted AppConfig fixture permissions");
+    }
 }
