@@ -295,7 +295,7 @@ async function seed(app: FastifyInstance): Promise<string> {
   });
   await new Promise((resolve) => setTimeout(resolve, 40));
 
-  await seedReviewedExperiment(
+  const primaryExperimentId = await seedReviewedExperiment(
     app,
     cookie,
     created.id,
@@ -330,6 +330,44 @@ async function seed(app: FastifyInstance): Promise<string> {
       evidenceRefs: ["ev-demo-checkout-log", "ev-demo-inventory-timeout"],
     },
   );
+
+  const syntheticTraceTranscripts = [
+    {
+      candidateId: "cand-qwen-3.6-27b",
+      text:
+        "Human: Determine why the fictional checkout request timed out.\n" +
+        "Tool: 2026-08-24T06:14:22Z checkout-service WARN request exceeded 30000ms while waiting for inventory-client; evidence ev-demo-checkout-log\n" +
+        "Tool: 2026-08-24T06:14:22Z inventory-client ERROR TimeoutError: inventory lookup exceeded 30000ms at InventoryClient.fetch (inventory-client.ts:118); evidence ev-demo-inventory-timeout\n" +
+        "Assistant: The checkout timeout is recorded by all lanes. This lane treats the inventory-client timeout as the leading cause, pending pool and network measurements.",
+    },
+    {
+      candidateId: "cand-gpt-oss-120b",
+      text:
+        "Human: Compare the fictional checkout and connection-pool signals.\n" +
+        "Tool: 2026-08-24T06:14:22Z checkout-service WARN request exceeded 30000ms; evidence ev-demo-checkout-log\n" +
+        "Tool: 2026-08-24T06:14:21Z connection-pool WARN active=40 idle=0 queued=17; evidence ev-demo-pool-exhaustion\n" +
+        "Assistant: Pool exhaustion is a plausible upstream contributor. Inspect pool wait duration and dependency latency before declaring a root cause.",
+    },
+    {
+      candidateId: "cand-ministral-14b",
+      text:
+        "Human: State only what the fictional checkout record establishes.\n" +
+        "Tool: 2026-08-24T06:14:22Z checkout-service WARN request exceeded 30000ms while awaiting a dependency; evidence ev-demo-checkout-log\n" +
+        "Assistant: The timeout symptom is established. The record is not sufficient to choose between dependency latency, pool pressure, or another cause.",
+    },
+  ];
+  for (const trace of syntheticTraceTranscripts) {
+    await okJson(app, {
+      method: "POST",
+      url: `/api/cases/${created.id}/experiments/${primaryExperimentId}/traces`,
+      cookie,
+      payload: {
+        schemaId: "cd-collab.plain_transcript.v1",
+        candidateId: trace.candidateId,
+        text: trace.text,
+      },
+    });
+  }
 
   await seedReviewedExperiment(
     app,

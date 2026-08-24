@@ -115,7 +115,10 @@ describe("synthetic demo server", () => {
         id: string;
         packageId: string;
         candidates: unknown[];
-        traces: unknown[];
+        traces: {
+          candidateId: string;
+          events: { excerpt: string | null; evidenceRefs: string[] }[];
+        }[];
         observations: unknown[];
         decisions: { status: string }[];
         gold: { version: number } | null;
@@ -126,6 +129,16 @@ describe("synthetic demo server", () => {
       "pkg-synth-strategy-paths-v1",
     ]);
     expect(body.experiments[0]?.candidates).toHaveLength(3);
+    expect(body.experiments[0]?.traces).toHaveLength(3);
+    expect(
+      body.experiments[0]?.traces.some((trace) =>
+        trace.events.some(
+          (event) =>
+            event.evidenceRefs.includes("ev-demo-inventory-timeout") &&
+            event.excerpt?.includes("TimeoutError"),
+        ),
+      ),
+    ).toBe(true);
     expect(body.experiments[0]?.observations).toHaveLength(3);
     expect(body.experiments[1]?.traces).toHaveLength(2);
     expect(body.experiments.every((row) => row.decisions.at(-1)?.status === "accepted")).toBe(

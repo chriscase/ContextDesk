@@ -581,16 +581,9 @@ export function Cases(props: {
           >
             Discussion
           </button>
-          {props.participant || discussionPresence !== null ? (
+          {discussionPresence !== null ? (
             <p className="focus-head__discussion-context">
-              {[
-                props.participant ? `Signed in as ${props.participant.username}` : null,
-                discussionPresence !== null
-                  ? `${discussionPresence} active now (polled)`
-                  : null,
-              ]
-                .filter(Boolean)
-                .join(" · ")}
+              {discussionPresence} active now (polled)
             </p>
           ) : null}
         </div>
