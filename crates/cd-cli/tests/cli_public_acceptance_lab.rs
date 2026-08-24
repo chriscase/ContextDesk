@@ -67,8 +67,10 @@ fn init_timezone_only(data_dir: &Path, zone: &str) {
     // Plant AppConfig instead of `config init --default-timezone`: production
     // `save_config` is Unix-only. This lab proves import/explore/context/chat
     // under an isolated data-dir, not durable config persistence.
-    let mut cfg = AppConfig::default();
-    cfg.default_timezone = Some(zone.to_string());
+    let cfg = AppConfig {
+        default_timezone: Some(zone.to_string()),
+        ..AppConfig::default()
+    };
     write_app_config(data_dir, &cfg);
 }
 

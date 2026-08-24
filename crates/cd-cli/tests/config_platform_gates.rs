@@ -23,10 +23,6 @@ fn cli(data_dir: &Path) -> Command {
     cmd
 }
 
-fn parse_envelope(bytes: &[u8]) -> Value {
-    serde_json::from_slice(bytes).expect("stdout is one JSON envelope")
-}
-
 fn jsonl(stdout: &[u8]) -> Vec<Value> {
     String::from_utf8_lossy(stdout)
         .lines()
@@ -35,10 +31,15 @@ fn jsonl(stdout: &[u8]) -> Vec<Value> {
         .collect()
 }
 
+#[cfg(not(unix))]
+fn parse_envelope(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).expect("stdout is one JSON envelope")
+}
+
 #[test]
 fn doctor_skip_live_turn_reads_planted_config_without_durable_save() {
     let data = tempfile::tempdir().unwrap();
-    app_config::plant_data_dir_app_config(data.path(), &AppConfig::default());
+    app_config::plant_app_config(&data.path().join("config.json"), &AppConfig::default());
     let output = cli(data.path())
         .args(["--jsonl", "doctor", "--skip-live-turn", "--timeout", "3"])
         .output()
@@ -100,10 +101,14 @@ fn config_init_with_provider_refuses_before_mutation() {
 #[test]
 fn config_deadline_set_refuses_and_leaves_planted_bytes_unchanged() {
     let data = tempfile::tempdir().unwrap();
-    let mut cfg = AppConfig::default();
-    cfg.router.deadline_ms = 180_000;
-    cfg.router.deadline_is_explicit = false;
-    app_config::plant_data_dir_app_config(data.path(), &cfg);
+    let mut router = AppConfig::default().router;
+    router.deadline_ms = 180_000;
+    router.deadline_is_explicit = false;
+    let cfg = AppConfig {
+        router,
+        ..AppConfig::default()
+    };
+    app_config::plant_app_config(&data.path().join("config.json"), &cfg);
     let path = data.path().join("config.json");
     let before = std::fs::read(&path).unwrap();
 
@@ -127,7 +132,7 @@ fn config_deadline_set_refuses_and_leaves_planted_bytes_unchanged() {
 #[test]
 fn config_effort_set_refuses_and_leaves_planted_bytes_unchanged() {
     let data = tempfile::tempdir().unwrap();
-    app_config::plant_data_dir_app_config(data.path(), &AppConfig::default());
+    app_config::plant_app_config(&data.path().join("config.json"), &AppConfig::default());
     let path = data.path().join("config.json");
     let before = std::fs::read(&path).unwrap();
 

@@ -14,7 +14,3 @@ pub fn plant_app_config(path: &Path, cfg: &AppConfig) {
     let raw = serde_json::to_string_pretty(cfg).expect("serialize AppConfig fixture");
     std::fs::write(path, raw).expect("plant AppConfig fixture without claiming durable save");
 }
-
-pub fn plant_data_dir_app_config(data_dir: &Path, cfg: &AppConfig) {
-    plant_app_config(&data_dir.join("config.json"), cfg);
-}
