@@ -451,7 +451,7 @@ struct AppState {
         Mutex<cd_core::triage_role_qualification::TriageRoleQualificationStoreV1>,
     /// Bounded, redacted Investigation Team qualification history.
     investigation_team_qualification:
-        Mutex<investigation_team_qualification_host::InvestigationTeamQualificationStore>,
+        Mutex<investigation_team_qualification_host::InvestigationTeamQualificationStoreState>,
     /// Secret-free history beside the other host qualification evidence.
     investigation_team_qualification_store_path: PathBuf,
     /// Durable, redacted provider-backed known-answer quality history.
@@ -8391,12 +8391,15 @@ fn clear_capability_qualification(
 #[tauri::command]
 fn get_investigation_team_qualification(
     state: State<'_, AppState>,
-) -> Option<investigation_team_qualification_host::InvestigationTeamQualificationDto> {
-    state
+) -> Result<Option<investigation_team_qualification_host::InvestigationTeamQualificationDto>, String> {
+    let mut guard = state
         .investigation_team_qualification
         .lock()
-        .expect("investigation_team_qualification")
-        .latest()
+        .expect("investigation_team_qualification");
+    let store = guard
+        .reload_for_operation(&state.investigation_team_qualification_store_path)
+        .map_err(|error| error.to_string())?;
+    Ok(store.latest())
 }
 
 /// Read bounded redacted history. This never contacts a provider or resolves
@@ -8404,12 +8407,15 @@ fn get_investigation_team_qualification(
 #[tauri::command]
 fn list_investigation_team_qualifications(
     state: State<'_, AppState>,
-) -> Vec<investigation_team_qualification_host::InvestigationTeamQualificationDto> {
-    state
+) -> Result<Vec<investigation_team_qualification_host::InvestigationTeamQualificationDto>, String> {
+    let mut guard = state
         .investigation_team_qualification
         .lock()
-        .expect("investigation_team_qualification")
-        .history()
+        .expect("investigation_team_qualification");
+    let store = guard
+        .reload_for_operation(&state.investigation_team_qualification_store_path)
+        .map_err(|error| error.to_string())?;
+    Ok(store.history())
 }
 
 /// Clear the durable redacted history without touching provider configuration,
@@ -8420,12 +8426,15 @@ fn clear_investigation_team_qualification(state: State<'_, AppState>) -> Result<
         .investigation_team_qualification
         .lock()
         .expect("investigation_team_qualification");
-    let mut next = guard.clone();
+    let mut next = guard
+        .reload_for_operation(&state.investigation_team_qualification_store_path)
+        .map_err(|error| error.to_string())?
+        .clone();
     let changed = next.clear();
     if changed {
         next.save(&state.investigation_team_qualification_store_path)
             .map_err(|error| format!("save investigation team qualification history: {error}"))?;
-        *guard = next;
+        guard.replace_with_committed(next);
     }
     Ok(changed)
 }
@@ -8450,7 +8459,10 @@ fn run_synthetic_investigation_team_qualification(
         .investigation_team_qualification
         .lock()
         .expect("investigation_team_qualification");
-    let mut next = store.clone();
+    let mut next = store
+        .reload_for_operation(&state.investigation_team_qualification_store_path)
+        .map_err(|error| error.to_string())?
+        .clone();
     let dto = next
         .publish(
             result,
@@ -8460,7 +8472,7 @@ fn run_synthetic_investigation_team_qualification(
         .map_err(|error| error.to_string())?;
     next.save(&state.investigation_team_qualification_store_path)
         .map_err(|error| format!("save investigation team qualification history: {error}"))?;
-    *store = next;
+    store.replace_with_committed(next);
     Ok(dto)
 }
 
@@ -8572,6 +8584,15 @@ fn resolve_live_investigation_targets(
 async fn run_live_investigation_team_qualification(
     state: State<'_, AppState>,
 ) -> Result<investigation_team_qualification_host::InvestigationTeamQualificationDto, String> {
+    {
+        let mut store = state
+            .investigation_team_qualification
+            .lock()
+            .expect("investigation_team_qualification");
+        store
+            .reload_for_operation(&state.investigation_team_qualification_store_path)
+            .map_err(|error| error.to_string())?;
+    }
     let cfg = state.config.lock().expect("config").clone();
     let targets = resolve_live_investigation_targets(&state, &cfg)?;
     let cancel = {
@@ -8607,7 +8628,10 @@ async fn run_live_investigation_team_qualification(
         .investigation_team_qualification
         .lock()
         .expect("investigation_team_qualification");
-    let mut next = store.clone();
+    let mut next = store
+        .reload_for_operation(&state.investigation_team_qualification_store_path)
+        .map_err(|error| error.to_string())?
+        .clone();
     let dto = next
         .publish(
             execution.result,
@@ -8617,7 +8641,7 @@ async fn run_live_investigation_team_qualification(
         .map_err(|error| error.to_string())?;
     next.save(&state.investigation_team_qualification_store_path)
         .map_err(|error| format!("save investigation team qualification history: {error}"))?;
-    *store = next;
+    store.replace_with_committed(next);
     Ok(dto)
 }
 
@@ -15523,14 +15547,17 @@ pub fn run() {
         investigation_team_qualification_host::investigation_team_qualification_store_path(
             path.parent().expect("config directory"),
         );
-    let investigation_team_qualification =
+    let investigation_team_qualification_load =
         investigation_team_qualification_host::InvestigationTeamQualificationStore::load(
             &investigation_team_qualification_store_path,
-        )
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "investigation team qualification history could not be loaded");
-            investigation_team_qualification_host::InvestigationTeamQualificationStore::default()
-        });
+        );
+    if let Err(error) = &investigation_team_qualification_load {
+        tracing::warn!(%error, "investigation team qualification history is unavailable");
+    }
+    let investigation_team_qualification =
+        investigation_team_qualification_host::InvestigationTeamQualificationStoreState::from_load_result(
+            investigation_team_qualification_load,
+        );
     let investigation_team_known_answer_store_path =
         investigation_team_known_answer_host::investigation_team_known_answer_store_path(
             path.parent().expect("config directory"),

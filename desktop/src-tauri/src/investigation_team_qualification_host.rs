@@ -207,6 +207,52 @@ impl Default for InvestigationTeamQualificationStore {
     }
 }
 
+/// Host lifecycle for durable aggregate qualification evidence. A malformed
+/// existing store is never replaced by an empty default. Every operation
+/// retries the secure load while holding the host mutex so an operator can
+/// repair or remove the file and recover without restarting ContextDesk.
+#[derive(Debug)]
+pub enum InvestigationTeamQualificationStoreState {
+    Available(InvestigationTeamQualificationStore),
+    Unavailable,
+}
+
+impl InvestigationTeamQualificationStoreState {
+    pub fn from_load_result(result: CoreResult<InvestigationTeamQualificationStore>) -> Self {
+        match result {
+            Ok(store) => Self::Available(store),
+            Err(_) => Self::Unavailable,
+        }
+    }
+
+    pub fn store(&self) -> CoreResult<&InvestigationTeamQualificationStore> {
+        match self {
+            Self::Available(store) => Ok(store),
+            Self::Unavailable => Err(store_unavailable_error()),
+        }
+    }
+
+    pub fn reload_for_operation(
+        &mut self,
+        path: &Path,
+    ) -> CoreResult<&InvestigationTeamQualificationStore> {
+        match InvestigationTeamQualificationStore::load(path) {
+            Ok(store) => {
+                *self = Self::Available(store);
+                self.store()
+            }
+            Err(error) => {
+                *self = Self::Unavailable;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn replace_with_committed(&mut self, store: InvestigationTeamQualificationStore) {
+        *self = Self::Available(store);
+    }
+}
+
 impl InvestigationTeamQualificationStore {
     fn validate(&self) -> CoreResult<()> {
         if self.schema_id != INVESTIGATION_TEAM_QUALIFICATION_STORE_SCHEMA_V1 {
@@ -669,6 +715,15 @@ pub fn investigation_team_qualification_store_path(config_dir: &Path) -> PathBuf
 
 fn store_error(detail: &str) -> CoreError {
     CoreError::Config(format!("investigation team qualification store: {detail}"))
+}
+
+fn store_unavailable_error() -> CoreError {
+    if let Err(error) = ensure_live_history_persistence_supported() {
+        return error;
+    }
+    store_error(
+        "existing evidence is unavailable; repair or remove the invalid owner store before listing, clearing, running, or saving",
+    )
 }
 
 fn ensure_live_history_persistence_supported() -> CoreResult<()> {
@@ -1943,6 +1998,32 @@ mod tests {
         assert!(loaded.latest().is_none());
         assert!(loaded.history().is_empty());
         assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_preserves_unavailable_history_until_the_owner_store_is_repaired() {
+        let directory = owner_tempdir();
+        let path = directory
+            .path()
+            .join("investigation-team-qualifications.json");
+        std::fs::write(&path, b"{malformed")
+            .expect("write malformed synthetic store");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("secure malformed synthetic store");
+
+        let mut state = InvestigationTeamQualificationStoreState::from_load_result(
+            InvestigationTeamQualificationStore::load(&path),
+        );
+        assert!(state.store().is_err());
+        assert!(state.reload_for_operation(&path).is_err());
+        assert_eq!(std::fs::read(&path).expect("preserved bytes"), b"{malformed");
+
+        std::fs::remove_file(&path).expect("operator removes invalid synthetic store");
+        let recovered = state
+            .reload_for_operation(&path)
+            .expect("missing store recovers to empty history");
+        assert!(recovered.history().is_empty());
     }
 
     #[cfg(unix)]

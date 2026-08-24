@@ -458,6 +458,40 @@ describe("InvestigationTeamReadinessPanel", () => {
     expect(host.get).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps settings visible but blocks team checks until aggregate history reloads", async () => {
+    host.qualification.mockRejectedValueOnce(
+      new Error("existing evidence is unavailable; repair or remove the invalid owner store"),
+    );
+    render(<InvestigationTeamReadinessPanel />);
+
+    await screen.findByTestId("investigation-team-readiness");
+    const alert = screen.getByTestId(
+      "investigation-team-qualification-history-unavailable",
+    );
+    expect(alert.textContent).toMatch(/existing evidence is unavailable/i);
+    expect(alert.textContent).toMatch(/no provider check will run/i);
+    expect(
+      (screen.getByTestId("investigation-team-run-synthetic") as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByTestId("investigation-team-run-live") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(host.runSynthetic).not.toHaveBeenCalled();
+    expect(host.runLive).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /retry secure read/i }));
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("investigation-team-run-live") as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    );
+    expect(host.qualification).toHaveBeenCalledTimes(2);
+    expect(host.runSynthetic).not.toHaveBeenCalled();
+    expect(host.runLive).not.toHaveBeenCalled();
+  });
+
   it("blocks providers until a repaired evidence store reloads in-process", async () => {
     host.knownAnswerHistory.mockRejectedValueOnce(
       new Error("existing evidence is unavailable; repair or remove the invalid owner store"),

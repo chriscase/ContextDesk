@@ -685,6 +685,11 @@ export function InvestigationTeamReadinessPanel() {
   );
   const [qualityError, setQualityError] = useState<string | null>(null);
   const [qualityHistoryAvailable, setQualityHistoryAvailable] = useState(true);
+  const [qualificationHistoryAvailable, setQualificationHistoryAvailable] =
+    useState(true);
+  const [qualificationHistoryError, setQualificationHistoryError] = useState<
+    string | null
+  >(null);
   const [phase, setPhase] = useState<"loading" | "ready" | "absent" | "error">(
     "loading",
   );
@@ -692,11 +697,24 @@ export function InvestigationTeamReadinessPanel() {
   const load = useCallback(async () => {
     setPhase("loading");
     try {
-      const [next, report, reports] = await Promise.all([
-        hostGetMultiModelSettings(),
-        hostGetInvestigationTeamQualification(),
-        hostListInvestigationTeamQualifications(),
-      ]);
+      const next = await hostGetMultiModelSettings();
+      let report: InvestigationTeamQualificationDto | null = null;
+      let reports: InvestigationTeamQualificationDto[] = [];
+      try {
+        [report, reports] = await Promise.all([
+          hostGetInvestigationTeamQualification(),
+          hostListInvestigationTeamQualifications(),
+        ]);
+        setQualificationHistoryAvailable(true);
+        setQualificationHistoryError(null);
+      } catch (error) {
+        setQualificationHistoryAvailable(false);
+        setQualificationHistoryError(
+          error instanceof Error
+            ? error.message
+            : "Existing team qualification history is unavailable. Repair or remove the invalid owner store, then retry the secure read without restarting ContextDesk.",
+        );
+      }
       let knownAnswerReports: InvestigationTeamKnownAnswerDto[] = [];
       try {
         knownAnswerReports = await hostListInvestigationTeamKnownAnswerQualifications();
@@ -905,6 +923,31 @@ export function InvestigationTeamReadinessPanel() {
       >
         <strong>{preflight.title}.</strong> {preflight.detail}
       </p>
+
+      {!qualificationHistoryAvailable ? (
+        <div
+          className="it-readiness__failures"
+          role="alert"
+          data-testid="investigation-team-qualification-history-unavailable"
+        >
+          <strong>Qualification history is unavailable</strong>
+          <p className="it-readiness__detail">
+            {qualificationHistoryError ??
+              "The host refused to replace unreadable evidence with an empty history."}
+          </p>
+          <p className="it-readiness__detail">
+            Repair or remove the invalid owner-only history file, then retry. No
+            provider check will run while existing evidence cannot be read safely.
+          </p>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onClick={() => void load()}
+          >
+            Retry secure read
+          </button>
+        </div>
+      ) : null}
 
       {qualification ? (
         <div
@@ -1421,9 +1464,13 @@ export function InvestigationTeamReadinessPanel() {
           className="btn btn--ghost btn--sm"
           data-testid="investigation-team-run-synthetic"
           onClick={() => void runSynthetic()}
-          disabled={syntheticPhase === "running"}
+          disabled={syntheticPhase === "running" || !qualificationHistoryAvailable}
         >
-          {syntheticPhase === "running" ? "Running local check…" : "Run local check"}
+          {syntheticPhase === "running"
+            ? "Running local check…"
+            : !qualificationHistoryAvailable
+              ? "Repair history before running"
+              : "Run local check"}
         </button>
         {syntheticPhase === "running" ? (
           <span className="it-readiness__detail" role="status">
@@ -1455,9 +1502,13 @@ export function InvestigationTeamReadinessPanel() {
           className="btn btn--primary btn--sm"
           data-testid="investigation-team-run-live"
           onClick={() => void runLive()}
-          disabled={livePhase === "running"}
+          disabled={livePhase === "running" || !qualificationHistoryAvailable}
         >
-          {livePhase === "running" ? "Running measured check…" : "Run measured check"}
+          {livePhase === "running"
+            ? "Running measured check…"
+            : !qualificationHistoryAvailable
+              ? "Repair history before measuring"
+              : "Run measured check"}
         </button>
         {livePhase === "running" ? (
           <button

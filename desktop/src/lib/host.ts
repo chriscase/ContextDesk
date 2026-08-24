@@ -1583,35 +1583,23 @@ export type InvestigationTeamQualificationDto = {
 /** Latest measured report (or synthetic only when no measured history exists). */
 export async function hostGetInvestigationTeamQualification(): Promise<InvestigationTeamQualificationDto | null> {
   if (!isTauri()) return null;
-  try {
-    return await invoke<InvestigationTeamQualificationDto | null>(
-      "get_investigation_team_qualification",
-    );
-  } catch {
-    return null;
-  }
+  return invoke<InvestigationTeamQualificationDto | null>(
+    "get_investigation_team_qualification",
+  );
 }
 
 /** Read bounded durable redacted history; no provider call or credential read. */
 export async function hostListInvestigationTeamQualifications(): Promise<InvestigationTeamQualificationDto[]> {
   if (!isTauri()) return [];
-  try {
-    return await invoke<InvestigationTeamQualificationDto[]>(
-      "list_investigation_team_qualifications",
-    );
-  } catch {
-    return [];
-  }
+  return invoke<InvestigationTeamQualificationDto[]>(
+    "list_investigation_team_qualifications",
+  );
 }
 
 /** Clear only redacted team history; configuration and role evidence remain. */
 export async function hostClearInvestigationTeamQualification(): Promise<boolean> {
   if (!isTauri()) return false;
-  try {
-    return await invoke<boolean>("clear_investigation_team_qualification");
-  } catch {
-    return false;
-  }
+  return invoke<boolean>("clear_investigation_team_qualification");
 }
 
 /**
