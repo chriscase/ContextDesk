@@ -1061,7 +1061,7 @@ async fn execute_live_turns(
 
     if cancel.load(Ordering::SeqCst) {
         return LiveTurnOutcome::Interrupted {
-            session_id: Some(session_id),
+            session_id: Some(session_id.clone()),
         };
     }
 
