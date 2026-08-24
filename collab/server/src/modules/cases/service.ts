@@ -103,9 +103,60 @@ export interface CaseSituationInput {
   openQuestions: string[];
 }
 
+export class SituationConflictError extends Error {
+  constructor(readonly currentVersion: number) {
+    super("situation conflict");
+  }
+}
+
 const SITUATION_TEXT_LIMIT = 12_000;
 const SITUATION_QUESTION_LIMIT = 2_000;
 const SITUATION_QUESTION_COUNT_LIMIT = 50;
+const RFC3339_TIMESTAMP =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function daysInMonth(year: number, month: number): number {
+  const days = [31, isLeapYear(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return days[month - 1] ?? 0;
+}
+
+function canonicalClientTime(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) return null;
+  const match = RFC3339_TIMESTAMP.exec(value);
+  if (!match) {
+    throw new Error("clientTime must be an RFC3339 timestamp");
+  }
+  const [, yearRaw, monthRaw, dayRaw, hourRaw, minuteRaw, secondRaw, offsetHourRaw,
+    offsetMinuteRaw] = match;
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  const validComponents = month >= 1
+    && month <= 12
+    && day >= 1
+    && day <= daysInMonth(year, month)
+    && Number(hourRaw) <= 23
+    && Number(minuteRaw) <= 59
+    && Number(secondRaw) <= 59
+    && (offsetHourRaw === undefined || Number(offsetHourRaw) <= 23)
+    && (offsetMinuteRaw === undefined || Number(offsetMinuteRaw) <= 59);
+  if (!validComponents) {
+    throw new Error("clientTime must be an RFC3339 timestamp");
+  }
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) {
+    throw new Error("clientTime must be an RFC3339 timestamp");
+  }
+  try {
+    return new Date(milliseconds).toISOString();
+  } catch {
+    throw new Error("clientTime must be an RFC3339 timestamp");
+  }
+}
 
 function cleanSituationText(value: string, field: string): string {
   const cleaned = value.trim();
@@ -144,8 +195,9 @@ export class CaseService {
   ) {}
 
   async appendDomainTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
+    const clientTime = canonicalClientTime(event.clientTime);
     await this.requireCase(caseId);
-    return this.store.appendTimeline(caseId, event);
+    return this.store.appendTimeline(caseId, { ...event, clientTime });
   }
 
   async listCases(actor: Actor, isAdmin: boolean): Promise<CaseV1[]> {
@@ -237,6 +289,7 @@ export class CaseService {
     },
     origin: string,
   ): Promise<CaseV1> {
+    const clientTime = canonicalClientTime(input.clientTime);
     const id = randomUUID();
     const now = new Date().toISOString();
     const situation = cleanSituation({
@@ -250,6 +303,7 @@ export class CaseService {
       id,
       title: input.title,
       ...situation,
+      situationVersion: 0,
       severity: input.severity ?? "medium",
       status: "open" as const,
       legalHold: false,
@@ -264,7 +318,7 @@ export class CaseService {
       kind: "case_created",
       actor,
       targetId: id,
-      clientTime: input.clientTime ?? null,
+      clientTime,
       payload: { title: row.title },
     });
     await this.audit.append({
@@ -281,14 +335,19 @@ export class CaseService {
     caseId: string,
     actor: Actor,
     input: Partial<CaseSituationInput>,
+    expectedVersion: number,
     origin: string,
     clientTime?: string,
   ): Promise<CaseV1> {
+    const canonicalTime = canonicalClientTime(clientTime);
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+      throw new Error("expectedVersion must be a non-negative safe integer");
+    }
     const row = await this.requireCase(caseId);
-    const changedFields = Object.keys(input).filter((key) =>
+    const suppliedFields = Object.keys(input).filter((key) =>
       ["problemStatement", "affectedParties", "impact", "scope", "openQuestions"].includes(key),
     );
-    if (changedFields.length === 0) throw new Error("no situation fields supplied");
+    if (suppliedFields.length === 0) throw new Error("no situation fields supplied");
     const situation = cleanSituation({
       problemStatement: input.problemStatement ?? row.problemStatement ?? "",
       affectedParties: input.affectedParties ?? row.affectedParties ?? "",
@@ -296,26 +355,46 @@ export class CaseService {
       scope: input.scope ?? row.scope ?? "",
       openQuestions: input.openQuestions ?? row.openQuestions ?? [],
     });
-    Object.assign(row, situation);
-    await this.store.updateCaseSituation({ id: row.id, ...situation });
-    await this.store.appendTimeline(caseId, {
-      kind: "case_situation_updated",
-      actor,
-      targetId: caseId,
-      clientTime: clientTime ?? null,
-      payload: {
+    const changedFields = suppliedFields.filter((field) => {
+      if (field === "openQuestions") {
+        return JSON.stringify(situation.openQuestions) !== JSON.stringify(row.openQuestions ?? []);
+      }
+      return situation[field as keyof Omit<CaseSituationInput, "openQuestions">]
+        !== (row[field as keyof Omit<CaseSituationInput, "openQuestions">] ?? "");
+    });
+    const result = await this.store.updateSituationAtomic(
+      {
+        id: row.id,
+        expectedVersion,
+        situation,
         changedFields,
-        openQuestionCount: situation.openQuestions.length,
+        timeline: {
+          kind: "case_situation_updated",
+          actor,
+          targetId: caseId,
+          clientTime: canonicalTime,
+          payload: {
+            changedFields,
+            openQuestionCount: situation.openQuestions.length,
+            predecessorVersion: expectedVersion,
+            situationVersion: expectedVersion + 1,
+          },
+        },
+        audit: {
+          identity: actor.id,
+          action: "case_situation_update",
+          target: caseId,
+          origin,
+          outcome: "success",
+        },
       },
-    });
-    await this.audit.append({
-      identity: actor.id,
-      action: "case_situation_update",
-      target: caseId,
-      origin,
-      outcome: "success",
-    });
-    return this.toCase(row);
+      this.audit,
+    );
+    if (result.status === "not_found") throw new Error("case not found");
+    if (result.status === "conflict") {
+      throw new SituationConflictError(result.currentVersion);
+    }
+    return this.toCase(result.row);
   }
 
   async setStatus(
@@ -325,6 +404,7 @@ export class CaseService {
     origin: string,
     clientTime?: string,
   ): Promise<CaseV1> {
+    const canonicalTime = canonicalClientTime(clientTime);
     const row = await this.requireCase(caseId);
     row.status = status;
     await this.store.updateCaseMeta(row);
@@ -332,7 +412,7 @@ export class CaseService {
       kind: "case_status",
       actor,
       targetId: caseId,
-      clientTime: clientTime ?? null,
+      clientTime: canonicalTime,
       payload: { status },
     });
     await this.audit.append({
@@ -433,6 +513,7 @@ export class CaseService {
     },
     origin: string,
   ): Promise<SnapshotV1> {
+    const clientTime = canonicalClientTime(input.clientTime);
     await this.requireCase(caseId);
     const evidenceIds = input.evidenceIds;
     if (new Set(evidenceIds).size !== evidenceIds.length) {
@@ -484,7 +565,7 @@ export class CaseService {
       kind: "snapshot_frozen",
       actor,
       targetId: row.id,
-      clientTime: input.clientTime ?? null,
+      clientTime,
       payload: {
         fingerprint,
         parentSnapshotId,
@@ -545,6 +626,7 @@ export class CaseService {
     },
     origin: string,
   ): Promise<ContributionV1> {
+    const clientTime = canonicalClientTime(input.clientTime);
     await this.requireCase(caseId);
     if (!isContributionKind(input.kind)) {
       throw new Error(`unknown contribution kind: ${input.kind}`);
@@ -580,7 +662,7 @@ export class CaseService {
       kind: "contribution_created",
       actor,
       targetId: id,
-      clientTime: input.clientTime ?? null,
+      clientTime,
       payload: { kind: input.kind, contentHash: hash, privacyClass: privacy, sourceId },
     });
     await this.audit.append({
@@ -601,6 +683,7 @@ export class CaseService {
     origin: string,
     clientTime?: string,
   ): Promise<ContributionV1> {
+    const canonicalTime = canonicalClientTime(clientTime);
     const latest = await this.requireLatest(caseId, contributionId);
     if (latest.tombstone) throw new Error("contribution not found");
     const next: RevisionRow = {
@@ -619,7 +702,7 @@ export class CaseService {
       kind: "contribution_revised",
       actor,
       targetId: contributionId,
-      clientTime: clientTime ?? null,
+      clientTime: canonicalTime,
       payload: {
         revision: next.revision,
         predecessor: latest.revision,
@@ -691,6 +774,7 @@ export class CaseService {
     origin: string,
     clientTime?: string,
   ): Promise<ContributionV1> {
+    const canonicalTime = canonicalClientTime(clientTime);
     assertSupportedLinks(status, links);
     const latest = await this.requireLatest(caseId, contributionId);
     if (latest.kind !== "hypothesis" || latest.tombstone) {
@@ -712,7 +796,7 @@ export class CaseService {
       kind: "hypothesis_status",
       actor,
       targetId: contributionId,
-      clientTime: clientTime ?? null,
+      clientTime: canonicalTime,
       payload: { status, links },
     });
     await this.audit.append({
@@ -742,6 +826,7 @@ export class CaseService {
     },
     origin: string,
   ): Promise<{ artifact: ArtifactV1; summary: ContributionV1 }> {
+    const clientTime = canonicalClientTime(input.clientTime);
     await this.requireCase(caseId);
     const privacy = defaultPrivacy(input.privacyClass);
     if (input.filename !== undefined) assertFilenameAllowed(input.filename);
@@ -790,7 +875,7 @@ export class CaseService {
       privacyClass: privacy,
       sourceId,
     };
-    if (input.clientTime !== undefined) summaryInput.clientTime = input.clientTime;
+    if (clientTime !== null) summaryInput.clientTime = clientTime;
     const summary = await this.addContribution(caseId, actor, summaryInput, origin);
 
     const row: ArtifactRow = {
@@ -816,7 +901,7 @@ export class CaseService {
       kind: "evidence_registered",
       actor,
       targetId: id,
-      clientTime: input.clientTime ?? null,
+      clientTime,
       payload: {
         artifactKind: input.kind,
         contentHash,
@@ -920,6 +1005,7 @@ export class CaseService {
     impact?: string;
     scope?: string;
     openQuestions?: string[];
+    situationVersion?: number;
     severity: CaseSeverity;
     status: CaseStatus;
     legalHold: boolean;
@@ -937,6 +1023,7 @@ export class CaseService {
       impact: row.impact ?? "",
       scope: row.scope ?? "",
       openQuestions: row.openQuestions ? [...row.openQuestions] : [],
+      situationVersion: row.situationVersion ?? 0,
       severity: row.severity,
       status: row.status,
       legalHold: row.legalHold,

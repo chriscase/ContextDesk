@@ -25,6 +25,7 @@ export interface CaseV1 {
   impact: string;
   scope: string;
   openQuestions: string[];
+  situationVersion: number;
   severity: CaseSeverity;
   status: CaseStatus;
   legalHold: boolean;
@@ -48,6 +49,7 @@ const caseShape: ObjectShape = {
   impact: f.opt(f.str),
   scope: f.opt(f.str),
   openQuestions: f.opt(f.arr(f.str)),
+  situationVersion: f.opt(f.u64),
   severity: f.req(f.en(...CASE_SEVERITIES)),
   status: f.req(f.en(...CASE_STATUSES)),
   legalHold: f.req(f.bool),
@@ -67,6 +69,7 @@ export function parseCase(raw: unknown): CaseV1 {
     impact: parsed.impact ?? "",
     scope: parsed.scope ?? "",
     openQuestions: parsed.openQuestions ? [...parsed.openQuestions] : [],
+    situationVersion: parsed.situationVersion ?? 0,
   };
 }
 

@@ -20,6 +20,8 @@ export interface AuditStore {
   list(filter?: { action?: string; identity?: string }): Promise<StoredAudit[]>;
 }
 
+export type AuditQueryable = Pick<Pool, "query">;
+
 function asRow(row: Record<string, unknown>): StoredAudit {
   return {
     id: Number(row.id),
@@ -53,18 +55,18 @@ export class MemoryAuditStore implements AuditStore {
 }
 
 export class PgAuditStore implements AuditStore {
-  constructor(private readonly pool: Pick<Pool, "query">) {}
+  constructor(private readonly pool: AuditQueryable) {}
+
+  isBoundTo(queryable: AuditQueryable): boolean {
+    return this.pool === queryable;
+  }
+
+  async appendUsing(queryable: AuditQueryable, record: AuditRecord): Promise<StoredAudit> {
+    return appendPgAudit(queryable, record);
+  }
 
   async append(record: AuditRecord): Promise<StoredAudit> {
-    const result = await this.pool.query(
-      `INSERT INTO audit_events (identity, action, target, origin, outcome)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, at, identity, action, target, origin, outcome`,
-      [record.identity, record.action, record.target, record.origin, record.outcome],
-    );
-    const row = result.rows[0] as Record<string, unknown> | undefined;
-    if (!row) throw new Error("audit insert returned no row");
-    return asRow(row);
+    return appendPgAudit(this.pool, record);
   }
 
   async list(filter?: { action?: string; identity?: string }): Promise<StoredAudit[]> {
@@ -78,4 +80,19 @@ export class PgAuditStore implements AuditStore {
     );
     return result.rows.map((r) => asRow(r as Record<string, unknown>));
   }
+}
+
+async function appendPgAudit(
+  queryable: AuditQueryable,
+  record: AuditRecord,
+): Promise<StoredAudit> {
+  const result = await queryable.query(
+    `INSERT INTO audit_events (identity, action, target, origin, outcome)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, at, identity, action, target, origin, outcome`,
+    [record.identity, record.action, record.target, record.origin, record.outcome],
+  );
+  const row = result.rows[0] as Record<string, unknown> | undefined;
+  if (!row) throw new Error("audit insert returned no row");
+  return asRow(row);
 }

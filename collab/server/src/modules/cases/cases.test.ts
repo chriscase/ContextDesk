@@ -154,6 +154,28 @@ async function login(
 }
 
 describe("cases timeline evidence provenance", () => {
+  it("rejects malformed clientTime values before creating durable state", async () => {
+    await withApp(async ({ app, audit }) => {
+      const alice = await login(app, "alice", ALICE);
+      for (const clientTime of ["not-a-timestamp", "2026-02-31T00:00:00Z", 1234]) {
+        const response = await app.inject({
+          method: "POST",
+          url: "/api/cases",
+          headers: { cookie: alice },
+          payload: { title: "Must not persist", clientTime },
+        });
+        expect(response.statusCode).toBe(400);
+      }
+      const listed = parseCaseList(JSON.parse((await app.inject({
+        method: "GET",
+        url: "/api/cases",
+        headers: { cookie: alice },
+      })).body));
+      expect(listed.cases).toEqual([]);
+      expect(await audit.list({ action: "case_create" })).toEqual([]);
+    });
+  });
+
   it("persists an explicitly unknown Situation and lets authorized members refine it", async () => {
     await withApp(async ({ app, audit }) => {
       const alice = await login(app, "alice", ALICE);
@@ -176,6 +198,7 @@ describe("cases timeline evidence provenance", () => {
         url: `/api/cases/${created.id}/situation`,
         headers: { cookie: alice },
         payload: {
+          expectedVersion: 0,
           problemStatement: "  Synthetic jobs remain queued after a worker restart.  ",
           affectedParties: "Fixture operators",
           impact: "Synthetic jobs require manual replay.",
@@ -197,6 +220,7 @@ describe("cases timeline evidence provenance", () => {
       expect(updated.openQuestions).toEqual([
         "Did lease recovery run before the queue stalled?",
       ]);
+      expect(updated.situationVersion).toBe(1);
 
       const fetched = parseCase(JSON.parse((await app.inject({
         method: "GET",
@@ -216,6 +240,95 @@ describe("cases timeline evidence provenance", () => {
           (event) => event.target === created.id && event.outcome === "success",
         ),
       ).toBe(true);
+
+      const noOp = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: {
+          expectedVersion: 1,
+          problemStatement: `  ${updated.problemStatement}  `,
+        },
+      });
+      expect(noOp.statusCode).toBe(200);
+      expect(parseCase(JSON.parse(noOp.body)).situationVersion).toBe(1);
+      expect(parseTimeline(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/timeline`,
+        headers: { cookie: alice },
+      })).body)).events).toHaveLength(timeline.events.length);
+      expect(await audit.list({ action: "case_situation_update" })).toHaveLength(1);
+
+      const invalidTime = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: {
+          expectedVersion: 1,
+          impact: "This must never be committed.",
+          clientTime: "not-a-timestamp",
+        },
+      });
+      expect(invalidTime.statusCode).toBe(400);
+      const afterInvalidTime = parseCase(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}`,
+        headers: { cookie: alice },
+      })).body));
+      expect(afterInvalidTime.impact).toBe(updated.impact);
+      expect(afterInvalidTime.situationVersion).toBe(1);
+      expect(await audit.list({ action: "case_situation_update" })).toHaveLength(1);
+
+      const secondUpdate = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: {
+          expectedVersion: 1,
+          impact: "Synthetic jobs now require two manual replay steps.",
+          changedFields: ["problemStatement", "scope"],
+          clientTime: "2026-08-24T12:00:00-05:00",
+        },
+      });
+      expect(secondUpdate.statusCode).toBe(200);
+      const second = parseCase(JSON.parse(secondUpdate.body));
+      expect(second.situationVersion).toBe(2);
+
+      const stale = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: {
+          expectedVersion: 1,
+          problemStatement: "A stale editor must not overwrite current context.",
+        },
+      });
+      expect(stale.statusCode).toBe(409);
+      expect(JSON.parse(stale.body)).toEqual({
+        error: "situation_conflict",
+        currentVersion: 2,
+      });
+      const afterStale = parseCase(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}`,
+        headers: { cookie: alice },
+      })).body));
+      expect(afterStale.problemStatement).toBe(updated.problemStatement);
+      expect(afterStale.impact).toBe(second.impact);
+      expect(afterStale.situationVersion).toBe(2);
+      const afterStaleTimeline = parseTimeline(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/timeline`,
+        headers: { cookie: alice },
+      })).body));
+      expect(afterStaleTimeline.events).toHaveLength(timeline.events.length + 1);
+      expect(afterStaleTimeline.events.at(-1)?.clientTime).toBe("2026-08-24T17:00:00.000Z");
+      expect(JSON.parse(afterStaleTimeline.events.at(-1)?.payload ?? "{}")).toMatchObject({
+        changedFields: ["impact"],
+        predecessorVersion: 1,
+        situationVersion: 2,
+      });
+      expect(await audit.list({ action: "case_situation_update" })).toHaveLength(2);
 
       const carol = await login(app, "carol", "fixture-carol-secret");
       const viewerDenied = await app.inject({

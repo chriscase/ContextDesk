@@ -31,6 +31,7 @@ interface CaseRow {
   impact?: string;
   scope?: string;
   openQuestions?: string[];
+  situationVersion?: number;
   status: string;
   severity: string;
   participants?: CaseParticipantRow[];
@@ -371,6 +372,7 @@ export function Cases(props: {
   const [newSituation, setNewSituation] = useState<SituationDraft>(EMPTY_SITUATION);
   const [situationDraft, setSituationDraft] = useState<SituationDraft>(EMPTY_SITUATION);
   const [situationEditing, setSituationEditing] = useState(false);
+  const [situationConflict, setSituationConflict] = useState(false);
   const [sources, setSources] = useState<SourceOption[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [importError, setImportError] = useState<string | null>(null);
@@ -484,6 +486,7 @@ export function Cases(props: {
     setActionError(null);
     setImportError(null);
     setSituationEditing(false);
+    setSituationConflict(false);
     setDiscussionOpen(false);
     setDiscussionPresence(null);
     if (focusCaseId) void loadTimeline(focusCaseId, controller.signal).catch(() => undefined);
@@ -573,9 +576,18 @@ export function Cases(props: {
         impact: situationDraft.impact,
         scope: situationDraft.scope,
         openQuestions: openQuestionsFrom(situationDraft.openQuestions),
+        expectedVersion: current?.situationVersion ?? 0,
       }),
     });
     if (!response.ok) {
+      if (response.status === 409) {
+        await refresh();
+        setSituationConflict(true);
+        setActionError(
+          "The Situation changed while you were editing. Reload the latest recorded context before saving again.",
+        );
+        return;
+      }
       setActionError("The Situation could not be saved. You may not have permission to change it.");
       return;
     }
@@ -583,6 +595,7 @@ export function Cases(props: {
     setCases((rows) => rows.map((row) => (row.id === updated.id ? updated : row)));
     setSituationDraft(draftFor(updated));
     setSituationEditing(false);
+    setSituationConflict(false);
     await Promise.all([refresh(), refreshActivity(), loadTimeline(focusCaseId)]);
   }
 
@@ -1154,6 +1167,7 @@ export function Cases(props: {
                   onClick={() => {
                     setSituationDraft(draftFor(current));
                     setSituationEditing(true);
+                    setSituationConflict(false);
                   }}
                 >
                   Edit situation
@@ -1219,11 +1233,29 @@ export function Cases(props: {
                   />
                 </label>
                 <div className="situation__form-actions">
-                  <button className="login__submit" type="submit">Save situation</button>
+                  <button className="login__submit" type="submit" disabled={situationConflict}>
+                    Save situation
+                  </button>
+                  {situationConflict ? (
+                    <button
+                      type="button"
+                      className="situation__cancel"
+                      onClick={() => {
+                        setSituationDraft(draftFor(current));
+                        setSituationConflict(false);
+                        setActionError(null);
+                      }}
+                    >
+                      Reload latest context
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="situation__cancel"
-                    onClick={() => setSituationEditing(false)}
+                    onClick={() => {
+                      setSituationEditing(false);
+                      setSituationConflict(false);
+                    }}
                   >
                     Cancel
                   </button>

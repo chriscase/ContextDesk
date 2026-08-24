@@ -72,7 +72,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     if (deps.pool) {
       try {
         await deps.pool.query(
-          "SELECT 1 FROM schema_migrations WHERE version = '011_triage_worker_leases'",
+          "SELECT 1 FROM schema_migrations WHERE version = '012_case_situation'",
         );
         database = "up";
       } catch {

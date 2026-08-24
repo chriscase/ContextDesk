@@ -147,6 +147,7 @@ describe("contracts unknown-field rejection", () => {
     expect(legacy.impact).toBe("");
     expect(legacy.scope).toBe("");
     expect(legacy.openQuestions).toEqual([]);
+    expect(legacy.situationVersion).toBe(0);
   });
 
   it("accepts the synthetic three-model experiment package and rejects unknown fields", () => {

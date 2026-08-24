@@ -78,7 +78,9 @@ function restoreStore(store: object, state: unknown): void {
 }
 
 function storeState(store: object): JsonValue {
-  return Object.fromEntries(Object.entries(store)) as JsonValue;
+  return Object.fromEntries(
+    Object.entries(store).filter(([, value]) => typeof value !== "function"),
+  ) as JsonValue;
 }
 
 function methodNames(store: object): string[] {
@@ -135,6 +137,30 @@ export class SqliteState {
       `INSERT INTO collab_state (key, payload, updated_at) VALUES (?, ?, ?)
        ON CONFLICT (key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
     ).run(key, JSON.stringify(encode(value)), new Date().toISOString());
+  }
+
+  async transaction<T>(
+    stores: readonly { key: string; store: object }[],
+    operation: () => Promise<T>,
+    shouldPersist: (result: T) => boolean = () => true,
+  ): Promise<T> {
+    const snapshots = stores.map(({ store }) => decode(encode(storeState(store))));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = await operation();
+      if (shouldPersist(result)) {
+        for (const { key, store } of stores) this.write(key, storeState(store));
+      }
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } finally {
+        stores.forEach(({ store }, index) => restoreStore(store, snapshots[index]));
+      }
+      throw error;
+    }
   }
 
   close(): void {
@@ -223,10 +249,39 @@ export function createSqliteRuntime(
   bootstrap: GroupRoleMapping = emptyMapping(),
 ): SqliteRuntime {
   const state = new SqliteState(path);
+  const rawAudit = new MemoryAuditStore();
+  const audit = persistentMemoryStore(state, "audit", rawAudit, new Set(["append"]));
+  const rawCases: MemoryCaseStore = new MemoryCaseStore((operation) =>
+    state.transaction(
+      [
+        { key: "audit", store: rawAudit },
+        { key: "cases", store: rawCases },
+      ],
+      operation,
+      (result) =>
+        typeof result === "object"
+        && result !== null
+        && "status" in result
+        && result.status === "updated",
+    ));
+  const cases = persistentMemoryStore(
+    state,
+    "cases",
+    rawCases,
+    new Set([
+      "insertCase",
+      "updateCaseMeta",
+      "addParticipant",
+      "appendTimeline",
+      "insertRevision",
+      "insertArtifact",
+      "insertSnapshot",
+    ]),
+  );
   return {
     state,
     databaseProbe: state,
-    audit: persistentMemoryStore(state, "audit", new MemoryAuditStore(), new Set(["append"])),
+    audit,
     sessions: persistentMemoryStore(
       state,
       "sessions",
@@ -240,21 +295,7 @@ export function createSqliteRuntime(
       new MemoryCatalogStore(),
       new Set(["insert", "updateMeta", "setLifecycle"]),
     ),
-    cases: persistentMemoryStore(
-      state,
-      "cases",
-      new MemoryCaseStore(),
-      new Set([
-        "insertCase",
-        "updateCaseMeta",
-        "updateCaseSituation",
-        "addParticipant",
-        "appendTimeline",
-        "insertRevision",
-        "insertArtifact",
-        "insertSnapshot",
-      ]),
-    ),
+    cases,
     runs: persistentMemoryStore(
       state,
       "runs",

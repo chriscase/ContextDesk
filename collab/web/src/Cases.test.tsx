@@ -17,6 +17,7 @@ const fixtureCases = [
     impact: "Synthetic requests need manual replay.",
     scope: "One disposable worker group.",
     openQuestions: ["Did the queue stall before the restart?"],
+    situationVersion: 0,
     status: "open",
     severity: "high",
     participants: [
@@ -584,7 +585,7 @@ describe("focused investigation view", () => {
   });
 
   it("lets an authorized member edit Situation context and keeps viewers read-only", async () => {
-    let current = { ...fixtureCases[0] };
+    let current = { ...fixtureCases[0]!, situationVersion: 0 };
     const fetchStub = stubCaseFetch({
       cases: [current],
       onRequest: (url, init) => {
@@ -592,7 +593,16 @@ describe("focused investigation view", () => {
           return Promise.resolve({ ok: true, json: async () => ({ cases: [current] }) });
         }
         if (url === "/api/cases/c1/situation" && init?.method === "PATCH") {
-          current = { ...current, ...(JSON.parse(String(init.body)) as object) };
+          const patch = JSON.parse(String(init.body)) as Record<string, unknown>;
+          current = {
+            ...current,
+            problemStatement: patch.problemStatement as string,
+            affectedParties: patch.affectedParties as string,
+            impact: patch.impact as string,
+            scope: patch.scope as string,
+            openQuestions: patch.openQuestions as string[],
+            situationVersion: current.situationVersion + 1,
+          };
           return Promise.resolve({ ok: true, json: async () => current });
         }
         return null;
@@ -622,6 +632,54 @@ describe("focused investigation view", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
     expect(screen.queryByRole("button", { name: "Edit situation" })).toBeNull();
     expect(screen.getByText("Synthetic queue pressure continues after restart.")).toBeTruthy();
+  });
+
+  it("preserves a stale draft but requires reloading current Situation context after 409", async () => {
+    let current = { ...fixtureCases[0]!, situationVersion: 0 };
+    let patchBody: Record<string, unknown> | null = null;
+    stubCaseFetch({
+      cases: [current],
+      onRequest: (url, init) => {
+        if (url === "/api/cases") {
+          return Promise.resolve({ ok: true, json: async () => ({ cases: [current] }) });
+        }
+        if (url === "/api/cases/c1/situation" && init?.method === "PATCH") {
+          patchBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          current = {
+            ...current,
+            problemStatement: "A teammate recorded newer context.",
+            situationVersion: 1,
+          };
+          return Promise.resolve({
+            ok: false,
+            status: 409,
+            json: async () => ({ error: "situation_conflict", currentVersion: 1 }),
+          });
+        }
+        return null;
+      },
+    });
+
+    render(<Cases roles={["contributor"]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit situation" }));
+    fireEvent.change(screen.getByLabelText("Problem statement"), {
+      target: { value: "My stale draft." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save situation" }));
+
+    expect(await screen.findByText(/changed while you were editing/i)).toBeTruthy();
+    expect(patchBody).toMatchObject({ expectedVersion: 0, problemStatement: "My stale draft." });
+    expect((screen.getByRole("button", { name: "Save situation" }) as HTMLButtonElement).disabled)
+      .toBe(true);
+    expect((screen.getByLabelText("Problem statement") as HTMLTextAreaElement).value)
+      .toBe("My stale draft.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload latest context" }));
+    expect((screen.getByLabelText("Problem statement") as HTMLTextAreaElement).value)
+      .toBe("A teammate recorded newer context.");
+    expect((screen.getByRole("button", { name: "Save situation" }) as HTMLButtonElement).disabled)
+      .toBe(false);
   });
 
   it("shows explicit not-recorded values for older investigations", async () => {

@@ -14,6 +14,7 @@
     "impact": { "type": "string" },
     "scope": { "type": "string" },
     "openQuestions": { "type": "array", "items": { "type": "string" } },
+    "situationVersion": { "type": "integer", "minimum": 0 },
     "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
     "status": { "type": "string", "enum": ["open", "monitoring", "resolved", "archived"] },
     "legalHold": { "type": "boolean" },

@@ -23,7 +23,28 @@ describe.skipIf(!adminUrl())("migrations", () => {
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
       expect(tables.rows).toHaveLength(1);
+      const situationColumns = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cases'
+           AND column_name IN ('open_questions', 'situation_version')
+         ORDER BY column_name`,
+      );
+      expect(situationColumns.rows.map((row) => row.column_name)).toEqual([
+        "open_questions",
+        "situation_version",
+      ]);
+      const constraint = await client.query<{ definition: string }>(
+        `SELECT pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint WHERE conname = 'cases_open_questions_array_check'`,
+      );
+      expect(constraint.rows[0]?.definition).toContain("jsonb_path_exists");
       expect((await migrateDown(client)).rolledBack).toBe("012_case_situation");
+      const rolledBackColumns = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cases'
+           AND column_name IN ('open_questions', 'situation_version')`,
+      );
+      expect(rolledBackColumns.rows).toHaveLength(0);
       expect((await migrateDown(client)).rolledBack).toBe("011_triage_worker_leases");
       expect((await migrateDown(client)).rolledBack).toBe("010_presence");
       expect((await migrateDown(client)).rolledBack).toBe("009_triage_jobs");

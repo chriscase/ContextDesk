@@ -1,7 +1,13 @@
 /** Cases, timelines, and the collaboration core. */
 export const MODULE_ID = "cases" as const;
 
-export { CaseService, LegalHoldError, MemoryCaseStore, PgCaseStore } from "./service.js";
+export {
+  CaseService,
+  LegalHoldError,
+  MemoryCaseStore,
+  PgCaseStore,
+  SituationConflictError,
+} from "./service.js";
 export type {
   Actor,
   CaseStore,
