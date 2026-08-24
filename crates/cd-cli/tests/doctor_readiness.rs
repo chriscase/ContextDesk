@@ -518,15 +518,15 @@ fn unwritable_state_fails_that_check_without_blocking_the_others() {
 #[tokio::test]
 async fn an_interrupted_run_still_cleans_up_the_synthetic_corpus() {
     let server = MockServer::start().await;
+    let first_request_entered = Arc::new(AtomicBool::new(false));
+    let release_first_response = Arc::new(AtomicBool::new(false));
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(Duration::from_secs(20))
-                .set_body_json(json!({
-                    "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "late"}}]
-                })),
-        )
+        .respond_with(GatedGroundedTwoTurnProvider {
+            call: Arc::new(AtomicUsize::new(0)),
+            first_request_entered: first_request_entered.clone(),
+            release_first_response: release_first_response.clone(),
+        })
         .mount(&server)
         .await;
 
@@ -534,7 +534,7 @@ async fn an_interrupted_run_still_cleans_up_the_synthetic_corpus() {
     write_profile(data_dir.path(), &server.uri(), "test-model");
 
     let bin = assert_cmd::cargo::cargo_bin("contextdesk");
-    let mut child = std::process::Command::new(bin)
+    let child = std::process::Command::new(bin)
         .args([
             "--data-dir",
             data_dir.path().to_str().unwrap(),
@@ -547,19 +547,13 @@ async fn an_interrupted_run_still_cleans_up_the_synthetic_corpus() {
         .spawn()
         .expect("spawn contextdesk doctor");
 
-    // Wait for the two fast local checks (config, writable_state) to
-    // actually print before signalling, rather than guessing a wall-clock
-    // budget for process start-up — see `wait_for_n_lines`. A small buffer
-    // after the second line covers the real (if fast) local disk I/O of
-    // creating and seeding the synthetic corpus that follows those two
-    // checks and precedes turn one's own network wait — signalling the
-    // instant the second line is observed sometimes lands SIGINT inside
-    // that local I/O, before the process has ever polled `ctrl_c()` even
-    // once. The mock's 20s delay on turn one itself guarantees it is still
-    // in flight well after this buffer.
-    let stdout = child.stdout.take().expect("piped stdout");
-    let (_observed, _stdout_drain) = wait_for_n_lines(stdout, 2);
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Synchronize on the exact in-flight provider request. Observing the
+    // two fast stdout checks plus a fixed pause was still racy under heavy
+    // hosted-runner load: SIGINT could land before the runtime had polled
+    // its handler, terminating by signal instead of the documented 130.
+    // Provider entry proves corpus creation finished and the cancellable
+    // live workflow is active.
+    wait_for_flag(&first_request_entered, "first provider request");
 
     let pid = child.id();
     let killed = std::process::Command::new("kill")
@@ -571,6 +565,7 @@ async fn an_interrupted_run_still_cleans_up_the_synthetic_corpus() {
     let output = child
         .wait_with_output()
         .expect("wait for interrupted process");
+    release_first_response.store(true, Ordering::SeqCst);
     assert_eq!(
         output.status.code(),
         Some(130),
