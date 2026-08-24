@@ -1,4 +1,10 @@
-export const AREA_IDS = ["overview", "investigations", "sources", "help"] as const;
+export const AREA_IDS = [
+  "overview",
+  "investigations",
+  "sources",
+  "administration",
+  "help",
+] as const;
 export type AreaId = (typeof AREA_IDS)[number];
 
 export const STAGE_IDS = [
@@ -243,6 +249,9 @@ export function parsePathname(pathname: string, search = "", hash = ""): ShellLo
   if (path === "/help") {
     return { area: "help", caseId: null, stage: "situation" };
   }
+  if (path === "/administration") {
+    return { area: "administration", caseId: null, stage: "situation" };
+  }
   const investigation = /^\/investigations\/([^/]+)(?:\/([^/]+))?$/.exec(path);
   if (investigation) {
     const caseId = investigation[1] ?? "";
@@ -273,6 +282,9 @@ export function areaPathFor(location: WorkLocation): string {
   }
   if (location.area === "help") {
     return "/help";
+  }
+  if (location.area === "administration") {
+    return "/administration";
   }
   return "/investigations";
 }
@@ -323,6 +335,9 @@ export function titleFor(location: ShellLocation, investigationTitle?: string | 
   }
   if (location.area === "help") {
     return "Help · ContextDesk War Room";
+  }
+  if (location.area === "administration") {
+    return "Administration · ContextDesk War Room";
   }
   if (location.area === "investigations" && location.caseId) {
     const stage = location.stage.slice(0, 1).toUpperCase() + location.stage.slice(1);

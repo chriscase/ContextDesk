@@ -1,7 +1,14 @@
 import {
+  ADMIN_ROLE_MAPPING_ERROR_SCHEMA_ID,
+  ADMIN_ROLE_MAPPING_LIST_SCHEMA_ID,
+  ADMIN_ROLE_MAPPING_MAX_RESULTS,
   AUTH_ERROR_SCHEMA_ID,
+  parseAdminRoleMappingList,
+  parseAdminRoleMappingRevokeRequest,
+  parseAdminRoleMappingUpdateRequest,
   type AuthErrorV1,
   type AppRole,
+  type AdminRoleMappingErrorCode,
 } from "@cd-collab/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AuditStore } from "../audit/index.js";
@@ -9,11 +16,15 @@ import {
   resolveActiveSession,
   type ActiveSessionDeps,
 } from "../auth/index.js";
-import { canPerform, isAppRole, type MutableGroupRoleMap } from "./roles.js";
+import { canPerform, type MutableGroupRoleMap } from "./roles.js";
 import type { GroupRoleStore } from "./store.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
+}
+
+function roleMappingError(error: AdminRoleMappingErrorCode) {
+  return { schemaId: ADMIN_ROLE_MAPPING_ERROR_SCHEMA_ID, error };
 }
 
 export interface AuthzRouteDeps {
@@ -29,6 +40,59 @@ export async function registerAuthzRoutes(
 ): Promise<void> {
   app.post("/api/authz/mutations", async (request, reply) => {
     return authorizeMutation(request, reply, deps, "mutate", "probe");
+  });
+
+  app.get("/api/authz/group-role-map", async (request, reply) => {
+    const session = await resolveActiveSession(request, deps.auth);
+    if (!session) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    if (!canPerform(deps.roles.resolve(session.groups), "admin")) {
+      await recordAuditBestEffort(deps.audit, {
+        identity: session.identity.id,
+        action: "role_mapping_read",
+        target: "current",
+        origin: request.ip,
+        outcome: "denied",
+      });
+      void reply.code(403);
+      return authError("forbidden");
+    }
+
+    try {
+      const mapping = await deps.roleStore.load();
+      const entries = [...mapping.entries.entries()].sort(([left], [right]) =>
+        left < right ? -1 : left > right ? 1 : 0,
+      );
+      const response = {
+        schemaId: ADMIN_ROLE_MAPPING_LIST_SCHEMA_ID,
+        mappings: entries
+          .slice(0, ADMIN_ROLE_MAPPING_MAX_RESULTS)
+          .map(([group, role]) => ({ group, role })),
+        limit: ADMIN_ROLE_MAPPING_MAX_RESULTS,
+        truncated: entries.length > ADMIN_ROLE_MAPPING_MAX_RESULTS,
+      };
+      parseAdminRoleMappingList(response);
+      await deps.audit.append({
+        identity: session.identity.id,
+        action: "role_mapping_read",
+        target: "current",
+        origin: request.ip,
+        outcome: "success",
+      });
+      return response;
+    } catch {
+      await recordAuditBestEffort(deps.audit, {
+        identity: session.identity.id,
+        action: "role_mapping_read",
+        target: "current",
+        origin: request.ip,
+        outcome: "failure",
+      });
+      void reply.code(503);
+      return roleMappingError("unavailable");
+    }
   });
 
   app.put("/api/authz/group-role-map", async (request, reply) => {
@@ -49,21 +113,14 @@ export async function registerAuthzRoutes(
       void reply.code(403);
       return authError("forbidden");
     }
-    const body = request.body;
-    if (
-      typeof body !== "object" ||
-      body === null ||
-      !("group" in body) ||
-      !("role" in body) ||
-      typeof (body as { group: unknown }).group !== "string" ||
-      typeof (body as { role: unknown }).role !== "string" ||
-      !isAppRole((body as { role: string }).role)
-    ) {
+    let update: { group: string; role: AppRole };
+    try {
+      update = parseAdminRoleMappingUpdateRequest(request.body);
+    } catch {
       void reply.code(400);
-      return authError("forbidden");
+      return roleMappingError("invalid_request");
     }
-    const group = (body as { group: string }).group;
-    const role = (body as { role: AppRole }).role;
+    const { group, role } = update;
     try {
       await deps.roleStore.set(group, role, session.identity.id);
     } catch {
@@ -75,7 +132,7 @@ export async function registerAuthzRoutes(
         outcome: "failure",
       });
       void reply.code(503);
-      return { error: "unavailable", audit };
+      return { ...roleMappingError("unavailable"), audit };
     }
     deps.roles.set(group, role);
     const audit = await recordAudit(deps.audit, {
@@ -106,17 +163,13 @@ export async function registerAuthzRoutes(
       void reply.code(403);
       return authError("forbidden");
     }
-    const body = request.body;
-    if (
-      typeof body !== "object" ||
-      body === null ||
-      !("group" in body) ||
-      typeof (body as { group: unknown }).group !== "string"
-    ) {
+    let group: string;
+    try {
+      group = parseAdminRoleMappingRevokeRequest(request.body).group;
+    } catch {
       void reply.code(400);
-      return authError("forbidden");
+      return roleMappingError("invalid_request");
     }
-    const group = (body as { group: string }).group;
     let deleted: boolean;
     try {
       deleted = await deps.roleStore.delete(group);
@@ -129,7 +182,7 @@ export async function registerAuthzRoutes(
         outcome: "failure",
       });
       void reply.code(503);
-      return { error: "unavailable", audit };
+      return { ...roleMappingError("unavailable"), audit };
     }
     if (!deleted) {
       const audit = await recordAudit(deps.audit, {
@@ -140,7 +193,7 @@ export async function registerAuthzRoutes(
         outcome: "failure",
       });
       void reply.code(404);
-      return { error: "not_found", audit };
+      return { ...roleMappingError("not_found"), audit };
     }
     deps.roles.delete(group);
     const audit = await recordAudit(deps.audit, {
@@ -163,6 +216,17 @@ async function recordAudit(
     return "recorded";
   } catch {
     return "failed";
+  }
+}
+
+async function recordAuditBestEffort(
+  audit: AuditStore,
+  record: Parameters<AuditStore["append"]>[0],
+): Promise<void> {
+  try {
+    await audit.append(record);
+  } catch {
+    // The caller returns no mapping bytes on failure or denial.
   }
 }
 

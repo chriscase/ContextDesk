@@ -18,6 +18,7 @@ import {
 } from "./app-location.js";
 import { Cases } from "./Cases.js";
 import { Catalog } from "./Catalog.js";
+import { Administration } from "./Administration.js";
 import { HelpCenter } from "./HelpCenter.js";
 import { LoginForm } from "./LoginForm.js";
 import { AUTH_LOST_EVENT } from "./protected-api.js";
@@ -68,6 +69,7 @@ const PRIMARY_NAV: readonly { area: AreaId; label: string }[] = [
   { area: "overview", label: "Overview" },
   { area: "investigations", label: "Investigations" },
   { area: "sources", label: "Sources" },
+  { area: "administration", label: "Administration" },
   { area: "help", label: "Help" },
 ];
 
@@ -387,6 +389,7 @@ export function App() {
     (roles.includes("case-lead") || roles.includes("admin") || roles.includes("contributor"));
   const canLeadCatalog =
     !staticReadOnly && (roles.includes("case-lead") || roles.includes("admin"));
+  const canAdmin = !staticReadOnly && roles.includes("admin");
   const work: WorkLocation = isWorkLocation(location) ? location : HOME;
   const inCasesArea = work.area === "overview" || work.area === "investigations";
   const unknown = isUnknownLocation(location);
@@ -418,7 +421,9 @@ export function App() {
         <div className="topbar__spread" data-open={navOpen ? "true" : undefined}>
           <nav id="primary-nav" className="topbar__nav" aria-label="Primary">
             <ul>
-              {PRIMARY_NAV.map((item) => {
+              {PRIMARY_NAV.filter(
+                (item) => item.area !== "administration" || canAdmin,
+              ).map((item) => {
                 const activeArea = item.area === currentArea;
                 // Help keeps the focused investigation in the location so its
                 // articles can offer a real way back to that work; the Help
@@ -556,6 +561,26 @@ export function App() {
                 }
               />
             </section>
+            {work.area === "administration" ? (
+              canAdmin ? (
+                <section className="app__area" aria-label="Administration">
+                  <Administration />
+                </section>
+              ) : (
+                <section className="not-found" aria-labelledby="administration-denied-title">
+                  <h2 className="not-found__title" id="administration-denied-title">
+                    Administration is unavailable
+                  </h2>
+                  <p className="not-found__copy" role="status">
+                    Your current workspace role does not allow administration. No directory or
+                    permission data was requested.
+                  </p>
+                  <button type="button" className="not-found__home" onClick={() => navigate(HOME)}>
+                    Back to overview
+                  </button>
+                </section>
+              )
+            ) : null}
           </>
         )}
       </main>

@@ -36,7 +36,7 @@ export const DEMO_PASSWORD = "demo";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtureRoot = join(here, "..", "..", "contracts", "fixtures");
-const demoRoleMap = "cn=demo-lead,ou=groups,dc=example,dc=test=case-lead";
+const demoRoleMap = "cn=demo-admins,ou=groups,dc=example,dc=test=admin";
 
 interface DemoApp {
   app: FastifyInstance;
@@ -63,9 +63,9 @@ function demoUsers() {
         identity: {
           id: "uid=demo,ou=people,dc=example,dc=test",
           username: DEMO_USERNAME,
-          displayName: "Demo case lead",
+          displayName: "Demo administrator",
         },
-        groups: ["cn=demo-lead,ou=groups,dc=example,dc=test"],
+        groups: ["cn=demo-admins,ou=groups,dc=example,dc=test"],
       },
     ],
   ]);

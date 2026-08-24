@@ -68,6 +68,26 @@ export type {
 } from "./admin-directory.js";
 
 export {
+  ADMIN_ROLE_MAPPING_ERROR_SCHEMA_ID,
+  ADMIN_ROLE_MAPPING_LIST_SCHEMA_ID,
+  ADMIN_ROLE_MAPPING_MAX_GROUP_LENGTH,
+  ADMIN_ROLE_MAPPING_MAX_RESULTS,
+  normalizeAdminRoleGroup,
+  parseAdminRoleMappingError,
+  parseAdminRoleMappingList,
+  parseAdminRoleMappingRevokeRequest,
+  parseAdminRoleMappingUpdateRequest,
+} from "./admin-role-map.js";
+export type {
+  AdminRoleMappingErrorCode,
+  AdminRoleMappingErrorV1,
+  AdminRoleMappingListV1,
+  AdminRoleMappingRevokeRequestV1,
+  AdminRoleMappingUpdateRequestV1,
+  AdminRoleMappingV1,
+} from "./admin-role-map.js";
+
+export {
   CASE_LIST_SCHEMA_ID,
   CASE_SCHEMA_ID,
   CASE_SEVERITIES,

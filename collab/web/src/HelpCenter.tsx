@@ -78,7 +78,7 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Sessions come from the workspace server; a directory group must map to a workspace role before the workspace opens.",
         keywords: ["login", "password", "roles", "permissions", "viewer", "contributor", "case-lead", "admin", "ldap", "fixture", "demo"],
         what:
-          "Signing in sends your username and password to the workspace server, which checks them against its configured identity source and maps your directory groups to one of four roles: viewer, contributor, case-lead, or admin. Viewers can read everything visible to their account. Contributors can also add notes, upload evidence, and import external runs. Case leads can additionally freeze snapshots, launch AI lanes, accept decisions, manage sources, change case status, and make share-safe exports. Admin adds server-side role-map management, not extra buttons in this app.",
+          "Signing in sends your username and password to the workspace server, which checks them against its configured identity source and maps your directory groups to one of four roles: viewer, contributor, case-lead, or admin. Viewers can read everything visible to their account. Contributors can also add notes, upload evidence, and import external runs. Case leads can additionally freeze snapshots, launch AI lanes, accept decisions, manage sources, change case status, and make share-safe exports. Admin also unlocks the Administration page for persistent group-to-role mapping.",
         when:
           "Use this when sign-in fails, or when a button you expected is missing — most missing controls are role-gated, and the page usually says which role is required.",
         steps: [
@@ -525,21 +525,24 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         id: "administration",
         title: "Administration and setup",
         summary:
-          "Role mapping, configuration, and health checks are operator work at the command line — this build has no admin screens and no setup wizard.",
-        keywords: ["admin", "setup", "configuration", "wizard", "operator", "doctor", "static", "read-only", "sample data"],
+          "Administrators can discover directory references and manage persistent group-to-role mappings; deployment setup remains operator work.",
+        keywords: ["admin", "directory", "group", "role", "grant", "revoke", "ldap", "setup", "configuration", "wizard", "operator", "doctor", "static", "read-only", "sample data"],
         what:
-          "The workspace's administration surface lives with the operator, not in this app: directory-group-to-role mapping is a server API with no web screen, and first-run configuration and health checks are command-line tools on the server. The web app's admin role unlocks no extra buttons here. Two special builds exist: a synthetic-demo build with sample data and a fixture sign-in, and a static read-only snapshot where editing and sign-out are removed and a banner says so.",
+          "The Administration page is visible only to the workspace admin role. It lists the persistent mappings that grant ContextDesk roles and provides bounded searches for identities and groups in the configured directory. Search results are references only: finding an identity or group grants nothing, creates nothing, and never changes directory membership. Access comes only from an explicit destination group mapping to viewer, contributor, case-lead, or admin.",
         when:
-          "Read this when you need something changed that no screen offers — role grants, gateway configuration, identity setup — so you know to ask an operator rather than hunt for a hidden page.",
+          "Use this when a directory group needs workspace access, a group's role changes, or a stale mapping must be revoked. Use operator tooling instead for first deployment, gateways, database settings, directory connection settings, backups, and health checks.",
         steps: [
-          "For role grants or identity changes, contact your workspace operator or administrator.",
+          "Open Administration from the primary navigation. Non-admin users cannot see the destination, and a direct route does not request protected administration data.",
+          "Search for a group or identity. Results are capped at twenty; refine the term rather than assuming the result is the full directory.",
+          "Select or enter the exact group reference, choose one workspace role, and grant it. Existing-role changes, revocation, and every administrator grant require an explicit confirmation.",
+          "Refresh Current group permissions to verify the destination state. The server also refreshes its live authorization map from persistent storage on each API request.",
           "For gateway or profile configuration, the operator sets host-side configuration; the launcher only reports availability.",
           "In sample-data mode, expect local sample state to reset when its service stops.",
         ],
         recorded:
-          "Server-side, sign-ins and sign-outs are audited and login attempts are rate-limited. This app does not display those records.",
+          "A mapping list is returned only after its successful read is audited. Updates and revocations submit success, failure, or denial audit records, and their server response separately records whether that audit write succeeded. Directory searches record only the search category and outcome — not the search term or returned directory data. The console refreshes from the persistent mapping store after a confirmed change.",
         limits:
-          "There is no graphical first-run setup wizard in this build, no user-management screen, and no backup or retention controls in the web UI. What you can see here is honestly limited to what the workspace server exposes.",
+          "There is still no graphical first-run setup wizard, directory-user editor, group-membership editor, gateway configuration screen, or backup and retention control in this build. Deployment-state and secret-reference foundations are not exposed here because the end-to-end setup flow is not yet shipped. The console never displays or accepts directory credentials and never trusts imported roles.",
       },
     ],
   },

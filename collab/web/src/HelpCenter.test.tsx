@@ -243,9 +243,12 @@ describe("honest limitation copy", () => {
     expect(screen.getByText(/LDAP directory by default/)).toBeTruthy();
   });
 
-  it("states that setup is operator work with no GUI wizard, and qualification is not surfaced", () => {
+  it("describes the shipped admin console while keeping setup and qualification limits honest", () => {
     renderHelp();
     fireEvent.click(screen.getByRole("button", { name: "Administration and setup" }));
+    expect(screen.getByText(/visible only to the workspace admin role/)).toBeTruthy();
+    expect(screen.getByText(/finding an identity or group grants nothing/)).toBeTruthy();
+    expect(screen.getByText(/never displays or accepts directory credentials/)).toBeTruthy();
     expect(screen.getByText(/no graphical first-run setup wizard/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Lane qualification and host profiles" }));
     expect(screen.getAllByText(/passed, failed, skipped, or partial/).length).toBeGreaterThan(0);

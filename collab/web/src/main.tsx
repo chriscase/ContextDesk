@@ -9,6 +9,7 @@ import "./styles/triage-workspace.css";
 import "./styles/catalog.css";
 import "./styles/export.css";
 import "./styles/experiment-lab.css";
+import "./styles/administration.css";
 
 const root = document.getElementById("root");
 if (!root) {

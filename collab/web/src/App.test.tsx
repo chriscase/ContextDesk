@@ -240,6 +240,7 @@ describe("authenticated application shell", () => {
       expect(within_nav(nav, label)).toBeTruthy();
     }
     expect(within_nav(nav, "How it works")).toBeNull();
+    expect(within_nav(nav, "Administration")).toBeNull();
     expect(screen.getByRole("button", { name: "Start investigation" })).toBeTruthy();
     expect(
       screen
@@ -247,6 +248,40 @@ describe("authenticated application shell", () => {
         .querySelector('[aria-current="page"]')?.textContent,
     ).toBe("Overview");
     expect(screen.getByRole("heading", { name: "Operating picture" })).toBeTruthy();
+  });
+
+  it("shows Administration only to admins and does not fetch protected admin data for direct non-admin routes", async () => {
+    window.history.replaceState(null, "", "/administration");
+    const nonAdminFetch = stubSignedInFetch({ username: "dave", roles: ["case-lead"] });
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Administration is unavailable" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
+    expect(nonAdminFetch.mock.calls.map((call) => String(call[0]))).not.toContain(
+      "/api/authz/group-role-map",
+    );
+    cleanup();
+
+    window.history.replaceState(null, "", "/");
+    stubSignedInFetch({ username: "owner", roles: ["admin"] }, (url) => {
+      if (url === "/api/authz/group-role-map") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            schemaId: "cd-collab.admin_role_mapping_list.v1",
+            mappings: [{ group: "local:admins", role: "admin" }],
+            limit: 500,
+            truncated: false,
+          }),
+        } as Response);
+      }
+      return null;
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Administration" }));
+    expect(await screen.findByRole("heading", { name: "Administration" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/administration");
+    expect(document.title).toBe("Administration · ContextDesk War Room");
   });
 
   it("routes Start investigation to the inventory and focuses the title field", async () => {
@@ -471,6 +506,11 @@ describe("pathname parsing", () => {
     });
     expect(parsePathname("/sources")).toEqual({
       area: "sources",
+      caseId: null,
+      stage: "situation",
+    });
+    expect(parsePathname("/administration")).toEqual({
+      area: "administration",
       caseId: null,
       stage: "situation",
     });

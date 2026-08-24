@@ -42,7 +42,7 @@ describe("synthetic demo server", () => {
     const headers = { cookie: cookie(login) };
     const session = await demo.app.inject({ method: "GET", url: "/api/auth/me", headers });
     expect(session.statusCode).toBe(200);
-    expect(JSON.parse(session.body).roles).toEqual(["case-lead"]);
+    expect(JSON.parse(session.body).roles).toEqual(["admin"]);
     const activityResponse = await demo.app.inject({
       method: "GET",
       url: "/api/activity?limit=30",
