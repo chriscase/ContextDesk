@@ -9,6 +9,7 @@ use cd_core::error::{CoreError, CoreResult};
 use cd_core::investigation_team_qualification::{InvestigationTeamRole, MemberBinding};
 use cd_core::openai_chat_contract::OpenAiChatRequestMode;
 use cd_core::provider_telemetry::ProviderTransportTelemetry;
+use cd_core::quality_eval::live_known_answer::scripted_diagnostic_from_parsed_response;
 #[cfg(unix)]
 use cd_core::quality_eval::LiveKnownAnswerOwnerDirectory;
 use cd_core::quality_eval::{
@@ -599,7 +600,7 @@ fn execute_target(
             ));
             continue;
         }
-        if case.requires_host_diagnostic() {
+        if case.blocks_diagnostic_before_dispatch() {
             observations.push(failed_observation(
                 scenario_id,
                 LaneStatus::Blocked,
@@ -663,7 +664,10 @@ fn execute_target(
                         answer_score: None,
                         host_score_failed: false,
                     });
-                    match score_live_known_answer_response(case, &parsed, None) {
+                    let host_diagnostic = case.requires_host_diagnostic().then(|| {
+                        scripted_diagnostic_from_parsed_response(&parsed, target.member.role)
+                    });
+                    match score_live_known_answer_response(case, &parsed, host_diagnostic) {
                         Ok(score) => observations.push(LiveKnownAnswerScenarioObservation {
                             scenario_id,
                             status: LaneStatus::Executed,
@@ -1356,11 +1360,16 @@ mod tests {
         )
         .expect("report");
         let report = evidence.report;
-        assert_eq!(transport.calls, 10);
+        assert_eq!(transport.calls, 12);
         assert_eq!(report.status, LiveKnownAnswerRunStatus::Partial);
-        assert_eq!(report.metrics.failed_scenarios, 10);
-        assert_eq!(report.metrics.blocked_scenarios, 4);
-        assert!(report.telemetry[8..12].iter().all(|row| {
+        assert_eq!(report.metrics.failed_scenarios, 12);
+        assert_eq!(report.metrics.blocked_scenarios, 2);
+        assert!(report.telemetry[8..10].iter().all(|row| {
+            row.status == LaneStatus::Failed
+                && row.failure_code.as_deref() == Some("provider_request_failed")
+                && row.message_content_bytes > 0
+        }));
+        assert!(report.telemetry[10..12].iter().all(|row| {
             row.status == LaneStatus::Blocked
                 && row.failure_code.as_deref() == Some("host_diagnostic_pipeline_unavailable")
                 && row.latency_ms == 0
@@ -1452,7 +1461,7 @@ mod tests {
         )
         .expect("evidence");
 
-        assert_eq!(transport.calls, 10);
+        assert_eq!(transport.calls, 12);
         assert_eq!(
             evidence.report.telemetry[0].failure_code.as_deref(),
             Some("provider_response_parse_failed")
@@ -1476,14 +1485,14 @@ mod tests {
             evidence.report.quality_run.quality_unit.subject.model_id,
             "model-a"
         );
-        assert_eq!(evidence.report.metrics.input_tokens, Some(1_000));
-        assert_eq!(evidence.report.metrics.output_tokens, Some(200));
-        assert_eq!(evidence.report.metrics.reasoning_tokens, Some(50));
-        assert_eq!(evidence.report.metrics.cached_tokens, Some(70));
-        assert_eq!(evidence.report.metrics.cost_microusd, Some(1_230));
+        assert_eq!(evidence.report.metrics.input_tokens, Some(1_200));
+        assert_eq!(evidence.report.metrics.output_tokens, Some(240));
+        assert_eq!(evidence.report.metrics.reasoning_tokens, Some(60));
+        assert_eq!(evidence.report.metrics.cached_tokens, Some(84));
+        assert_eq!(evidence.report.metrics.cost_microusd, Some(1_476));
 
         let capture = evidence.capture.as_ref().expect("capture");
-        assert_eq!(capture.scenarios.len(), 7);
+        assert_eq!(capture.scenarios.len(), 9);
         assert_eq!(capture.quality_unit.subject.model_id, "model-a");
         assert!(capture
             .scenarios
