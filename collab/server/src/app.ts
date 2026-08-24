@@ -36,6 +36,7 @@ import {
   registerPortableInvestigationRoutes,
   type PortableInvestigationService,
 } from "./modules/portable-investigations/index.js";
+import { registerSetupRoutes, type SetupService } from "./modules/setup/index.js";
 
 export interface SecurityDeps {
   auth: AuthRouteDeps;
@@ -58,6 +59,7 @@ export interface AppDeps {
   experiments?: ExperimentService;
   exporter?: ExportService;
   portable?: PortableInvestigationService;
+  setup?: SetupService;
   serveStatic?: boolean;
 }
 
@@ -111,11 +113,16 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     return body;
   });
 
+  if (deps.setup) {
+    await registerSetupRoutes(app, { setup: deps.setup });
+  }
+
   if (deps.security) {
     const security = deps.security;
     const roleStore = security.roleStore ?? new MemoryGroupRoleStore(security.roles);
     app.addHook("onRequest", async (request) => {
       if (!request.url.startsWith("/api/")) return;
+      if (request.url.startsWith("/api/setup/")) return;
       security.roles.replace(await roleStore.load());
     });
     await registerAuthRoutes(app, security.auth);
