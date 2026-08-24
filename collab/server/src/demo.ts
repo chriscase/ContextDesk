@@ -30,6 +30,7 @@ import {
   type RustBridgeTriageExecutorOptions,
 } from "./modules/triage-runs/index.js";
 import { PresenceService } from "./modules/presence/index.js";
+import type { SetupService } from "./modules/setup/index.js";
 
 export const DEMO_USERNAME = "demo";
 export const DEMO_PASSWORD = "demo";
@@ -52,6 +53,8 @@ interface DemoAppOptions {
   appBuilder?: typeof buildApp;
   /** Test observer for the temporary root created before app construction. */
   onEvidenceRootCreated?: (root: string) => void;
+  /** Explicit setup host seam for first-run UI qualification. */
+  setup?: SetupService;
 }
 
 function demoUsers() {
@@ -487,6 +490,7 @@ export async function buildDemoApp(options: DemoAppOptions = {}): Promise<DemoAp
       experiments,
       exporter,
       portable,
+      ...(options.setup ? { setup: options.setup } : {}),
       serveStatic: staticDir !== null,
       security: {
         auth: {
