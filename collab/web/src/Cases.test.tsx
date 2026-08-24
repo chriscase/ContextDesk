@@ -169,6 +169,160 @@ describe("war room overview", () => {
     expect(screen.queryByText("permission denied")).toBeNull();
   });
 
+  it("opens a newly created investigation without falling back to the inventory", async () => {
+    let listReads = 0;
+    stubCaseFetch({
+      cases: [],
+      onRequest: (url, init) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/cases" && method === "GET") {
+          listReads += 1;
+          if (listReads === 1) {
+            return Promise.resolve({ ok: true, json: async () => ({ cases: [] }) });
+          }
+          return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
+        }
+        if (url === "/api/cases" && method === "POST") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              id: "c-created",
+              title: "Newly created investigation",
+              status: "open",
+              severity: "medium",
+            }),
+          });
+        }
+        return null;
+      },
+    });
+
+    render(<Cases roles={["case-lead"]} view="investigations" />);
+    const title = await screen.findByPlaceholderText("New investigation title");
+    fireEvent.change(title, { target: { value: "Newly created investigation" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Newly created investigation" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Investigations" })).toBeNull();
+    expect(screen.queryByText("That investigation is not available to your account.")).toBeNull();
+  });
+
+  it("ignores an older successful inventory response after creating an investigation", async () => {
+    let resolveInitialList: ((value: unknown) => void) | undefined;
+    const initialList = new Promise((resolve) => {
+      resolveInitialList = resolve;
+    });
+    let listReads = 0;
+    stubCaseFetch({
+      cases: [],
+      onRequest: (url, init) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/cases" && method === "GET") {
+          listReads += 1;
+          if (listReads === 1) return initialList;
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              cases: [
+                {
+                  id: "c-created",
+                  title: "Race-safe investigation",
+                  status: "open",
+                  severity: "medium",
+                },
+              ],
+            }),
+          });
+        }
+        if (url === "/api/cases" && method === "POST") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              id: "c-created",
+              title: "Race-safe investigation",
+              status: "open",
+              severity: "medium",
+            }),
+          });
+        }
+        return null;
+      },
+    });
+
+    render(<Cases roles={["case-lead"]} view="investigations" />);
+    const title = await screen.findByPlaceholderText("New investigation title");
+    fireEvent.change(title, { target: { value: "Race-safe investigation" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
+
+    expect(await screen.findByRole("heading", { name: "Race-safe investigation" })).toBeTruthy();
+    resolveInitialList?.({ ok: true, json: async () => ({ cases: [] }) });
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Race-safe investigation" })).toBeTruthy();
+      expect(screen.queryByText("That investigation is not available to your account.")).toBeNull();
+    });
+  });
+
+  it("clears a newly created investigation when the latest inventory refresh loses authorization", async () => {
+    let listReads = 0;
+    stubCaseFetch({
+      cases: [],
+      onRequest: (url, init) => {
+        const method = init?.method ?? "GET";
+        if (url === "/api/cases" && method === "GET") {
+          listReads += 1;
+          if (listReads === 1) {
+            return Promise.resolve({ ok: true, json: async () => ({ cases: [] }) });
+          }
+          return Promise.resolve({ ok: false, status: 403, json: async () => ({}) });
+        }
+        if (url === "/api/cases" && method === "POST") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              id: "c-created",
+              title: "Authorization changed",
+              status: "open",
+              severity: "medium",
+            }),
+          });
+        }
+        return null;
+      },
+    });
+
+    render(<Cases roles={["case-lead"]} view="investigations" />);
+    const title = await screen.findByPlaceholderText("New investigation title");
+    fireEvent.change(title, { target: { value: "Authorization changed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
+
+    expect(await screen.findByRole("heading", { name: "Investigation unavailable" })).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain(
+      "That investigation is not available to your account.",
+    );
+    expect(screen.queryByRole("heading", { name: "Authorization changed" })).toBeNull();
+  });
+
+  it("renders an unavailable deep link as a focused error, not the investigation inventory", async () => {
+    stubCaseFetch();
+    render(
+      <Cases
+        roles={["case-lead"]}
+        view="investigations"
+        focusCaseId="c-not-visible"
+        onOpenCase={vi.fn()}
+      />,
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("That investigation is not available to your account.");
+    expect(screen.getByRole("heading", { name: "Investigation unavailable" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Investigations" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Fixture incident" })).toBeNull();
+  });
+
   it("shows cross-investigation activity with a direct work-item route", async () => {
     const onActivityOpen = vi.fn();
     stubCaseFetch({

@@ -100,7 +100,7 @@ test.describe("complete war-room operator journey", () => {
       .filter({ hasText: "queue depth is the root cause" });
     await expect(imported.locator(".imported-run__banner")).toHaveText("Unverified imported run");
     await expect(imported).toContainText("Fixture chat assistant");
-    await expect(imported).toContainText("kind external-tool");
+    await expect(imported).toContainText("Source: Fixture chat assistant · external-tool");
     await expect(imported).toContainText("visibility importer_described");
     await expect(imported).not.toContainText("human-authored");
     await expect(page.getByText("imported output").first()).toBeVisible();
