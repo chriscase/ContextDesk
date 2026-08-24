@@ -614,6 +614,11 @@ pub fn config_path(branding: &Branding) -> CoreResult<PathBuf> {
 /// tightened to owner-only only when it is already owned by the current user
 /// — never home or an unrelated pre-existing ancestor.
 ///
+/// On macOS only, `/tmp/<child>` and `/var/folders/...` may begin through the
+/// corresponding root-owned system alias. The alias must resolve to the same
+/// device/inode as the separately no-follow-opened canonical directory; all
+/// later components retain the policy above.
+///
 /// On platforms where no-follow, owner-bound traversal cannot be guaranteed
 /// with current dependencies, this fails closed instead of calling
 /// `create_dir_all`.
@@ -691,9 +696,27 @@ fn ensure_directory_chain_unix(
             "durable store path must be an absolute directory",
         ));
     }
-    let mut directory = open_existing_directory_nofollow(Path::new("/"))?;
+    if dir
+        .components()
+        .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(store_config_error(
+            "store path component is not a single normal name",
+        ));
+    }
+    let root = open_existing_directory_nofollow(Path::new("/"))?;
+    #[cfg(target_os = "macos")]
+    let (mut directory, skipped_components) = match macos_trusted_root_alias(dir) {
+        Some(alias) => (open_verified_macos_root_alias(&root, alias)?, 2),
+        None => (root, 0),
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (mut directory, skipped_components) = (root, 0);
     let mut saw_segment = false;
-    for component in dir.components() {
+    for (index, component) in dir.components().enumerate() {
+        if index < skipped_components {
+            continue;
+        }
         match component {
             Component::RootDir => {}
             Component::Normal(name) => {
@@ -716,6 +739,226 @@ fn ensure_directory_chain_unix(
         fchmod_owner_only_directory(&directory, expected_uid)?;
     }
     Ok(directory)
+}
+
+/// macOS exposes two root-level, root-owned compatibility aliases used by
+/// ordinary temporary-directory APIs: `/tmp -> /private/tmp` and
+/// `/var -> /private/var`. Only paths with a user-controlled descendant are
+/// eligible. Everything after the verified alias is still traversed with the
+/// regular descriptor-relative `O_NOFOLLOW` policy.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacosTrustedRootAlias {
+    Tmp,
+    Var,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_trusted_root_alias(path: &Path) -> Option<MacosTrustedRootAlias> {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return None;
+    }
+    match components.next() {
+        Some(Component::Normal(alias)) if alias == std::ffi::OsStr::new("tmp") => {
+            matches!(components.next(), Some(Component::Normal(_)))
+                .then_some(MacosTrustedRootAlias::Tmp)
+        }
+        Some(Component::Normal(alias)) if alias == std::ffi::OsStr::new("var") => {
+            let has_folders = matches!(
+                components.next(),
+                Some(Component::Normal(folders)) if folders == std::ffi::OsStr::new("folders")
+            );
+            (has_folders && matches!(components.next(), Some(Component::Normal(_))))
+                .then_some(MacosTrustedRootAlias::Var)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_verified_macos_root_alias(
+    root: &std::fs::File,
+    alias: MacosTrustedRootAlias,
+) -> CoreResult<std::fs::File> {
+    open_verified_macos_root_alias_with_ops(root, alias, &mut MacosRootAliasHostOps)
+}
+
+/// Private operation boundary for the macOS root-alias verifier. Production
+/// always uses [`MacosRootAliasHostOps`]; tests inject a scripted implementation
+/// so every fail-closed branch and the single deliberate symlink-follow can be
+/// exercised through this exact verification sequence.
+#[cfg(target_os = "macos")]
+trait MacosRootAliasVerifierOps {
+    fn stat_alias_nofollow(
+        &mut self,
+        root: &std::fs::File,
+        alias_name: &std::ffi::CString,
+    ) -> CoreResult<Option<libc::stat>>;
+
+    fn open_directory_nofollow(
+        &mut self,
+        parent: &std::fs::File,
+        name: &std::ffi::CString,
+    ) -> Result<std::fs::File, OpenComponentError>;
+
+    fn open_alias_following(
+        &mut self,
+        root: &std::fs::File,
+        alias_name: &std::ffi::CString,
+    ) -> CoreResult<std::fs::File>;
+
+    fn metadata(
+        &mut self,
+        file: &std::fs::File,
+        subject: MacosAliasMetadataSubject,
+    ) -> std::io::Result<std::fs::Metadata>;
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum MacosAliasMetadataSubject {
+    FollowedAlias,
+    CanonicalTarget,
+}
+
+#[cfg(target_os = "macos")]
+struct MacosRootAliasHostOps;
+
+#[cfg(target_os = "macos")]
+impl MacosRootAliasVerifierOps for MacosRootAliasHostOps {
+    fn stat_alias_nofollow(
+        &mut self,
+        root: &std::fs::File,
+        alias_name: &std::ffi::CString,
+    ) -> CoreResult<Option<libc::stat>> {
+        fstatat_nofollow(root, alias_name)
+    }
+
+    fn open_directory_nofollow(
+        &mut self,
+        parent: &std::fs::File,
+        name: &std::ffi::CString,
+    ) -> Result<std::fs::File, OpenComponentError> {
+        try_openat_directory_nofollow(parent, name)
+    }
+
+    fn open_alias_following(
+        &mut self,
+        root: &std::fs::File,
+        alias_name: &std::ffi::CString,
+    ) -> CoreResult<std::fs::File> {
+        openat_directory_following_macos_root_alias(root, alias_name)
+    }
+
+    fn metadata(
+        &mut self,
+        file: &std::fs::File,
+        _subject: MacosAliasMetadataSubject,
+    ) -> std::io::Result<std::fs::Metadata> {
+        file.metadata()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_verified_macos_root_alias_with_ops<O: MacosRootAliasVerifierOps>(
+    root: &std::fs::File,
+    alias: MacosTrustedRootAlias,
+    ops: &mut O,
+) -> CoreResult<std::fs::File> {
+    let (alias_name, canonical_leaf) = match alias {
+        MacosTrustedRootAlias::Tmp => ("tmp", "tmp"),
+        MacosTrustedRootAlias::Var => ("var", "var"),
+    };
+    let alias_name = path_component_cstring(std::ffi::OsStr::new(alias_name))?;
+    let before = ops
+        .stat_alias_nofollow(root, &alias_name)?
+        .ok_or_else(|| store_config_error("trusted macOS root alias is missing"))?;
+    if !macos_root_alias_stat_is_trusted(&before) {
+        return Err(store_config_error(
+            "trusted macOS root alias is not a root-owned symlink",
+        ));
+    }
+
+    let private_name = path_component_cstring(std::ffi::OsStr::new("private"))?;
+    let private = ops
+        .open_directory_nofollow(root, &private_name)
+        .map_err(|_| {
+            store_config_error("canonical macOS private directory cannot be opened safely")
+        })?;
+    let canonical_leaf = path_component_cstring(std::ffi::OsStr::new(canonical_leaf))?;
+    let canonical = ops
+        .open_directory_nofollow(&private, &canonical_leaf)
+        .map_err(|_| store_config_error("canonical macOS alias target cannot be opened safely"))?;
+    let followed_alias = ops.open_alias_following(root, &alias_name)?;
+
+    let after = ops
+        .stat_alias_nofollow(root, &alias_name)?
+        .ok_or_else(|| store_config_error("trusted macOS root alias disappeared"))?;
+    if !same_named_inode(&before, &after) || !macos_root_alias_stat_is_trusted(&after) {
+        return Err(store_config_error(
+            "trusted macOS root alias identity changed during verification",
+        ));
+    }
+
+    let alias_target = ops
+        .metadata(&followed_alias, MacosAliasMetadataSubject::FollowedAlias)
+        .map_err(|_| store_config_error("cannot inspect trusted macOS alias target"))?;
+    let canonical_target = ops
+        .metadata(&canonical, MacosAliasMetadataSubject::CanonicalTarget)
+        .map_err(|_| store_config_error("cannot inspect canonical macOS alias target"))?;
+    if !macos_alias_target_matches_canonical(&alias_target, &canonical_target) {
+        return Err(store_config_error(
+            "trusted macOS root alias does not name its canonical target",
+        ));
+    }
+
+    Ok(canonical)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_root_alias_stat_is_trusted(stat: &libc::stat) -> bool {
+    stat.st_mode & libc::S_IFMT == libc::S_IFLNK && stat.st_uid == 0
+}
+
+#[cfg(target_os = "macos")]
+fn macos_alias_target_matches_canonical(
+    alias_target: &std::fs::Metadata,
+    canonical_target: &std::fs::Metadata,
+) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    alias_target.is_dir()
+        && canonical_target.is_dir()
+        && alias_target.dev() == canonical_target.dev()
+        && alias_target.ino() == canonical_target.ino()
+}
+
+#[cfg(target_os = "macos")]
+fn openat_directory_following_macos_root_alias(
+    root: &std::fs::File,
+    alias_name: &std::ffi::CString,
+) -> CoreResult<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    // SAFETY: `root` is the retained filesystem-root descriptor and
+    // `alias_name` is one of the two fixed names accepted above. This is the
+    // only traversal open that follows a symlink; its target is immediately
+    // matched by device/inode to a separately no-follow-opened canonical dir.
+    let descriptor = unsafe {
+        libc::openat(
+            root.as_raw_fd(),
+            alias_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        return Err(store_config_error(
+            "trusted macOS root alias cannot be opened for verification",
+        ));
+    }
+    // SAFETY: `openat` returned a new owned descriptor.
+    Ok(unsafe { std::fs::File::from_raw_fd(descriptor) })
 }
 
 #[cfg(unix)]
@@ -1577,6 +1820,9 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
 /// symlinks, hardlinks, and unsafe modes fail closed and leave any existing
 /// destination unchanged. Missing parents are created incrementally without
 /// following symlinks or chmodding pre-existing ancestors.
+/// macOS root aliases for `/tmp/<child>` and `/var/folders/...` are accepted
+/// only after root ownership and canonical target identity are verified; the
+/// complete requested path is never canonicalized.
 ///
 /// On platforms where that no-follow, owner-only, directory-relative replace
 /// cannot be guaranteed with current dependencies, this fails closed instead
@@ -2121,6 +2367,115 @@ mod tests {
         names
     }
 
+    #[cfg(target_os = "macos")]
+    fn macos_alias_spelling(canonical: &Path, canonical_root: &Path, alias_root: &Path) -> PathBuf {
+        alias_root.join(
+            canonical
+                .strip_prefix(canonical_root)
+                .expect("canonical path beneath expected macOS private root"),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    struct ScriptedMacosRootAliasVerifierOps {
+        before: libc::stat,
+        after: libc::stat,
+        stat_calls: usize,
+        nofollow_open_calls: usize,
+        canonical: std::fs::File,
+        followed: std::fs::File,
+        calls: Vec<&'static str>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl ScriptedMacosRootAliasVerifierOps {
+        fn new(before: libc::stat, after: libc::stat, canonical: &Path, followed: &Path) -> Self {
+            Self {
+                before,
+                after,
+                stat_calls: 0,
+                nofollow_open_calls: 0,
+                canonical: std::fs::File::open(canonical)
+                    .expect("open scripted canonical directory"),
+                followed: std::fs::File::open(followed).expect("open scripted followed directory"),
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl MacosRootAliasVerifierOps for ScriptedMacosRootAliasVerifierOps {
+        fn stat_alias_nofollow(
+            &mut self,
+            _root: &std::fs::File,
+            _alias_name: &std::ffi::CString,
+        ) -> CoreResult<Option<libc::stat>> {
+            let stat = if self.stat_calls == 0 {
+                self.calls.push("stat_alias_nofollow_before");
+                self.before
+            } else {
+                self.calls.push("stat_alias_nofollow_after");
+                self.after
+            };
+            self.stat_calls += 1;
+            Ok(Some(stat))
+        }
+
+        fn open_directory_nofollow(
+            &mut self,
+            _parent: &std::fs::File,
+            _name: &std::ffi::CString,
+        ) -> Result<std::fs::File, OpenComponentError> {
+            self.calls.push(if self.nofollow_open_calls == 0 {
+                "open_private_nofollow"
+            } else {
+                "open_canonical_target_nofollow"
+            });
+            self.nofollow_open_calls += 1;
+            self.canonical
+                .try_clone()
+                .map_err(|_| OpenComponentError::Unsafe)
+        }
+
+        fn open_alias_following(
+            &mut self,
+            _root: &std::fs::File,
+            _alias_name: &std::ffi::CString,
+        ) -> CoreResult<std::fs::File> {
+            self.calls.push("open_alias_following");
+            self.followed
+                .try_clone()
+                .map_err(|_| store_config_error("scripted alias target cannot be opened"))
+        }
+
+        fn metadata(
+            &mut self,
+            file: &std::fs::File,
+            subject: MacosAliasMetadataSubject,
+        ) -> std::io::Result<std::fs::Metadata> {
+            self.calls.push(match subject {
+                MacosAliasMetadataSubject::FollowedAlias => "metadata_followed_alias",
+                MacosAliasMetadataSubject::CanonicalTarget => "metadata_canonical_target",
+            });
+            file.metadata()
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn scripted_macos_alias_stat(mode: libc::mode_t, uid: libc::uid_t, inode: u64) -> libc::stat {
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        stat.st_mode = mode;
+        stat.st_uid = uid;
+        stat.st_dev = 41;
+        stat.st_ino = inode;
+        stat
+    }
+
+    #[cfg(target_os = "macos")]
+    fn trusted_scripted_macos_alias_stat(inode: u64) -> libc::stat {
+        scripted_macos_alias_stat(libc::S_IFLNK | 0o777, 0, inode)
+    }
+
     #[test]
     #[cfg(unix)]
     fn owner_only_creation_uses_branded_directory_name() {
@@ -2426,6 +2781,293 @@ mod tests {
         assert!(listed_names(&decoy)
             .iter()
             .all(|name| !name.starts_with(".cd-w-")));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn save_config_accepts_verified_macos_tmp_alias() {
+        let canonical_dir = tempfile::Builder::new()
+            .prefix("cd-macos-tmp-alias-")
+            .tempdir_in("/private/tmp")
+            .expect("create canonical macOS tmp fixture");
+        let alias_dir = macos_alias_spelling(
+            canonical_dir.path(),
+            Path::new("/private/tmp"),
+            Path::new("/tmp"),
+        );
+        let alias_path = alias_dir.join("config.json");
+        let canonical_path = canonical_dir.path().join("config.json");
+        let config = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+
+        save_config(&alias_path, &config).expect("save through verified /tmp alias");
+
+        assert_eq!(
+            load_config(&canonical_path).expect("canonical load").theme,
+            "light"
+        );
+        assert_eq!(
+            std::fs::read(&alias_path).unwrap(),
+            std::fs::read(&canonical_path).unwrap()
+        );
+        assert_eq!(unix_mode(&canonical_path), 0o600);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn save_config_accepts_verified_macos_var_folders_alias() {
+        let canonical_temp = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical process temp directory");
+        assert!(
+            canonical_temp.starts_with("/private/var/folders"),
+            "macOS process temp root must be beneath /private/var/folders: {}",
+            canonical_temp.display()
+        );
+        let canonical_dir = tempfile::Builder::new()
+            .prefix("cd-macos-var-alias-")
+            .tempdir_in(&canonical_temp)
+            .expect("create canonical macOS var fixture");
+        let alias_dir = macos_alias_spelling(
+            canonical_dir.path(),
+            Path::new("/private/var"),
+            Path::new("/var"),
+        );
+        let alias_path = alias_dir.join("config.json");
+        let canonical_path = canonical_dir.path().join("config.json");
+
+        save_config(&alias_path, &AppConfig::default())
+            .expect("save through verified /var/folders alias");
+
+        assert!(canonical_path.is_file());
+        assert_eq!(
+            std::fs::read(&alias_path).unwrap(),
+            std::fs::read(&canonical_path).unwrap()
+        );
+        assert_eq!(unix_mode(&canonical_path), 0o600);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_trusted_alias_still_rejects_later_intermediate_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let canonical_dir = tempfile::Builder::new()
+            .prefix("cd-macos-alias-symlink-")
+            .tempdir_in("/private/tmp")
+            .expect("create canonical macOS tmp fixture");
+        let alias_dir = macos_alias_spelling(
+            canonical_dir.path(),
+            Path::new("/private/tmp"),
+            Path::new("/tmp"),
+        );
+        let decoy = canonical_dir.path().join("decoy");
+        std::fs::create_dir(&decoy).unwrap();
+        let canary = decoy.join("canary");
+        std::fs::write(&canary, b"preserve").unwrap();
+        symlink(&decoy, canonical_dir.path().join("linked-home")).unwrap();
+
+        let attempted = alias_dir
+            .join("linked-home")
+            .join("nested")
+            .join("config.json");
+        let err = save_config(&attempted, &AppConfig::default())
+            .expect_err("later symlink must remain forbidden");
+
+        assert!(err.to_string().contains("symlinked") || err.to_string().contains("unreadable"));
+        assert_eq!(std::fs::read(&canary).unwrap(), b"preserve");
+        assert!(!decoy.join("nested").exists());
+        assert!(listed_names(&decoy)
+            .iter()
+            .all(|name| !name.starts_with(".cd-w-")));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_alias_classifier_and_identity_checks_fail_closed() {
+        assert_eq!(
+            macos_trusted_root_alias(Path::new("/tmp/fixture")),
+            Some(MacosTrustedRootAlias::Tmp)
+        );
+        assert_eq!(
+            macos_trusted_root_alias(Path::new("/var/folders/fixture")),
+            Some(MacosTrustedRootAlias::Var)
+        );
+        for wrong in [
+            "/tmp",
+            "/var",
+            "/var/tmp/fixture",
+            "/var/foldersx/fixture",
+            "/etc/fixture",
+            "/tmp/../fixture",
+            "/var/folders/../fixture",
+        ] {
+            assert_eq!(
+                macos_trusted_root_alias(Path::new(wrong)),
+                None,
+                "must not trust {wrong}"
+            );
+        }
+
+        let mut alias_stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        alias_stat.st_mode = libc::S_IFLNK | 0o777;
+        alias_stat.st_uid = 0;
+        assert!(macos_root_alias_stat_is_trusted(&alias_stat));
+        alias_stat.st_uid = 501;
+        assert!(!macos_root_alias_stat_is_trusted(&alias_stat));
+        alias_stat.st_uid = 0;
+        alias_stat.st_mode = libc::S_IFDIR | 0o755;
+        assert!(!macos_root_alias_stat_is_trusted(&alias_stat));
+
+        let first = store_tempdir();
+        let second = store_tempdir();
+        let first_meta = std::fs::metadata(first.path()).unwrap();
+        let second_meta = std::fs::metadata(second.path()).unwrap();
+        assert!(macos_alias_target_matches_canonical(
+            &first_meta,
+            &first_meta
+        ));
+        assert!(!macos_alias_target_matches_canonical(
+            &first_meta,
+            &second_meta
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_alias_verifier_rejects_actual_wrong_entry_type_and_owner_branches() {
+        let root = open_existing_directory_nofollow(Path::new("/")).expect("open root");
+        let fixture = store_tempdir();
+        let wrong_entries = [
+            (
+                "type",
+                scripted_macos_alias_stat(libc::S_IFDIR | 0o755, 0, 71),
+            ),
+            (
+                "owner",
+                scripted_macos_alias_stat(libc::S_IFLNK | 0o777, 501, 72),
+            ),
+        ];
+
+        for (case, before) in wrong_entries {
+            let mut ops = ScriptedMacosRootAliasVerifierOps::new(
+                before,
+                trusted_scripted_macos_alias_stat(72),
+                fixture.path(),
+                fixture.path(),
+            );
+            let error = open_verified_macos_root_alias_with_ops(
+                &root,
+                MacosTrustedRootAlias::Tmp,
+                &mut ops,
+            )
+            .expect_err("wrong alias entry must fail closed");
+
+            assert!(
+                error.to_string().contains("not a root-owned symlink"),
+                "{case}"
+            );
+            assert_eq!(ops.calls, ["stat_alias_nofollow_before"], "{case}");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_alias_verifier_rejects_identity_change_between_real_stat_steps() {
+        let root = open_existing_directory_nofollow(Path::new("/")).expect("open root");
+        let fixture = store_tempdir();
+        let mut ops = ScriptedMacosRootAliasVerifierOps::new(
+            trusted_scripted_macos_alias_stat(81),
+            trusted_scripted_macos_alias_stat(82),
+            fixture.path(),
+            fixture.path(),
+        );
+
+        let error =
+            open_verified_macos_root_alias_with_ops(&root, MacosTrustedRootAlias::Tmp, &mut ops)
+                .expect_err("replaced alias entry must fail closed");
+
+        assert!(error.to_string().contains("identity changed"));
+        assert_eq!(
+            ops.calls,
+            [
+                "stat_alias_nofollow_before",
+                "open_private_nofollow",
+                "open_canonical_target_nofollow",
+                "open_alias_following",
+                "stat_alias_nofollow_after",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_alias_verifier_rejects_followed_target_with_different_device_or_inode() {
+        let root = open_existing_directory_nofollow(Path::new("/")).expect("open root");
+        let canonical = store_tempdir();
+        let followed = store_tempdir();
+        let stable = trusted_scripted_macos_alias_stat(91);
+        let mut ops = ScriptedMacosRootAliasVerifierOps::new(
+            stable,
+            stable,
+            canonical.path(),
+            followed.path(),
+        );
+
+        let error =
+            open_verified_macos_root_alias_with_ops(&root, MacosTrustedRootAlias::Tmp, &mut ops)
+                .expect_err("wrong alias target must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains("does not name its canonical target"));
+        assert_eq!(
+            ops.calls,
+            [
+                "stat_alias_nofollow_before",
+                "open_private_nofollow",
+                "open_canonical_target_nofollow",
+                "open_alias_following",
+                "stat_alias_nofollow_after",
+                "metadata_followed_alias",
+                "metadata_canonical_target",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_alias_verifier_orders_the_only_follow_between_nofollow_open_and_restat() {
+        let root = open_existing_directory_nofollow(Path::new("/")).expect("open root");
+        let target = store_tempdir();
+        let stable = trusted_scripted_macos_alias_stat(101);
+        let mut ops =
+            ScriptedMacosRootAliasVerifierOps::new(stable, stable, target.path(), target.path());
+
+        open_verified_macos_root_alias_with_ops(&root, MacosTrustedRootAlias::Tmp, &mut ops)
+            .expect("stable alias to canonical target must pass");
+
+        assert_eq!(
+            ops.calls,
+            [
+                "stat_alias_nofollow_before",
+                "open_private_nofollow",
+                "open_canonical_target_nofollow",
+                "open_alias_following",
+                "stat_alias_nofollow_after",
+                "metadata_followed_alias",
+                "metadata_canonical_target",
+            ]
+        );
+        assert_eq!(
+            ops.calls
+                .iter()
+                .filter(|operation| **operation == "open_alias_following")
+                .count(),
+            1
+        );
     }
 
     #[test]
