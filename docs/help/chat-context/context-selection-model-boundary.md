@@ -28,6 +28,8 @@ host decides which sources and tools are eligible, enforces permissions and
 caps, performs the requested retrieval, and records provenance. The model can
 choose among the tools it is offered and synthesize their returned evidence,
 but it cannot widen an allowlist, invent a grant, or bypass a result limit.
+This page explains what is sent to models, what remains host-only, and how
+ContextDesk keeps that boundary visible when retrieval or fitting fails.
 
 ![End-to-end answer flow separating deterministic host controls from model tool choice and synthesis](../assets/context-answer-operation.svg)
 
