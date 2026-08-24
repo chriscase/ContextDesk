@@ -699,10 +699,13 @@ Durable `AppConfig` persistence (`<data-dir>/config.json` via
 `cd_core::config::save_config`) is Unix-only: it requires a no-follow,
 owner-only, directory-relative replace. On other hosts those writes fail
 closed with `not_implemented` (exit 7) and a stable reason, without
-mutating the destination. `--data-dir` still isolates read-only commands
-(`doctor`, `models`, `chat`, import/explore) when a readable `config.json`
-is already present. `cli.toml` (CLI preferences) uses a separate, weaker
-write path and is not that durability contract.
+mutating the destination. Shared-directory creation (`ensure_config_dir`)
+fails the same way; `--json` / `--jsonl` still emit the envelope because
+those flags are parsed before `cli.toml` is loaded. `--data-dir` still
+isolates read-only commands (`doctor`, `models`, `chat`, import/explore)
+when a readable `config.json` is already present. `cli.toml` (CLI
+preferences) uses a separate, weaker write path and is not that durability
+contract.
 
 `contextdesk config init`'s output always reports the resolved data
 location and whether it is isolated:

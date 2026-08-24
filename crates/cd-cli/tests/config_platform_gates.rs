@@ -33,7 +33,12 @@ fn jsonl(stdout: &[u8]) -> Vec<Value> {
 
 #[cfg(not(unix))]
 fn parse_envelope(bytes: &[u8]) -> Value {
-    serde_json::from_slice(bytes).expect("stdout is one JSON envelope")
+    serde_json::from_slice(bytes).unwrap_or_else(|error| {
+        panic!(
+            "stdout is one JSON envelope: {error}; stdout={:?}",
+            String::from_utf8_lossy(bytes)
+        )
+    })
 }
 
 #[test]
@@ -166,7 +171,13 @@ fn shared_profile_without_data_dir_refuses_directory_creation() {
         ])
         .output()
         .expect("config init without data-dir");
-    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
     let envelope = parse_envelope(&output.stdout);
     assert_eq!(envelope["ok"], false);
     assert_eq!(envelope["error"]["kind"], "not_implemented");
