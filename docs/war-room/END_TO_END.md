@@ -58,11 +58,13 @@ recorded** rather than manufacture context.
 Expected result: you can repeat the problem without naming an unproven cause.
 Situation orients the investigation; it is not the conclusion.
 
-## 1:40 — Capture and inspect recognizable evidence
+## 1:40 — Capture provenance, then inspect recognizable evidence
 
-Move to **Capture** and confirm that the case contains recognizable synthetic
-logs or stack traces. Then open **Compare**, find an investigative finding,
-and choose **Inspect supporting artifact**. Confirm that the destination shows
+Move to **Capture** and confirm that human notes remain human-authored and that
+outside model output remains labeled imported and unverified. Move to
+**Analyze** to inspect the uploaded synthetic logs or stack traces and their
+frozen snapshot. Then open **Compare**, find an investigative finding, and
+choose **Inspect supporting artifact**. Confirm that the destination shows
 recognizable context, not just an isolated phrase.
 
 ![Fully synthetic evidence deep-link destination](../assets/war-room/war-room-evidence-deep-link.png)
@@ -85,8 +87,9 @@ Move to **Analyze** and confirm which bounded lanes ran against the frozen
 evidence. Return to **Compare**, scroll to Decision readiness, and use
 **Inspect a lane**. The compact digest shows its question, recognizable
 evidence, latest conclusion, and unknowns without changing the aggregate
-comparison. Open **View full chronological lane history** only when you need
-every recorded step.
+comparison. Open the full chronological trace only when you need every
+recorded step in that selected lane; use **Historical artifacts** to open prior
+runs and comparisons.
 
 ![Fully synthetic focused analysis lane and history](../assets/war-room/war-room-lane-focus.png)
 

@@ -174,7 +174,7 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
       </form>
       <form
         className="composer"
-        aria-label="Export prompt package"
+        aria-label="Export selected-evidence prompt package"
         onSubmit={(e) => void exportPackage(e)}
       >
         <fieldset
@@ -203,7 +203,8 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           ) : null}
           {inventoryStatus === "ready" && items.length === 0 ? (
             <p className="case-memory__empty">
-              This case has no exportable evidence yet, so a prompt package cannot be exported.
+              This case has no exportable evidence yet, so a selected-evidence prompt package
+              cannot be exported.
             </p>
           ) : null}
           {items.map((item) => (
@@ -225,6 +226,10 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
               </span>
             </label>
           ))}
+          <p className="case-memory__note">
+            This package contains only the evidence you select for another analysis tool. It is
+            not a full investigation backup and cannot restore this case on another War Room.
+          </p>
           {inventoryStatus === "ready" && items.length > 0 ? (
             <p className="case-memory__note" aria-live="polite">
               {selectedCount} of {selectableItems.length} selectable item
@@ -252,13 +257,15 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           type="submit"
           disabled={!allowed || pending !== null || selectedCount === 0}
         >
-          Export prompt package
+          Export selected-evidence prompt package
         </button>
       </form>
       {pending ? (
         <p className="case-memory__note" role="status">
-          {pending === "brief" ? "Exporting triage brief…" : "Exporting prompt package…"} Export
-          buttons stay disabled until it finishes; your selection is preserved.
+          {pending === "brief"
+            ? "Exporting triage brief…"
+            : "Exporting selected-evidence prompt package…"} Export buttons stay disabled until
+          it finishes; your selection is preserved.
         </p>
       ) : null}
       {error ? (
@@ -285,8 +292,10 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
       ) : null}
       {completed ? (
         <p className="export__copy" role="status">
-          {completed === "brief" ? "Triage brief exported." : "Prompt package exported."} The
-          result below is a read-only projection of the case.
+          {completed === "brief"
+            ? "Triage brief exported."
+            : "Selected-evidence prompt package exported."} The result below is a read-only
+          projection of the case.
         </p>
       ) : null}
       {snapshot ? (

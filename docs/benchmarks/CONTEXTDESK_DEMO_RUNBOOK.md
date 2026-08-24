@@ -27,15 +27,16 @@ Present the seeded investigation in this order:
 2. Use the breadcrumbs and five stage controls to orient the audience. On
    **Situation**, show the recorded status, severity, participants, activity,
    and work areas. These are recorded facts, not an inferred verdict.
-3. On **Capture**, show the human-authored note, uploaded evidence, and the
-   external AI paste labeled **imported · unverified**. Explain that imported
-   output is not silently treated as human-authored or corroborated evidence.
+3. On **Capture**, show the human-authored note and the external AI paste
+   labeled **imported · unverified**. Explain that imported output is not
+   silently treated as human-authored or corroborated evidence.
 4. Open **Discussion**. Explain that messages are durable case records while
    presence is ephemeral; refresh is bounded polling, not realtime chat. Post
    one clearly synthetic message if desired.
-5. On **Analyze**, show the evidence board, snapshot lineage, run history, and
-   the synthetic/offline launcher. Do not switch to a live gateway during the
-   five-minute story. Unknown usage and cost must remain unknown.
+5. On **Analyze**, show the uploaded logs/stack traces, evidence board,
+   snapshot lineage, run history, and the synthetic/offline launcher. Do not
+   switch to a live gateway during the five-minute story. Unknown usage and
+   cost must remain unknown.
 6. On **Compare**, choose the comparison labeled with the `qwen-3.6-27b`,
    `gpt-oss-120b`, and `ministral-14b` lanes. Point out shared evidence,
    candidate-specific clues, and the role conflict. Agreement is useful, but

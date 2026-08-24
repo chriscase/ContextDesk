@@ -48,8 +48,8 @@ case visible to the user.
 | Stage | Operator question | Durable output |
 | --- | --- | --- |
 | **Situation** | What problem are we trying to understand? | An editable, durable problem statement, affected parties, impact, bounded scope, and explicit open questions; missing fields remain not recorded |
-| **Capture** | What can a reviewer recognize and inspect? | Source-aware logs, stack traces, notes, and other evidence with provenance |
-| **Analyze** | What did each human or model lane try? | Independent attempts, evidence-backed findings, and lane history |
+| **Capture** | What did people observe, and what outside analysis was brought in? | Human-authored notes, hypotheses, actions, and clearly labeled imported output |
+| **Analyze** | What evidence is available, and what did each lane try? | Uploaded logs and stack traces, frozen evidence snapshots, independent attempts, and run history |
 | **Compare** | Where do the attempts align or diverge? | Agreement, disagreement, unsupported claims, and unresolved questions |
 | **Decide** | What happens next, and who owns it? | A human-selected action, owner, rationale, and exportable record |
 
@@ -82,10 +82,12 @@ for example, one small-model lane can reconstruct a timeline, another can
 look for a failure boundary, and a third can challenge unsupported causal
 claims. Their outputs are candidates for review, not votes.
 
-**Lane history** preserves prior attempts and their state. A rerun does not
-quietly replace the result that informed an earlier discussion or decision.
-The reviewer can see what changed, what evidence was available, and whether a
-lane completed, failed, or stopped with uncertainty.
+The focused-lane digest shows the currently selected comparison lane and its
+recorded trace; it is not a universal cross-run history browser. Earlier runs
+remain separate **Historical artifacts** in Compare. Opening a historical
+comparison preserves the exact candidates and trace that informed an earlier
+discussion or decision. A rerun must create a new recorded run/comparison
+rather than quietly replacing the prior result.
 
 Agreement increases confidence that several attempts noticed the same thing;
 it does not prove the thing is correct. Disagreement is useful when the

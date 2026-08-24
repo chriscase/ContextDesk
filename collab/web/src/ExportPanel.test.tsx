@@ -93,14 +93,18 @@ describe("export panel", () => {
     render(<ExportPanel caseId="c1" canWrite canLead />);
     expect(screen.getByText("Loading evidence inventory…")).toBeTruthy();
     expect(
-      (screen.getByRole("button", { name: "Export prompt package" }) as HTMLButtonElement)
+      (screen.getByRole("button", {
+        name: "Export selected-evidence prompt package",
+      }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
     inventory.resolve(jsonResponse(true, { items: [] }));
     expect(await screen.findByText(/no exportable evidence yet/)).toBeTruthy();
     expect(screen.queryByText("Loading evidence inventory…")).toBeNull();
     expect(
-      (screen.getByRole("button", { name: "Export prompt package" }) as HTMLButtonElement)
+      (screen.getByRole("button", {
+        name: "Export selected-evidence prompt package",
+      }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
   });
@@ -157,6 +161,7 @@ describe("export panel", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<ExportPanel caseId="c1" canWrite canLead />);
     expect(await screen.findByText(/0 of 1 selectable item selected\./)).toBeTruthy();
+    expect(screen.getByText(/not a full investigation backup/)).toBeTruthy();
     expect(
       screen.getByText(/a package with no selected evidence cannot be exported/),
     ).toBeTruthy();
@@ -165,7 +170,7 @@ describe("export panel", () => {
     ).toBeTruthy();
     expect(screen.getByText(/agent_transcript · owner_only \(excluded by default\)/)).toBeTruthy();
     const packageButton = screen.getByRole("button", {
-      name: "Export prompt package",
+      name: "Export selected-evidence prompt package",
     }) as HTMLButtonElement;
     expect(packageButton.disabled).toBe(true);
     const excludedBox = screen.getByRole("checkbox", {
@@ -180,7 +185,7 @@ describe("export panel", () => {
       target: { value: "Summarize the incident" },
     });
     fireEvent.click(packageButton);
-    expect(await screen.findByText(/Prompt package exported\./)).toBeTruthy();
+    expect(await screen.findByText(/Selected-evidence prompt package exported\./)).toBeTruthy();
     expect(packageBodies).toEqual([
       {
         variant: "owner_only",
@@ -218,7 +223,9 @@ describe("export panel", () => {
     expect(await screen.findByText(/Exporting triage brief…/)).toBeTruthy();
     expect(briefButton.disabled).toBe(true);
     expect(
-      (screen.getByRole("button", { name: "Export prompt package" }) as HTMLButtonElement)
+      (screen.getByRole("button", {
+        name: "Export selected-evidence prompt package",
+      }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
     expect((screen.getByDisplayValue("owner_only") as HTMLSelectElement).disabled).toBe(true);
@@ -296,7 +303,9 @@ describe("export panel", () => {
     render(<ExportPanel caseId="c1" canWrite canLead />);
     await screen.findByText(/app.log/);
     expect(screen.getByRole("form", { name: "Export triage brief" })).toBeTruthy();
-    expect(screen.getByRole("form", { name: "Export prompt package" })).toBeTruthy();
+    expect(
+      screen.getByRole("form", { name: "Export selected-evidence prompt package" }),
+    ).toBeTruthy();
     expect(screen.getByLabelText(/Variant/).tagName).toBe("SELECT");
     expect(screen.getByLabelText(/Optional prompt scaffold/).tagName).toBe("TEXTAREA");
     expect(screen.getByRole("checkbox", { name: /artifact · app\.log · owner_only/ })).toBeTruthy();

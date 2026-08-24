@@ -128,6 +128,21 @@ describe("help search", () => {
     }
   });
 
+  it("explains that current exports cannot restore a full investigation", () => {
+    renderHelp();
+    searchFor("restore");
+    const result = within(resultsList()).getByRole("button", {
+      name: /Move or restore a complete investigation/,
+    });
+    fireEvent.click(result);
+    expect(
+      screen.getByText(/current brief and selected-evidence package/, { exact: false }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/no full-investigation archive download/, { exact: false }),
+    ).toBeTruthy();
+  });
+
   it("finds glossary terms and jumps focus to the matched term", () => {
     renderHelp();
     searchFor("qualification");

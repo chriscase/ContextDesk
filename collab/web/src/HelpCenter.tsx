@@ -355,12 +355,12 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
       },
       {
         id: "share-safe-export",
-        title: "Export a brief or package share-safely",
+        title: "Export a brief or selected-evidence package share-safely",
         summary:
           "Exports are read-only projections. The share_safe variant is default-deny for private material and must pass a privacy scan before anything leaves the case.",
         keywords: ["export", "share safe", "share-safe", "brief", "package", "privacy scan", "redaction", "omissions", "owner only"],
         what:
-          "The Decide stage's export tools produce two projections: a triage brief and a prompt package, each in an owner_only or share_safe variant. share_safe excludes the content of owner-only items, replaces identities with neutral labels, carries digests instead of raw timeline payloads, and is blocked entirely if a privacy scan finds credentials, internal hostnames, or raw private evidence. Imported external runs are excluded from packages by default. The Experiment Lab has its own share-safe review export that replaces every identifier with an alias and records five hard-coded omissions: no model labels, no participant identities, no free text, no private content, no correlatable metadata.",
+          "The Decide stage's export tools produce two read-only projections: a triage brief and a selected-evidence prompt package, each in an owner_only or share_safe variant. The package contains only the evidence you explicitly select for another analysis tool; it is not a full case backup. share_safe excludes the content of owner-only items, replaces identities with neutral labels, carries digests instead of raw timeline payloads, and is blocked entirely if a privacy scan finds credentials, internal hostnames, or raw private evidence. Imported external runs are excluded from packages by default. The Experiment Lab has its own share-safe review export that replaces every identifier with an alias and records five hard-coded omissions: no model labels, no participant identities, no free text, no private content, no correlatable metadata.",
         when:
           "Export when findings need to travel — a summary for stakeholders, or a package another tool will consume — instead of copying raw case data out of the workspace.",
         steps: [
@@ -372,7 +372,29 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
         recorded:
           "Each export reports a snapshot identity: the content hash of its manifest, so identical inputs reproduce the same identity. Export never edits the case.",
         limits:
-          "The snapshot identity is a content hash, not a cryptographic signature — exports are not signed. share_safe is deny-by-default, and a blocked export sends nothing.",
+          "The snapshot identity is a content hash, not a cryptographic signature — exports are not signed. share_safe is deny-by-default, and a blocked export sends nothing. Neither current export can reconstruct the complete investigation on another installation.",
+        actions: [{ label: "Open the Decide stage", go: { stage: "decide" } }],
+      },
+      {
+        id: "move-or-restore-investigation",
+        title: "Move or restore a complete investigation",
+        summary:
+          "A portable full-fidelity archive is different from the current brief and selected-evidence package; complete apply and restore are not shipped in this web app.",
+        keywords: ["move", "restore", "backup", "portable", "archive", "import", "different installation", "migration"],
+        what:
+          "Moving an investigation requires more than a readable summary. A complete portable archive must preserve the Situation, contributions, source attribution, evidence inventory and bytes when allowed, frozen snapshots, triage runs, comparisons, discussions, decisions, benchmark history, and audit references while remapping identities safely for the destination installation. Historical people and roles remain attribution only; importing them must never grant destination access.",
+        when:
+          "Read this when you need disaster recovery, migration to another installation, or a case that another War Room can reconstruct and continue.",
+        steps: [
+          "Do not use the triage brief or selected-evidence prompt package as a backup; both are intentionally partial projections.",
+          "Keep the original evidence under the current installation's retention and privacy controls until a portable archive workflow is available and qualified.",
+          "When portable import is shipped, run its dry-run preflight first, review identity and object remaps, resolve blocked or missing content, and authorize apply as a separate human action.",
+          "After import, verify the reconstructed Situation, evidence digests, snapshot lineage, decisions, and historical attribution before continuing work.",
+        ],
+        recorded:
+          "The current contract work can calculate semantic and transport identities and a dry-run reconstruction status. It does not write a destination database or grant destination permissions.",
+        limits:
+          "This build has no full-investigation archive download, server-side apply, restore, signing/verification, or import screen. The contract and dry-run work are foundations, not a shipped backup feature.",
         actions: [{ label: "Open the Decide stage", go: { stage: "decide" } }],
       },
     ],

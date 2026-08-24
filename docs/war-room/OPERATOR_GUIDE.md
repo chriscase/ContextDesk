@@ -46,12 +46,14 @@ Good Situation text makes it possible to tell when the investigation has
 drifted. If a lane answers a different question, keep the output in its lane
 history but do not promote it into a finding for the current decision.
 
-## 2. Capture: make the evidence recognizable
+## 2. Capture: record people and imported output honestly
 
-Capture the material a reviewer would actually recognize: log excerpts,
-stack traces, error messages, timestamps, and human observations. Preserve
-enough surrounding context to evaluate the claim. A copied phrase without
-its source, time, or neighboring lines is weak evidence.
+Capture is for human-authored messages, notes, hypotheses, and actions, plus
+output imported from an outside tool with its provenance stated honestly.
+Upload log files, stack traces, and other inspectable artifacts on
+**Analyze**, where they can be hashed, selected, and frozen into a snapshot.
+Preserve enough surrounding context to evaluate the claim. A copied phrase
+without its source, time, or neighboring lines is weak evidence.
 
 For every item, confirm:
 
@@ -109,21 +111,22 @@ Small models can be effective when the evidence window and role are narrow.
 Comparison should focus on citation quality, useful distinctions, and honest
 unknowns—not on which lane writes the smoothest explanation.
 
-### Lane inspection and lane history
+### Lane inspection and recorded history
 
 After lanes are recorded, use **Inspect a lane** in Compare when you need one
 attempt's question, recognizable evidence, latest conclusion, and unknowns in
 one compact digest. Selecting a lane updates the shareable URL without moving
 the page or changing the aggregate decision basis. Open the full chronological
-history only when you need every recorded step.
+trace only when you need every recorded step in that selected attempt.
 
 ![Synthetic focused lane with evidence-backed attempt history](../assets/war-room/war-room-lane-focus.png)
 
-Lane history is the audit trail of attempts. Preserve completed, failed,
-superseded, and partial attempts. Before rerunning a lane, note what changed:
-new evidence, a revised Situation, a different strategy, or a different model
-configuration. If nothing changed, a different answer is itself relevant
-comparison evidence, not something to hide by replacing the old output.
+Earlier runs and comparisons remain separately selectable under **Historical
+artifacts**. Preserve completed, failed, superseded, and partial attempts.
+Before rerunning a lane, note what changed: new evidence, a revised Situation,
+a different strategy, or a different model configuration. If nothing changed,
+a different answer is itself relevant comparison evidence, not something to
+hide by replacing the old output.
 
 ## 4. Compare: inspect findings, not votes
 
