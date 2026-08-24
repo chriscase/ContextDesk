@@ -18,7 +18,7 @@
     "corpus_id": "corpus:demo:01",
     "corpus_revision": 63,
     "source_ids": [
-      "source:edm"
+      "source:synthetic-system"
     ]
   },
   "task": "Find the initiating cause and keep downstream symptoms separate."

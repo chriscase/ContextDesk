@@ -25,7 +25,7 @@ fn request() -> TriageRequestV2 {
         scope: TriageScopeV1 {
             corpus_id: "corpus:demo:01".into(),
             corpus_revision: Some(63),
-            source_ids: vec!["source:edm".into()],
+            source_ids: vec!["source:synthetic-system".into()],
         },
         policy: TriagePolicySelectionV2::Standard {
             model: ModelRef {
