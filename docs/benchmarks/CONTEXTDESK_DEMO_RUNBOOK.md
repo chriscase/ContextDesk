@@ -36,14 +36,17 @@ Present the seeded investigation in this order:
 5. On **Analyze**, show the evidence board, snapshot lineage, run history, and
    the synthetic/offline launcher. Do not switch to a live gateway during the
    five-minute story. Unknown usage and cost must remain unknown.
-6. On **Compare**, start with `pkg-synth-three-model-checkout-v1`. Point out the
-   three candidates, shared evidence, candidate-specific clues, and role
-   conflict. Agreement is useful, but the UI explicitly says it is not proof.
-   Show human helpfulness observations as separate evidence-support,
-   actionability, and uncertainty-calibration judgments.
-7. Select `pkg-synth-strategy-paths-v1` to compare the structured programmatic
-   path with the pasted-chat path. They may ask different questions; missing
-   comparability stays visible instead of being invented.
+6. On **Compare**, choose the comparison labeled with the `qwen-3.6-27b`,
+   `gpt-oss-120b`, and `ministral-14b` lanes. Point out shared evidence,
+   candidate-specific clues, and the role conflict. Agreement is useful, but
+   the UI explicitly says it is not proof. Show human helpfulness observations
+   as separate evidence-support, actionability, and uncertainty-calibration
+   judgments.
+7. Choose the comparison whose visible labels contrast the structured
+   programmatic path with the pasted-chat path. They may ask different
+   questions; missing comparability stays visible instead of being invented.
+   Package IDs are audit metadata under **Technical artifact identity**, not
+   presenter controls.
 8. On **Decide**, show the accepted human decision and gold v1. Gold is a
    versioned human benchmark, not infallible truth. Export only the synthetic
    Experiment Lab review with the final privacy gate enabled. The readable

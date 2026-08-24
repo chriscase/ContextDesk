@@ -14,8 +14,10 @@ too broad. A useful Situation states what was observed, the relevant time or
 scope, the operational consequence, and what is not yet known. Avoid putting a
 favored explanation into the problem statement as though it were fact.
 
-The investigation list is the entry point for resuming work. Use names that
-describe the synthetic problem, not a presumed cause.
+Overview is the entry point for resuming work: use its latest-activity links to
+return to the exact recorded change, or open **Investigations** for the complete
+searchable inventory. Use names that describe the synthetic problem, not a
+presumed cause.
 
 ![Synthetic investigation list with War Room entries](../assets/war-room/war-room-investigations.png)
 
