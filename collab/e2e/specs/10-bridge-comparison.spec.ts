@@ -40,17 +40,17 @@ test.describe("provider-free Rust bridge comparison", () => {
     await expect(page.getByRole("heading", { name: "Start a snapshot-bound comparison" })).toBeVisible();
 
     await page.getByRole("combobox", { name: "Execution mode" }).selectOption("gateway");
-    await expect(page.getByRole("combobox", { name: "qwen-3.6-27b host connector profile" })).toBeVisible();
-    await page.getByRole("combobox", { name: "qwen-3.6-27b host connector profile" }).selectOption("profile:fixture-qwen");
-    await page.getByRole("combobox", { name: "gpt-oss-120b host connector profile" }).selectOption("profile:fixture-gpt");
-    await page.getByRole("combobox", { name: "ministral-3-14b-instruct-2512 host connector profile" }).selectOption("profile:fixture-ministral");
+    await expect(page.getByRole("combobox", { name: "qwen-3.6-27b gateway model" })).toBeVisible();
+    await page.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }).selectOption("profile:fixture-qwen");
+    await page.getByRole("combobox", { name: "gpt-oss-120b gateway model" }).selectOption("profile:fixture-gpt");
+    await page.getByRole("combobox", { name: "ministral-3-14b-instruct-2512 gateway model" }).selectOption("profile:fixture-ministral");
     await page.getByRole("combobox", { name: "Lane concurrency" }).selectOption("2");
     await page.getByRole("button", { name: "Run gateway comparison" }).click();
 
     await expect(page.locator(".triage-runs__status--completed").first()).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByText("Host profile profile:fixture-qwen")).toBeVisible();
-    await expect(page.getByText("Host profile profile:fixture-gpt")).toBeVisible();
-    await expect(page.getByText("Host profile profile:fixture-ministral")).toBeVisible();
+    await expect(page.getByText("Gateway model Fixture Qwen")).toBeVisible();
+    await expect(page.getByText("Gateway model Fixture GPT-OSS")).toBeVisible();
+    await expect(page.getByText("Gateway model Fixture Ministral")).toBeVisible();
     await expect(page.getByText("Same frozen snapshot").first()).toBeVisible();
 
     await importChat(page, {
