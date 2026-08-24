@@ -25,6 +25,11 @@ interface CaseParticipantRow {
 interface CaseRow {
   id: string;
   title: string;
+  problemStatement?: string;
+  affectedParties?: string;
+  impact?: string;
+  scope?: string;
+  openQuestions?: string[];
   status: string;
   severity: string;
   participants?: CaseParticipantRow[];
@@ -35,6 +40,36 @@ interface CaseRow {
   summary?: string | null;
   createdByUsername?: string | null;
   creator?: string | null;
+}
+
+interface SituationDraft {
+  problemStatement: string;
+  affectedParties: string;
+  impact: string;
+  scope: string;
+  openQuestions: string;
+}
+
+const EMPTY_SITUATION: SituationDraft = {
+  problemStatement: "",
+  affectedParties: "",
+  impact: "",
+  scope: "",
+  openQuestions: "",
+};
+
+function draftFor(row: CaseRow): SituationDraft {
+  return {
+    problemStatement: row.problemStatement ?? "",
+    affectedParties: row.affectedParties ?? "",
+    impact: row.impact ?? "",
+    scope: row.scope ?? "",
+    openQuestions: (row.openQuestions ?? []).join("\n"),
+  };
+}
+
+function openQuestionsFrom(value: string): string[] {
+  return value.split("\n").map((question) => question.trim()).filter(Boolean);
 }
 
 interface ActivityItem {
@@ -100,6 +135,7 @@ function activityLabel(item: ActivityItem): string {
     case_status: `changed the status${typeof item.details.status === "string" ? ` to ${item.details.status}` : ""}`,
     membership: "changed the investigation team",
     legal_hold: "changed the legal-hold state",
+    case_situation_updated: "updated the shared Situation",
     contribution_revised: "revised a recorded contribution",
     contribution_tombstoned: "removed a contribution from the working record",
     hypothesis_status: "updated a working hypothesis",
@@ -222,6 +258,9 @@ export function Cases(props: {
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [contributions, setContributions] = useState<ContributionView[]>([]);
   const [title, setTitle] = useState("");
+  const [newSituation, setNewSituation] = useState<SituationDraft>(EMPTY_SITUATION);
+  const [situationDraft, setSituationDraft] = useState<SituationDraft>(EMPTY_SITUATION);
+  const [situationEditing, setSituationEditing] = useState(false);
   const [sources, setSources] = useState<SourceOption[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [importError, setImportError] = useState<string | null>(null);
@@ -334,6 +373,7 @@ export function Cases(props: {
     setRuns([]);
     setActionError(null);
     setImportError(null);
+    setSituationEditing(false);
     setDiscussionOpen(false);
     setDiscussionPresence(null);
     if (focusCaseId) void loadTimeline(focusCaseId, controller.signal).catch(() => undefined);
@@ -370,7 +410,15 @@ export function Cases(props: {
     const res = await fetch("/api/cases", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title, severity: "medium" }),
+      body: JSON.stringify({
+        title,
+        severity: "medium",
+        problemStatement: newSituation.problemStatement,
+        affectedParties: newSituation.affectedParties,
+        impact: newSituation.impact,
+        scope: newSituation.scope,
+        openQuestions: openQuestionsFrom(newSituation.openQuestions),
+      }),
     });
     if (!res.ok) {
       setActionError("The investigation could not be created. You may not have permission to create one.");
@@ -378,6 +426,7 @@ export function Cases(props: {
     }
     const created = (await res.json()) as CaseRow;
     setTitle("");
+    setNewSituation(EMPTY_SITUATION);
     // Make the server-confirmed investigation available before changing the URL.
     // A list refresh may still be in flight (or fail), but the focused workspace
     // must never momentarily fall back to the inventory for a case we just created.
@@ -399,6 +448,32 @@ export function Cases(props: {
       return;
     }
     await Promise.all([refresh(), refreshActivity()]);
+  }
+
+  async function saveSituation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!focusCaseId) return;
+    setActionError(null);
+    const response = await fetch(`/api/cases/${focusCaseId}/situation`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        problemStatement: situationDraft.problemStatement,
+        affectedParties: situationDraft.affectedParties,
+        impact: situationDraft.impact,
+        scope: situationDraft.scope,
+        openQuestions: openQuestionsFrom(situationDraft.openQuestions),
+      }),
+    });
+    if (!response.ok) {
+      setActionError("The Situation could not be saved. You may not have permission to change it.");
+      return;
+    }
+    const updated = (await response.json()) as CaseRow;
+    setCases((rows) => rows.map((row) => (row.id === updated.id ? updated : row)));
+    setSituationDraft(draftFor(updated));
+    setSituationEditing(false);
+    await Promise.all([refresh(), refreshActivity(), loadTimeline(focusCaseId)]);
   }
 
   async function importRun(event: FormEvent<HTMLFormElement>) {
@@ -532,6 +607,72 @@ export function Cases(props: {
         <button className="login__submit" type="submit">
           Create investigation
         </button>
+      </div>
+      <p className="case-form__help">
+        Record what is known now. Blank fields remain explicitly not recorded and can be refined
+        from Situation later.
+      </p>
+      <div className="case-form__situation">
+        <label>
+          <span>Problem statement</span>
+          <textarea
+            value={newSituation.problemStatement}
+            onChange={(event) => setNewSituation((draft) => ({
+              ...draft,
+              problemStatement: event.target.value,
+            }))}
+            placeholder="What was observed, without assuming the cause?"
+            rows={3}
+          />
+        </label>
+        <label>
+          <span>Affected people or systems</span>
+          <textarea
+            value={newSituation.affectedParties}
+            onChange={(event) => setNewSituation((draft) => ({
+              ...draft,
+              affectedParties: event.target.value,
+            }))}
+            placeholder="Who or what is affected?"
+            rows={2}
+          />
+        </label>
+        <label>
+          <span>Impact</span>
+          <textarea
+            value={newSituation.impact}
+            onChange={(event) => setNewSituation((draft) => ({
+              ...draft,
+              impact: event.target.value,
+            }))}
+            placeholder="What is the recorded operational or user impact?"
+            rows={2}
+          />
+        </label>
+        <label>
+          <span>Scope</span>
+          <textarea
+            value={newSituation.scope}
+            onChange={(event) => setNewSituation((draft) => ({
+              ...draft,
+              scope: event.target.value,
+            }))}
+            placeholder="What is in scope, and what is known to be outside it?"
+            rows={2}
+          />
+        </label>
+        <label className="case-form__wide">
+          <span>Open questions</span>
+          <textarea
+            value={newSituation.openQuestions}
+            onChange={(event) => setNewSituation((draft) => ({
+              ...draft,
+              openQuestions: event.target.value,
+            }))}
+            placeholder="One unresolved question per line"
+            rows={3}
+          />
+        </label>
       </div>
     </form>
   ) : null;
@@ -887,6 +1028,127 @@ export function Cases(props: {
               an inferred verdict or readiness score.
             </p>
           </header>
+          <section className="situation__summary" aria-labelledby="situation-summary-title">
+            <div className="situation__summary-head">
+              <div>
+                <h4 id="situation-summary-title">Recorded context</h4>
+                <p>Recorded context for everyone working this investigation.</p>
+              </div>
+              {canWrite && !situationEditing ? (
+                <button
+                  type="button"
+                  className="situation__edit"
+                  onClick={() => {
+                    setSituationDraft(draftFor(current));
+                    setSituationEditing(true);
+                  }}
+                >
+                  Edit situation
+                </button>
+              ) : null}
+            </div>
+            {situationEditing ? (
+              <form className="situation__form" onSubmit={(event) => void saveSituation(event)}>
+                <label>
+                  <span>Problem statement</span>
+                  <textarea
+                    value={situationDraft.problemStatement}
+                    onChange={(event) => setSituationDraft((draft) => ({
+                      ...draft,
+                      problemStatement: event.target.value,
+                    }))}
+                    rows={4}
+                  />
+                </label>
+                <label>
+                  <span>Affected people or systems</span>
+                  <textarea
+                    value={situationDraft.affectedParties}
+                    onChange={(event) => setSituationDraft((draft) => ({
+                      ...draft,
+                      affectedParties: event.target.value,
+                    }))}
+                    rows={3}
+                  />
+                </label>
+                <label>
+                  <span>Impact</span>
+                  <textarea
+                    value={situationDraft.impact}
+                    onChange={(event) => setSituationDraft((draft) => ({
+                      ...draft,
+                      impact: event.target.value,
+                    }))}
+                    rows={3}
+                  />
+                </label>
+                <label>
+                  <span>Scope</span>
+                  <textarea
+                    value={situationDraft.scope}
+                    onChange={(event) => setSituationDraft((draft) => ({
+                      ...draft,
+                      scope: event.target.value,
+                    }))}
+                    rows={3}
+                  />
+                </label>
+                <label className="situation__form-wide">
+                  <span>Open questions</span>
+                  <textarea
+                    value={situationDraft.openQuestions}
+                    onChange={(event) => setSituationDraft((draft) => ({
+                      ...draft,
+                      openQuestions: event.target.value,
+                    }))}
+                    placeholder="One unresolved question per line"
+                    rows={4}
+                  />
+                </label>
+                <div className="situation__form-actions">
+                  <button className="login__submit" type="submit">Save situation</button>
+                  <button
+                    type="button"
+                    className="situation__cancel"
+                    onClick={() => setSituationEditing(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="situation__summary-grid">
+                <section className="situation__summary-primary">
+                  <h5>Problem statement</h5>
+                  <p>{current.problemStatement || "Not recorded"}</p>
+                </section>
+                <section>
+                  <h5>Affected people or systems</h5>
+                  <p>{current.affectedParties || "Not recorded"}</p>
+                </section>
+                <section>
+                  <h5>Impact</h5>
+                  <p>{current.impact || "Not recorded"}</p>
+                </section>
+                <section>
+                  <h5>Scope</h5>
+                  <p>{current.scope || "Not recorded"}</p>
+                </section>
+                <section className="situation__summary-primary">
+                  <h5>Open questions</h5>
+                  {(current.openQuestions ?? []).length ? (
+                    <ul>
+                      {(current.openQuestions ?? []).map((question, index) => (
+                        <li key={`${index}:${question}`}>{question}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>None recorded</p>
+                  )}
+                </section>
+              </div>
+            )}
+          </section>
           <dl className="situation__facts">
             <div>
               <dt>Status</dt>

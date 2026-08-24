@@ -45,9 +45,13 @@ live environment.
 In **Situation**, identify four things:
 
 1. the observable synthetic problem;
-2. its bounded time or scope;
-3. the stated impact or priority; and
+2. who or what is recorded as affected;
+3. its impact and bounded scope; and
 4. the questions that are still unknown.
+
+If you have write access, choose **Edit situation** to update those durable
+fields. Leave a field blank when it is not known; the UI will show **Not
+recorded** rather than manufacture context.
 
 ![Fully synthetic Situation screen](../assets/war-room/war-room-situation.png)
 

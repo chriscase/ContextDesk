@@ -95,6 +95,46 @@ export interface CaseActivityItem {
   details: Record<string, string | number | boolean | null>;
 }
 
+export interface CaseSituationInput {
+  problemStatement: string;
+  affectedParties: string;
+  impact: string;
+  scope: string;
+  openQuestions: string[];
+}
+
+const SITUATION_TEXT_LIMIT = 12_000;
+const SITUATION_QUESTION_LIMIT = 2_000;
+const SITUATION_QUESTION_COUNT_LIMIT = 50;
+
+function cleanSituationText(value: string, field: string): string {
+  const cleaned = value.trim();
+  if (cleaned.length > SITUATION_TEXT_LIMIT) {
+    throw new Error(`${field} is too long`);
+  }
+  return cleaned;
+}
+
+function cleanSituation(input: CaseSituationInput): CaseSituationInput {
+  if (input.openQuestions.length > SITUATION_QUESTION_COUNT_LIMIT) {
+    throw new Error("too many open questions");
+  }
+  const openQuestions = input.openQuestions.map((question) => {
+    const cleaned = question.trim();
+    if (cleaned.length > SITUATION_QUESTION_LIMIT) {
+      throw new Error("open question is too long");
+    }
+    return cleaned;
+  }).filter(Boolean);
+  return {
+    problemStatement: cleanSituationText(input.problemStatement, "problem statement"),
+    affectedParties: cleanSituationText(input.affectedParties, "affected parties"),
+    impact: cleanSituationText(input.impact, "impact"),
+    scope: cleanSituationText(input.scope, "scope"),
+    openQuestions,
+  };
+}
+
 export class CaseService {
   constructor(
     private readonly evidence: EvidenceStore,
@@ -185,14 +225,31 @@ export class CaseService {
 
   async createCase(
     actor: Actor,
-    input: { title: string; severity?: CaseSeverity; clientTime?: string },
+    input: {
+      title: string;
+      severity?: CaseSeverity;
+      clientTime?: string;
+      problemStatement?: string;
+      affectedParties?: string;
+      impact?: string;
+      scope?: string;
+      openQuestions?: string[];
+    },
     origin: string,
   ): Promise<CaseV1> {
     const id = randomUUID();
     const now = new Date().toISOString();
+    const situation = cleanSituation({
+      problemStatement: input.problemStatement ?? "",
+      affectedParties: input.affectedParties ?? "",
+      impact: input.impact ?? "",
+      scope: input.scope ?? "",
+      openQuestions: input.openQuestions ?? [],
+    });
     const row = {
       id,
       title: input.title,
+      ...situation,
       severity: input.severity ?? "medium",
       status: "open" as const,
       legalHold: false,
@@ -214,6 +271,47 @@ export class CaseService {
       identity: actor.id,
       action: "case_create",
       target: id,
+      origin,
+      outcome: "success",
+    });
+    return this.toCase(row);
+  }
+
+  async updateSituation(
+    caseId: string,
+    actor: Actor,
+    input: Partial<CaseSituationInput>,
+    origin: string,
+    clientTime?: string,
+  ): Promise<CaseV1> {
+    const row = await this.requireCase(caseId);
+    const changedFields = Object.keys(input).filter((key) =>
+      ["problemStatement", "affectedParties", "impact", "scope", "openQuestions"].includes(key),
+    );
+    if (changedFields.length === 0) throw new Error("no situation fields supplied");
+    const situation = cleanSituation({
+      problemStatement: input.problemStatement ?? row.problemStatement ?? "",
+      affectedParties: input.affectedParties ?? row.affectedParties ?? "",
+      impact: input.impact ?? row.impact ?? "",
+      scope: input.scope ?? row.scope ?? "",
+      openQuestions: input.openQuestions ?? row.openQuestions ?? [],
+    });
+    Object.assign(row, situation);
+    await this.store.updateCaseSituation({ id: row.id, ...situation });
+    await this.store.appendTimeline(caseId, {
+      kind: "case_situation_updated",
+      actor,
+      targetId: caseId,
+      clientTime: clientTime ?? null,
+      payload: {
+        changedFields,
+        openQuestionCount: situation.openQuestions.length,
+      },
+    });
+    await this.audit.append({
+      identity: actor.id,
+      action: "case_situation_update",
+      target: caseId,
       origin,
       outcome: "success",
     });
@@ -817,6 +915,11 @@ export class CaseService {
   private toCase(row: {
     id: string;
     title: string;
+    problemStatement?: string;
+    affectedParties?: string;
+    impact?: string;
+    scope?: string;
+    openQuestions?: string[];
     severity: CaseSeverity;
     status: CaseStatus;
     legalHold: boolean;
@@ -829,6 +932,11 @@ export class CaseService {
       schemaId: CASE_SCHEMA_ID,
       id: row.id,
       title: row.title,
+      problemStatement: row.problemStatement ?? "",
+      affectedParties: row.affectedParties ?? "",
+      impact: row.impact ?? "",
+      scope: row.scope ?? "",
+      openQuestions: row.openQuestions ? [...row.openQuestions] : [],
       severity: row.severity,
       status: row.status,
       legalHold: row.legalHold,

@@ -16,7 +16,16 @@ describe("SQLite local runtime", () => {
       const evidence = new FilesystemEvidenceStore({ rootDir: join(root, "evidence") });
       const catalog = new CatalogService(first.catalog, first.audit);
       const cases = new CaseService(evidence, first.audit, first.cases, catalog);
-      const created = await cases.createCase(actor, { title: "SQLite persistence" }, "test");
+      const created = await cases.createCase(actor, {
+        title: "SQLite persistence",
+        problemStatement: "Synthetic alerts repeat after a fixture restart.",
+      }, "test");
+      await cases.updateSituation(created.id, actor, {
+        affectedParties: "Fixture operators",
+        impact: "Synthetic alerts require manual review.",
+        scope: "One disposable fixture environment.",
+        openQuestions: ["Does the alert stop after the next fixture cycle?"],
+      }, "test");
       const session = await first.sessions.create({
         identity: { id: actor.id, username: actor.username, displayName: "Case Lead" },
         groups: ["local:case-lead"],
@@ -36,6 +45,11 @@ describe("SQLite local runtime", () => {
       const second = createSqliteRuntime(path);
       const reopened = await second.cases.getCase(created.id);
       expect(reopened?.title).toBe("SQLite persistence");
+      expect(reopened?.problemStatement).toBe("Synthetic alerts repeat after a fixture restart.");
+      expect(reopened?.affectedParties).toBe("Fixture operators");
+      expect(reopened?.openQuestions).toEqual([
+        "Does the alert stop after the next fixture cycle?",
+      ]);
       expect((await second.sessions.getByToken(session.token))?.identity.username).toBe("lead");
       expect(await second.roleStore.load()).toEqual({
         entries: new Map([["local:case-lead", "case-lead"]]),

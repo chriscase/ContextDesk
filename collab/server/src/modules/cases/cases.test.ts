@@ -154,6 +154,97 @@ async function login(
 }
 
 describe("cases timeline evidence provenance", () => {
+  it("persists an explicitly unknown Situation and lets authorized members refine it", async () => {
+    await withApp(async ({ app, audit }) => {
+      const alice = await login(app, "alice", ALICE);
+      const createdResponse = await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Synthetic queue delay" },
+      });
+      expect(createdResponse.statusCode).toBe(200);
+      const created = parseCase(JSON.parse(createdResponse.body));
+      expect(created.problemStatement).toBe("");
+      expect(created.affectedParties).toBe("");
+      expect(created.impact).toBe("");
+      expect(created.scope).toBe("");
+      expect(created.openQuestions).toEqual([]);
+
+      const updatedResponse = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: {
+          problemStatement: "  Synthetic jobs remain queued after a worker restart.  ",
+          affectedParties: "Fixture operators",
+          impact: "Synthetic jobs require manual replay.",
+          scope: "One disposable worker group.",
+          openQuestions: [
+            " Did lease recovery run before the queue stalled? ",
+            "",
+          ],
+        },
+      });
+      expect(updatedResponse.statusCode).toBe(200);
+      const updated = parseCase(JSON.parse(updatedResponse.body));
+      expect(updated.problemStatement).toBe(
+        "Synthetic jobs remain queued after a worker restart.",
+      );
+      expect(updated.affectedParties).toBe("Fixture operators");
+      expect(updated.impact).toBe("Synthetic jobs require manual replay.");
+      expect(updated.scope).toBe("One disposable worker group.");
+      expect(updated.openQuestions).toEqual([
+        "Did lease recovery run before the queue stalled?",
+      ]);
+
+      const fetched = parseCase(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}`,
+        headers: { cookie: alice },
+      })).body));
+      expect(fetched).toEqual(updated);
+
+      const timeline = parseTimeline(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/timeline`,
+        headers: { cookie: alice },
+      })).body));
+      expect(timeline.events.at(-1)?.kind).toBe("case_situation_updated");
+      expect(
+        (await audit.list({ action: "case_situation_update" })).some(
+          (event) => event.target === created.id && event.outcome === "success",
+        ),
+      ).toBe(true);
+
+      const carol = await login(app, "carol", "fixture-carol-secret");
+      const viewerDenied = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: carol },
+        payload: { scope: "Should not be accepted" },
+      });
+      expect(viewerDenied.statusCode).toBe(403);
+
+      const eve = await login(app, "eve", "fixture-eve-secret");
+      const nonMemberDenied = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: eve },
+        payload: { scope: "Should not be accepted" },
+      });
+      expect(nonMemberDenied.statusCode).toBe(404);
+
+      const malformed = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: { openQuestions: "not-an-array" },
+      });
+      expect(malformed.statusCode).toBe(400);
+    });
+  });
+
   it("round-trips a fixture incident with attribution, hashes, revisions, and privacy", async () => {
     await withApp(async ({ app, audit, store }) => {
       const alice = await login(app, "alice", ALICE);

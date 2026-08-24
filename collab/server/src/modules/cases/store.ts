@@ -39,6 +39,11 @@ export interface CaseTimelineRow extends TimelineRow {
 export interface CaseRow {
   id: string;
   title: string;
+  problemStatement?: string;
+  affectedParties?: string;
+  impact?: string;
+  scope?: string;
+  openQuestions?: string[];
   severity: CaseSeverity;
   status: CaseStatus;
   legalHold: boolean;
@@ -170,6 +175,16 @@ export interface CaseStore {
   getCase(id: string): Promise<CaseRow | null>;
   insertCase(row: CaseRow): Promise<void>;
   updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void>;
+  updateCaseSituation(
+    row: {
+      id: string;
+      problemStatement: string;
+      affectedParties: string;
+      impact: string;
+      scope: string;
+      openQuestions: string[];
+    },
+  ): Promise<void>;
   addParticipant(
     caseId: string,
     participant: { identityId: string; username: string },
@@ -221,6 +236,25 @@ export class MemoryCaseStore implements CaseStore {
     if (!existing) throw new Error("case not found");
     existing.status = row.status;
     existing.legalHold = row.legalHold;
+  }
+
+  async updateCaseSituation(
+    row: {
+      id: string;
+      problemStatement: string;
+      affectedParties: string;
+      impact: string;
+      scope: string;
+      openQuestions: string[];
+    },
+  ): Promise<void> {
+    const existing = this.cases.get(row.id);
+    if (!existing) throw new Error("case not found");
+    existing.problemStatement = row.problemStatement;
+    existing.affectedParties = row.affectedParties;
+    existing.impact = row.impact;
+    existing.scope = row.scope;
+    existing.openQuestions = [...row.openQuestions];
   }
 
   async addParticipant(
@@ -428,12 +462,18 @@ export class PgCaseStore implements CaseStore {
   async insertCase(row: CaseRow): Promise<void> {
     await this.db.query(
       `INSERT INTO cases (
-         id, title, severity, status, legal_hold, retention_class,
+         id, title, problem_statement, affected_parties, impact, situation_scope, open_questions,
+         severity, status, legal_hold, retention_class,
          created_at, created_by, created_by_username, last_seq
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, 0)`,
       [
         row.id,
         row.title,
+        row.problemStatement ?? "",
+        row.affectedParties ?? "",
+        row.impact ?? "",
+        row.scope ?? "",
+        JSON.stringify(row.openQuestions ?? []),
         row.severity,
         row.status,
         row.legalHold,
@@ -452,6 +492,33 @@ export class PgCaseStore implements CaseStore {
     const result = await this.db.query(
       `UPDATE cases SET status = $2, legal_hold = $3 WHERE id = $1`,
       [row.id, row.status, row.legalHold],
+    );
+    if (result.rowCount === 0) throw new Error("case not found");
+  }
+
+  async updateCaseSituation(
+    row: {
+      id: string;
+      problemStatement: string;
+      affectedParties: string;
+      impact: string;
+      scope: string;
+      openQuestions: string[];
+    },
+  ): Promise<void> {
+    const result = await this.db.query(
+      `UPDATE cases
+       SET problem_statement = $2, affected_parties = $3, impact = $4, situation_scope = $5,
+           open_questions = $6::jsonb
+       WHERE id = $1`,
+      [
+        row.id,
+        row.problemStatement,
+        row.affectedParties,
+        row.impact,
+        row.scope,
+        JSON.stringify(row.openQuestions),
+      ],
     );
     if (result.rowCount === 0) throw new Error("case not found");
   }
@@ -766,7 +833,8 @@ export class PgCaseStore implements CaseStore {
 }
 
 const CASE_SELECT = `
-  SELECT c.id, c.title, c.severity, c.status, c.legal_hold, c.retention_class,
+  SELECT c.id, c.title, c.problem_statement, c.affected_parties, c.impact, c.situation_scope,
+         c.open_questions, c.severity, c.status, c.legal_hold, c.retention_class,
          c.created_at, c.created_by, c.created_by_username,
          COALESCE(
            json_agg(
@@ -781,6 +849,11 @@ const CASE_SELECT = `
 function cloneCase(row: CaseRow): CaseRow {
   return {
     ...row,
+    problemStatement: row.problemStatement ?? "",
+    affectedParties: row.affectedParties ?? "",
+    impact: row.impact ?? "",
+    scope: row.scope ?? "",
+    openQuestions: Array.isArray(row.openQuestions) ? [...row.openQuestions] : [],
     participants: row.participants.map((p) => ({ ...p })),
   };
 }
@@ -801,6 +874,19 @@ function asCase(row: Record<string, unknown>): CaseRow {
   return {
     id: String(row.id),
     title: String(row.title),
+    problemStatement: row.problem_statement === null || row.problem_statement === undefined
+      ? ""
+      : String(row.problem_statement),
+    affectedParties: row.affected_parties === null || row.affected_parties === undefined
+      ? ""
+      : String(row.affected_parties),
+    impact: row.impact === null || row.impact === undefined ? "" : String(row.impact),
+    scope: row.situation_scope === null || row.situation_scope === undefined
+      ? ""
+      : String(row.situation_scope),
+    openQuestions: Array.isArray(row.open_questions)
+      ? row.open_questions.map((question) => String(question))
+      : [],
     severity: row.severity as CaseSeverity,
     status: row.status as CaseStatus,
     legalHold: Boolean(row.legal_hold),

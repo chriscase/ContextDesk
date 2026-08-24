@@ -99,18 +99,19 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
           "Contributors and leads can open a new investigation; everyone can search and filter the recorded list.",
         keywords: ["create", "new case", "search cases", "filter", "status", "severity", "title"],
         what:
-          "An investigation is the unit of work: a titled case with a recorded status (open, monitoring, resolved, or archived), a severity, participants, and a timeline. The Investigations area lists every case visible to your account, with search over title, ID, creator, and participants, plus a status filter.",
+          "An investigation is the unit of work: a titled case with a durable Situation, recorded status (open, monitoring, resolved, or archived), severity, participants, and timeline. Situation records the problem statement, affected people or systems, impact, scope, and open questions without treating missing context as fact. The Investigations area lists every case visible to your account, with search over title, ID, creator, and participants, plus a status filter.",
         when:
           "Start an investigation when your team begins working a problem it wants a durable, attributable record of.",
         steps: [
           "Select Start investigation in the top bar (or use the form under the investigation list).",
-          "Enter a title and create it — the new case opens on its Situation stage.",
+          "Enter a title and the Situation context you know now: the observed problem, affected people or systems, impact, scope, and one open question per line. Blank fields remain visibly not recorded.",
+          "Create the investigation — it opens on Situation, where an authorized member can refine those fields as the investigation develops.",
           "To find existing work, use the list's search field or the status filter.",
         ],
         recorded:
-          "Creation records who opened the case and when. Status changes are recorded, and only a case lead can make them.",
+          "Creation records who opened the case and when. Situation edits and status changes are recorded. Contributors, case leads, and admins can edit Situation on a case they can access; only a case lead can change status.",
         limits:
-          "Creating requires the contributor or case-lead role. Severity starts at medium; this build does not offer a severity picker at creation.",
+          "Creating requires the contributor or case-lead role. Severity starts at medium; this build does not offer a severity picker at creation. Empty Situation fields mean not recorded — they are never filled from model guesses.",
         actions: [{ label: "Go to Investigations", go: { area: "investigations" } }],
       },
     ],

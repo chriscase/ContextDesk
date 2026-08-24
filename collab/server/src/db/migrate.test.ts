@@ -18,10 +18,12 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("009_triage_jobs");
       expect(up.applied).toContain("010_presence");
       expect(up.applied).toContain("011_triage_worker_leases");
+      expect(up.applied).toContain("012_case_situation");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
       expect(tables.rows).toHaveLength(1);
+      expect((await migrateDown(client)).rolledBack).toBe("012_case_situation");
       expect((await migrateDown(client)).rolledBack).toBe("011_triage_worker_leases");
       expect((await migrateDown(client)).rolledBack).toBe("010_presence");
       expect((await migrateDown(client)).rolledBack).toBe("009_triage_jobs");
@@ -57,6 +59,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("009_triage_jobs");
       expect(dry.pending).toContain("010_presence");
       expect(dry.pending).toContain("011_triage_worker_leases");
+      expect(dry.pending).toContain("012_case_situation");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

@@ -25,11 +25,16 @@ presumed cause.
 
 Situation gives every lane the same orientation. Record:
 
-- the observed symptom;
-- when and where it appears in the synthetic scenario;
-- the current impact and urgency;
-- constraints that affect the investigation; and
-- open questions that must remain unknown for now.
+- a problem statement describing the observed symptom without assuming a cause;
+- the people or systems known to be affected;
+- the current recorded impact;
+- the bounded scope, including relevant time and system boundaries; and
+- one or more open questions that must remain unknown for now.
+
+The creation form records this context with the title. Authorized investigation
+members can use **Edit situation** to refine it later. A blank field is displayed
+as **Not recorded**; ContextDesk does not infer or backfill missing Situation
+facts from model output.
 
 Separate observations from hypotheses. “The synthetic request returned an
 error” is an observation if captured evidence shows it. “A dependency caused

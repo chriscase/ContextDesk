@@ -24,6 +24,11 @@ function caseRow(id = CASE_ID): CaseRow {
   return {
     id,
     title: "fixture",
+    problemStatement: "",
+    affectedParties: "",
+    impact: "",
+    scope: "",
+    openQuestions: [],
     severity: "low",
     status: "open",
     legalHold: false,
@@ -270,7 +275,14 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
       const catalog = new CatalogService(new PgCatalogStore(client), audit);
       try {
         const first = new CaseService(store, audit, new PgCaseStore(client), catalog);
-        const created = await first.createCase(actor, { title: "Durable fixture" }, "test");
+        const created = await first.createCase(actor, {
+          title: "Durable fixture",
+          problemStatement: "Synthetic workers stop accepting queued tasks.",
+          affectedParties: "Fixture operators",
+          impact: "Synthetic tasks remain queued.",
+          scope: "One fixture worker group.",
+          openQuestions: ["Did queue pressure begin before the timeout?"],
+        }, "test");
         const note = await first.addContribution(
           created.id,
           actor,
@@ -282,6 +294,8 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
         const second = new CaseService(store, audit, new PgCaseStore(client), catalog);
         const reloaded = await second.getCase(created.id, actor, false);
         expect(reloaded?.title).toBe("Durable fixture");
+        expect(reloaded?.problemStatement).toBe("Synthetic workers stop accepting queued tasks.");
+        expect(reloaded?.openQuestions).toEqual(["Did queue pressure begin before the timeout?"]);
         const chain = await second.provenance(created.id, note.id);
         expect(chain).toHaveLength(2);
         expect(chain[0]?.body).toBe("revision 1");
@@ -295,6 +309,24 @@ describe.skipIf(!adminUrl())("pg-backed case memory", () => {
 });
 
 describe("memory snapshot persistence", () => {
+  it("normalizes Situation fields missing from a legacy memory or SQLite case", async () => {
+    const store = new MemoryCaseStore();
+    const legacy = { ...caseRow() } as unknown as Record<string, unknown>;
+    delete legacy.problemStatement;
+    delete legacy.affectedParties;
+    delete legacy.impact;
+    delete legacy.scope;
+    delete legacy.openQuestions;
+    (store as unknown as { cases: Map<string, unknown> }).cases.set(CASE_ID, legacy);
+
+    const restored = await store.getCase(CASE_ID);
+    expect(restored?.problemStatement).toBe("");
+    expect(restored?.affectedParties).toBe("");
+    expect(restored?.impact).toBe("");
+    expect(restored?.scope).toBe("");
+    expect(restored?.openQuestions).toEqual([]);
+  });
+
   it("round-trips fingerprint, lineage, privacy, fairness, status, timestamp, creator, and evidence", async () => {
     const store = new MemoryCaseStore();
     const snapshot = validSnapshot();

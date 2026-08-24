@@ -24,7 +24,12 @@ import {
   type ActiveSessionDeps,
 } from "../auth/index.js";
 import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
-import { LegalHoldError, type Actor, type CaseService } from "./service.js";
+import {
+  LegalHoldError,
+  type Actor,
+  type CaseService,
+  type CaseSituationInput,
+} from "./service.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
@@ -38,6 +43,36 @@ function asRecord(body: unknown): Record<string, unknown> {
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
+}
+
+const SITUATION_KEYS = [
+  "problemStatement",
+  "affectedParties",
+  "impact",
+  "scope",
+  "openQuestions",
+] as const;
+
+function situationInput(body: Record<string, unknown>):
+  | { valid: true; value: Partial<CaseSituationInput>; supplied: boolean }
+  | { valid: false } {
+  const value: Partial<CaseSituationInput> = {};
+  let supplied = false;
+  for (const key of SITUATION_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
+    supplied = true;
+    const field = body[key];
+    if (key === "openQuestions") {
+      if (!Array.isArray(field) || !field.every((item) => typeof item === "string")) {
+        return { valid: false };
+      }
+      value.openQuestions = field;
+    } else {
+      if (typeof field !== "string") return { valid: false };
+      value[key] = field;
+    }
+  }
+  return { valid: true, value, supplied };
 }
 
 function domainError(
@@ -183,7 +218,21 @@ export async function registerCaseRoutes(
       void reply.code(400);
       return authError("forbidden");
     }
-    const input: { title: string; severity?: CaseSeverity; clientTime?: string } = { title };
+    const situation = situationInput(body);
+    if (!situation.valid) {
+      void reply.code(400);
+      return authError("forbidden");
+    }
+    const input: {
+      title: string;
+      severity?: CaseSeverity;
+      clientTime?: string;
+      problemStatement?: string;
+      affectedParties?: string;
+      impact?: string;
+      scope?: string;
+      openQuestions?: string[];
+    } = { title, ...situation.value };
     const severity = str(body.severity);
     if (severity && (CASE_SEVERITIES as readonly string[]).includes(severity)) {
       input.severity = severity as CaseSeverity;
@@ -229,6 +278,40 @@ export async function registerCaseRoutes(
     }
     try {
       return await deps.domain.setStatus(id, ctx.actor, status as CaseStatus, request.ip);
+    } catch (err) {
+      return domainError(reply, err);
+    }
+  });
+
+  app.patch("/api/cases/:id/situation", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    if (!ctx.canWrite) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return authError("forbidden");
+    }
+    const body = asRecord(request.body);
+    const situation = situationInput(body);
+    if (!situation.valid || !situation.supplied) {
+      void reply.code(400);
+      return authError("forbidden");
+    }
+    const clientTime = str(body.clientTime);
+    try {
+      return await deps.domain.updateSituation(
+        id,
+        ctx.actor,
+        situation.value,
+        request.ip,
+        clientTime,
+      );
     } catch (err) {
       return domainError(reply, err);
     }

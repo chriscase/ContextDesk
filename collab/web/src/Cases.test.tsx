@@ -12,6 +12,11 @@ const fixtureCases = [
   {
     id: "c1",
     title: "Fixture incident",
+    problemStatement: "Synthetic requests pause while a fixture worker restarts.",
+    affectedParties: "Fixture operators",
+    impact: "Synthetic requests need manual replay.",
+    scope: "One disposable worker group.",
+    openQuestions: ["Did the queue stall before the restart?"],
     status: "open",
     severity: "high",
     participants: [
@@ -207,6 +212,68 @@ describe("war room overview", () => {
     ).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Investigations" })).toBeNull();
     expect(screen.queryByText("That investigation is not available to your account.")).toBeNull();
+  });
+
+  it("captures Situation context when an investigation is created", async () => {
+    let submitted: Record<string, unknown> | null = null;
+    let created: Record<string, unknown> | null = null;
+    stubCaseFetch({
+      cases: [],
+      onRequest: (url, init) => {
+        if (url === "/api/cases" && (init?.method ?? "GET") === "GET" && created) {
+          return Promise.resolve({ ok: true, json: async () => ({ cases: [created] }) });
+        }
+        if (url === "/api/cases" && init?.method === "POST") {
+          submitted = JSON.parse(String(init.body)) as Record<string, unknown>;
+          created = {
+            id: "c-created",
+            title: submitted.title,
+            status: "open",
+            severity: "medium",
+            problemStatement: submitted.problemStatement,
+            affectedParties: submitted.affectedParties,
+            impact: submitted.impact,
+            scope: submitted.scope,
+            openQuestions: submitted.openQuestions,
+          };
+          return Promise.resolve({
+            ok: true,
+            json: async () => created,
+          });
+        }
+        return null;
+      },
+    });
+
+    render(<Cases roles={["contributor"]} view="investigations" />);
+    fireEvent.change(await screen.findByPlaceholderText("New investigation title"), {
+      target: { value: "Synthetic worker delay" },
+    });
+    fireEvent.change(screen.getByLabelText("Problem statement"), {
+      target: { value: "Synthetic jobs remain queued after a fixture restart." },
+    });
+    fireEvent.change(screen.getByLabelText("Affected people or systems"), {
+      target: { value: "Fixture operators" },
+    });
+    fireEvent.change(screen.getByLabelText("Impact"), {
+      target: { value: "Synthetic jobs require manual replay." },
+    });
+    fireEvent.change(screen.getByLabelText("Scope"), {
+      target: { value: "One disposable worker group." },
+    });
+    fireEvent.change(screen.getByLabelText("Open questions"), {
+      target: { value: "Did lease recovery run?\n\nDoes the queue recover?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create investigation" }));
+
+    expect(await screen.findByRole("heading", { name: "Synthetic worker delay" })).toBeTruthy();
+    expect(submitted).toMatchObject({
+      problemStatement: "Synthetic jobs remain queued after a fixture restart.",
+      affectedParties: "Fixture operators",
+      impact: "Synthetic jobs require manual replay.",
+      scope: "One disposable worker group.",
+      openQuestions: ["Did lease recovery run?", "Does the queue recover?"],
+    });
   });
 
   it("ignores an older successful inventory response after creating an investigation", async () => {
@@ -460,6 +527,62 @@ describe("focused investigation view", () => {
     const facts = document.querySelector(".situation__facts") as HTMLElement;
     expect(facts.textContent).toContain("alice, dave");
     expect(facts.textContent).toContain("by alice");
+    const situation = screen.getByRole("region", { name: "Recorded context" });
+    expect(situation.textContent).toContain(
+      "Synthetic requests pause while a fixture worker restarts.",
+    );
+    expect(situation.textContent).toContain("Fixture operators");
+    expect(situation.textContent).toContain("Did the queue stall before the restart?");
+  });
+
+  it("lets an authorized member edit Situation context and keeps viewers read-only", async () => {
+    let current = { ...fixtureCases[0] };
+    const fetchStub = stubCaseFetch({
+      cases: [current],
+      onRequest: (url, init) => {
+        if (url === "/api/cases") {
+          return Promise.resolve({ ok: true, json: async () => ({ cases: [current] }) });
+        }
+        if (url === "/api/cases/c1/situation" && init?.method === "PATCH") {
+          current = { ...current, ...(JSON.parse(String(init.body)) as object) };
+          return Promise.resolve({ ok: true, json: async () => current });
+        }
+        return null;
+      },
+    });
+    const { unmount } = render(<Cases roles={["contributor"]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit situation" }));
+    fireEvent.change(screen.getByLabelText("Problem statement"), {
+      target: { value: "Synthetic queue pressure continues after restart." },
+    });
+    fireEvent.change(screen.getByLabelText("Open questions"), {
+      target: { value: "Did the worker reclaim its lease?\nIs backlog still increasing?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save situation" }));
+
+    await screen.findByText("Synthetic queue pressure continues after restart.");
+    expect(screen.getByText("Did the worker reclaim its lease?")).toBeTruthy();
+    const patchCall = fetchStub.mock.calls.find(
+      (call) => String(call[0]) === "/api/cases/c1/situation",
+    );
+    expect(patchCall?.[1]?.method).toBe("PATCH");
+    unmount();
+
+    stubCaseFetch({ cases: [current] });
+    render(<Cases roles={["viewer"]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Fixture incident" }));
+    expect(screen.queryByRole("button", { name: "Edit situation" })).toBeNull();
+    expect(screen.getByText("Synthetic queue pressure continues after restart.")).toBeTruthy();
+  });
+
+  it("shows explicit not-recorded values for older investigations", async () => {
+    stubCaseFetch({ cases: [fixtureCases[1]] });
+    render(<Cases roles={["case-lead"]} view="investigations" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Search indexing" }));
+    const situation = screen.getByRole("region", { name: "Recorded context" });
+    expect(within(situation).getAllByText("Not recorded")).toHaveLength(4);
+    expect(within(situation).getByText("None recorded")).toBeTruthy();
   });
 
   it("routes stages so exactly one work surface is presented, with aria-current", async () => {

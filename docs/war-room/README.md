@@ -47,7 +47,7 @@ case visible to the user.
 
 | Stage | Operator question | Durable output |
 | --- | --- | --- |
-| **Situation** | What problem are we trying to understand? | A bounded problem statement, current context, urgency, and explicit unknowns |
+| **Situation** | What problem are we trying to understand? | An editable, durable problem statement, affected parties, impact, bounded scope, and explicit open questions; missing fields remain not recorded |
 | **Capture** | What can a reviewer recognize and inspect? | Source-aware logs, stack traces, notes, and other evidence with provenance |
 | **Analyze** | What did each human or model lane try? | Independent attempts, evidence-backed findings, and lane history |
 | **Compare** | Where do the attempts align or diverge? | Agreement, disagreement, unsupported claims, and unresolved questions |

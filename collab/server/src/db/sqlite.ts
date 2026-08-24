@@ -247,6 +247,7 @@ export function createSqliteRuntime(
       new Set([
         "insertCase",
         "updateCaseMeta",
+        "updateCaseSituation",
         "addParticipant",
         "appendTimeline",
         "insertRevision",

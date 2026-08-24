@@ -183,6 +183,17 @@ async function seed(app: FastifyInstance): Promise<string> {
     payload: {
       title: "Checkout timeouts — model and strategy comparison",
       severity: "high",
+      problemStatement:
+        "Synthetic checkout requests time out while waiting for the inventory service.",
+      affectedParties: "Fixture storefront operators and synthetic checkout users",
+      impact:
+        "Synthetic checkout attempts do not complete within the expected service window.",
+      scope:
+        "The recorded fixture covers checkout-to-inventory calls; payment processing is outside the available evidence.",
+      openQuestions: [
+        "Did inventory pool pressure begin before checkout latency increased?",
+        "Does the timeout reproduce when the fixture worker pool is isolated?",
+      ],
     },
   });
 
