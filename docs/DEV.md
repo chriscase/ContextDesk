@@ -81,8 +81,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
 # One CI Ubuntu test shard, exactly as CI partitions it (#874) — see below
-sh scripts/ci_shard_plan.sh verify --shards 8
-sh scripts/ci_run_shard.sh --shard 2 --shards 8
+sh scripts/ci_shard_config.sh list
+sh scripts/ci_shard_plan.sh verify --os ubuntu
+sh scripts/ci_run_shard.sh --shard 2
 sh scripts/ci_run_shard.sh --summary ci-shards
 sh scripts/tests/ci_shard_test.sh
 sh scripts/tests/ci_platform_shard_test.sh
@@ -134,7 +135,10 @@ CI therefore:
 1. Compiles Ubuntu workspace tests **once** in `rust (ubuntu-latest)`
    (`cargo test --workspace --no-run`) and **saves** the shared
    `ubuntu-workspace-tests` rust-cache entry there.
-2. Runs the same suite as `CD_SHARD_COUNT` (currently **8**) restore-only shards
+2. Runs the same suite as the canonical Ubuntu capacity (currently **8**)
+   defined in `scripts/ci_shard_config.sh`. The workflow generates its matrix
+   from that definition; planner and aggregate calls reject a mismatched count.
+   These are restore-only shards
    that restore that cache. `cd-core/lib` is executed as two complementary
    filters (`log_analysis::` and `--skip log_analysis::`) so the heavy library
    binary is not pinned to shard 1.
@@ -153,12 +157,13 @@ CI therefore:
 
 | Script | Role |
 | --- | --- |
-| `scripts/ci_shard_plan.sh` | Enumerates every testable target from `cargo metadata` and partitions it. `verify` fails closed if the partition is not an exact, duplicate-free cover. |
+| `scripts/ci_shard_config.sh` | Owns the one canonical per-OS capacity definition and emits GitHub-compatible matrices. Ubuntu remains 8; macOS and Windows remain 4. |
+| `scripts/ci_shard_plan.sh` | Enumerates every testable target from `cargo metadata` and partitions it. `verify --os …` also rejects a count that differs from the canonical OS capacity. |
 | `scripts/ci_run_shard.sh` | Runs one shard: per-unit start/finish lines, a heartbeat while a unit runs, a bounded `manifest.json`, `progress.jsonl`, and `status.json`. SIGTERM writes `incomplete`. |
 | `scripts/ci_run_platform_shard.sh` | Validates `macos` / `windows` and delegates to the portable shard runner; no GNU `tail --pid`, `stdbuf`, or platform-specific test selection. |
 | `scripts/ci_record_cache.sh` | Records `cache_state=warm` only on an exact rust-cache hit whose `target/` contains compiled deps and bundled DuckDB. |
 | `scripts/ci_cache_fingerprint.sh` | Records the per-OS shared key, Cargo.lock digest, rustc identity, and `RUSTFLAGS`. |
-| `scripts/ci_aggregate_shards.sh` | The gate. Fails if a shard is missing, failed, incomplete, stopped early, or if any test unit was claimed by no shard. |
+| `scripts/ci_aggregate_shards.sh` | The gate. `--os …` rejects topology drift, then fails if a shard is missing, failed, incomplete, stopped early, or if any test unit was claimed by no shard. |
 
 Properties worth knowing:
 
@@ -170,7 +175,7 @@ Properties worth knowing:
   integration target are all units.
 - **The partition is deterministic** — round-robin over a canonically sorted
   unit list — so a shard reproduces identically on a laptop:
-  `sh scripts/ci_run_shard.sh --shard 2 --shards 8`.
+  `sh scripts/ci_run_shard.sh --shard 2` (defaults to canonical Ubuntu capacity).
 - **Cancellation diagnostics:** a step timeout or job cancel SIGTERM's
   `ci_run_shard.sh` while the VM is still up; the trap writes `status.json`
   and `if: always()` uploads `rust-ubuntu-shard-N` (14-day retention). A VM

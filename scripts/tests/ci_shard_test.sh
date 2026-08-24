@@ -12,6 +12,7 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/contextdesk-shard-test.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 PLAN="$ROOT/scripts/ci_shard_plan.sh"
+CONFIG="$ROOT/scripts/ci_shard_config.sh"
 RUN="$ROOT/scripts/ci_run_shard.sh"
 AGG="$ROOT/scripts/ci_aggregate_shards.sh"
 CACHE="$ROOT/scripts/ci_record_cache.sh"
@@ -160,9 +161,9 @@ expect_fail "runner must reject a shard outside the matrix" \
   sh "$RUN" --shard 9 --shards 4 --out "$TMP/never"
 
 # ------------------------------------------------------------- aggregate gate
-# Must equal the workflow's CD_SHARD_COUNT: the workflow-contract check below
-# compares them and fails closed when they drift.
-SHARDS=8
+# Canonical Ubuntu capacity. The workflow-contract check below proves that the
+# dynamic matrix, planner, runner, and aggregate all consume this same value.
+SHARDS=$(sh "$CONFIG" count ubuntu)
 
 make_results() {
   dir=$1
@@ -512,14 +513,21 @@ expect_ok "preflight role is restore-only by default" \
 [ "$(jq -r '.save' "$TMP/cache-preflight.json")" = false ] || fail "preflight must not save"
 
 # ------------------------------------------------------- workflow contracts
-python3 - "$WF" "$SHARDS" <<'PY' || fail "workflow contract python failed"
-import sys, yaml
+python3 - "$WF" "$CONFIG" <<'PY' || fail "workflow contract python failed"
+import subprocess
+import sys
+import yaml
 
-path, expected_shards = sys.argv[1], int(sys.argv[2])
+path, config = sys.argv[1], sys.argv[2]
 wf = yaml.safe_load(open(path))
-count = int(wf["env"]["CD_SHARD_COUNT"])
-if count != expected_shards:
-    raise SystemExit(f"CD_SHARD_COUNT={count} != test SHARDS={expected_shards}")
+
+def configured(os_name):
+    return int(subprocess.check_output(["sh", config, "count", os_name], text=True).strip())
+
+counts = {os_name: configured(os_name) for os_name in ("ubuntu", "macos", "windows")}
+count = counts["ubuntu"]
+if "CD_SHARD_COUNT" in wf.get("env", {}):
+    raise SystemExit("workflow env must not duplicate canonical shard capacity")
 
 jobs = wf["jobs"]
 required = [
@@ -527,6 +535,7 @@ required = [
     "claims",
     "close-proof",
     "gui-accept-contracts",
+    "rust-shard-config",
     "rust-macos",
     "rust-windows",
     "rust-macos-cache-probe",
@@ -571,6 +580,7 @@ if not ubuntu_aggregate_steps or ubuntu_aggregate_steps[0].get("name") != "requi
 routing_guard = ubuntu_aggregate_steps[0]
 expected_routing_env = {
     "PATH_FILTER_RESULT": "${{ needs.ci-path-filter.result }}",
+    "SHARD_CONFIG_RESULT": "${{ needs.rust-shard-config.result }}",
     "SURFACE": "${{ needs.ci-path-filter.outputs.surface }}",
     "RUN_UBUNTU": "${{ needs.ci-path-filter.outputs.run_ubuntu }}",
 }
@@ -579,14 +589,18 @@ if routing_guard.get("env") != expected_routing_env:
 routing_run = routing_guard.get("run") or ""
 for required_text in (
     '"$PATH_FILTER_RESULT" != success',
+    '"$SHARD_CONFIG_RESULT" != success',
     "full:true|collab-only:false",
 ):
     if required_text not in routing_run:
         raise SystemExit(f"Ubuntu aggregate routing guard is missing {required_text!r}")
 
 shard_ids = jobs["rust-ubuntu-shard"]["strategy"]["matrix"]["shard"]
-if shard_ids != list(range(1, count + 1)):
-    raise SystemExit(f"matrix shards {shard_ids} != 1..{count}")
+expected_matrix = "${{ fromJSON(needs.rust-shard-config.outputs.ubuntu_matrix) }}"
+if shard_ids != expected_matrix:
+    raise SystemExit(f"Ubuntu matrix does not consume topology output: {shard_ids!r}")
+if jobs["rust-ubuntu-shard"].get("env", {}).get("CD_SHARD_COUNT") != "${{ needs.rust-shard-config.outputs.ubuntu_count }}":
+    raise SystemExit("Ubuntu shard count does not consume topology output")
 
 def steps(job):
     return job["steps"]
@@ -727,12 +741,17 @@ for os_name, shard_job, agg_job, preflight in (
     ("macos-latest", "rust-macos-shard", "rust-macos-tests", "rust-macos"),
     ("windows-latest", "rust-windows-shard", "rust-windows-tests", "rust-windows"),
 ):
+    logical_os = os_name.removesuffix("-latest")
     if jobs[preflight]["name"] != f"rust ({os_name})":
         raise SystemExit(f"{preflight} check name changed")
     if jobs[shard_job]["name"] != f"rust tests ({os_name} shard ${{{{ matrix.shard }}}})":
         raise SystemExit(f"{shard_job} check name changed")
-    if jobs[shard_job]["strategy"]["matrix"]["shard"] != [1, 2, 3, 4]:
-        raise SystemExit(f"{shard_job} must stay four-way")
+    expected_matrix = f"${{{{ fromJSON(needs.rust-shard-config.outputs.{logical_os}_matrix) }}}}"
+    if jobs[shard_job]["strategy"]["matrix"]["shard"] != expected_matrix:
+        raise SystemExit(f"{shard_job} matrix must consume canonical topology")
+    expected_count = f"${{{{ needs.rust-shard-config.outputs.{logical_os}_count }}}}"
+    if jobs[shard_job].get("env", {}).get("CD_SHARD_COUNT") != expected_count:
+        raise SystemExit(f"{shard_job} count must consume canonical topology")
     cache = cache_step(jobs[shard_job])["with"]
     if cache.get("shared-key") != f"{os_name}-workspace-tests-v2":
         raise SystemExit(f"{shard_job} cache key mismatch")
@@ -752,11 +771,15 @@ for os_name, shard_job, agg_job, preflight in (
         raise SystemExit(f"{agg_job} check name changed")
     if jobs[agg_job].get("if") != "always()":
         raise SystemExit(f"{agg_job} must run if: always()")
-    if need_list(jobs[agg_job]) != [shard_job]:
-        raise SystemExit(f"{agg_job} must depend only on {shard_job}")
+    if need_list(jobs[agg_job]) != ["rust-shard-config", shard_job]:
+        raise SystemExit(f"{agg_job} must depend on topology and {shard_job}")
+    if jobs[agg_job].get("env", {}).get("CD_SHARD_COUNT") != expected_count:
+        raise SystemExit(f"{agg_job} count must consume canonical topology")
     agg_runs = "\n".join(s.get("run") or "" for s in steps(jobs[agg_job]))
-    if "ci_aggregate_shards.sh" not in agg_runs or "--shards 4" not in agg_runs:
-        raise SystemExit(f"{agg_job} must use the fail-closed four-way aggregate")
+    if ("ci_aggregate_shards.sh" not in agg_runs
+            or f"--os {logical_os}" not in agg_runs
+            or '--shards "$CD_SHARD_COUNT"' not in agg_runs):
+        raise SystemExit(f"{agg_job} must use the canonical fail-closed aggregate")
 
 tauri_os = jobs["tauri-host"]["strategy"]["matrix"]["os"]
 if tauri_os != ["ubuntu-latest", "macos-latest"]:
