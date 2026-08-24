@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkFocus } from "./app-location.js";
@@ -1923,6 +1923,50 @@ describe("focused Compare workspace", () => {
     );
   }
 
+  function RoutedCasesHarness(props: { remountOnFocus?: boolean }) {
+    const [focus, setFocus] = useState<WorkFocus | undefined>();
+    const route = (nextFocus: WorkFocus) => {
+      const params = new URLSearchParams({ section: nextFocus.section });
+      if (nextFocus.item) params.set("item", nextFocus.item);
+      if (nextFocus.lane) params.set("lane", nextFocus.lane);
+      if (nextFocus.experiment) params.set("experiment", nextFocus.experiment);
+      window.history.pushState(
+        nextFocus,
+        "",
+        `/investigations/c1/compare?${params.toString()}#${encodeURIComponent(nextFocus.section)}`,
+      );
+      setFocus(nextFocus);
+    };
+    const routeGeneration = props.remountOnFocus && focus ? "focused" : "bare";
+    const focusProps = focus ? { routeFocus: focus } : {};
+    return (
+      <>
+        <section aria-label="Compare stage">
+          <ExperimentLab
+            key={`compare-${routeGeneration}`}
+            caseId="c1"
+            surface="comparison"
+            canWrite
+            canLead
+            {...focusProps}
+            onDeepNavigate={route}
+          />
+        </section>
+        <section aria-label="Decide stage" hidden>
+          <ExperimentLab
+            key={`decide-${routeGeneration}`}
+            caseId="c1"
+            surface="decision"
+            canWrite
+            canLead
+            {...focusProps}
+            onDeepNavigate={route}
+          />
+        </section>
+      </>
+    );
+  }
+
   it("renders one major subsection at a time and a useful default summary", async () => {
     stubExperiments([cockpitView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
@@ -2168,6 +2212,33 @@ describe("focused Compare workspace", () => {
       expect(window.location.search).toContain("experiment=exp-1");
       expect(scrollIntoView).not.toHaveBeenCalled();
       expect(document.activeElement).toBe(laneButton);
+      expect(document.activeElement).not.toBe(summaryHeading);
+    } finally {
+      HTMLElement.prototype.scrollIntoView = originalScroll;
+    }
+  });
+
+  it("keeps an internally routed lane click non-navigational across a lab remount", async () => {
+    stubExperiments([seededThreeModelView]);
+    const scrollIntoView = vi.fn();
+    const originalScroll = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    try {
+      render(<RoutedCasesHarness remountOnFocus />);
+
+      const summaryHeading = await screen.findByRole("heading", { name: "At a glance" });
+      const laneButton = screen.getByRole("button", { name: "qwen-3.6-27b" });
+      laneButton.focus();
+      scrollIntoView.mockClear();
+      fireEvent.click(laneButton);
+
+      await waitFor(() => {
+        expect(window.location.search).toContain("lane=cand-qwen-3.6-27b");
+        expect(screen.getByRole("button", { name: "qwen-3.6-27b" }).getAttribute("aria-pressed"))
+          .toBe("true");
+      });
+      await act(async () => new Promise((resolve) => window.setTimeout(resolve, 20)));
+      expect(scrollIntoView).not.toHaveBeenCalled();
       expect(document.activeElement).not.toBe(summaryHeading);
     } finally {
       HTMLElement.prototype.scrollIntoView = originalScroll;

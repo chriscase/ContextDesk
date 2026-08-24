@@ -329,7 +329,12 @@ function stageForSection(section: string): "compare" | "decide" {
 }
 
 function navigationKey(focus: WorkFocus): string {
-  return [focus.section, focus.item ?? "", focus.experiment ?? ""].join("\u0000");
+  return [
+    focus.section,
+    focus.item ?? "",
+    focus.experiment ?? "",
+    focus.navigation ?? "focus",
+  ].join("\u0000");
 }
 
 function isModifiedClick(event: MouseEvent<HTMLAnchorElement>): boolean {
@@ -1205,9 +1210,12 @@ export function ExperimentLab(props: {
   const [workspaceItem, setWorkspaceItem] = useState<string | null>(
     () => props.routeFocus?.item ?? null,
   );
-  const [navigationTarget, setNavigationTarget] = useState<WorkFocus | null>(
-    () => props.routeFocus ?? null,
-  );
+  const surfaceStage = surface === "decision" ? "decide" : "compare";
+  const [navigationTarget, setNavigationTarget] = useState<WorkFocus | null>(() => {
+    const routeFocus = props.routeFocus;
+    if (!routeFocus || stageForSection(routeFocus.section) !== surfaceStage) return null;
+    return routeFocus.navigation === "preserve" ? null : routeFocus;
+  });
   const lastNavigationKey = useRef<string | null>(
     props.routeFocus ? navigationKey(props.routeFocus) : null,
   );
@@ -1311,12 +1319,19 @@ export function ExperimentLab(props: {
     setWorkspaceItem(props.routeFocus?.item ?? null);
     if (props.routeFocus) {
       const nextNavigationKey = navigationKey(props.routeFocus);
+      if (props.routeFocus.navigation === "preserve") {
+        lastNavigationKey.current = nextNavigationKey;
+        setNavigationTarget(null);
+        return;
+      }
       if (lastNavigationKey.current !== nextNavigationKey) {
         lastNavigationKey.current = nextNavigationKey;
-        setNavigationTarget(props.routeFocus);
+        if (stageForSection(props.routeFocus.section) === surfaceStage) {
+          setNavigationTarget(props.routeFocus);
+        }
       }
     }
-  }, [props.routeFocus?.section, props.routeFocus?.item, props.routeFocus?.experiment]);
+  }, [props.routeFocus?.section, props.routeFocus?.item, props.routeFocus?.experiment, props.routeFocus?.navigation, surfaceStage]);
 
   useEffect(() => {
     // Section and item navigation moves keyboard focus to the rendered destination.
@@ -1396,15 +1411,20 @@ export function ExperimentLab(props: {
     lastNavigationKey.current = navigationKey(focus);
     if (navigateDestination) {
       setNavigationTarget(focus);
+    } else {
+      setNavigationTarget(null);
     }
   };
   const commitFocus = (focus: WorkFocus, navigateDestination = true) => {
-    applyFocus(focus, navigateDestination);
+    const routedFocus: WorkFocus = navigateDestination
+      ? focus
+      : { ...focus, navigation: "preserve" };
+    applyFocus(routedFocus, navigateDestination);
     if (props.onDeepNavigate) {
-      props.onDeepNavigate(focus);
+      props.onDeepNavigate(routedFocus);
       return;
     }
-    window.history.pushState(window.history.state, "", hrefFor(focus));
+    window.history.pushState(routedFocus, "", hrefFor(routedFocus));
   };
   const deepLink = (
     label: ReactNode,

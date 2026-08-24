@@ -15,6 +15,8 @@ export type WorkFocus = {
   item: string | null;
   lane: string | null;
   experiment: string | null;
+  /** In-memory intent only; canonical URLs deliberately do not encode it. */
+  navigation?: "preserve";
 };
 
 export type WorkLocation = {
@@ -85,6 +87,19 @@ export function isWorkLocation(value: unknown): value is WorkLocation {
   if (candidate.caseId !== null && typeof candidate.caseId !== "string") {
     return false;
   }
+  if (candidate.focus !== undefined) {
+    if (!candidate.focus || typeof candidate.focus !== "object") return false;
+    const focus = candidate.focus as Record<string, unknown>;
+    if (
+      typeof focus.section !== "string" ||
+      (focus.item !== null && typeof focus.item !== "string") ||
+      (focus.lane !== null && typeof focus.lane !== "string") ||
+      (focus.experiment !== null && typeof focus.experiment !== "string") ||
+      (focus.navigation !== undefined && focus.navigation !== "preserve")
+    ) {
+      return false;
+    }
+  }
   return isStageId(String(candidate.stage ?? ""));
 }
 
@@ -126,7 +141,8 @@ export function sameLocation(a: ShellLocation, b: ShellLocation): boolean {
     (a.focus?.section ?? null) === (b.focus?.section ?? null) &&
     (a.focus?.item ?? null) === (b.focus?.item ?? null) &&
     (a.focus?.lane ?? null) === (b.focus?.lane ?? null) &&
-    (a.focus?.experiment ?? null) === (b.focus?.experiment ?? null);
+    (a.focus?.experiment ?? null) === (b.focus?.experiment ?? null) &&
+    (a.focus?.navigation ?? null) === (b.focus?.navigation ?? null);
 }
 
 export function normalizePathname(pathname: string): string {
