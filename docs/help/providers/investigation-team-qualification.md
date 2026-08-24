@@ -132,10 +132,12 @@ the opaque host run id, non-secret fingerprints, and lifecycle state while
 omitting credentials, private endpoints, evaluator truth, canonical private
 responses, and unrelated model inventory.
 
-The Settings view currently presents these redacted artifacts inline for
-inspection. It does not expose the private canonical-response capture. Treat
-copying or saving the visible text as an explicit operator action rather than
-background export.
+The Settings view presents these redacted artifacts inline and provides
+explicit **Copy redacted JSON** and **Copy redacted Markdown** actions. It never
+copies or writes them automatically and does not expose the private canonical
+response capture. A clipboard denial stays visible and leaves the inline
+artifact available for manual selection. Saving a copy remains an explicit
+operator action outside this view.
 
 When sharing a comparison, include the number of repeats, run order, exact role,
 and every identity needed to reproduce it. Keep the private canonical response

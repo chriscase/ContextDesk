@@ -115,6 +115,55 @@ function knownMetric(value: number | null | undefined, suffix = ""): string {
   return value == null ? "unknown" : `${value}${suffix}`;
 }
 
+function RedactedArtifact({
+  label,
+  text,
+  testId,
+  copyTestId,
+}: {
+  label: string;
+  text: string;
+  testId?: string;
+  copyTestId?: string;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+
+  const copy = async () => {
+    setCopyState("idle");
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+  };
+
+  return (
+    <details>
+      <summary>View {label}</summary>
+      <div className="it-readiness__export-actions">
+        <button
+          type="button"
+          className="btn btn--ghost btn--sm"
+          data-testid={copyTestId}
+          onClick={() => void copy()}
+        >
+          Copy {label}
+        </button>
+        {copyState !== "idle" ? (
+          <span role="status" aria-live="polite">
+            {copyState === "copied"
+              ? `Copied ${label}.`
+              : `Couldn’t copy ${label}. Select the redacted text and copy it manually.`}
+          </span>
+        ) : null}
+      </div>
+      <pre data-testid={testId}>{text}</pre>
+    </details>
+  );
+}
+
 function knownAnswerHistoryKey(
   report: InvestigationTeamKnownAnswerDto,
   index: number,
@@ -958,14 +1007,18 @@ export function InvestigationTeamReadinessPanel() {
             evaluator truth and provider credentials are not exposed here.
           </p>
           <div className="it-readiness__exports" data-testid="investigation-team-redacted-exports">
-            <details>
-              <summary>View redacted JSON</summary>
-              <pre data-testid="investigation-team-redacted-json">{qualification.redacted_json}</pre>
-            </details>
-            <details>
-              <summary>View redacted Markdown</summary>
-              <pre data-testid="investigation-team-redacted-markdown">{qualification.redacted_markdown}</pre>
-            </details>
+            <RedactedArtifact
+              label="redacted JSON"
+              text={qualification.redacted_json}
+              testId="investigation-team-redacted-json"
+              copyTestId="investigation-team-copy-redacted-json"
+            />
+            <RedactedArtifact
+              label="redacted Markdown"
+              text={qualification.redacted_markdown}
+              testId="investigation-team-redacted-markdown"
+              copyTestId="investigation-team-copy-redacted-markdown"
+            />
           </div>
           {failures.length > 0 ? (
             <div
@@ -1328,14 +1381,16 @@ export function InvestigationTeamReadinessPanel() {
                   </ol>
                 </details>
                 <div className="it-readiness__exports">
-                  <details>
-                    <summary>View redacted quality JSON</summary>
-                    <pre>{report.redacted_json}</pre>
-                  </details>
-                  <details>
-                    <summary>View redacted quality Markdown</summary>
-                    <pre>{report.redacted_markdown}</pre>
-                  </details>
+                  <RedactedArtifact
+                    label="redacted quality JSON"
+                    text={report.redacted_json}
+                    copyTestId={`investigation-team-copy-known-answer-json-${index}`}
+                  />
+                  <RedactedArtifact
+                    label="redacted quality Markdown"
+                    text={report.redacted_markdown}
+                    copyTestId={`investigation-team-copy-known-answer-markdown-${index}`}
+                  />
                 </div>
               </details>
             ))}

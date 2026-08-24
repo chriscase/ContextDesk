@@ -215,6 +215,53 @@ beforeEach(() => {
 });
 
 describe("InvestigationTeamReadinessPanel", () => {
+  it("copies only the rendered redacted team and quality artifacts on explicit action", async () => {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const aggregate = report();
+    const quality = knownAnswerReport();
+    host.qualification.mockResolvedValue(aggregate);
+    host.history.mockResolvedValue([aggregate]);
+    host.knownAnswerHistory.mockResolvedValue([quality]);
+
+    render(<InvestigationTeamReadinessPanel />);
+    await screen.findByTestId("investigation-team-readiness");
+
+    fireEvent.click(screen.getByTestId("investigation-team-copy-redacted-json"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(aggregate.redacted_json));
+    expect(screen.getByText("Copied redacted JSON.")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("investigation-team-copy-redacted-markdown"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(aggregate.redacted_markdown));
+
+    fireEvent.click(screen.getByTestId("investigation-team-copy-known-answer-json-0"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(quality.redacted_json));
+    expect(writeText).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps clipboard denial visible and leaves the redacted artifact inspectable", async () => {
+    const writeText = vi.fn(async () => {
+      throw new Error("clipboard denied");
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    host.qualification.mockResolvedValue(report());
+
+    render(<InvestigationTeamReadinessPanel />);
+    await screen.findByTestId("investigation-team-readiness");
+    fireEvent.click(screen.getByTestId("investigation-team-copy-redacted-json"));
+
+    expect(await screen.findByText(/couldn’t copy redacted JSON/i)).toBeTruthy();
+    expect(screen.getByTestId("investigation-team-redacted-json").textContent).toBe(
+      "{\"safe\":true}",
+    );
+  });
+
   it("separates configured investigator from measured reviewer readiness", async () => {
     render(<InvestigationTeamReadinessPanel />);
     const panel = await screen.findByTestId("investigation-team-readiness");
