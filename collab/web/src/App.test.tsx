@@ -737,6 +737,37 @@ describe("pathname shell routing", () => {
     expect(window.location.pathname).toBe("/");
   });
 
+  it("shows first-run setup before sign-in when the host reports an unconfigured installation", async () => {
+    const stub = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/setup/status") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            schemaId: "cd-collab.setup_status.v1",
+            revision: 0,
+            phase: "unclaimed",
+            claimed: false,
+            failureCode: null,
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", stub);
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Prepare your War Room in about five minutes",
+      }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+    expect(stub.mock.calls.some(([input]) => String(input) === "/api/auth/me")).toBe(false);
+  });
+
   it("returns to the dedicated sign-in route immediately on sign-out, without a stale shell flash", async () => {
     let release: (value: { ok: boolean; json: () => Promise<unknown> }) => void = () => {};
     const gate = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((resolve) => {

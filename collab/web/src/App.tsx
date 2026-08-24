@@ -21,6 +21,7 @@ import { Catalog } from "./Catalog.js";
 import { Administration } from "./Administration.js";
 import { HelpCenter } from "./HelpCenter.js";
 import { LoginForm } from "./LoginForm.js";
+import { SetupWizard } from "./SetupWizard.js";
 import { AUTH_LOST_EVENT } from "./protected-api.js";
 
 interface SessionView {
@@ -184,6 +185,7 @@ export function App() {
   const staticReadOnly = window.__CONTEXTDESK_STATIC_READ_ONLY__ === true;
   const [session, setSession] = useState<SessionView | null>(null);
   const [ready, setReady] = useState(false);
+  const [setupAvailable, setSetupAvailable] = useState<boolean | null>(null);
   const [theme, setTheme] = useState<ThemeName>(savedTheme);
   const [location, setLocation] = useState<ShellLocation>(() =>
     parsePathname(window.location.pathname, window.location.search, window.location.hash),
@@ -252,7 +254,29 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    void refresh();
+    let active = true;
+    void fetch("/api/setup/status", {
+      headers: { accept: "application/json" },
+      cache: "no-store",
+    })
+      .then((response) => {
+        if (!active) return;
+        if (response.ok) {
+          setSetupAvailable(true);
+          setReady(true);
+          return;
+        }
+        setSetupAvailable(false);
+        void refresh();
+      })
+      .catch(() => {
+        if (!active) return;
+        setSetupAvailable(false);
+        void refresh();
+      });
+    return () => {
+      active = false;
+    };
   }, [refresh]);
 
   const navigate = useCallback((next: ShellLocation, mode: "push" | "replace" = "push") => {
@@ -350,7 +374,19 @@ export function App() {
     navigate({ area, caseId, stage });
   }
 
-  if (!ready) {
+  if (setupAvailable === true) {
+    return (
+      <SetupWizard
+        onUnavailable={() => {
+          setSetupAvailable(false);
+          setReady(false);
+          void refresh();
+        }}
+      />
+    );
+  }
+
+  if (!ready || setupAvailable === null) {
     return (
       <main className="shell shell--gate" aria-busy="true">
         <p className="shell__eyebrow">ContextDesk</p>
