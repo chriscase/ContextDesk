@@ -1925,7 +1925,7 @@ describe("decision readiness cockpit", () => {
 
     await screen.findByRole("region", { name: "Decision readiness" });
     fireEvent.click(screen.getByRole("button", { name: "chat-operator" }));
-    expect(screen.getByText(/Highlighting chat-operator in place/)).toBeTruthy();
+    expect(await screen.findByText(/Highlighting chat-operator in place/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /Comparison 2/ }));
     expect(screen.queryByText(/Highlighting chat-operator/)).toBeNull();
