@@ -43,6 +43,8 @@ describe("opt-in signed updater (#173)", () => {
     expect(yml).toMatch(/TAURI_SIGNING_PRIVATE_KEY/);
     expect(yml).toMatch(/includeUpdaterJson/);
     expect(yml).not.toMatch(/BEGIN.*PRIVATE/);
+    expect(yml).toMatch(/libayatana-appindicator3-dev/);
+    expect(yml).not.toMatch(/\blibappindicator3-dev\b/);
   });
 
   it("host check/install helpers exist and docs cover trust boundary", () => {
