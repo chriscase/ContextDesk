@@ -24,9 +24,10 @@ use cd_workflow::investigation_team_qualification::{
     QualificationExecutionResult, QualificationStatus,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 #[cfg(unix)]
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
@@ -42,7 +43,20 @@ pub const INVESTIGATION_TEAM_QUALIFICATION_STORE_SCHEMA_V1: &str =
 pub const MAX_INVESTIGATION_TEAM_QUALIFICATION_RECORDS: usize = 128;
 pub const MAX_INVESTIGATION_TEAM_QUALIFICATION_STORE_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(not(unix))]
-const QUALIFICATION_STORE_PLATFORM_UNAVAILABLE: &str = "investigation team qualification history persistence is unavailable on this host because stable no-follow file identity, owner-only retention, and atomic replacement cannot all be guaranteed";
+const QUALIFICATION_STORE_PLATFORM_UNAVAILABLE: &str = "redacted investigation team qualification history persistence is unavailable on this host because this build has no supported atomic-replacement and compare-and-swap backend";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum QualificationStoreRevision {
+    #[default]
+    Missing,
+    Present([u8; 32]),
+}
+
+impl QualificationStoreRevision {
+    fn for_validated_bytes(bytes: &[u8]) -> Self {
+        Self::Present(Sha256::digest(bytes).into())
+    }
+}
 
 /// Distinguishes provider-free wiring evidence from measured provider runs.
 /// A synthetic result can validate the host seam, but must never be displayed
@@ -177,6 +191,10 @@ pub struct InvestigationTeamQualificationStore {
     schema_id: String,
     #[serde(default)]
     records: Vec<StoredInvestigationTeamQualification>,
+    /// Exact validated bytes observed by this process. This is host-only CAS
+    /// state and is never serialized into the redacted history document.
+    #[serde(skip)]
+    expected_revision: QualificationStoreRevision,
 }
 
 impl Default for InvestigationTeamQualificationStore {
@@ -184,6 +202,7 @@ impl Default for InvestigationTeamQualificationStore {
         Self {
             schema_id: INVESTIGATION_TEAM_QUALIFICATION_STORE_SCHEMA_V1.into(),
             records: Vec::new(),
+            expected_revision: QualificationStoreRevision::Missing,
         }
     }
 }
@@ -238,8 +257,10 @@ impl InvestigationTeamQualificationStore {
         }
     }
 
-    /// Atomically persist the validated, redacted store.
-    pub fn save(&self, path: &Path) -> CoreResult<()> {
+    /// Atomically persist the validated, redacted store. Unix additionally
+    /// applies owner-only permissions as defense in depth; this redacted store
+    /// is not represented as a private canonical-capture boundary.
+    pub fn save(&mut self, path: &Path) -> CoreResult<()> {
         #[cfg(unix)]
         {
             self.save_unix(path, |_| Ok(()), sync_parent_directory)
@@ -310,10 +331,10 @@ impl InvestigationTeamQualificationStore {
 
     #[cfg(unix)]
     fn save_unix(
-        &self,
+        &mut self,
         path: &Path,
         before_replace: impl FnOnce(&Path) -> CoreResult<()>,
-        sync_parent: impl FnOnce(&LiveKnownAnswerOwnerDirectory) -> CoreResult<()>,
+        mut sync_parent: impl FnMut(&LiveKnownAnswerOwnerDirectory) -> CoreResult<()>,
     ) -> CoreResult<()> {
         self.validate()?;
         let body = serde_json::to_vec_pretty(self)
@@ -322,9 +343,10 @@ impl InvestigationTeamQualificationStore {
             return Err(store_error("store is too large"));
         }
         let decoded = Self::decode(&body)?;
-        if decoded != *self {
+        if decoded.schema_id != self.schema_id || decoded.records != self.records {
             return Err(store_error("store encoding is not canonical"));
         }
+        let next_revision = decoded.expected_revision;
         let (parent, name) = store_parent_and_name(path)?;
         verify_existing_parent(parent, true)?;
         let directory = LiveKnownAnswerOwnerDirectory::open(parent).map_err(|error| {
@@ -337,52 +359,121 @@ impl InvestigationTeamQualificationStore {
             .map_err(|_| store_error("store parent identity changed"))?;
         let lock_name = format!(".{name}.lock");
         tighten_owned_regular_file(&parent.join(&lock_name), "lock")?;
-        let _lock = acquire_qualification_write_lock(&directory, &lock_name)?;
+        let lock = acquire_qualification_write_lock(&directory, &lock_name)?;
         tighten_owned_regular_file(path, "store")?;
         let tmp_name = format!(".{name}.{}.tmp", Uuid::new_v4());
-        let result = (|| -> CoreResult<()> {
-            if let Some(existing) = directory
-                .open_owner_regular(
-                    name,
-                    MAX_INVESTIGATION_TEAM_QUALIFICATION_STORE_BYTES as u64,
-                    false,
-                )
-                .map_err(|_| store_error("existing store path is unsafe to replace"))?
-            {
-                let metadata = existing.file.metadata()?;
-                if metadata.file_type().is_symlink() || !metadata.is_file() {
-                    return Err(store_error("existing store path is not a regular file"));
+        let current = read_validated_current_store(&directory, name)?;
+        let current_revision = current
+            .as_ref()
+            .map(|store| store.revision.clone())
+            .unwrap_or_default();
+        if current_revision != self.expected_revision {
+            return Err(store_error(
+                "store revision changed since it was loaded; reload before saving",
+            ));
+        }
+        let rollback_name = current
+            .as_ref()
+            .map(|_| format!(".{name}.{}.rollback", Uuid::new_v4()));
+        let prepared = (|| -> CoreResult<Metadata> {
+            if let (Some(current), Some(rollback_name)) = (&current, &rollback_name) {
+                let rollback_metadata =
+                    write_verified_owner_file(&directory, rollback_name, &current.bytes)?;
+                let rollback = read_validated_current_store(&directory, rollback_name)?
+                    .ok_or_else(|| store_error("rollback store disappeared"))?;
+                validate_stable_open_metadata(
+                    &rollback_metadata,
+                    &rollback.metadata,
+                    current.bytes.len() as u64,
+                )?;
+                if rollback.bytes != current.bytes || rollback.revision != current.revision {
+                    return Err(store_error("rollback store verification failed"));
                 }
             }
-            let mut file = directory
-                .create_owner_regular(&tmp_name)
-                .map_err(|_| store_error("cannot create a unique owner-only temporary store"))?;
-            file.write_all(&body)?;
-            file.flush()?;
-            file.sync_all()?;
-            file.seek(SeekFrom::Start(0))?;
-            let before = file.metadata()?;
-            let written = read_exact_open_file(&mut file, body.len() as u64)?;
-            let after = file.metadata()?;
-            validate_stable_open_metadata(&before, &after, body.len() as u64)?;
-            if written != body {
-                return Err(store_error("temporary store bytes changed before replace"));
-            }
-            let verified = Self::decode(&written)?;
-            if verified != *self {
+            let tmp_metadata = write_verified_owner_file(&directory, &tmp_name, &body)?;
+            let verified = Self::decode(&body)?;
+            if verified.schema_id != self.schema_id || verified.records != self.records {
                 return Err(store_error("temporary store verification failed"));
             }
-            let named = directory
-                .open_owner_regular(&tmp_name, body.len() as u64, false)?
-                .ok_or_else(|| store_error("temporary store pathname disappeared"))?;
-            validate_stable_open_metadata(&after, &named.file.metadata()?, body.len() as u64)?;
+            Ok(tmp_metadata)
+        })();
+        let tmp_metadata = match prepared {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                let _ = directory.remove_file(&tmp_name);
+                if let Some(rollback_name) = &rollback_name {
+                    let _ = directory.remove_file(rollback_name);
+                }
+                return Err(error);
+            }
+        };
+
+        let before_publication = (|| -> CoreResult<()> {
             before_replace(path)?;
             directory
                 .revalidate_path(parent)
                 .map_err(|_| store_error("store path identity changed"))?;
-            if let Ok(metadata) = std::fs::symlink_metadata(path) {
-                if metadata.file_type().is_symlink() {
-                    return Err(store_error("store path identity changed to a symlink"));
+            lock.revalidate(&directory, &lock_name)?;
+            let named_tmp = directory
+                .open_owner_regular(&tmp_name, body.len() as u64, false)?
+                .ok_or_else(|| store_error("temporary store pathname disappeared"))?;
+            validate_stable_open_metadata(
+                &tmp_metadata,
+                &named_tmp.file.metadata()?,
+                body.len() as u64,
+            )?;
+            // This destination read is intentionally the final operation
+            // before atomic replacement. It binds CAS to both the exact
+            // validated bytes and the inode observed under the retained lock.
+            let destination = read_validated_current_store(&directory, name)?;
+            match (&current, &destination) {
+                (None, None) => {}
+                (Some(expected), Some(actual)) => {
+                    validate_stable_open_metadata(
+                        &expected.metadata,
+                        &actual.metadata,
+                        expected.bytes.len() as u64,
+                    )
+                    .map_err(|_| {
+                        store_error(
+                            "store destination inode changed immediately before replacement",
+                        )
+                    })?;
+                    if actual.revision != expected.revision || actual.bytes != expected.bytes {
+                        return Err(store_error(
+                            "store destination changed immediately before replacement",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(store_error(
+                        "store destination changed immediately before replacement",
+                    ));
+                }
+            }
+            lock.revalidate(&directory, &lock_name)?;
+            let destination = read_validated_current_store(&directory, name)?;
+            match (&current, &destination) {
+                (None, None) => {}
+                (Some(expected), Some(actual)) => {
+                    validate_stable_open_metadata(
+                        &expected.metadata,
+                        &actual.metadata,
+                        expected.bytes.len() as u64,
+                    )
+                    .map_err(|_| {
+                        store_error("store destination inode changed at atomic replacement")
+                    })?;
+                    if actual.revision != expected.revision || actual.bytes != expected.bytes {
+                        return Err(store_error(
+                            "store destination changed at atomic replacement",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(store_error(
+                        "store destination changed at atomic replacement",
+                    ));
                 }
             }
             directory
@@ -390,22 +481,110 @@ impl InvestigationTeamQualificationStore {
                 .map_err(|_| store_error("cannot atomically replace the qualification store"))?;
             Ok(())
         })();
-        if result.is_err() {
+        if let Err(error) = before_publication {
             let _ = directory.remove_file(&tmp_name);
+            if let Some(rollback_name) = &rollback_name {
+                let _ = directory.remove_file(rollback_name);
+            }
+            return Err(error);
         }
-        result?;
-        sync_parent(&directory)?;
+
+        if let Err(publication_sync_error) = sync_parent(&directory) {
+            let rollback = (|| -> CoreResult<()> {
+                let verified_rollback = if let (Some(expected), Some(rollback_name)) =
+                    (&current, &rollback_name)
+                {
+                    let rollback = read_validated_current_store(&directory, rollback_name)?
+                        .ok_or_else(|| store_error("rollback store disappeared"))?;
+                    if rollback.bytes != expected.bytes || rollback.revision != expected.revision {
+                        return Err(store_error("rollback store changed before restoration"));
+                    }
+                    Some(rollback_name)
+                } else {
+                    None
+                };
+                lock.revalidate(&directory, &lock_name)?;
+                let published = read_validated_current_store(&directory, name)?
+                    .ok_or_else(|| store_error("published store disappeared before rollback"))?;
+                validate_renamed_file_identity(
+                    &tmp_metadata,
+                    &published.metadata,
+                    body.len() as u64,
+                )?;
+                if published.bytes != body || published.revision != next_revision {
+                    return Err(store_error(
+                        "published store changed before rollback; refusing to overwrite it",
+                    ));
+                }
+                if let Some(rollback_name) = verified_rollback {
+                    directory
+                        .rename_replace(rollback_name, name)
+                        .map_err(|_| store_error("cannot atomically restore the prior store"))?;
+                } else {
+                    directory
+                        .remove_file(name)
+                        .map_err(|_| store_error("cannot remove uncommitted new store"))?;
+                }
+                sync_parent(&directory)?;
+                directory
+                    .revalidate_path(parent)
+                    .map_err(|_| store_error("store path identity changed during rollback"))?;
+                lock.revalidate(&directory, &lock_name)?;
+                let restored = read_validated_current_store(&directory, name)?;
+                match (&current, restored) {
+                    (None, None) => Ok(()),
+                    (Some(expected), Some(actual))
+                        if actual.bytes == expected.bytes
+                            && actual.revision == expected.revision =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(store_error(
+                        "prior store could not be proven after publication rollback",
+                    )),
+                }
+            })();
+            if let Err(rollback_error) = rollback {
+                return Err(store_error(&format!(
+                    "publication sync failed and rollback durability is indeterminate: {publication_sync_error}; {rollback_error}"
+                )));
+            }
+            return Err(publication_sync_error);
+        }
+
+        directory
+            .revalidate_path(parent)
+            .map_err(|_| store_error("store path identity changed after publication"))?;
+        lock.revalidate(&directory, &lock_name)?;
+        let committed = read_validated_current_store(&directory, name)?
+            .ok_or_else(|| store_error("committed store disappeared"))?;
+        validate_renamed_file_identity(&tmp_metadata, &committed.metadata, body.len() as u64)?;
+        if committed.bytes != body || committed.revision != next_revision {
+            return Err(store_error(
+                "committed store changed before the writer revision could advance",
+            ));
+        }
+        lock.revalidate(&directory, &lock_name)?;
+        self.expected_revision = next_revision;
+        if let Some(rollback_name) = &rollback_name {
+            if let Err(error) = directory.remove_file(rollback_name) {
+                tracing::warn!(%error, "committed qualification history left a recoverable rollback sibling");
+            } else if let Err(error) = sync_parent_directory(&directory) {
+                tracing::warn!(%error, "qualification history rollback-sibling cleanup was not durably synced");
+            }
+        }
         Ok(())
     }
 
     fn decode(bytes: &[u8]) -> CoreResult<Self> {
         let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-        let store = Self::deserialize(&mut deserializer)
+        let mut store = Self::deserialize(&mut deserializer)
             .map_err(|error| store_error(&format!("store is malformed: {error}")))?;
         deserializer
             .end()
             .map_err(|_| store_error("store has trailing bytes"))?;
         store.validate()?;
+        store.expected_revision = QualificationStoreRevision::for_validated_bytes(bytes);
         Ok(store)
     }
 
@@ -490,6 +669,17 @@ pub fn investigation_team_qualification_store_path(config_dir: &Path) -> PathBuf
 
 fn store_error(detail: &str) -> CoreError {
     CoreError::Config(format!("investigation team qualification store: {detail}"))
+}
+
+fn ensure_live_history_persistence_supported() -> CoreResult<()> {
+    #[cfg(unix)]
+    {
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        Err(store_error(QUALIFICATION_STORE_PLATFORM_UNAVAILABLE))
+    }
 }
 
 fn store_parent_and_name(path: &Path) -> CoreResult<(&Path, &str)> {
@@ -667,7 +857,35 @@ fn tighten_owned_regular_file(path: &Path, kind: &str) -> CoreResult<()> {
 
 #[cfg(unix)]
 struct QualificationWriteLock {
-    _file: File,
+    file: File,
+    identity: Metadata,
+}
+
+#[cfg(unix)]
+impl QualificationWriteLock {
+    fn revalidate(&self, directory: &LiveKnownAnswerOwnerDirectory, name: &str) -> CoreResult<()> {
+        let held = self.file.metadata()?;
+        validate_stable_open_metadata(&self.identity, &held, 0)
+            .map_err(|_| store_error("qualification write lock retained inode metadata changed"))?;
+        if held.nlink() != 1 {
+            return Err(store_error(
+                "qualification write lock pathname is no longer uniquely bound",
+            ));
+        }
+        let named = directory
+            .open_owner_regular(name, 0, false)
+            .map_err(|_| store_error("qualification write lock is unsafe to revalidate"))?
+            .ok_or_else(|| store_error("qualification write lock pathname disappeared"))?;
+        let named_metadata = named.file.metadata()?;
+        validate_stable_open_metadata(&held, &named_metadata, 0)
+            .map_err(|_| store_error("qualification write lock pathname identity changed"))?;
+        if named_metadata.nlink() != 1 {
+            return Err(store_error(
+                "qualification write lock pathname is no longer uniquely bound",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -698,7 +916,78 @@ fn acquire_qualification_write_lock(
         .map_err(|_| store_error("qualification write lock is unsafe after lock"))?
         .ok_or_else(|| store_error("qualification write lock disappeared after lock"))?;
     validate_stable_open_metadata(&locked_metadata, &locked_named.file.metadata()?, 0)?;
-    Ok(QualificationWriteLock { _file: file })
+    if locked_metadata.nlink() != 1 {
+        return Err(store_error(
+            "qualification write lock pathname is not uniquely bound",
+        ));
+    }
+    Ok(QualificationWriteLock {
+        file,
+        identity: locked_metadata,
+    })
+}
+
+#[cfg(unix)]
+struct ValidatedCurrentStore {
+    bytes: Vec<u8>,
+    metadata: Metadata,
+    revision: QualificationStoreRevision,
+}
+
+#[cfg(unix)]
+fn read_validated_current_store(
+    directory: &LiveKnownAnswerOwnerDirectory,
+    name: &str,
+) -> CoreResult<Option<ValidatedCurrentStore>> {
+    let Some(mut opened) = directory
+        .open_owner_regular(
+            name,
+            MAX_INVESTIGATION_TEAM_QUALIFICATION_STORE_BYTES as u64,
+            false,
+        )
+        .map_err(|_| store_error("existing store path is unsafe to read"))?
+    else {
+        return Ok(None);
+    };
+    let before = opened.file.metadata()?;
+    let bytes = read_exact_open_file(&mut opened.file, opened.size)?;
+    let after = opened.file.metadata()?;
+    validate_stable_open_metadata(&before, &after, opened.size)?;
+    let revision = InvestigationTeamQualificationStore::decode(&bytes)?.expected_revision;
+    Ok(Some(ValidatedCurrentStore {
+        bytes,
+        metadata: after,
+        revision,
+    }))
+}
+
+#[cfg(unix)]
+fn write_verified_owner_file(
+    directory: &LiveKnownAnswerOwnerDirectory,
+    name: &str,
+    bytes: &[u8],
+) -> CoreResult<Metadata> {
+    let mut file = directory
+        .create_owner_regular(name)
+        .map_err(|_| store_error("cannot create a unique owner-only store sibling"))?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    file.sync_all()?;
+    file.seek(SeekFrom::Start(0))?;
+    let before = file.metadata()?;
+    let written = read_exact_open_file(&mut file, bytes.len() as u64)?;
+    let after = file.metadata()?;
+    validate_stable_open_metadata(&before, &after, bytes.len() as u64)?;
+    if written != bytes {
+        return Err(store_error(
+            "store sibling bytes changed before publication",
+        ));
+    }
+    let named = directory
+        .open_owner_regular(name, bytes.len() as u64, false)?
+        .ok_or_else(|| store_error("store sibling pathname disappeared"))?;
+    validate_stable_open_metadata(&after, &named.file.metadata()?, bytes.len() as u64)?;
+    Ok(after)
 }
 
 #[cfg(unix)]
@@ -742,6 +1031,28 @@ fn validate_stable_open_metadata(
         || before.ctime_nsec() != after.ctime_nsec()
     {
         return Err(store_error("open store metadata changed while reading"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_renamed_file_identity(
+    before: &std::fs::Metadata,
+    after: &std::fs::Metadata,
+    expected_size: u64,
+) -> CoreResult<()> {
+    if !before.is_file()
+        || !after.is_file()
+        || before.len() != expected_size
+        || after.len() != expected_size
+        || before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.uid() != after.uid()
+        || before.mode() != after.mode()
+    {
+        return Err(store_error(
+            "published store inode identity changed across atomic rename",
+        ));
     }
     Ok(())
 }
@@ -1131,6 +1442,10 @@ pub fn execute_live(
     observed_at: i64,
     cancel: &AtomicBool,
 ) -> CoreResult<LiveQualificationExecutionResult> {
+    // Unsupported platforms fail before provider dispatch because this build
+    // has no persistence backend with the required atomic-replace and CAS seam.
+    // Unix destination availability is still validated when the result saves.
+    ensure_live_history_persistence_supported()?;
     if targets.is_empty() {
         return Err(CoreError::Config(
             "live qualification requires at least one host-owned target".into(),
@@ -1637,7 +1952,7 @@ mod tests {
         let path = directory
             .path()
             .join("investigation-team-qualifications.json");
-        let store = populated_store();
+        let mut store = populated_store();
         store.save(&path).expect("save");
         let reopened = InvestigationTeamQualificationStore::load(&path).expect("load");
         assert_eq!(reopened, store);
@@ -1740,13 +2055,12 @@ mod tests {
         let path = directory
             .path()
             .join("investigation-team-qualifications.json");
-        populated_store().save(&path).expect("save");
+        let mut store = populated_store();
+        store.save(&path).expect("save");
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("0640");
         assert!(InvestigationTeamQualificationStore::load(&path).is_err());
-        populated_store()
-            .save(&path)
-            .expect("save tightens owned store file");
+        store.save(&path).expect("save tightens owned store file");
         assert_eq!(
             std::fs::symlink_metadata(&path)
                 .expect("tightened store")
@@ -1760,9 +2074,7 @@ mod tests {
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750))
             .expect("0750 parent");
         assert!(InvestigationTeamQualificationStore::load(&path).is_err());
-        populated_store()
-            .save(&path)
-            .expect("save tightens owned parent");
+        store.save(&path).expect("save tightens owned parent");
         assert_eq!(
             std::fs::symlink_metadata(directory.path())
                 .expect("tightened parent")
@@ -1816,7 +2128,7 @@ mod tests {
         std::fs::create_dir(&parent).expect("parent");
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).expect("0700");
         let path = parent.join("investigation-team-qualifications.json");
-        let original = populated_store();
+        let mut original = populated_store();
         original.save(&path).expect("original");
         let moved = root.path().join("moved-parent");
         let error = original
@@ -1847,7 +2159,7 @@ mod tests {
     fn load_after_path_swap_reads_opened_inode_or_fails_closed() {
         use std::os::unix::fs::symlink;
 
-        let expected = populated_store();
+        let mut expected = populated_store();
         let directory = owner_tempdir();
         let path = directory
             .path()
@@ -1879,7 +2191,7 @@ mod tests {
         let path = directory
             .path()
             .join("investigation-team-qualifications.json");
-        let store = populated_store();
+        let mut store = populated_store();
         store.save(&path).expect("first save");
         let lock_path = directory
             .path()
@@ -1894,14 +2206,245 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn stale_sequential_writer_fails_cas_without_losing_newer_history() {
+        let directory = owner_tempdir();
+        let path = directory
+            .path()
+            .join("investigation-team-qualifications.json");
+        let mut initial = populated_store();
+        initial.save(&path).expect("initial save");
+
+        let mut first = InvestigationTeamQualificationStore::load(&path).expect("first load");
+        let mut stale = InvestigationTeamQualificationStore::load(&path).expect("stale load");
+        first
+            .publish(
+                measured_result(1_777_000_100),
+                InvestigationTeamQualificationRunKind::Measured,
+                Vec::new(),
+            )
+            .expect("first publish");
+        first.save(&path).expect("first writer");
+
+        stale
+            .publish(
+                measured_result(1_777_000_200),
+                InvestigationTeamQualificationRunKind::Measured,
+                Vec::new(),
+            )
+            .expect("stale publish");
+        let error = stale.save(&path).expect_err("stale writer");
+        assert!(error.to_string().contains("revision changed"), "{error}");
+        assert_eq!(
+            InvestigationTeamQualificationStore::load(&path).expect("preserved newer history"),
+            first
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_current_store_fails_cas_without_replacement() {
+        let directory = owner_tempdir();
+        let path = directory
+            .path()
+            .join("investigation-team-qualifications.json");
+        let mut loaded = populated_store();
+        loaded.save(&path).expect("initial save");
+        let malformed = b"{synthetic-malformed-history";
+        std::fs::write(&path, malformed).expect("inject malformed history");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("0600");
+
+        loaded
+            .publish(
+                measured_result(1_777_000_100),
+                InvestigationTeamQualificationRunKind::Measured,
+                Vec::new(),
+            )
+            .expect("publish in memory");
+        let error = loaded.save(&path).expect_err("malformed current store");
+        assert!(error.to_string().contains("malformed"), "{error}");
+        assert_eq!(std::fs::read(&path).expect("unchanged bytes"), malformed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_publication_sync_failure_restores_exact_prior_revision_and_bytes() {
+        let directory = owner_tempdir();
+        let path = directory
+            .path()
+            .join("investigation-team-qualifications.json");
+        let mut original = populated_store();
+        original.save(&path).expect("initial save");
+        let prior_bytes = std::fs::read(&path).expect("prior bytes");
+
+        let mut candidate =
+            InvestigationTeamQualificationStore::load(&path).expect("candidate load");
+        let prior_revision = candidate.expected_revision.clone();
+        candidate
+            .publish(
+                measured_result(1_777_000_300),
+                InvestigationTeamQualificationRunKind::Measured,
+                Vec::new(),
+            )
+            .expect("candidate publish");
+
+        let sync_attempts = std::cell::Cell::new(0usize);
+        let error = candidate
+            .save_unix(
+                &path,
+                |_| Ok(()),
+                |owner_directory| {
+                    let attempt = sync_attempts.get();
+                    sync_attempts.set(attempt + 1);
+                    if attempt == 0 {
+                        Err(store_error("injected post-publication sync failure"))
+                    } else {
+                        sync_parent_directory(owner_directory)
+                    }
+                },
+            )
+            .expect_err("publication sync failure");
+        assert!(
+            error
+                .to_string()
+                .contains("injected post-publication sync failure"),
+            "{error}"
+        );
+        assert_eq!(sync_attempts.get(), 2, "rollback must be durably synced");
+        assert_eq!(std::fs::read(&path).expect("restored bytes"), prior_bytes);
+        assert_eq!(candidate.expected_revision, prior_revision);
+        let restored = InvestigationTeamQualificationStore::load(&path).expect("restored store");
+        assert_eq!(restored.expected_revision, prior_revision);
+        assert_eq!(restored, original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_swap_before_atomic_replace_fails_without_overwriting_newer_store() {
+        let directory = owner_tempdir();
+        let path = directory
+            .path()
+            .join("investigation-team-qualifications.json");
+        let mut original = populated_store();
+        original.save(&path).expect("initial save");
+
+        let mut candidate =
+            InvestigationTeamQualificationStore::load(&path).expect("candidate load");
+        candidate
+            .publish(
+                measured_result(1_777_000_300),
+                InvestigationTeamQualificationRunKind::Measured,
+                Vec::new(),
+            )
+            .expect("candidate publish");
+
+        let mut newer = InvestigationTeamQualificationStore::load(&path).expect("newer load");
+        newer
+            .publish(
+                measured_result(1_777_000_400),
+                InvestigationTeamQualificationRunKind::Measured,
+                Vec::new(),
+            )
+            .expect("newer publish");
+        let newer_bytes = serde_json::to_vec_pretty(&newer).expect("newer bytes");
+        let replacement = directory.path().join("synthetic-newer-store.json");
+        std::fs::write(&replacement, &newer_bytes).expect("write newer store");
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600))
+            .expect("newer 0600");
+        let displaced = directory.path().join("synthetic-displaced-store.json");
+
+        let error = candidate
+            .save_unix(
+                &path,
+                |destination| {
+                    std::fs::rename(destination, &displaced)?;
+                    std::fs::rename(&replacement, destination)?;
+                    Ok(())
+                },
+                sync_parent_directory,
+            )
+            .expect_err("destination swap");
+        assert!(error.to_string().contains("destination"), "{error}");
+        assert_eq!(
+            std::fs::read(&path).expect("newer bytes retained"),
+            newer_bytes
+        );
+        assert_eq!(
+            InvestigationTeamQualificationStore::load(&path).expect("newer store retained"),
+            InvestigationTeamQualificationStore::decode(&newer_bytes).expect("decode newer")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_path_swap_fails_before_destination_replacement() {
+        let directory = owner_tempdir();
+        let path = directory
+            .path()
+            .join("investigation-team-qualifications.json");
+        let mut original = populated_store();
+        original.save(&path).expect("initial save");
+        let prior_bytes = std::fs::read(&path).expect("prior bytes");
+
+        let mut candidate =
+            InvestigationTeamQualificationStore::load(&path).expect("candidate load");
+        candidate
+            .publish(
+                measured_result(1_777_000_300),
+                InvestigationTeamQualificationRunKind::Measured,
+                Vec::new(),
+            )
+            .expect("candidate publish");
+        let lock_path = directory
+            .path()
+            .join(".investigation-team-qualifications.json.lock");
+        let displaced_lock = directory.path().join("synthetic-displaced.lock");
+        let replacement_domain = std::cell::RefCell::new(None);
+
+        let error = candidate
+            .save_unix(
+                &path,
+                |_| {
+                    std::fs::rename(&lock_path, &displaced_lock)?;
+                    let replacement = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&lock_path)?;
+                    replacement.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                    replacement.try_lock().map_err(|_| {
+                        store_error("synthetic replacement lock domain could not be acquired")
+                    })?;
+                    replacement_domain.replace(Some(replacement));
+                    Ok(())
+                },
+                sync_parent_directory,
+            )
+            .expect_err("lock path swap");
+        assert!(error.to_string().contains("write lock"), "{error}");
+        assert!(
+            replacement_domain.borrow().is_some(),
+            "the replacement pathname formed a second cooperating lock domain"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("prior bytes retained"),
+            prior_bytes
+        );
+        assert_eq!(
+            InvestigationTeamQualificationStore::load(&path).expect("original retained"),
+            original
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn interrupted_write_preserves_the_original_store() {
         let directory = owner_tempdir();
         let path = directory
             .path()
             .join("investigation-team-qualifications.json");
-        let original = populated_store();
+        let mut original = populated_store();
         original.save(&path).expect("original");
-        let mut next = InvestigationTeamQualificationStore::default();
+        let mut next = InvestigationTeamQualificationStore::load(&path).expect("next load");
+        assert!(next.clear());
         next.publish(
             measured_result(1_777_000_200),
             InvestigationTeamQualificationRunKind::Synthetic,
@@ -1934,8 +2477,36 @@ mod tests {
             .path()
             .join("investigation-team-qualifications.json");
         assert!(InvestigationTeamQualificationStore::load(&path).is_err());
-        assert!(populated_store_unavailable().save(&path).is_err());
+        let mut store = populated_store_unavailable();
+        assert!(store.save(&path).is_err());
         assert!(!path.exists());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn live_provider_work_is_capability_gated_before_dispatch() {
+        let target = LiveQualificationTarget {
+            member: MemberBinding::from_deployment(
+                InvestigationTeamRole::Single,
+                "synthetic-profile",
+                "synthetic-model",
+                "https://qualification.example.test/v1",
+            )
+            .expect("synthetic member"),
+            backend: LiveBackendKind::OpenAiCompatible,
+            base_url: "https://qualification.example.test/v1".into(),
+            api_key: None,
+            extra_headers: Vec::new(),
+            local_only: false,
+        };
+        let error = execute_live(vec![target], 1_777_000_000, &AtomicBool::new(false))
+            .expect_err("unsupported persistence must gate before transport");
+        assert!(
+            error
+                .to_string()
+                .contains("no supported atomic-replacement and compare-and-swap backend"),
+            "{error}"
+        );
     }
 
     #[cfg(not(unix))]
