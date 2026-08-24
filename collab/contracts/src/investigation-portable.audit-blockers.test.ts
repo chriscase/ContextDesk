@@ -125,12 +125,20 @@ describe("audit blockers vs parent #1032", () => {
     );
   });
 
-  it("blocker 3: experiment candidateIds must be triage-job members", () => {
+  it("blocker 3: experiment candidateIds must be backed by a triage job or imported run", () => {
     const bundle = loadValid();
     bundle.experiments[0]!.candidateIds.push("cand-ghost");
     expect(() => portable.parsePortableInvestigation(reseal(bundle))).toThrow(
-      /experiment candidate is not a member of any triage job/,
+      /experiment candidate is not backed by a triage job or imported AI run/,
     );
+  });
+
+  it("blocker 3: an imported AI run can remain a first-class experiment candidate", () => {
+    const bundle = loadValid();
+    const imported = bundle.importedAiRuns[0];
+    expect(imported).toBeTruthy();
+    bundle.experiments[0]!.candidateIds.push(`chat-${imported!.id}`);
+    expect(() => portable.parsePortableInvestigation(reseal(bundle))).not.toThrow();
   });
 
   it("blocker 3: helpfulness candidateIds must belong to that experiment", () => {

@@ -1705,9 +1705,10 @@ export function parsePortableInvestigation(
       }
     }
   }
-  const triageCandidateIds = new Set(
-    bundle.triageJobs.flatMap((job) => job.candidates.map((row) => row.candidateId)),
-  );
+  const backedCandidateIds = new Set([
+    ...bundle.triageJobs.flatMap((job) => job.candidates.map((row) => row.candidateId)),
+    ...bundle.importedAiRuns.map((run) => `chat-${run.id}`),
+  ]);
 
   uniqueIds(
     "$.experiments.id",
@@ -1725,10 +1726,10 @@ export function parsePortableInvestigation(
       exp.candidateIds,
     );
     for (const [j, candidateId] of exp.candidateIds.entries()) {
-      if (!triageCandidateIds.has(candidateId)) {
+      if (!backedCandidateIds.has(candidateId)) {
         throw new ContractViolation(
           `$.experiments[${i}].candidateIds[${j}]`,
-          "experiment candidate is not a member of any triage job",
+          "experiment candidate is not backed by a triage job or imported AI run",
         );
       }
     }
