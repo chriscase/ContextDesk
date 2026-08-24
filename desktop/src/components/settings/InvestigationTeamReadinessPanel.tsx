@@ -47,8 +47,7 @@ type EvidencePreflight = {
     | "measurement_required"
     | "refresh_required"
     | "attention_required"
-    | "identity_review"
-    | "ready_for_bounded_trial";
+    | "identity_review";
   tone: "ok" | "warn" | "neutral";
   title: string;
   detail: string;
@@ -65,9 +64,9 @@ function stateLabel(state: RoleState): string {
     case "configured":
       return "Configured";
     case "qualified":
-      return "Measured qualified";
+      return "Saved label: qualified";
     case "unqualified":
-      return "Measured — did not qualify";
+      return "Saved label: unqualified";
     default:
       return "Not measured yet";
   }
@@ -246,6 +245,54 @@ function knownAnswerIsComplete(report: InvestigationTeamKnownAnswerDto): boolean
     metrics.blocked_scenarios === 0;
 }
 
+type KnownAnswerComparability = Pick<
+  InvestigationTeamKnownAnswerDto,
+  | "build_identity"
+  | "suite_id"
+  | "suite_digest"
+  | "prompt_set_hash"
+  | "orchestration_policy_fingerprint"
+>;
+
+function sameKnownAnswerBasis(
+  left: KnownAnswerComparability,
+  right: KnownAnswerComparability,
+): boolean {
+  return left.build_identity === right.build_identity &&
+    left.suite_id === right.suite_id &&
+    left.suite_digest === right.suite_digest &&
+    left.prompt_set_hash === right.prompt_set_hash &&
+    left.orchestration_policy_fingerprint ===
+      right.orchestration_policy_fingerprint;
+}
+
+function knownAnswerForRow(
+  settings: MultiModelSettingsDto,
+  row: RoleRow,
+  capability: QualificationReportDto | null | undefined,
+  aggregate: InvestigationTeamQualificationDto | null,
+  knownAnswers: InvestigationTeamKnownAnswerDto[],
+): InvestigationTeamKnownAnswerDto | null {
+  if (!capability || !aggregate) return null;
+  const role = expectedRole(settings, row);
+  const member = (aggregate.members ?? []).find((entry) =>
+    entry.role === role &&
+    entry.profile_id === row.profileId &&
+    entry.model_id === row.model &&
+    entry.endpoint_fingerprint === capability.endpoint_fingerprint
+  );
+  if (!member) return null;
+  return knownAnswers
+    .filter((entry) =>
+      entry.role === role &&
+      entry.subject_storage_id === member.subject_storage_id &&
+      entry.profile_id === member.profile_id &&
+      entry.model_id === member.model_id &&
+      entry.endpoint_fingerprint === member.endpoint_fingerprint
+    )
+    .sort((left, right) => right.observed_at - left.observed_at)[0] ?? null;
+}
+
 function evidencePreflight(
   settings: MultiModelSettingsDto,
   rows: RoleRow[],
@@ -271,6 +318,7 @@ function evidencePreflight(
     };
   }
 
+  const comparableEvidence: InvestigationTeamKnownAnswerDto[] = [];
   for (const row of rows) {
     const capability = capabilities[row.id];
     if (!capability) {
@@ -362,15 +410,13 @@ function evidencePreflight(
         detail: `The current ${role} binding does not match the latest measured pipeline fingerprint.`,
       };
     }
-    const evidence = knownAnswers
-      .filter((entry) =>
-        entry.role === role &&
-        entry.subject_storage_id === member.subject_storage_id &&
-        entry.profile_id === member.profile_id &&
-        entry.model_id === member.model_id &&
-        entry.endpoint_fingerprint === member.endpoint_fingerprint
-      )
-      .sort((left, right) => right.observed_at - left.observed_at)[0];
+    const evidence = knownAnswerForRow(
+      settings,
+      row,
+      capability,
+      aggregate,
+      knownAnswers,
+    );
     if (!evidence) {
       return {
         state: "measurement_required",
@@ -408,14 +454,31 @@ function evidencePreflight(
         detail: `The ${role} suite is partial, failed, cancelled, blocked, or otherwise incomplete.`,
       };
     }
+    comparableEvidence.push(evidence);
+  }
+
+  const comparisonBasis = comparableEvidence[0];
+  if (
+    comparisonBasis &&
+    comparableEvidence.some((evidence) =>
+      !sameKnownAnswerBasis(comparisonBasis, evidence)
+    )
+  ) {
+    return {
+      state: "refresh_required",
+      tone: "warn",
+      title: "The role evidence is not directly comparable",
+      detail:
+        "Refresh every role against the same app build, suite, prompt set, and orchestration policy before comparing observations.",
+    };
   }
 
   return {
-    state: "ready_for_bounded_trial",
-    tone: "ok",
-    title: "Ready for a bounded Investigation Team trial",
+    state: "attention_required",
+    tone: "neutral",
+    title: "Evidence recorded; operator review is required",
     detail:
-      "Current capability, measured pipeline, and per-role known-answer evidence match. This is not a universal model recommendation or proof that every role will execute in a future investigation.",
+      "The current host cannot yet prove the complete attempt, tool-loop, and multi-stage role seams. Treat these comparable observations as preparation for a bounded trial, not authorization, a model ranking, or proof that every role will execute.",
   };
 }
 
@@ -450,9 +513,9 @@ function summaryFor(settings: MultiModelSettingsDto, rows: RoleRow[]): {
   }
   return {
     tone: "ok",
-    title: "Configured roles are measured qualified",
+    title: "Configured role labels are present",
     detail:
-      "This is readiness evidence, not proof that a future investigation will execute every role.",
+      "Saved qualification labels are configuration metadata. Use the host evidence below to review what was actually measured.",
   };
 }
 
@@ -643,6 +706,18 @@ export function InvestigationTeamReadinessPanel() {
     currentMeasured,
     knownAnswerHistory,
   );
+  const roleEvidence = rows.map((row) => ({
+    row,
+    role: expectedRole(settings, row),
+    capability: capabilityEvidence[row.id] ?? null,
+    knownAnswer: knownAnswerForRow(
+      settings,
+      row,
+      capabilityEvidence[row.id],
+      currentMeasured,
+      knownAnswerHistory,
+    ),
+  }));
   const failures = qualification?.failures ?? [];
   return (
     <section
@@ -674,6 +749,9 @@ export function InvestigationTeamReadinessPanel() {
         data-tone={preflight.tone}
         data-state={preflight.state}
         data-testid="investigation-team-evidence-preflight"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
       >
         <strong>{preflight.title}.</strong> {preflight.detail}
       </p>
@@ -870,6 +948,74 @@ export function InvestigationTeamReadinessPanel() {
         </p>
       )}
 
+      {roleEvidence.length > 0 ? (
+        <div
+          className="it-readiness__quality-history"
+          data-testid="investigation-team-role-evidence"
+          aria-label="Observed evidence by configured role"
+        >
+          <strong>Observed evidence by role</strong>
+          <p className="it-readiness__detail">
+            These cards describe host-recorded observations. They do not rank models
+            or prove that a composed Investigation Team executed.
+          </p>
+          {roleEvidence.map(({ row, role, capability, knownAnswer }) => (
+            <article
+              className="it-readiness__quality-report"
+              data-testid={`investigation-team-role-evidence-${role}`}
+              key={row.id}
+            >
+              <div className="it-readiness__quality-report-title">
+                <strong>{role}</strong> · <code>{row.model ?? "model not recorded"}</code>
+              </div>
+              <dl className="it-readiness__quality-identity">
+                <div>
+                  <dt>Capability</dt>
+                  <dd>
+                    {capability
+                      ? `${capability.readiness.state} · ${capability.stale ? "stale" : "current"}`
+                      : "not recorded"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Known-answer lifecycle</dt>
+                  <dd>
+                    {knownAnswer
+                      ? `${knownAnswer.reported_status} · ${knownAnswer.metrics.passed_scenarios}/${knownAnswer.metrics.required_scenarios} passed · ${knownAnswer.metrics.blocked_scenarios} blocked`
+                      : "not recorded for this exact role binding"}
+                  </dd>
+                </div>
+                {knownAnswer ? (
+                  <>
+                    <div>
+                      <dt>Observed</dt>
+                      <dd>{new Date(knownAnswer.observed_at * 1000).toLocaleString()}</dd>
+                    </div>
+                    <div>
+                      <dt>Comparable basis</dt>
+                      <dd>
+                        build <code>{knownAnswer.build_identity}</code> · suite{" "}
+                        <code>{knownAnswer.suite_id}</code> · prompt{" "}
+                        <code>{knownAnswer.prompt_set_hash}</code> · policy{" "}
+                        <code>{knownAnswer.orchestration_policy_fingerprint}</code>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Usage and cost</dt>
+                      <dd>
+                        tokens: {knownMetric(knownAnswer.metrics.input_tokens)} input /{" "}
+                        {knownMetric(knownAnswer.metrics.output_tokens)} output · cost:{" "}
+                        {knownMetric(knownAnswer.metrics.cost_microusd, " μUSD")}
+                      </dd>
+                    </div>
+                  </>
+                ) : null}
+              </dl>
+            </article>
+          ))}
+        </div>
+      ) : null}
+
       <section
         className="it-readiness__quality"
         data-testid="investigation-team-known-answer-quality"
@@ -972,7 +1118,7 @@ export function InvestigationTeamReadinessPanel() {
           <div className="it-readiness__quality-history">
             {knownAnswerHistory.map((report, index) => (
               <details
-                key={`${report.role}:${report.observed_at}:${report.subject_storage_id}`}
+                key={`${report.role}:${report.observed_at}:${report.subject_storage_id}:${report.suite_digest}:${report.prompt_set_hash}:${report.orchestration_policy_fingerprint}:${index}`}
                 open={index === 0}
                 className="it-readiness__quality-report"
                 data-status={report.status}

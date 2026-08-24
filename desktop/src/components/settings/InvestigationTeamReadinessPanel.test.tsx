@@ -217,14 +217,14 @@ describe("InvestigationTeamReadinessPanel", () => {
     render(<InvestigationTeamReadinessPanel />);
     const panel = await screen.findByTestId("investigation-team-readiness");
     expect(panel.textContent).toMatch(/configured; team qualification evidence is not attached/i);
-    expect(panel.textContent).toMatch(/measured qualified/i);
+    expect(panel.textContent).toMatch(/saved label: qualified/i);
     expect(panel.textContent).toMatch(/never claims that a configured role actually ran/i);
     expect(host.capability).toHaveBeenCalledTimes(2);
     expect(host.runLive).not.toHaveBeenCalled();
     expect(host.runKnownAnswer).not.toHaveBeenCalled();
   });
 
-  it("joins exact cached evidence into a bounded-trial preflight", async () => {
+  it("joins exact cached evidence without overstating bounded-trial readiness", async () => {
     const aggregate = report({
       members: [
         {
@@ -259,10 +259,68 @@ describe("InvestigationTeamReadinessPanel", () => {
 
     render(<InvestigationTeamReadinessPanel />);
     const preflight = await screen.findByTestId("investigation-team-evidence-preflight");
-    expect(preflight.getAttribute("data-state")).toBe("ready_for_bounded_trial");
-    expect(preflight.textContent).toMatch(/ready for a bounded investigation team trial/i);
-    expect(preflight.textContent).toMatch(/not a universal model recommendation/i);
-    expect(preflight.textContent).toMatch(/or proof that every role will execute/i);
+    expect(preflight.getAttribute("data-state")).toBe("attention_required");
+    expect(preflight.getAttribute("role")).toBe("status");
+    expect(preflight.getAttribute("aria-live")).toBe("polite");
+    expect(preflight.getAttribute("aria-atomic")).toBe("true");
+    expect(preflight.textContent).toMatch(/operator review is required/i);
+    expect(preflight.textContent).toMatch(
+      /cannot yet prove the complete attempt, tool-loop, and multi-stage role seams/i,
+    );
+    expect(preflight.textContent).toMatch(/not authorization, a model ranking/i);
+
+    const roleEvidence = screen.getByTestId("investigation-team-role-evidence");
+    expect(roleEvidence.textContent).toMatch(/observed evidence by role/i);
+    expect(roleEvidence.textContent).toMatch(/14\/14 passed/i);
+    expect(screen.getByTestId("investigation-team-role-evidence-investigator").textContent)
+      .toMatch(/model-a/i);
+    expect(screen.getByTestId("investigation-team-role-evidence-reviewer").textContent)
+      .toMatch(/model-b/i);
+    expect(roleEvidence.textContent).not.toMatch(/best|winner|recommended/i);
+    expect(host.runLive).not.toHaveBeenCalled();
+    expect(host.runKnownAnswer).not.toHaveBeenCalled();
+  });
+
+  it("requires the same build, suite, prompt set, and policy across roles", async () => {
+    const aggregate = report({
+      members: [
+        {
+          role: "investigator",
+          subject_storage_id: "subject-a",
+          profile_id: "investigator-1",
+          model_id: "model-a",
+          endpoint_fingerprint: "a".repeat(64),
+        },
+        {
+          role: "reviewer",
+          subject_storage_id: "subject-b",
+          profile_id: "reviewer-1",
+          model_id: "model-b",
+          endpoint_fingerprint: "b".repeat(64),
+        },
+      ],
+    });
+    host.qualification.mockResolvedValue(aggregate);
+    host.history.mockResolvedValue([aggregate]);
+    host.knownAnswerHistory.mockResolvedValue([
+      knownAnswerReport(),
+      knownAnswerReport({
+        role: "reviewer",
+        subject_storage_id: "subject-b",
+        profile_id: "reviewer-1",
+        model_id: "model-b",
+        endpoint_fingerprint: "b".repeat(64),
+        prompt_set_hash: "e".repeat(64),
+      }),
+    ]);
+
+    render(<InvestigationTeamReadinessPanel />);
+    const preflight = await screen.findByTestId("investigation-team-evidence-preflight");
+    expect(preflight.getAttribute("data-state")).toBe("refresh_required");
+    expect(preflight.textContent).toMatch(/role evidence is not directly comparable/i);
+    expect(preflight.textContent).toMatch(
+      /same app build, suite, prompt set, and orchestration policy/i,
+    );
   });
 
   it("shows honest degradation when the reviewer is unconfigured", async () => {
