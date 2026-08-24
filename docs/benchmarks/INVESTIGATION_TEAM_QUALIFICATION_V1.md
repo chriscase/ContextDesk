@@ -1,6 +1,6 @@
 # Investigation Team qualification core V1
 
-Status: hermetic, provider-neutral core slice of issue #726.  
+Status: hermetic, provider-neutral core slice of issue #726.
 **Does not prove** live-provider quality, in-app matrix UX, stored results, or recommended defaults.
 
 ## What this slice is
