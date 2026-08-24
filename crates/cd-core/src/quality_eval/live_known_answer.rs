@@ -506,17 +506,31 @@ impl PreparedLiveKnownAnswerCase {
     }
 
     /// Whether the serial answer runner can honestly observe the diagnostic
-    /// facts this scenario requires.
+    /// facts this scenario requires *and* join them into a scored envelope.
     ///
-    /// Tool-progress/withdrawal and three-role budget coverage need host seams
-    /// this runner does not have. Those stay pre-dispatch blocked.
+    /// A scored live envelope requires a structurally valid parsed response.
+    /// This runner's parsed path only emits [`SERIAL_PARSED_ATTEMPT_CATEGORY`].
+    /// Timeout/auth/transport classifiers exist and never emit host-grounding,
+    /// but those outcomes have no parsed body to score (`Executed` requires
+    /// provider content plus an `AnswerScore`). Tool-progress/withdrawal and
+    /// three-role budget coverage need host seams this runner does not have.
+    /// Unobservable cases stay pre-dispatch blocked rather than Execute-and-fail
+    /// `diagnostic_category` as if the model were wrong.
     pub fn host_can_observe_diagnostic(&self) -> bool {
         match &self.truth.diagnostic {
             None => true,
             Some(diagnostic) => {
-                !diagnostic.require_citeable_on_tool_progress
-                    && !diagnostic.require_tool_withdrawal_after_non_progress
-                    && diagnostic.required_roles.is_empty()
+                if diagnostic.require_citeable_on_tool_progress
+                    || diagnostic.require_tool_withdrawal_after_non_progress
+                    || !diagnostic.required_roles.is_empty()
+                {
+                    return false;
+                }
+                diagnostic.allowed_categories.is_empty()
+                    || diagnostic
+                        .allowed_categories
+                        .iter()
+                        .any(|allowed| allowed == SERIAL_PARSED_ATTEMPT_CATEGORY)
             }
         }
     }
@@ -525,7 +539,28 @@ impl PreparedLiveKnownAnswerCase {
     pub fn blocks_diagnostic_before_dispatch(&self) -> bool {
         self.requires_host_diagnostic() && !self.host_can_observe_diagnostic()
     }
+
+    /// Whether a host-built `reported_category` is in this case's allow-list.
+    /// Empty / absent allow-lists do not constrain the category.
+    pub fn host_allows_reported_category(&self, category: &str) -> bool {
+        match &self.truth.diagnostic {
+            None => true,
+            Some(diagnostic) if diagnostic.allowed_categories.is_empty() => true,
+            Some(diagnostic) => diagnostic
+                .allowed_categories
+                .iter()
+                .any(|allowed| allowed == category),
+        }
+    }
 }
+
+/// Category this serial runner emits for one parsed success attempt.
+///
+/// Timeout/auth/transport/all-failed labels are produced by
+/// [`HostAttemptClass`] classifiers, but this runner cannot join them into a
+/// scored live envelope: `score_live_known_answer_response` requires a parsed
+/// response, and `Executed` requires provider content.
+pub const SERIAL_PARSED_ATTEMPT_CATEGORY: &str = "compatible_success";
 
 /// Host-owned classification of one observed chat attempt.
 /// Never derived from provider JSON `diagnostic` fields or fixture truth labels.
@@ -646,7 +681,7 @@ pub fn scripted_diagnostic_from_host_attempts(
     } else if all_fail {
         ("all_attempts_failed", "all_failed", false)
     } else if any_success {
-        ("compatible_success", "all_succeeded", true)
+        (SERIAL_PARSED_ATTEMPT_CATEGORY, "all_succeeded", true)
     } else {
         ("empty_terminal_answer", "none", false)
     };
@@ -687,14 +722,52 @@ pub fn scripted_diagnostic_from_parsed_response(
     response: &LiveKnownAnswerResponse,
     configured_role: InvestigationTeamRole,
 ) -> ScriptedDiagnostic {
-    let citeable_evidence = response
-        .claims
-        .iter()
-        .any(|claim| !claim.citations.is_empty());
+    host_diagnostic_from_chat_outcome(configured_role, false, None, Some(response))
+}
+
+/// Build a host-owned diagnostic from observed chat/cancel/error facts.
+///
+/// Classification always goes through [`HostAttemptClass::from_chat_outcome`] /
+/// [`HostAttemptClass::from_transport_reason`]. The result is `None` when this
+/// case has no diagnostic truth, or when the derived category is not in the
+/// host allow-list (do not join `compatible_success` into qe09/qe10).
+pub fn host_diagnostic_for_observed_chat(
+    case: &PreparedLiveKnownAnswerCase,
+    configured_role: InvestigationTeamRole,
+    cancelled: bool,
+    raw_error: Option<&str>,
+    parsed: Option<&LiveKnownAnswerResponse>,
+) -> Option<ScriptedDiagnostic> {
+    if !case.requires_host_diagnostic() {
+        return None;
+    }
+    let diagnostic =
+        host_diagnostic_from_chat_outcome(configured_role, cancelled, raw_error, parsed);
+    case.host_allows_reported_category(&diagnostic.reported_category)
+        .then_some(diagnostic)
+}
+
+fn host_diagnostic_from_chat_outcome(
+    configured_role: InvestigationTeamRole,
+    cancelled: bool,
+    raw_error: Option<&str>,
+    parsed: Option<&LiveKnownAnswerResponse>,
+) -> ScriptedDiagnostic {
+    let empty_content = parsed.is_some_and(|response| {
+        response.claims.is_empty() && response.conclusion.trim().is_empty()
+    });
+    let class =
+        HostAttemptClass::from_chat_outcome(cancelled, raw_error, parsed.is_some(), empty_content);
+    let citeable_evidence = parsed.is_some_and(|response| {
+        response
+            .claims
+            .iter()
+            .any(|claim| !claim.citations.is_empty())
+    });
     scripted_diagnostic_from_host_attempts(
         &[HostAttemptObservation {
             attempt_id: "host-1".into(),
-            class: HostAttemptClass::Success,
+            class,
             citeable_evidence,
         }],
         configured_role,

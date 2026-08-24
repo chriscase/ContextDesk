@@ -1,7 +1,8 @@
 use cd_core::investigation_team_qualification::InvestigationTeamRole;
 use cd_core::quality_eval::live_known_answer::{
-    scripted_diagnostic_from_host_attempts, scripted_diagnostic_from_parsed_response,
-    HostAttemptClass, HostAttemptObservation,
+    host_diagnostic_for_observed_chat, scripted_diagnostic_from_host_attempts,
+    scripted_diagnostic_from_parsed_response, HostAttemptClass, HostAttemptObservation,
+    SERIAL_PARSED_ATTEMPT_CATEGORY,
 };
 use cd_core::quality_eval::{
     live_known_answer_prompt_set_hash, load_suite, parse_live_known_answer_response,
@@ -118,14 +119,21 @@ fn prepares_all_fourteen_cases_in_manifest_order_with_opaque_ids() {
         .iter()
         .chain(&prepared[12..])
         .all(|case| !case.requires_host_diagnostic()));
-    assert!(prepared[8].host_can_observe_diagnostic());
-    assert!(prepared[9].host_can_observe_diagnostic());
+    assert!(!prepared[8].host_can_observe_diagnostic());
+    assert!(!prepared[9].host_can_observe_diagnostic());
     assert!(!prepared[10].host_can_observe_diagnostic());
     assert!(!prepared[11].host_can_observe_diagnostic());
+    assert!(prepared[8].blocks_diagnostic_before_dispatch());
+    assert!(prepared[9].blocks_diagnostic_before_dispatch());
     assert!(prepared[10].blocks_diagnostic_before_dispatch());
     assert!(prepared[11].blocks_diagnostic_before_dispatch());
-    assert!(!prepared[8].blocks_diagnostic_before_dispatch());
-    assert!(!prepared[9].blocks_diagnostic_before_dispatch());
+    assert!(!prepared[8].host_allows_reported_category(SERIAL_PARSED_ATTEMPT_CATEGORY));
+    assert!(!prepared[9].host_allows_reported_category(SERIAL_PARSED_ATTEMPT_CATEGORY));
+    assert!(prepared[8].host_allows_reported_category("mixed_attempts_accounted"));
+    assert!(prepared[8].host_allows_reported_category("all_attempts_failed"));
+    assert!(prepared[9].host_allows_reported_category("timeout"));
+    assert!(prepared[9].host_allows_reported_category("transport_failure"));
+    assert!(prepared[9].host_allows_reported_category("auth_failure"));
 }
 
 #[test]
@@ -735,5 +743,104 @@ fn transport_classifier_never_emits_host_grounding() {
     assert_eq!(
         HostAttemptClass::from_chat_outcome(false, Some("connection reset"), false, false).as_str(),
         "transport"
+    );
+}
+
+#[test]
+fn parsed_success_is_not_joined_when_its_category_is_not_allowed() {
+    let suite = suite();
+    let prepared = prepare_live_known_answer_suite(&suite).expect("prepare live suite");
+    let qe09 = prepared_index(&prepared, "qe09-attempt-usefulness");
+    let qe10 = prepared_index(&prepared, "qe10-grounding-vs-transport");
+    let response_09 = response_from_candidate(
+        qe09,
+        candidate(&suite, "qe09-attempt-usefulness", "good_mixed_accounted"),
+    );
+    let response_10 = response_from_candidate(
+        qe10,
+        candidate(
+            &suite,
+            "qe10-grounding-vs-transport",
+            "good_timeout_classified",
+        ),
+    );
+
+    let parsed_success =
+        scripted_diagnostic_from_parsed_response(&response_09, InvestigationTeamRole::Single);
+    assert_eq!(
+        parsed_success.reported_category,
+        SERIAL_PARSED_ATTEMPT_CATEGORY
+    );
+    let misjoined = score_response(qe09, &response_09, Some(parsed_success));
+    assert!(
+        misjoined
+            .answer
+            .failed_ids()
+            .contains(&"diagnostic_category"),
+        "joining a 1-shot success into qe09 must not look like a model pass: {:?}",
+        misjoined.answer.failed_ids()
+    );
+
+    assert!(host_diagnostic_for_observed_chat(
+        qe09,
+        InvestigationTeamRole::Single,
+        false,
+        None,
+        Some(&response_09),
+    )
+    .is_none());
+    assert!(host_diagnostic_for_observed_chat(
+        qe10,
+        InvestigationTeamRole::Single,
+        false,
+        None,
+        Some(&response_10),
+    )
+    .is_none());
+
+    let timeout = host_diagnostic_for_observed_chat(
+        qe10,
+        InvestigationTeamRole::Single,
+        false,
+        Some("deadline exceeded"),
+        None,
+    )
+    .expect("timeout is an allowed qe10 category");
+    assert_eq!(timeout.reported_category, "timeout");
+    assert_ne!(timeout.reported_category, "host_grounding_refusal");
+    let timeout_score = score_response(qe10, &response_10, Some(timeout));
+    assert!(!timeout_score
+        .answer
+        .failed_ids()
+        .contains(&"transport_versus_grounding"));
+    assert!(!timeout_score
+        .answer
+        .failed_ids()
+        .contains(&"diagnostic_category"));
+    assert!(
+        qe10.blocks_diagnostic_before_dispatch(),
+        "timeout can be classified, but this runner cannot score it without a parsed error body"
+    );
+
+    let mixed = scripted_diagnostic_from_host_attempts(
+        &[
+            HostAttemptObservation {
+                attempt_id: "host-transport".into(),
+                class: HostAttemptClass::Transport,
+                citeable_evidence: false,
+            },
+            HostAttemptObservation {
+                attempt_id: "host-success".into(),
+                class: HostAttemptClass::Success,
+                citeable_evidence: true,
+            },
+        ],
+        InvestigationTeamRole::Single,
+    );
+    assert_eq!(mixed.reported_category, "mixed_attempts_accounted");
+    assert!(qe09.host_allows_reported_category(&mixed.reported_category));
+    assert!(
+        qe09.blocks_diagnostic_before_dispatch(),
+        "mixed attempts are allowed but this serial runner never records two attempts"
     );
 }
