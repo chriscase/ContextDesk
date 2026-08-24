@@ -53,8 +53,28 @@ Parent `618b259c` accepted four hostile rows. Smallest fail-closed repairs:
 5. Deterministic remap candidates cannot overwrite an occupied destination id; bounded exhaustion fails closed.
 6. Canonical bags, hashes, fingerprints, remap rows, and identity resolutions use explicit locale-independent UTF-16 code-unit ordering.
 
+## Apply-readiness rows added in this child
+
+The same synthetic lab still drives `parsePortableInvestigation`,
+`attachPortableIntegrity`, `canonicalizePortableInvestigation`,
+`portableBundleFingerprint`, `computePortableObjectHashes`, and
+`preflightPortableInvestigation`. Additional rows now prove:
+
+| Class | Result |
+| --- | --- |
+| Typed reconstruction on the gold synthetic bundle | `reconstructionStatus` is `metadata_only`; `exactReconstruction` is false (parent returned unconditional true) |
+| Destination id collision under `fail` | `reconstructionStatus` is `blocked` with reason `id_collision` |
+| Caller-owned inputs | parse / preflight still do not mutate caller objects |
+| Historical roles | `applyAuthorized` remains false; no destination membership/role/capability grant |
+
+Archive apply-readiness lives in
+`collab/contracts/src/investigation-portable-archive.ts` and
+`docs/benchmarks/WAR_ROOM_PORTABLE_INVESTIGATION_ARCHIVE_APPLY_READINESS_V1.md`.
+That module is still contract + dry-run only.
+
 ## Non-claims / future work
 
-Import apply, persistence, destination authorization, and UI remain future
-work. This lab does not call a live provider and does not invent gold, cost, or
-usage.
+Import apply, persistence, destination authorization, archive I/O, Ed25519
+verification, and UI remain future work. This lab does not call a live provider
+and does not invent gold, cost, or usage. SHA-256 fingerprints are integrity,
+not authenticity.

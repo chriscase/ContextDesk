@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,10 +16,13 @@ import {
   PORTABLE_SCHEMA_ID,
   attachPortableIntegrity,
   canonicalizePortableInvestigation,
+  destinationCatalogDigest,
   parsePortableInvestigation,
   portableBundleFingerprint,
+  portableSemanticFingerprint,
   portableSnapshotFingerprint,
   preflightPortableInvestigation,
+  evaluatePortableReconstruction,
   type PortableInvestigationUnsigned,
   type PortableInvestigationV1,
   type PreflightRequestV1,
@@ -129,16 +133,22 @@ describe("portable investigation contract", () => {
     );
   });
 
-  it("reports exact reconstruction semantics from the shipped preflight path", () => {
+  it("reports typed reconstruction status instead of unconditional exactReconstruction", () => {
     const parsed = valid();
     const report = preflightPortableInvestigation(parsed, dryRun(parsed));
     expect(report.schemaId).toBe(PORTABLE_PREFLIGHT_SCHEMA_ID);
     expect(report.mode).toBe("dry_run");
-    expect(report.exactReconstruction).toBe(true);
+    expect(report.reconstructionStatus).toBe("metadata_only");
+    expect(report.exactReconstruction).toBe(false);
     expect(report.applyAuthorized).toBe(false);
+    expect(report.destinationCatalogIsAuthorization).toBe(false);
+    expect(report.historicalParticipantsAreAttributionOnly).toBe(true);
+    expect(report.destinationMembershipGranted).toBe(false);
     expect(report.bundleFingerprint).toBe(parsed.bundleFingerprint);
+    expect(report.semanticFingerprint).toBe(portableSemanticFingerprint(parsed));
     expect(report.counts.update).toBe(0);
     expect(report.idRemap.some((row) => row.namespace === "investigation")).toBe(true);
+    expect(report.reconstructionReasons.some((row) => row.code === "content_private")).toBe(true);
   });
 
   it("does not auto-merge identity collisions across installations by name or email", () => {
@@ -361,5 +371,212 @@ describe("portable investigation contract", () => {
     expect(() => parsePortableInvestigation(reseal(leak))).toThrow(
       /forbidden credential|credential, token, secret, or live endpoint leakage/,
     );
+  });
+
+  it("keeps semantic identity stable across exportedAt while transport fingerprint changes", () => {
+    const first = valid();
+    const shifted = unsignedOf(first);
+    shifted.exportedAt = "2026-08-24T18:00:00Z";
+    const second = attachPortableIntegrity(shifted);
+    expect(portableSemanticFingerprint(first)).toBe(portableSemanticFingerprint(second));
+    expect(first.bundleFingerprint).not.toBe(second.bundleFingerprint);
+    expect(parsePortableInvestigation(first).bundleFingerprint).toBe(first.bundleFingerprint);
+  });
+
+  it("ignores inline payload bytes when computing semantic identity", () => {
+    const first = valid();
+    const stripped = unsignedOf(structuredClone(first));
+    const present = stripped.contentObjects.find((row) => row.inclusion === "present");
+    expect(present?.payloadBase64).toBeTruthy();
+    present!.payloadBase64 = null;
+    expect(portableSemanticFingerprint(stripped)).toBe(portableSemanticFingerprint(first));
+    expect(() => parsePortableInvestigation(attachPortableIntegrity(stripped))).toThrow(
+      /missing required content/,
+    );
+    expect(() =>
+      parsePortableInvestigation(attachPortableIntegrity(stripped), {
+        requireInlinePresentPayload: false,
+      }),
+    ).not.toThrow();
+  });
+
+  it("binds a host-authored catalog digest that is order-independent and not authorization", () => {
+    const parsed = valid();
+    const destinationA = {
+      identities: [
+        { actorId: "dest-b", username: "bravo", email: null, displayName: "Bravo" },
+        { actorId: "dest-a", username: "alpha", email: "alpha@synthetic.example", displayName: "Alpha" },
+      ],
+      objectIds: { evidence: ["z-id", "a-id"], contribution: ["c-2", "c-1"] },
+      knownProfileIds: ["profile-z", "profile-a"],
+    };
+    const destinationB = {
+      identities: [...destinationA.identities].reverse(),
+      objectIds: {
+        contribution: ["c-1", "c-2"],
+        evidence: ["a-id", "z-id"],
+      },
+      knownProfileIds: ["profile-a", "profile-z"],
+    };
+    expect(destinationCatalogDigest(destinationA)).toBe(destinationCatalogDigest(destinationB));
+    const report = preflightPortableInvestigation(
+      parsed,
+      dryRun(parsed, { destination: destinationA }),
+    );
+    expect(report.destinationCatalogDigest).toBe(destinationCatalogDigest(destinationA));
+    expect(report.destinationCatalogIsAuthorization).toBe(false);
+    expect(report.destinationCatalogMustRevalidate).toBe(true);
+  });
+
+  it("marks reconstruction blocked when a mapped destination user is missing", () => {
+    const parsed = valid();
+    const mapped = dryRun(parsed, {
+      identityMap: parsed.actors.map((actor, index) =>
+        index === 0
+          ? {
+              sourceActorId: actor.sourceActorId,
+              action: "map_existing" as const,
+              destinationActorId: "nobody-at-destination",
+            }
+          : {
+              sourceActorId: actor.sourceActorId,
+              action: "leave_unresolved" as const,
+              destinationActorId: null,
+            },
+      ),
+    });
+    const report = preflightPortableInvestigation(parsed, mapped);
+    expect(report.reconstructionStatus).toBe("blocked");
+    expect(report.exactReconstruction).toBe(false);
+    expect(report.reconstructionReasons.some((row) => row.code === "missing_user")).toBe(true);
+    expect(report.historicalParticipantsAreAttributionOnly).toBe(true);
+    expect(report.destinationRoleGranted).toBe(false);
+  });
+
+  it("parent-fail: gold fixture is metadata_only rather than unconditional exactReconstruction true", () => {
+    const parsed = valid();
+    const report = preflightPortableInvestigation(parsed, dryRun(parsed));
+    expect(report.reconstructionStatus).toBe("metadata_only");
+    expect(report.exactReconstruction).toBe(false);
+    expect(report.applyAuthorized).toBe(false);
+  });
+
+  it("returns exact reconstruction when every blob is present and matched", () => {
+    const bundle = valid();
+    const bytes = Buffer.from("synth-owner-notes-v1", "utf8");
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    const privateEv = bundle.evidence.find((row) => row.inclusion === "private")!;
+    const privateCo = bundle.contentObjects.find((row) => row.digest === privateEv.digest)!;
+    const oldDigest = privateEv.digest;
+    privateEv.inclusion = "present";
+    privateEv.digest = digest;
+    privateEv.byteLength = bytes.byteLength;
+    privateCo.inclusion = "present";
+    privateCo.digest = digest;
+    privateCo.byteLength = bytes.byteLength;
+    privateCo.payloadBase64 = bytes.toString("base64");
+    for (const att of bundle.attachments) {
+      if (att.digest === oldDigest) att.digest = digest;
+    }
+    const sealed = reseal(bundle);
+    const report = preflightPortableInvestigation(sealed, dryRun(sealed));
+    expect(report.reconstructionStatus).toBe("exact");
+    expect(report.exactReconstruction).toBe(true);
+    expect(report.applyAuthorized).toBe(false);
+  });
+
+  it("yields metadata_only for omitted and redacted content", () => {
+    const omitted = valid();
+    const presentEv = omitted.evidence.find((row) => row.inclusion === "present")!;
+    const presentCo = omitted.contentObjects.find((row) => row.digest === presentEv.digest)!;
+    presentEv.inclusion = "omitted";
+    presentCo.inclusion = "omitted";
+    presentCo.payloadBase64 = null;
+    const omittedSealed = reseal(omitted);
+    const omittedReport = preflightPortableInvestigation(omittedSealed, dryRun(omittedSealed));
+    expect(omittedReport.reconstructionStatus).toBe("metadata_only");
+    expect(omittedReport.reconstructionReasons.some((row) => row.code === "content_omitted")).toBe(true);
+
+    const redacted = valid();
+    const ev = redacted.evidence.find((row) => row.inclusion === "present")!;
+    const co = redacted.contentObjects.find((row) => row.digest === ev.digest)!;
+    ev.inclusion = "redacted";
+    co.inclusion = "redacted";
+    co.payloadBase64 = null;
+    const redactedSealed = reseal(redacted);
+    const redactedReport = preflightPortableInvestigation(redactedSealed, dryRun(redactedSealed));
+    expect(redactedReport.reconstructionStatus).toBe("metadata_only");
+    expect(redactedReport.reconstructionReasons.some((row) => row.code === "content_redacted")).toBe(true);
+  });
+
+  it("covers every reconstruction reason code via shipped evaluatePortableReconstruction", () => {
+    const omitted = evaluatePortableReconstruction({
+      evidence: [{ id: "e-omit", inclusion: "omitted" }],
+      contentObjects: [],
+      referentialIntegrityFailures: [],
+    });
+    expect(omitted.reconstructionStatus).toBe("metadata_only");
+    expect(omitted.reconstructionReasons.map((row) => row.code)).toContain("content_omitted");
+
+    const priv = evaluatePortableReconstruction({
+      evidence: [{ id: "e-priv", inclusion: "private" }],
+      contentObjects: [{ digest: "aa", inclusion: "private" }],
+      referentialIntegrityFailures: [],
+    });
+    expect(priv.reconstructionReasons.some((row) => row.code === "content_private")).toBe(true);
+
+    const redacted = evaluatePortableReconstruction({
+      evidence: [{ id: "e-red", inclusion: "redacted" }],
+      contentObjects: [],
+      referentialIntegrityFailures: [],
+    });
+    expect(redacted.reconstructionReasons.some((row) => row.code === "content_redacted")).toBe(true);
+
+    const missing = evaluatePortableReconstruction({
+      evidence: [],
+      contentObjects: [],
+      referentialIntegrityFailures: [{ code: "missing_user", path: "actor:x", detail: "missing" }],
+    });
+    expect(missing.reconstructionStatus).toBe("blocked");
+    expect(missing.reconstructionReasons.some((row) => row.code === "missing_user")).toBe(true);
+
+    const collision = evaluatePortableReconstruction({
+      evidence: [],
+      contentObjects: [],
+      referentialIntegrityFailures: [{ code: "id_collision", path: "evidence:e", detail: "collision" }],
+    });
+    expect(collision.reconstructionStatus).toBe("blocked");
+    expect(collision.reconstructionReasons.some((row) => row.code === "id_collision")).toBe(true);
+
+    const blocking = evaluatePortableReconstruction({
+      evidence: [],
+      contentObjects: [],
+      referentialIntegrityFailures: [{ code: "identity_name_collision", path: "actor:y", detail: "synthetic" }],
+    });
+    expect(blocking.reconstructionStatus).toBe("blocked");
+    expect(blocking.reconstructionReasons.some((row) => row.code === "blocking_identity_action")).toBe(true);
+
+    const missingBytes = evaluatePortableReconstruction({
+      evidence: [],
+      contentObjects: [{ digest: "aa", inclusion: "present", payloadBase64: null, byteLength: 4 }],
+      referentialIntegrityFailures: [],
+    });
+    expect(missingBytes.reconstructionStatus).toBe("blocked");
+    expect(missingBytes.reconstructionReasons.some((row) => row.code === "declared_present_bytes_missing")).toBe(true);
+
+    const four = Buffer.from("nope").toString("base64");
+    const digestMismatch = evaluatePortableReconstruction({
+      evidence: [],
+      contentObjects: [{ digest: "ab".repeat(32), inclusion: "present", payloadBase64: four, byteLength: 4 }],
+      referentialIntegrityFailures: [],
+    });
+    expect(digestMismatch.reconstructionReasons.some((row) => row.code === "declared_present_digest_mismatch")).toBe(true);
+
+    const lengthMismatch = evaluatePortableReconstruction({
+      evidence: [],
+      contentObjects: [{ digest: "ab".repeat(32), inclusion: "present", payloadBase64: four, byteLength: 99 }],
+      referentialIntegrityFailures: [],
+    });
+    expect(lengthMismatch.reconstructionReasons.some((row) => row.code === "declared_present_length_mismatch")).toBe(true);
   });
 });
