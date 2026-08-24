@@ -346,7 +346,7 @@ pub async fn run(
             paths,
             cfg,
             |index| emit_started_event(&request, index),
-            |index, live| emit_progress_event(&request, index, live),
+            |index, live| emit_progress_event(&request, index, live, &library.path),
         )
         .await?
     } else {
@@ -397,22 +397,14 @@ pub async fn run(
             .collect::<Vec<_>>();
         evidence_refs.sort();
         evidence_refs.dedup();
-        candidates.push(CollabCandidateResult {
-            candidate_id: candidate.candidate_id.clone(),
-            profile_id: candidate.profile_id.clone(),
-            model_id: candidate.model_id.clone(),
-            role: candidate.role.clone(),
-            status: durable.status.as_str().into(),
-            run_id: Some(durable.run_id.clone()),
-            summary: safe_run_summary(&durable),
-            error_code: safe_error_code(&store, &durable),
-            output_hash: Some(durable.raw_output.digest.hex),
+        candidates.push(project_candidate_result(
+            candidate,
+            &durable,
+            &store,
+            run.packet_fingerprint.clone(),
+            run.corpus_fingerprint.clone(),
             evidence_refs,
-            packet_fingerprint: Some(run.packet_fingerprint.clone()),
-            corpus_fingerprint: Some(run.corpus_fingerprint.clone()),
-            usage: "unknown",
-            cost: "unknown",
-        });
+        ));
     }
     Ok(CollabTriageRunOutput {
         schema_id: RESULT_SCHEMA_ID,
@@ -442,11 +434,15 @@ fn emit_progress_event(
     request: &CollabTriageRunRequest,
     index: usize,
     live: &cd_triage_bench_live::LiveRunResult,
+    library_path: &Path,
 ) {
     let Some(candidate) = request.candidates.get(index) else {
         return;
     };
     let durable = &live.recorded.bench_run;
+    let Ok(store) = cd_triage_bench::BenchStore::open(library_path) else {
+        return;
+    };
     let mut evidence_refs = durable
         .claims
         .iter()
@@ -461,26 +457,44 @@ fn emit_progress_event(
         case_id: request.case.case_id.clone(),
         collab_snapshot_id: request.snapshot.snapshot_id.clone(),
         collab_snapshot_fingerprint: request.snapshot.fingerprint.clone(),
-        candidate: Some(CollabCandidateResult {
-            candidate_id: candidate.candidate_id.clone(),
-            profile_id: candidate.profile_id.clone(),
-            model_id: candidate.model_id.clone(),
-            role: candidate.role.clone(),
-            status: durable.status.as_str().into(),
-            run_id: Some(durable.run_id.clone()),
-            summary: safe_run_summary(durable),
-            error_code: None,
-            output_hash: Some(durable.raw_output.digest.hex.clone()),
+        candidate: Some(project_candidate_result(
+            candidate,
+            durable,
+            &store,
+            live.recorded.owner_only.fingerprints.packet.clone(),
+            live.recorded.owner_only.fingerprints.corpus.clone(),
             evidence_refs,
-            packet_fingerprint: Some(live.recorded.owner_only.fingerprints.packet.clone()),
-            corpus_fingerprint: Some(live.recorded.owner_only.fingerprints.corpus.clone()),
-            usage: "unknown",
-            cost: "unknown",
-        }),
+        )),
         candidate_id: None,
     };
     if let Ok(json) = serde_json::to_string(&event) {
         eprintln!("{PROGRESS_EVENT_PREFIX}{json}");
+    }
+}
+
+fn project_candidate_result(
+    candidate: &CollabCandidate,
+    durable: &cd_triage_bench::TriageRun,
+    store: &cd_triage_bench::BenchStore,
+    packet_fingerprint: String,
+    corpus_fingerprint: String,
+    evidence_refs: Vec<String>,
+) -> CollabCandidateResult {
+    CollabCandidateResult {
+        candidate_id: candidate.candidate_id.clone(),
+        profile_id: candidate.profile_id.clone(),
+        model_id: candidate.model_id.clone(),
+        role: candidate.role.clone(),
+        status: durable.status.as_str().into(),
+        run_id: Some(durable.run_id.clone()),
+        summary: safe_run_summary(durable),
+        error_code: safe_error_code(store, durable),
+        output_hash: Some(durable.raw_output.digest.hex.clone()),
+        evidence_refs,
+        packet_fingerprint: Some(packet_fingerprint),
+        corpus_fingerprint: Some(corpus_fingerprint),
+        usage: "unknown",
+        cost: "unknown",
     }
 }
 

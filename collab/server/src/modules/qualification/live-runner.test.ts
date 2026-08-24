@@ -172,7 +172,7 @@ describe("live qualification runner", () => {
           const completed = index === 0;
           return {
             ...candidate,
-            status: completed ? "completed" : "failed",
+            status: completed ? "completed" : "partial",
             benchmarkRunId: completed ? `durable-${candidate.candidateId}` : null,
             outputHash: completed ? "c".repeat(64) : null,
             summary: completed ? "synthetic result" : null,
@@ -180,7 +180,7 @@ describe("live qualification runner", () => {
             unknowns: completed ? ["usage", "cost"] : ["result"],
             usageStatus: "unknown",
             costStatus: "unknown",
-            errorCode: completed ? null : "provider_error",
+            errorCode: completed ? null : "root_cause_not_established",
             startedAt: "2026-08-20T00:00:00.000Z",
             finishedAt: "2026-08-20T00:00:01.000Z",
             privacyClass: "owner_only",
@@ -198,7 +198,8 @@ describe("live qualification runner", () => {
       });
       expect(report.verdict).toBe("partial");
       expect(report.lanes.every((lane) => lane.ran)).toBe(true);
-      expect(report.lanes.map((lane) => lane.status)).toEqual(["completed", "failed"]);
+      expect(report.lanes.map((lane) => lane.status)).toEqual(["completed", "partial"]);
+      expect(report.lanes[1]?.errorCode).toBe("root_cause_not_established");
     } finally {
       await rm(fx.root, { recursive: true, force: true });
     }

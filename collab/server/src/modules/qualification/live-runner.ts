@@ -40,6 +40,7 @@ const SAFE_ERROR_CODES = new Set<NonNullable<LiveQualificationLaneV1["errorCode"
   "provider_rate_limited",
   "provider_call_budget_exhausted",
   "malformed_output",
+  "root_cause_not_established",
 ]);
 
 export interface LiveQualificationRunnerOptions {

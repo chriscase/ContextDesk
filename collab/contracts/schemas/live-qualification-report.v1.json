@@ -37,7 +37,7 @@
           "ran": { "type": "boolean" },
           "status": { "enum": ["completed", "partial", "failed", "timed_out", "cancelled", "skipped"] },
           "skippedReason": { "enum": ["live_disabled", "confirmation_required", "catalog_missing", "profile_not_configured", "bridge_not_configured", "not_enough_profiles", null] },
-          "errorCode": { "enum": ["runner_error", "gateway_runner_error", "gateway_error", "deadline_exceeded", "cancel_requested", "output_overflow", "executor_error", "provider_error", "provider_unavailable", "provider_rate_limited", "provider_call_budget_exhausted", "malformed_output", null] },
+          "errorCode": { "enum": ["runner_error", "gateway_runner_error", "gateway_error", "deadline_exceeded", "cancel_requested", "output_overflow", "executor_error", "provider_error", "provider_unavailable", "provider_rate_limited", "provider_call_budget_exhausted", "malformed_output", "root_cause_not_established", null] },
           "evidenceCount": { "type": "integer", "minimum": 0 },
           "unknownCount": { "type": "integer", "minimum": 0 },
           "startedAt": { "type": ["string", "null"] },
