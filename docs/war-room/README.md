@@ -215,7 +215,7 @@ No live provider or external material is required. Continue with the
 | Discussion | Durable records refreshed through polling | No WebSocket chat, typing indicators, instant delivery, or authoritative presence |
 | Identity and administration | LDAP-capable sign-in adapter, directory display identity, bounded directory visibility, persistent group-to-role mappings | LDAP must be configured and qualified per deployment; the console does not administer the directory itself |
 | Portable archive | Complete archive download and fail-closed dry-run preflight with deterministic ID remapping and historical identity isolation | No restore/apply or cross-store atomic reconstruction yet |
-| Setup | Existing deployment configuration and operator tooling | A first-run web setup wizard is not shipped behavior |
+| Setup | A first-run wizard appears before sign-in when the host exposes an unconfigured setup service; it claims one owner, stages SQLite/local or PostgreSQL/LDAP configuration and optional gateway references, and runs bounded checks | It does not yet atomically commit configuration, prove external connectivity, restart the service, or complete installation |
 
 ## Continue reading
 

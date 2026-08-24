@@ -201,7 +201,9 @@ The synthetic demo does not claim:
   presence;
 - portable archive restore/apply or atomic reconstruction;
 - web ZIP or directory upload;
-- a shipped first-run web setup wizard;
+- a completed installation from the first-run preparation wizard (the wizard
+  can claim, stage, and run bounded checks, but cannot atomically install or
+  restart the deployment);
 - live-provider quality, production performance, or correctness on external
   material; or
 - availability of any gateway model on an unconfigured host.

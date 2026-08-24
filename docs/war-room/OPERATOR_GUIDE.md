@@ -311,7 +311,11 @@ matters.
   and atomic reconstruction are not.
 - The selected-evidence prompt package is not a full investigation backup.
 - Web ZIP and directory upload are not claimed.
-- A first-run web setup wizard is not shipped behavior.
+- The first-run web setup wizard is a bounded preparation surface: it can
+  claim the installation, stage SQLite/local or PostgreSQL/LDAP settings,
+  exchange protected values for host-owned handles, and run structural checks.
+  It does not commit configuration, prove external connectivity, restart the
+  service, or claim installation completion.
 - Configured gateway model availability, quality, cost, and usage reporting
   depend on the host and provider. Missing measurements remain unknown.
 
