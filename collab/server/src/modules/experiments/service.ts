@@ -40,6 +40,7 @@ import {
   type HelpfulnessDimension,
   type HelpfulnessObservationV1,
   type InteractionTraceV1,
+  type NormalizedExperimentDecisionV1,
   type StrategyComparisonV1,
   type TriageJobV1,
 } from "@cd-collab/contracts";
@@ -98,7 +99,7 @@ export interface ExperimentView {
   candidates: ReturnType<typeof projectCandidateMatrix>;
   agreement: ExperimentAgreementV1;
   observations: HelpfulnessObservationV1[];
-  decisions: ExperimentDecisionV1[];
+  decisions: NormalizedExperimentDecisionV1[];
   golds: GoldReferenceV1[];
   gold: GoldReferenceV1 | null;
   alignments: CandidateGoldAlignmentV1[];
@@ -638,6 +639,7 @@ export class ExperimentService {
     if (!row.candidates.some((c) => c.candidateId === input.candidateId)) {
       throw new Error("unknown candidateId");
     }
+    await this.assertExportableEvidenceRefs(row, input.evidenceRefs);
     const observation = parseHelpfulnessObservation({
       schemaId: HELPFULNESS_OBSERVATION_SCHEMA_ID,
       id: randomUUID(),
@@ -687,7 +689,7 @@ export class ExperimentService {
     },
     origin: string,
     isAdmin: boolean,
-  ): Promise<ExperimentDecisionV1> {
+  ): Promise<NormalizedExperimentDecisionV1> {
     const row = await this.requireExperiment(caseId, experimentId, actor, isAdmin);
     const history = await this.store.listDecisions(experimentId);
     const latest = history.at(-1) ?? null;
@@ -695,6 +697,7 @@ export class ExperimentService {
       throw new ExperimentConflictError("already_accepted", "accepted decision is immutable");
     }
     this.assertExpectedRevision(latest, input.expectedRevision, history.length === 0);
+    await this.assertExportableEvidenceRefs(row, input.evidenceRefs);
     const revision = latest ? latest.revision + 1 : 1;
     const decision = parseExperimentDecision({
       schemaId: EXPERIMENT_DECISION_SCHEMA_ID,
@@ -709,9 +712,13 @@ export class ExperimentService {
       packageId: row.packageId,
       authorId: actor.id,
       authorUsername: actor.username,
-      ownerId: input.owner?.id ?? null,
-      ownerUsername: input.owner?.username ?? null,
-      remainingUnknowns: input.remainingUnknowns ?? [],
+      ownerId: input.owner === undefined ? latest?.ownerId ?? null : input.owner?.id ?? null,
+      ownerUsername:
+        input.owner === undefined ? latest?.ownerUsername ?? null : input.owner?.username ?? null,
+      remainingUnknowns:
+        input.remainingUnknowns === undefined
+          ? [...(latest?.remainingUnknowns ?? [])]
+          : input.remainingUnknowns,
       createdAt: new Date().toISOString(),
     });
     await this.store.insertDecision(decision);
@@ -739,7 +746,7 @@ export class ExperimentService {
     expectedRevision: number,
     origin: string,
     isAdmin: boolean,
-  ): Promise<ExperimentDecisionV1> {
+  ): Promise<NormalizedExperimentDecisionV1> {
     const row = await this.requireExperiment(caseId, experimentId, actor, isAdmin);
     const history = await this.store.listDecisions(experimentId);
     const latest = history.at(-1) ?? null;
@@ -958,14 +965,7 @@ export class ExperimentService {
     if (input.evidenceAnchors.length === 0) {
       throw new Error("at least one evidence anchor is required");
     }
-    const known = knownAgreementEvidence(row.agreement);
-    if (known.size > 0) {
-      for (const ref of input.evidenceAnchors) {
-        if (!known.has(ref)) {
-          throw new Error(`unknown evidence anchor ${ref}`);
-        }
-      }
-    }
+    await this.assertExportableEvidenceRefs(row, input.evidenceAnchors);
     if (input.helpfulnessDimensions) {
       for (const dimension of input.helpfulnessDimensions) {
         if (!(HELPFULNESS_DIMENSIONS as readonly string[]).includes(dimension)) {
@@ -1086,6 +1086,36 @@ export class ExperimentService {
         "stale_revision",
         `expected revision ${latest?.revision ?? 0}`,
       );
+    }
+  }
+
+  private async exportableEvidenceRefs(
+    row: Pick<ExperimentRow, "id" | "agreement">,
+  ): Promise<Set<string>> {
+    const known = knownAgreementEvidence(row.agreement);
+    const [traces, annotations] = await Promise.all([
+      this.store.listTraces(row.id),
+      this.store.listAnnotations(row.id),
+    ]);
+    for (const trace of traces) {
+      for (const event of trace.events) {
+        for (const ref of event.evidenceRefs) known.add(ref);
+      }
+    }
+    for (const annotation of annotations) {
+      for (const ref of annotation.event.evidenceRefs) known.add(ref);
+    }
+    return known;
+  }
+
+  private async assertExportableEvidenceRefs(
+    row: Pick<ExperimentRow, "id" | "agreement">,
+    refs: readonly string[],
+  ): Promise<void> {
+    if (refs.length === 0) return;
+    const known = await this.exportableEvidenceRefs(row);
+    for (const ref of refs) {
+      if (!known.has(ref)) throw new Error(`unknown experiment evidence ${ref}`);
     }
   }
 

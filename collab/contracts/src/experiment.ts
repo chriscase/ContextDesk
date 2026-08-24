@@ -236,11 +236,18 @@ export interface ExperimentDecisionV1 {
   authorId: string;
   authorUsername: string;
   /** The person accountable for driving the decision to closure, when assigned. */
+  ownerId?: string | null;
+  ownerUsername?: string | null;
+  /** Open questions that remain recorded alongside this revision. */
+  remainingUnknowns?: string[];
+  createdAt: string;
+}
+
+/** Parsed decision shape with legacy-optional fields normalized for application use. */
+export interface NormalizedExperimentDecisionV1 extends ExperimentDecisionV1 {
   ownerId: string | null;
   ownerUsername: string | null;
-  /** Open questions that remain recorded alongside this revision. */
   remainingUnknowns: string[];
-  createdAt: string;
 }
 
 /** @deprecated Read-only legacy shape; it cannot honestly express share-safe omissions. */
@@ -638,14 +645,14 @@ export function parseHelpfulnessObservation(raw: unknown): HelpfulnessObservatio
   return row;
 }
 
-export function parseExperimentDecision(raw: unknown): ExperimentDecisionV1 {
+export function parseExperimentDecision(raw: unknown): NormalizedExperimentDecisionV1 {
   checkObject("$", decisionShape, raw);
   const stored = raw as ExperimentDecisionV1 & {
     ownerId?: string | null;
     ownerUsername?: string | null;
     remainingUnknowns?: string[];
   };
-  const row: ExperimentDecisionV1 = {
+  const row: NormalizedExperimentDecisionV1 = {
     ...stored,
     ownerId: stored.ownerId ?? null,
     ownerUsername: stored.ownerUsername ?? null,

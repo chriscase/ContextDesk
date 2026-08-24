@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   EXPERIMENT_DECISION_SCHEMA_ID,
   parseExperimentDecision,
+  type ExperimentDecisionV1,
+  type NormalizedExperimentDecisionV1,
 } from "./experiment.js";
 
 function decision(overrides: Record<string, unknown> = {}) {
@@ -24,6 +26,30 @@ function decision(overrides: Record<string, unknown> = {}) {
 }
 
 describe("experiment decision ownership and open questions", () => {
+  it("keeps legacy V1 construction source-compatible while returning normalized output", () => {
+    const legacy: ExperimentDecisionV1 = {
+      schemaId: EXPERIMENT_DECISION_SCHEMA_ID,
+      id: "decision-legacy-1",
+      experimentId: "experiment-legacy-1",
+      status: "proposed",
+      revision: 1,
+      predecessorRevision: null,
+      text: "Inspect the legacy decision.",
+      rationale: "Legacy callers do not know the new optional fields.",
+      evidenceRefs: [],
+      packageId: "package-legacy-1",
+      authorId: "actor-legacy-reviewer",
+      authorUsername: "Legacy Reviewer",
+      createdAt: "2026-08-24T12:00:00.000Z",
+    };
+
+    const parsed = parseExperimentDecision(legacy);
+    expectTypeOf(parsed).toEqualTypeOf<NormalizedExperimentDecisionV1>();
+    expectTypeOf(parsed.ownerId).toEqualTypeOf<string | null>();
+    expectTypeOf(parsed.remainingUnknowns).toEqualTypeOf<string[]>();
+    expect(parsed).toMatchObject({ ownerId: null, ownerUsername: null, remainingUnknowns: [] });
+  });
+
   it("normalizes legacy records to explicit unassigned ownership and no unknowns", () => {
     const parsed = parseExperimentDecision(decision());
     expect(parsed.ownerId).toBeNull();

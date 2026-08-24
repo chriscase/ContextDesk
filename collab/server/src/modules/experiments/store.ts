@@ -11,6 +11,7 @@ import type {
   SnapshotFairnessClass,
   SnapshotLineageClass,
   SnapshotProofBasis,
+  NormalizedExperimentDecisionV1,
 } from "@cd-collab/contracts";
 import {
   SNAPSHOT_FAIRNESS_CLASSES,
@@ -60,7 +61,7 @@ export interface LatestProposedDecisionRow {
   caseTitle: string;
   experimentId: string;
   packageId: string;
-  decision: ExperimentDecisionV1;
+  decision: NormalizedExperimentDecisionV1;
 }
 
 export interface ListOverviewProposedQuery extends OverviewScope {
@@ -78,8 +79,8 @@ export interface ExperimentStore {
   listOverviewProposed(query: ListOverviewProposedQuery): Promise<LatestProposedDecisionRow[]>;
   listObservations(experimentId: string): Promise<HelpfulnessObservationV1[]>;
   insertObservation(row: HelpfulnessObservationV1): Promise<void>;
-  listDecisions(experimentId: string): Promise<ExperimentDecisionV1[]>;
-  insertDecision(row: ExperimentDecisionV1): Promise<void>;
+  listDecisions(experimentId: string): Promise<NormalizedExperimentDecisionV1[]>;
+  insertDecision(row: NormalizedExperimentDecisionV1): Promise<void>;
   listGolds(experimentId: string): Promise<GoldReferenceV1[]>;
   insertGold(row: GoldReferenceV1): Promise<void>;
   listTraces(experimentId: string): Promise<InteractionTraceV1[]>;
@@ -165,7 +166,7 @@ function parseSnapshotProof(raw: unknown): ExperimentSnapshotProof {
   return parsed;
 }
 
-function cloneDecision(row: ExperimentDecisionV1): ExperimentDecisionV1 {
+function cloneDecision(row: ExperimentDecisionV1): NormalizedExperimentDecisionV1 {
   return parseExperimentDecision({
     ...row,
     evidenceRefs: [...row.evidenceRefs],
@@ -262,7 +263,7 @@ function cloneGold(row: GoldReferenceV1): GoldReferenceV1 {
 export class MemoryExperimentStore implements ExperimentStore {
   private readonly experiments = new Map<string, ExperimentRow>();
   private readonly observations = new Map<string, HelpfulnessObservationV1[]>();
-  private readonly decisions = new Map<string, ExperimentDecisionV1[]>();
+  private readonly decisions = new Map<string, NormalizedExperimentDecisionV1[]>();
   private readonly golds = new Map<string, GoldReferenceV1[]>();
   private readonly traces = new Map<string, InteractionTraceV1[]>();
   private readonly annotations = new Map<string, TraceAnnotationRow[]>();
@@ -355,11 +356,11 @@ export class MemoryExperimentStore implements ExperimentStore {
     this.observations.set(row.experimentId, list);
   }
 
-  async listDecisions(experimentId: string): Promise<ExperimentDecisionV1[]> {
+  async listDecisions(experimentId: string): Promise<NormalizedExperimentDecisionV1[]> {
     return [...(this.decisions.get(experimentId) ?? [])].sort((a, b) => a.revision - b.revision);
   }
 
-  async insertDecision(row: ExperimentDecisionV1): Promise<void> {
+  async insertDecision(row: NormalizedExperimentDecisionV1): Promise<void> {
     const list = this.decisions.get(row.experimentId) ?? [];
     if (list.some((d) => d.revision === row.revision && d.id === row.id)) {
       throw new Error("decision revision already exists");
@@ -546,15 +547,17 @@ export class PgExperimentStore implements ExperimentStore {
     );
   }
 
-  async listDecisions(experimentId: string): Promise<ExperimentDecisionV1[]> {
+  async listDecisions(experimentId: string): Promise<NormalizedExperimentDecisionV1[]> {
     const res = await this.db.query(
       `SELECT payload FROM experiment_decisions WHERE experiment_id = $1 ORDER BY revision, id`,
       [experimentId],
     );
-    return res.rows.map((row: { payload: ExperimentDecisionV1 }) => row.payload);
+    return res.rows.map((row: { payload: ExperimentDecisionV1 }) =>
+      parseExperimentDecision(row.payload),
+    );
   }
 
-  async insertDecision(row: ExperimentDecisionV1): Promise<void> {
+  async insertDecision(row: NormalizedExperimentDecisionV1): Promise<void> {
     await this.db.query(
       `INSERT INTO experiment_decisions (id, experiment_id, revision, created_at, payload)
        VALUES ($1,$2,$3,$4,$5::jsonb)`,

@@ -429,6 +429,173 @@ describe("experiment lab review loop", () => {
     });
   });
 
+  it("preserves omitted legacy decision metadata and supports explicit clearing", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const created = await createCase(app, alice);
+      const imported = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments`,
+        headers: { cookie: alice },
+        payload: PACKAGE,
+      });
+      const experimentId = JSON.parse(imported.body).id as string;
+
+      const first = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/decisions`,
+        headers: { cookie: alice },
+        payload: {
+          text: "Keep the first owner accountable.",
+          rationale: "The open question still needs an answer.",
+          evidenceRefs: ["ev-demo-checkout-log"],
+          ownerAssignment: "self",
+          remainingUnknowns: ["Does the timeout still reproduce?"],
+        },
+      });
+      expect(first.statusCode).toBe(200);
+
+      const legacyRevision = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/decisions`,
+        headers: { cookie: alice },
+        payload: {
+          text: "Revise through a legacy client.",
+          rationale: "The legacy payload omits fields it does not know.",
+          evidenceRefs: ["ev-demo-checkout-log"],
+          expectedRevision: 1,
+        },
+      });
+      expect(legacyRevision.statusCode).toBe(200);
+      expect(JSON.parse(legacyRevision.body)).toMatchObject({
+        revision: 2,
+        ownerId: "uid=alice,ou=people,dc=example,dc=test",
+        ownerUsername: "alice",
+        remainingUnknowns: ["Does the timeout still reproduce?"],
+      });
+
+      const cleared = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/decisions`,
+        headers: { cookie: alice },
+        payload: {
+          text: "Clear resolved accountability metadata explicitly.",
+          rationale: "The question is resolved and the decision is unassigned.",
+          evidenceRefs: ["ev-demo-checkout-log"],
+          ownerAssignment: "unassigned",
+          remainingUnknowns: [],
+          expectedRevision: 2,
+        },
+      });
+      expect(cleared.statusCode).toBe(200);
+      expect(JSON.parse(cleared.body)).toMatchObject({
+        revision: 3,
+        ownerId: null,
+        ownerUsername: null,
+        remainingUnknowns: [],
+      });
+    });
+  });
+
+  it("rejects evidence outside the experiment export graph before persistence", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const dave = await login(app, "dave", DAVE);
+      const created = await createCase(app, alice);
+      const imported = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments`,
+        headers: { cookie: alice },
+        payload: PACKAGE,
+      });
+      const experimentId = JSON.parse(imported.body).id as string;
+      const unrelated = "ev-unrelated-case-artifact";
+
+      const helpfulness = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/helpfulness`,
+        headers: { cookie: alice },
+        payload: {
+          candidateId: "cand-qwen-3.6-27b",
+          dimension: "evidence_support",
+          score: 2,
+          rationale: "This case artifact is outside the experiment graph.",
+          evidenceRefs: [unrelated],
+        },
+      });
+      expect(helpfulness.statusCode).toBe(400);
+      expect(helpfulness.body).toContain("unknown experiment evidence");
+
+      const rejectedDecision = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/decisions`,
+        headers: { cookie: alice },
+        payload: {
+          text: "Do not persist unrelated evidence.",
+          rationale: "It cannot be represented by the share-safe exporter.",
+          evidenceRefs: [unrelated],
+        },
+      });
+      expect(rejectedDecision.statusCode).toBe(400);
+
+      const proposal = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/decisions`,
+        headers: { cookie: alice },
+        payload: {
+          text: "Use evidence in the experiment graph.",
+          rationale: "The selected log is export-valid.",
+          evidenceRefs: ["ev-demo-checkout-log"],
+        },
+      });
+      expect(proposal.statusCode).toBe(200);
+      const proposed = JSON.parse(proposal.body) as { id: string; revision: number };
+      const accepted = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/decisions/${proposed.id}/accept`,
+        headers: { cookie: dave },
+        payload: { expectedRevision: proposed.revision },
+      });
+      expect(accepted.statusCode).toBe(200);
+      const acceptedDecision = JSON.parse(accepted.body) as { id: string; revision: number };
+
+      const gold = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/gold`,
+        headers: { cookie: dave },
+        payload: {
+          decisionId: acceptedDecision.id,
+          expectedRevision: acceptedDecision.revision,
+          evidenceAnchors: [unrelated],
+        },
+      });
+      expect(gold.statusCode).toBe(400);
+
+      const persisted = await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/experiments/${experimentId}`,
+        headers: { cookie: alice },
+      });
+      expect(persisted.statusCode).toBe(200);
+      const view = JSON.parse(persisted.body) as {
+        observations: unknown[];
+        decisions: { evidenceRefs: string[] }[];
+        gold: unknown;
+      };
+      expect(view.observations).toEqual([]);
+      expect(view.decisions).toHaveLength(2);
+      expect(view.decisions.every((decision) => !decision.evidenceRefs.includes(unrelated))).toBe(true);
+      expect(view.gold).toBeNull();
+
+      const exported = await app.inject({
+        method: "POST",
+        url: `/api/cases/${created.id}/experiments/${experimentId}/export`,
+        headers: { cookie: dave },
+      });
+      expect(exported.statusCode).toBe(200);
+    });
+  });
+
   it("rejects unknown package fields and does not fabricate cost", async () => {
     await withApp(async ({ app }) => {
       const token = await login(app, "alice", ALICE);

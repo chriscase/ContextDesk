@@ -252,9 +252,17 @@ export async function registerExperimentRoutes(
       : [];
     const remainingUnknowns = Array.isArray(body.remainingUnknowns)
       ? body.remainingUnknowns.filter((item): item is string => typeof item === "string")
-      : [];
-    const ownerAssignment = body.ownerAssignment ?? "unassigned";
-    if (ownerAssignment !== "self" && ownerAssignment !== "unassigned") {
+      : undefined;
+    if (body.remainingUnknowns !== undefined && remainingUnknowns === undefined) {
+      void reply.code(400);
+      return { error: "remainingUnknowns must be an array" };
+    }
+    const ownerAssignment = body.ownerAssignment;
+    if (
+      ownerAssignment !== undefined &&
+      ownerAssignment !== "self" &&
+      ownerAssignment !== "unassigned"
+    ) {
       void reply.code(400);
       return { error: "ownerAssignment must be self or unassigned" };
     }
@@ -269,8 +277,10 @@ export async function registerExperimentRoutes(
           text,
           rationale,
           evidenceRefs,
-          remainingUnknowns,
-          owner: ownerAssignment === "self" ? ctx.actor : null,
+          ...(remainingUnknowns === undefined ? {} : { remainingUnknowns }),
+          ...(ownerAssignment === undefined
+            ? {}
+            : { owner: ownerAssignment === "self" ? ctx.actor : null }),
           expectedRevision,
         },
         request.ip,

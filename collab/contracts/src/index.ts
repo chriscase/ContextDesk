@@ -340,6 +340,7 @@ export type {
   ExperimentAgreementV1,
   ExperimentCandidateV1,
   ExperimentDecisionV1,
+  NormalizedExperimentDecisionV1,
   ExperimentPackageV1,
   ExperimentReviewExportV1,
   ExperimentReviewExportV2,

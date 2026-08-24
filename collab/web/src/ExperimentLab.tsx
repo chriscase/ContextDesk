@@ -421,20 +421,13 @@ function supportingArtifact(view: ExperimentView, evidenceRef: string): Supporti
   };
 }
 
-function evidenceRefsFor(view: ExperimentView, artifacts: EvidenceArtifactView[]): string[] {
-  const refs = new Set(artifacts.map((artifact) => artifact.id));
+function evidenceRefsFor(view: ExperimentView): string[] {
+  const refs = new Set<string>();
   for (const anchor of view.agreement.sharedAnchors) refs.add(anchor.evidenceRef);
   for (const row of view.agreement.candidateSpecific) {
     for (const ref of row.evidenceRefs) refs.add(ref);
   }
   for (const row of view.agreement.roleConflicts) refs.add(row.evidenceRef);
-  for (const row of view.observations) {
-    for (const ref of row.evidenceRefs ?? []) refs.add(ref);
-  }
-  for (const row of view.decisions) {
-    for (const ref of row.evidenceRefs ?? []) refs.add(ref);
-  }
-  for (const ref of view.gold?.evidenceAnchors ?? []) refs.add(ref);
   for (const trace of view.traces ?? []) {
     for (const event of trace.events) {
       for (const ref of event.evidenceRefs) refs.add(ref);
@@ -466,7 +459,7 @@ function EvidencePicker(props: {
   const [selectedRefs, setSelectedRefs] = useState<Set<string>>(() => new Set());
   const fieldsetRef = useRef<HTMLFieldSetElement>(null);
   const artifactsById = new Map(props.artifacts.map((artifact) => [artifact.id, artifact]));
-  const choices = evidenceRefsFor(props.view, props.artifacts).map((ref) => {
+  const choices = evidenceRefsFor(props.view).map((ref) => {
     const artifact = artifactsById.get(ref);
     const support = supportingArtifact(props.view, ref);
     return {
@@ -499,6 +492,11 @@ function EvidencePicker(props: {
     return () => form.removeEventListener("reset", reset);
   }, []);
 
+  useEffect(() => {
+    setSelectedRefs(new Set());
+    setQuery("");
+  }, [props.view.id]);
+
   return (
     <fieldset className="experiment-lab__evidence-picker" ref={fieldsetRef}>
       <legend>{props.legend}</legend>
@@ -523,9 +521,10 @@ function EvidencePicker(props: {
                   value={choice.ref}
                   checked={selectedRefs.has(choice.ref)}
                   onChange={(event) => {
+                    const checked = event.currentTarget.checked;
                     setSelectedRefs((current) => {
                       const next = new Set(current);
-                      if (event.currentTarget.checked) next.add(choice.ref);
+                      if (checked) next.add(choice.ref);
                       else next.delete(choice.ref);
                       return next;
                     });
@@ -540,7 +539,12 @@ function EvidencePicker(props: {
               {props.roles ? (
                 <label className="experiment-lab__evidence-role">
                   <span>Expected role (optional)</span>
-                  <select className="login__input" name={`evidenceRole:${choice.ref}`} defaultValue="">
+                  <select
+                    aria-label={`Expected role for ${choice.label}`}
+                    className="login__input"
+                    name={`evidenceRole:${choice.ref}`}
+                    defaultValue=""
+                  >
                     <option value="">No role recorded</option>
                     <option value="trigger">Trigger</option>
                     <option value="cause">Cause</option>

@@ -366,10 +366,22 @@ describe("experiment lab", () => {
   });
 
   it("builds a gold benchmark from recognizable evidence choices instead of raw ids", async () => {
+    const pickerView = {
+      ...goldView,
+      agreement: {
+        ...goldView.agreement,
+        candidateSpecific: [
+          {
+            candidateId: "cand-qwen-3.6-27b",
+            evidenceRefs: ["ev-demo-inventory-timeout"],
+          },
+        ],
+      },
+    };
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/experiments") && !init?.method) {
-        return { ok: true, json: async () => ({ experiments: [goldView] }) };
+        return { ok: true, json: async () => ({ experiments: [pickerView] }) };
       }
       if (url.endsWith("/evidence")) {
         return {
@@ -385,6 +397,24 @@ describe("experiment lab", () => {
                 privacyClass: "share_safe",
                 verificationStatus: "verified",
               },
+              {
+                id: "ev-demo-inventory-timeout",
+                kind: "log",
+                filename: "synthetic-inventory-timeout.log",
+                uri: null,
+                mediaType: "text/plain",
+                privacyClass: "share_safe",
+                verificationStatus: "verified",
+              },
+              {
+                id: "ev-unrelated-case-artifact",
+                kind: "log",
+                filename: "unrelated-case-only.log",
+                uri: null,
+                mediaType: "text/plain",
+                privacyClass: "owner_only",
+                verificationStatus: "verified",
+              },
             ],
           }),
         };
@@ -398,8 +428,14 @@ describe("experiment lab", () => {
     const benchmarkEvidence = screen.getByRole("group", {
       name: "Evidence anchors for this human benchmark",
     });
+    expect(screen.queryByText("unrelated-case-only.log")).toBeNull();
+    const roleSelectors = within(benchmarkEvidence).getAllByRole("combobox");
+    expect(roleSelectors.map((select) => select.getAttribute("aria-label"))).toEqual([
+      "Expected role for synthetic-checkout-timeout.log",
+      "Expected role for synthetic-inventory-timeout.log",
+    ]);
     fireEvent.click(within(benchmarkEvidence).getAllByRole("checkbox")[0]!);
-    fireEvent.change(within(benchmarkEvidence).getAllByRole("combobox")[0]!, {
+    fireEvent.change(roleSelectors[0]!, {
       target: { value: "symptom" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Promote accepted decision to gold" }));
@@ -1292,6 +1328,40 @@ describe("experiment lab", () => {
       "/api/cases/c1/experiments/exp-cockpit/decisions/dec-cockpit/accept",
     );
     expect(JSON.parse(String(acceptCall[1]?.body))).toEqual({ expectedRevision: 1 });
+  });
+
+  it("resets evidence picker search and selection when the experiment changes", async () => {
+    const second = {
+      ...cockpitView,
+      id: "exp-cockpit-second",
+      packageId: "pkg-synth-cockpit-v2",
+    };
+    stubExperiments([cockpitView, second]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+
+    const firstPicker = await screen.findByRole("group", {
+      name: "Evidence supporting this decision (optional)",
+    });
+    const firstCheckbox = within(firstPicker).getAllByRole("checkbox")[0] as HTMLInputElement;
+    const firstSearch = within(firstPicker).getByRole("searchbox") as HTMLInputElement;
+    fireEvent.click(firstCheckbox);
+    fireEvent.change(firstSearch, { target: { value: "checkout" } });
+    expect(firstCheckbox.checked).toBe(true);
+    expect(firstSearch.value).toBe("checkout");
+
+    fireEvent.click(screen.getByRole("button", { name: /Comparison 2/ }));
+
+    const secondPicker = screen.getByRole("group", {
+      name: "Evidence supporting this decision (optional)",
+    });
+    await waitFor(() =>
+      expect((within(secondPicker).getByRole("searchbox") as HTMLInputElement).value).toBe(""),
+    );
+    expect(
+      within(secondPicker)
+        .getAllByRole("checkbox")
+        .every((checkbox) => !(checkbox as HTMLInputElement).checked),
+    ).toBe(true);
   });
 });
 
