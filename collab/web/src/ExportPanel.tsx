@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { protectedApiFetch } from "./protected-api.js";
 
 interface InventoryItem {
@@ -18,6 +18,53 @@ interface ScanFinding {
 
 type ExportKind = "brief" | "package";
 type InventoryStatus = "loading" | "ready" | "error";
+type PortableStatus = "loading" | "ready" | "unavailable";
+
+interface PortableCapabilities {
+  exportAvailable: boolean;
+  dryRunPreflightAvailable: boolean;
+  maximumArchiveBytes: number;
+  apply: { available: false; reason: string };
+}
+
+interface PortableActor {
+  sourceActorId: string;
+}
+
+interface PortableSelection {
+  archive: unknown;
+  actorIds: string[];
+}
+
+interface PortablePreflightResult {
+  report: {
+    counts: { create: number; update: number; conflict: number; blocked: number };
+    collisionPolicy: string;
+    warnings: unknown[];
+    referentialIntegrityFailures: unknown[];
+    idRemap: unknown[];
+    reconstructionStatus: string;
+    exactReconstruction: boolean;
+  };
+  privacy: {
+    classification: string;
+    ownerOnlyEvidence: number;
+    shareSafeEvidence: number;
+    inlineBlobCount: number;
+    omittedBlobCount: number;
+    privateBlobCount: number;
+    redactedBlobCount: number;
+  };
+  omitted: unknown[];
+  unsupported: string[];
+  authorization: {
+    sourceRolesTrusted: false;
+    destinationMembershipGranted: false;
+    destinationRoleGranted: false;
+    destinationCapabilityGranted: false;
+  };
+  apply: { available: false; reason: string };
+}
 
 function safeFinding(finding: ScanFinding): ScanFinding {
   if (/(credential|secret|token|authorization|request[_-]?id|endpoint|url)/i.test(finding.rule)) {
@@ -33,6 +80,51 @@ const NETWORK_ERROR_MESSAGE =
   "The export request did not complete — the server returned no result. Nothing was exported and " +
   "your variant and evidence selection are unchanged; retry with the same export button.";
 
+const PORTABLE_NETWORK_ERROR =
+  "The archive request did not complete. Nothing was downloaded or changed; check your connection and try again.";
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function portableActors(value: unknown): PortableActor[] | null {
+  const archive = asRecord(value);
+  const investigation = asRecord(archive?.investigation);
+  if (!investigation || !Array.isArray(investigation.actors)) return null;
+  const actors: PortableActor[] = [];
+  const seen = new Set<string>();
+  for (const value of investigation.actors) {
+    const actor = asRecord(value);
+    if (!actor || typeof actor.sourceActorId !== "string" || !actor.sourceActorId.trim()) {
+      return null;
+    }
+    if (seen.has(actor.sourceActorId)) return null;
+    seen.add(actor.sourceActorId);
+    actors.push({ sourceActorId: actor.sourceActorId });
+  }
+  return actors.sort((left, right) =>
+    left.sourceActorId < right.sourceActorId
+      ? -1
+      : left.sourceActorId > right.sourceActorId
+        ? 1
+        : 0,
+  );
+}
+
+function portableErrorMessage(status: number): string {
+  if (status === 413) return "This archive is larger than this War Room accepts.";
+  if (status === 401 || status === 403) {
+    return "Your current account is not authorized to check portable investigation archives.";
+  }
+  return "This archive could not be checked. It may be malformed, incomplete, or incompatible.";
+}
+
+function readablePrivacy(value: string): string {
+  return value.replaceAll("_", " ");
+}
+
 export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead: boolean }) {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [inventoryStatus, setInventoryStatus] = useState<InventoryStatus>("loading");
@@ -46,6 +138,15 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<ExportKind | null>(null);
   const [completed, setCompleted] = useState<ExportKind | null>(null);
+  const [portableStatus, setPortableStatus] = useState<PortableStatus>("loading");
+  const [portableCapabilities, setPortableCapabilities] = useState<PortableCapabilities | null>(
+    null,
+  );
+  const [portableSelection, setPortableSelection] = useState<PortableSelection | null>(null);
+  const [portablePending, setPortablePending] = useState<"download" | "preflight" | null>(null);
+  const [portableMessage, setPortableMessage] = useState<string | null>(null);
+  const [portableError, setPortableError] = useState<string | null>(null);
+  const [preflight, setPreflight] = useState<PortablePreflightResult | null>(null);
   const inFlight = useRef(false);
 
   useEffect(() => {
@@ -69,6 +170,41 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
       stale = true;
     };
   }, [props.caseId, inventoryAttempt]);
+
+  useEffect(() => {
+    if (!props.canLead) {
+      setPortableStatus("unavailable");
+      return;
+    }
+    let stale = false;
+    setPortableStatus("loading");
+    void protectedApiFetch("/api/portable-investigations/capabilities")
+      .then(async (res) => {
+        if (!res.ok) throw new Error("capabilities unavailable");
+        return (await res.json()) as PortableCapabilities;
+      })
+      .then((body) => {
+        if (stale) return;
+        if (
+          body.exportAvailable !== true ||
+          body.dryRunPreflightAvailable !== true ||
+          !Number.isSafeInteger(body.maximumArchiveBytes) ||
+          body.maximumArchiveBytes <= 0 ||
+          body.apply?.available !== false
+        ) {
+          setPortableStatus("unavailable");
+          return;
+        }
+        setPortableCapabilities(body);
+        setPortableStatus("ready");
+      })
+      .catch(() => {
+        if (!stale) setPortableStatus("unavailable");
+      });
+    return () => {
+      stale = true;
+    };
+  }, [props.canLead]);
 
   const allowed = variant === "share_safe" ? props.canLead : props.canWrite;
   const selectableItems = items.filter((item) => !item.excludedByDefault);
@@ -140,6 +276,105 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
       selection,
       promptScaffold: scaffold || null,
     });
+  }
+
+  async function downloadPortableArchive() {
+    if (!props.canLead || portableStatus !== "ready" || portablePending) return;
+    setPortablePending("download");
+    setPortableError(null);
+    setPortableMessage(null);
+    try {
+      const response = await protectedApiFetch(`/api/cases/${props.caseId}/portable-archive`);
+      if (!response.ok) {
+        setPortableError(portableErrorMessage(response.status));
+        return;
+      }
+      const archive = await response.json();
+      const contents = JSON.stringify(archive, null, 2);
+      const url = URL.createObjectURL(
+        new Blob([contents], { type: "application/json;charset=utf-8" }),
+      );
+      const anchor = document.createElement("a");
+      const safeId = props.caseId.replace(/[^a-zA-Z0-9_-]/g, "-");
+      anchor.href = url;
+      anchor.download = `contextdesk-investigation-${safeId}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setPortableMessage(
+        "Complete investigation archive downloaded. Store it according to its privacy classification.",
+      );
+    } catch {
+      setPortableError(PORTABLE_NETWORK_ERROR);
+    } finally {
+      setPortablePending(null);
+    }
+  }
+
+  async function selectPortableArchive(event: ChangeEvent<HTMLInputElement>) {
+    setPortableSelection(null);
+    setPreflight(null);
+    setPortableMessage(null);
+    setPortableError(null);
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!portableCapabilities || file.size > portableCapabilities.maximumArchiveBytes) {
+      setPortableError("This archive is larger than this War Room accepts.");
+      event.target.value = "";
+      return;
+    }
+    try {
+      const archive = JSON.parse(await file.text()) as unknown;
+      const actors = portableActors(archive);
+      if (!actors) {
+        setPortableError("This file is not a valid portable investigation archive.");
+        event.target.value = "";
+        return;
+      }
+      setPortableSelection({ archive, actorIds: actors.map((actor) => actor.sourceActorId) });
+      setPortableMessage(
+        `Archive selected. ${actors.length} historical participant${actors.length === 1 ? "" : "s"} will remain attribution only.`,
+      );
+    } catch {
+      setPortableError("This file is not a valid portable investigation archive.");
+      event.target.value = "";
+    }
+  }
+
+  async function runPortablePreflight() {
+    if (!props.canLead || !portableSelection || portablePending) return;
+    setPortablePending("preflight");
+    setPortableError(null);
+    setPortableMessage(null);
+    setPreflight(null);
+    try {
+      const response = await protectedApiFetch("/api/portable-investigations/preflight", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          archive: portableSelection.archive,
+          mode: "dry_run",
+          collisionPolicy: "remap_deterministic",
+          identityMap: portableSelection.actorIds.map((sourceActorId) => ({
+            sourceActorId,
+            action: "preserve_historical_external",
+            destinationActorId: null,
+          })),
+        }),
+      });
+      if (!response.ok) {
+        setPortableError(portableErrorMessage(response.status));
+        return;
+      }
+      const result = (await response.json()) as PortablePreflightResult;
+      setPreflight(result);
+      setPortableMessage(
+        "Dry-run check complete. No investigation, user, membership, role, or permission was created or changed.",
+      );
+    } catch {
+      setPortableError(PORTABLE_NETWORK_ERROR);
+    } finally {
+      setPortablePending(null);
+    }
   }
 
   return (
@@ -315,6 +550,162 @@ export function ExportPanel(props: { caseId: string; canWrite: boolean; canLead:
           {markdown}
         </pre>
       ) : null}
+      <section className="export__portable" aria-labelledby="portable-archive-heading">
+        <div className="export__portable-heading">
+          <div>
+            <p className="export__eyebrow">Move or preserve an investigation</p>
+            <h4 id="portable-archive-heading">Complete investigation archive</h4>
+          </div>
+          <span className="export__badge">Lead access</span>
+        </div>
+        <p className="export__copy">
+          Download the complete portable record for safekeeping or transfer. Unlike the
+          selected-evidence package above, this archive represents the investigation record and
+          its included evidence.
+        </p>
+        <div className="export__portable-grid">
+          <article className="export__portable-card">
+            <h5>1. Download this investigation</h5>
+            <p>
+              Creates one clearly named JSON file. The export is read-only and does not change the
+              investigation.
+            </p>
+            <button
+              className="login__submit"
+              type="button"
+              disabled={!props.canLead || portableStatus !== "ready" || portablePending !== null}
+              onClick={() => void downloadPortableArchive()}
+            >
+              {portablePending === "download"
+                ? "Preparing archive…"
+                : "Download complete investigation archive"}
+            </button>
+          </article>
+          <article className="export__portable-card">
+            <h5>2. Check an archive before moving it</h5>
+            <p>
+              Select an archive and run a dry-run check. Historical people remain attribution
+              only; this never grants destination access or permissions.
+            </p>
+            <label className="export__file-label" htmlFor="portable-archive-file">
+              Portable investigation JSON
+            </label>
+            <input
+              id="portable-archive-file"
+              className="export__file"
+              type="file"
+              accept="application/json,.json"
+              disabled={!props.canLead || portableStatus !== "ready" || portablePending !== null}
+              onChange={(event) => void selectPortableArchive(event)}
+            />
+            <button
+              className="case-memory__secondary-button"
+              type="button"
+              disabled={!portableSelection || portablePending !== null}
+              onClick={() => void runPortablePreflight()}
+            >
+              {portablePending === "preflight" ? "Checking archive…" : "Run dry-run check"}
+            </button>
+          </article>
+        </div>
+        {!props.canLead ? (
+          <p className="case-memory__note">
+            A case lead or administrator must download or check complete investigation archives.
+          </p>
+        ) : portableStatus === "loading" ? (
+          <p className="case-memory__note" role="status">
+            Checking portable archive availability…
+          </p>
+        ) : portableStatus === "unavailable" ? (
+          <p className="case-memory__note">
+            Portable archive tools are unavailable on this War Room right now.
+          </p>
+        ) : null}
+        <p className="export__portable-policy">
+          ID collisions are remapped deterministically, so the same archive and destination state
+          produce the same plan. Source roles are never trusted. Historical identities do not
+          become destination users, members, leads, administrators, or capability holders.
+        </p>
+        <p className="export__portable-warning">
+          Restore/apply is unavailable. This War Room can export and safely inspect an archive, but
+          it cannot yet reconstruct that archive on another installation with proven atomic
+          rollback. No apply control is provided.
+        </p>
+        <div className="export__portable-status" aria-live="polite" aria-atomic="true">
+          {portableMessage ? <p>{portableMessage}</p> : null}
+          {portableError ? (
+            <p className="export__error" role="alert">
+              {portableError}
+            </p>
+          ) : null}
+        </div>
+        {preflight ? (
+          <section
+            className="export__preflight"
+            aria-labelledby="portable-preflight-heading"
+            tabIndex={0}
+          >
+            <div className="export__portable-heading">
+              <div>
+                <p className="export__eyebrow">Dry-run result</p>
+                <h5 id="portable-preflight-heading">Archive readiness summary</h5>
+              </div>
+              <span className="export__badge">
+                {readablePrivacy(preflight.report.reconstructionStatus)}
+              </span>
+            </div>
+            <dl className="export__summary-grid">
+              <div>
+                <dt>Objects to create</dt>
+                <dd>{preflight.report.counts.create}</dd>
+              </div>
+              <div>
+                <dt>Existing objects updated</dt>
+                <dd>{preflight.report.counts.update}</dd>
+              </div>
+              <div>
+                <dt>Collisions</dt>
+                <dd>{preflight.report.counts.conflict}</dd>
+              </div>
+              <div>
+                <dt>Blocked objects</dt>
+                <dd>{preflight.report.counts.blocked}</dd>
+              </div>
+              <div>
+                <dt>Deterministic ID remaps</dt>
+                <dd>{preflight.report.idRemap.length}</dd>
+              </div>
+              <div>
+                <dt>Privacy</dt>
+                <dd>{readablePrivacy(preflight.privacy.classification)}</dd>
+              </div>
+            </dl>
+            <ul className="export__preflight-notes">
+              <li>
+                Included evidence: {preflight.privacy.shareSafeEvidence} share-safe and{" "}
+                {preflight.privacy.ownerOnlyEvidence} owner-only.
+              </li>
+              <li>
+                Content state: {preflight.privacy.inlineBlobCount} included, {preflight.privacy.omittedBlobCount} omitted, {preflight.privacy.privateBlobCount} private, and{" "}
+                {preflight.privacy.redactedBlobCount} redacted.
+              </li>
+              <li>
+                {preflight.omitted.length} reconstruction limitation
+                {preflight.omitted.length === 1 ? "" : "s"}; {preflight.unsupported.length} state
+                {preflight.unsupported.length === 1 ? " is" : "s are"} not represented by this
+                archive version.
+              </li>
+              <li>
+                {preflight.report.warnings.length} warning
+                {preflight.report.warnings.length === 1 ? "" : "s"};{" "}
+                {preflight.report.referentialIntegrityFailures.length} broken reference
+                {preflight.report.referentialIntegrityFailures.length === 1 ? "" : "s"}.
+              </li>
+              <li>Restore/apply remains unavailable after this check.</li>
+            </ul>
+          </section>
+        ) : null}
+      </section>
     </section>
   );
 }
