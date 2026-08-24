@@ -267,23 +267,74 @@ exclusive: `Ok` has a body and `raw_error = None`; `Err` is mapped to empty
 content plus a reason. The host therefore executes qe09 only when mixed attempts
 are observed as a real two-call sequence (failed first chat, then a parsed
 follow-up). Timeout/auth/transport classifiers exist and never emit
-`host_grounding`, but those `Err` outcomes have no parsed body to score, so qe10
-stays pre-dispatch blocked rather than being “executed” via a dual-state
-(`Ok` body + `raw_error`) the production transport never returns. A fluent
-1-shot success emits `compatible_success`, which is not joined
-(`host_score_failed`, never a `diagnostic_category` model failure). qe11/qe12
-stay blocked for missing tool-host / budget seams.
+`host_grounding`, and those `Err` outcomes still have no parsed body to score —
+a single bodyless attempt (or, since qe10 never allows a follow-up, the only
+attempt it ever dispatches) stays an honest `provider_request_failed` outcome, never
+invented into a dual-state (`Ok` body + `raw_error`) the production transport
+never returns. What changed: qe10 now dispatches one real attempt. A genuinely
+fluent, well-formed response that asserts **zero claims** is a host-observed
+grounding refusal (`response.claims.is_empty()` — never a provider-declared
+field, the schema has none): the host records that attempt's row as
+`failure_class = "host_grounding"` / `succeeded = false` — a transport
+success that produced nothing evaluable, not a "successful evaluable
+analysis" — and joins `host_grounding_refusal`, which qe10 allows. This is
+only ever claimed when the whole observed lineage has no earlier unsucceeded
+transport/auth/timeout attempt; the scorer's `transport_versus_grounding`
+dimension would otherwise flag it as a transport failure mislabeled as
+grounding, and qe10's fixed `all_failed` usefulness policy requires every
+attempt row to honestly report non-success. A fluent response *with* real
+claims (each contractually cited) emits `compatible_success`, which qe10 does
+not allow either — so a fluent response without host-observed grounding
+refusal is never joined into a scored envelope, and neither is a fluent
+response that is genuinely grounded (qe10 has no "successful grounded"
+category at all; both cases stay an honest `host_score_failed` gap, never a
+`diagnostic_category` model failure). qe11/qe12 stay blocked.
 
 | Scenario | Host seam | Decision |
 | --- | --- | --- |
 | `qe09-attempt-usefulness` | chat `Err` then one follow-up `Ok` (production exclusive states) | **Execute** when mixed attempts are observed and joined; fluent-only `compatible_success` is not joined |
-| `qe10-grounding-vs-transport` | classify timeout/auth/transport from `Err` reasons; never `host_grounding` | **Blocked** `host_diagnostic_pipeline_unavailable`, zero dispatch bytes: `Err` has no parsed body, `Ok` has no error |
+| `qe10-grounding-vs-transport` | one real attempt; host-observed zero-claims refusal (`failure_class = "host_grounding"`) vs. bodyless `Err` classification | **Execute** on a single clean parsed attempt asserting zero claims (`host_grounding_refusal`); **Failed** `host_score_failed` on a genuinely grounded fluent answer or any lineage tainted by an earlier transport/auth/timeout attempt; **Failed** `provider_request_failed` (never Executed) when every attempt stays bodyless |
 | `qe11-tool-progress` | host-executed tool loop (not provider `tool_calls`) | **Blocked** `host_diagnostic_pipeline_unavailable`, zero dispatch bytes |
 | `qe12-multimodel-budget` | investigator/reviewer/synthesizer budget pipeline | **Blocked** `host_diagnostic_pipeline_unavailable`, zero dispatch bytes |
 
 Unsupported host capabilities stay blocked and are never blamed on the model.
 A fluent parsed answer cannot drop host-recorded failed/partial diagnostic rows.
 A clean 14/14 result is not claimed.
+
+### Why qe11/qe12 stay blocked, and what would unblock them
+
+Both were re-audited against the shipped production seams outside this
+scenario's write scope, not just re-asserted as blocked:
+
+- **qe11 (host-executed tool loop).** A real host-executed tool loop already
+  exists in production — `cd_core::tool_host::ToolHost::execute` /
+  `resolve_execute_name`, driven by the round loop in `cd_core::agent`. It is
+  not reachable from this runner: `LiveQualificationTransport::chat_complete`
+  (`crates/cd-workflow/src/capability_qualification.rs`) rejects any tool
+  definition that is not the single inert probe tool
+  (`non_inert_probe_tool_rejected`) before a request ever reaches the
+  provider. Unblocking qe11 honestly needs a bounded, host-validated tool
+  contract accepted by that transport (`crates/cd-workflow/src/capability_qualification.rs`
+  and `crates/cd-core/src/capability_qualification.rs`) plus a bridge from the
+  known-answer dispatch path into `cd_core::tool_host::ToolHost` — none of
+  which are in this change's write allowlist. It stays honestly blocked
+  rather than faking a tool loop against the existing inert-probe-only
+  transport.
+- **qe12 (investigator/reviewer/synthesizer budget pipeline).** A real
+  reviewer-first multi-model pipeline already exists in production
+  (`cd_core::multi_model`: `MultiModelBudget`, `StageTelemetry`,
+  `run_review_pipeline`), wired into the live agent turn loop. It has no
+  three-role, live-qualification-compatible mode today (`MultiModelMode` is
+  `Single` / `Review` / `Contributions`; `Review` resolves at most an
+  Investigator and a Reviewer target, and `Contributions` explicitly fails
+  closed for qualification). This known-answer runner also has no per-stage
+  or total budget ceiling at all: `ScriptedDiagnostic.host_budget_exhausted`
+  is a report-only honesty flag, never computed by a real budget check.
+  Unblocking qe12 honestly needs a three-role live-qualification mode and a
+  real budget ceiling in `crates/cd-core/src/multi_model/mod.rs` (or a
+  sibling) — outside this change's write allowlist. It stays honestly
+  blocked rather than dispatching a synthesizer role with invented budget
+  accounting.
 
 ## Security and mutation coverage
 
@@ -303,9 +354,14 @@ The focused suite proves:
 - zero-cite tool progress and non-progress without withdrawal fail;
 - silent role dropout and budget-exhausted+useful fail;
 - qe09 dispatches and joins mixed-attempt host envelopes on a real `Err` then
-  `Ok` sequence; fluent `compatible_success` is not joined; qe10–qe12 stay
-  pre-dispatch blocked (qe10 because production chat never returns a scored
-  timeout/auth/transport envelope);
+  `Ok` sequence; fluent `compatible_success` is not joined;
+- qe10 dispatches one real attempt and joins a host-observed zero-claims
+  grounding refusal (`failure_class = "host_grounding"`, never reusing the raw
+  transport-success classification); a genuinely grounded fluent answer, and a
+  zero-claims refusal preceded anywhere in the lineage by a real transport/
+  auth/timeout attempt, both stay an honest `host_score_failed` gap instead of
+  a joined pass; an all-bodyless attempt sequence never reaches `Executed`;
+  qe11–qe12 stay pre-dispatch blocked;
 - configured and provider-reported model ids remain distinct and mismatches
   stay visible;
 - complete provider usage aggregates exactly while one missing value keeps the
@@ -335,14 +391,19 @@ is present only when reported by the gateway; it is not independently audited
 against billing. Cost is rounded to the nearest micro-US-dollar for the durable
 integer report, and all exported integers stay within the exact JavaScript
 range. Canonical captures are private local regression evidence, not share-safe
-exports or cryptographically authenticated attestations. This path still does not execute qe10 transport-versus-grounding (production
-chat never pairs a parsed body with a transport error), qe11 tool-progress, or
-qe12 three-role budget scenarios through a host tool loop / multi-stage budget
-pipeline, derive measured recommendations, or prove a packaged
-configured-provider acceptance run. qe09 executes only when the host actually
-observed mixed attempts; a fluent 1-shot answer is not treated as a diagnostic
-pass. Those remaining gaps are follow-up work for issue #726. It does not
-manufacture a green 14/14.
+exports or cryptographically authenticated attestations. This path still does
+not execute qe11 tool-progress or qe12 three-role budget scenarios through a
+host tool loop / multi-stage budget pipeline (see "Why qe11/qe12 stay
+blocked" above for the exact seams and files that would be needed), derive
+measured recommendations, or prove a packaged configured-provider acceptance
+run. qe09 executes only when the host actually observed mixed attempts; a
+fluent 1-shot answer is not treated as a diagnostic pass. qe10 executes only
+on a single clean parsed attempt honestly asserting zero claims; it does not
+claim semantic grounding verification beyond "the model asserted at least one
+claim" — a claim that parses with a citation but whose citation is wrong or
+fabricated is caught by the separate `live_exact_source_time_citations`
+dimension, not by `transport_versus_grounding`. Those remaining gaps are
+follow-up work for issue #726. It does not manufacture a green 14/14.
 
 ## Verification
 
