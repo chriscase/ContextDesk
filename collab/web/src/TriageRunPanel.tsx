@@ -116,7 +116,7 @@ const DEFAULT_GATEWAY_CONCURRENCY = 2;
 const GATEWAY_CONCURRENCY_OPTIONS = [1, 2, 3, 4] as const;
 const MAX_ERROR_LENGTH = 240;
 // Synthetic fixture labels; suggestions only — the operator may type any
-// non-DeepSeek model id their host profile actually serves.
+// non-DeepSeek model id their configured gateway connection actually serves.
 const SUGGESTED_MODEL_IDS = [
   "qwen-3.6-27b",
   "gpt-oss-120b",
@@ -642,7 +642,7 @@ export function TriageRunPanel(props: {
                   <p className="case-memory__note">
                     {mode === "gateway"
                       ? gatewayAvailable
-                        ? "The host bridge owns provider calls and credentials; each lane sends only a profile id."
+                        ? "Your War Room host owns provider calls and credentials; choose the gateway model each lane should run."
                         : "Gateway execution is not configured on this deployment; synthetic mode remains available."
                       : "Synthetic runs are offline and make no provider calls."}
                   </p>
@@ -724,9 +724,9 @@ export function TriageRunPanel(props: {
                         {mode === "gateway" && selectedCandidates.includes(candidate.candidateId) ? (
                           gatewayProfiles.length > 0 ? (
                             <label className="triage-runs__lane-profile">
-                              Host profile
+                              Gateway model
                               <select
-                                aria-label={`${candidate.model} host connector profile`}
+                                aria-label={`${candidate.model} gateway model`}
                                 value={profileFor(candidate)}
                                 onChange={(event) => setLaneProfiles((current) => ({ ...current, [candidate.candidateId]: event.target.value }))}
                               >
@@ -740,9 +740,9 @@ export function TriageRunPanel(props: {
                             </label>
                           ) : (
                             <label className="triage-runs__lane-profile">
-                              Host profile id
+                              Gateway connection ID
                               <input
-                                aria-label={`${candidate.model} host connector profile`}
+                                aria-label={`${candidate.model} gateway connection ID`}
                                 value={profileFor(candidate)}
                                 onChange={(event) => setLaneProfiles((current) => ({ ...current, [candidate.candidateId]: event.target.value }))}
                                 placeholder="profile:employer-gateway"
@@ -754,7 +754,7 @@ export function TriageRunPanel(props: {
                     ))}
                     {mode === "gateway" ? (
                       <span className="case-memory__note">
-                        Each selected lane chooses its own host profile. Credentials and endpoints stay on the host.
+                        Each selected lane chooses its own gateway model. Credentials and endpoints stay on the War Room host.
                         {!gatewayAvailable ? " Configure COLLAB_TRIAGE_RUNNER to enable gateway execution." : ""}
                         {selectedCandidates.length < 2 ? " Gateway comparisons require at least two lanes." : ""}
                       </span>
@@ -764,7 +764,7 @@ export function TriageRunPanel(props: {
                       <form className="triage-runs__lane-picker-form" onSubmit={addLane}>
                         <p className="case-memory__note">
                           Identifiers only: lane alias, model id, and (for gateway runs) a host
-                          profile id. Endpoints, credentials, and raw provider traffic never enter
+                          gateway connection. Endpoints, credentials, and raw provider traffic never enter
                           the browser. DeepSeek lanes are rejected.
                         </p>
                         <label className="triage-runs__field">
@@ -804,8 +804,8 @@ export function TriageRunPanel(props: {
                         {mode === "gateway" ? (
                           gatewayProfiles.length > 0 ? (
                             <label className="triage-runs__field">
-                              Host profile
-                              <select name="laneProfile" aria-label="New lane host profile" defaultValue="">
+                              Gateway model
+                              <select name="laneProfile" aria-label="New lane gateway model" defaultValue="">
                                 <option value="" disabled>
                                   Select a profile
                                 </option>
@@ -818,10 +818,10 @@ export function TriageRunPanel(props: {
                             </label>
                           ) : (
                             <label className="triage-runs__field">
-                              Host profile id
+                              Gateway connection ID
                               <input
                                 name="laneProfile"
-                                aria-label="New lane host profile id"
+                                aria-label="New lane gateway connection ID"
                                 placeholder="profile:employer-gateway"
                               />
                             </label>
@@ -1030,7 +1030,7 @@ export function TriageRunPanel(props: {
                                   <strong>{candidate.model}</strong>
                                   <span>{candidate.role} · {candidateLifecycleText(candidate.status)}</span>
                                 </div>
-                                {candidate.profileId ? <p className="case-memory__note">Host profile {profileLabelFor(candidate)}</p> : null}
+                                {candidate.profileId ? <p className="case-memory__note">Gateway model {profileLabelFor(candidate)}</p> : null}
                                 {candidate.summary ? <p>{candidate.summary}</p> : null}
                         {candidate.benchmarkRunId ? <p className="case-memory__note">Experiment Lab run {shortHash(candidate.benchmarkRunId)}</p> : null}
                         {candidate.evidenceRefs.length > 0 ? (

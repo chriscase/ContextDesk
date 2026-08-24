@@ -301,7 +301,7 @@ describe("TriageRunPanel", () => {
     expect(screen.queryByText(/ai-gateway\.vercel\.sh/)).toBeNull();
   });
 
-  it("configures each gateway lane with its own host profile", async () => {
+  it("configures each gateway lane with its own gateway model", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/snapshots")) {
@@ -329,9 +329,9 @@ describe("TriageRunPanel", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Execution mode" }), { target: { value: "gateway" } });
     expect((screen.getByRole("combobox", { name: "Lane concurrency" }) as HTMLSelectElement).value).toBe("2");
     fireEvent.change(screen.getByRole("combobox", { name: "Lane concurrency" }), { target: { value: "3" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "qwen-3.6-27b host connector profile" }), { target: { value: "profile:qwen" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "gpt-oss-120b host connector profile" }), { target: { value: "profile:gpt" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "ministral-3-14b-instruct-2512 host connector profile" }), { target: { value: "profile:qwen" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }), { target: { value: "profile:qwen" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "gpt-oss-120b gateway model" }), { target: { value: "profile:gpt" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "ministral-3-14b-instruct-2512 gateway model" }), { target: { value: "profile:qwen" } });
     fireEvent.click(screen.getByRole("button", { name: "Run gateway comparison" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
@@ -346,7 +346,7 @@ describe("TriageRunPanel", () => {
     expect(request?.body).toContain('"concurrency":3');
   });
 
-  it("keeps distinct catalog models selectable when they share one host profile", async () => {
+  it("keeps distinct catalog models selectable when they share one gateway connection", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/snapshots")) {
@@ -389,9 +389,9 @@ describe("TriageRunPanel", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Execution mode" }), { target: { value: "gateway" } });
     fireEvent.click(screen.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512/ }));
 
-    expect((screen.getByRole("combobox", { name: "qwen-3.6-27b host connector profile" }) as HTMLSelectElement).value)
+    expect((screen.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }) as HTMLSelectElement).value)
       .toBe("subject:qwen");
-    expect((screen.getByRole("combobox", { name: "gpt-oss-120b host connector profile" }) as HTMLSelectElement).value)
+    expect((screen.getByRole("combobox", { name: "gpt-oss-120b gateway model" }) as HTMLSelectElement).value)
       .toBe("subject:gpt-oss");
 
     fireEvent.click(screen.getByRole("button", { name: "Run gateway comparison" }));
