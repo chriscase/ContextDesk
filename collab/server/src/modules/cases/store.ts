@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Pool, type PoolClient } from "pg";
 import {
   parseSnapshot,
@@ -95,6 +96,20 @@ export interface ArtifactRow {
   uploaderId: string;
   uploaderUsername: string;
   sourceId: string;
+  relativePath?: string | null;
+  intakeBatchId?: string | null;
+}
+
+export interface IntakeBatchRow {
+  id: string;
+  caseId: string;
+  idempotencyKey: string;
+  origin: string;
+  sourceLabel: string;
+  privacyClass: PrivacyClass;
+  createdAt: string;
+  createdBy: string;
+  payloadJson: string;
 }
 
 export type SnapshotRow = SnapshotV1;
@@ -240,6 +255,10 @@ export interface CaseStore {
   getArtifact(artifactId: string): Promise<ArtifactRow | null>;
   listArtifactsByCase(caseId: string): Promise<ArtifactRow[]>;
   insertArtifact(row: ArtifactRow): Promise<void>;
+  withAtomic<T>(operation: () => Promise<T>): Promise<T>;
+  getIntakeBatchByIdempotency(caseId: string, key: string): Promise<IntakeBatchRow | null>;
+  getIntakeBatch(caseId: string, batchId: string): Promise<IntakeBatchRow | null>;
+  insertIntakeBatch(row: IntakeBatchRow): Promise<void>;
   listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]>;
   getSnapshot(snapshotId: string): Promise<SnapshotRow | null>;
   insertSnapshot(row: SnapshotRow): Promise<void>;
@@ -253,6 +272,7 @@ export class MemoryCaseStore implements CaseStore {
   private readonly revisions = new Map<string, RevisionRow[]>();
   private readonly artifacts = new Map<string, ArtifactRow>();
   private readonly snapshots = new Map<string, SnapshotRow>();
+  private readonly intakeBatches = new Map<string, IntakeBatchRow>();
   private readonly atomicBoundary: AtomicBoundary;
 
   constructor(boundary: AtomicBoundary = async (operation) => operation()) {
@@ -480,6 +500,49 @@ export class MemoryCaseStore implements CaseStore {
     this.artifacts.set(row.id, { ...row });
   }
 
+  async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
+    return this.atomicBoundary(async () => {
+      const artifacts = new Map(this.artifacts);
+      const revisions = new Map(
+        [...this.revisions.entries()].map(([key, chain]) => [key, chain.map((row) => ({ ...row }))]),
+      );
+      const timeline = new Map(
+        [...this.timeline.entries()].map(([key, events]) => [key, events.map((row) => ({ ...row }))]),
+      );
+      const batches = new Map(this.intakeBatches);
+      try {
+        return await operation();
+      } catch (error) {
+        this.artifacts.clear();
+        for (const [key, value] of artifacts) this.artifacts.set(key, value);
+        this.revisions.clear();
+        for (const [key, value] of revisions) this.revisions.set(key, value);
+        this.timeline.clear();
+        for (const [key, value] of timeline) this.timeline.set(key, value);
+        this.intakeBatches.clear();
+        for (const [key, value] of batches) this.intakeBatches.set(key, value);
+        throw error;
+      }
+    });
+  }
+
+  async getIntakeBatchByIdempotency(caseId: string, key: string): Promise<IntakeBatchRow | null> {
+    return (
+      [...this.intakeBatches.values()].find(
+        (row) => row.caseId === caseId && row.idempotencyKey === key,
+      ) ?? null
+    );
+  }
+
+  async getIntakeBatch(caseId: string, batchId: string): Promise<IntakeBatchRow | null> {
+    const row = this.intakeBatches.get(batchId);
+    return row && row.caseId === caseId ? { ...row } : null;
+  }
+
+  async insertIntakeBatch(row: IntakeBatchRow): Promise<void> {
+    this.intakeBatches.set(row.id, { ...row });
+  }
+
   async listSnapshotsByCase(caseId: string): Promise<SnapshotRow[]> {
     return [...this.snapshots.values()]
       .filter((row) => row.caseId === caseId)
@@ -507,8 +570,18 @@ export class MemoryCaseStore implements CaseStore {
   }
 }
 
+const pgCaseTx = new AsyncLocalStorage<Queryable>();
+
 export class PgCaseStore implements CaseStore {
-  constructor(private readonly db: Queryable) {}
+  private readonly pool: Queryable;
+
+  constructor(db: Queryable) {
+    this.pool = db;
+  }
+
+  private get db(): Queryable {
+    return pgCaseTx.getStore() ?? this.pool;
+  }
 
   async listCases(): Promise<CaseRow[]> {
     const result = await this.db.query(`${CASE_SELECT} GROUP BY c.id`);
@@ -564,10 +637,11 @@ export class PgCaseStore implements CaseStore {
     input: AtomicSituationUpdate,
     audit: AuditStore,
   ): Promise<AtomicSituationUpdateResult> {
-    if (!(audit instanceof PgAuditStore) || !audit.isBoundTo(this.db)) {
+    if (!(audit instanceof PgAuditStore) || !audit.isBoundTo(this.pool)) {
       throw new Error("PostgreSQL case and audit stores must share one connection source");
     }
-    return withPgTransaction(this.db, async (transaction) => {
+    return withPgTransaction(this.pool, async (transaction) => {
+      return pgCaseTx.run(transaction, async () => {
       const locked = await transaction.query<{ situation_version: number }>(
         `SELECT situation_version FROM cases WHERE id = $1 FOR UPDATE`,
         [input.id],
@@ -610,6 +684,7 @@ export class PgCaseStore implements CaseStore {
       const row = await getPgCase(transaction, input.id);
       if (!row) return { status: "not_found" };
       return { status: "updated", row };
+      });
     });
   }
 
@@ -820,8 +895,9 @@ export class PgCaseStore implements CaseStore {
       `INSERT INTO evidence_artifacts (
          id, case_id, kind, filename, uri, media_type, byte_length, content_hash,
          expected_hash, verification_status, ref_id, privacy_class,
-         summary_contribution_id, uploader_id, uploader_username, source_id
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+         summary_contribution_id, uploader_id, uploader_username, source_id,
+         relative_path, intake_batch_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
       [
         row.id,
         row.caseId,
@@ -839,6 +915,50 @@ export class PgCaseStore implements CaseStore {
         row.uploaderId,
         row.uploaderUsername,
         row.sourceId,
+        row.relativePath ?? row.filename,
+        row.intakeBatchId ?? null,
+      ],
+    );
+  }
+
+  async withAtomic<T>(operation: () => Promise<T>): Promise<T> {
+    return withPgTransaction(this.pool, (transaction) => pgCaseTx.run(transaction, operation));
+  }
+
+  async getIntakeBatchByIdempotency(caseId: string, key: string): Promise<IntakeBatchRow | null> {
+    const result = await this.db.query(
+      `SELECT * FROM evidence_intake_batches WHERE case_id = $1 AND idempotency_key = $2`,
+      [caseId, key],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asIntakeBatch(row) : null;
+  }
+
+  async getIntakeBatch(caseId: string, batchId: string): Promise<IntakeBatchRow | null> {
+    const result = await this.db.query(
+      `SELECT * FROM evidence_intake_batches WHERE case_id = $1 AND id = $2`,
+      [caseId, batchId],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? asIntakeBatch(row) : null;
+  }
+
+  async insertIntakeBatch(row: IntakeBatchRow): Promise<void> {
+    await this.db.query(
+      `INSERT INTO evidence_intake_batches (
+         id, case_id, idempotency_key, origin, source_label, privacy_class,
+         created_at, created_by, payload_json
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        row.id,
+        row.caseId,
+        row.idempotencyKey,
+        row.origin,
+        row.sourceLabel,
+        row.privacyClass,
+        row.createdAt,
+        row.createdBy,
+        row.payloadJson,
       ],
     );
   }
@@ -1128,6 +1248,30 @@ function asArtifact(row: Record<string, unknown>): ArtifactRow {
     uploaderId: String(row.uploader_id),
     uploaderUsername: String(row.uploader_username),
     sourceId: row.source_id === null || row.source_id === undefined ? "" : String(row.source_id),
+    relativePath:
+      row.relative_path === null || row.relative_path === undefined
+        ? row.filename === null || row.filename === undefined
+          ? null
+          : String(row.filename)
+        : String(row.relative_path),
+    intakeBatchId:
+      row.intake_batch_id === null || row.intake_batch_id === undefined
+        ? null
+        : String(row.intake_batch_id),
+  };
+}
+
+function asIntakeBatch(row: Record<string, unknown>): IntakeBatchRow {
+  return {
+    id: String(row.id),
+    caseId: String(row.case_id),
+    idempotencyKey: String(row.idempotency_key),
+    origin: String(row.origin),
+    sourceLabel: String(row.source_label),
+    privacyClass: row.privacy_class as PrivacyClass,
+    createdAt: asIso(row.created_at),
+    createdBy: String(row.created_by),
+    payloadJson: String(row.payload_json),
   };
 }
 

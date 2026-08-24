@@ -27,6 +27,18 @@ import {
   isContributionKind,
 } from "../contributions/index.js";
 import { assertFilenameAllowed, assertUploadAllowed } from "../evidence/index.js";
+import {
+  decodeBase64,
+  previewCorpusBytes,
+} from "../corpus-intake/index.js";
+import {
+  CORPUS_INTAKE_BATCH_SCHEMA_ID,
+  parseCorpusIntakeBatch,
+  parseCorpusIntakeCommitRequest,
+  parseCorpusIntakePreviewRequest,
+  type CorpusIntakeBatchV1,
+  type CorpusIntakePreviewReportV1,
+} from "@cd-collab/contracts";
 import { LegalHoldError, assertCanTombstone, visibleBody } from "../provenance/index.js";
 import { deriveCaseBoard, type AcceptedDecisionBoardInput } from "./board.js";
 import {
@@ -917,6 +929,216 @@ export class CaseService {
       outcome: "success",
     });
     return { artifact: this.toArtifact(row), summary };
+  }
+
+  async previewCorpusIntake(
+    caseId: string,
+    actor: Actor,
+    raw: unknown,
+  ): Promise<CorpusIntakePreviewReportV1> {
+    await this.requireCase(caseId);
+    const request = parseCorpusIntakePreviewRequest(raw);
+    const artifacts = await this.store.listArtifactsByCase(caseId);
+    const knownDigests = new Set(
+      artifacts.map((row) => row.contentHash).filter((hash): hash is string => Boolean(hash)),
+    );
+    const files = request.files.map((file) => ({
+      relativePath: file.relativePath,
+      mediaType: file.mediaType,
+      bytes: decodeBase64(file.relativePath, file.contentBase64),
+    }));
+    const archive = request.archiveBase64
+      ? decodeBase64("archive", request.archiveBase64)
+      : null;
+    return previewCorpusBytes({
+      caseId,
+      origin: request.origin,
+      privacyClass: request.privacyClass,
+      files,
+      archive,
+      knownDigests,
+    }).report;
+  }
+
+  async commitCorpusIntake(
+    caseId: string,
+    actor: Actor,
+    raw: unknown,
+    origin: string,
+  ): Promise<CorpusIntakeBatchV1> {
+    await this.requireCase(caseId);
+    const request = parseCorpusIntakeCommitRequest(raw);
+    const existing = await this.store.getIntakeBatchByIdempotency(caseId, request.idempotencyKey);
+    if (existing) {
+      return { ...parseCorpusIntakeBatch(JSON.parse(existing.payloadJson)), replayed: true };
+    }
+    const artifacts = await this.store.listArtifactsByCase(caseId);
+    const knownDigests = new Set(
+      artifacts.map((row) => row.contentHash).filter((hash): hash is string => Boolean(hash)),
+    );
+    const files = request.files.map((file) => ({
+      relativePath: file.relativePath,
+      mediaType: file.mediaType,
+      bytes: decodeBase64(file.relativePath, file.contentBase64),
+    }));
+    const archive = request.archiveBase64
+      ? decodeBase64("archive", request.archiveBase64)
+      : null;
+    const preview = previewCorpusBytes({
+      caseId,
+      origin: request.origin,
+      privacyClass: request.privacyClass,
+      files,
+      archive,
+      knownDigests,
+    });
+    const sourceId = await this.resolveSourceId(actor);
+    const batchId = randomUUID();
+    const createdAt = new Date().toISOString();
+    const items: CorpusIntakeBatchV1["items"] = [];
+
+    return this.store.withAtomic(async () => {
+      const replay = await this.store.getIntakeBatchByIdempotency(caseId, request.idempotencyKey);
+      if (replay) {
+        return { ...parseCorpusIntakeBatch(JSON.parse(replay.payloadJson)), replayed: true };
+      }
+      for (const file of preview.classified) {
+        const already = (await this.store.listArtifactsByCase(caseId)).find(
+          (row) => row.contentHash === file.digest,
+        );
+        if (already) {
+          await this.store.appendTimeline(caseId, {
+            kind: "evidence_attributed",
+            actor,
+            targetId: already.id,
+            clientTime: null,
+            payload: {
+              relativePath: file.relativePath,
+              contentHash: file.digest,
+              intakeBatchId: batchId,
+              duplicateDigest: true,
+            },
+          });
+          items.push({
+            artifactId: already.id,
+            relativePath: file.relativePath,
+            digest: file.digest,
+            byteLength: file.bytes.byteLength,
+            mediaType: file.mediaType,
+            privacyClass: request.privacyClass,
+            sourceId: already.sourceId,
+            duplicateDigest: true,
+          });
+          continue;
+        }
+        const meta = await this.evidence.put(file.bytes, { contentType: file.mediaType });
+        if (!(await this.evidence.verify(meta.hash))) {
+          throw new Error("hash verification failed after storage");
+        }
+        const summary = await this.addContribution(
+          caseId,
+          actor,
+          {
+            kind: "upload",
+            body: `Corpus intake ${file.relativePath}`,
+            privacyClass: request.privacyClass,
+            sourceId,
+          },
+          origin,
+        );
+        const artifactId = randomUUID();
+        await this.store.insertArtifact({
+          id: artifactId,
+          caseId,
+          kind: file.artifactKind,
+          filename: file.relativePath,
+          uri: null,
+          mediaType: file.mediaType,
+          byteLength: meta.byteLength,
+          contentHash: meta.hash,
+          expectedHash: meta.hash,
+          verificationStatus: "verified",
+          refId: null,
+          privacyClass: request.privacyClass,
+          summaryContributionId: summary.id,
+          uploaderId: actor.id,
+          uploaderUsername: actor.username,
+          sourceId,
+          relativePath: file.relativePath,
+          intakeBatchId: batchId,
+        });
+        await this.store.appendTimeline(caseId, {
+          kind: "evidence_registered",
+          actor,
+          targetId: artifactId,
+          clientTime: null,
+          payload: {
+            artifactKind: file.artifactKind,
+            contentHash: meta.hash,
+            privacyClass: request.privacyClass,
+            summaryId: summary.id,
+            relativePath: file.relativePath,
+            intakeBatchId: batchId,
+          },
+        });
+        items.push({
+          artifactId,
+          relativePath: file.relativePath,
+          digest: meta.hash,
+          byteLength: meta.byteLength,
+          mediaType: file.mediaType,
+          privacyClass: request.privacyClass,
+          sourceId,
+          duplicateDigest: false,
+        });
+      }
+      const batch: CorpusIntakeBatchV1 = {
+        schemaId: CORPUS_INTAKE_BATCH_SCHEMA_ID,
+        id: batchId,
+        caseId,
+        origin: request.origin,
+        sourceLabel: request.sourceLabel,
+        privacyClass: request.privacyClass,
+        idempotencyKey: request.idempotencyKey,
+        replayed: false,
+        createdAt,
+        createdBy: actor.id,
+        items,
+        rejected: preview.report.rejected,
+      };
+      await this.store.insertIntakeBatch({
+        id: batchId,
+        caseId,
+        idempotencyKey: request.idempotencyKey,
+        origin: request.origin,
+        sourceLabel: request.sourceLabel,
+        privacyClass: request.privacyClass,
+        createdAt,
+        createdBy: actor.id,
+        payloadJson: JSON.stringify(batch),
+      });
+      await this.store.appendTimeline(caseId, {
+        kind: "corpus_intake_committed",
+        actor,
+        targetId: batchId,
+        clientTime: null,
+        payload: { accepted: items.length, rejected: preview.report.rejected.length, origin: request.origin },
+      });
+      await this.audit.append({
+        identity: actor.id,
+        action: "corpus_intake_commit",
+        target: batchId,
+        origin,
+        outcome: "success",
+      });
+      return batch;
+    });
+  }
+
+  async getCorpusIntakeBatch(caseId: string, batchId: string): Promise<CorpusIntakeBatchV1 | null> {
+    const row = await this.store.getIntakeBatch(caseId, batchId);
+    if (!row) return null;
+    return parseCorpusIntakeBatch(JSON.parse(row.payloadJson));
   }
 
   async getArtifact(caseId: string, artifactId: string): Promise<ArtifactV1 | null> {

@@ -199,6 +199,35 @@ export { ARTIFACT_KINDS, ARTIFACT_SCHEMA_ID, parseArtifact } from "./artifact.js
 export type { ArtifactKind, ArtifactV1 } from "./artifact.js";
 
 export {
+  CORPUS_ALLOWED_EXTENSIONS,
+  CORPUS_ALLOWED_MEDIA,
+  CORPUS_INTAKE_BATCH_SCHEMA_ID,
+  CORPUS_INTAKE_COMMIT_SCHEMA_ID,
+  CORPUS_INTAKE_LIMITS,
+  CORPUS_INTAKE_ORIGINS,
+  CORPUS_INTAKE_PREVIEW_SCHEMA_ID,
+  CORPUS_INTAKE_REPORT_SCHEMA_ID,
+  CORPUS_REJECTION_REASONS,
+  parseCorpusIntakeBatch,
+  parseCorpusIntakeCommitRequest,
+  parseCorpusIntakePreviewReport,
+  parseCorpusIntakePreviewRequest,
+} from "./investigation-corpus-intake.js";
+export type {
+  CorpusAcceptedFileV1,
+  CorpusAllowedMedia,
+  CorpusIntakeBatchV1,
+  CorpusIntakeCommitRequestV1,
+  CorpusIntakeCommittedItemV1,
+  CorpusIntakeFileEntryV1,
+  CorpusIntakeOrigin,
+  CorpusIntakePreviewReportV1,
+  CorpusIntakePreviewRequestV1,
+  CorpusRejectedFileV1,
+  CorpusRejectionReason,
+} from "./investigation-corpus-intake.js";
+
+export {
   SNAPSHOT_FAIRNESS_CLASSES,
   SNAPSHOT_LIST_SCHEMA_ID,
   SNAPSHOT_SCHEMA_ID,

@@ -128,6 +128,16 @@ describe("help search", () => {
     }
   });
 
+  it("finds file, ZIP, and directory intake with privacy and size limits", () => {
+    renderHelp();
+    searchFor("idempotency key");
+    fireEvent.click(within(resultsList()).getAllByRole("button")[0] as HTMLElement);
+    expect(screen.getByText(/8 MiB/)).toBeTruthy();
+    expect(screen.getByText(/share_safe runs the privacy scan/)).toBeTruthy();
+    expect(screen.getByText(/qwen-3.6-27b, gpt-oss-120b, and ministral/)).toBeTruthy();
+    expect(screen.getByText(/global source catalog is not the intake path/)).toBeTruthy();
+  });
+
   it("explains that current exports cannot restore a full investigation", () => {
     renderHelp();
     searchFor("restore");

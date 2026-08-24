@@ -142,7 +142,9 @@ function activityLabel(item: ActivityItem): string {
     contribution_tombstoned: "removed a contribution from the working record",
     hypothesis_status: "updated a working hypothesis",
     evidence_registered: "added evidence",
+    evidence_attributed: "attributed existing evidence",
     evidence_recheck: "rechecked evidence integrity",
+    corpus_intake_committed: "committed a log intake batch",
     snapshot_frozen: "froze an evidence snapshot",
     external_run_imported: "imported external analysis",
     run_corroboration: "reviewed imported analysis",
@@ -208,6 +210,18 @@ function activityDestination(item: ActivityItem): { stage: StageId; focus: WorkF
         section: "triage-lane-runner",
         item: item.targetId,
         itemKind: item.kind.startsWith("triage_candidate") ? "triage-candidate" : "triage-run",
+        lane: null,
+        experiment: null,
+      },
+    };
+  }
+  if (item.kind === "corpus_intake_committed") {
+    return {
+      stage: "capture",
+      focus: {
+        section: "corpus-intake",
+        item: item.targetId,
+        itemKind: "intake-batch",
         lane: null,
         experiment: null,
       },
@@ -302,6 +316,18 @@ function investigationEventDestination(
         section: "triage-lane-runner",
         item: event.targetId ?? null,
         itemKind: event.kind.startsWith("triage_candidate") ? "triage-candidate" : "triage-run",
+        lane: null,
+        experiment: null,
+      },
+    };
+  }
+  if (event.kind === "corpus_intake_committed") {
+    return {
+      stage: "capture",
+      focus: {
+        section: "corpus-intake",
+        item: event.targetId ?? null,
+        itemKind: "intake-batch",
         lane: null,
         experiment: null,
       },
@@ -1404,6 +1430,7 @@ export function Cases(props: {
         >
           <TriageWorkspace
             key={current.id}
+            caseId={current.id}
             canWrite={canWrite}
             readOnly={readOnly}
             sources={sources}

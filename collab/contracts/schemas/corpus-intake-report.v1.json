@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/corpus-intake-report.v1.json",
+  "title": "cd-collab Corpus Intake Preview Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "caseId", "origin", "accepted", "rejected", "limits"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.corpus_intake_report.v1" },
+    "caseId": { "type": "string" },
+    "origin": { "type": "string", "enum": ["files", "zip", "directory"] },
+    "accepted": { "type": "array" },
+    "rejected": { "type": "array" },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxArchiveBytes",
+        "maxExpandedBytes",
+        "maxCompressionRatio",
+        "maxFileCount",
+        "maxPathDepth",
+        "maxPathLength",
+        "maxFileBytes",
+        "maxProcessingMs"
+      ],
+      "properties": {
+        "maxArchiveBytes": { "type": "integer" },
+        "maxExpandedBytes": { "type": "integer" },
+        "maxCompressionRatio": { "type": "integer" },
+        "maxFileCount": { "type": "integer" },
+        "maxPathDepth": { "type": "integer" },
+        "maxPathLength": { "type": "integer" },
+        "maxFileBytes": { "type": "integer" },
+        "maxProcessingMs": { "type": "integer" }
+      }
+    }
+  }
+}

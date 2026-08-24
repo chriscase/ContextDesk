@@ -25,6 +25,7 @@ export const ROUTE_ITEM_KINDS = [
   "imported-run",
   "triage-run",
   "triage-candidate",
+  "intake-batch",
 ] as const;
 export type RouteItemKind = (typeof ROUTE_ITEM_KINDS)[number];
 
@@ -65,6 +66,7 @@ export const SIGN_IN: SignInLocation = { kind: "sign-in" };
  */
 export const LEGACY_ANCHOR_STAGES: Record<string, StageId> = {
   "triage-capture": "capture",
+  "corpus-intake": "capture",
   "triage-analyze": "analyze",
   "triage-evidence-board": "analyze",
   "triage-lane-runner": "analyze",

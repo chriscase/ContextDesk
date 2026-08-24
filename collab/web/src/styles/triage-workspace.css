@@ -554,3 +554,87 @@
     gap: 0.35rem;
   }
 }
+
+.corpus-intake {
+  margin-top: 0.9rem;
+  padding: 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+}
+
+.corpus-intake__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.corpus-intake__head h4,
+.corpus-intake h4,
+.corpus-intake h5 {
+  margin: 0;
+}
+
+.corpus-intake__copy,
+.corpus-intake__meta {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.corpus-intake__origin {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 0.7rem 0;
+  border: 0;
+  padding: 0;
+}
+
+.corpus-intake__origin label {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  font-size: 0.8rem;
+}
+
+.corpus-intake__field {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 0.55rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.corpus-intake__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.corpus-intake__report,
+.corpus-intake__batch {
+  margin-top: 0.75rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.corpus-intake__report ul,
+.corpus-intake__batch ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.78rem;
+}
+
+.corpus-intake__report li,
+.corpus-intake__batch li {
+  display: grid;
+}
+
+.corpus-intake__deeplink {
+  color: var(--accent);
+  font-size: 0.78rem;
+}

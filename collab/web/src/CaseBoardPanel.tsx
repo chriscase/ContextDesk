@@ -104,6 +104,52 @@ function boundedError(message: string, fallback: string): string {
     : trimmed;
 }
 
+function LogEvidenceViewer(props: { filename: string; text: string }) {
+  const lines = props.text.split(/\r?\n/);
+  const interesting = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => /error|exception|traceback|at\s+\S+\(/i.test(line));
+  const collapsedIndexes = new Set<number>();
+  if (interesting.length > 0) {
+    for (const row of interesting.slice(0, 4)) {
+      for (let around = row.index - 2; around <= row.index + 2; around += 1) {
+        if (around >= 0 && around < lines.length) collapsedIndexes.add(around);
+      }
+    }
+  } else {
+    for (let index = 0; index < Math.min(8, lines.length); index += 1) collapsedIndexes.add(index);
+  }
+  const collapsed = [...collapsedIndexes].sort((a, b) => a - b);
+  const isLarge = lines.length > 8 || props.text.length > 480;
+  return (
+    <div className="log-viewer" aria-label={`Log ${props.filename}`}>
+      <p className="log-viewer__name">{props.filename}</p>
+      <ol className="log-viewer__lines log-viewer__lines--preview">
+        {collapsed.map((index) => (
+          <li key={index} value={index + 1}>
+            {lines[index]}
+          </li>
+        ))}
+      </ol>
+      {isLarge ? (
+        <details>
+          <summary>
+            Expand complete log or stack trace · {lines.length} lines · {props.text.length.toLocaleString()}{" "}
+            characters
+          </summary>
+          <ol className="log-viewer__lines">
+            {lines.map((line, index) => (
+              <li key={index} value={index + 1}>
+                {line}
+              </li>
+            ))}
+          </ol>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
 function readFileAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -135,6 +181,9 @@ export function CaseBoardPanel(props: {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [inspecting, setInspecting] = useState<string | null>(null);
+  const [inspectText, setInspectText] = useState<string | null>(null);
+  const [inspectMetaOnly, setInspectMetaOnly] = useState(false);
   const loadGeneration = useRef(0);
   useRouteFocus(props.routeFocus, !loading);
 
@@ -172,6 +221,47 @@ export function CaseBoardPanel(props: {
     setSelectedEvidence([]);
     void load(null);
   }, [load]);
+
+  useEffect(() => {
+    const onIntake = (event: Event) => {
+      const detail = (event as CustomEvent<{ caseId?: string }>).detail;
+      if (detail?.caseId === props.caseId) void load(null);
+    };
+    window.addEventListener("contextdesk:corpus-intake-committed", onIntake);
+    return () => window.removeEventListener("contextdesk:corpus-intake-committed", onIntake);
+  }, [load, props.caseId]);
+
+  async function inspectArtifact(artifact: ArtifactView) {
+    if (inspecting === artifact.id) {
+      setInspecting(null);
+      setInspectText(null);
+      setInspectMetaOnly(false);
+      return;
+    }
+    setInspecting(artifact.id);
+    setInspectText(null);
+    setInspectMetaOnly(false);
+    const response = await protectedApiFetch(`/api/cases/${props.caseId}/evidence/${artifact.id}/bytes`);
+    if (!response.ok) {
+      setInspectMetaOnly(true);
+      return;
+    }
+    const body = (await response.json()) as { contentBase64?: string };
+    if (!body.contentBase64) {
+      setInspectMetaOnly(true);
+      return;
+    }
+    try {
+      const bytes = Uint8Array.from(atob(body.contentBase64), (char) => char.charCodeAt(0));
+      if (bytes.subarray(0, 1024).includes(0)) {
+        setInspectMetaOnly(true);
+        return;
+      }
+      setInspectText(new TextDecoder().decode(bytes));
+    } catch {
+      setInspectMetaOnly(true);
+    }
+  }
 
   async function freezeSnapshot() {
     setError(null);
@@ -332,6 +422,22 @@ export function CaseBoardPanel(props: {
                         {artifact.kind} · {artifact.verificationStatus ?? "verification unknown"} · {artifact.uploaderId}
                       </span>
                       <span className="case-memory__meta">hash {shortHash(artifact.contentHash)} · {artifact.privacyClass}</span>
+                      <button
+                        type="button"
+                        className="case-memory__inspect"
+                        onClick={() => void inspectArtifact(artifact)}
+                      >
+                        {inspecting === artifact.id ? "Hide log" : "Inspect log"}
+                      </button>
+                      {inspecting === artifact.id ? (
+                        inspectMetaOnly ? (
+                          <p className="case-memory__note">Metadata only — bytes are not decoded as text.</p>
+                        ) : inspectText !== null ? (
+                          <LogEvidenceViewer filename={artifact.filename ?? artifact.kind} text={inspectText} />
+                        ) : (
+                          <p className="case-memory__empty">Loading log…</p>
+                        )
+                      ) : null}
                     </div>
                   </li>
                 ))}

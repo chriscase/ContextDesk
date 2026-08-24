@@ -23,6 +23,7 @@ import type { AuditStore } from "./modules/audit/index.js";
 import { registerAdminDirectoryRoutes } from "./modules/admin/index.js";
 import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/index.js";
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
+import { registerCorpusIntakeRoutes } from "./modules/corpus-intake/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
 import { registerImportRoutes, type ImportService } from "./modules/import/index.js";
 import { registerTriageRunRoutes, type TriageRunService } from "./modules/triage-runs/index.js";
@@ -144,6 +145,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         audit: security.audit,
         domain: deps.domain,
         ...(deps.experiments ? { experiments: deps.experiments } : {}),
+      });
+      await registerCorpusIntakeRoutes(app, {
+        auth: security.auth,
+        roles: security.roles,
+        domain: deps.domain,
       });
     }
     if (deps.catalog) {

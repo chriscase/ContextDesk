@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/corpus-intake-preview.v1.json",
+  "title": "cd-collab Corpus Intake Preview Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaId", "origin", "sourceLabel", "privacyClass", "files", "archiveBase64"],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.corpus_intake_preview.v1" },
+    "origin": { "type": "string", "enum": ["files", "zip", "directory"] },
+    "sourceLabel": { "type": "string", "minLength": 1 },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["relativePath", "mediaType", "contentBase64"],
+        "properties": {
+          "relativePath": { "type": "string" },
+          "mediaType": { "type": "string" },
+          "contentBase64": { "type": "string" }
+        }
+      }
+    },
+    "archiveBase64": { "type": ["string", "null"] }
+  }
+}

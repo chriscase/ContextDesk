@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/corpus-intake-commit.v1.json",
+  "title": "cd-collab Corpus Intake Commit Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "origin",
+    "sourceLabel",
+    "privacyClass",
+    "idempotencyKey",
+    "files",
+    "archiveBase64"
+  ],
+  "properties": {
+    "schemaId": { "type": "string", "const": "cd-collab.corpus_intake_commit.v1" },
+    "origin": { "type": "string", "enum": ["files", "zip", "directory"] },
+    "sourceLabel": { "type": "string", "minLength": 1 },
+    "privacyClass": { "type": "string", "enum": ["owner_only", "share_safe"] },
+    "idempotencyKey": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["relativePath", "mediaType", "contentBase64"],
+        "properties": {
+          "relativePath": { "type": "string" },
+          "mediaType": { "type": "string" },
+          "contentBase64": { "type": "string" }
+        }
+      }
+    },
+    "archiveBase64": { "type": ["string", "null"] }
+  }
+}
