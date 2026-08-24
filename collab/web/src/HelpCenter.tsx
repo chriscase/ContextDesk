@@ -413,24 +413,24 @@ const HELP_CATEGORIES: readonly HelpCategory[] = [
       },
       {
         id: "move-or-restore-investigation",
-        title: "Move or restore a complete investigation",
+        title: "Move or restore a portable investigation",
         summary:
-          "A portable full-fidelity archive is different from the current brief and selected-evidence package; complete apply and restore are not shipped in this web app.",
+          "A portable archive is different from the current brief and selected-evidence package. Only fields represented and supported exactly can be restored after a dry-run check and typed confirmation.",
         keywords: ["move", "restore", "backup", "portable", "archive", "import", "different installation", "migration"],
         what:
-          "Moving an investigation requires more than a readable summary. A complete portable archive must preserve the Situation, contributions, source attribution, evidence inventory and bytes when allowed, frozen snapshots, triage runs, comparisons, discussions, decisions, benchmark history, and audit references while remapping identities safely for the destination installation. Historical people and roles remain attribution only; importing them must never grant destination access.",
+          "Moving an investigation requires more than a readable summary. This archive carries the supported Situation, contributions, historical attribution, evidence inventory and bytes, frozen snapshots, triage runs, comparisons, decisions, and benchmark history. Source memberships, role authority, audit references, discussions, and opaque imported-run state are not exported; an archive that represents unsupported exact-apply state is blocked. Historical people and roles remain attribution only and never grant destination access.",
         when:
           "Read this when you need disaster recovery, migration to another installation, or a case that another War Room can reconstruct and continue.",
         steps: [
           "Do not use the triage brief or selected-evidence prompt package as a backup; both are intentionally partial projections.",
-          "Keep the original evidence under the current installation's retention and privacy controls until a portable archive workflow is available and qualified.",
-          "When portable import is shipped, run its dry-run preflight first, review identity and object remaps, resolve blocked or missing content, and authorize apply as a separate human action.",
-          "After import, verify the reconstructed Situation, evidence digests, snapshot lineage, decisions, and historical attribution before continuing work.",
+          "Download the portable investigation archive from Decide, then on the destination War Room run the dry-run check.",
+          "Restore only when the check reports an exact reconstruction. Type RESTORE as a separate confirmation. Metadata-only, blocked, omitted, private, or redacted required content cannot be applied.",
+          "After restore, open the returned investigation link and verify the reconstructed Situation, evidence, snapshot lineage, decisions, and historical attribution before continuing work.",
         ],
         recorded:
-          "The current contract work can calculate semantic and transport identities and a dry-run reconstruction status. It does not write a destination database or grant destination permissions.",
+          "A successful restore writes one investigation with destination identifiers, source-installation provenance, evidence bytes, and an apply audit in one coordinated operation. Replay is scoped to the applying actor. Historical people are not granted membership, roles, or capabilities.",
         limits:
-          "This build has no full-investigation archive download, server-side apply, restore, signing/verification, or import screen. The contract and dry-run work are foundations, not a shipped backup feature.",
+          "Restore applies only an exact reconstruction. Archive Ed25519 metadata is recorded, not verified. Interaction traces, discussions, audit references, source membership, and opaque imported-run details remain unsupported. Evidence bytes are staged and rolled back with failed metadata writes. PostgreSQL mode coordinates replicas transactionally; memory and SQLite modes are supported only as single-server-instance coordination, and the dry-run screen reports whether confirmation survives restart.",
         actions: [{ label: "Open the Decide stage", go: { stage: "decide" } }],
       },
     ],

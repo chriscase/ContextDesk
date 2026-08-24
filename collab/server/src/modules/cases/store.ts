@@ -121,6 +121,8 @@ export interface TimelineInsert {
   actor: Actor;
   targetId: string | null;
   clientTime: string | null;
+  /** Server-owned historical timestamp used only by verified portable restore. */
+  serverTime?: string;
   payload: unknown;
 }
 
@@ -283,6 +285,40 @@ export class MemoryCaseStore implements CaseStore {
     this.atomicBoundary = serializedAtomicBoundary(boundary);
   }
 
+  capture(): unknown {
+    return structuredClone({
+      cases: [...this.cases.entries()],
+      timeline: [...this.timeline.entries()],
+      revisions: [...this.revisions.entries()],
+      artifacts: [...this.artifacts.entries()],
+      snapshots: [...this.snapshots.entries()],
+      intakeBatches: [...this.intakeBatches.entries()],
+    });
+  }
+
+  restore(snapshot: unknown): void {
+    const row = structuredClone(snapshot) as {
+      cases: [string, CaseRow][];
+      timeline: [string, TimelineRow[]][];
+      revisions: [string, RevisionRow[]][];
+      artifacts: [string, ArtifactRow][];
+      snapshots: [string, SnapshotRow][];
+      intakeBatches: [string, IntakeBatchRow][];
+    };
+    this.cases.clear();
+    this.timeline.clear();
+    this.revisions.clear();
+    this.artifacts.clear();
+    this.snapshots.clear();
+    this.intakeBatches.clear();
+    for (const [id, value] of row.cases) this.cases.set(id, value);
+    for (const [id, value] of row.timeline) this.timeline.set(id, value);
+    for (const [id, value] of row.revisions) this.revisions.set(id, value);
+    for (const [id, value] of row.artifacts) this.artifacts.set(id, value);
+    for (const [id, value] of row.snapshots) this.snapshots.set(id, value);
+    for (const [id, value] of row.intakeBatches) this.intakeBatches.set(id, value);
+  }
+
   async listCases(): Promise<CaseRow[]> {
     return [...this.cases.values()].map((row) => cloneCase(row));
   }
@@ -348,7 +384,7 @@ export class MemoryCaseStore implements CaseStore {
       actorUsername: event.actor.username,
       targetId: event.targetId,
       clientTime: event.clientTime,
-      serverTime: new Date().toISOString(),
+      serverTime: event.serverTime ?? new Date().toISOString(),
       payload: JSON.stringify(event.payload),
     };
     list.push(row);
@@ -1154,7 +1190,7 @@ async function appendPgTimeline(
   const seqRaw = seqRes.rows[0]?.last_seq;
   if (seqRaw === undefined) throw new Error("case not found");
   const seq = Number(seqRaw);
-  const serverTime = new Date().toISOString();
+  const serverTime = event.serverTime ?? new Date().toISOString();
   const payload = JSON.stringify(event.payload);
   await db.query(
     `INSERT INTO timeline_events (

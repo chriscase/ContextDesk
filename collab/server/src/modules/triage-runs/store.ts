@@ -57,6 +57,16 @@ function cloneJob(job: TriageJobV1): TriageJobV1 {
 export class MemoryTriageJobStore implements TriageJobStore {
   private readonly jobs = new Map<string, TriageJobV1>();
 
+  capture(): unknown {
+    return structuredClone({ jobs: [...this.jobs.entries()] });
+  }
+
+  restore(snapshot: unknown): void {
+    const row = structuredClone(snapshot) as { jobs: [string, TriageJobV1][] };
+    this.jobs.clear();
+    for (const [id, value] of row.jobs) this.jobs.set(id, value);
+  }
+
   async insert(job: TriageJobV1): Promise<void> {
     if (this.jobs.has(job.id)) throw new Error("triage job already exists");
     this.jobs.set(job.id, cloneJob(job));

@@ -1,7 +1,7 @@
 # War Room portable investigation contract v1
 
 Status: **contract only**. This document specifies a fail-closed JSON contract for
-exporting and reconstructing **one** complete investigation on another
+exporting and reconstructing **one** supported investigation record on another
 ContextDesk installation. It does **not** claim persistence, UI, storage,
 network transport, or import apply wiring. No live provider calls. No invented
 gold, cost, or usage.
@@ -13,9 +13,9 @@ The package barrel (`collab/contracts/src/index.ts`) re-exports this module.
 Consumers import `@cd-collab/contracts`.
 
 Apply-readiness hardening lives in `collab/contracts/src/investigation-portable-archive.ts`
-(schema `investigation-portable-archive.v1.json`). That layer is still **contract +
-dry-run only**: no archive I/O, signing implementation, persistence apply,
-authorization route, or UI.
+(schema `investigation-portable-archive.v1.json`). Exact-reconstruction apply is
+documented in `docs/benchmarks/WAR_ROOM_PORTABLE_INVESTIGATION_ARCHIVE_APPLY_READINESS_V1.md`.
+Ed25519 verification is still not implemented.
 
 ## Scope
 
@@ -45,6 +45,11 @@ The bundle covers:
 The bundle contains **no** credentials, tokens, gateway secrets, live endpoints,
 LDAP credentials, or destination capabilities. Destination permissions are not
 imported: they must be newly authorized and audited (`permissionCaveat`).
+
+The current server intentionally exports empty source-membership, discussion,
+alignment, and audit-reference collections and omits opaque imported-run state.
+An incoming archive that represents those unsupported fields is not eligible
+for exact apply.
 Imported history is immutable and never auto-merged by display name or email
 (`historyCaveat`).
 
@@ -134,20 +139,18 @@ authenticity.
 
 ## Residuals (persistence / apply / UI)
 
-This slice does **not** ship:
+The contract slice still does **not** itself persist. Server apply V1 ships
+exact reconstruction only. Remaining residuals:
 
-- PostgreSQL persistence apply of remapped UUID rows
-- authorization routes or capability probes
-- War Room import/export UI
-- archive byte I/O on disk
 - Ed25519 key management, signing, or verification (metadata is recorded, not verified)
-- host catalog revalidation at apply time (`destinationCatalogMustRevalidate` remains true)
+- metadata-only / blocked apply
+- interaction traces, live discussion presence, and some imported-run details
+- treating a client-supplied destination catalog as authorization
+  (`destinationCatalogMustRevalidate` remains true)
 
 ## What this does not prove
 
-- A running importer, database apply, archive I/O, or War Room UI
 - Ed25519 verification or source trust (signature metadata is recorded, not verified)
 - That gold is truth, or that agreement is correctness
 - Destination capability probes, live gateways, or LDAP
-- Persistence of remapped ids after a real apply (apply is not shipped)
 - That a client-supplied destination catalog grants authority

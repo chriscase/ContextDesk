@@ -37,7 +37,11 @@ import {
 import { PgPresenceBackend, PresenceService } from "./modules/presence/index.js";
 import {
   loadPortableInstallationId,
+  memoryApplyBoundary,
+  PgPortableApplyStateStore,
   PortableInvestigationService,
+  type PortableApplyStateStore,
+  withPgApplyTransaction,
 } from "./modules/portable-investigations/index.js";
 
 interface StorageRuntime {
@@ -51,6 +55,8 @@ interface StorageRuntime {
   runs: RunStore;
   experiments: ExperimentStore;
   jobs: TriageJobStore;
+  applyState: PortableApplyStateStore;
+  runPortableTransaction?: <T>(operation: () => Promise<T>) => Promise<T>;
   presence: PresenceService;
 }
 
@@ -69,6 +75,8 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
       runs: runtime.runs,
       experiments: runtime.experiments,
       jobs: runtime.jobs,
+      applyState: runtime.applyState,
+      runPortableTransaction: runtime.runPortableTransaction,
       presence: new PresenceService(),
     };
   }
@@ -86,6 +94,7 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
     runs: new PgRunStore(pool),
     experiments: new PgExperimentStore(pool),
     jobs: new PgTriageJobStore(pool),
+    applyState: new PgPortableApplyStateStore(pool),
     presence: new PresenceService(new PgPresenceBackend(pool)),
   };
 }
@@ -93,7 +102,33 @@ function createStorage(config: ReturnType<typeof loadRuntimeConfig>): StorageRun
 async function main(): Promise<void> {
   const config = loadRuntimeConfig();
   const storage = createStorage(config);
-  const store = new FilesystemEvidenceStore({ rootDir: config.evidenceRoot });
+  const store = new FilesystemEvidenceStore({
+    rootDir: config.evidenceRoot,
+    ...(storage.pool
+      ? {
+          acquireWriteLease: async () => {
+            const client = await storage.pool!.connect();
+            try {
+              await client.query(
+                `SELECT pg_advisory_lock(hashtextextended('contextdesk-evidence-write-v1', 0))`,
+              );
+              return async () => {
+                try {
+                  await client.query(
+                    `SELECT pg_advisory_unlock(hashtextextended('contextdesk-evidence-write-v1', 0))`,
+                  );
+                } finally {
+                  client.release();
+                }
+              };
+            } catch (error) {
+              client.release(error instanceof Error ? error : undefined);
+              throw error;
+            }
+          },
+        }
+      : {}),
+  });
   await store.ping();
   const log = createAuthLog();
   const adapter = config.authMode === "local"
@@ -138,6 +173,25 @@ async function main(): Promise<void> {
     audit,
     privacy: loadExportPrivacyConfig(),
   });
+  const persistPorts = {
+    cases: storage.cases,
+    catalog: storage.catalog,
+    experiments: storage.experiments,
+    runs: storage.runs,
+    jobs: storage.jobs,
+    evidence: store,
+    audit,
+    applyState: storage.applyState,
+  };
+  const memoryBoundary =
+    storage.pool === null
+      ? memoryApplyBoundary({
+          ...persistPorts,
+          ...(storage.runPortableTransaction
+            ? { runDurably: storage.runPortableTransaction }
+            : {}),
+        })
+      : null;
   const portable = new PortableInvestigationService({
     installationId: await loadPortableInstallationId(
       config.evidenceRoot,
@@ -149,6 +203,15 @@ async function main(): Promise<void> {
     triageRuns,
     experiments,
     audit,
+    applyState: storage.applyState,
+    applyCoordination: storage.pool === null ? "single_instance" : "postgres_transactional",
+    confirmationRestartDurable: storage.pool !== null || config.storage === "sqlite",
+    ...(memoryBoundary
+      ? { withTransaction: memoryBoundary.withTransaction }
+      : {
+          withTransaction: (operation) =>
+            withPgApplyTransaction(storage.pool as NonNullable<typeof storage.pool>, store, operation),
+        }),
   });
   const app = await buildApp({
     config,

@@ -268,6 +268,40 @@ export class MemoryExperimentStore implements ExperimentStore {
   private readonly traces = new Map<string, InteractionTraceV1[]>();
   private readonly annotations = new Map<string, TraceAnnotationRow[]>();
 
+  capture(): unknown {
+    return structuredClone({
+      experiments: [...this.experiments.entries()],
+      observations: [...this.observations.entries()],
+      decisions: [...this.decisions.entries()],
+      golds: [...this.golds.entries()],
+      traces: [...this.traces.entries()],
+      annotations: [...this.annotations.entries()],
+    });
+  }
+
+  restore(snapshot: unknown): void {
+    const row = structuredClone(snapshot) as {
+      experiments: [string, ExperimentRow][];
+      observations: [string, HelpfulnessObservationV1[]][];
+      decisions: [string, NormalizedExperimentDecisionV1[]][];
+      golds: [string, GoldReferenceV1[]][];
+      traces: [string, InteractionTraceV1[]][];
+      annotations: [string, TraceAnnotationRow[]][];
+    };
+    this.experiments.clear();
+    this.observations.clear();
+    this.decisions.clear();
+    this.golds.clear();
+    this.traces.clear();
+    this.annotations.clear();
+    for (const [id, value] of row.experiments) this.experiments.set(id, value);
+    for (const [id, value] of row.observations) this.observations.set(id, value);
+    for (const [id, value] of row.decisions) this.decisions.set(id, value);
+    for (const [id, value] of row.golds) this.golds.set(id, value);
+    for (const [id, value] of row.traces) this.traces.set(id, value);
+    for (const [id, value] of row.annotations) this.annotations.set(id, value);
+  }
+
   async insert(row: ExperimentRow): Promise<void> {
     this.experiments.set(row.id, {
       ...row,

@@ -138,18 +138,23 @@ describe("help search", () => {
     expect(screen.getByText(/global source catalog is not the intake path/)).toBeTruthy();
   });
 
-  it("explains that current exports cannot restore a full investigation", () => {
+  it("explains the supported portable restore boundary", () => {
     renderHelp();
     searchFor("restore");
     const result = within(resultsList()).getByRole("button", {
-      name: /Move or restore a complete investigation/,
+      name: /Move or restore a portable investigation/,
     });
     fireEvent.click(result);
     expect(
       screen.getByText(/current brief and selected-evidence package/, { exact: false }),
     ).toBeTruthy();
     expect(
-      screen.getByText(/no full-investigation archive download/, { exact: false }),
+      screen.getByText(/Only fields represented and supported exactly can be restored/, {
+        exact: false,
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/Ed25519 metadata is recorded, not verified/, { exact: false }),
     ).toBeTruthy();
   });
 

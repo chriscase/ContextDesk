@@ -21,12 +21,18 @@ import {
   defaultSessionPolicy,
 } from "../../server/src/modules/auth/index.js";
 import { MutableGroupRoleMap, parseGroupRoleMap } from "../../server/src/modules/authz/index.js";
-import { CatalogService } from "../../server/src/modules/catalog/index.js";
-import { CaseService } from "../../server/src/modules/cases/index.js";
+import { CatalogService, MemoryCatalogStore } from "../../server/src/modules/catalog/index.js";
+import { CaseService, MemoryCaseStore } from "../../server/src/modules/cases/index.js";
 import { ExportService, testExportPrivacyConfig } from "../../server/src/modules/export/index.js";
 import { ImportService, MemoryRunStore } from "../../server/src/modules/import/index.js";
 import { ExperimentService, MemoryExperimentStore } from "../../server/src/modules/experiments/index.js";
 import { PresenceService } from "../../server/src/modules/presence/index.js";
+import {
+  loadPortableInstallationId,
+  memoryApplyBoundary,
+  MemoryPortableApplyStateStore,
+  PortableInvestigationService,
+} from "../../server/src/modules/portable-investigations/index.js";
 import {
   DeterministicMockTriageExecutor,
   MemoryTriageJobStore,
@@ -58,20 +64,27 @@ async function main(): Promise<void> {
   const store = new FilesystemEvidenceStore({ rootDir: root });
   await store.ping();
   const audit = new MemoryAuditStore();
-  const catalog = new CatalogService(undefined, audit);
-  const domain = new CaseService(store, audit, undefined, catalog);
+  const caseStore = new MemoryCaseStore();
+  const catalogStore = new MemoryCatalogStore();
+  const runStore = new MemoryRunStore();
+  const experimentStore = new MemoryExperimentStore();
+  const jobStore = new MemoryTriageJobStore();
+  const applyState = new MemoryPortableApplyStateStore();
+  const catalog = new CatalogService(catalogStore, audit);
+  const domain = new CaseService(store, audit, caseStore, catalog);
   const imports = new ImportService({
     evidence: store,
     audit,
+    applyState,
     cases: domain,
     catalog,
-    runs: new MemoryRunStore(),
+    runs: runStore,
   });
   const bridgeMode = process.env.COLLAB_E2E_BRIDGE === "1";
   const triageRuns = new TriageRunService({
     cases: domain,
     audit,
-    jobs: new MemoryTriageJobStore(),
+    jobs: jobStore,
     ...(bridgeMode
       ? {
           gatewayExecutor: new RustBridgeTriageExecutor({
@@ -93,7 +106,30 @@ async function main(): Promise<void> {
   const experiments = new ExperimentService({
     cases: domain,
     audit,
-    experiments: new MemoryExperimentStore(),
+    experiments: experimentStore,
+  });
+  const applyBoundary = memoryApplyBoundary({
+    cases: caseStore,
+    catalog: catalogStore,
+    experiments: experimentStore,
+    runs: runStore,
+    jobs: jobStore,
+    evidence: store,
+    audit,
+    applyState,
+  });
+  const portable = new PortableInvestigationService({
+    installationId: await loadPortableInstallationId(root),
+    cases: domain,
+    catalog,
+    imports,
+    triageRuns,
+    experiments,
+    audit,
+    applyState,
+    withTransaction: applyBoundary.withTransaction,
+    applyCoordination: "single_instance",
+    confirmationRestartDurable: false,
   });
   const presence = new PresenceService();
   const exporter = new ExportService({
@@ -141,6 +177,7 @@ async function main(): Promise<void> {
     presence,
     experiments,
     exporter,
+    portable,
     security: {
       auth: {
         adapter: new MapAuthAdapter(adapterUsers()),

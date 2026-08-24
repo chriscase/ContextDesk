@@ -250,6 +250,14 @@
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "title": { "type": "string", "minLength": 1 },
+          "artifactKind": {
+            "type": "string",
+            "enum": ["log", "email", "attachment", "file_server_ref"]
+          },
+          "sourceId": { "type": "string", "minLength": 1 },
+          "summaryContributionId": { "type": ["string", "null"] },
+          "relativePath": { "type": ["string", "null"] },
+          "intakeBatchId": { "type": ["string", "null"] },
           "privacyClass": { "$ref": "#/$defs/privacy" },
           "digest": { "$ref": "#/$defs/sha256" },
           "inclusion": { "$ref": "#/$defs/inclusion" },
@@ -258,6 +266,37 @@
           "createdBy": { "type": "string", "minLength": 1 },
           "createdAt": { "$ref": "#/$defs/timestamp" },
           "objectHash": { "$ref": "#/$defs/objectHash" }
+        }
+      }
+    },
+    "intakeBatches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "caseId",
+          "idempotencyKey",
+          "requestDigest",
+          "origin",
+          "sourceLabel",
+          "privacyClass",
+          "createdAt",
+          "createdBy",
+          "payloadJson"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "caseId": { "type": "string", "minLength": 1 },
+          "idempotencyKey": { "type": "string", "minLength": 1 },
+          "requestDigest": { "$ref": "#/$defs/sha256" },
+          "origin": { "type": "string", "enum": ["files", "zip", "directory"] },
+          "sourceLabel": { "type": "string", "minLength": 1 },
+          "privacyClass": { "$ref": "#/$defs/privacy" },
+          "createdAt": { "$ref": "#/$defs/timestamp" },
+          "createdBy": { "type": "string", "minLength": 1 },
+          "payloadJson": { "type": "string", "minLength": 2 }
         }
       }
     },

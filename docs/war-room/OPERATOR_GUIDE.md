@@ -262,13 +262,19 @@ items remain out.
 This is not a complete investigation archive. It is intentionally narrower so
 an operator can control what another analysis tool receives.
 
-### Complete investigation archive
+### Portable investigation archive
 
 A case lead or administrator can download the portable JSON archive from
 Decide. It represents the durable Situation and the investigation objects and
 included evidence supported by the current archive version. It also carries
 integrity data, privacy classifications, content inclusion state, historical
 attribution, and explicit reconstruction limitations.
+
+For investigation-scoped file, ZIP, and directory intake, an exact archive
+preserves the accepted batch record, relative paths, source attribution, and
+included evidence bytes. Restore remaps destination identities while keeping
+those relationships intact, so the reconstructed evidence can be inspected or
+processed again without pretending that historical users are local users.
 
 On another War Room, select the archive and run **Run dry-run check**. The
 preflight:
@@ -285,13 +291,33 @@ The same archive and destination state produce the same remap plan. The dry
 run changes nothing. It does not create an investigation, user, membership,
 role, permission, or capability.
 
-![Synthetic complete investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
+Source memberships, audit references, discussions, alignments, and opaque
+imported-run details are not exported by the current server. If an incoming
+archive represents unsupported apply state, the dry run blocks exact apply.
+
+If the dry-run reports an **exact reconstruction**, a case lead or
+administrator can type **RESTORE** to apply it. The server recomputes parse,
+integrity, hashes, identity mapping, and the destination catalog and does not
+trust the client preflight report. Apply uses a short-lived confirmation token
+bound to the actor, archive transport hash, catalog digest, identity map, and
+collision policy. Metadata and staged evidence bytes commit or roll back
+together. Replay is scoped to the applying actor. Historical people remain
+attribution only.
+
+PostgreSQL coordinates apply transactionally across replicas and takes a
+database-backed lease around filesystem evidence writes; apply fails closed if
+that lease is unavailable. An interrupted database commit whose outcome cannot
+be verified is reported as unconfirmed and should be retried for replay
+resolution. Memory and SQLite modes support only one server instance; the
+readiness screen reports that boundary and whether confirmation survives
+restart.
+
+Metadata-only, blocked, omitted, private, or redacted required content cannot
+be applied. Archive signature metadata is recorded, not verified.
+
+![Synthetic portable investigation archive workspace](../assets/war-room/war-room-portable-archive.png)
 
 ![Portable investigation archive trust boundary](../assets/war-room/war-room-portable-archive.svg)
-
-**Restore/apply is not available.** There is no apply control because atomic
-rollback across supported storage backends has not been proven. A successful
-preflight is a reviewable plan, not a completed import.
 
 ## Provenance and honest unknowns
 
@@ -311,8 +337,9 @@ matters.
   encrypted configuration and qualification.
 - Discussion and activity use polling; realtime sockets, instant delivery,
   typing indicators, and authoritative presence are not shipped claims.
-- Complete archive export and dry-run preflight are available; restore/apply
-  and atomic reconstruction are not.
+- Complete archive export, dry-run preflight, and exact-reconstruction restore
+  are available. Archive signatures are not verified. Metadata-only archives
+  cannot be applied.
 - The selected-evidence prompt package is not a full investigation backup.
 - Web ZIP and directory upload are not claimed.
 - The first-run web setup wizard is a bounded preparation surface: it can
@@ -339,6 +366,7 @@ matters.
 - [ ] The decision is attributed to a human.
 - [ ] Discussion contains context, but the formal decision is in Decide.
 - [ ] The chosen export matches the intended audience and transfer need.
-- [ ] A portable-archive dry run is not described as a completed restore.
+- [ ] A portable-archive dry run is not described as a completed restore
+      unless typed confirmation succeeded and the new investigation opened.
 
 Next: run the [fully synthetic end-to-end walkthrough](END_TO_END.md).

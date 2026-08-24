@@ -22,6 +22,7 @@ import {
  * recorded operation supplied with bytes by the caller (or marked unreachable).
  */
 export interface EvidenceStore {
+  readonly writeCoordination?: "single_process" | "external";
   put(
     bytes: Uint8Array,
     opts?: { contentType?: string },
@@ -53,6 +54,21 @@ export interface EvidenceStore {
 
   /** Readiness probe for the byte backend. */
   ping(): Promise<void>;
+
+  /**
+   * Begin an exclusive staged write batch. Implementations that cannot provide
+   * rollback-safe promotion omit this method; portable apply then fails closed.
+   */
+  beginWriteBatch?(): Promise<EvidenceWriteBatch>;
+}
+
+export interface EvidenceWriteBatch extends EvidenceStore {
+  /** Promote staged bytes while retaining the exclusive write lock. */
+  promote(): Promise<void>;
+  /** Remove staged/promoted bytes and release the exclusive write lock. */
+  rollback(): Promise<void>;
+  /** Keep promoted bytes, clean scratch state, and release the write lock. */
+  finalize(): Promise<void>;
 }
 
 export interface EvidenceStage {
@@ -83,6 +99,7 @@ function refPath(root: string, id: string): string {
 
 export interface FilesystemEvidenceStoreOptions {
   rootDir: string;
+  acquireWriteLease?: () => Promise<() => void | Promise<void>>;
 }
 
 /**
@@ -96,9 +113,16 @@ export interface FilesystemEvidenceStoreOptions {
 export class FilesystemEvidenceStore implements EvidenceStore {
   readonly rootDir: string;
   private readonly stageTails = new Map<string, Promise<void>>();
+  readonly writeCoordination: "single_process" | "external";
+  private writeTail: Promise<void> = Promise.resolve();
+  private readonly acquireWriteLease:
+    | (() => Promise<() => void | Promise<void>>)
+    | undefined;
 
   constructor(opts: FilesystemEvidenceStoreOptions) {
     this.rootDir = opts.rootDir;
+    this.acquireWriteLease = opts.acquireWriteLease;
+    this.writeCoordination = opts.acquireWriteLease ? "external" : "single_process";
   }
 
   async ping(): Promise<void> {
@@ -110,16 +134,94 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     bytes: Uint8Array,
     opts?: { contentType?: string },
   ): Promise<BlobMetaV1> {
-    const stage = await this.stage(bytes, opts);
+    const release = await this.acquireWriteLock();
     try {
-      await stage.commit();
-      return stage.meta;
-    } catch (error) {
-      await stage.rollback();
-      throw error;
+      return await this.putUnlocked(bytes, opts);
     } finally {
-      stage.release();
+      await release();
     }
+  }
+
+  async beginWriteBatch(): Promise<EvidenceWriteBatch> {
+    const release = await this.acquireWriteLock();
+    try {
+      await this.ping();
+      return new FilesystemEvidenceWriteBatch(this, release);
+    } catch (error) {
+      await release();
+      throw error;
+    }
+  }
+
+  private async acquireWriteLock(): Promise<() => Promise<void>> {
+    const prior = this.writeTail;
+    let release!: () => void;
+    this.writeTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prior;
+    let releaseLease: (() => void | Promise<void>) | undefined;
+    try {
+      releaseLease = await this.acquireWriteLease?.();
+    } catch (error) {
+      release();
+      throw error;
+    }
+    return async () => {
+      try {
+        await releaseLease?.();
+      } finally {
+        release();
+      }
+    };
+  }
+
+  async putUnlocked(
+    bytes: Uint8Array,
+    opts?: { contentType?: string },
+  ): Promise<BlobMetaV1> {
+    await this.ping();
+    const hash = sha256Hex(bytes);
+    const path = blobPath(this.rootDir, hash);
+    const metadataPath = metaPath(this.rootDir, hash);
+    const meta: BlobMetaV1 = {
+      hash,
+      byteLength: bytes.byteLength,
+      contentType: opts?.contentType ?? null,
+    };
+    try {
+      await stat(path);
+      if (!(await this.verify(hash))) {
+        throw new Error("existing content-addressed evidence failed verification");
+      }
+      return meta;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("failed verification")) {
+        throw error;
+      }
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+    await mkdir(dirname(path), { recursive: true });
+    const temporaryPath = `${path}.tmp-${randomUUID()}`;
+    const temporaryMetaPath = `${metadataPath}.tmp-${randomUUID()}`;
+    try {
+      await writeFile(temporaryPath, bytes);
+      await writeFile(temporaryMetaPath, JSON.stringify(meta), "utf8");
+      await rename(temporaryPath, path);
+      try {
+        await rename(temporaryMetaPath, metadataPath);
+      } catch (error) {
+        await rm(path, { force: true });
+        throw error;
+      }
+    } catch (error) {
+      await rm(temporaryPath, { force: true });
+      await rm(temporaryMetaPath, { force: true });
+      throw error;
+    }
+    return meta;
   }
 
   async stage(
@@ -222,13 +324,17 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     };
   }
 
-  async get(hash: ContentHash): Promise<Uint8Array | null> {
+  async getUnlocked(hash: ContentHash): Promise<Uint8Array | null> {
     try {
       const buf = await readFile(blobPath(this.rootDir, hash));
       return new Uint8Array(buf);
     } catch {
       return null;
     }
+  }
+
+  async get(hash: ContentHash): Promise<Uint8Array | null> {
+    return this.getUnlocked(hash);
   }
 
   async head(hash: ContentHash): Promise<BlobMetaV1 | null> {
@@ -313,6 +419,133 @@ export class FilesystemEvidenceStore implements EvidenceStore {
     }
     await writeFile(refPath(this.rootDir, id), JSON.stringify(next), "utf8");
     return next;
+  }
+}
+
+class FilesystemEvidenceWriteBatch implements EvidenceWriteBatch {
+  private readonly stageRoot: string;
+  private readonly staged = new Map<ContentHash, BlobMetaV1>();
+  private readonly created: Array<{ blob: string; meta: string }> = [];
+  private released = false;
+  private promoted = false;
+
+  constructor(
+    private readonly owner: FilesystemEvidenceStore,
+    private readonly releaseLock: () => Promise<void>,
+  ) {
+    this.stageRoot = join(owner.rootDir, ".staging", randomUUID());
+  }
+
+  async put(bytes: Uint8Array, opts?: { contentType?: string }): Promise<BlobMetaV1> {
+    if (this.promoted) throw new Error("evidence write batch is already promoted");
+    const hash = sha256Hex(bytes);
+    const meta: BlobMetaV1 = {
+      hash,
+      byteLength: bytes.byteLength,
+      contentType: opts?.contentType ?? null,
+    };
+    const prior = this.staged.get(hash);
+    if (prior) return prior;
+    if ((await this.owner.head(hash)) && (await this.owner.verify(hash))) return meta;
+    const path = blobPath(this.stageRoot, hash);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, bytes);
+    await writeFile(metaPath(this.stageRoot, hash), JSON.stringify(meta), "utf8");
+    this.staged.set(hash, meta);
+    return meta;
+  }
+
+  async stage(): Promise<EvidenceStage> {
+    throw new Error("nested evidence stages are unsupported in an evidence write batch");
+  }
+
+  async get(hash: ContentHash): Promise<Uint8Array | null> {
+    if (this.staged.has(hash) && !this.promoted) {
+      try {
+        return new Uint8Array(await readFile(blobPath(this.stageRoot, hash)));
+      } catch {
+        return null;
+      }
+    }
+    return this.owner.getUnlocked(hash);
+  }
+
+  async head(hash: ContentHash): Promise<BlobMetaV1 | null> {
+    return this.staged.get(hash) ?? this.owner.head(hash);
+  }
+
+  async verify(hash: ContentHash): Promise<boolean> {
+    const bytes = await this.get(hash);
+    return bytes !== null && sha256Hex(bytes) === hash;
+  }
+
+  async putFileServerReference(): Promise<FileServerReferenceV1> {
+    throw new Error("file-server references are unsupported in an evidence write batch");
+  }
+
+  async getFileServerReference(id: string): Promise<FileServerReferenceV1 | null> {
+    return this.owner.getFileServerReference(id);
+  }
+
+  async verifyFileServerReference(): Promise<FileServerReferenceV1> {
+    throw new Error("file-server references are unsupported in an evidence write batch");
+  }
+
+  async ping(): Promise<void> {
+    await this.owner.ping();
+  }
+
+  async beginWriteBatch(): Promise<EvidenceWriteBatch> {
+    throw new Error("nested evidence write batches are unsupported");
+  }
+
+  async promote(): Promise<void> {
+    if (this.promoted) return;
+    for (const [hash] of this.staged) {
+      const destinationBlob = blobPath(this.owner.rootDir, hash);
+      try {
+        await stat(destinationBlob);
+        continue;
+      } catch {
+        // This batch holds the owner's exclusive write lock, so absence is stable.
+      }
+      const destinationMeta = metaPath(this.owner.rootDir, hash);
+      await mkdir(dirname(destinationBlob), { recursive: true });
+      await rename(blobPath(this.stageRoot, hash), destinationBlob);
+      this.created.push({ blob: destinationBlob, meta: destinationMeta });
+      await rename(metaPath(this.stageRoot, hash), destinationMeta);
+    }
+    this.promoted = true;
+  }
+
+  async rollback(): Promise<void> {
+    if (this.released) return;
+    try {
+      for (const row of [...this.created].reverse()) {
+        await rm(row.meta, { force: true });
+        await rm(row.blob, { force: true });
+      }
+      await rm(this.stageRoot, { recursive: true, force: true });
+    } finally {
+      await this.release();
+    }
+  }
+
+  async finalize(): Promise<void> {
+    if (this.released) return;
+    try {
+      await rm(this.stageRoot, { recursive: true, force: true });
+    } catch {
+      // Committed evidence remains canonical; stale scratch cleanup is best effort.
+    } finally {
+      await this.release();
+    }
+  }
+
+  private async release(): Promise<void> {
+    if (this.released) return;
+    this.released = true;
+    await this.releaseLock();
   }
 }
 

@@ -88,6 +88,33 @@ describe.skipIf(!adminUrl())("PostgreSQL least-privilege grants", () => {
           /insert-only|permission denied/,
         );
         await app.query(
+          `INSERT INTO portable_apply_intents (
+             token_hash, actor_id, installation_id, transport_hash, semantic_fingerprint,
+             destination_catalog_digest, identity_map_digest, materialized_content_digest,
+             collision_policy, expires_at
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'remap_deterministic', $9)`,
+          [
+            "11".repeat(32),
+            "actor-synthetic-north",
+            "inst-synthetic-north",
+            "22".repeat(32),
+            "33".repeat(32),
+            "44".repeat(32),
+            "55".repeat(32),
+            "66".repeat(32),
+            "2042-03-04T12:10:00.000Z",
+          ],
+        );
+        await app.query(
+          `UPDATE portable_apply_intents
+           SET applied_investigation_id = $2, applied_at = CURRENT_TIMESTAMP
+           WHERE token_hash = $1`,
+          ["11".repeat(32), "11111111-1111-1111-1111-111111111111"],
+        );
+        await expect(app.query(`DELETE FROM portable_apply_intents`)).rejects.toThrow(
+          /permission denied/,
+        );
+        await app.query(
           `INSERT INTO authz_group_role_map (group_dn, role, updated_by)
            VALUES ($1, $2, $3)`,
           ["cn=temporary,ou=groups,dc=example,dc=test", "viewer", "collab_app"],

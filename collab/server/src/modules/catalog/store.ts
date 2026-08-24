@@ -46,6 +46,16 @@ export function permanentUnknownSource(): SourceRow {
 export class MemoryCatalogStore implements CatalogStore {
   private readonly rows = new Map<string, SourceRow>();
 
+  capture(): unknown {
+    return structuredClone({ rows: [...this.rows.entries()] });
+  }
+
+  restore(snapshot: unknown): void {
+    const dump = structuredClone(snapshot) as { rows: [string, SourceRow][] };
+    this.rows.clear();
+    for (const [id, value] of dump.rows) this.rows.set(id, value);
+  }
+
   constructor() {
     const unknown = permanentUnknownSource();
     this.rows.set(unknown.id, unknown);

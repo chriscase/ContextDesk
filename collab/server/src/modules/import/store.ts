@@ -56,6 +56,24 @@ export class MemoryRunStore implements RunStore {
   private readonly runs = new Map<string, FrozenRunRow>();
   private readonly events = new Map<string, CorroborationRow[]>();
 
+  capture(): unknown {
+    return structuredClone({
+      runs: [...this.runs.entries()],
+      events: [...this.events.entries()],
+    });
+  }
+
+  restore(snapshot: unknown): void {
+    const row = structuredClone(snapshot) as {
+      runs: [string, FrozenRunRow][];
+      events: [string, CorroborationRow[]][];
+    };
+    this.runs.clear();
+    this.events.clear();
+    for (const [id, value] of row.runs) this.runs.set(id, value);
+    for (const [id, value] of row.events) this.events.set(id, value);
+  }
+
   async insert(row: FrozenRunRow): Promise<void> {
     this.runs.set(row.id, Object.freeze({ ...row, claimedTraces: [...row.claimedTraces] }));
     this.events.set(row.id, []);

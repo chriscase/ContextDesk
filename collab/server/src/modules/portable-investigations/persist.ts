@@ -1,0 +1,978 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { Pool } from "pg";
+import {
+  PERMANENT_UNKNOWN_SOURCE_ID,
+  PORTABLE_OBJECT_KINDS,
+  parseCorpusIntakeBatch,
+  portableDestinationUuid,
+  snapshotFairness,
+  snapshotFingerprint,
+  type ArchivePreflightReportV1,
+  type GoldReferenceV1,
+  type HelpfulnessObservationV1,
+  type IdentityMapEntryV1,
+  type NormalizedExperimentDecisionV1,
+  type PortableArchiveV1,
+  type PortableObjectKind,
+  type TriageJobV1,
+} from "@cd-collab/contracts";
+import type { EvidenceStore, EvidenceWriteBatch } from "../../evidence/store.js";
+import { PgAuditStore, type AuditStore } from "../audit/index.js";
+import { PgCatalogStore, type CatalogStore } from "../catalog/index.js";
+import { PgCaseStore, type Actor, type CaseStore } from "../cases/index.js";
+import { PgExperimentStore, type ExperimentStore } from "../experiments/index.js";
+import { PgRunStore, type RunStore } from "../import/index.js";
+import { PgTriageJobStore, type TriageJobStore } from "../triage-runs/index.js";
+
+export interface PortablePersistPorts {
+  cases: CaseStore;
+  catalog: CatalogStore;
+  experiments: ExperimentStore;
+  runs: RunStore;
+  jobs: TriageJobStore;
+  evidence: EvidenceStore;
+  audit: AuditStore;
+  applyState: PortableApplyStateStore;
+}
+
+export interface StoredPortableApplyIntent {
+  tokenHash: string;
+  actorId: string;
+  installationId: string;
+  transportHash: string;
+  semanticFingerprint: string;
+  destinationCatalogDigest: string;
+  identityMapDigest: string;
+  materializedContentDigest: string;
+  collisionPolicy: string;
+  expiresAt: string;
+  appliedInvestigationId: string | null;
+}
+
+export interface PortableApplyStateStore {
+  putIntent(intent: StoredPortableApplyIntent): Promise<void>;
+  getIntent(tokenHash: string): Promise<StoredPortableApplyIntent | null>;
+  findApplied(input: {
+    actorId: string;
+    installationId: string;
+    transportHash: string;
+  }): Promise<StoredPortableApplyIntent | null>;
+  lockApply(input: {
+    actorId: string;
+    installationId: string;
+    transportHash: string;
+  }): Promise<void>;
+  markApplied(tokenHash: string, investigationId: string): Promise<void>;
+}
+
+type CaseRow = Parameters<CaseStore["insertCase"]>[0];
+type RevisionRow = Parameters<CaseStore["insertRevision"]>[0];
+type ArtifactRow = Parameters<CaseStore["insertArtifact"]>[0];
+type SourceRow = Parameters<CatalogStore["insert"]>[0];
+type FrozenRunRow = Parameters<RunStore["insert"]>[0];
+type ExperimentRow = Parameters<ExperimentStore["insert"]>[0];
+
+interface Capturable {
+  capture(): unknown;
+  restore(snapshot: unknown): void | Promise<void>;
+}
+
+export interface MemoryApplyBoundary {
+  withTransaction: <T>(operation: (ports: PortablePersistPorts) => Promise<T>) => Promise<T>;
+}
+
+function remapOf(
+  report: ArchivePreflightReportV1,
+  kind: PortableObjectKind,
+  sourceId: string,
+): string {
+  const hit = report.idRemap.find((row) => row.namespace === kind && row.sourceId === sourceId);
+  return hit?.destinationId ?? sourceId;
+}
+
+function actorAttribution(
+  sourceActorId: string,
+  identityMap: IdentityMapEntryV1[],
+  report: ArchivePreflightReportV1,
+  archive: PortableArchiveV1,
+  destinationUsernames: ReadonlyMap<string, string>,
+): { id: string; username: string } {
+  const mapped = identityMap.find((row) => row.sourceActorId === sourceActorId);
+  const snapshot = archive.investigation.actors.find((row) => row.sourceActorId === sourceActorId);
+  const username = snapshot?.username || snapshot?.displayName || "historical-operator";
+  if (mapped?.action === "map_existing" && mapped.destinationActorId) {
+    const canonical = destinationUsernames.get(mapped.destinationActorId);
+    if (!canonical) throw new Error("mapped destination identity is absent from the host catalog");
+    return { id: mapped.destinationActorId, username: canonical };
+  }
+  return { id: remapOf(report, "actor", sourceActorId), username };
+}
+
+function asCapturable(store: object): Capturable {
+  const candidate = store as Capturable;
+  if (typeof candidate.capture !== "function" || typeof candidate.restore !== "function") {
+    throw new Error("apply snapshot requires capture/restore on memory stores");
+  }
+  return candidate;
+}
+
+function cloneIntent(intent: StoredPortableApplyIntent): StoredPortableApplyIntent {
+  return { ...intent };
+}
+
+export class MemoryPortableApplyStateStore implements PortableApplyStateStore {
+  private readonly intents = new Map<string, StoredPortableApplyIntent>();
+
+  capture(): unknown {
+    return structuredClone({ intents: [...this.intents.entries()] });
+  }
+
+  restore(snapshot: unknown): void {
+    const row = structuredClone(snapshot) as {
+      intents: [string, StoredPortableApplyIntent][];
+    };
+    this.intents.clear();
+    for (const [tokenHash, intent] of row.intents) this.intents.set(tokenHash, intent);
+  }
+
+  async putIntent(intent: StoredPortableApplyIntent): Promise<void> {
+    this.intents.set(intent.tokenHash, cloneIntent(intent));
+  }
+
+  async getIntent(tokenHash: string): Promise<StoredPortableApplyIntent | null> {
+    const hit = this.intents.get(tokenHash);
+    return hit ? cloneIntent(hit) : null;
+  }
+
+  async findApplied(input: {
+    actorId: string;
+    installationId: string;
+    transportHash: string;
+  }): Promise<StoredPortableApplyIntent | null> {
+    const hit = [...this.intents.values()].find(
+      (row) =>
+        row.appliedInvestigationId !== null &&
+        row.actorId === input.actorId &&
+        row.installationId === input.installationId &&
+        row.transportHash === input.transportHash,
+    );
+    return hit ? cloneIntent(hit) : null;
+  }
+
+  async lockApply(): Promise<void> {
+    // The memory apply coordinator holds one process-wide exclusive section.
+  }
+
+  async markApplied(tokenHash: string, investigationId: string): Promise<void> {
+    const intent = this.intents.get(tokenHash);
+    if (!intent) throw new Error("portable apply intent is missing");
+    if (
+      intent.appliedInvestigationId !== null &&
+      intent.appliedInvestigationId !== investigationId
+    ) {
+      throw new Error("portable apply intent is already bound to another investigation");
+    }
+    intent.appliedInvestigationId = investigationId;
+  }
+}
+
+type ApplyQueryable = Pick<Pool, "query">;
+
+function storedIntentFromRow(row: Record<string, unknown>): StoredPortableApplyIntent {
+  return {
+    tokenHash: String(row.token_hash),
+    actorId: String(row.actor_id),
+    installationId: String(row.installation_id),
+    transportHash: String(row.transport_hash),
+    semanticFingerprint: String(row.semantic_fingerprint),
+    destinationCatalogDigest: String(row.destination_catalog_digest),
+    identityMapDigest: String(row.identity_map_digest),
+    materializedContentDigest: String(row.materialized_content_digest),
+    collisionPolicy: String(row.collision_policy),
+    expiresAt: new Date(String(row.expires_at)).toISOString(),
+    appliedInvestigationId:
+      row.applied_investigation_id === null || row.applied_investigation_id === undefined
+        ? null
+        : String(row.applied_investigation_id),
+  };
+}
+
+export class PgPortableApplyStateStore implements PortableApplyStateStore {
+  constructor(
+    private readonly db: ApplyQueryable,
+    private readonly onMarkedApplied?: (tokenHash: string, investigationId: string) => void,
+  ) {}
+
+  async putIntent(intent: StoredPortableApplyIntent): Promise<void> {
+    await this.db.query(
+      `INSERT INTO portable_apply_intents (
+         token_hash, actor_id, installation_id, transport_hash, semantic_fingerprint,
+         destination_catalog_digest, identity_map_digest, materialized_content_digest,
+         collision_policy, expires_at, applied_investigation_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       ON CONFLICT (token_hash) DO NOTHING`,
+      [
+        intent.tokenHash,
+        intent.actorId,
+        intent.installationId,
+        intent.transportHash,
+        intent.semanticFingerprint,
+        intent.destinationCatalogDigest,
+        intent.identityMapDigest,
+        intent.materializedContentDigest,
+        intent.collisionPolicy,
+        intent.expiresAt,
+        intent.appliedInvestigationId,
+      ],
+    );
+  }
+
+  async getIntent(tokenHash: string): Promise<StoredPortableApplyIntent | null> {
+    const result = await this.db.query(
+      `SELECT token_hash, actor_id, installation_id, transport_hash, semantic_fingerprint,
+              destination_catalog_digest, identity_map_digest, materialized_content_digest,
+              collision_policy, expires_at, applied_investigation_id
+       FROM portable_apply_intents WHERE token_hash = $1`,
+      [tokenHash],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? storedIntentFromRow(row) : null;
+  }
+
+  async findApplied(input: {
+    actorId: string;
+    installationId: string;
+    transportHash: string;
+  }): Promise<StoredPortableApplyIntent | null> {
+    const result = await this.db.query(
+      `SELECT token_hash, actor_id, installation_id, transport_hash, semantic_fingerprint,
+              destination_catalog_digest, identity_map_digest, materialized_content_digest,
+              collision_policy, expires_at, applied_investigation_id
+       FROM portable_apply_intents
+       WHERE actor_id = $1 AND installation_id = $2 AND transport_hash = $3
+         AND applied_investigation_id IS NOT NULL
+       ORDER BY applied_at ASC, token_hash ASC
+       LIMIT 1`,
+      [input.actorId, input.installationId, input.transportHash],
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? storedIntentFromRow(row) : null;
+  }
+
+  async lockApply(input: {
+    actorId: string;
+    installationId: string;
+    transportHash: string;
+  }): Promise<void> {
+    await this.db.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+      `${input.actorId}\u0000${input.installationId}\u0000${input.transportHash}`,
+    ]);
+  }
+
+  async markApplied(tokenHash: string, investigationId: string): Promise<void> {
+    const result = await this.db.query(
+      `UPDATE portable_apply_intents
+       SET applied_investigation_id = COALESCE(applied_investigation_id, $2),
+           applied_at = COALESCE(applied_at, CURRENT_TIMESTAMP)
+       WHERE token_hash = $1
+         AND (applied_investigation_id IS NULL OR applied_investigation_id = $2)`,
+      [tokenHash, investigationId],
+    );
+    if (result.rowCount !== 1) throw new Error("portable apply intent was not claimable");
+    this.onMarkedApplied?.(tokenHash, investigationId);
+  }
+}
+
+export class PortableCommitOutcomeUnknownError extends Error {
+  constructor() {
+    super("portable apply database commit outcome is unknown");
+    this.name = "PortableCommitOutcomeUnknownError";
+  }
+}
+
+class MemoryApplyCoordinator {
+  private readonly context = new AsyncLocalStorage<boolean>();
+  private tail: Promise<void> = Promise.resolve();
+
+  async exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.context.getStore()) return operation();
+    const prior = this.tail;
+    let release!: () => void;
+    this.tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prior;
+    try {
+      return await this.context.run(true, operation);
+    } finally {
+      release();
+    }
+  }
+
+  wrap(store: object): void {
+    const names = new Set<string>();
+    let prototype = Object.getPrototypeOf(store) as object | null;
+    while (prototype && prototype !== Object.prototype) {
+      for (const name of Object.getOwnPropertyNames(prototype)) names.add(name);
+      prototype = Object.getPrototypeOf(prototype) as object | null;
+    }
+    for (const name of names) {
+      if (name === "constructor" || name === "capture" || name === "restore") continue;
+      const original = Reflect.get(store, name);
+      if (typeof original !== "function") continue;
+      Reflect.set(store, name, (...args: unknown[]) =>
+        this.exclusive(() => Promise.resolve(Reflect.apply(original, store, args))),
+      );
+    }
+  }
+}
+
+async function beginEvidenceBatch(evidence: EvidenceStore): Promise<EvidenceWriteBatch> {
+  if (typeof evidence.beginWriteBatch !== "function") {
+    throw new Error("transactional evidence staging is unavailable");
+  }
+  return evidence.beginWriteBatch();
+}
+
+export function memoryApplyBoundary(input: {
+  cases: CaseStore;
+  catalog: CatalogStore;
+  experiments: ExperimentStore;
+  runs: RunStore;
+  jobs: TriageJobStore;
+  evidence: EvidenceStore;
+  audit: AuditStore;
+  applyState: PortableApplyStateStore;
+  runDurably?: <T>(operation: () => Promise<T>) => Promise<T>;
+}): MemoryApplyBoundary {
+  const cases = asCapturable(input.cases);
+  const catalog = asCapturable(input.catalog);
+  const experiments = asCapturable(input.experiments);
+  const runs = asCapturable(input.runs);
+  const jobs = asCapturable(input.jobs);
+  const audit = asCapturable(input.audit);
+  const applyState = asCapturable(input.applyState);
+  const coordinator = new MemoryApplyCoordinator();
+  for (const store of [
+    input.cases,
+    input.catalog,
+    input.experiments,
+    input.runs,
+    input.jobs,
+    input.audit,
+    input.applyState,
+    input.evidence,
+  ]) {
+    coordinator.wrap(store);
+  }
+  async function withTransaction<T>(
+    operation: (ports: PortablePersistPorts) => Promise<T>,
+  ): Promise<T> {
+    return coordinator.exclusive(async () => {
+      const batch = await beginEvidenceBatch(input.evidence);
+      const snapshot = {
+        cases: await Promise.resolve(cases.capture()),
+        catalog: await Promise.resolve(catalog.capture()),
+        experiments: await Promise.resolve(experiments.capture()),
+        runs: await Promise.resolve(runs.capture()),
+        jobs: await Promise.resolve(jobs.capture()),
+        audit: await Promise.resolve(audit.capture()),
+        applyState: await Promise.resolve(applyState.capture()),
+      };
+      const execute = async (): Promise<T> => {
+        const result = await operation({ ...input, evidence: batch });
+        await batch.promote();
+        return result;
+      };
+      try {
+        const result = input.runDurably ? await input.runDurably(execute) : await execute();
+        await batch.finalize();
+        return result;
+      } catch (error) {
+        try {
+          await Promise.resolve(cases.restore(snapshot.cases));
+          await Promise.resolve(catalog.restore(snapshot.catalog));
+          await Promise.resolve(experiments.restore(snapshot.experiments));
+          await Promise.resolve(runs.restore(snapshot.runs));
+          await Promise.resolve(jobs.restore(snapshot.jobs));
+          await Promise.resolve(audit.restore(snapshot.audit));
+          await Promise.resolve(applyState.restore(snapshot.applyState));
+        } finally {
+          await batch.rollback();
+        }
+        throw error;
+      }
+    });
+  }
+  return { withTransaction };
+}
+
+export async function withPgApplyTransaction<T>(
+  db: Pool | Pick<Pool, "query">,
+  evidence: EvidenceStore,
+  operation: (ports: PortablePersistPorts) => Promise<T>,
+): Promise<T> {
+  if (evidence.writeCoordination !== "external") {
+    throw new Error("PostgreSQL portable apply requires externally coordinated evidence writes");
+  }
+  const pooled = db instanceof Pool ? await db.connect() : null;
+  const tx = pooled ?? db;
+  let pooledReleased = false;
+  const batch = await beginEvidenceBatch(evidence);
+  let began = false;
+  let commitAttempted = false;
+  let result: T | undefined;
+  const marked: Array<{ tokenHash: string; investigationId: string }> = [];
+  try {
+    await tx.query("BEGIN");
+    began = true;
+    result = await operation({
+      cases: new PgCaseStore(tx),
+      catalog: new PgCatalogStore(tx),
+      experiments: new PgExperimentStore(tx),
+      runs: new PgRunStore(tx),
+      jobs: new PgTriageJobStore(tx),
+      evidence: batch,
+      audit: new PgAuditStore(tx),
+      applyState: new PgPortableApplyStateStore(tx, (tokenHash, investigationId) => {
+        marked.push({ tokenHash, investigationId });
+      }),
+    });
+    await batch.promote();
+    commitAttempted = true;
+    await tx.query("COMMIT");
+    await batch.finalize();
+    return result;
+  } catch (error) {
+    if (commitAttempted && db instanceof Pool && marked.length > 0) {
+      pooled?.release(error instanceof Error ? error : undefined);
+      pooledReleased = true;
+      began = false;
+      try {
+        const committed = await Promise.all(
+          marked.map(async ({ tokenHash, investigationId }) => {
+            const check = await db.query(
+              `SELECT 1 FROM portable_apply_intents
+               WHERE token_hash = $1 AND applied_investigation_id = $2`,
+              [tokenHash, investigationId],
+            );
+            return check.rowCount === 1;
+          }),
+        );
+        if (committed.every(Boolean)) {
+          await batch.finalize();
+          return result as T;
+        }
+      } catch {
+        await batch.finalize();
+        throw new PortableCommitOutcomeUnknownError();
+      }
+    } else if (commitAttempted) {
+      await batch.finalize();
+      throw new PortableCommitOutcomeUnknownError();
+    }
+    if (began) {
+      try {
+        await tx.query("ROLLBACK");
+      } catch {
+        // Preserve the mutation failure.
+      }
+    }
+    await batch.rollback();
+    throw error;
+  } finally {
+    if (!pooledReleased) pooled?.release();
+  }
+}
+
+export async function persistPortableArchive(input: {
+  archive: PortableArchiveV1;
+  report: ArchivePreflightReportV1;
+  identityMap: IdentityMapEntryV1[];
+  actor: Actor;
+  destinationUsernames: ReadonlyMap<string, string>;
+  contentBytes: ReadonlyMap<string, Uint8Array>;
+  ports: PortablePersistPorts;
+  now: string;
+  origin?: string;
+}): Promise<string> {
+  const { archive, report, identityMap, actor, destinationUsernames, contentBytes, ports, now } = input;
+  const attribution = (sourceActorId: string) =>
+    actorAttribution(sourceActorId, identityMap, report, archive, destinationUsernames);
+  const investigationId = remapOf(
+    report,
+    "investigation",
+    archive.investigation.investigation.id,
+  );
+  const bundle = archive.investigation;
+  const remapCandidateId = (candidateId: string): string => {
+    const imported = bundle.importedAiRuns.find((run) => candidateId === `chat-${run.id}`);
+    return imported
+      ? `chat-${remapOf(report, "imported_ai_run", imported.id)}`
+      : candidateId;
+  };
+  const caseRow: CaseRow = {
+    id: investigationId,
+    title: bundle.investigation.title,
+    problemStatement: bundle.investigation.problemStatement,
+    affectedParties: bundle.investigation.affectedParties,
+    impact: bundle.investigation.impact,
+    scope: bundle.investigation.scope,
+    openQuestions: [...bundle.investigation.openQuestions],
+    situationVersion: bundle.investigation.situationVersion,
+    severity: bundle.investigation.severity,
+    status: bundle.investigation.status,
+    legalHold: bundle.investigation.legalHold,
+    retentionClass: bundle.investigation.retentionClass,
+    createdAt: bundle.investigation.createdAt,
+    createdBy: attribution(bundle.investigation.createdBy).id,
+    createdByUsername: attribution(bundle.investigation.createdBy).username,
+    participants: [{ identityId: actor.id, username: actor.username }],
+  };
+  await ports.cases.insertCase(caseRow);
+
+  for (const source of bundle.sources) {
+    const id = remapOf(report, "source", source.id);
+    const existing = await ports.catalog.get(id);
+    if (existing) continue;
+    const createdBy = attribution(source.createdBy);
+    const row: SourceRow = {
+      id,
+      name: source.name,
+      kind: source.kind,
+      description: null,
+      lifecycle: source.lifecycle,
+      identityId: null,
+      createdAt: source.createdAt,
+      createdBy: createdBy.id,
+    };
+    await ports.catalog.insert(row);
+  }
+
+  const fallbackSourceId = bundle.sources[0]
+    ? remapOf(report, "source", bundle.sources[0].id)
+    : PERMANENT_UNKNOWN_SOURCE_ID;
+
+  for (const contribution of [...bundle.contributions].sort(
+    (a, b) => a.id.localeCompare(b.id) || a.revision - b.revision,
+  )) {
+    const author = attribution(contribution.authorId);
+    const rev: RevisionRow = {
+      contributionId: remapOf(report, "contribution", contribution.id),
+      caseId: investigationId,
+      kind: contribution.kind,
+      revision: contribution.revision,
+      predecessorRevision: contribution.predecessorRevision,
+      body: contribution.body ?? "",
+      contentHash: contribution.contentHash,
+      privacyClass: contribution.privacyClass,
+      tombstone: contribution.tombstoned,
+      authorId: author.id,
+      authorUsername: author.username,
+      createdAt: contribution.createdAt,
+      hypothesisStatus: contribution.hypothesisStatus,
+      hypothesisLinks: [],
+      sourceId: remapOf(report, "source", contribution.sourceId),
+    };
+    await ports.cases.insertRevision(rev);
+  }
+
+  const digestBytes = new Map<string, Uint8Array>();
+  for (const content of bundle.contentObjects) {
+    if (content.inclusion === "present") {
+      const bytes = contentBytes.get(content.digest);
+      if (!bytes) throw new Error("materialized content bytes are missing");
+      const stored = await ports.evidence.put(bytes, {
+        contentType: content.contentType ?? "application/octet-stream",
+      });
+      if (stored.hash !== content.digest || stored.byteLength !== content.byteLength) {
+        throw new Error("imported evidence digest mismatch");
+      }
+      digestBytes.set(content.digest, bytes);
+    }
+  }
+
+  const intakeBatchIds = new Map<string, string>();
+  for (const batch of bundle.intakeBatches ?? []) {
+    const id = portableDestinationUuid(
+      bundle.sourceInstallationId,
+      "evidence",
+      `intake-batch:${batch.id}`,
+      0,
+    );
+    const sourcePayload = parseCorpusIntakeBatch(JSON.parse(batch.payloadJson));
+    const createdBy = attribution(batch.createdBy);
+    const payload = {
+      ...sourcePayload,
+      id,
+      caseId: investigationId,
+      replayed: false,
+      createdBy: createdBy.id,
+      items: sourcePayload.items.map((item) => ({
+        ...item,
+        artifactId: remapOf(report, "evidence", item.artifactId),
+        sourceId: remapOf(report, "source", item.sourceId),
+      })),
+    };
+    await ports.cases.insertIntakeBatch({
+      id,
+      caseId: investigationId,
+      idempotencyKey: batch.idempotencyKey,
+      requestDigest: batch.requestDigest,
+      origin: batch.origin,
+      sourceLabel: batch.sourceLabel,
+      privacyClass: batch.privacyClass,
+      createdAt: batch.createdAt,
+      createdBy: createdBy.id,
+      payloadJson: JSON.stringify(payload),
+    });
+    intakeBatchIds.set(batch.id, id);
+  }
+
+  for (const evidence of bundle.evidence) {
+    const id = remapOf(report, "evidence", evidence.id);
+    const uploader = attribution(evidence.createdBy);
+    let intakeBatchId: string | null = null;
+    if (evidence.intakeBatchId) {
+      const mapped = intakeBatchIds.get(evidence.intakeBatchId);
+      if (!mapped) throw new Error("portable evidence has a dangling corpus intake batch");
+      intakeBatchId = mapped;
+    }
+    const row: ArtifactRow = {
+      id,
+      caseId: investigationId,
+      kind: evidence.artifactKind ?? (
+        bundle.attachments.some((item) => item.evidenceId === evidence.id)
+          ? "attachment"
+          : "log"
+      ),
+      filename: evidence.title,
+      uri: null,
+      mediaType: evidence.contentType,
+      byteLength: evidence.byteLength,
+      contentHash: digestBytes.has(evidence.digest) ? evidence.digest : null,
+      expectedHash: evidence.digest,
+      verificationStatus: digestBytes.has(evidence.digest) ? "verified" : "unverified",
+      refId: null,
+      privacyClass: evidence.privacyClass,
+      summaryContributionId: evidence.summaryContributionId
+        ? remapOf(report, "contribution", evidence.summaryContributionId)
+        : null,
+      uploaderId: uploader.id,
+      uploaderUsername: uploader.username,
+      sourceId: evidence.sourceId
+        ? remapOf(report, "source", evidence.sourceId)
+        : fallbackSourceId,
+      relativePath: evidence.relativePath ?? evidence.title,
+      intakeBatchId,
+    };
+    await ports.cases.insertArtifact(row);
+  }
+
+  const destSnapshotFingerprints = new Map<string, string>();
+  for (const snap of bundle.snapshots) {
+    const evidence = snap.evidence.map((item, ordinal) => ({
+      evidenceId: remapOf(report, "evidence", item.evidenceId),
+      ordinal,
+      contentHash: item.contentHash,
+      expectedHash: item.contentHash,
+      verificationStatus: item.contentHash ? "verified" : null,
+      privacyClass: item.privacyClass,
+    }));
+    const parentSnapshotId = snap.parentSnapshotId
+      ? remapOf(report, "snapshot", snap.parentSnapshotId)
+      : null;
+    const fingerprint = snapshotFingerprint({
+      parentSnapshotId,
+      evidence,
+      visibility: snap.visibility,
+      protocolVersion: snap.protocolVersion,
+    });
+    destSnapshotFingerprints.set(snap.id, fingerprint);
+    await ports.cases.insertSnapshot({
+      schemaId: "cd-collab.snapshot.v1",
+      id: remapOf(report, "snapshot", snap.id),
+      caseId: investigationId,
+      fingerprint,
+      parentSnapshotId,
+      evidence,
+      visibility: snap.visibility,
+      protocolVersion: snap.protocolVersion,
+      fairnessClass: snapshotFairness(evidence),
+      status: "frozen",
+      createdAt: snap.createdAt,
+      createdBy: attribution(snap.createdBy).id,
+    });
+  }
+
+  for (const run of bundle.importedAiRuns) {
+    const output = digestBytes.get(run.outputDigest ?? "") ?? new Uint8Array();
+    const outputText = Buffer.from(output).toString("utf8");
+    const row: FrozenRunRow = {
+      id: remapOf(report, "imported_ai_run", run.id),
+      caseId: investigationId,
+      contributionId: bundle.contributions[0]
+        ? remapOf(report, "contribution", bundle.contributions[0].id)
+        : investigationId,
+      sourceId: remapOf(report, "source", run.sourceId),
+      outputHash: run.outputDigest ?? "00".repeat(32),
+      outputText,
+      promptHash: null,
+      promptText: null,
+      promptCompleteness: "unknown",
+      outputCompleteness: "unknown",
+      workflowCompleteness: "unknown",
+      evidenceVisibility: "unknown",
+      snapshotBinding: null,
+      visibilityNote: null,
+      importerId: actor.id,
+      importerUsername: actor.username,
+      operatorId: actor.id,
+      operatorUsername: actor.username,
+      provider: run.providerKind,
+      model: run.model,
+      version: run.version,
+      claimedTraces: [],
+      uncertainty: null,
+      timing: null,
+      cost: null,
+      redacted: false,
+      privacyClass: "owner_only",
+      createdAt: run.importedAt,
+    };
+    await ports.runs.insert(row);
+  }
+
+  for (const job of bundle.triageJobs) {
+    const requester = attribution(job.requestedBy);
+    const snapshotFingerprintValue =
+      destSnapshotFingerprints.get(job.snapshotId) ?? job.snapshotFingerprint;
+    const row: TriageJobV1 = {
+      schemaId: "cd-collab.triage_job.v1",
+      id: remapOf(report, "triage_job", job.id),
+      caseId: investigationId,
+      snapshotId: remapOf(report, "snapshot", job.snapshotId),
+      snapshotFingerprint: snapshotFingerprintValue,
+      requestFingerprint: job.requestFingerprint,
+      cancellationId: portableDestinationUuid(
+        bundle.sourceInstallationId,
+        "triage_job",
+        `${job.id}:cancel`,
+        0,
+      ),
+      ...(job.parentJobId
+        ? { parentJobId: remapOf(report, "triage_job", job.parentJobId) }
+        : {}),
+      request: {
+        schemaId: "cd-collab.triage_job_request.v1",
+        snapshotId: remapOf(report, "snapshot", job.snapshotId),
+        mode: "deterministic_mock",
+        strategyId: job.strategyId,
+        question: "Imported portable comparison",
+        policyFingerprint: null,
+        taskFingerprint: job.requestFingerprint,
+        candidates: job.candidates.map((candidate) => ({
+          candidateId: candidate.candidateId,
+          role: candidate.role,
+          provider: candidate.providerKind,
+          profileId: candidate.profileId,
+          model: candidate.model,
+          version: candidate.version,
+        })),
+      },
+      status: job.status,
+      candidates: job.candidates.map((candidate) => ({
+        candidateId: candidate.candidateId,
+        role: candidate.role,
+        provider: candidate.providerKind,
+        profileId: candidate.profileId,
+        model: candidate.model,
+        version: candidate.version,
+        status: job.status,
+        benchmarkRunId: null,
+        outputHash: candidate.outputHash,
+        summary: null,
+        evidenceRefs: candidate.evidenceRefs.map((id) => remapOf(report, "evidence", id)),
+        unknowns: [],
+        usageStatus: "unknown",
+        costStatus: "unknown",
+        errorCode: null,
+        startedAt: null,
+        finishedAt: null,
+        privacyClass: "owner_only",
+      })),
+      sameSnapshot: null,
+      agreementNotice: "Agreement is not proof of correctness.",
+      requestedBy: requester.id,
+      requestedByUsername: requester.username,
+      createdAt: job.createdAt,
+      updatedAt: job.createdAt,
+      startedAt: null,
+      finishedAt: null,
+      cancelRequestedAt: null,
+      stoppedReason: null,
+    };
+    await ports.jobs.insert(row);
+  }
+
+  for (const experiment of bundle.experiments) {
+    const id = remapOf(report, "experiment", experiment.id);
+    const experimentRow: ExperimentRow = {
+      id,
+      caseId: investigationId,
+      packageId: experiment.packageId,
+      sourceSchemaId: "cd-collab.experiment_package.v1",
+      taskFingerprint: experiment.taskFingerprint,
+      snapshotFingerprint:
+        destSnapshotFingerprints.get(
+          bundle.snapshots.find((snap) => snap.fingerprint === experiment.snapshotFingerprint)?.id ??
+            "",
+        ) ?? experiment.snapshotFingerprint,
+      snapshotProof: {
+        basis: "unknown",
+        fairnessClass: "unknown",
+        lineageClass: "unknown",
+      },
+      candidates: experiment.candidateIds.map((candidateId) => ({
+        candidateId: remapCandidateId(candidateId),
+        modelLabel: "imported-historical",
+        role: "reviewer",
+        runStatus: "completed",
+        observedLatency: { status: "unknown" },
+        cost: { status: "unknown" },
+        usage: { status: "unknown" },
+        helpfulnessState: "unreviewed",
+        goldState: "unknown",
+      })),
+      agreement: { sharedAnchors: [], candidateSpecific: [], roleConflicts: [], notes: [] },
+      createdAt: experiment.createdAt,
+      importerId: actor.id,
+      importerUsername: actor.username,
+    };
+    await ports.experiments.insert(experimentRow);
+  }
+
+  for (const observation of bundle.helpfulnessObservations) {
+    const reviewer = attribution(observation.reviewerId);
+    const row: HelpfulnessObservationV1 = {
+      schemaId: "cd-collab.helpfulness_observation.v1",
+      id: remapOf(report, "helpfulness", observation.id),
+      experimentId: remapOf(report, "experiment", observation.experimentId),
+      candidateId: remapCandidateId(observation.candidateId),
+      dimension: observation.dimension,
+      score: observation.score,
+      rationale: observation.rationale,
+      evidenceRefs: observation.evidenceRefs.map((id) => remapOf(report, "evidence", id)),
+      reviewerId: reviewer.id,
+      reviewerUsername: reviewer.username,
+      createdAt: observation.createdAt,
+    };
+    await ports.experiments.insertObservation(row);
+  }
+
+  for (const decision of bundle.decisions) {
+    const author = attribution(decision.authorId);
+    const owner = decision.ownerId
+      ? attribution(decision.ownerId)
+      : null;
+    const experiment = bundle.experiments.find((row) => row.id === decision.experimentId);
+    const row: NormalizedExperimentDecisionV1 = {
+      schemaId: "cd-collab.experiment_decision.v1",
+      id: remapOf(report, "decision", decision.id),
+      experimentId: remapOf(report, "experiment", decision.experimentId),
+      status: decision.status,
+      revision: decision.revision,
+      predecessorRevision: decision.predecessorRevision,
+      text: decision.text,
+      rationale: decision.rationale,
+      evidenceRefs: decision.evidenceRefs.map((id) => remapOf(report, "evidence", id)),
+      packageId: experiment?.packageId ?? "pkg-imported",
+      authorId: author.id,
+      authorUsername: author.username,
+      createdAt: decision.createdAt,
+      ownerId: owner?.id ?? null,
+      ownerUsername: owner?.username ?? null,
+      remainingUnknowns: [...(decision.remainingUnknowns ?? [])],
+    };
+    await ports.experiments.insertDecision(row);
+  }
+
+  for (const gold of bundle.gold) {
+    const promoter = attribution(gold.promotedById);
+    const experiment = bundle.experiments.find((row) => row.id === gold.experimentId);
+    const row: GoldReferenceV1 = {
+      schemaId: "cd-collab.gold_reference.v1",
+      goldId: remapOf(report, "gold", gold.goldId),
+      version: gold.version,
+      predecessorGoldId: gold.predecessorGoldId
+        ? remapOf(report, "gold", gold.predecessorGoldId)
+        : null,
+      caseId: investigationId,
+      experimentId: remapOf(report, "experiment", gold.experimentId),
+      packageId: experiment?.packageId ?? "pkg-imported",
+      taskFingerprint: experiment?.taskFingerprint ?? "00".repeat(32),
+      snapshotFingerprint:
+        destSnapshotFingerprints.get(
+          bundle.snapshots.find((snap) => snap.fingerprint === experiment?.snapshotFingerprint)?.id ??
+            "",
+        ) ??
+        experiment?.snapshotFingerprint ??
+        "00".repeat(32),
+      acceptedDecisionId: remapOf(report, "decision", gold.acceptedDecisionId),
+      acceptedDecisionRevision: gold.acceptedDecisionRevision,
+      auditRefs: [],
+      evidenceAnchors: gold.evidenceAnchors.map((id) => remapOf(report, "evidence", id)),
+      notes: gold.notes,
+      promotedById: promoter.id,
+      promotedByUsername: promoter.username,
+      createdAt: gold.createdAt,
+    };
+    await ports.experiments.insertGold(row);
+  }
+
+  for (const event of bundle.timeline) {
+    const historical = attribution(event.actorId);
+    await ports.cases.appendTimeline(investigationId, {
+      kind: event.kind,
+      actor: historical,
+      targetId:
+        event.targetId &&
+        event.targetNamespace &&
+        (PORTABLE_OBJECT_KINDS as readonly string[]).includes(event.targetNamespace)
+          ? remapOf(report, event.targetNamespace as PortableObjectKind, event.targetId)
+          : event.targetId,
+      clientTime: null,
+      serverTime: event.serverTime,
+      payload: {
+        imported: true,
+        sourceSeq: event.seq,
+        sourceInstallationId: bundle.sourceInstallationId,
+      },
+    });
+  }
+
+  await ports.cases.appendTimeline(investigationId, {
+    kind: "portable_archive_applied",
+    actor,
+    targetId: investigationId,
+    clientTime: null,
+    serverTime: now,
+    payload: {
+      sourceInstallationId: bundle.sourceInstallationId,
+      transportHash: archive.transportHash,
+      semanticFingerprint: archive.semanticFingerprint,
+      sourceInvestigationId: bundle.investigation.id,
+      appliedAt: now,
+    },
+  });
+
+  await ports.audit.append({
+    identity: actor.id,
+    action: "portable_archive_apply",
+    target: investigationId,
+    origin: input.origin ?? "apply",
+    outcome: "success",
+  });
+
+  return investigationId;
+}
