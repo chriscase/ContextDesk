@@ -47,22 +47,24 @@ pub use live_known_answer::{
 #[cfg(unix)]
 pub use live_known_answer::{LiveKnownAnswerOpenedFile, LiveKnownAnswerOwnerDirectory};
 pub use live_known_answer_capture::{
-    build_live_known_answer_capture, live_known_answer_answer_score_sha256,
-    live_known_answer_capture_sha256, parse_live_known_answer_capture_json,
-    render_live_known_answer_capture_json, validate_live_known_answer_capture,
-    LiveKnownAnswerCanonicalCapture, LiveKnownAnswerCanonicalScenario,
-    LiveKnownAnswerCanonicalScenarioInput, LIVE_KNOWN_ANSWER_CAPTURE_MAX_BYTES,
-    LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID,
+    build_live_known_answer_capture, build_live_known_answer_capture_v2,
+    live_known_answer_answer_score_sha256, live_known_answer_capture_sha256,
+    parse_live_known_answer_capture_json, render_live_known_answer_capture_json,
+    validate_live_known_answer_capture, LiveKnownAnswerCanonicalCapture,
+    LiveKnownAnswerCanonicalScenario, LiveKnownAnswerCanonicalScenarioInput,
+    LIVE_KNOWN_ANSWER_CAPTURE_MAX_BYTES, LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID,
+    LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V1, LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V2,
 };
 pub use live_known_answer_run::{
-    build_live_known_answer_run, live_known_answer_quality_unit, parse_live_known_answer_json,
-    render_live_known_answer_json, render_live_known_answer_markdown,
-    validate_live_known_answer_quality_unit, validate_live_known_answer_run,
+    build_live_known_answer_run, build_live_known_answer_run_v2, live_known_answer_quality_unit,
+    parse_live_known_answer_json, render_live_known_answer_json, render_live_known_answer_markdown,
+    validate_live_known_answer_quality_unit, validate_live_known_answer_run, LiveKnownAnswerRunId,
     LiveKnownAnswerRunMetrics, LiveKnownAnswerRunReport, LiveKnownAnswerRunStatus,
     LiveKnownAnswerScenarioObservation, LiveKnownAnswerScenarioTelemetry,
     LIVE_KNOWN_ANSWER_JS_SAFE_MAX, LIVE_KNOWN_ANSWER_ORCHESTRATION_POLICY,
-    LIVE_KNOWN_ANSWER_REQUIRED_SCENARIOS, LIVE_KNOWN_ANSWER_RUN_MAX_BYTES,
-    LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID,
+    LIVE_KNOWN_ANSWER_REQUIRED_SCENARIOS, LIVE_KNOWN_ANSWER_RUN_ID_PREFIX,
+    LIVE_KNOWN_ANSWER_RUN_MAX_BYTES, LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID,
+    LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V1, LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V2,
 };
 pub use matrix::{matrix_summary_lines, matrix_summary_rows};
 pub use metrics::{round6, score_retrieval, validate_ranking};

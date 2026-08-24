@@ -1,13 +1,20 @@
 use cd_core::investigation_team_qualification::InvestigationTeamRole;
 use cd_core::quality_eval::{
-    build_live_known_answer_run, live_known_answer_prompt_set_hash, live_known_answer_quality_unit,
-    load_embedded_open_v1_suite, load_suite, parse_live_known_answer_json,
-    prepare_live_known_answer_suite, render_live_known_answer_json,
+    build_live_known_answer_run, build_live_known_answer_run_v2, live_known_answer_prompt_set_hash,
+    live_known_answer_quality_unit, load_embedded_open_v1_suite, load_suite,
+    parse_live_known_answer_json, prepare_live_known_answer_suite, render_live_known_answer_json,
     render_live_known_answer_markdown, AnswerDimension, AnswerScore, LaneStatus,
-    LiveKnownAnswerRunStatus, LiveKnownAnswerScenarioObservation, ModelSubject,
-    LIVE_KNOWN_ANSWER_JS_SAFE_MAX, LIVE_KNOWN_ANSWER_REQUIRED_SCENARIOS,
+    LiveKnownAnswerRunId, LiveKnownAnswerRunStatus, LiveKnownAnswerScenarioObservation,
+    ModelSubject, LIVE_KNOWN_ANSWER_JS_SAFE_MAX, LIVE_KNOWN_ANSWER_REQUIRED_SCENARIOS,
+    LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V1, LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V2,
 };
 use std::path::PathBuf;
+
+const RUN_ID: &str = "lkar_4c63aaf36da4470987f58d02cfba7e3d";
+
+fn run_id() -> LiveKnownAnswerRunId {
+    LiveKnownAnswerRunId::parse(RUN_ID).expect("synthetic UUIDv4 run id")
+}
 
 fn answer(passed: bool) -> AnswerScore {
     AnswerScore {
@@ -116,6 +123,92 @@ fn qualified_report_is_exact_redacted_and_canonical() {
     assert!(markdown.contains("Message/provider content bytes: 1400/700"));
     assert!(markdown.contains("Input/output tokens: unknown/unknown"));
     assert!(markdown.contains("Cost (micro-USD): unknown"));
+}
+
+#[test]
+fn v2_report_carries_one_host_minted_run_id_and_v1_remains_explicitly_legacy() {
+    let (_, _, unit) = identity();
+    let v2 = build_live_known_answer_run_v2(
+        run_id(),
+        1_777_000_000,
+        InvestigationTeamRole::Investigator,
+        unit.clone(),
+        observations(),
+    )
+    .expect("v2 report");
+    assert_eq!(v2.schema_id, LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V2);
+    assert_eq!(
+        v2.run_id.as_ref().map(LiveKnownAnswerRunId::as_str),
+        Some(RUN_ID)
+    );
+
+    let json = render_live_known_answer_json(&v2).expect("v2 json");
+    assert!(json.contains(RUN_ID));
+    assert_eq!(parse_live_known_answer_json(&json).expect("v2 parse"), v2);
+    let markdown = render_live_known_answer_markdown(&v2).expect("v2 markdown");
+    assert!(markdown.contains(&format!("Run identity: host-minted `{RUN_ID}`")));
+
+    let v1 = build_live_known_answer_run(
+        1_777_000_000,
+        InvestigationTeamRole::Investigator,
+        unit,
+        observations(),
+    )
+    .expect("legacy v1 report");
+    assert_eq!(v1.schema_id, LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V1);
+    assert_eq!(v1.run_id, None);
+    assert!(!render_live_known_answer_json(&v1)
+        .expect("v1 json")
+        .contains("run_id"));
+    assert!(render_live_known_answer_markdown(&v1)
+        .expect("v1 markdown")
+        .contains("legacy record predates host-minted run IDs"));
+}
+
+#[test]
+fn run_id_grammar_and_schema_generation_fail_closed() {
+    for invalid in [
+        "",
+        "lkar_4c63aaf36da4470987f58d02cfba7e3",
+        "lkar_4C63AAF36DA4470987F58D02CFBA7E3D",
+        "run_4c63aaf36da4470987f58d02cfba7e3d",
+        "lkar_4c63aaf36da4570987f58d02cfba7e3d",
+        "lkar_4c63aaf36da4470977f58d02cfba7e3d",
+        "lkar_4c63aaf36da4470987f58d02cfba7e3g",
+        "lkar_https://fictional.invalid/run",
+        "lkar_password=synthetic-secret",
+        "lkar_../../synthetic-path",
+        "lkar_this is prose rather than identity",
+    ] {
+        assert!(
+            LiveKnownAnswerRunId::parse(invalid).is_err(),
+            "invalid run identity must fail: {invalid}"
+        );
+    }
+
+    let (_, _, unit) = identity();
+    let v2 = build_live_known_answer_run_v2(
+        run_id(),
+        1_777_000_000,
+        InvestigationTeamRole::Single,
+        unit,
+        observations(),
+    )
+    .expect("v2 report");
+    let mut v1_with_id = serde_json::to_value(&v2).expect("v2 value");
+    v1_with_id["schema_id"] = serde_json::json!(LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V1);
+    assert!(parse_live_known_answer_json(&v1_with_id.to_string()).is_err());
+
+    let mut v2_without_id = serde_json::to_value(&v2).expect("v2 value");
+    v2_without_id
+        .as_object_mut()
+        .expect("report object")
+        .remove("run_id");
+    assert!(parse_live_known_answer_json(&v2_without_id.to_string()).is_err());
+
+    let mut v2_invalid_id = serde_json::to_value(v2).expect("v2 value");
+    v2_invalid_id["run_id"] = serde_json::json!("lkar_4c63aaf36da5470977f58d02cfba7e3d");
+    assert!(parse_live_known_answer_json(&v2_invalid_id.to_string()).is_err());
 }
 
 #[test]

@@ -1,12 +1,16 @@
 use cd_core::investigation_team_qualification::InvestigationTeamRole;
 use cd_core::quality_eval::{
-    build_live_known_answer_capture, live_known_answer_capture_sha256,
-    live_known_answer_prompt_set_hash, live_known_answer_quality_unit, load_embedded_open_v1_suite,
+    build_live_known_answer_capture, build_live_known_answer_capture_v2,
+    live_known_answer_capture_sha256, live_known_answer_prompt_set_hash,
+    live_known_answer_quality_unit, load_embedded_open_v1_suite,
     parse_live_known_answer_capture_json, prepare_live_known_answer_suite,
     render_live_known_answer_capture_json, AnswerDimension, AnswerScore, LaneStatus,
     LiveAnswerClaim, LiveCitation, LiveKnownAnswerCanonicalScenarioInput, LiveKnownAnswerResponse,
-    ModelSubject, LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID,
+    LiveKnownAnswerRunId, ModelSubject, LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V1,
+    LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V2, LIVE_KNOWN_ANSWER_RESPONSE_SCHEMA_ID,
 };
+
+const RUN_ID: &str = "lkar_4c63aaf36da4470987f58d02cfba7e3d";
 
 fn quality_unit() -> cd_core::quality_eval::QualityUnit {
     let suite = load_embedded_open_v1_suite().expect("suite");
@@ -98,6 +102,79 @@ fn canonical_capture_is_deterministic_and_keeps_reported_model_separate() {
     assert!(!json.contains("answer_key"));
     assert!(!json.contains("endpoint_url"));
     assert!(!json.contains("authorization"));
+}
+
+#[test]
+fn v2_capture_carries_run_identity_and_schema_generation_is_strict() {
+    let build_v2 = |value: &str| {
+        build_live_known_answer_capture_v2(
+            LiveKnownAnswerRunId::parse(value).expect("synthetic UUIDv4 run id"),
+            1_777_000_000,
+            InvestigationTeamRole::Single,
+            quality_unit(),
+            vec![LiveKnownAnswerCanonicalScenarioInput {
+                scenario_id: "scenario-001".into(),
+                reported_model_id: Some("openai/gpt-oss-120b".into()),
+                response: response("Evidence does not establish the initiating cause."),
+                answer_score: Some(answer()),
+                host_score_failed: false,
+            }],
+        )
+        .expect("v2 capture")
+    };
+    let capture = build_v2(RUN_ID);
+    assert_eq!(capture.schema_id, LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V2);
+    assert_eq!(
+        capture.run_id.as_ref().map(LiveKnownAnswerRunId::as_str),
+        Some(RUN_ID)
+    );
+    let json = render_live_known_answer_capture_json(&capture).expect("v2 json");
+    assert!(json.contains(RUN_ID));
+    assert_eq!(
+        parse_live_known_answer_capture_json(&json).expect("v2 parse"),
+        capture
+    );
+    let same_second_distinct_run = build_v2("lkar_a14d36e7c0924b0a9f30e284f8d87c61");
+    assert_ne!(capture.run_id, same_second_distinct_run.run_id);
+    assert_ne!(
+        live_known_answer_capture_sha256(&capture).expect("first run digest"),
+        live_known_answer_capture_sha256(&same_second_distinct_run).expect("second run digest"),
+        "run identity must bind otherwise identical same-second captures"
+    );
+
+    let v1 = build_live_known_answer_capture(
+        1_777_000_000,
+        InvestigationTeamRole::Single,
+        quality_unit(),
+        vec![LiveKnownAnswerCanonicalScenarioInput {
+            scenario_id: "scenario-001".into(),
+            reported_model_id: None,
+            response: response("Insufficient evidence."),
+            answer_score: Some(answer()),
+            host_score_failed: false,
+        }],
+    )
+    .expect("legacy v1 capture");
+    assert_eq!(v1.schema_id, LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V1);
+    assert_eq!(v1.run_id, None);
+    assert!(!render_live_known_answer_capture_json(&v1)
+        .expect("v1 json")
+        .contains("run_id"));
+
+    let mut v1_with_id = serde_json::to_value(build_v2(RUN_ID)).expect("v2 value");
+    v1_with_id["schema_id"] = serde_json::json!(LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V1);
+    assert!(parse_live_known_answer_capture_json(&v1_with_id.to_string()).is_err());
+
+    let mut v2_without_id = serde_json::to_value(build_v2(RUN_ID)).expect("v2 value");
+    v2_without_id
+        .as_object_mut()
+        .expect("capture object")
+        .remove("run_id");
+    assert!(parse_live_known_answer_capture_json(&v2_without_id.to_string()).is_err());
+
+    let mut v2_invalid_id = serde_json::to_value(build_v2(RUN_ID)).expect("v2 value");
+    v2_invalid_id["run_id"] = serde_json::json!("lkar_4c63aaf36da5470977f58d02cfba7e3d");
+    assert!(parse_live_known_answer_capture_json(&v2_invalid_id.to_string()).is_err());
 }
 
 #[test]

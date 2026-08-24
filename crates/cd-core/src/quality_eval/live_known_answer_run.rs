@@ -16,11 +16,19 @@ use super::types::{
 };
 use crate::error::{CoreError, CoreResult};
 use crate::investigation_team_qualification::InvestigationTeamRole;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
 
-/// Schema identity for one role/model known-answer report.
-pub const LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID: &str =
+/// Legacy schema identity for reports that predate host-minted run identity.
+pub const LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V1: &str =
     "contextdesk.investigation_team_known_answer_run.v1";
+/// Current schema identity for reports with host-minted run identity.
+pub const LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V2: &str =
+    "contextdesk.investigation_team_known_answer_run.v2";
+/// Current schema identity for newly created role/model reports.
+pub const LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID: &str = LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V2;
+/// Stable, non-semantic prefix for one host-minted execution identity.
+pub const LIVE_KNOWN_ANSWER_RUN_ID_PREFIX: &str = "lkar_";
 /// OPEN-v1 currently contains exactly fourteen required scenarios.
 pub const LIVE_KNOWN_ANSWER_REQUIRED_SCENARIOS: usize = 14;
 /// Bounded durable/report parser size.
@@ -31,6 +39,57 @@ pub const LIVE_KNOWN_ANSWER_JS_SAFE_MAX: u64 = 9_007_199_254_740_991;
 /// Stable host orchestration policy; the digest is recorded in the quality unit.
 pub const LIVE_KNOWN_ANSWER_ORCHESTRATION_POLICY: &str =
     "contextdesk.live_known_answer.serial_per_role.v1";
+
+/// Opaque identity minted once by the trusted host for one execution.
+///
+/// This value is not an authorization token, signature, semantic digest, or
+/// authenticity proof. The core validates a UUIDv4-shaped, lowercase,
+/// hyphen-free representation; only the trusted host is allowed to mint it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LiveKnownAnswerRunId(String);
+
+impl LiveKnownAnswerRunId {
+    /// Parse one exact `lkar_` plus lowercase UUIDv4-hex identity.
+    pub fn parse(value: impl Into<String>) -> CoreResult<Self> {
+        let value = value.into();
+        let Some(hex) = value.strip_prefix(LIVE_KNOWN_ANSWER_RUN_ID_PREFIX) else {
+            return Err(run_error("known-answer run identity is invalid"));
+        };
+        let bytes = hex.as_bytes();
+        if bytes.len() != 32
+            || !bytes
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || bytes[12] != b'4'
+            || !matches!(bytes[16], b'8' | b'9' | b'a' | b'b')
+        {
+            return Err(run_error("known-answer run identity is invalid"));
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrow the opaque serialized identity.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for LiveKnownAnswerRunId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LiveKnownAnswerRunId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(|_| serde::de::Error::custom("invalid known-answer run id"))
+    }
+}
 
 /// Overall interpretation of one exact role/model suite run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +208,10 @@ pub struct LiveKnownAnswerRunMetrics {
 pub struct LiveKnownAnswerRunReport {
     /// Report schema identity.
     pub schema_id: String,
+    /// Opaque host-minted execution identity. Absent only on legacy V1
+    /// evidence that predates run identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<LiveKnownAnswerRunId>,
     /// Positive host-owned observation timestamp.
     pub observed_at: i64,
     /// Exact Investigation Team role exercised by this report.
@@ -226,9 +289,49 @@ pub fn live_known_answer_quality_unit(
     }
 }
 
-/// Convert host observations into a bounded redacted report. Scenario order is
-/// the public opaque manifest order (`scenario-001` through `scenario-014`).
+/// Build legacy V1 evidence without a run ID.
+///
+/// This compatibility constructor exists for migration and legacy fixtures.
+/// Trusted hosts creating new executions must use
+/// [`build_live_known_answer_run_v2`]. Scenario order is the public opaque
+/// manifest order (`scenario-001` through `scenario-014`).
 pub fn build_live_known_answer_run(
+    observed_at: i64,
+    role: InvestigationTeamRole,
+    quality_unit: QualityUnit,
+    observations: Vec<LiveKnownAnswerScenarioObservation>,
+) -> CoreResult<LiveKnownAnswerRunReport> {
+    build_live_known_answer_run_inner(
+        LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V1,
+        None,
+        observed_at,
+        role,
+        quality_unit,
+        observations,
+    )
+}
+
+/// Build a current V2 report with one trusted-host-minted run identity.
+pub fn build_live_known_answer_run_v2(
+    run_id: LiveKnownAnswerRunId,
+    observed_at: i64,
+    role: InvestigationTeamRole,
+    quality_unit: QualityUnit,
+    observations: Vec<LiveKnownAnswerScenarioObservation>,
+) -> CoreResult<LiveKnownAnswerRunReport> {
+    build_live_known_answer_run_inner(
+        LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V2,
+        Some(run_id),
+        observed_at,
+        role,
+        quality_unit,
+        observations,
+    )
+}
+
+fn build_live_known_answer_run_inner(
+    schema_id: &str,
+    run_id: Option<LiveKnownAnswerRunId>,
     observed_at: i64,
     role: InvestigationTeamRole,
     quality_unit: QualityUnit,
@@ -333,7 +436,8 @@ pub fn build_live_known_answer_run(
     };
     let metrics = derive_metrics(&quality_run.cases, &telemetry)?;
     let report = LiveKnownAnswerRunReport {
-        schema_id: LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID.into(),
+        schema_id: schema_id.into(),
+        run_id,
         observed_at,
         role,
         status,
@@ -348,10 +452,8 @@ pub fn build_live_known_answer_run(
 
 /// Validate a durable report, including recomputed status and aggregate metrics.
 pub fn validate_live_known_answer_run(report: &LiveKnownAnswerRunReport) -> CoreResult<()> {
-    if report.schema_id != LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID
-        || report.observed_at <= 0
-        || report.observed_at as u64 > LIVE_KNOWN_ANSWER_JS_SAFE_MAX
-    {
+    validate_run_schema_identity(&report.schema_id, report.run_id.as_ref())?;
+    if report.observed_at <= 0 || report.observed_at as u64 > LIVE_KNOWN_ANSWER_JS_SAFE_MAX {
         return Err(run_error("known-answer report identity is invalid"));
     }
     if report
@@ -478,6 +580,11 @@ pub fn render_live_known_answer_markdown(report: &LiveKnownAnswerRunReport) -> C
     body.push_str("# Investigation Team known-answer qualification\n\n");
     body.push_str(&format!("- Status: `{}`\n", report.status.as_str()));
     body.push_str(&format!("- Role: `{}`\n", report.role.as_str()));
+    match &report.run_id {
+        Some(run_id) => body.push_str(&format!("- Run identity: host-minted `{run_id}`\n")),
+        None => body
+            .push_str("- Run identity: unavailable — legacy record predates host-minted run IDs\n"),
+    }
     body.push_str(&format!("- Observed at: `{}`\n", report.observed_at));
     body.push_str(&format!("- Build: `{}`\n", unit.build_identity));
     body.push_str(&format!(
@@ -810,6 +917,20 @@ fn is_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_run_schema_identity(
+    schema_id: &str,
+    run_id: Option<&LiveKnownAnswerRunId>,
+) -> CoreResult<()> {
+    match schema_id {
+        LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V1 if run_id.is_none() => Ok(()),
+        LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V2 if run_id.is_some() => Ok(()),
+        LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V1 | LIVE_KNOWN_ANSWER_RUN_SCHEMA_ID_V2 => {
+            Err(run_error("known-answer run schema and identity disagree"))
+        }
+        _ => Err(run_error("known-answer report identity is invalid")),
+    }
 }
 
 fn is_safe_identity(value: &str, max_bytes: usize) -> bool {

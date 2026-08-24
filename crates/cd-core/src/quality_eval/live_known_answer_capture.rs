@@ -12,7 +12,7 @@ use super::live_known_answer::{
     validate_response_prompt_separation, LiveKnownAnswerResponse, PreparedLiveKnownAnswerCase,
 };
 use super::live_known_answer_run::{
-    validate_live_known_answer_quality_unit, LIVE_KNOWN_ANSWER_JS_SAFE_MAX,
+    validate_live_known_answer_quality_unit, LiveKnownAnswerRunId, LIVE_KNOWN_ANSWER_JS_SAFE_MAX,
 };
 use super::suite::{hex_sha256, load_embedded_open_v1_suite};
 use super::types::{
@@ -23,9 +23,14 @@ use crate::investigation_team_qualification::InvestigationTeamRole;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Canonical capture schema identity.
-pub const LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID: &str =
+/// Legacy capture schema identity for evidence without host-minted run IDs.
+pub const LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V1: &str =
     "contextdesk.investigation_team_known_answer_capture.v1";
+/// Current capture schema identity with host-minted run identity.
+pub const LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V2: &str =
+    "contextdesk.investigation_team_known_answer_capture.v2";
+/// Current schema identity for newly created captures.
+pub const LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID: &str = LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V2;
 /// Bounded parser/export size for one role/model capture.
 pub const LIVE_KNOWN_ANSWER_CAPTURE_MAX_BYTES: usize = 1024 * 1024;
 
@@ -75,6 +80,10 @@ pub struct LiveKnownAnswerCanonicalScenario {
 pub struct LiveKnownAnswerCanonicalCapture {
     /// Capture schema identity.
     pub schema_id: String,
+    /// Opaque host-minted execution identity shared with the redacted report.
+    /// Absent only on legacy V1 captures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<LiveKnownAnswerRunId>,
     /// Positive host-owned observation timestamp shared with the score report.
     pub observed_at: i64,
     /// Exact Investigation Team role.
@@ -87,8 +96,48 @@ pub struct LiveKnownAnswerCanonicalCapture {
     pub scenarios: Vec<LiveKnownAnswerCanonicalScenario>,
 }
 
-/// Build a canonical capture after strict parsing/privacy/vocabulary gates.
+/// Build a legacy V1 capture without a run ID.
+///
+/// This compatibility constructor exists for migration and legacy fixtures.
+/// Trusted hosts creating new executions must use
+/// [`build_live_known_answer_capture_v2`].
 pub fn build_live_known_answer_capture(
+    observed_at: i64,
+    role: InvestigationTeamRole,
+    quality_unit: QualityUnit,
+    inputs: Vec<LiveKnownAnswerCanonicalScenarioInput>,
+) -> CoreResult<LiveKnownAnswerCanonicalCapture> {
+    build_live_known_answer_capture_inner(
+        LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V1,
+        None,
+        observed_at,
+        role,
+        quality_unit,
+        inputs,
+    )
+}
+
+/// Build a current V2 capture bound to one trusted-host-minted run identity.
+pub fn build_live_known_answer_capture_v2(
+    run_id: LiveKnownAnswerRunId,
+    observed_at: i64,
+    role: InvestigationTeamRole,
+    quality_unit: QualityUnit,
+    inputs: Vec<LiveKnownAnswerCanonicalScenarioInput>,
+) -> CoreResult<LiveKnownAnswerCanonicalCapture> {
+    build_live_known_answer_capture_inner(
+        LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V2,
+        Some(run_id),
+        observed_at,
+        role,
+        quality_unit,
+        inputs,
+    )
+}
+
+fn build_live_known_answer_capture_inner(
+    schema_id: &str,
+    run_id: Option<LiveKnownAnswerRunId>,
     observed_at: i64,
     role: InvestigationTeamRole,
     quality_unit: QualityUnit,
@@ -125,7 +174,8 @@ pub fn build_live_known_answer_capture(
         });
     }
     let capture = LiveKnownAnswerCanonicalCapture {
-        schema_id: LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID.into(),
+        schema_id: schema_id.into(),
+        run_id,
         observed_at,
         role,
         quality_unit,
@@ -140,10 +190,8 @@ pub fn validate_live_known_answer_capture(
     capture: &LiveKnownAnswerCanonicalCapture,
 ) -> CoreResult<()> {
     let prepared = canonical_prepared_cases()?;
-    if capture.schema_id != LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID
-        || capture.observed_at <= 0
-        || capture.observed_at as u64 > LIVE_KNOWN_ANSWER_JS_SAFE_MAX
-    {
+    validate_capture_schema_identity(&capture.schema_id, capture.run_id.as_ref())?;
+    if capture.observed_at <= 0 || capture.observed_at as u64 > LIVE_KNOWN_ANSWER_JS_SAFE_MAX {
         return Err(capture_error("capture identity is invalid"));
     }
     let identity_record = QualityRunRecord {
@@ -367,6 +415,20 @@ fn is_safe_identity(value: &str) -> bool {
 
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_capture_schema_identity(
+    schema_id: &str,
+    run_id: Option<&LiveKnownAnswerRunId>,
+) -> CoreResult<()> {
+    match schema_id {
+        LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V1 if run_id.is_none() => Ok(()),
+        LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V2 if run_id.is_some() => Ok(()),
+        LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V1 | LIVE_KNOWN_ANSWER_CAPTURE_SCHEMA_ID_V2 => {
+            Err(capture_error("capture schema and run identity disagree"))
+        }
+        _ => Err(capture_error("capture identity is invalid")),
+    }
 }
 
 fn capture_error(detail: &str) -> CoreError {
