@@ -1,11 +1,21 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { WorkFocus } from "./app-location.js";
 import { ExperimentLab } from "./ExperimentLab.js";
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
+
+function compareWorkspaceNav() {
+  return screen.getByRole("navigation", { name: "Compare workspace" });
+}
+
+function openCompareWorkspace(label: string) {
+  fireEvent.click(within(compareWorkspaceNav()).getByRole("link", { name: label }));
+}
 
 const view = {
   id: "exp-1",
@@ -301,8 +311,11 @@ describe("experiment lab", () => {
     expect(screen.getAllByText(/Agreement is not proof of correctness/).length).toBeGreaterThan(0);
     expect(screen.getByRole("columnheader", { name: "Gold" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import experiment" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Strategy comparison" })).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Compare workspace" })).toBeTruthy();
     expect(screen.getByText(/No gold reference/)).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Strategy comparison" })).toBeNull();
+    openCompareWorkspace("Strategy paths");
+    expect(screen.getByRole("heading", { name: "Strategy comparison" })).toBeTruthy();
     expect(
       screen.getAllByText(/A gold reference is a human benchmark decision/).length,
     ).toBeGreaterThan(0);
@@ -325,6 +338,7 @@ describe("experiment lab", () => {
       screen.getByText(/accepted decision “Treat inventory timeout as the benchmark cause\.” \(r2\)/),
     ).toBeTruthy();
     expect(screen.getByText(/promoted by dave/)).toBeTruthy();
+    openCompareWorkspace("Signals");
     expect(
       screen.getByText(/Helpfulness: dave scored qwen-3.6-27b evidence support 3\/3/),
     ).toBeTruthy();
@@ -398,8 +412,11 @@ describe("experiment lab", () => {
       }),
     );
     render(<ExperimentLab caseId="c1" canWrite canLead />);
-    expect(await screen.findByText(/Question path: What timed out in checkout/)).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "At a glance" })).toBeTruthy();
+    openCompareWorkspace("Evidence");
     expect(screen.getAllByText(/Shared supporting evidence/).length).toBeGreaterThan(0);
+    openCompareWorkspace("Strategy paths");
+    expect(screen.getByText(/Question path: What timed out in checkout/)).toBeTruthy();
     expect(screen.getByText(/Models converge on supporting evidence in the human benchmark/)).toBeTruthy();
     expect(screen.getByText(/unknown: turns, tools/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import trace" })).toBeTruthy();
@@ -550,7 +567,7 @@ describe("experiment lab", () => {
     expect(await screen.findByRole("table", { name: /Candidate comparison/ })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Experiment lab" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Gold reference" })).toBeTruthy();
-    expect(screen.getByRole("region", { name: "Strategy comparison" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Strategy comparison" })).toBeNull();
     expect(screen.getByRole("region", { name: "Export review" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Export share-safe review" })).toBeTruthy();
     const presenterSummary = screen.getByLabelText("Experiment summary");
@@ -559,8 +576,10 @@ describe("experiment lab", () => {
     expect(presenterSummary.textContent).not.toMatch(/[{}]/);
     expect(screen.queryByText(/cd-collab\.experiment_lab_export\.v2/)).toBeNull();
     expect(screen.getAllByText(/Agreement is not proof of correctness/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Gold alignment is not a correctness verdict/)).toBeTruthy();
+    expect(screen.getAllByText(/Gold alignment is not a correctness verdict/).length).toBeGreaterThan(0);
     expect(screen.getByText(/Not live provider output/)).toBeTruthy();
+    openCompareWorkspace("Strategy paths");
+    expect(screen.getByRole("region", { name: "Strategy comparison" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Export share-safe review" }));
 
@@ -711,6 +730,11 @@ describe("experiment lab", () => {
     );
     render(<ExperimentLab caseId="c1" canWrite={false} canLead={false} readOnly />);
 
+    await screen.findByRole("heading", { name: "At a glance" });
+    const summary = screen.getByLabelText("Experiment summary");
+    expect(summary.textContent).toMatch(/Divergences1/);
+    expect(summary.textContent).toMatch(/Decisionaccepted r2/);
+    openCompareWorkspace("Signals");
     expect(await screen.findByText(/programmatic-agent: partially aligned/)).toBeTruthy();
     expect(
       screen.getByText(/role differs on ev-demo-inventory-timeout \(treated as symptom\)/),
@@ -719,9 +743,7 @@ describe("experiment lab", () => {
     expect(
       screen.getByText(/chat-operator: unscored — no cited evidence to compare/),
     ).toBeTruthy();
-    const summary = screen.getByLabelText("Experiment summary");
-    expect(summary.textContent).toMatch(/Divergences1/);
-    expect(summary.textContent).toMatch(/Decisionaccepted r2/);
+    openCompareWorkspace("Strategy paths");
     expect(
       screen.getByText(/pasted chat · partial trace — unproven steps stay unknown/),
     ).toBeTruthy();
@@ -761,7 +783,7 @@ describe("experiment lab", () => {
     expect(screen.getByRole("navigation", { name: "Historical triage artifacts" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Gold reference" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Candidate comparison" })).toBeTruthy();
-    expect(screen.getByRole("region", { name: "Strategy comparison" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Strategy comparison" })).toBeNull();
     expect(screen.getByRole("status").textContent).toMatch(/Static read-only mode/);
     expect(screen.getByText(/Sources: seeded · ContextDesk connector · pasted chat/)).toBeTruthy();
     expect(screen.getByText(/Next extensions: semantic search · multi-worker leases/)).toBeTruthy();
@@ -772,10 +794,11 @@ describe("experiment lab", () => {
     expect(screen.getByText(/package pkg-synth-strategy-paths-v1/)).toBeTruthy();
     expect(screen.getAllByText("programmatic-agent").length).toBeGreaterThan(0);
     expect(screen.getAllByText("chat-operator").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Textual similarity is not a winner/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Gold alignment is not a correctness verdict/).length).toBeGreaterThan(0);
+    openCompareWorkspace("Strategy paths");
     expect(screen.getByText(/Question path: Which inventory call is blocking checkout/)).toBeTruthy();
     expect(screen.getByText(/Question path: What timed out in checkout/)).toBeTruthy();
-    expect(screen.getByText(/Textual similarity is not a winner/)).toBeTruthy();
-    expect(screen.getByText(/Gold alignment is not a correctness verdict/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /Comparison 1/ }));
     expect(screen.getByText(/package pkg-synth-three-model-checkout-v1/)).toBeTruthy();
@@ -848,14 +871,12 @@ describe("experiment lab", () => {
 
     const matrix = screen.getByRole("table", { name: /Candidate comparison/ });
     expect(scan.compareDocumentPosition(matrix) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    const helpfulnessTool = screen.getByText("Score candidate helpfulness");
-    expect(
-      scan.compareDocumentPosition(helpfulnessTool) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
     const proposeTool = screen.getByText("Propose a new human decision");
     expect(
       scan.compareDocumentPosition(proposeTool) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    openCompareWorkspace("Signals");
+    expect(screen.getByText("Score candidate helpfulness")).toBeTruthy();
   });
 
   it("surfaces decision text, rationale, status, revision, and author at scan level and in the decision section", async () => {
@@ -913,13 +934,14 @@ describe("experiment lab", () => {
 
     expect(await screen.findByRole("table", { name: /Candidate comparison/ })).toBeTruthy();
     const matrixRegion = screen.getByRole("region", { name: "Candidate comparison" });
-    const helpfulnessRegion = screen.getByRole("region", { name: "Helpfulness" });
-    const alignmentRegion = screen.getByRole("region", { name: "Gold alignment" });
     expect(
       within(matrixRegion).getByText(
         "Candidate comparison — observed run facts and review signals",
       ),
     ).toBeTruthy();
+    openCompareWorkspace("Signals");
+    const helpfulnessRegion = screen.getByRole("region", { name: "Helpfulness" });
+    const alignmentRegion = screen.getByRole("region", { name: "Gold alignment" });
     expect(within(helpfulnessRegion).getByText("Separate from gold")).toBeTruthy();
     expect(
       within(helpfulnessRegion).queryByText(/aligned — cites every benchmark anchor/),
@@ -947,7 +969,7 @@ describe("experiment lab", () => {
     expect(text).not.toMatch(/\bwins\b|\bwinning\b|\bbest candidate\b|\bconfidence\b/i);
     expect(text).not.toMatch(/\bready to ship\b|\bconsensus quality\b|\bmost correct\b/i);
     expect(screen.getAllByText(/Agreement is not proof of correctness/).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Textual similarity is not a winner/)).toBeTruthy();
+    expect(screen.getAllByText(/Textual similarity is not a winner/).length).toBeGreaterThan(0);
     expect(screen.getByText("Facts only · no winner implied")).toBeTruthy();
   });
 
@@ -977,6 +999,8 @@ describe("experiment lab", () => {
     expect(unknownCard?.textContent).toContain("programmatic-agent — trace cannot establish turns");
     expect(unknownCard?.textContent).toContain("chat-operator — no interaction trace recorded");
     expect(unknownCard?.textContent).toContain("Gold benchmark — none recorded for this experiment");
+    expect(unknownCard?.textContent).toContain("cost unknown");
+    expect(unknownCard?.textContent).toContain("usage unknown");
     const summary = screen.getByLabelText("Experiment summary");
     expect(summary.textContent).toMatch(/Explicit unknowns/);
   });
@@ -993,9 +1017,10 @@ describe("experiment lab", () => {
     );
     const contributor = render(<ExperimentLab caseId="c1" canWrite canLead={false} />);
     await screen.findByRole("region", { name: "At a glance" });
-    for (const name of ["Import experiment", "Record helpfulness", "Propose decision"]) {
-      expect(screen.getByRole("button", { name })).toBeTruthy();
-    }
+    expect(screen.getByRole("button", { name: "Import experiment" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Propose decision" })).toBeTruthy();
+    openCompareWorkspace("Signals");
+    expect(screen.getByRole("button", { name: "Record helpfulness" })).toBeTruthy();
     for (const name of [
       "Accept decision",
       "Promote accepted decision to gold",
@@ -1040,6 +1065,7 @@ describe("experiment lab", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
     await screen.findByRole("region", { name: "At a glance" });
+    openCompareWorkspace("Signals");
 
     fireEvent.change(screen.getByPlaceholderText("Helpfulness rationale"), {
       target: { value: "Cited the checkout log." },
@@ -1288,7 +1314,7 @@ describe("decision readiness cockpit", () => {
     stubExperiments([artifactView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
 
-    const controls = await screen.findAllByText(/View full log or stack trace · 12 lines/);
+    const controls = await screen.findAllByText(/Expand log or stack trace · 12 lines/);
     expect(controls.length).toBeGreaterThan(0);
     const expandable = controls[0]!.closest("details") as HTMLDetailsElement;
     expect(expandable.open).toBe(false);
@@ -1373,6 +1399,8 @@ describe("decision readiness cockpit", () => {
     stubExperiments([cockpitView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
 
+    await screen.findByRole("heading", { name: "At a glance" });
+    openCompareWorkspace("Review queue");
     const queue = await screen.findByRole("region", { name: "Human review queue" });
     expect(within(queue).getByText("Fixed order · not a priority ranking")).toBeTruthy();
     expect(
@@ -1431,6 +1459,11 @@ describe("decision readiness cockpit", () => {
     stubExperiments([readyView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
 
+    await screen.findByRole("region", { name: "Decision readiness" });
+    expect(within(screen.getByRole("region", { name: "Decision readiness" })).getByText("accepted r1")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "Decision readiness" })).getByText("no unknown measurements recorded")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "Decision readiness" })).getByText("2 complete")).toBeTruthy();
+    openCompareWorkspace("Review queue");
     const queue = await screen.findByRole("region", { name: "Human review queue" });
     expect(within(queue).queryAllByRole("listitem").length).toBe(0);
     expect(
@@ -1438,16 +1471,14 @@ describe("decision readiness cockpit", () => {
         /An empty queue does not certify correctness — it only means nothing further was recorded\./,
       ),
     ).toBeTruthy();
-    const readiness = screen.getByRole("region", { name: "Decision readiness" });
-    expect(within(readiness).getByText("accepted r1")).toBeTruthy();
-    expect(within(readiness).getByText("no unknown measurements recorded")).toBeTruthy();
-    expect(within(readiness).getByText("2 complete")).toBeTruthy();
   });
 
   it("cross-examines shared, conflicting, and single-lane evidence without a benchmark", async () => {
     stubExperiments([cockpitView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
 
+    await screen.findByRole("heading", { name: "At a glance" });
+    openCompareWorkspace("Evidence");
     const table = await screen.findByRole("table", { name: /Evidence cross-examination/ });
     const evidenceRegion = screen.getByRole("region", { name: "Shared and different evidence" });
     expect(within(evidenceRegion).getByRole("table", { name: /Evidence cross-examination/ })).toBe(
@@ -1470,6 +1501,8 @@ describe("decision readiness cockpit", () => {
     stubExperiments([benchmarkCrossView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
 
+    await screen.findByRole("heading", { name: "At a glance" });
+    openCompareWorkspace("Evidence");
     const table = await screen.findByRole("table", { name: /Evidence cross-examination/ });
     expect(within(table).getAllByText("anchor").length).toBe(2);
     expect(within(table).getByText("not an anchor")).toBeTruthy();
@@ -1479,6 +1512,7 @@ describe("decision readiness cockpit", () => {
       within(table).getAllByText("benchmark anchor this lane does not cite").length,
     ).toBe(2);
     expect(within(table).getByText("anchor no lane cites")).toBeTruthy();
+    openCompareWorkspace("Review queue");
     const queue = screen.getByRole("region", { name: "Human review queue" });
     expect(
       within(queue).getByText(
@@ -1496,6 +1530,8 @@ describe("decision readiness cockpit", () => {
     stubExperiments([benchmarkCrossView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
 
+    await screen.findByRole("heading", { name: "At a glance" });
+    openCompareWorkspace("Evidence");
     const table = await screen.findByRole("table", { name: /Evidence cross-examination/ });
     expect(within(table).getByRole("rowheader", { name: "Trace coverage" })).toBeTruthy();
     expect(
@@ -1512,6 +1548,8 @@ describe("decision readiness cockpit", () => {
     vi.unstubAllGlobals();
     stubExperiments([missingTraceView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
+    await screen.findByRole("heading", { name: "At a glance" });
+    openCompareWorkspace("Evidence");
     const rerendered = await screen.findByRole("table", { name: /Evidence cross-examination/ });
     expect(
       within(rerendered).getAllByText("no trace recorded — coverage unknown").length,
@@ -1522,13 +1560,22 @@ describe("decision readiness cockpit", () => {
     stubExperiments([cockpitView]);
     render(<ExperimentLab caseId="c1" canWrite canLead />);
 
-    await screen.findByRole("table", { name: /Evidence cross-examination/ });
-    // The browser qualification suite strict-locates table.experiment-lab__matrix
-    // and .experiment-lab__matrix-wrap; the cross-examination table must never
-    // share that identity, and each table keeps its own accessible name.
+    expect(await screen.findByRole("table", { name: /Candidate comparison/ })).toBeTruthy();
     const matrixTables = document.querySelectorAll("table.experiment-lab__matrix");
     expect(matrixTables.length).toBe(1);
     expect(document.querySelectorAll(".experiment-lab__matrix-wrap").length).toBe(1);
+    expect(document.querySelectorAll("table.experiment-lab__crossexam").length).toBe(0);
+    expect(
+      within(matrixTables[0] as HTMLElement).getByText(
+        "Candidate comparison — observed run facts and review signals",
+      ),
+    ).toBeTruthy();
+
+    openCompareWorkspace("Evidence");
+    // The browser qualification suite strict-locates table.experiment-lab__matrix
+    // and .experiment-lab__matrix-wrap; the cross-examination table must never
+    // share that identity, and each table keeps its own accessible name.
+    expect(document.querySelectorAll("table.experiment-lab__matrix").length).toBe(0);
     const crossexamTables = document.querySelectorAll("table.experiment-lab__crossexam");
     expect(crossexamTables.length).toBe(1);
     const crossexam = crossexamTables[0] as HTMLElement;
@@ -1539,11 +1586,6 @@ describe("decision readiness cockpit", () => {
     expect(crossexam.parentElement?.classList.contains("experiment-lab__matrix-wrap")).toBe(
       false,
     );
-    expect(
-      within(matrixTables[0] as HTMLElement).getByText(
-        "Candidate comparison — observed run facts and review signals",
-      ),
-    ).toBeTruthy();
     expect(
       within(crossexam).getByText(
         /Evidence cross-examination — recorded citations, benchmark anchors, and trace/,
@@ -1567,8 +1609,9 @@ describe("decision readiness cockpit", () => {
     expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
       "false",
     );
-    expect(screen.getByText(/Inspecting programmatic-agent\. This quick digest changes in place/)).toBeTruthy();
+    expect(screen.getByText(/Focusing programmatic-agent\. This digest restates recorded facts/)).toBeTruthy();
     expect(window.location.search).toContain("lane=cand-programmatic-agent");
+    expect(window.location.search).toContain("section=scan-heading");
 
     const digest = screen.getByRole("article", { name: "programmatic-agent" });
     expect(within(digest).getByText("Question or input")).toBeTruthy();
@@ -1587,18 +1630,23 @@ describe("decision readiness cockpit", () => {
       within(digest).getByText(/never changes the aggregate comparison, benchmark, or accepted human decision/),
     ).toBeTruthy();
 
-    // The other lane stays fully present everywhere.
+    // Candidate comparison on Summary still lists the unfocused lane.
+    const matrix = screen.getByRole("table", { name: /Candidate comparison/ });
+    expect(within(matrix).getByRole("rowheader", { name: /chat-operator/ })).toBeTruthy();
+    expect(screen.getAllByText("chat-operator").length).toBeGreaterThan(0);
+
+    openCompareWorkspace("Evidence");
     const table = screen.getByRole("table", { name: /Evidence cross-examination/ });
     expect(within(table).getByRole("columnheader", { name: /chat-operator/ })).toBeTruthy();
-    expect(screen.getAllByText("chat-operator").length).toBeGreaterThan(0);
+    openCompareWorkspace("Review queue");
     const queue = screen.getByRole("region", { name: "Human review queue" });
     expect(within(queue).getAllByText("involves focused lane").length).toBe(4);
     expect(
       within(queue).getAllByText(/chat-operator has no recorded human helpfulness observation/)[0],
     ).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Close lane inspection" }));
-    expect(screen.queryByText(/Inspecting programmatic-agent/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "All lanes" }));
+    expect(screen.queryByText(/Focusing programmatic-agent/)).toBeNull();
     expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
       "true",
     );
@@ -1610,10 +1658,10 @@ describe("decision readiness cockpit", () => {
 
     await screen.findByRole("region", { name: "Decision readiness" });
     fireEvent.click(screen.getByRole("button", { name: "chat-operator" }));
-    expect(screen.getByText(/Inspecting chat-operator/)).toBeTruthy();
+    expect(screen.getByText(/Focusing chat-operator\. This digest restates recorded facts/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /Comparison 2/ }));
-    expect(screen.queryByText(/Inspecting chat-operator/)).toBeNull();
+    expect(screen.queryByText(/Focusing chat-operator/)).toBeNull();
     expect(screen.getByRole("button", { name: "All lanes" }).getAttribute("aria-pressed")).toBe(
       "true",
     );
@@ -1637,12 +1685,13 @@ describe("decision readiness cockpit", () => {
     );
 
     await screen.findByRole("region", { name: "Decision readiness" });
-    expect(await screen.findByText(/Inspecting chat-operator/)).toBeTruthy();
+    expect(await screen.findByText(/Focusing chat-operator\. This digest restates recorded facts/)).toBeTruthy();
     expect(screen.queryAllByRole("textbox").length).toBe(0);
     expect(screen.queryAllByRole("combobox").length).toBe(0);
     for (const name of ["Import experiment", "Record helpfulness", "Propose decision"]) {
       expect(screen.queryByRole("button", { name })).toBeNull();
     }
+    openCompareWorkspace("Review queue");
     expect(screen.getByRole("region", { name: "Human review queue" })).toBeTruthy();
   });
 });
@@ -1663,6 +1712,8 @@ describe("focused surfaces", () => {
     render(<ExperimentLab caseId="c1" canWrite canLead surface="comparison" />);
     expect(await screen.findByRole("heading", { name: "Experiment lab" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "At a glance" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Strategy comparison" })).toBeNull();
+    openCompareWorkspace("Strategy paths");
     expect(screen.getByRole("heading", { name: "Strategy comparison" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import experiment" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Accepted decision" })).toBeNull();
@@ -1685,5 +1736,274 @@ describe("focused surfaces", () => {
     expect(screen.queryByRole("button", { name: "Import experiment" })).toBeNull();
     // Identity truth stays visible on both surfaces.
     expect(screen.getByText(/The server remains authoritative/)).toBeTruthy();
+  });
+});
+
+describe("focused Compare workspace", () => {
+  function CompareHarness(props: { initial?: WorkFocus }) {
+    const [focus, setFocus] = useState<WorkFocus | undefined>(props.initial);
+    return (
+      <ExperimentLab
+        caseId="c1"
+        canWrite
+        canLead
+        {...(focus ? { routeFocus: focus } : {})}
+        onDeepNavigate={setFocus}
+      />
+    );
+  }
+
+  it("renders one major subsection at a time and a useful default summary", async () => {
+    stubExperiments([cockpitView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+
+    expect(await screen.findByRole("heading", { name: "At a glance" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Decision readiness" })).toBeTruthy();
+    expect(screen.getByRole("table", { name: /Candidate comparison/ })).toBeTruthy();
+    expect(screen.getByLabelText("Experiment summary").textContent).toMatch(/Candidates/);
+    expect(screen.queryByRole("region", { name: "Human review queue" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Shared and different evidence" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Strategy comparison" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Helpfulness" })).toBeNull();
+    expect(screen.queryByText("Jump to:")).toBeNull();
+  });
+
+  it("makes every subsection keyboard reachable and URL-backed", async () => {
+    stubExperiments([cockpitView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    await screen.findByRole("navigation", { name: "Compare workspace" });
+
+    const expected = [
+      ["Summary", "scan-heading", "At a glance"],
+      ["Review queue", "review-queue-heading", "Human review queue"],
+      ["Evidence", "evidence-heading", "Shared and different evidence"],
+      ["Strategy paths", "strategy-heading", "Strategy comparison"],
+      ["Signals", "helpfulness-heading", "Helpfulness"],
+    ] as const;
+
+    for (const [label, section, heading] of expected) {
+      const link = within(compareWorkspaceNav()).getByRole("link", { name: label });
+      expect(link.getAttribute("href")).toContain(`section=${section}`);
+      link.focus();
+      expect(document.activeElement).toBe(link);
+      fireEvent.click(link);
+      expect(await screen.findByRole(label === "Strategy paths" ? "heading" : "region", { name: heading })).toBeTruthy();
+      expect(window.location.search).toContain(`section=${section}`);
+      expect(within(compareWorkspaceNav()).getByRole("link", { name: label }).getAttribute("aria-current")).toBe("page");
+    }
+  });
+
+  it("selects the mapped subsection from shipped section, item, and lane deep links", async () => {
+    stubExperiments([cockpitView]);
+    render(
+      <ExperimentLab
+        caseId="c1"
+        canWrite
+        canLead
+        routeFocus={{
+          section: "cross-exam-heading",
+          item: "ev-demo-inventory-timeout",
+          lane: "cand-programmatic-agent",
+          experiment: "exp-cockpit",
+        }}
+      />,
+    );
+
+    expect(await screen.findByRole("region", { name: "Shared and different evidence" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "At a glance" })).toBeNull();
+    expect(document.querySelector("[data-route-item='ev-demo-inventory-timeout']")).toBeTruthy();
+    expect(await screen.findByText(/Focusing programmatic-agent/)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "programmatic-agent" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(screen.getByText(/Focus highlights one lane/)).toBeTruthy();
+  });
+
+  it("fails unknown section ids to the useful summary instead of a blank screen", async () => {
+    stubExperiments([cockpitView]);
+    render(
+      <ExperimentLab
+        caseId="c1"
+        canWrite
+        canLead
+        routeFocus={{
+          section: "not-a-shipped-section",
+          item: null,
+          lane: null,
+          experiment: "exp-cockpit",
+        }}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "At a glance" })).toBeTruthy();
+    expect(screen.getByLabelText("Experiment summary").textContent).toMatch(/Candidates2/);
+    expect(screen.queryByRole("region", { name: "Human review queue" })).toBeNull();
+  });
+
+  it("restores the subsection across in-app navigation, reload props, and back/forward", async () => {
+    stubExperiments([cockpitView]);
+    const { rerender } = render(<CompareHarness />);
+    await screen.findByRole("heading", { name: "At a glance" });
+
+    fireEvent.click(within(compareWorkspaceNav()).getByRole("link", { name: "Evidence" }));
+    expect(await screen.findByRole("region", { name: "Shared and different evidence" })).toBeTruthy();
+
+    rerender(
+      <ExperimentLab
+        caseId="c1"
+        canWrite
+        canLead
+        routeFocus={{
+          section: "strategy-heading",
+          item: null,
+          lane: null,
+          experiment: "exp-cockpit",
+        }}
+      />,
+    );
+    expect(await screen.findByRole("heading", { name: "Strategy comparison" })).toBeTruthy();
+
+    rerender(
+      <ExperimentLab
+        caseId="c1"
+        canWrite
+        canLead
+        routeFocus={{
+          section: "review-queue-heading",
+          item: null,
+          lane: "cand-chat-operator",
+          experiment: "exp-cockpit",
+        }}
+      />,
+    );
+    expect(await screen.findByRole("region", { name: "Human review queue" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "chat-operator" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+  });
+
+  it("does not scroll to a distant lane anchor when focusing a lane", async () => {
+    stubExperiments([cockpitView]);
+    const scrollIntoView = vi.fn();
+    const originalScroll = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    try {
+      render(<ExperimentLab caseId="c1" canWrite canLead />);
+
+      await screen.findByRole("region", { name: "Decision readiness" });
+      openCompareWorkspace("Review queue");
+      expect(screen.getByRole("region", { name: "Human review queue" })).toBeTruthy();
+      scrollIntoView.mockClear();
+
+      fireEvent.click(screen.getByRole("button", { name: "programmatic-agent" }));
+      expect(window.location.search).toContain("lane=cand-programmatic-agent");
+      expect(window.location.search).toContain("section=review-queue-heading");
+      expect(screen.getByRole("region", { name: "Human review queue" })).toBeTruthy();
+      expect(screen.queryByRole("heading", { name: "Strategy comparison" })).toBeNull();
+      expect(screen.queryByRole("heading", { name: "At a glance" })).toBeNull();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      HTMLElement.prototype.scrollIntoView = originalScroll;
+    }
+  });
+
+  it("lands evidence and strategy review links on the relevant subsection", async () => {
+    stubExperiments([cockpitView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    await screen.findByRole("heading", { name: "At a glance" });
+
+    const inspect = screen.getAllByRole("link", { name: "Inspect supporting artifact" })[0]!;
+    expect(inspect.getAttribute("href")).toContain("section=cross-exam-heading");
+    fireEvent.click(inspect);
+    expect(await screen.findByRole("region", { name: "Shared and different evidence" })).toBeTruthy();
+    expect(screen.getByRole("table", { name: /Evidence cross-examination/ })).toBeTruthy();
+
+    openCompareWorkspace("Review queue");
+    fireEvent.click(screen.getAllByRole("link", { name: "open cross-examination" })[0]!);
+    expect(await screen.findByRole("region", { name: "Shared and different evidence" })).toBeTruthy();
+    expect(screen.getByRole("table", { name: /Evidence cross-examination/ })).toBeTruthy();
+
+    openCompareWorkspace("Review queue");
+    fireEvent.click(screen.getByRole("link", { name: "open strategy comparison" }));
+    expect(await screen.findByRole("heading", { name: "Strategy comparison" })).toBeTruthy();
+
+    openCompareWorkspace("Review queue");
+    fireEvent.click(screen.getAllByRole("link", { name: "open run facts" })[0]!);
+    expect(await screen.findByRole("region", { name: "Candidate comparison" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Human review queue" })).toBeNull();
+  });
+
+  it("expands long evidence and leaves short evidence fully visible", async () => {
+    const longExcerpt = Array.from(
+      { length: 12 },
+      (_, index) => `${String(index + 1).padStart(2, "0")} synthetic stack frame at Worker.step${index + 1} (worker.ts:${40 + index})`,
+    ).join("\n");
+    const artifactView = {
+      ...cockpitView,
+      traces: cockpitView.traces.map((trace, index) => index === 0 ? {
+        ...trace,
+        events: [{
+          eventId: "trace-event-synthetic-large",
+          sequence: 1,
+          kind: "evidence_review",
+          actor: "tool",
+          excerpt: longExcerpt,
+          evidenceRefs: ["ev-demo-inventory-timeout"],
+          unknowns: [],
+        }, {
+          eventId: "trace-event-synthetic-short",
+          sequence: 2,
+          kind: "evidence_review",
+          actor: "tool",
+          excerpt: "short checkout timeout line",
+          evidenceRefs: ["ev-demo-pool-exhaustion"],
+          unknowns: [],
+        }],
+      } : trace),
+    };
+    stubExperiments([artifactView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+
+    const expand = await screen.findByText(/Expand log or stack trace · 12 lines/);
+    const details = expand.closest("details") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    fireEvent.click(expand);
+    expect(details.open).toBe(true);
+    expect(screen.getByText(/Collapse log or stack trace · 12 lines/)).toBeTruthy();
+    expect(details.querySelector(".experiment-lab__artifact-full")?.textContent).toContain(
+      "12 synthetic stack frame",
+    );
+
+    openCompareWorkspace("Evidence");
+    expect(screen.getByText("short checkout timeout line")).toBeTruthy();
+    const shortExcerpt = [...document.querySelectorAll(".experiment-lab__artifact-excerpt")].find(
+      (node) => node.textContent === "short checkout timeout line",
+    );
+    expect(shortExcerpt?.closest(".experiment-lab__artifact-collapsible")).toBeNull();
+  });
+
+  it("keeps finding headings semantic and the workspace contained for narrow viewports", async () => {
+    stubExperiments([cockpitView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    const scan = await screen.findByRole("region", { name: "At a glance" });
+    const finding = within(scan).getByRole("heading", {
+      name: "Models assign different meaning to the same evidence",
+    });
+    expect(finding.tagName).toBe("H6");
+    expect(finding.classList.contains("experiment-lab__finding-title")).toBe(true);
+    expect(document.querySelector(".experiment-lab__workspace")).toBeTruthy();
+    expect(document.querySelector(".experiment-lab")?.className).toContain("experiment-lab");
+    openCompareWorkspace("Evidence");
+    expect(document.querySelector(".experiment-lab__crossexam-wrap")).toBeTruthy();
+  });
+
+  it("preserves modifier-click so a subsection href can open without in-app navigation", async () => {
+    stubExperiments([cockpitView]);
+    render(<ExperimentLab caseId="c1" canWrite canLead />);
+    await screen.findByRole("heading", { name: "At a glance" });
+    const evidence = within(compareWorkspaceNav()).getByRole("link", { name: "Evidence" });
+    fireEvent.click(evidence, { metaKey: true });
+    expect(screen.getByRole("heading", { name: "At a glance" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Shared and different evidence" })).toBeNull();
   });
 });
