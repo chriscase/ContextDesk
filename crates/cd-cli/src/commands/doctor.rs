@@ -1125,6 +1125,19 @@ async fn execute_live_turns(
         }
     };
 
+    // The workflow and cancellation branches can become ready in the same
+    // scheduler tick: the in-flight workflow observes the shared cancel flag
+    // and settles while `wait_until_cancelled` is also waking. `select!` may
+    // choose the workflow result in that tie. Re-read the host-owned flag
+    // before interpreting the result so an operator Ctrl-C can never be
+    // downgraded into an ordinary failed/not-ready second turn. The first
+    // turn's durable session id is already known, so cleanup remains exact.
+    if cancel.load(Ordering::SeqCst) {
+        return LiveTurnOutcome::Interrupted {
+            session_id: Some(session_id),
+        };
+    }
+
     let continuity = match raced_two {
         Ok(Ok(outcome_two)) => match sessions.load(&session_id) {
             Ok(session_after) => evaluate_continuity(
