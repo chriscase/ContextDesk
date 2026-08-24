@@ -851,7 +851,7 @@ async fn non_streaming_vercel_shaped_usage_and_safe_request_id() {
     assert_eq!(completion.finish_reason, "stop");
     let tel = &completion.telemetry;
     assert_eq!(
-        tel.response_model.as_deref(),
+        tel.certified_response_model(),
         Some("anthropic/claude-sonnet-4")
     );
     assert_eq!(
@@ -899,7 +899,7 @@ async fn streaming_captures_final_usage_chunk() {
     assert_eq!(completion.telemetry.total_tokens, Some(4));
     assert_eq!(completion.telemetry.cost, Some(0.0));
     assert_eq!(
-        completion.telemetry.response_model.as_deref(),
+        completion.telemetry.certified_response_model(),
         Some("openai/gpt-test")
     );
     assert_eq!(completion.telemetry.observed_route, ObservedRoute::Unknown);
@@ -1114,7 +1114,10 @@ async fn secrets_never_appear_in_traced_transport_dto() {
         telemetry: Box::new(cd_core::provider_telemetry::ProviderTurnTelemetry {
             configured_profile_id: "openai-compatible".into(),
             configured_model: "configured-model-id".into(),
-            response_model: turn_transport.response_model.clone(),
+            response_model: turn_transport
+                .certified_response_model()
+                .map(str::to_string),
+            model_identity_status: turn_transport.model_identity_status(),
             provider_request_id: turn_transport.provider_request_id.clone(),
             observed_route: turn_transport.observed_route.clone(),
             prompt_tokens: turn_transport.prompt_tokens,

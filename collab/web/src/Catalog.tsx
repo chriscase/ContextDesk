@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { protectedApiFetch } from "./protected-api.js";
 
 interface SourceRow {
   id: string;
@@ -177,7 +178,7 @@ export function Catalog(props: { canLead: boolean }) {
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch("/api/catalog/sources");
+      const res = await protectedApiFetch("/api/catalog/sources");
       if (!res.ok) {
         setLoadState((prev) => (prev === "ready" ? "ready" : "error"));
         return;
@@ -201,7 +202,7 @@ export function Catalog(props: { canLead: boolean }) {
     const data = new FormData(form);
     setSaving(true);
     try {
-      const response = await fetch("/api/catalog/sources", {
+      const response = await protectedApiFetch("/api/catalog/sources", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -233,7 +234,7 @@ export function Catalog(props: { canLead: boolean }) {
     setRetireError(null);
     setConfirmRetireId(null);
     try {
-      const response = await fetch(`/api/catalog/sources/${id}/retire`, {
+      const response = await protectedApiFetch(`/api/catalog/sources/${id}/retire`, {
         method: "POST",
       });
       if (!response.ok) {

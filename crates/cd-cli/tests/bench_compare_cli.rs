@@ -2,6 +2,9 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::json;
 
+#[path = "helpers/app_config.rs"]
+mod app_config;
+
 fn candidate(cancellation_id: &str) -> serde_json::Value {
     json!({
         "policy": {
@@ -295,8 +298,8 @@ fn remote_profile(id: &str, api_key_ref: &str) -> cd_core::providers::ProviderPr
 fn write_app_config(
     data_dir: &std::path::Path,
     profiles: Vec<cd_core::providers::ProviderProfile>,
-) {
-    use cd_core::config::{save_config, AppConfig};
+) -> std::path::PathBuf {
+    use cd_core::config::AppConfig;
     use cd_core::providers::ProviderConfig;
     let active_id = profiles.first().map(|profile| profile.id.clone());
     let cfg = AppConfig {
@@ -306,7 +309,9 @@ fn write_app_config(
         },
         ..AppConfig::default()
     };
-    save_config(&data_dir.join("config.json"), &cfg).expect("write app config");
+    let data_dir = data_dir.canonicalize().expect("canonical data dir");
+    app_config::plant_app_config(&data_dir.join("config.json"), &cfg);
+    data_dir
 }
 
 fn candidate_for_profile(profile_id: &str, cancellation_id: &str) -> serde_json::Value {
@@ -330,7 +335,7 @@ fn candidate_for_profile(profile_id: &str, cancellation_id: &str) -> serde_json:
 #[test]
 fn mixed_employer_and_vercel_reject_the_global_api_key_before_library_or_provider_access() {
     let data_dir = tempfile::tempdir().expect("data dir");
-    write_app_config(
+    let data_root = write_app_config(
         data_dir.path(),
         vec![
             remote_profile("employer", "provider/employer/api_key"),
@@ -359,7 +364,7 @@ fn mixed_employer_and_vercel_reject_the_global_api_key_before_library_or_provide
         .env("CONTEXTDESK_PROVIDER_API_KEY", SHARED)
         .args([
             "--data-dir",
-            data_dir.path().to_str().expect("data path"),
+            data_root.to_str().expect("data path"),
             "bench-compare",
             "--library",
             "/path/that-must-not-be-opened",
@@ -383,7 +388,7 @@ fn mixed_employer_and_vercel_reject_the_global_api_key_before_library_or_provide
 #[test]
 fn single_profile_comparison_still_accepts_the_global_override() {
     let data_dir = tempfile::tempdir().expect("data dir");
-    write_app_config(
+    let data_root = write_app_config(
         data_dir.path(),
         vec![remote_profile("vercel", "provider/vercel/api_key")],
     );
@@ -409,7 +414,7 @@ fn single_profile_comparison_still_accepts_the_global_override() {
         )
         .args([
             "--data-dir",
-            data_dir.path().to_str().expect("data path"),
+            data_root.to_str().expect("data path"),
             "bench-compare",
             "--library",
             "/path/that-need-not-exist",

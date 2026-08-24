@@ -8,6 +8,14 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./setup": {
+      "types": "./dist/setup.d.ts",
+      "import": "./dist/setup.js"
+    },
+    "./admin": {
+      "types": "./dist/admin-web.d.ts",
+      "import": "./dist/admin-web.js"
+    },
     "./schemas/*.json": "./schemas/*.json"
   },
   "files": [

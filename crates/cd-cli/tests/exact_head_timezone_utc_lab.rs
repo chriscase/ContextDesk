@@ -4,12 +4,15 @@
 //! Synthetic fixtures only. No private data. No network.
 
 use assert_cmd::Command;
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::log_analysis::store::LogCorpus;
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
+
+#[path = "helpers/app_config.rs"]
+mod app_config;
 
 fn cli(data_dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("contextdesk").expect("contextdesk binary");
@@ -33,7 +36,7 @@ fn write_default_config(data_dir: &Path) {
         default_timezone: None,
         ..AppConfig::default()
     };
-    save_config(&data_dir.join("config.json"), &cfg).expect("write config");
+    app_config::plant_app_config(&data_dir.join("config.json"), &cfg);
 }
 
 /// Local wall clocks without zone (ambiguous until apply-all).

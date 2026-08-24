@@ -14,7 +14,7 @@ import {
 } from "@cd-collab/contracts";
 import type { AuditStore } from "../audit/index.js";
 import type { Actor, CaseService } from "../cases/index.js";
-import type { TriageJobStore } from "./store.js";
+import type { OverviewJobQuery, OverviewListedJob, TriageJobStore } from "./store.js";
 import type { TriageProfileOption } from "./profiles.js";
 
 const MAX_CANDIDATES = 16;
@@ -250,6 +250,21 @@ export class TriageRunService {
     return this.deps.jobs.listByCase(caseId);
   }
 
+  async listOverviewJobs(
+    scope: { actorId: string; isAdmin: boolean },
+    statuses: TriageJobStatus[],
+    limit: number,
+    visibility: OverviewJobQuery["visibility"],
+  ): Promise<OverviewListedJob[]> {
+    return this.deps.jobs.listOverviewJobs({
+      actorId: scope.actorId,
+      isAdmin: scope.isAdmin,
+      statuses,
+      limit,
+      visibility,
+    });
+  }
+
   async get(
     caseId: string,
     jobId: string,
@@ -361,7 +376,10 @@ export class TriageRunService {
       if (
         request.mode === "gateway"
         && this.deps.profiles && this.deps.profiles.length > 0
-        && !this.deps.profiles.some((profile) => profile.id === candidate.profileId)
+        && !this.deps.profiles.some((profile) =>
+          (profile.profileId ?? profile.id) === candidate.profileId
+          && (!profile.modelId || profile.modelId === candidate.model),
+        )
       ) {
         throw new TriageRunConflictError(`unknown gateway profile for candidate ${candidate.candidateId}`);
       }

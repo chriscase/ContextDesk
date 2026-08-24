@@ -4,10 +4,17 @@ import { INVENTED_ROUTES } from "../src/surface-map.js";
 import { FIXTURE_USERS } from "../src/users.js";
 
 test.describe("local-auth demo login (MapAuthAdapter fixture)", () => {
-  test("maps a contributor through the login form", async ({ page }) => {
+  test("maps a contributor through the sign-in screen into the War Room shell", async ({ page }) => {
+    await page.goto("/");
+    // Signed out: only the sign-in screen — no navigation, no case data.
+    await expect(page.getByRole("heading", { level: 1, name: "ContextDesk War Room" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Primary" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Start investigation" })).toHaveCount(0);
+
     await loginAs(page, FIXTURE_USERS.alice);
-    await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Cases" })).toBeVisible();
+    await expect(page.getByRole("button", { name: `Signed in as ${FIXTURE_USERS.alice.username}` })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Operating picture" })).toBeVisible();
     await screenshot(page, "01-login-alice");
   });
 

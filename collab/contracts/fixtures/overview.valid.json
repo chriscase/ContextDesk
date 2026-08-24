@@ -1,0 +1,105 @@
+{
+  "schemaId": "cd-collab.overview.v1",
+  "generatedAt": "2026-08-24T12:00:00.000Z",
+  "viewer": {
+    "identity": {
+      "id": "uid=fixture-lead,ou=people,dc=example,dc=test",
+      "username": "fixture-lead",
+      "displayName": "Fixture lead"
+    },
+    "roles": ["case-lead"]
+  },
+  "statusCounts": {
+    "open": 2,
+    "monitoring": 1,
+    "resolved": 0,
+    "archived": 0
+  },
+  "severityCounts": {
+    "low": 0,
+    "medium": 2,
+    "high": 1,
+    "critical": 0
+  },
+  "openCases": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "title": "Synthetic checkout timeouts",
+      "status": "open",
+      "severity": "high",
+      "createdAt": "2026-08-24T11:00:00.000Z"
+    }
+  ],
+  "recentActivity": [
+    {
+      "caseId": "11111111-1111-4111-8111-111111111111",
+      "title": "Synthetic checkout timeouts",
+      "kind": "case_created",
+      "actor": "fixture-lead",
+      "serverTime": "2026-08-24T11:00:00.000Z",
+      "seq": 1
+    }
+  ],
+  "queuedAndRunningJobs": [
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "caseId": "11111111-1111-4111-8111-111111111111",
+      "caseTitle": "Synthetic checkout timeouts",
+      "status": "running",
+      "strategyId": "contextdesk.standard",
+      "sameSnapshot": null,
+      "createdAt": "2026-08-24T11:01:00.000Z",
+      "updatedAt": "2026-08-24T11:01:05.000Z",
+      "startedAt": "2026-08-24T11:01:05.000Z",
+      "finishedAt": null
+    }
+  ],
+  "recentTerminalJobs": [
+    {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "caseId": "11111111-1111-4111-8111-111111111111",
+      "caseTitle": "Synthetic checkout timeouts",
+      "status": "completed",
+      "strategyId": "contextdesk.standard",
+      "sameSnapshot": true,
+      "createdAt": "2026-08-24T11:02:00.000Z",
+      "updatedAt": "2026-08-24T11:02:10.000Z",
+      "startedAt": "2026-08-24T11:02:01.000Z",
+      "finishedAt": "2026-08-24T11:02:10.000Z"
+    }
+  ],
+  "presence": {
+    "available": true,
+    "reason": "ephemeral_live",
+    "ttlSeconds": 45,
+    "members": [
+      {
+        "caseId": "11111111-1111-4111-8111-111111111111",
+        "identityId": "uid=fixture-lead,ou=people,dc=example,dc=test",
+        "username": "fixture-lead",
+        "surface": "experiment_lab",
+        "lastSeenAt": "2026-08-24T11:59:00.000Z"
+      }
+    ]
+  },
+  "attention": [
+    {
+      "predicate": "accept_eligible_proposal",
+      "caseId": "11111111-1111-4111-8111-111111111111",
+      "caseTitle": "Synthetic checkout timeouts",
+      "experimentId": "44444444-4444-4444-8444-444444444444",
+      "decisionId": "55555555-5555-4555-8555-555555555555",
+      "revision": 1,
+      "authorUsername": "fixture-contributor",
+      "createdAt": "2026-08-24T11:03:00.000Z"
+    }
+  ],
+  "notices": [
+    "Recorded counts are not progress or completeness.",
+    "Overview is not the full investigation inventory.",
+    "Presence is ephemeral and is not evidence.",
+    "Agreement is not proof of correctness, and cost and usage may remain unknown.",
+    "No blocked or stale investigation state exists unless it is recorded.",
+    "Attention names only an accept-eligible proposed decision the current lead or admin did not author, or the current actor's own still-open proposal."
+  ]
+}

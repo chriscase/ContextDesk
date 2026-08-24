@@ -488,7 +488,16 @@ async fn run_init(
 
     // Both layers are fully built (and every validation has already run)
     // before either write happens — a rejected timezone or URL never
-    // leaves a half-written cli.toml behind.
+    // leaves a half-written cli.toml behind. AppConfig persistence is
+    // Unix-only; refuse before mutating either layer when this host cannot
+    // honor that contract.
+    let needs_app_config = provider_setup.is_some() || independent_timezone.is_some();
+    if needs_app_config && !cd_core::config::durable_config_persistence_supported() {
+        return Err(CliError::not_implemented(format!(
+            "save config: config: {}",
+            cd_core::config::DURABLE_CONFIG_SAVE_UNSUPPORTED
+        )));
+    }
     let created = !path.exists();
     save_layer(&path, &cli_cfg)?;
 
@@ -1219,7 +1228,12 @@ mod tests {
 
     fn isolated_paths() -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::resolve(Some(dir.path()), None).unwrap();
+        // macOS exposes the default temporary root through `/var`, a symlink
+        // to `/private/var`. Resolve the disposable root before exercising
+        // the production config store, whose no-symlink-ancestor policy is
+        // intentionally stricter than `tempfile`'s default spelling.
+        let root = dir.path().canonicalize().unwrap();
+        let paths = Paths::resolve(Some(&root), None).unwrap();
         assert!(paths.isolated);
         (dir, paths)
     }
@@ -1279,6 +1293,7 @@ mod tests {
     /// The end-to-end guarantee: after a full successful `run_init`, the
     /// credential really has landed in the secret store, and neither
     /// on-disk config file contains it.
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_init_stores_the_credential_only_after_both_config_files_are_written() {
         let env_var = "CD_CONFIG_CMD_TEST_KEY_LANDS";
@@ -1390,6 +1405,7 @@ mod tests {
 
     /// `--default-timezone` must land on AppConfig even when the caller
     /// skips every provider step (`--skip-provider` / no `--provider-kind`).
+    #[cfg(unix)]
     #[tokio::test]
     async fn default_timezone_works_with_skip_provider() {
         let (dir, paths) = isolated_paths();
@@ -1413,6 +1429,60 @@ mod tests {
             "AppConfig.default_timezone must be set without any provider profile"
         );
         assert!(cfg.providers.profiles.is_empty());
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn run_init_refuses_app_config_persistence_before_mutation() {
+        let env_var = "CD_CONFIG_CMD_TEST_KEY_UNSUPPORTED_HOST";
+        std::env::set_var(env_var, "sk-must-not-be-stored");
+        let (dir, paths) = isolated_paths();
+        let mut args = base_args();
+        args.provider_kind = Some(ProviderKindArg::OpenAiCompatible);
+        args.base_url = Some("http://127.0.0.1:1/v1".into());
+        args.chat_model = Some("test-model".into());
+        args.profile_id = Some("test-profile-unsupported".into());
+        args.api_key_env = Some(env_var.into());
+
+        let secrets = MemorySecretStore::new();
+        let err = match run_init(&args, &paths, dir.path(), &AppConfig::default(), &secrets).await {
+            Err(e) => e,
+            Ok(_) => panic!("non-unix AppConfig persistence must fail closed"),
+        };
+        std::env::remove_var(env_var);
+
+        assert_eq!(err.category, crate::envelope::ExitCategory::NotImplemented);
+        assert!(
+            err.message
+                .contains(cd_core::config::DURABLE_CONFIG_SAVE_UNSUPPORTED),
+            "{}",
+            err.message
+        );
+        let key_ref = key_ref_for_profile("test-profile-unsupported");
+        assert_eq!(
+            secrets.get(&key_ref).unwrap(),
+            None,
+            "unsupported host must not store the credential"
+        );
+        assert!(!paths.app_config_path.exists());
+        assert!(!global_config_path(&paths.config_dir).exists());
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn timezone_only_init_refuses_before_writing_cli_toml() {
+        let (dir, paths) = isolated_paths();
+        let mut args = base_args();
+        args.skip_provider = true;
+        args.default_timezone = Some("America/Chicago".into());
+        let secrets = MemorySecretStore::new();
+        let err = match run_init(&args, &paths, dir.path(), &AppConfig::default(), &secrets).await {
+            Err(e) => e,
+            Ok(_) => panic!("timezone persistence requires durable AppConfig save"),
+        };
+        assert_eq!(err.category, crate::envelope::ExitCategory::NotImplemented);
+        assert!(!paths.app_config_path.exists());
+        assert!(!global_config_path(&paths.config_dir).exists());
     }
 
     /// A provider kind that doesn't need a key (Ollama) must never touch

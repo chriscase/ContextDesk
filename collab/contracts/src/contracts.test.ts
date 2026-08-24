@@ -28,6 +28,7 @@ import {
   parseHealthResponse,
   parseLiveQualificationCatalog,
   parseLiveQualificationReport,
+  parseOverview,
   parsePromptPackage,
   parseSource,
 } from "./index.js";
@@ -111,6 +112,11 @@ describe("contracts unknown-field rejection", () => {
         schemaId: CASE_SCHEMA_ID,
         id: "c1",
         title: "t",
+        problemStatement: "",
+        affectedParties: "",
+        impact: "",
+        scope: "",
+        openQuestions: [],
         severity: "low",
         status: "open",
         legalHold: false,
@@ -121,6 +127,27 @@ describe("contracts unknown-field rejection", () => {
         extra: true,
       }),
     ).toThrow(/unknown key/);
+  });
+
+  it("normalizes Situation fields omitted by an older case document", () => {
+    const legacy = parseCase({
+      schemaId: CASE_SCHEMA_ID,
+      id: "legacy-case",
+      title: "Legacy synthetic case",
+      severity: "low",
+      status: "open",
+      legalHold: false,
+      retentionClass: "standard",
+      participants: [],
+      createdAt: "2026-08-01T00:00:00.000Z",
+      createdBy: "fixture-operator",
+    });
+    expect(legacy.problemStatement).toBe("");
+    expect(legacy.affectedParties).toBe("");
+    expect(legacy.impact).toBe("");
+    expect(legacy.scope).toBe("");
+    expect(legacy.openQuestions).toEqual([]);
+    expect(legacy.situationVersion).toBe(0);
   });
 
   it("accepts the synthetic three-model experiment package and rejects unknown fields", () => {
@@ -229,6 +256,11 @@ describe("JSON Schema additionalProperties: false", () => {
         schemaId: CASE_SCHEMA_ID,
         id: "c",
         title: "t",
+        problemStatement: "",
+        affectedParties: "",
+        impact: "",
+        scope: "",
+        openQuestions: [],
         severity: "low",
         status: "open",
         legalHold: false,
@@ -314,6 +346,23 @@ describe("JSON Schema additionalProperties: false", () => {
         JSON.parse(readFileSync(join(fixturesDir, "profile-catalog.unknown-field.json"), "utf8")),
       ),
     ).toBe(false);
+  });
+
+  it("overview schema rejects unknown fields and accepts the synthetic fixture", () => {
+    const overview = ajv.compile(loadSchema("overview.v1.json"));
+    expect(
+      overview(JSON.parse(readFileSync(join(fixturesDir, "overview.valid.json"), "utf8"))),
+    ).toBe(true);
+    expect(
+      overview(
+        JSON.parse(readFileSync(join(fixturesDir, "overview.unknown-field.json"), "utf8")),
+      ),
+    ).toBe(false);
+    expect(() =>
+      parseOverview(
+        JSON.parse(readFileSync(join(fixturesDir, "overview.unknown-field.json"), "utf8")),
+      ),
+    ).toThrow(/unknown key/);
   });
 
   it("live qualification schemas reject unknown fields and accept fixtures", () => {

@@ -184,7 +184,20 @@ describe("TriageRunPanel", () => {
       }),
     );
 
-    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    render(
+      <TriageRunPanel
+        caseId="case-1"
+        canLead
+        readOnly={false}
+        routeFocus={{
+          section: "triage-lane-runner",
+          item: "job-1:qwen-reviewer",
+          itemKind: "triage-candidate",
+          lane: null,
+          experiment: null,
+        }}
+      />,
+    );
     expect(await screen.findByText("Start a snapshot-bound comparison")).toBeTruthy();
     expect(screen.getAllByText("qwen-3.6-27b", { exact: false }).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("reviewer · settled")).toBeTruthy();
@@ -194,6 +207,10 @@ describe("TriageRunPanel", () => {
     expect(screen.getByText(/Agreement is not proof of correctness/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Use this setup again" })).toBeTruthy();
     expect(screen.queryByText(/schemaId/)).toBeNull();
+    const candidate = document.querySelector(
+      '[data-route-item="job-1:qwen-reviewer"][data-route-kind="triage-candidate"]',
+    ) as HTMLElement;
+    await waitFor(() => expect(document.activeElement).toBe(candidate));
   });
 
   it("adds an operator-picked lane by identifiers only and rejects DeepSeek", async () => {
@@ -284,7 +301,7 @@ describe("TriageRunPanel", () => {
     expect(screen.queryByText(/ai-gateway\.vercel\.sh/)).toBeNull();
   });
 
-  it("configures each gateway lane with its own host profile", async () => {
+  it("configures each gateway lane with its own gateway model", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/snapshots")) {
@@ -312,9 +329,9 @@ describe("TriageRunPanel", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Execution mode" }), { target: { value: "gateway" } });
     expect((screen.getByRole("combobox", { name: "Lane concurrency" }) as HTMLSelectElement).value).toBe("2");
     fireEvent.change(screen.getByRole("combobox", { name: "Lane concurrency" }), { target: { value: "3" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "qwen-3.6-27b host connector profile" }), { target: { value: "profile:qwen" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "gpt-oss-120b host connector profile" }), { target: { value: "profile:gpt" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "ministral-3-14b-instruct-2512 host connector profile" }), { target: { value: "profile:qwen" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }), { target: { value: "profile:qwen" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "gpt-oss-120b gateway model" }), { target: { value: "profile:gpt" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "ministral-3-14b-instruct-2512 gateway model" }), { target: { value: "profile:qwen" } });
     fireEvent.click(screen.getByRole("button", { name: "Run gateway comparison" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
@@ -327,6 +344,74 @@ describe("TriageRunPanel", () => {
     const request = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")?.[1];
     expect(request?.body).toContain('"profileId":"profile:gpt"');
     expect(request?.body).toContain('"concurrency":3');
+  });
+
+  it("keeps distinct catalog models selectable when they share one gateway connection", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/snapshots")) {
+        return response({
+          snapshots: [{ id: "snapshot-1", fingerprint: "a".repeat(64), evidence: [], createdBy: "lead" }],
+        });
+      }
+      if (url.endsWith("/evidence")) return response({ artifacts: [] });
+      if (url.endsWith("/imports")) return response({ runs: [] });
+      if (url.endsWith("/api/triage-profiles")) {
+        return response({
+          profiles: [
+            {
+              id: "subject:qwen",
+              profileId: "shared-employer-gateway",
+              modelId: "qwen-3.6-27b",
+              alias: "qwen-3.6-27b",
+              label: "Qwen 3.6 27B",
+              provider: "openai-compatible",
+            },
+            {
+              id: "subject:gpt-oss",
+              profileId: "shared-employer-gateway",
+              modelId: "gpt-oss-120b",
+              alias: "gpt-oss-120b",
+              label: "GPT OSS 120B",
+              provider: "openai-compatible",
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/api/triage-capabilities")) return response({ gatewayAvailable: true });
+      if (init?.method === "POST") return response({ id: "job-1" });
+      return response({ jobs: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<TriageRunPanel caseId="case-1" canLead readOnly={false} />);
+    await screen.findByRole("heading", { name: "Run history" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Execution mode" }), { target: { value: "gateway" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /ministral-3-14b-instruct-2512/ }));
+
+    expect((screen.getByRole("combobox", { name: "qwen-3.6-27b gateway model" }) as HTMLSelectElement).value)
+      .toBe("subject:qwen");
+    expect((screen.getByRole("combobox", { name: "gpt-oss-120b gateway model" }) as HTMLSelectElement).value)
+      .toBe("subject:gpt-oss");
+
+    fireEvent.click(screen.getByRole("button", { name: "Run gateway comparison" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
+    const request = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")?.[1];
+    const body = JSON.parse(String(request?.body)) as {
+      candidates: Array<{ candidateId: string; profileId: string | null; model: string }>;
+    };
+    expect(body.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        candidateId: "qwen-reviewer",
+        profileId: "shared-employer-gateway",
+        model: "qwen-3.6-27b",
+      }),
+      expect.objectContaining({
+        candidateId: "gpt-oss-contributor",
+        profileId: "shared-employer-gateway",
+        model: "gpt-oss-120b",
+      }),
+    ]));
   });
 
   it("restores gateway lane concurrency when reusing a run setup", async () => {

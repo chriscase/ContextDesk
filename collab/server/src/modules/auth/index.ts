@@ -4,10 +4,21 @@
  */
 export const MODULE_ID = "auth" as const;
 
-export type { AuthAdapter, AuthIdentity, AuthSuccess } from "./adapter.js";
+export type {
+  AuthAdapter,
+  AuthIdentity,
+  AuthSuccess,
+  DirectorySearchOptions,
+} from "./adapter.js";
 export { MapAuthAdapter } from "./adapter.js";
 export { loadLocalAuthAdapter } from "./local-adapter.js";
-export { LdapAuthAdapter, ldapClientOptions, ldapTlsOptions } from "./ldap-adapter.js";
+export {
+  LdapAuthAdapter,
+  directoryGroupFilter,
+  directoryIdentityFilter,
+  ldapClientOptions,
+  ldapTlsOptions,
+} from "./ldap-adapter.js";
 export { loadLdapConfig } from "./ldap-config.js";
 export type { LdapConfig } from "./ldap-config.js";
 export { createAuthLog } from "./log.js";

@@ -24,7 +24,13 @@ import {
   type ActiveSessionDeps,
 } from "../auth/index.js";
 import { canPerform, type MutableGroupRoleMap } from "../authz/index.js";
-import { LegalHoldError, type Actor, type CaseService } from "./service.js";
+import {
+  LegalHoldError,
+  SituationConflictError,
+  type Actor,
+  type CaseService,
+  type CaseSituationInput,
+} from "./service.js";
 
 function authError(error: AuthErrorV1["error"]): AuthErrorV1 {
   return { schemaId: AUTH_ERROR_SCHEMA_ID, error };
@@ -40,13 +46,58 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
+function clientTimeInput(body: Record<string, unknown>):
+  | { valid: true; value: string | undefined }
+  | { valid: false } {
+  if (!Object.prototype.hasOwnProperty.call(body, "clientTime")) {
+    return { valid: true, value: undefined };
+  }
+  return typeof body.clientTime === "string"
+    ? { valid: true, value: body.clientTime }
+    : { valid: false };
+}
+
+const SITUATION_KEYS = [
+  "problemStatement",
+  "affectedParties",
+  "impact",
+  "scope",
+  "openQuestions",
+] as const;
+
+function situationInput(body: Record<string, unknown>):
+  | { valid: true; value: Partial<CaseSituationInput>; supplied: boolean }
+  | { valid: false } {
+  const value: Partial<CaseSituationInput> = {};
+  let supplied = false;
+  for (const key of SITUATION_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(body, key)) continue;
+    supplied = true;
+    const field = body[key];
+    if (key === "openQuestions") {
+      if (!Array.isArray(field) || !field.every((item) => typeof item === "string")) {
+        return { valid: false };
+      }
+      value.openQuestions = field;
+    } else {
+      if (typeof field !== "string") return { valid: false };
+      value[key] = field;
+    }
+  }
+  return { valid: true, value, supplied };
+}
+
 function domainError(
   reply: { code: (status: number) => unknown },
   err: unknown,
-): { error: string } {
+): { error: string; currentVersion?: number } {
   if (err instanceof LegalHoldError) {
     void reply.code(409);
     return { error: "legal_hold" };
+  }
+  if (err instanceof SituationConflictError) {
+    void reply.code(409);
+    return { error: "situation_conflict", currentVersion: err.currentVersion };
   }
   const message = err instanceof Error ? err.message : "invalid";
   if (
@@ -126,6 +177,24 @@ export async function registerCaseRoutes(
     };
   }
 
+  app.get("/api/activity", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    if (!ctx.canRead) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const rawLimit = (request.query as { limit?: unknown }).limit;
+    const parsedLimit = typeof rawLimit === "string" ? Number.parseInt(rawLimit, 10) : 30;
+    return {
+      schemaId: "cd-collab.activity_feed.v1",
+      activities: await deps.domain.listRecentActivity(ctx.actor, ctx.isAdmin, parsedLimit),
+    };
+  });
+
   app.get("/api/cases", async (request, reply) => {
     const ctx = await sessionOf(request);
     if (!ctx) {
@@ -165,14 +234,32 @@ export async function registerCaseRoutes(
       void reply.code(400);
       return authError("forbidden");
     }
-    const input: { title: string; severity?: CaseSeverity; clientTime?: string } = { title };
+    const situation = situationInput(body);
+    const suppliedClientTime = clientTimeInput(body);
+    if (!situation.valid || !suppliedClientTime.valid) {
+      void reply.code(400);
+      return authError("forbidden");
+    }
+    const input: {
+      title: string;
+      severity?: CaseSeverity;
+      clientTime?: string;
+      problemStatement?: string;
+      affectedParties?: string;
+      impact?: string;
+      scope?: string;
+      openQuestions?: string[];
+    } = { title, ...situation.value };
     const severity = str(body.severity);
     if (severity && (CASE_SEVERITIES as readonly string[]).includes(severity)) {
       input.severity = severity as CaseSeverity;
     }
-    const clientTime = str(body.clientTime);
-    if (clientTime) input.clientTime = clientTime;
-    return deps.domain.createCase(ctx.actor, input, request.ip);
+    if (suppliedClientTime.value !== undefined) input.clientTime = suppliedClientTime.value;
+    try {
+      return await deps.domain.createCase(ctx.actor, input, request.ip);
+    } catch (err) {
+      return domainError(reply, err);
+    }
   });
 
   app.get("/api/cases/:id", async (request, reply) => {
@@ -204,13 +291,67 @@ export async function registerCaseRoutes(
     if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
       return authError("forbidden");
     }
-    const status = str(asRecord(request.body).status);
+    const body = asRecord(request.body);
+    const status = str(body.status);
+    const suppliedClientTime = clientTimeInput(body);
     if (!status || !(CASE_STATUSES as readonly string[]).includes(status)) {
       void reply.code(400);
       return authError("forbidden");
     }
+    if (!suppliedClientTime.valid) {
+      void reply.code(400);
+      return { error: "clientTime must be a string" };
+    }
     try {
-      return await deps.domain.setStatus(id, ctx.actor, status as CaseStatus, request.ip);
+      return await deps.domain.setStatus(
+        id,
+        ctx.actor,
+        status as CaseStatus,
+        request.ip,
+        suppliedClientTime.value,
+      );
+    } catch (err) {
+      return domainError(reply, err);
+    }
+  });
+
+  app.patch("/api/cases/:id/situation", async (request, reply) => {
+    const ctx = await sessionOf(request);
+    if (!ctx) {
+      void reply.code(401);
+      return authError("unauthenticated");
+    }
+    if (!ctx.canWrite) {
+      void reply.code(403);
+      return authError("forbidden");
+    }
+    const id = (request.params as { id: string }).id;
+    if (!(await requireCaseAccess(deps.domain, ctx, id, reply))) {
+      return authError("forbidden");
+    }
+    const body = asRecord(request.body);
+    const situation = situationInput(body);
+    const suppliedClientTime = clientTimeInput(body);
+    const expectedVersion = body.expectedVersion;
+    if (
+      !situation.valid
+      || !situation.supplied
+      || !suppliedClientTime.valid
+      || !Number.isSafeInteger(expectedVersion)
+      || (expectedVersion as number) < 0
+    ) {
+      void reply.code(400);
+      return authError("forbidden");
+    }
+    try {
+      return await deps.domain.updateSituation(
+        id,
+        ctx.actor,
+        situation.value,
+        expectedVersion as number,
+        request.ip,
+        suppliedClientTime.value,
+      );
     } catch (err) {
       return domainError(reply, err);
     }
@@ -326,7 +467,11 @@ export async function registerCaseRoutes(
     }
     const visibility = str(body.visibility);
     const protocolVersion = str(body.protocolVersion);
-    const clientTime = str(body.clientTime);
+    const suppliedClientTime = clientTimeInput(body);
+    if (!suppliedClientTime.valid) {
+      void reply.code(400);
+      return { error: "clientTime must be a string" };
+    }
     try {
       return await deps.domain.createSnapshot(
         id,
@@ -337,7 +482,9 @@ export async function registerCaseRoutes(
             ? { visibility: visibility as PrivacyClass }
             : {}),
           ...(protocolVersion ? { protocolVersion } : {}),
-          ...(clientTime ? { clientTime } : {}),
+          ...(suppliedClientTime.value === undefined
+            ? {}
+            : { clientTime: suppliedClientTime.value }),
         },
         request.ip,
       );
@@ -424,8 +571,12 @@ export async function registerCaseRoutes(
     if (privacy && (PRIVACY_CLASSES as readonly string[]).includes(privacy)) {
       input.privacyClass = privacy as PrivacyClass;
     }
-    const clientTime = str(body.clientTime);
-    if (clientTime) input.clientTime = clientTime;
+    const suppliedClientTime = clientTimeInput(body);
+    if (!suppliedClientTime.valid) {
+      void reply.code(400);
+      return { error: "clientTime must be a string" };
+    }
+    if (suppliedClientTime.value !== undefined) input.clientTime = suppliedClientTime.value;
     const hypothesisStatus = str(body.hypothesisStatus);
     if (
       hypothesisStatus &&
@@ -479,10 +630,16 @@ export async function registerCaseRoutes(
     if (!(await requireCaseAccess(deps.domain, ctx, params.id, reply))) {
       return authError("forbidden");
     }
-    const text = str(asRecord(request.body).body);
+    const body = asRecord(request.body);
+    const text = str(body.body);
+    const suppliedClientTime = clientTimeInput(body);
     if (text === undefined) {
       void reply.code(400);
       return authError("forbidden");
+    }
+    if (!suppliedClientTime.valid) {
+      void reply.code(400);
+      return { error: "clientTime must be a string" };
     }
     try {
       return await deps.domain.reviseContribution(
@@ -491,6 +648,7 @@ export async function registerCaseRoutes(
         ctx.actor,
         text,
         request.ip,
+        suppliedClientTime.value,
       );
     } catch (err) {
       return domainError(reply, err);
@@ -560,9 +718,14 @@ export async function registerCaseRoutes(
     }
     const body = asRecord(request.body);
     const status = str(body.status);
+    const suppliedClientTime = clientTimeInput(body);
     if (!status || !(HYPOTHESIS_STATUSES as readonly string[]).includes(status)) {
       void reply.code(400);
       return authError("forbidden");
+    }
+    if (!suppliedClientTime.valid) {
+      void reply.code(400);
+      return { error: "clientTime must be a string" };
     }
     const links = Array.isArray(body.links)
       ? (body.links as { kind: "artifact" | "contribution"; id: string }[])
@@ -575,6 +738,7 @@ export async function registerCaseRoutes(
         status as HypothesisStatus,
         links,
         request.ip,
+        suppliedClientTime.value,
       );
     } catch (err) {
       return domainError(reply, err);
@@ -635,8 +799,12 @@ export async function registerCaseRoutes(
     if (privacy && (PRIVACY_CLASSES as readonly string[]).includes(privacy)) {
       evidence.privacyClass = privacy as PrivacyClass;
     }
-    const clientTime = str(body.clientTime);
-    if (clientTime) evidence.clientTime = clientTime;
+    const suppliedClientTime = clientTimeInput(body);
+    if (!suppliedClientTime.valid) {
+      void reply.code(400);
+      return { error: "clientTime must be a string" };
+    }
+    if (suppliedClientTime.value !== undefined) evidence.clientTime = suppliedClientTime.value;
     const evidenceSource = str(body.sourceId);
     if (evidenceSource) evidence.sourceId = evidenceSource;
     try {

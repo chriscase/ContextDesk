@@ -16,6 +16,10 @@ fn cli(home: &Path) -> Command {
     let mut cmd =
         Command::cargo_bin("contextdesk").expect("contextdesk binary built by this workspace");
     cmd.env("HOME", home);
+    // `--data-dir` is the cross-platform isolation seam. HOME alone does not
+    // skip `ensure_config_dir` on Windows (`dirs::home_dir()` uses the
+    // profile folder and ignores HOME).
+    cmd.args(["--data-dir", home.to_str().unwrap()]);
     cmd
 }
 
@@ -41,7 +45,12 @@ fn ctrl_c_cancels_cleanly_and_a_retry_succeeds() {
     let bin = assert_cmd::cargo::cargo_bin("contextdesk");
     let mut child = std::process::Command::new(&bin)
         .env("HOME", home.path())
-        .args(["import", source.path().to_str().unwrap()])
+        .args([
+            "--data-dir",
+            home.path().to_str().unwrap(),
+            "import",
+            source.path().to_str().unwrap(),
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()

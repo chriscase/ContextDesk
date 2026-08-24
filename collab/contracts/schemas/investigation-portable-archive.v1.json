@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cd-collab.local/schemas/investigation-portable-archive.v1.json",
+  "title": "cd-collab portable investigation archive v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "exportedAt",
+    "semanticFingerprint",
+    "transportHash",
+    "permissionCaveat",
+    "historyCaveat",
+    "blobInventory",
+    "signature",
+    "investigation"
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time" }
+  },
+  "properties": {
+    "schemaId": {
+      "type": "string",
+      "const": "cd-collab.investigation_portable_archive.v1"
+    },
+    "exportedAt": { "$ref": "#/$defs/timestamp" },
+    "semanticFingerprint": { "$ref": "#/$defs/sha256" },
+    "transportHash": { "$ref": "#/$defs/sha256" },
+    "permissionCaveat": { "type": "string" },
+    "historyCaveat": { "type": "string" },
+    "blobInventory": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["digest", "byteLength", "contentType", "presence", "payloadBase64"],
+        "properties": {
+          "digest": { "$ref": "#/$defs/sha256" },
+          "byteLength": { "type": "integer", "minimum": 0 },
+          "contentType": { "type": ["string", "null"] },
+          "presence": {
+            "type": "string",
+            "enum": ["inline", "detached", "omitted", "private", "redacted"]
+          },
+          "payloadBase64": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "signature": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "signingKeyFingerprint",
+        "signedManifestHash",
+        "hashInventory",
+        "signatureBase64",
+        "verificationStatus",
+        "authenticityClaim"
+      ],
+      "properties": {
+        "algorithm": { "type": "string", "const": "Ed25519" },
+        "signingKeyFingerprint": { "$ref": "#/$defs/sha256" },
+        "signedManifestHash": { "$ref": "#/$defs/sha256" },
+        "hashInventory": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "id", "hash"],
+            "properties": {
+              "kind": { "type": "string", "minLength": 1 },
+              "id": { "type": "string", "minLength": 1 },
+              "hash": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        },
+        "signatureBase64": { "type": ["string", "null"] },
+        "verificationStatus": { "type": "string", "const": "unverified" },
+        "authenticityClaim": { "type": "string", "const": "none" }
+      }
+    },
+    "investigation": { "type": "object" }
+  }
+}

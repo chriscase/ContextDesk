@@ -1,0 +1,259 @@
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { HelpCenter } from "./HelpCenter.js";
+
+afterEach(() => {
+  cleanup();
+});
+
+function renderHelp(overrides?: {
+  onOpenArea?: ReturnType<typeof vi.fn>;
+  onOpenStage?: ReturnType<typeof vi.fn> | null;
+}) {
+  const onOpenArea = overrides?.onOpenArea ?? vi.fn();
+  const onOpenStage = overrides?.onOpenStage === undefined ? null : overrides.onOpenStage;
+  render(<HelpCenter onOpenArea={onOpenArea} onOpenStage={onOpenStage} />);
+  return { onOpenArea, onOpenStage };
+}
+
+function searchFor(value: string) {
+  fireEvent.change(screen.getByLabelText("Search help"), { target: { value } });
+}
+
+function resultsList(): HTMLElement {
+  return screen.getByRole("list", { name: "Search results" });
+}
+
+describe("help landing", () => {
+  it("shows the searchable landing with orientation, quick tasks, and the flow graphic", () => {
+    renderHelp();
+    expect(screen.getByRole("heading", { name: "Help Center" })).toBeTruthy();
+    expect(screen.getByRole("search")).toBeTruthy();
+    expect(screen.getByLabelText("Search help")).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { name: "What are you trying to do?" }),
+    ).toBeTruthy();
+    const flow = screen.getByRole("list", { name: "Capture to Decide flow" });
+    const steps = within(flow).getAllByRole("listitem");
+    expect(steps.map((step) => step.textContent)).toEqual([
+      "Captureevidence in, with provenance",
+      "Analyzesnapshots & AI lanes",
+      "Comparelanes on the same evidence",
+      "Decidea person makes the call",
+    ]);
+  });
+
+  it("lists every topic category and the glossary in the topic rail", () => {
+    renderHelp();
+    const rail = screen.getByRole("navigation", { name: "Help topics" });
+    for (const category of [
+      "Get started",
+      "Capture & provenance",
+      "Analyze & triage runs",
+      "Compare models & evidence fairness",
+      "Decide & share-safe export",
+      "Investigation Teams & qualification",
+      "Sources",
+      "Collaboration & presence",
+      "Privacy & administration",
+    ]) {
+      expect(within(rail).getByRole("heading", { name: category })).toBeTruthy();
+    }
+    expect(within(rail).getByRole("button", { name: "Glossary" })).toBeTruthy();
+  });
+
+  it("does not render every article body at once", () => {
+    renderHelp();
+    expect(screen.queryByRole("heading", { name: "What this is" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Limits" })).toBeNull();
+  });
+});
+
+describe("help search", () => {
+  it("ranks a title match above body-only matches and announces the count", () => {
+    renderHelp();
+    searchFor("import");
+    expect(screen.getByRole("status").textContent).toMatch(/^\d+ results? for “import”$/);
+    const results = within(resultsList()).getAllByRole("button");
+    expect(results.length).toBeGreaterThan(1);
+    expect(results[0]?.querySelector(".help-result__title")?.textContent).toBe(
+      "Import output from an outside tool",
+    );
+  });
+
+  it("shows matched context with the term highlighted", () => {
+    renderHelp();
+    searchFor("fingerprint");
+    const snippetMark = resultsList().querySelector(".help-result__snippet mark");
+    expect(snippetMark?.textContent?.toLowerCase()).toBe("fingerprint");
+  });
+
+  it("clears the search and returns to the landing view", () => {
+    renderHelp();
+    searchFor("snapshot");
+    expect(screen.queryByRole("heading", { name: "What are you trying to do?" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect((screen.getByLabelText("Search help") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("heading", { name: "What are you trying to do?" })).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe("");
+  });
+
+  it("states an honest no-results outcome and what search does not cover", () => {
+    renderHelp();
+    searchFor("zzzunfindable");
+    expect(screen.getByRole("status").textContent).toBe("0 results for “zzzunfindable”");
+    expect(screen.getByText(/No help articles match/)).toBeTruthy();
+    expect(
+      screen.getByText(/does not search your investigations or evidence/),
+    ).toBeTruthy();
+  });
+
+  it("opens an article from a result and clears the query", () => {
+    renderHelp();
+    searchFor("import");
+    const results = within(resultsList()).getAllByRole("button");
+    fireEvent.click(results[0] as HTMLElement);
+    expect(
+      screen.getByRole("heading", { name: "Import output from an outside tool" }),
+    ).toBeTruthy();
+    expect((screen.getByLabelText("Search help") as HTMLInputElement).value).toBe("");
+    for (const section of [
+      "What this is",
+      "When to use it",
+      "Steps",
+      "What gets recorded",
+      "Limits",
+    ]) {
+      expect(screen.getByRole("heading", { name: section })).toBeTruthy();
+    }
+  });
+
+  it("explains that current exports cannot restore a full investigation", () => {
+    renderHelp();
+    searchFor("restore");
+    const result = within(resultsList()).getByRole("button", {
+      name: /Move or restore a complete investigation/,
+    });
+    fireEvent.click(result);
+    expect(
+      screen.getByText(/current brief and selected-evidence package/, { exact: false }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/no full-investigation archive download/, { exact: false }),
+    ).toBeTruthy();
+  });
+
+  it("finds glossary terms and jumps focus to the matched term", () => {
+    renderHelp();
+    searchFor("qualification");
+    const glossaryResult = within(resultsList())
+      .getAllByRole("button")
+      .find((button) => button.querySelector(".help-result__category")?.textContent === "Glossary");
+    expect(glossaryResult).toBeTruthy();
+    fireEvent.click(glossaryResult as HTMLElement);
+    expect(screen.getByRole("heading", { name: "Glossary" })).toBeTruthy();
+    expect(document.activeElement?.id).toBe("help-term-qualification");
+  });
+});
+
+describe("article selection and mobile back", () => {
+  it("selects an article from the rail, marks it current, and hands focus to its title", () => {
+    renderHelp();
+    const link = screen.getByRole("button", { name: "Freeze an evidence snapshot" });
+    fireEvent.click(link);
+    const title = screen.getByRole("heading", { name: "Freeze an evidence snapshot" });
+    expect(document.activeElement).toBe(title);
+    expect(link.getAttribute("aria-current")).toBe("true");
+  });
+
+  it("returns to the topic list through the Back to topics control", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: "Read the case board" }));
+    expect(screen.getByRole("heading", { name: "Read the case board" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "What are you trying to do?" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back to topics" }));
+    expect(screen.queryByRole("heading", { name: "Read the case board" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "What are you trying to do?" })).toBeTruthy();
+  });
+});
+
+describe("glossary", () => {
+  it("defines every core term, including the required vocabulary", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: "Glossary" }));
+    const terms = screen.getAllByRole("term").map((node) => node.textContent);
+    for (const required of [
+      "investigation",
+      "evidence snapshot",
+      "imported run",
+      "provenance",
+      "lane",
+      "accepted decision",
+      "share-safe",
+      "profile",
+      "qualification",
+      "host profile",
+    ]) {
+      expect(terms).toContain(required);
+    }
+  });
+});
+
+describe("real navigation callbacks", () => {
+  it("routes area actions through the bounded callback", () => {
+    const { onOpenArea } = renderHelp({ onOpenArea: vi.fn() });
+    fireEvent.click(screen.getByRole("button", { name: "The source & provenance library" }));
+    fireEvent.click(screen.getByRole("button", { name: "Go to Sources" }));
+    expect(onOpenArea).toHaveBeenCalledWith("sources");
+  });
+
+  it("renders no stage shortcuts at all without an investigation context", () => {
+    renderHelp({ onOpenStage: null });
+    expect(screen.queryByRole("group", { name: "Return to your investigation" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Run AI lanes against a snapshot" }));
+    expect(screen.queryByRole("button", { name: "Open the Analyze stage" })).toBeNull();
+  });
+
+  it("offers working stage shortcuts when an investigation is in focus", () => {
+    const onOpenStage = vi.fn();
+    renderHelp({ onOpenStage });
+    const shortcuts = screen.getByRole("group", { name: "Return to your investigation" });
+    fireEvent.click(within(shortcuts).getByRole("button", { name: "Decide" }));
+    expect(onOpenStage).toHaveBeenCalledWith("decide");
+    fireEvent.click(screen.getByRole("button", { name: "Run AI lanes against a snapshot" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open the Analyze stage" }));
+    expect(onOpenStage).toHaveBeenCalledWith("analyze");
+  });
+});
+
+describe("honest limitation copy", () => {
+  it("states that presence is polling, not a real-time chat channel", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: "See who is working the case" }));
+    expect(screen.getAllByText(/about every 15 seconds/).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/HTTP polling, not a real-time connection — there is no live chat channel/),
+    ).toBeTruthy();
+  });
+
+  it("states that demo sign-in is a fixture account, not the production directory", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in, roles, and what you can do" }));
+    expect(screen.getByText(/built-in fixture account/)).toBeTruthy();
+    expect(screen.getByText(/LDAP directory by default/)).toBeTruthy();
+  });
+
+  it("describes the shipped admin console while keeping setup and qualification limits honest", () => {
+    renderHelp();
+    fireEvent.click(screen.getByRole("button", { name: "Administration and setup" }));
+    expect(screen.getByText(/visible only to the workspace admin role/)).toBeTruthy();
+    expect(screen.getByText(/finding an identity or group grants nothing/)).toBeTruthy();
+    expect(screen.getByText(/never displays or accepts directory credentials/)).toBeTruthy();
+    expect(screen.getByText(/no graphical first-run setup wizard/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Lane qualification and host profiles" }));
+    expect(screen.getAllByText(/passed, failed, skipped, or partial/).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/This web app shows no qualification status/),
+    ).toBeTruthy();
+  });
+});

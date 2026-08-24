@@ -695,6 +695,15 @@ including a broken or absent `$HOME`, which fails the default
 `AppConfig` path on top of either default, isolated or not, and is used as
 an exact path (never joined with `--data-dir`).
 
+Durable `AppConfig` persistence (`<data-dir>/config.json` via
+`cd_core::config::save_config`) is Unix-only: it requires a no-follow,
+owner-only, directory-relative replace. On other hosts those writes fail
+closed with `not_implemented` (exit 7) and a stable reason, without
+mutating the destination. `--data-dir` still isolates read-only commands
+(`doctor`, `models`, `chat`, import/explore) when a readable `config.json`
+is already present. `cli.toml` (CLI preferences) uses a separate, weaker
+write path and is not that durability contract.
+
 `contextdesk config init`'s output always reports the resolved data
 location and whether it is isolated:
 
@@ -703,6 +712,7 @@ location and whether it is isolated:
 ```
 
 The same root also holds the durable **reviewed-format** store when used by import (`<data-dir>/cache/reviewed_formats` or the app-config-relative path the host opens for profiles under that data root).
+
 ## Configuration
 
 The CLI has its own, separate, versioned TOML configuration for CLI-only
@@ -1551,6 +1561,10 @@ closed as a `conflict` rather than partially applying.
   `--profile-id` opts out by design; `xai-grok-build` uses a
   machine-wide session that cannot be isolated and is therefore refused by
   `--check-connection` under an isolated data directory.
+- Durable `AppConfig` save (`config.json`) is Unix-only. Unsupported hosts
+  fail closed with `not_implemented` (exit 7) rather than writing through
+  ordinary `create_dir_all` / `rename`. Read-only CLI paths remain usable
+  under `--data-dir` with a planted or previously written config file.
 - The desktop Tauri `agent_turn` command does not yet call
   `cd_workflow::chat::run_chat_workflow`, and the desktop does not consume
   CLI trace output. Both hosts use the same `cd_core` research/agent kernel;

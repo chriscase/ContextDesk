@@ -205,6 +205,37 @@ export const HELP_INVESTIGATION_REPORT: HelpTipContent = {
   helpLocator: "help://investigation-reports#what-a-report-is",
 };
 
+/** Reproducible, identity-bound Investigation Team model comparison (#726). */
+export const HELP_INVESTIGATION_TEAM_COMPARISON: HelpTipContent = {
+  title: "Compare Investigation Team models fairly",
+  definition:
+    "Compare exact role, deployment, suite, prompt-set, and orchestration-policy evidence—not model names or vendor reputation.",
+  currentState:
+    "ContextDesk joins cached capability evidence, the latest measured team report, and per-role known-answer results into a read-only preflight. It does not authorize execution or declare a universal winner.",
+  useWhen:
+    "you are deciding whether a configured Investigator or Reviewer binding is ready for a bounded trial, or reproducing a comparison among gateway models.",
+  comparison: {
+    columns: ["Evidence", "Question it answers"],
+    rows: [
+      {
+        option: "Capability",
+        meaning: "Can this exact deployment satisfy the required host contract?",
+      },
+      {
+        option: "Known answer",
+        meaning: "How did it perform on the frozen suite for this exact role?",
+      },
+      {
+        option: "Speed / resource",
+        meaning: "What did this complete, comparable run observe—not what is universally cheapest or fastest?",
+      },
+    ],
+  },
+  safety:
+    "Stale, partial, blocked, cancelled, policy-mismatched, or provider-identity-mismatched runs are not comparable. Unknown tokens or cost stay unknown.",
+  helpLocator: "help://investigation-team-qualification#compare-models-fairly",
+};
+
 /** Coverage checklist for audits (#541). */
 export const HELP_COVERAGE_KEYS = [
   "find-vs-filter",

@@ -1,0 +1,445 @@
+{
+  "schemaId": "cd-collab.investigation_portable.v1",
+  "protocolVersion": "cd.v1",
+  "sourceInstallationId": "inst-7a1c9e2b4d6f80ab",
+  "exportedAt": "2026-08-23T12:00:00Z",
+  "permissionCaveat": "Imported membership and roles are historical snapshots only. Destination permissions must be newly authorized and audited.",
+  "historyCaveat": "Imported history is immutable. Destination identity is never inferred from display name or email.",
+  "investigation": {
+    "id": "inv-1",
+    "title": "Portable contract fixture",
+    "status": "open",
+    "severity": "medium",
+    "legalHold": false,
+    "retentionClass": "standard",
+    "privacyClass": "share_safe",
+    "problemStatement": "Synthetic workers stop draining a bounded queue.",
+    "affectedParties": "Fictional operations group",
+    "impact": "Synthetic requests remain queued beyond the expected interval.",
+    "scope": "One fictional worker pool.",
+    "openQuestions": [
+      "Which synthetic signal precedes the stall?"
+    ],
+    "situationVersion": 3,
+    "createdAt": "2026-08-23T12:00:00Z",
+    "createdBy": "actor-alice",
+    "objectHash": "23ca557fce9962403e97d9c0f4089324700ad95e05cf583f5861f7c1849db167"
+  },
+  "actors": [
+    {
+      "sourceActorId": "actor-alice",
+      "username": "alice",
+      "displayName": "Alice",
+      "email": null,
+      "roleNote": "case-lead",
+      "objectHash": "a29376f0484f35b48ab6412d8c63684e9e0f57574fa1825db641696027b805bb"
+    },
+    {
+      "sourceActorId": "actor-dave",
+      "username": "dave",
+      "displayName": "Dave",
+      "email": null,
+      "roleNote": "contributor",
+      "objectHash": "3565f0202c4f8561ae1d5f36e51b44d40238c602d649f0ba51f9df430b81f151"
+    }
+  ],
+  "participants": [
+    {
+      "sourceActorId": "actor-alice",
+      "role": "case-lead"
+    },
+    {
+      "sourceActorId": "actor-dave",
+      "role": "contributor"
+    }
+  ],
+  "contributions": [
+    {
+      "id": "c-note",
+      "kind": "note",
+      "revision": 1,
+      "predecessorRevision": null,
+      "body": "Fixture note body.",
+      "contentHash": "9e86b4e6488be84df8a8f56974d26e8ea8a0fb9f5f0b53fb10e6db481945c844",
+      "privacyClass": "share_safe",
+      "tombstoned": false,
+      "authorId": "actor-alice",
+      "sourceId": "src-human",
+      "createdAt": "2026-08-23T12:00:00Z",
+      "hypothesisStatus": null,
+      "objectHash": "d913839a5a5b7876e4d01db031094e9d55dbafc92a7fe6665dbf0c6da2116e88"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ev-private",
+      "title": "Owner-only notes",
+      "privacyClass": "owner_only",
+      "digest": "1a5104c068d0fa940533d7d428e5efed3c792ae8492a410cec13d05fcbf73cb1",
+      "inclusion": "private",
+      "contentType": "text/plain",
+      "byteLength": 16,
+      "createdBy": "actor-alice",
+      "createdAt": "2026-08-23T12:00:00Z",
+      "objectHash": "42be5d85a03bb30d5b2b4034265aace0e7b6a54253e3de2f21d993ee73f83cb3"
+    },
+    {
+      "id": "ev-share",
+      "title": "Share-safe log excerpt",
+      "privacyClass": "share_safe",
+      "digest": "63e2c73197dd1b1f5fbab225ff5ada2a1fe5a394bcf12025017ca9074b2ea7ae",
+      "inclusion": "present",
+      "contentType": "text/plain",
+      "byteLength": 19,
+      "createdBy": "actor-alice",
+      "createdAt": "2026-08-23T12:00:00Z",
+      "objectHash": "01a8c8fe96fc82d9942c129b9f52f30ab82ab198135eaa421ee9adb532339dfb"
+    }
+  ],
+  "contentObjects": [
+    {
+      "digest": "1a5104c068d0fa940533d7d428e5efed3c792ae8492a410cec13d05fcbf73cb1",
+      "byteLength": 16,
+      "contentType": "text/plain",
+      "inclusion": "private",
+      "payloadBase64": null,
+      "objectHash": "dc9858b1e1ff6912273f5701ff0acd7af290d08821824f6a25965ea88f0ba83e"
+    },
+    {
+      "digest": "63e2c73197dd1b1f5fbab225ff5ada2a1fe5a394bcf12025017ca9074b2ea7ae",
+      "byteLength": 19,
+      "contentType": "text/plain",
+      "inclusion": "present",
+      "payloadBase64": "Zml4dHVyZS1ldmlkZW5jZS12MQ==",
+      "objectHash": "c2e78c205a8db7628e61907d1bf46f4d61447e59e380f9aabc99f9789924d11a"
+    }
+  ],
+  "sources": [
+    {
+      "id": "src-human",
+      "name": "Human notes",
+      "kind": "human",
+      "lifecycle": "active",
+      "identityId": "actor-alice",
+      "createdAt": "2026-08-23T12:00:00Z",
+      "createdBy": "actor-alice",
+      "objectHash": "3d879ddd6e63128536c865baef1b3a4279a6ad1ae6a8065e243f659b322adaa4"
+    },
+    {
+      "id": "src-import",
+      "name": "Imported model run",
+      "kind": "external-tool",
+      "lifecycle": "active",
+      "identityId": null,
+      "createdAt": "2026-08-23T12:00:00Z",
+      "createdBy": "actor-alice",
+      "objectHash": "3ed7c0a194a5c3d5b3c206011a52ac30e3f9c592cb5469a903f2b89db9e291c9"
+    }
+  ],
+  "importedAiRuns": [
+    {
+      "id": "run-1",
+      "sourceId": "src-import",
+      "importedAt": "2026-08-23T12:00:00Z",
+      "providerKind": "openai_compatible",
+      "model": "fixture-model",
+      "version": "1",
+      "profileId": "profile-synth",
+      "usageStatus": "unknown",
+      "costStatus": "unknown",
+      "outputDigest": "63e2c73197dd1b1f5fbab225ff5ada2a1fe5a394bcf12025017ca9074b2ea7ae",
+      "opaquePayloadJson": "{\"extraVendor\":1,\"vendorNote\":\"synthetic\"}",
+      "objectHash": "3c4b5ef6859512ae475ba36ca228c0e55f4af6ceda689d739bc3770d805bb5cb"
+    }
+  ],
+  "snapshots": [
+    {
+      "id": "snap-1",
+      "fingerprint": "81cb734d7b8fe65e2cb6e2c7264c0136eeaaf91417834297cdeeb2848da3fa93",
+      "parentSnapshotId": null,
+      "fairnessClass": "same_snapshot",
+      "lineageClass": "root",
+      "visibility": "share_safe",
+      "protocolVersion": "cd.v1",
+      "evidence": [
+        {
+          "evidenceId": "ev-share",
+          "ordinal": 0,
+          "contentHash": "63e2c73197dd1b1f5fbab225ff5ada2a1fe5a394bcf12025017ca9074b2ea7ae",
+          "privacyClass": "share_safe"
+        }
+      ],
+      "createdAt": "2026-08-23T12:00:00Z",
+      "createdBy": "actor-alice",
+      "objectHash": "7661716dfc08d425f2429930c473183149758bd4a97c3c522bc41294fe4b4e66"
+    }
+  ],
+  "triageJobs": [
+    {
+      "id": "job-1",
+      "snapshotId": "snap-1",
+      "snapshotFingerprint": "81cb734d7b8fe65e2cb6e2c7264c0136eeaaf91417834297cdeeb2848da3fa93",
+      "strategyId": "strat-1",
+      "status": "completed",
+      "parentJobId": null,
+      "requestFingerprint": "fa159f88d2361c286fbf2f9ac9f2efceaeda678c73a8d6a6c967314f14606212",
+      "candidates": [
+        {
+          "candidateId": "cand-1",
+          "role": "primary",
+          "providerKind": "openai_compatible",
+          "profileId": "profile-synth",
+          "model": "fixture-model",
+          "version": "1",
+          "usageStatus": "unknown",
+          "costStatus": "unknown",
+          "outputHash": "63e2c73197dd1b1f5fbab225ff5ada2a1fe5a394bcf12025017ca9074b2ea7ae",
+          "evidenceRefs": [
+            "ev-share"
+          ]
+        }
+      ],
+      "requestedBy": "actor-alice",
+      "createdAt": "2026-08-23T12:00:00Z",
+      "objectHash": "ecada038eb8c236780c9cd980cff5b9c792421a9906b48fc48c2badf38aebe20"
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp-1",
+      "packageId": "pkg-1",
+      "snapshotFingerprint": "81cb734d7b8fe65e2cb6e2c7264c0136eeaaf91417834297cdeeb2848da3fa93",
+      "taskFingerprint": "710d30b454ac58c51de5d5989efef5332d223d8b65ae915bf8a89106219705b8",
+      "candidateIds": [
+        "cand-1"
+      ],
+      "createdAt": "2026-08-23T12:00:00Z",
+      "objectHash": "66b8c19ca5b33065d633d02ddfea74112b2710184776f001ed54960c7238d1cb"
+    }
+  ],
+  "helpfulnessObservations": [
+    {
+      "id": "help-1",
+      "experimentId": "exp-1",
+      "candidateId": "cand-1",
+      "dimension": "evidence_support",
+      "score": 1,
+      "rationale": "Cites the share-safe excerpt.",
+      "evidenceRefs": [
+        "ev-share"
+      ],
+      "reviewerId": "actor-dave",
+      "createdAt": "2026-08-23T12:00:00Z",
+      "objectHash": "682349b5cd481b69468e7a8f5704c66f97b1a69c619635a4e58eb76f6127c7cf"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "dec-1",
+      "experimentId": "exp-1",
+      "status": "accepted",
+      "revision": 1,
+      "predecessorRevision": null,
+      "text": "Restart the stalled worker.",
+      "rationale": "Matches the recorded excerpt.",
+      "evidenceRefs": [
+        "ev-share"
+      ],
+      "authorId": "actor-alice",
+      "createdAt": "2026-08-23T12:00:00Z",
+      "objectHash": "33debce65099d728c5d103c9ea8764ffaba6065a6b2010bd3118555f336ac917"
+    }
+  ],
+  "gold": [
+    {
+      "goldId": "gold-1",
+      "version": 1,
+      "predecessorGoldId": null,
+      "experimentId": "exp-1",
+      "acceptedDecisionId": "dec-1",
+      "acceptedDecisionRevision": 1,
+      "evidenceAnchors": [
+        "ev-share"
+      ],
+      "notes": [
+        "A gold reference is a human benchmark decision, not an infallible truth claim."
+      ],
+      "promotedById": "actor-alice",
+      "createdAt": "2026-08-23T12:00:00Z",
+      "objectHash": "f8811e4ee721246f3c1328c8f77414d1c6501b88819c227b082257c0453bf511"
+    }
+  ],
+  "alignments": [
+    {
+      "id": "align-1",
+      "goldId": "gold-1",
+      "candidateId": "cand-1",
+      "status": "aligned",
+      "matchedAnchors": [
+        "ev-share"
+      ],
+      "missingAnchors": [],
+      "extraAnchors": [],
+      "notes": [
+        "Gold alignment is not a correctness verdict."
+      ],
+      "objectHash": "de381d8b233cc58200985f0e4b13c5c5d45187520a8b17ac500f67af72459409"
+    }
+  ],
+  "discussions": [
+    {
+      "id": "disc-1",
+      "title": "Notes",
+      "authorId": "actor-alice",
+      "createdAt": "2026-08-23T12:00:00Z",
+      "messageIds": [
+        "c-note"
+      ],
+      "objectHash": "124af2026aa85eed0265fc1c5bbbbbdb3a4d580486919cac035a249ce430d772"
+    }
+  ],
+  "timeline": [
+    {
+      "seq": 1,
+      "kind": "contribution_created",
+      "actorId": "actor-alice",
+      "targetId": "c-note",
+      "targetNamespace": "contribution",
+      "serverTime": "2026-08-23T12:00:00Z",
+      "objectHash": "e032bc29cb02fc7f6f172de7cbc2057e9916b78e1671279e826511d684906849"
+    }
+  ],
+  "auditRefs": [
+    {
+      "id": "aud-1",
+      "kind": "export_prepared",
+      "actorId": "actor-alice",
+      "createdAt": "2026-08-23T12:00:00Z",
+      "summaryHash": "6311136135e0d48dda1a70f31a300e4256fdf478361ab69f8df46c54a5c83890",
+      "objectHash": "d5f665cc35c30e6031e9f82b7b50db8248ca391ca179374610577524229ce8d1"
+    }
+  ],
+  "attachments": [
+    {
+      "id": "att-1",
+      "discussionId": "disc-1",
+      "evidenceId": "ev-share",
+      "digest": "63e2c73197dd1b1f5fbab225ff5ada2a1fe5a394bcf12025017ca9074b2ea7ae",
+      "inclusion": "present",
+      "objectHash": "557925635a6ac15d7c3a86017294cf32f0907c16ff9621341e8f1aa9d1692b5f"
+    }
+  ],
+  "objectHashes": [
+    {
+      "kind": "actor",
+      "id": "actor-alice",
+      "hash": "a29376f0484f35b48ab6412d8c63684e9e0f57574fa1825db641696027b805bb"
+    },
+    {
+      "kind": "actor",
+      "id": "actor-dave",
+      "hash": "3565f0202c4f8561ae1d5f36e51b44d40238c602d649f0ba51f9df430b81f151"
+    },
+    {
+      "kind": "alignment",
+      "id": "align-1",
+      "hash": "de381d8b233cc58200985f0e4b13c5c5d45187520a8b17ac500f67af72459409"
+    },
+    {
+      "kind": "attachment",
+      "id": "att-1",
+      "hash": "557925635a6ac15d7c3a86017294cf32f0907c16ff9621341e8f1aa9d1692b5f"
+    },
+    {
+      "kind": "audit",
+      "id": "aud-1",
+      "hash": "d5f665cc35c30e6031e9f82b7b50db8248ca391ca179374610577524229ce8d1"
+    },
+    {
+      "kind": "content",
+      "id": "1a5104c068d0fa940533d7d428e5efed3c792ae8492a410cec13d05fcbf73cb1",
+      "hash": "dc9858b1e1ff6912273f5701ff0acd7af290d08821824f6a25965ea88f0ba83e"
+    },
+    {
+      "kind": "content",
+      "id": "63e2c73197dd1b1f5fbab225ff5ada2a1fe5a394bcf12025017ca9074b2ea7ae",
+      "hash": "c2e78c205a8db7628e61907d1bf46f4d61447e59e380f9aabc99f9789924d11a"
+    },
+    {
+      "kind": "contribution",
+      "id": "c-note:1",
+      "hash": "d913839a5a5b7876e4d01db031094e9d55dbafc92a7fe6665dbf0c6da2116e88"
+    },
+    {
+      "kind": "decision",
+      "id": "dec-1:1",
+      "hash": "33debce65099d728c5d103c9ea8764ffaba6065a6b2010bd3118555f336ac917"
+    },
+    {
+      "kind": "discussion",
+      "id": "disc-1",
+      "hash": "124af2026aa85eed0265fc1c5bbbbbdb3a4d580486919cac035a249ce430d772"
+    },
+    {
+      "kind": "evidence",
+      "id": "ev-private",
+      "hash": "42be5d85a03bb30d5b2b4034265aace0e7b6a54253e3de2f21d993ee73f83cb3"
+    },
+    {
+      "kind": "evidence",
+      "id": "ev-share",
+      "hash": "01a8c8fe96fc82d9942c129b9f52f30ab82ab198135eaa421ee9adb532339dfb"
+    },
+    {
+      "kind": "experiment",
+      "id": "exp-1",
+      "hash": "66b8c19ca5b33065d633d02ddfea74112b2710184776f001ed54960c7238d1cb"
+    },
+    {
+      "kind": "gold",
+      "id": "gold-1:1",
+      "hash": "f8811e4ee721246f3c1328c8f77414d1c6501b88819c227b082257c0453bf511"
+    },
+    {
+      "kind": "helpfulness",
+      "id": "help-1",
+      "hash": "682349b5cd481b69468e7a8f5704c66f97b1a69c619635a4e58eb76f6127c7cf"
+    },
+    {
+      "kind": "imported_ai_run",
+      "id": "run-1",
+      "hash": "3c4b5ef6859512ae475ba36ca228c0e55f4af6ceda689d739bc3770d805bb5cb"
+    },
+    {
+      "kind": "investigation",
+      "id": "inv-1",
+      "hash": "23ca557fce9962403e97d9c0f4089324700ad95e05cf583f5861f7c1849db167"
+    },
+    {
+      "kind": "snapshot",
+      "id": "snap-1",
+      "hash": "7661716dfc08d425f2429930c473183149758bd4a97c3c522bc41294fe4b4e66"
+    },
+    {
+      "kind": "source",
+      "id": "src-human",
+      "hash": "3d879ddd6e63128536c865baef1b3a4279a6ad1ae6a8065e243f659b322adaa4"
+    },
+    {
+      "kind": "source",
+      "id": "src-import",
+      "hash": "3ed7c0a194a5c3d5b3c206011a52ac30e3f9c592cb5469a903f2b89db9e291c9"
+    },
+    {
+      "kind": "timeline",
+      "id": "1",
+      "hash": "e032bc29cb02fc7f6f172de7cbc2057e9916b78e1671279e826511d684906849"
+    },
+    {
+      "kind": "triage_job",
+      "id": "job-1",
+      "hash": "ecada038eb8c236780c9cd980cff5b9c792421a9906b48fc48c2badf38aebe20"
+    }
+  ],
+  "bundleFingerprint": "0638ea7fe0d3cc045681e513a525003a67e51f2a38d06b25b440641f1cd6c4bb"
+}

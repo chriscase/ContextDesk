@@ -1,10 +1,17 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseOverview } from "@cd-collab/contracts";
 import type { FastifyInstance } from "fastify";
 import { buildDemoApp, DEMO_PASSWORD, DEMO_USERNAME } from "./demo.js";
+import { projectOverviewForStaticSnapshot } from "./modules/overview/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+const SEEDED_DISCUSSION_MESSAGES = [
+  "Inventory timeout is the leading cause to investigate.",
+  "Checkout and inventory pool pressure should be investigated together.",
+] as const;
 
 function cookie(headers: Record<string, unknown>): string {
   const raw = headers["set-cookie"];
@@ -17,12 +24,67 @@ async function json(
   method: "GET" | "POST",
   url: string,
   session: string,
+  payload?: object,
 ): Promise<unknown> {
-  const response = await app.inject({ method, url, headers: { cookie: session } });
+  const response = await app.inject({
+    method,
+    url,
+    headers: { cookie: session },
+    ...(payload === undefined ? {} : { payload }),
+  });
   if (response.statusCode < 200 || response.statusCode >= 300) {
     throw new Error(`static demo snapshot failed: ${method} ${url} returned ${response.statusCode}`);
   }
   return JSON.parse(response.body) as unknown;
+}
+
+function terminalJob(status: string | undefined): boolean {
+  return (
+    status === "completed" ||
+    status === "partial" ||
+    status === "failed" ||
+    status === "timed_out" ||
+    status === "cancelled"
+  );
+}
+
+async function waitForTriageJobs(
+  app: FastifyInstance,
+  caseId: string,
+  session: string,
+): Promise<{ jobs?: { id?: string; status?: string }[] }> {
+  let last: { jobs?: { id?: string; status?: string }[] } = { jobs: [] };
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    last = (await json(app, "GET", `/api/cases/${caseId}/triage-runs`, session)) as {
+      jobs?: { id?: string; status?: string }[];
+    };
+    const jobs = last.jobs ?? [];
+    if (jobs.length > 0 && jobs.every((job) => terminalJob(job.status))) {
+      return last;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+  return last;
+}
+
+async function seedDiscussionMessages(
+  app: FastifyInstance,
+  caseId: string,
+  session: string,
+): Promise<void> {
+  const existing = (await json(app, "GET", `/api/cases/${caseId}/contributions`, session)) as {
+    contributions?: { kind?: string }[];
+  };
+  if ((existing.contributions ?? []).some((row) => row.kind === "message")) {
+    return;
+  }
+  for (const body of SEEDED_DISCUSSION_MESSAGES) {
+    await json(app, "POST", `/api/cases/${caseId}/contributions`, session, {
+      kind: "message",
+      body,
+      privacyClass: "share_safe",
+    });
+  }
 }
 
 async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<string, unknown>> {
@@ -33,37 +95,64 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
   });
   if (login.statusCode !== 200) throw new Error("static demo login failed");
   const session = cookie(login.headers);
+  await waitForTriageJobs(app, caseId, session);
   await app.inject({
     method: "POST",
     url: `/api/cases/${caseId}/presence`,
     headers: { cookie: session },
     payload: { surface: "experiment_lab" },
   });
+  await seedDiscussionMessages(app, caseId, session);
+
   const experiments = (await json(
     app,
     "GET",
     `/api/cases/${caseId}/experiments`,
     session,
   )) as { experiments?: { id: string }[] };
+  const snapshotList = (await json(app, "GET", `/api/cases/${caseId}/snapshots`, session)) as {
+    snapshots?: { id?: string }[];
+  };
   const routes: Record<string, unknown> = {
-    "GET /api/auth/me": {
-      identity: { username: "demo", displayName: "Demo case lead" },
-      roles: ["case-lead"],
-    },
+    "GET /api/auth/me": await json(app, "GET", "/api/auth/me", session),
     "POST /api/auth/login": { status: "synthetic_demo" },
     "POST /api/auth/logout": { status: "synthetic_demo" },
     "GET /api/cases": await json(app, "GET", "/api/cases", session),
+    "GET /api/activity?limit=30": await json(app, "GET", "/api/activity?limit=30", session),
+    [`GET /api/cases/${caseId}`]: await json(app, "GET", `/api/cases/${caseId}`, session),
     "GET /api/catalog/sources": await json(app, "GET", "/api/catalog/sources", session),
+    "GET /api/triage-profiles": await json(app, "GET", "/api/triage-profiles", session),
+    "GET /api/triage-capabilities": await json(app, "GET", "/api/triage-capabilities", session),
     [`GET /api/cases/${caseId}/timeline`]: await json(
       app,
       "GET",
       `/api/cases/${caseId}/timeline`,
       session,
     ),
+    [`GET /api/cases/${caseId}/contributions`]: await json(
+      app,
+      "GET",
+      `/api/cases/${caseId}/contributions`,
+      session,
+    ),
     [`GET /api/cases/${caseId}/imports`]: await json(
       app,
       "GET",
       `/api/cases/${caseId}/imports`,
+      session,
+    ),
+    [`GET /api/cases/${caseId}/evidence`]: await json(
+      app,
+      "GET",
+      `/api/cases/${caseId}/evidence`,
+      session,
+    ),
+    [`GET /api/cases/${caseId}/snapshots`]: snapshotList,
+    [`GET /api/cases/${caseId}/board`]: await json(app, "GET", `/api/cases/${caseId}/board`, session),
+    [`GET /api/cases/${caseId}/triage-runs`]: await json(
+      app,
+      "GET",
+      `/api/cases/${caseId}/triage-runs`,
       session,
     ),
     [`GET /api/cases/${caseId}/experiments`]: experiments,
@@ -80,6 +169,13 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
       session,
     ),
   };
+  const liveOverview = parseOverview(await json(app, "GET", "/api/overview", session));
+  routes["GET /api/overview"] = projectOverviewForStaticSnapshot(liveOverview);
+  for (const snapshot of snapshotList.snapshots ?? []) {
+    if (!snapshot.id) continue;
+    const boardUrl = `/api/cases/${caseId}/board?snapshotId=${encodeURIComponent(snapshot.id)}`;
+    routes[`GET ${boardUrl}`] = await json(app, "GET", boardUrl, session);
+  }
   for (const experiment of experiments.experiments ?? []) {
     routes[`POST /api/cases/${caseId}/experiments/${experiment.id}/export`] = await json(
       app,
@@ -89,6 +185,13 @@ async function snapshots(app: FastifyInstance, caseId: string): Promise<Record<s
     );
   }
   return routes;
+}
+
+export async function captureStaticDemoRoutes(
+  app: FastifyInstance,
+  caseId: string,
+): Promise<Record<string, unknown>> {
+  return snapshots(app, caseId);
 }
 
 function escapeScript(value: string): string {
@@ -117,23 +220,39 @@ export async function writeStaticDemo(outputPath: string): Promise<string> {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ContextDesk Experiment Lab — synthetic fallback</title>
+    <title>ContextDesk War Room — synthetic read-only fallback</title>
     <style>${css}</style>
     <script>
       window.__CONTEXTDESK_STATIC_READ_ONLY__ = true;
+      try {
+        var path = location.pathname;
+        if (
+          path !== "/" &&
+          path.indexOf("/investigations") !== 0 &&
+          path !== "/sources" &&
+          path !== "/help" &&
+          path !== "/signin" &&
+          path !== "/sign-in" &&
+          path !== "/login"
+        ) {
+          history.replaceState(null, "", "/");
+        }
+      } catch (e) {}
       const contextDeskDemoRoutes = ${routeJson};
       window.fetch = async (input, init = {}) => {
         const raw = typeof input === "string" ? input : input.url;
-        const path = raw.startsWith("http") ? new URL(raw).pathname : raw.split("?")[0];
+        const parsed = raw.startsWith("http") ? new URL(raw) : new URL(raw, "http://static.local");
+        const path = parsed.pathname;
+        const search = parsed.search;
         const method = String(init.method || (typeof input === "string" ? "GET" : input.method) || "GET").toUpperCase();
-        const body = contextDeskDemoRoutes[method + " " + path];
+        const body = contextDeskDemoRoutes[method + " " + path + search] || contextDeskDemoRoutes[method + " " + path];
         if (body !== undefined) {
           return new Response(JSON.stringify(body), {
             status: 200,
             headers: { "content-type": "application/json" },
           });
         }
-        if (method === "POST") {
+        if (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE") {
           return new Response(JSON.stringify({ error: "Static fallback is read-only; use the local demo server for edits." }), {
             status: 409,
             headers: { "content-type": "application/json" },

@@ -1,0 +1,6 @@
+{
+  "schemaId": "cd-collab.investigation_portable.v1",
+  "protocolVersion": "cd.v1",
+  "gatewayEndpoint": "https://example.invalid/v1",
+  "ldapBindPassword": "fixture-not-a-real-secret"
+}

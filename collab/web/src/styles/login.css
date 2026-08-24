@@ -96,11 +96,37 @@
   border: 0;
 }
 
-.session {
-  margin-top: 1.25rem;
+/* The signed-out gate: one column, product identity above the form. */
+.login-screen {
+  padding: 1.4rem 1.5rem 1.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.85rem;
+  background: color-mix(in srgb, var(--fg) 2%, var(--bg));
 }
 
-.session__roles {
-  color: var(--muted);
-  font-size: 0.85rem;
+@media (max-width: 480px) {
+  .login-screen {
+    padding: 1.1rem 1rem 1.25rem;
+    border: 0;
+    background: transparent;
+  }
+}
+
+
+.login__submit:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.login-screen {
+  width: min(26rem, 100%);
+  max-width: 100%;
+}
+
+.login,
+.login__input,
+.login__submit {
+  max-width: 100%;
 }

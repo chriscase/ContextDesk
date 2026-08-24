@@ -1,19 +1,21 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExportPanel } from "./ExportPanel.js";
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 interface MockResponse {
   ok: boolean;
+  status: number;
   json: () => Promise<unknown>;
 }
 
-function jsonResponse(ok: boolean, body: unknown): MockResponse {
-  return { ok, json: async () => body };
+function jsonResponse(ok: boolean, body: unknown, status = ok ? 200 : 422): MockResponse {
+  return { ok, status, json: async () => body };
 }
 
 function deferred<T>() {
@@ -41,6 +43,31 @@ const EXCLUDED_ITEM = {
   contentHash: null,
   excludedByDefault: true,
 };
+
+const PORTABLE_CAPABILITIES = {
+  schemaId: "cd-collab.portable_investigation_capabilities.v1",
+  exportAvailable: true,
+  dryRunPreflightAvailable: true,
+  maximumArchiveBytes: 1024 * 1024,
+  apply: { available: false, reason: "atomic_apply_not_proven_for_memory_and_postgresql" },
+};
+
+const SYNTHETIC_ARCHIVE = {
+  schemaId: "cd-collab.investigation_portable_archive.v1",
+  investigation: {
+    actors: [
+      { sourceActorId: "historical-reviewer" },
+      { sourceActorId: "historical-operator" },
+    ],
+  },
+};
+
+function jsonFile(value: unknown, name = "investigation.json"): File {
+  const contents = JSON.stringify(value);
+  const file = new File([contents], name, { type: "application/json" });
+  Object.defineProperty(file, "text", { value: async () => contents });
+  return file;
+}
 
 describe("export panel", () => {
   it("exports a brief and shows a privacy-scan report with redacted findings", async () => {
@@ -93,14 +120,18 @@ describe("export panel", () => {
     render(<ExportPanel caseId="c1" canWrite canLead />);
     expect(screen.getByText("Loading evidence inventory…")).toBeTruthy();
     expect(
-      (screen.getByRole("button", { name: "Export prompt package" }) as HTMLButtonElement)
+      (screen.getByRole("button", {
+        name: "Export selected-evidence prompt package",
+      }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
     inventory.resolve(jsonResponse(true, { items: [] }));
     expect(await screen.findByText(/no exportable evidence yet/)).toBeTruthy();
     expect(screen.queryByText("Loading evidence inventory…")).toBeNull();
     expect(
-      (screen.getByRole("button", { name: "Export prompt package" }) as HTMLButtonElement)
+      (screen.getByRole("button", {
+        name: "Export selected-evidence prompt package",
+      }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
   });
@@ -157,6 +188,7 @@ describe("export panel", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<ExportPanel caseId="c1" canWrite canLead />);
     expect(await screen.findByText(/0 of 1 selectable item selected\./)).toBeTruthy();
+    expect(screen.getByText(/not a full investigation backup/)).toBeTruthy();
     expect(
       screen.getByText(/a package with no selected evidence cannot be exported/),
     ).toBeTruthy();
@@ -165,7 +197,7 @@ describe("export panel", () => {
     ).toBeTruthy();
     expect(screen.getByText(/agent_transcript · owner_only \(excluded by default\)/)).toBeTruthy();
     const packageButton = screen.getByRole("button", {
-      name: "Export prompt package",
+      name: "Export selected-evidence prompt package",
     }) as HTMLButtonElement;
     expect(packageButton.disabled).toBe(true);
     const excludedBox = screen.getByRole("checkbox", {
@@ -180,7 +212,7 @@ describe("export panel", () => {
       target: { value: "Summarize the incident" },
     });
     fireEvent.click(packageButton);
-    expect(await screen.findByText(/Prompt package exported\./)).toBeTruthy();
+    expect(await screen.findByText(/Selected-evidence prompt package exported\./)).toBeTruthy();
     expect(packageBodies).toEqual([
       {
         variant: "owner_only",
@@ -218,7 +250,9 @@ describe("export panel", () => {
     expect(await screen.findByText(/Exporting triage brief…/)).toBeTruthy();
     expect(briefButton.disabled).toBe(true);
     expect(
-      (screen.getByRole("button", { name: "Export prompt package" }) as HTMLButtonElement)
+      (screen.getByRole("button", {
+        name: "Export selected-evidence prompt package",
+      }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
     expect((screen.getByDisplayValue("owner_only") as HTMLSelectElement).disabled).toBe(true);
@@ -296,12 +330,218 @@ describe("export panel", () => {
     render(<ExportPanel caseId="c1" canWrite canLead />);
     await screen.findByText(/app.log/);
     expect(screen.getByRole("form", { name: "Export triage brief" })).toBeTruthy();
-    expect(screen.getByRole("form", { name: "Export prompt package" })).toBeTruthy();
+    expect(
+      screen.getByRole("form", { name: "Export selected-evidence prompt package" }),
+    ).toBeTruthy();
     expect(screen.getByLabelText(/Variant/).tagName).toBe("SELECT");
     expect(screen.getByLabelText(/Optional prompt scaffold/).tagName).toBe("TEXTAREA");
     expect(screen.getByRole("checkbox", { name: /artifact · app\.log · owner_only/ })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Export triage brief" }));
     const region = await screen.findByRole("region", { name: "Exported markdown" });
     expect(region.getAttribute("tabindex")).toBe("0");
+  });
+
+  it("downloads a clearly named complete archive only for a lead", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases/case-safe/export/inventory") {
+        return jsonResponse(true, { items: [] });
+      }
+      if (url === "/api/portable-investigations/capabilities") {
+        return jsonResponse(true, PORTABLE_CAPABILITIES);
+      }
+      if (url === "/api/cases/case-safe/portable-archive") {
+        return jsonResponse(true, SYNTHETIC_ARCHIVE);
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const createObjectURL = vi.fn(() => "blob:portable-archive");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    let downloadName = "";
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      downloadName = this.download;
+    });
+
+    render(<ExportPanel caseId="case-safe" canWrite canLead />);
+    const button = await screen.findByRole("button", {
+      name: "Download complete investigation archive",
+    });
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(button);
+
+    expect(await screen.findByText(/Complete investigation archive downloaded/)).toBeTruthy();
+    expect(downloadName).toBe("contextdesk-investigation-case-safe.json");
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:portable-archive");
+    expect(screen.getByText(/Unlike the selected-evidence package above/)).toBeTruthy();
+    expect(screen.getByText(/Restore\/apply is unavailable/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /apply|restore/i })).toBeNull();
+  });
+
+  it("preflights an archive with attribution-only identities and deterministic remaps", async () => {
+    const bodies: unknown[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/cases/c1/export/inventory") {
+        return jsonResponse(true, { items: [] });
+      }
+      if (url === "/api/portable-investigations/capabilities") {
+        return jsonResponse(true, PORTABLE_CAPABILITIES);
+      }
+      if (url === "/api/portable-investigations/preflight") {
+        bodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse(true, {
+          report: {
+            counts: { create: 17, update: 0, conflict: 2, blocked: 1 },
+            collisionPolicy: "remap_deterministic",
+            warnings: [{ code: "synthetic_warning" }],
+            referentialIntegrityFailures: [],
+            idRemap: [{ namespace: "investigation" }, { namespace: "evidence" }],
+            reconstructionStatus: "metadata_only",
+            exactReconstruction: false,
+          },
+          privacy: {
+            classification: "contains_owner_only",
+            ownerOnlyEvidence: 2,
+            shareSafeEvidence: 4,
+            inlineBlobCount: 5,
+            omittedBlobCount: 1,
+            privateBlobCount: 2,
+            redactedBlobCount: 1,
+          },
+          omitted: [{ code: "content_omitted" }],
+          unsupported: ["synthetic_state_one", "synthetic_state_two"],
+          authorization: {
+            sourceRolesTrusted: false,
+            destinationMembershipGranted: false,
+            destinationRoleGranted: false,
+            destinationCapabilityGranted: false,
+          },
+          apply: { available: false, reason: "atomic_apply_not_proven" },
+        });
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExportPanel caseId="c1" canWrite canLead />);
+    const input = await screen.findByLabelText("Portable investigation JSON");
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
+    fireEvent.change(input, { target: { files: [jsonFile(SYNTHETIC_ARCHIVE)] } });
+    expect(await screen.findByText(/2 historical participants will remain attribution only/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Run dry-run check" }));
+
+    expect(await screen.findByRole("region", { name: "Archive readiness summary" })).toBeTruthy();
+    expect(screen.getByText("17")).toBeTruthy();
+    expect(screen.getByText("contains owner only")).toBeTruthy();
+    expect(screen.getByText("Deterministic ID remaps").parentElement?.textContent).toContain("2");
+    expect(screen.getByText(/2 states are not represented/)).toBeTruthy();
+    expect(screen.getByText(/No investigation, user, membership, role, or permission was created/)).toBeTruthy();
+    expect(bodies).toEqual([
+      {
+        archive: SYNTHETIC_ARCHIVE,
+        mode: "dry_run",
+        collisionPolicy: "remap_deterministic",
+        identityMap: [
+          {
+            sourceActorId: "historical-operator",
+            action: "preserve_historical_external",
+            destinationActorId: null,
+          },
+          {
+            sourceActorId: "historical-reviewer",
+            action: "preserve_historical_external",
+            destinationActorId: null,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("rejects malformed and oversized files without reflecting their contents", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases/c1/export/inventory") {
+        return jsonResponse(true, { items: [] });
+      }
+      if (url === "/api/portable-investigations/capabilities") {
+        return jsonResponse(true, { ...PORTABLE_CAPABILITIES, maximumArchiveBytes: 24 });
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExportPanel caseId="c1" canWrite canLead />);
+    const input = await screen.findByLabelText("Portable investigation JSON");
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
+    const sensitiveText = "not-json-sensitive-value".repeat(4);
+    const malformed = new File([sensitiveText], "bad.json", { type: "application/json" });
+    Object.defineProperty(malformed, "text", { value: async () => sensitiveText });
+    fireEvent.change(input, { target: { files: [malformed] } });
+    expect((await screen.findByRole("alert")).textContent).toMatch(
+      /larger than this War Room accepts/,
+    );
+    expect(screen.queryByText(sensitiveText)).toBeNull();
+    expect(
+      (screen.getByRole("button", { name: "Run dry-run check" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("reports malformed archive and portable network failures without payload details", async () => {
+    let preflightCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url === "/api/cases/c1/export/inventory") {
+        return jsonResponse(true, { items: [] });
+      }
+      if (url === "/api/portable-investigations/capabilities") {
+        return jsonResponse(true, PORTABLE_CAPABILITIES);
+      }
+      if (url === "/api/portable-investigations/preflight") {
+        preflightCalls += 1;
+        throw new TypeError("synthetic network failure");
+      }
+      return jsonResponse(false, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ExportPanel caseId="c1" canWrite canLead />);
+    const input = await screen.findByLabelText("Portable investigation JSON");
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
+
+    const sensitiveText = "private-value-that-must-not-render";
+    const malformed = new File([sensitiveText], "malformed.json", {
+      type: "application/json",
+    });
+    Object.defineProperty(malformed, "text", { value: async () => sensitiveText });
+    fireEvent.change(input, { target: { files: [malformed] } });
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "not a valid portable investigation archive",
+    );
+    expect(screen.queryByText(sensitiveText)).toBeNull();
+
+    fireEvent.change(input, { target: { files: [jsonFile(SYNTHETIC_ARCHIVE)] } });
+    await screen.findByText(/2 historical participants/);
+    fireEvent.click(screen.getByRole("button", { name: "Run dry-run check" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "archive request did not complete",
+    );
+    expect(preflightCalls).toBe(1);
+    expect(screen.queryByRole("region", { name: "Archive readiness summary" })).toBeNull();
+  });
+
+  it("keeps archive controls lead-only without hiding the explanation", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(true, { items: [] })));
+    render(<ExportPanel caseId="c1" canWrite canLead={false} />);
+    expect(await screen.findByText(/case lead or administrator must download or check/)).toBeTruthy();
+    expect(
+      (screen.getByRole("button", {
+        name: "Download complete investigation archive",
+      }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect((screen.getByLabelText("Portable investigation JSON") as HTMLInputElement).disabled).toBe(
+      true,
+    );
   });
 });

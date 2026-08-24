@@ -756,7 +756,7 @@ describe("LinkedChatRail", () => {
       "Linked chat model",
     )) as HTMLSelectElement;
     expect(selector.options[0]?.disabled).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "Retry tools" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry tools" }));
 
     await waitFor(() =>
       expect(host.hostSetModelToolsEnabled).toHaveBeenCalledWith({

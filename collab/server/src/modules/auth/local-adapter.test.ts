@@ -20,6 +20,46 @@ describe("local auth adapter", () => {
     });
     expect(await adapter.authenticate("lead", "wrong")).toBeNull();
     expect(await adapter.lookupGroups(success!.identity)).toEqual(["local:case-lead"]);
+    expect(await adapter.searchIdentities("local", { limit: 20, timeoutMs: 100 })).toEqual([
+      {
+        id: "local:lead",
+        username: "lead",
+        displayName: "Local Lead",
+        source: "local",
+      },
+    ]);
+    expect(
+      await adapter.searchDirectoryGroups("local", { limit: 20, timeoutMs: 100 }),
+    ).toEqual([
+      {
+        dn: "local:case-lead",
+        name: "case-lead",
+        source: "local",
+      },
+    ]);
+  });
+
+  it("bounds, sorts, and privacy-projects configured local search results", async () => {
+    const adapter = loadLocalAuthAdapter({
+      COLLAB_LOCAL_USERS: JSON.stringify(
+        Array.from({ length: 25 }, (_, index) => ({
+          username: `person-${String(index).padStart(2, "0")}`,
+          password: `secret-${index}`,
+          displayName: `Person ${String(index).padStart(2, "0")}`,
+          groups: ["local:operators"],
+        })),
+      ),
+    });
+    const identities = await adapter.searchIdentities("person", {
+      limit: 20,
+      timeoutMs: 100,
+    });
+    expect(identities).toHaveLength(20);
+    expect(identities[0]?.username).toBe("person-00");
+    expect(JSON.stringify(identities)).not.toContain("secret-");
+    expect(
+      await adapter.searchDirectoryGroups("local", { limit: 20, timeoutMs: 100 }),
+    ).toHaveLength(1);
   });
 
   it("fails closed for missing, malformed, and duplicate local users", () => {

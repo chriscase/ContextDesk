@@ -1,0 +1,332 @@
+.administration {
+  display: grid;
+  gap: 1rem;
+  max-width: 72rem;
+}
+
+.administration__masthead {
+  max-width: 50rem;
+}
+
+.administration__masthead h2,
+.administration__panel h3,
+.administration__boundary h3,
+.administration__results h4 {
+  margin: 0;
+}
+
+.administration__masthead h2 {
+  font-size: 1.65rem;
+}
+
+.administration__masthead h2:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0.25rem;
+}
+
+.administration__masthead > p:last-child,
+.administration__panel-heading p,
+.administration__panel > p,
+.administration__results p,
+.administration__boundary p {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.administration__eyebrow {
+  margin: 0 0 0.25rem;
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.administration__panel,
+.administration__boundary {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+}
+
+.administration__boundary {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+
+.administration__panel-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.administration button,
+.administration select,
+.administration input,
+.admin-confirm button {
+  font: inherit;
+}
+
+.administration button,
+.admin-confirm button {
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  padding: 0.42rem 0.7rem;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.administration button:hover:not(:disabled),
+.admin-confirm button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.administration button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.administration button:focus-visible,
+.administration select:focus-visible,
+.administration input:focus-visible,
+.admin-confirm button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.administration select,
+.administration input {
+  min-height: 2.25rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  padding: 0.42rem 0.55rem;
+  background: var(--surface-input);
+  color: var(--fg);
+}
+
+.administration__message {
+  margin: 0;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--success) 55%, var(--border));
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+}
+
+.administration__message--error {
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.administration__table-wrap {
+  margin-top: 0.8rem;
+  overflow-x: auto;
+}
+
+.administration__table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.administration__table th,
+.administration__table td {
+  padding: 0.65rem 0.55rem;
+  border-top: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.administration__table thead th {
+  border-top: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.administration__table tbody th {
+  max-width: 34rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.administration__row-actions {
+  display: flex;
+  gap: 0.45rem;
+}
+
+.admin-button--danger-text {
+  color: var(--danger) !important;
+}
+
+.administration__limit {
+  color: var(--warning) !important;
+}
+
+.administration__search,
+.administration__grant {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.9rem;
+}
+
+.administration__search > div {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.administration__search input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.administration__results {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin-top: 1rem;
+}
+
+.administration__results > section {
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--surface-deep);
+}
+
+.administration__results ul {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.7rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.administration__results li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+
+.administration__results li > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+}
+
+.administration__results code,
+.administration__results span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.administration__grant {
+  grid-template-columns: minmax(18rem, 2fr) minmax(12rem, 1fr) auto;
+  align-items: end;
+}
+
+.administration__grant label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.administration__role-description {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.admin-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(0 0 0 / 0.68);
+}
+
+.admin-confirm__dialog {
+  width: min(32rem, 100%);
+  padding: 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+  box-shadow: 0 18px 50px rgb(0 0 0 / 0.5);
+}
+
+.admin-confirm__dialog h2,
+.admin-confirm__dialog p {
+  margin: 0;
+}
+
+.admin-confirm__dialog p {
+  margin-top: 0.65rem;
+  color: var(--muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.admin-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  margin-top: 1rem;
+}
+
+.admin-button--danger {
+  border-color: color-mix(in srgb, var(--danger) 65%, var(--border)) !important;
+  color: var(--danger) !important;
+}
+
+@media (max-width: 760px) {
+  .administration__results,
+  .administration__grant {
+    grid-template-columns: 1fr;
+  }
+
+  .administration__grant button {
+    justify-self: start;
+  }
+
+  .administration__search > div {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .administration__search button,
+  .administration__results li button {
+    justify-self: start;
+  }
+
+  .administration__results li {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .administration__table th,
+  .administration__table td {
+    min-width: 10rem;
+  }
+}
+
+@media (max-width: 520px) {
+  .administration__panel-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .administration__panel-heading > button {
+    align-self: start;
+  }
+}

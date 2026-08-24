@@ -1,8 +1,15 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseLiveQualificationCatalog } from "@cd-collab/contracts";
 
 export interface TriageProfileOption {
+  /** Stable UI selection identity for one gateway + model subject. */
   id: string;
+  /** Host-owned connector profile passed to the private bridge. */
+  profileId?: string;
+  /** Exact catalog model bound to this subject, when known. */
+  modelId?: string;
+  alias?: string;
   label: string;
   provider: string;
 }
@@ -63,7 +70,12 @@ export function loadConfiguredTriageProfileCatalog(
   }
   const catalog = parseLiveQualificationCatalog(raw);
   return catalog.profiles.map((profile) => ({
-    id: profile.profileId,
+    id: `subject:${createHash("sha256")
+      .update(JSON.stringify([profile.profileId, profile.provider, profile.modelId, profile.alias]))
+      .digest("hex")}`,
+    profileId: profile.profileId,
+    modelId: profile.modelId,
+    alias: profile.alias,
     label: profile.label,
     provider: profile.provider,
   }));

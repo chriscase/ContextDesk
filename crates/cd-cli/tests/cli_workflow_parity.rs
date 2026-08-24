@@ -12,12 +12,15 @@
 //! Unix-specific `HOME` environment variable.
 
 use assert_cmd::Command;
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use serde_json::Value;
 use std::path::Path;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[path = "helpers/app_config.rs"]
+mod app_config;
 
 fn cli(data_dir: &Path) -> Command {
     let mut cmd =
@@ -72,7 +75,7 @@ async fn chat_command_reaches_the_shared_chat_workflow_against_a_mock_provider()
         },
         ..AppConfig::default()
     };
-    save_config(&app_config_path, &cfg).expect("write app config");
+    app_config::plant_app_config(&app_config_path, &cfg);
 
     let output = cli(home.path())
         .args([

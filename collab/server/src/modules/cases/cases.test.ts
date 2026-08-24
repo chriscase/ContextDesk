@@ -154,6 +154,210 @@ async function login(
 }
 
 describe("cases timeline evidence provenance", () => {
+  it("rejects malformed clientTime values before creating durable state", async () => {
+    await withApp(async ({ app, audit }) => {
+      const alice = await login(app, "alice", ALICE);
+      for (const clientTime of ["not-a-timestamp", "2026-02-31T00:00:00Z", 1234]) {
+        const response = await app.inject({
+          method: "POST",
+          url: "/api/cases",
+          headers: { cookie: alice },
+          payload: { title: "Must not persist", clientTime },
+        });
+        expect(response.statusCode).toBe(400);
+      }
+      const listed = parseCaseList(JSON.parse((await app.inject({
+        method: "GET",
+        url: "/api/cases",
+        headers: { cookie: alice },
+      })).body));
+      expect(listed.cases).toEqual([]);
+      expect(await audit.list({ action: "case_create" })).toEqual([]);
+    });
+  });
+
+  it("persists an explicitly unknown Situation and lets authorized members refine it", async () => {
+    await withApp(async ({ app, audit }) => {
+      const alice = await login(app, "alice", ALICE);
+      const createdResponse = await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Synthetic queue delay" },
+      });
+      expect(createdResponse.statusCode).toBe(200);
+      const created = parseCase(JSON.parse(createdResponse.body));
+      expect(created.problemStatement).toBe("");
+      expect(created.affectedParties).toBe("");
+      expect(created.impact).toBe("");
+      expect(created.scope).toBe("");
+      expect(created.openQuestions).toEqual([]);
+
+      const updatedResponse = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: {
+          expectedVersion: 0,
+          problemStatement: "  Synthetic jobs remain queued after a worker restart.  ",
+          affectedParties: "Fixture operators",
+          impact: "Synthetic jobs require manual replay.",
+          scope: "One disposable worker group.",
+          openQuestions: [
+            " Did lease recovery run before the queue stalled? ",
+            "",
+          ],
+        },
+      });
+      expect(updatedResponse.statusCode).toBe(200);
+      const updated = parseCase(JSON.parse(updatedResponse.body));
+      expect(updated.problemStatement).toBe(
+        "Synthetic jobs remain queued after a worker restart.",
+      );
+      expect(updated.affectedParties).toBe("Fixture operators");
+      expect(updated.impact).toBe("Synthetic jobs require manual replay.");
+      expect(updated.scope).toBe("One disposable worker group.");
+      expect(updated.openQuestions).toEqual([
+        "Did lease recovery run before the queue stalled?",
+      ]);
+      expect(updated.situationVersion).toBe(1);
+
+      const fetched = parseCase(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}`,
+        headers: { cookie: alice },
+      })).body));
+      expect(fetched).toEqual(updated);
+
+      const timeline = parseTimeline(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/timeline`,
+        headers: { cookie: alice },
+      })).body));
+      expect(timeline.events.at(-1)?.kind).toBe("case_situation_updated");
+      expect(
+        (await audit.list({ action: "case_situation_update" })).some(
+          (event) => event.target === created.id && event.outcome === "success",
+        ),
+      ).toBe(true);
+
+      const noOp = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: {
+          expectedVersion: 1,
+          problemStatement: `  ${updated.problemStatement}  `,
+        },
+      });
+      expect(noOp.statusCode).toBe(200);
+      expect(parseCase(JSON.parse(noOp.body)).situationVersion).toBe(1);
+      expect(parseTimeline(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/timeline`,
+        headers: { cookie: alice },
+      })).body)).events).toHaveLength(timeline.events.length);
+      expect(await audit.list({ action: "case_situation_update" })).toHaveLength(1);
+
+      const invalidTime = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: {
+          expectedVersion: 1,
+          impact: "This must never be committed.",
+          clientTime: "not-a-timestamp",
+        },
+      });
+      expect(invalidTime.statusCode).toBe(400);
+      const afterInvalidTime = parseCase(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}`,
+        headers: { cookie: alice },
+      })).body));
+      expect(afterInvalidTime.impact).toBe(updated.impact);
+      expect(afterInvalidTime.situationVersion).toBe(1);
+      expect(await audit.list({ action: "case_situation_update" })).toHaveLength(1);
+
+      const secondUpdate = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: {
+          expectedVersion: 1,
+          impact: "Synthetic jobs now require two manual replay steps.",
+          changedFields: ["problemStatement", "scope"],
+          clientTime: "2026-08-24T12:00:00-05:00",
+        },
+      });
+      expect(secondUpdate.statusCode).toBe(200);
+      const second = parseCase(JSON.parse(secondUpdate.body));
+      expect(second.situationVersion).toBe(2);
+
+      const stale = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: {
+          expectedVersion: 1,
+          problemStatement: "A stale editor must not overwrite current context.",
+        },
+      });
+      expect(stale.statusCode).toBe(409);
+      expect(JSON.parse(stale.body)).toEqual({
+        error: "situation_conflict",
+        currentVersion: 2,
+      });
+      const afterStale = parseCase(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}`,
+        headers: { cookie: alice },
+      })).body));
+      expect(afterStale.problemStatement).toBe(updated.problemStatement);
+      expect(afterStale.impact).toBe(second.impact);
+      expect(afterStale.situationVersion).toBe(2);
+      const afterStaleTimeline = parseTimeline(JSON.parse((await app.inject({
+        method: "GET",
+        url: `/api/cases/${created.id}/timeline`,
+        headers: { cookie: alice },
+      })).body));
+      expect(afterStaleTimeline.events).toHaveLength(timeline.events.length + 1);
+      expect(afterStaleTimeline.events.at(-1)?.clientTime).toBe("2026-08-24T17:00:00.000Z");
+      expect(JSON.parse(afterStaleTimeline.events.at(-1)?.payload ?? "{}")).toMatchObject({
+        changedFields: ["impact"],
+        predecessorVersion: 1,
+        situationVersion: 2,
+      });
+      expect(await audit.list({ action: "case_situation_update" })).toHaveLength(2);
+
+      const carol = await login(app, "carol", "fixture-carol-secret");
+      const viewerDenied = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: carol },
+        payload: { scope: "Should not be accepted" },
+      });
+      expect(viewerDenied.statusCode).toBe(403);
+
+      const eve = await login(app, "eve", "fixture-eve-secret");
+      const nonMemberDenied = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: eve },
+        payload: { scope: "Should not be accepted" },
+      });
+      expect(nonMemberDenied.statusCode).toBe(404);
+
+      const malformed = await app.inject({
+        method: "PATCH",
+        url: `/api/cases/${created.id}/situation`,
+        headers: { cookie: alice },
+        payload: { openQuestions: "not-an-array" },
+      });
+      expect(malformed.statusCode).toBe(400);
+    });
+  });
+
   it("round-trips a fixture incident with attribution, hashes, revisions, and privacy", async () => {
     await withApp(async ({ app, audit, store }) => {
       const alice = await login(app, "alice", ALICE);
@@ -643,6 +847,59 @@ describe("cases timeline evidence provenance", () => {
         payload: { kind: "note", body: "This must not land after revoke." },
       });
       expect(write.statusCode).toBe(403);
+    });
+  });
+
+  it("projects a bounded recent activity feed without exposing another case or contribution text", async () => {
+    await withApp(async ({ app }) => {
+      const alice = await login(app, "alice", ALICE);
+      const eve = await login(app, "eve", "fixture-eve-secret");
+      const aliceCase = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: alice },
+        payload: { title: "Synthetic queue investigation", severity: "high" },
+      })).body));
+      const eveCase = parseCase(JSON.parse((await app.inject({
+        method: "POST",
+        url: "/api/cases",
+        headers: { cookie: eve },
+        payload: { title: "Private synthetic investigation", severity: "low" },
+      })).body));
+      const privateBody = "Synthetic private observation must stay out of the feed";
+      await app.inject({
+        method: "POST",
+        url: `/api/cases/${aliceCase.id}/contributions`,
+        headers: { cookie: alice },
+        payload: { kind: "message", body: privateBody, privacyClass: "owner_only" },
+      });
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/activity?limit=2",
+        headers: { cookie: alice },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as {
+        schemaId: string;
+        activities: {
+          caseId: string;
+          caseTitle: string;
+          kind: string;
+          actorUsername: string;
+          details: Record<string, unknown>;
+        }[];
+      };
+      expect(body.schemaId).toBe("cd-collab.activity_feed.v1");
+      expect(body.activities).toHaveLength(2);
+      expect(body.activities.every((item) => item.caseId === aliceCase.id)).toBe(true);
+      expect(body.activities.some((item) => item.kind === "contribution_created")).toBe(true);
+      expect(body.activities.find((item) => item.kind === "contribution_created")?.details).toEqual({
+        kind: "message",
+      });
+      expect(response.body).not.toContain(privateBody);
+      expect(response.body).not.toContain(eveCase.id);
+      expect(response.body).not.toContain(eveCase.title);
     });
   });
 });

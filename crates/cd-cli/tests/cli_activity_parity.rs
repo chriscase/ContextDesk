@@ -1,7 +1,7 @@
 //! Activity/trace parity proofs for the CLI host — real binary path.
 
 use assert_cmd::Command;
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+#[path = "helpers/app_config.rs"]
+mod app_config;
 
 fn cli(home: &Path) -> Command {
     let mut cmd =
@@ -39,7 +42,7 @@ fn write_profile(home: &Path, server_uri: &str, tools: bool) -> PathBuf {
         },
         ..AppConfig::default()
     };
-    save_config(&app_config_path, &cfg).expect("write app config");
+    app_config::plant_app_config(&app_config_path, &cfg);
     app_config_path
 }
 

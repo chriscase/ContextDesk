@@ -17,13 +17,16 @@
 // Windows equivalent in this harness; the whole suite is unix-only.
 #![cfg(unix)]
 
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[path = "helpers/app_config.rs"]
+mod app_config;
 
 /// Bounded wait for a child to exit — polls `try_wait` rather than blocking,
 /// so a hung child can never stall the caller past `timeout`.
@@ -101,7 +104,7 @@ async fn ctrl_c_cancels_a_chat_turn_cleanly_instead_of_hanging_or_faking_success
         },
         ..AppConfig::default()
     };
-    save_config(&app_config_path, &cfg).expect("write app config");
+    app_config::plant_app_config(&app_config_path, &cfg);
 
     let bin = assert_cmd::cargo::cargo_bin("contextdesk");
     let mut child = std::process::Command::new(&bin)

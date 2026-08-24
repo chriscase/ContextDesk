@@ -1,15 +1,26 @@
-import type { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import {
   parseSnapshot,
   SNAPSHOT_SCHEMA_ID,
+  CASE_SEVERITIES,
+  CASE_STATUSES,
+  OVERVIEW_OPEN_STATUSES,
   type ArtifactKind,
   type CaseSeverity,
   type CaseStatus,
   type ContributionKind,
   type HypothesisStatus,
+  type OverviewOpenStatus,
+  type OverviewSeverityCountsV1,
+  type OverviewStatusCountsV1,
   type PrivacyClass,
   type SnapshotV1,
 } from "@cd-collab/contracts";
+import {
+  PgAuditStore,
+  type AuditRecord,
+  type AuditStore,
+} from "../audit/index.js";
 export interface Actor {
   id: string;
   username: string;
@@ -26,9 +37,19 @@ export interface TimelineRow {
   payload: string;
 }
 
+export interface CaseTimelineRow extends TimelineRow {
+  caseId: string;
+}
+
 export interface CaseRow {
   id: string;
   title: string;
+  problemStatement?: string;
+  affectedParties?: string;
+  impact?: string;
+  scope?: string;
+  openQuestions?: string[];
+  situationVersion?: number;
   severity: CaseSeverity;
   status: CaseStatus;
   legalHold: boolean;
@@ -86,17 +107,132 @@ export interface TimelineInsert {
   payload: unknown;
 }
 
+export interface AtomicSituationUpdate {
+  id: string;
+  expectedVersion: number;
+  situation: {
+    problemStatement: string;
+    affectedParties: string;
+    impact: string;
+    scope: string;
+    openQuestions: string[];
+  };
+  changedFields: string[];
+  timeline: TimelineInsert;
+  audit: AuditRecord;
+}
+
+export type AtomicSituationUpdateResult =
+  | { status: "updated" | "unchanged"; row: CaseRow }
+  | { status: "conflict"; currentVersion: number }
+  | { status: "not_found" };
+
+export type AtomicBoundary = <T>(operation: () => Promise<T>) => Promise<T>;
+
+function serializedAtomicBoundary(boundary: AtomicBoundary): AtomicBoundary {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(operation: () => Promise<T>): Promise<T> => {
+    const run = tail.then(
+      () => boundary(operation),
+      () => boundary(operation),
+    );
+    tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+}
+
+export interface OverviewScope {
+  actorId: string;
+  isAdmin: boolean;
+}
+
+/**
+ * Process-local visibility boundary used by memory-backed Overview stores.
+ * PostgreSQL stores correlate visibility inside SQL and therefore return null.
+ */
+export interface OverviewVisibilityBoundary {
+  caseTitle(caseId: string): string | null;
+}
+
+export interface OverviewActivityRow {
+  caseId: string;
+  title: string;
+  kind: string;
+  actor: string;
+  serverTime: string;
+  seq: number;
+}
+
+export interface OverviewOpenCaseRow {
+  id: string;
+  title: string;
+  status: OverviewOpenStatus;
+  severity: CaseSeverity;
+  createdAt: string;
+}
+
+export interface OverviewCounts {
+  status: OverviewStatusCountsV1;
+  severity: OverviewSeverityCountsV1;
+}
+
+export function overviewVisiblePredicate(
+  caseIdExpr: string,
+  adminParam: string,
+  actorParam: string,
+): string {
+  return `(${adminParam}::boolean OR EXISTS (
+    SELECT 1 FROM case_participants p
+    WHERE p.case_id = ${caseIdExpr} AND p.identity_id = ${actorParam}
+  ))`;
+}
+
+export function isOverviewVisibleCase(
+  row: { participants: { identityId: string }[] },
+  scope: OverviewScope,
+): boolean {
+  return scope.isAdmin || row.participants.some((participant) => participant.identityId === scope.actorId);
+}
+
+function emptyOverviewCounts(): OverviewCounts {
+  return {
+    status: { open: 0, monitoring: 0, resolved: 0, archived: 0 },
+    severity: { low: 0, medium: 0, high: 0, critical: 0 },
+  };
+}
+
+function isOverviewOpenStatus(status: string): status is OverviewOpenStatus {
+  return (OVERVIEW_OPEN_STATUSES as readonly string[]).includes(status);
+}
+
+function compareOverviewOpenCases(left: OverviewOpenCaseRow, right: OverviewOpenCaseRow): number {
+  const byCreated = right.createdAt.localeCompare(left.createdAt);
+  return byCreated !== 0 ? byCreated : left.id.localeCompare(right.id);
+}
+
 export interface CaseStore {
   listCases(): Promise<CaseRow[]>;
   getCase(id: string): Promise<CaseRow | null>;
   insertCase(row: CaseRow): Promise<void>;
   updateCaseMeta(row: Pick<CaseRow, "id" | "status" | "legalHold">): Promise<void>;
+  updateSituationAtomic(
+    input: AtomicSituationUpdate,
+    audit: AuditStore,
+  ): Promise<AtomicSituationUpdateResult>;
   addParticipant(
     caseId: string,
     participant: { identityId: string; username: string },
     addedBy: string,
   ): Promise<void>;
   listTimeline(caseId: string): Promise<TimelineRow[]>;
+  listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]>;
+  overviewVisibilityBoundary(scope: OverviewScope): Promise<OverviewVisibilityBoundary | null>;
+  overviewCounts(scope: OverviewScope): Promise<OverviewCounts>;
+  listOverviewOpenCases(scope: OverviewScope, limit: number): Promise<OverviewOpenCaseRow[]>;
+  listOverviewActivity(scope: OverviewScope, limit: number): Promise<OverviewActivityRow[]>;
   appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow>;
   listRevisions(contributionId: string): Promise<RevisionRow[]>;
   listLatestRevisions(caseId: string): Promise<RevisionRow[]>;
@@ -117,6 +253,11 @@ export class MemoryCaseStore implements CaseStore {
   private readonly revisions = new Map<string, RevisionRow[]>();
   private readonly artifacts = new Map<string, ArtifactRow>();
   private readonly snapshots = new Map<string, SnapshotRow>();
+  private readonly atomicBoundary: AtomicBoundary;
+
+  constructor(boundary: AtomicBoundary = async (operation) => operation()) {
+    this.atomicBoundary = serializedAtomicBoundary(boundary);
+  }
 
   async listCases(): Promise<CaseRow[]> {
     return [...this.cases.values()].map((row) => cloneCase(row));
@@ -139,6 +280,58 @@ export class MemoryCaseStore implements CaseStore {
     existing.legalHold = row.legalHold;
   }
 
+  async updateSituationAtomic(
+    input: AtomicSituationUpdate,
+    audit: AuditStore,
+  ): Promise<AtomicSituationUpdateResult> {
+    return this.atomicBoundary(async () => {
+      const existing = this.cases.get(input.id);
+      if (!existing) return { status: "not_found" };
+      const currentVersion = existing.situationVersion ?? 0;
+      if (currentVersion !== input.expectedVersion) {
+        return { status: "conflict", currentVersion };
+      }
+      if (input.changedFields.length === 0) {
+        return { status: "unchanged", row: cloneCase(existing) };
+      }
+
+      const before = cloneCase(existing);
+      const timelineBefore = [...(this.timeline.get(input.id) ?? [])];
+      try {
+        existing.problemStatement = input.situation.problemStatement;
+        existing.affectedParties = input.situation.affectedParties;
+        existing.impact = input.situation.impact;
+        existing.scope = input.situation.scope;
+        existing.openQuestions = [...input.situation.openQuestions];
+        existing.situationVersion = currentVersion + 1;
+        this.appendTimelineInMemory(input.id, input.timeline);
+        await audit.append(input.audit);
+        return { status: "updated", row: cloneCase(existing) };
+      } catch (error) {
+        this.cases.set(input.id, before);
+        this.timeline.set(input.id, timelineBefore);
+        throw error;
+      }
+    });
+  }
+
+  private appendTimelineInMemory(caseId: string, event: TimelineInsert): TimelineRow {
+    const list = this.timeline.get(caseId) ?? [];
+    const row: TimelineRow = {
+      seq: list.length + 1,
+      kind: event.kind,
+      actorId: event.actor.id,
+      actorUsername: event.actor.username,
+      targetId: event.targetId,
+      clientTime: event.clientTime,
+      serverTime: new Date().toISOString(),
+      payload: JSON.stringify(event.payload),
+    };
+    list.push(row);
+    this.timeline.set(caseId, list);
+    return row;
+  }
+
   async addParticipant(
     caseId: string,
     participant: { identityId: string; username: string },
@@ -155,21 +348,90 @@ export class MemoryCaseStore implements CaseStore {
     return [...(this.timeline.get(caseId) ?? [])];
   }
 
-  async appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
-    const list = this.timeline.get(caseId) ?? [];
-    const row: TimelineRow = {
-      seq: list.length + 1,
-      kind: event.kind,
-      actorId: event.actor.id,
-      actorUsername: event.actor.username,
-      targetId: event.targetId,
-      clientTime: event.clientTime,
-      serverTime: new Date().toISOString(),
-      payload: JSON.stringify(event.payload),
+  async listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]> {
+    return caseIds
+      .flatMap((caseId) =>
+        (this.timeline.get(caseId) ?? []).map((row) => ({ ...row, caseId })),
+      )
+      .sort((left, right) => {
+        const byTime = right.serverTime.localeCompare(left.serverTime);
+        if (byTime !== 0) return byTime;
+        const byCase = left.caseId.localeCompare(right.caseId);
+        return byCase !== 0 ? byCase : right.seq - left.seq;
+      })
+      .slice(0, limit);
+  }
+
+  async overviewVisibilityBoundary(scope: OverviewScope): Promise<OverviewVisibilityBoundary> {
+    return {
+      caseTitle: (caseId) => {
+        const row = this.cases.get(caseId);
+        return row && isOverviewVisibleCase(row, scope) ? row.title : null;
+      },
     };
-    list.push(row);
-    this.timeline.set(caseId, list);
-    return row;
+  }
+
+  async overviewCounts(scope: OverviewScope): Promise<OverviewCounts> {
+    const counts = emptyOverviewCounts();
+    for (const row of this.cases.values()) {
+      if (!isOverviewVisibleCase(row, scope)) continue;
+      if ((CASE_STATUSES as readonly string[]).includes(row.status)) {
+        counts.status[row.status] += 1;
+      }
+      if ((CASE_SEVERITIES as readonly string[]).includes(row.severity)) {
+        counts.severity[row.severity] += 1;
+      }
+    }
+    return counts;
+  }
+
+  async listOverviewOpenCases(scope: OverviewScope, limit: number): Promise<OverviewOpenCaseRow[]> {
+    const cap = Math.max(0, Math.trunc(limit) || 0);
+    if (cap === 0) return [];
+    return [...this.cases.values()]
+      .flatMap((row): OverviewOpenCaseRow[] => {
+        if (!isOverviewVisibleCase(row, scope) || !isOverviewOpenStatus(row.status)) return [];
+        return [{
+          id: row.id,
+          title: row.title,
+          status: row.status,
+          severity: row.severity,
+          createdAt: row.createdAt,
+        }];
+      })
+      .sort(compareOverviewOpenCases)
+      .slice(0, cap);
+  }
+
+  async listOverviewActivity(scope: OverviewScope, limit: number): Promise<OverviewActivityRow[]> {
+    const cap = Math.max(0, Math.trunc(limit) || 0);
+    if (cap === 0) return [];
+    const rows: OverviewActivityRow[] = [];
+    for (const row of this.cases.values()) {
+      if (!isOverviewVisibleCase(row, scope)) continue;
+      for (const event of this.timeline.get(row.id) ?? []) {
+        rows.push({
+          caseId: row.id,
+          title: row.title,
+          kind: event.kind,
+          actor: event.actorUsername,
+          serverTime: event.serverTime,
+          seq: event.seq,
+        });
+      }
+    }
+    return rows
+      .sort((left, right) => {
+        const byTime = right.serverTime.localeCompare(left.serverTime);
+        if (byTime !== 0) return byTime;
+        const byCase = left.caseId.localeCompare(right.caseId);
+        return byCase !== 0 ? byCase : right.seq - left.seq;
+      })
+      .slice(0, cap);
+  }
+
+  async appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
+    return this.appendTimelineInMemory(caseId, event);
   }
 
   async listRevisions(contributionId: string): Promise<RevisionRow[]> {
@@ -262,12 +524,20 @@ export class PgCaseStore implements CaseStore {
   async insertCase(row: CaseRow): Promise<void> {
     await this.db.query(
       `INSERT INTO cases (
-         id, title, severity, status, legal_hold, retention_class,
+         id, title, problem_statement, affected_parties, impact, situation_scope, open_questions,
+         situation_version,
+         severity, status, legal_hold, retention_class,
          created_at, created_by, created_by_username, last_seq
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, 0)`,
       [
         row.id,
         row.title,
+        row.problemStatement ?? "",
+        row.affectedParties ?? "",
+        row.impact ?? "",
+        row.scope ?? "",
+        JSON.stringify(row.openQuestions ?? []),
+        row.situationVersion ?? 0,
         row.severity,
         row.status,
         row.legalHold,
@@ -288,6 +558,59 @@ export class PgCaseStore implements CaseStore {
       [row.id, row.status, row.legalHold],
     );
     if (result.rowCount === 0) throw new Error("case not found");
+  }
+
+  async updateSituationAtomic(
+    input: AtomicSituationUpdate,
+    audit: AuditStore,
+  ): Promise<AtomicSituationUpdateResult> {
+    if (!(audit instanceof PgAuditStore) || !audit.isBoundTo(this.db)) {
+      throw new Error("PostgreSQL case and audit stores must share one connection source");
+    }
+    return withPgTransaction(this.db, async (transaction) => {
+      const locked = await transaction.query<{ situation_version: number }>(
+        `SELECT situation_version FROM cases WHERE id = $1 FOR UPDATE`,
+        [input.id],
+      );
+      const versionRaw = locked.rows[0]?.situation_version;
+      if (versionRaw === undefined) return { status: "not_found" };
+      const currentVersion = Number(versionRaw);
+      if (!Number.isSafeInteger(currentVersion) || currentVersion < 0) {
+        throw new Error("invalid cases.situation_version");
+      }
+      if (currentVersion !== input.expectedVersion) {
+        return { status: "conflict", currentVersion };
+      }
+      if (input.changedFields.length === 0) {
+        const row = await getPgCase(transaction, input.id);
+        if (!row) return { status: "not_found" };
+        return { status: "unchanged", row };
+      }
+
+      const updated = await transaction.query(
+        `UPDATE cases
+         SET problem_statement = $2, affected_parties = $3, impact = $4, situation_scope = $5,
+             open_questions = $6::jsonb, situation_version = situation_version + 1
+         WHERE id = $1 AND situation_version = $7`,
+        [
+          input.id,
+          input.situation.problemStatement,
+          input.situation.affectedParties,
+          input.situation.impact,
+          input.situation.scope,
+          JSON.stringify(input.situation.openQuestions),
+          input.expectedVersion,
+        ],
+      );
+      if (updated.rowCount !== 1) {
+        throw new Error("situation version changed while row lock was held");
+      }
+      await appendPgTimeline(transaction, input.id, input.timeline);
+      await audit.appendUsing(transaction, input.audit);
+      const row = await getPgCase(transaction, input.id);
+      if (!row) return { status: "not_found" };
+      return { status: "updated", row };
+    });
   }
 
   async addParticipant(
@@ -312,42 +635,97 @@ export class PgCaseStore implements CaseStore {
     return result.rows.map((row) => asTimeline(row as Record<string, unknown>));
   }
 
+  async listRecentTimeline(caseIds: string[], limit: number): Promise<CaseTimelineRow[]> {
+    if (caseIds.length === 0) return [];
+    const result = await this.db.query(
+      `SELECT case_id, seq, kind, actor_id, actor_username, target_id,
+              client_time, server_time, payload
+       FROM timeline_events
+       WHERE case_id = ANY($1::uuid[])
+       ORDER BY server_time DESC, case_id ASC, seq DESC
+       LIMIT $2`,
+      [caseIds, limit],
+    );
+    return result.rows.map((row) => ({
+      ...asTimeline(row as Record<string, unknown>),
+      caseId: String((row as Record<string, unknown>).case_id),
+    }));
+  }
+
+  async overviewVisibilityBoundary(_scope: OverviewScope): Promise<null> {
+    // PostgreSQL Overview queries enforce visibility in their own joins.
+    return null;
+  }
+
+  async overviewCounts(scope: OverviewScope): Promise<OverviewCounts> {
+    const counts = emptyOverviewCounts();
+    const result = await this.db.query(
+      `SELECT c.status, c.severity, COUNT(*)::int AS n
+       FROM cases c
+       WHERE ${overviewVisiblePredicate("c.id", "$1", "$2")}
+       GROUP BY c.status, c.severity`,
+      [scope.isAdmin, scope.actorId],
+    );
+    for (const row of result.rows as { status: string; severity: string; n: number }[]) {
+      if ((CASE_STATUSES as readonly string[]).includes(row.status)) {
+        counts.status[row.status as CaseStatus] += Number(row.n);
+      }
+      if ((CASE_SEVERITIES as readonly string[]).includes(row.severity)) {
+        counts.severity[row.severity as CaseSeverity] += Number(row.n);
+      }
+    }
+    return counts;
+  }
+
+  async listOverviewOpenCases(scope: OverviewScope, limit: number): Promise<OverviewOpenCaseRow[]> {
+    const cap = Math.max(0, Math.trunc(limit) || 0);
+    if (cap === 0) return [];
+    const result = await this.db.query(
+      `SELECT c.id, c.title, c.status, c.severity, c.created_at
+       FROM cases c
+       WHERE c.status = ANY($3::text[])
+         AND ${overviewVisiblePredicate("c.id", "$1", "$2")}
+       ORDER BY c.created_at DESC, c.id ASC
+       LIMIT $4`,
+      [scope.isAdmin, scope.actorId, [...OVERVIEW_OPEN_STATUSES], cap],
+    );
+    return (result.rows as Record<string, unknown>[]).flatMap((row): OverviewOpenCaseRow[] => {
+      const status = String(row.status);
+      if (!isOverviewOpenStatus(status)) return [];
+      return [{
+        id: String(row.id),
+        title: String(row.title),
+        status,
+        severity: row.severity as CaseSeverity,
+        createdAt: asIso(row.created_at),
+      }];
+    });
+  }
+
+  async listOverviewActivity(scope: OverviewScope, limit: number): Promise<OverviewActivityRow[]> {
+    const cap = Math.max(0, Math.trunc(limit) || 0);
+    if (cap === 0) return [];
+    const result = await this.db.query(
+      `SELECT e.case_id, c.title, e.kind, e.actor_username, e.server_time, e.seq
+       FROM timeline_events e
+       INNER JOIN cases c ON c.id = e.case_id
+       WHERE ${overviewVisiblePredicate("c.id", "$1", "$2")}
+       ORDER BY e.server_time DESC, e.case_id ASC, e.seq DESC
+       LIMIT $3`,
+      [scope.isAdmin, scope.actorId, cap],
+    );
+    return (result.rows as Record<string, unknown>[]).map((row) => ({
+      caseId: String(row.case_id),
+      title: String(row.title),
+      kind: String(row.kind),
+      actor: String(row.actor_username),
+      serverTime: asIso(row.server_time),
+      seq: Number(row.seq),
+    }));
+  }
+
   async appendTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
-    const seqRes = await this.db.query<{ last_seq: string | number }>(
-      `UPDATE cases SET last_seq = last_seq + 1 WHERE id = $1 RETURNING last_seq`,
-      [caseId],
-    );
-    const seqRaw = seqRes.rows[0]?.last_seq;
-    if (seqRaw === undefined) throw new Error("case not found");
-    const seq = Number(seqRaw);
-    const serverTime = new Date().toISOString();
-    const payload = JSON.stringify(event.payload);
-    await this.db.query(
-      `INSERT INTO timeline_events (
-         case_id, seq, kind, actor_id, actor_username, target_id, client_time, server_time, payload
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
-      [
-        caseId,
-        seq,
-        event.kind,
-        event.actor.id,
-        event.actor.username,
-        event.targetId,
-        event.clientTime,
-        serverTime,
-        payload,
-      ],
-    );
-    return {
-      seq,
-      kind: event.kind,
-      actorId: event.actor.id,
-      actorUsername: event.actor.username,
-      targetId: event.targetId,
-      clientTime: event.clientTime,
-      serverTime,
-      payload,
-    };
+    return appendPgTimeline(this.db, caseId, event);
   }
 
   async listRevisions(contributionId: string): Promise<RevisionRow[]> {
@@ -511,7 +889,9 @@ export class PgCaseStore implements CaseStore {
 }
 
 const CASE_SELECT = `
-  SELECT c.id, c.title, c.severity, c.status, c.legal_hold, c.retention_class,
+  SELECT c.id, c.title, c.problem_statement, c.affected_parties, c.impact, c.situation_scope,
+         c.open_questions, c.situation_version, c.severity, c.status, c.legal_hold,
+         c.retention_class,
          c.created_at, c.created_by, c.created_by_username,
          COALESCE(
            json_agg(
@@ -526,6 +906,12 @@ const CASE_SELECT = `
 function cloneCase(row: CaseRow): CaseRow {
   return {
     ...row,
+    problemStatement: row.problemStatement ?? "",
+    affectedParties: row.affectedParties ?? "",
+    impact: row.impact ?? "",
+    scope: row.scope ?? "",
+    openQuestions: caseOpenQuestions(row.openQuestions, "case.openQuestions"),
+    situationVersion: caseSituationVersion(row.situationVersion),
     participants: row.participants.map((p) => ({ ...p })),
   };
 }
@@ -546,6 +932,18 @@ function asCase(row: Record<string, unknown>): CaseRow {
   return {
     id: String(row.id),
     title: String(row.title),
+    problemStatement: row.problem_statement === null || row.problem_statement === undefined
+      ? ""
+      : String(row.problem_statement),
+    affectedParties: row.affected_parties === null || row.affected_parties === undefined
+      ? ""
+      : String(row.affected_parties),
+    impact: row.impact === null || row.impact === undefined ? "" : String(row.impact),
+    scope: row.situation_scope === null || row.situation_scope === undefined
+      ? ""
+      : String(row.situation_scope),
+    openQuestions: caseOpenQuestions(row.open_questions, "cases.open_questions"),
+    situationVersion: caseSituationVersion(row.situation_version),
     severity: row.severity as CaseSeverity,
     status: row.status as CaseStatus,
     legalHold: Boolean(row.legal_hold),
@@ -555,6 +953,98 @@ function asCase(row: Record<string, unknown>): CaseRow {
     createdByUsername: String(row.created_by_username),
     participants,
   };
+}
+
+function caseOpenQuestions(value: unknown, field: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((question) => typeof question === "string")) {
+    throw new Error(`invalid ${field}: expected an array of strings`);
+  }
+  return [...value];
+}
+
+function caseSituationVersion(value: unknown): number {
+  if (value === undefined) return 0;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error("invalid cases.situation_version");
+  }
+  return parsed;
+}
+
+async function getPgCase(db: Queryable, id: string): Promise<CaseRow | null> {
+  const result = await db.query(`${CASE_SELECT} WHERE c.id = $1 GROUP BY c.id`, [id]);
+  const row = result.rows[0] as Record<string, unknown> | undefined;
+  return row ? asCase(row) : null;
+}
+
+async function appendPgTimeline(
+  db: Queryable,
+  caseId: string,
+  event: TimelineInsert,
+): Promise<TimelineRow> {
+  const seqRes = await db.query<{ last_seq: string | number }>(
+    `UPDATE cases SET last_seq = last_seq + 1 WHERE id = $1 RETURNING last_seq`,
+    [caseId],
+  );
+  const seqRaw = seqRes.rows[0]?.last_seq;
+  if (seqRaw === undefined) throw new Error("case not found");
+  const seq = Number(seqRaw);
+  const serverTime = new Date().toISOString();
+  const payload = JSON.stringify(event.payload);
+  await db.query(
+    `INSERT INTO timeline_events (
+       case_id, seq, kind, actor_id, actor_username, target_id, client_time, server_time, payload
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+    [
+      caseId,
+      seq,
+      event.kind,
+      event.actor.id,
+      event.actor.username,
+      event.targetId,
+      event.clientTime,
+      serverTime,
+      payload,
+    ],
+  );
+  return {
+    seq,
+    kind: event.kind,
+    actorId: event.actor.id,
+    actorUsername: event.actor.username,
+    targetId: event.targetId,
+    clientTime: event.clientTime,
+    serverTime,
+    payload,
+  };
+}
+
+async function withPgTransaction<T>(
+  db: Queryable,
+  operation: (transaction: Queryable) => Promise<T>,
+): Promise<T> {
+  let transaction: Queryable = db;
+  let pooled: PoolClient | null = null;
+  if (db instanceof Pool) {
+    pooled = await db.connect();
+    transaction = pooled;
+  }
+  await transaction.query("BEGIN");
+  try {
+    const result = await operation(transaction);
+    await transaction.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await transaction.query("ROLLBACK");
+    } catch {
+      // Preserve the mutation failure; the connection is released below.
+    }
+    throw error;
+  } finally {
+    pooled?.release();
+  }
 }
 
 function asTimeline(row: Record<string, unknown>): TimelineRow {

@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="760" viewBox="0 0 1440 760" role="img" aria-labelledby="portable-title portable-desc">
+  <title id="portable-title">Portable investigation archive trust boundary</title>
+  <desc id="portable-desc">A dark-neutral and gold diagram showing a source War Room exporting a complete investigation archive, a destination War Room validating it with a dry-run preflight and deterministic identifier remapping, historical identities remaining attribution only, and a blocked restore boundary because apply is not available.</desc>
+
+  <defs>
+    <linearGradient id="portable-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#11110f"/>
+      <stop offset="0.55" stop-color="#1c1a16"/>
+      <stop offset="1" stop-color="#121211"/>
+    </linearGradient>
+    <linearGradient id="portable-gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8c7335"/>
+      <stop offset="0.5" stop-color="#e4c56c"/>
+      <stop offset="1" stop-color="#8c7335"/>
+    </linearGradient>
+    <filter id="portable-shadow" x="-15%" y="-20%" width="130%" height="150%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity="0.34"/>
+    </filter>
+    <marker id="portable-arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1 1 L11 6 L1 11 Z" fill="#d8b85f"/>
+    </marker>
+    <style>
+      .sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .eyebrow { font-size: 13px; font-weight: 750; letter-spacing: 2.4px; text-transform: uppercase; }
+      .title { font-size: 36px; font-weight: 760; letter-spacing: -0.7px; }
+      .card-title { font-size: 24px; font-weight: 730; }
+      .body { font-size: 15px; font-weight: 450; }
+      .label { font-size: 14px; font-weight: 680; }
+      .small { font-size: 13px; font-weight: 520; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="760" rx="28" fill="url(#portable-bg)"/>
+  <path d="M0 142 C342 96 583 182 904 129 C1132 91 1284 107 1440 73 L1440 0 L0 0 Z" fill="#d8b65c" opacity="0.035"/>
+
+  <g class="sans">
+    <text x="72" y="64" class="eyebrow" fill="#d9b85f">Complete investigation archive</text>
+    <text x="72" y="112" class="title" fill="#f6f0e2">Inspect the transfer plan before anything can change</text>
+    <text x="72" y="146" class="body" fill="#aaa69c">Export and dry-run preflight are available. Restore/apply is intentionally unavailable.</text>
+
+    <!-- Source -->
+    <g filter="url(#portable-shadow)">
+      <rect x="64" y="206" width="336" height="334" rx="20" fill="#22211e" stroke="#4a463b"/>
+      <rect x="64" y="206" width="336" height="5" rx="2.5" fill="#997f3f"/>
+    </g>
+    <text x="90" y="251" class="eyebrow" fill="#b99b4d">Source War Room</text>
+    <text x="90" y="291" class="card-title" fill="#f6f0e2">Download archive</text>
+    <text x="90" y="328" class="body" fill="#c5c0b5">
+      <tspan x="90" dy="0">Portable JSON represents the durable</tspan>
+      <tspan x="90" dy="23">Situation, supported investigation</tspan>
+      <tspan x="90" dy="23">objects, included evidence, provenance,</tspan>
+      <tspan x="90" dy="23">integrity, and reconstruction limits.</tspan>
+    </text>
+    <rect x="90" y="443" width="154" height="31" rx="15.5" fill="#302d26" stroke="#5a5241"/>
+    <text x="167" y="464" text-anchor="middle" class="label" fill="#dfd6c5">Read-only export</text>
+    <text x="90" y="507" class="small" fill="#98948b">No source investigation mutation</text>
+
+    <!-- Archive connector -->
+    <path d="M400 372 H516" fill="none" stroke="url(#portable-gold)" stroke-width="3" marker-end="url(#portable-arrow)"/>
+    <rect x="421" y="326" width="82" height="67" rx="9" fill="#29261f" stroke="#9e8342"/>
+    <path d="M477 326 L503 352 H477 Z" fill="#5a4927"/>
+    <text x="462" y="416" text-anchor="middle" class="small" fill="#d9c58e">archive JSON</text>
+
+    <!-- Destination preflight -->
+    <g filter="url(#portable-shadow)">
+      <rect x="518" y="206" width="500" height="334" rx="20" fill="#22211e" stroke="#6a5931" stroke-width="1.5"/>
+      <rect x="518" y="206" width="500" height="5" rx="2.5" fill="#d4b45b"/>
+    </g>
+    <text x="546" y="251" class="eyebrow" fill="#d5b55b">Destination War Room</text>
+    <text x="546" y="291" class="card-title" fill="#fff7e6">Run dry-run preflight</text>
+
+    <g>
+      <circle cx="562" cy="337" r="11" fill="#3b321f" stroke="#d7b75e"/>
+      <path d="M556 337 L560 341 L568 332" fill="none" stroke="#f2d880" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="586" y="342" class="body" fill="#d7d0c2">Validate hashes + references</text>
+
+      <circle cx="562" cy="382" r="11" fill="#3b321f" stroke="#d7b75e"/>
+      <path d="M556 382 L560 386 L568 377" fill="none" stroke="#f2d880" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="586" y="387" class="body" fill="#d7d0c2">Summarize privacy + omissions</text>
+
+      <circle cx="562" cy="427" r="11" fill="#3b321f" stroke="#d7b75e"/>
+      <path d="M556 427 L560 431 L568 422" fill="none" stroke="#f2d880" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="586" y="432" class="body" fill="#d7d0c2">Plan deterministic ID remaps</text>
+
+      <circle cx="562" cy="472" r="11" fill="#3b321f" stroke="#d7b75e"/>
+      <path d="M556 472 L560 476 L568 467" fill="none" stroke="#f2d880" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="586" y="477" class="body" fill="#d7d0c2">Report blocks + warnings</text>
+    </g>
+
+    <rect x="827" y="320" width="159" height="167" rx="15" fill="#191917" stroke="#4a463b"/>
+    <text x="849" y="348" class="eyebrow" fill="#9e9a91">Identity rule</text>
+    <text x="849" y="383" class="label" fill="#eee7d9">Historical people</text>
+    <text x="849" y="407" class="label" fill="#eee7d9">stay attribution only</text>
+    <text x="849" y="442" class="small" fill="#9f9b92">No destination user</text>
+    <text x="849" y="462" class="small" fill="#9f9b92">No role or capability</text>
+
+    <!-- Blocked apply -->
+    <path d="M1018 372 H1124" fill="none" stroke="#7c6940" stroke-width="3" stroke-dasharray="9 9"/>
+    <circle cx="1072" cy="372" r="23" fill="#2b231c" stroke="#d28a55" stroke-width="2"/>
+    <path d="M1062 362 L1082 382 M1082 362 L1062 382" stroke="#efb17f" stroke-width="3" stroke-linecap="round"/>
+
+    <g filter="url(#portable-shadow)">
+      <rect x="1124" y="206" width="252" height="334" rx="20" fill="#211b18" stroke="#8a5a3c"/>
+      <rect x="1124" y="206" width="252" height="5" rx="2.5" fill="#c77a49"/>
+    </g>
+    <text x="1150" y="251" class="eyebrow" fill="#e19c6d">Trust boundary</text>
+    <text x="1150" y="291" class="card-title" fill="#fff1e7">No restore/apply</text>
+    <text x="1150" y="332" class="body" fill="#d2c2b8">
+      <tspan x="1150" dy="0">The preflight creates no</tspan>
+      <tspan x="1150" dy="23">investigation, user, member,</tspan>
+      <tspan x="1150" dy="23">role, permission, or capability.</tspan>
+    </text>
+    <text x="1150" y="427" class="body" fill="#d2c2b8">
+      <tspan x="1150" dy="0">Apply remains unavailable until</tspan>
+      <tspan x="1150" dy="23">atomic rollback is proven across</tspan>
+      <tspan x="1150" dy="23">supported storage backends.</tspan>
+    </text>
+
+    <!-- Bottom result rail -->
+    <rect x="64" y="590" width="1312" height="104" rx="18" fill="#181815" stroke="#3c3931"/>
+    <text x="94" y="628" class="eyebrow" fill="#b99b4d">Dry-run result</text>
+    <text x="94" y="663" class="body" fill="#eee7d9">A deterministic, reviewable transfer plan — not a completed import.</text>
+    <rect x="1016" y="615" width="330" height="42" rx="21" fill="#30291d" stroke="#8d7538"/>
+    <text x="1181" y="642" text-anchor="middle" class="label" fill="#f0d887">Destination state remains unchanged</text>
+
+    <text x="720" y="731" text-anchor="middle" class="small" fill="#77736b">Source roles are untrusted. Historical identity is preserved without granting destination authority.</text>
+  </g>
+</svg>

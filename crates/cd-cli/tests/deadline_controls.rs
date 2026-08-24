@@ -48,6 +48,11 @@ fn write_minimal_app_config(data: &Path) {
         serde_json::to_vec_pretty(&cfg).unwrap(),
     )
     .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(app_config_path(data), fs::Permissions::from_mode(0o600)).unwrap();
+    }
 }
 
 #[test]
@@ -78,6 +83,7 @@ fn config_deadline_show_human_and_json() {
     let _ = v;
 }
 
+#[cfg(unix)]
 #[test]
 fn config_deadline_set_only_touches_deadline_fields() {
     let (_tmp, data) = isolated_home();
@@ -109,6 +115,7 @@ fn config_deadline_set_only_touches_deadline_fields() {
     assert_eq!(saved["default_timezone"], "America/Chicago");
 }
 
+#[cfg(unix)]
 #[test]
 fn config_deadline_auto_preserves_numeric_value() {
     let (_tmp, data) = isolated_home();
@@ -363,6 +370,7 @@ fn legacy_config_missing_deadline_is_explicit_loads_and_show_reports_custom() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn config_deadline_set_then_auto_preserves_unrelated_json_keys() {
     let (_tmp, data) = isolated_home();

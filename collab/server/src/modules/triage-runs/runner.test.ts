@@ -239,6 +239,66 @@ process.stdout.write(${JSON.stringify(output)});
     }
   });
 
+  it("preserves every bounded host lifecycle fallback across the CLI result seam", async () => {
+    const root = await mkdtemp(join(tmpdir(), "contextdesk-runner-reasons-test-"));
+    const command = join(root, "reason-runner.mjs");
+    const reasons = [
+      ["live_run_failed", "failed"],
+      ["live_run_stopped", "failed"],
+      ["cancel_requested", "cancelled"],
+      ["gateway_runner_error", "failed"],
+      ["provider body: TOP-SECRET", "failed"],
+    ] as const;
+    const candidates = reasons.map(([_reason], index) => ({
+      ...context.request.candidates[index % context.request.candidates.length]!,
+      candidateId: `candidate-${index}`,
+      role: `role-${index}`,
+    }));
+    const output = JSON.stringify({
+      ok: true,
+      data: {
+        schema_id: "cd-collab.triage_run_result.v1",
+        action: "collab_triage_run",
+        job_id: "job-runner-test",
+        case_id: "case-runner-test",
+        collab_snapshot_id: "snapshot-runner-test",
+        collab_snapshot_fingerprint: "f".repeat(64),
+        same_snapshot: true,
+        candidates: reasons.map(([errorCode, status], index) => ({
+          candidate_id: `candidate-${index}`,
+          status,
+          run_id: `run-${index}`,
+          output_hash: `out-${index}`,
+          summary: index === reasons.length - 1 ? "Authorization: Bearer TOP-SECRET" : `safe ${errorCode}`,
+          error_code: errorCode,
+          evidence_refs: [],
+        })),
+      },
+    });
+    await writeFile(
+      command,
+      `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(output)});\n`,
+      { mode: 0o755 },
+    );
+    try {
+      const executor = new RustBridgeTriageExecutor({ command });
+      const results = await executor.executeBatch({
+        ...context,
+        request: { ...context.request, candidates },
+      }, new AbortController().signal);
+      expect(results.map((result) => result.errorCode)).toEqual([
+        "live_run_failed",
+        "live_run_stopped",
+        "cancel_requested",
+        "gateway_runner_error",
+        "gateway_error",
+      ]);
+      expect(JSON.stringify(results)).not.toContain("TOP-SECRET");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("interrupts a host that exceeds the output bound", async () => {
     const root = await mkdtemp(join(tmpdir(), "contextdesk-runner-overflow-test-"));
     const command = join(root, "overflow-runner.mjs");

@@ -11,12 +11,19 @@ import type {
   SnapshotFairnessClass,
   SnapshotLineageClass,
   SnapshotProofBasis,
+  NormalizedExperimentDecisionV1,
 } from "@cd-collab/contracts";
 import {
   SNAPSHOT_FAIRNESS_CLASSES,
   SNAPSHOT_LINEAGE_CLASSES,
   SNAPSHOT_PROOF_BASES,
+  parseExperimentDecision,
 } from "@cd-collab/contracts";
+import {
+  overviewVisiblePredicate,
+  type OverviewScope,
+  type OverviewVisibilityBoundary,
+} from "../cases/index.js";
 
 export interface ExperimentSnapshotProof {
   basis: SnapshotProofBasis;
@@ -49,15 +56,31 @@ export interface ExperimentRow {
   importerUsername: string;
 }
 
+export interface LatestProposedDecisionRow {
+  caseId: string;
+  caseTitle: string;
+  experimentId: string;
+  packageId: string;
+  decision: NormalizedExperimentDecisionV1;
+}
+
+export interface ListOverviewProposedQuery extends OverviewScope {
+  limit: number;
+  authorId?: string;
+  excludeAuthorId?: string;
+  visibility: OverviewVisibilityBoundary | null;
+}
+
 export interface ExperimentStore {
   insert(row: ExperimentRow): Promise<void>;
   get(id: string): Promise<ExperimentRow | null>;
   findByPackage(caseId: string, packageId: string): Promise<ExperimentRow | null>;
   listByCase(caseId: string): Promise<ExperimentRow[]>;
+  listOverviewProposed(query: ListOverviewProposedQuery): Promise<LatestProposedDecisionRow[]>;
   listObservations(experimentId: string): Promise<HelpfulnessObservationV1[]>;
   insertObservation(row: HelpfulnessObservationV1): Promise<void>;
-  listDecisions(experimentId: string): Promise<ExperimentDecisionV1[]>;
-  insertDecision(row: ExperimentDecisionV1): Promise<void>;
+  listDecisions(experimentId: string): Promise<NormalizedExperimentDecisionV1[]>;
+  insertDecision(row: NormalizedExperimentDecisionV1): Promise<void>;
   listGolds(experimentId: string): Promise<GoldReferenceV1[]>;
   insertGold(row: GoldReferenceV1): Promise<void>;
   listTraces(experimentId: string): Promise<InteractionTraceV1[]>;
@@ -143,6 +166,31 @@ function parseSnapshotProof(raw: unknown): ExperimentSnapshotProof {
   return parsed;
 }
 
+function cloneDecision(row: ExperimentDecisionV1): NormalizedExperimentDecisionV1 {
+  return parseExperimentDecision({
+    ...row,
+    evidenceRefs: [...row.evidenceRefs],
+  });
+}
+
+function matchesProposedQuery(
+  authorId: string,
+  query: Pick<ListOverviewProposedQuery, "authorId" | "excludeAuthorId">,
+): boolean {
+  if (query.authorId !== undefined && authorId !== query.authorId) return false;
+  if (query.excludeAuthorId !== undefined && authorId === query.excludeAuthorId) return false;
+  return true;
+}
+
+function sortProposed(rows: LatestProposedDecisionRow[]): LatestProposedDecisionRow[] {
+  return [...rows].sort((left, right) => {
+    const byTime = right.decision.createdAt.localeCompare(left.decision.createdAt);
+    if (byTime !== 0) return byTime;
+    const byExperiment = left.experimentId.localeCompare(right.experimentId);
+    return byExperiment !== 0 ? byExperiment : left.decision.id.localeCompare(right.decision.id);
+  });
+}
+
 function storedAgreement(row: ExperimentRow): object {
   return {
     publicAgreement: row.agreement,
@@ -215,7 +263,7 @@ function cloneGold(row: GoldReferenceV1): GoldReferenceV1 {
 export class MemoryExperimentStore implements ExperimentStore {
   private readonly experiments = new Map<string, ExperimentRow>();
   private readonly observations = new Map<string, HelpfulnessObservationV1[]>();
-  private readonly decisions = new Map<string, ExperimentDecisionV1[]>();
+  private readonly decisions = new Map<string, NormalizedExperimentDecisionV1[]>();
   private readonly golds = new Map<string, GoldReferenceV1[]>();
   private readonly traces = new Map<string, InteractionTraceV1[]>();
   private readonly annotations = new Map<string, TraceAnnotationRow[]>();
@@ -268,6 +316,36 @@ export class MemoryExperimentStore implements ExperimentStore {
     return rows.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   }
 
+  async listOverviewProposed(
+    query: ListOverviewProposedQuery,
+  ): Promise<LatestProposedDecisionRow[]> {
+    const cap = Math.max(0, Math.trunc(query.limit) || 0);
+    if (cap === 0) return [];
+    const rows: LatestProposedDecisionRow[] = [];
+    const titles = new Map<string, string | null>();
+    for (const experiment of this.experiments.values()) {
+      if (!titles.has(experiment.caseId)) {
+        titles.set(experiment.caseId, query.visibility?.caseTitle(experiment.caseId) ?? null);
+      }
+      const caseTitle = titles.get(experiment.caseId);
+      if (!caseTitle) continue;
+      const latest = (this.decisions.get(experiment.id) ?? [])
+        .slice()
+        .sort((a, b) => a.revision - b.revision)
+        .at(-1);
+      if (!latest || latest.status !== "proposed") continue;
+      if (!matchesProposedQuery(latest.authorId, query)) continue;
+      rows.push({
+        caseId: experiment.caseId,
+        caseTitle,
+        experimentId: experiment.id,
+        packageId: experiment.packageId,
+        decision: cloneDecision(latest),
+      });
+    }
+    return sortProposed(rows).slice(0, cap);
+  }
+
   async listObservations(experimentId: string): Promise<HelpfulnessObservationV1[]> {
     return [...(this.observations.get(experimentId) ?? [])];
   }
@@ -278,11 +356,11 @@ export class MemoryExperimentStore implements ExperimentStore {
     this.observations.set(row.experimentId, list);
   }
 
-  async listDecisions(experimentId: string): Promise<ExperimentDecisionV1[]> {
+  async listDecisions(experimentId: string): Promise<NormalizedExperimentDecisionV1[]> {
     return [...(this.decisions.get(experimentId) ?? [])].sort((a, b) => a.revision - b.revision);
   }
 
-  async insertDecision(row: ExperimentDecisionV1): Promise<void> {
+  async insertDecision(row: NormalizedExperimentDecisionV1): Promise<void> {
     const list = this.decisions.get(row.experimentId) ?? [];
     if (list.some((d) => d.revision === row.revision && d.id === row.id)) {
       throw new Error("decision revision already exists");
@@ -408,6 +486,51 @@ export class PgExperimentStore implements ExperimentStore {
     return (res.rows as Record<string, unknown>[]).map(fromPgExperiment);
   }
 
+  async listOverviewProposed(
+    query: ListOverviewProposedQuery,
+  ): Promise<LatestProposedDecisionRow[]> {
+    const cap = Math.max(0, Math.trunc(query.limit) || 0);
+    if (cap === 0) return [];
+    const res = await this.db.query(
+      `SELECT e.case_id, c.title AS case_title, e.id AS experiment_id, e.package_id, d.payload
+       FROM experiment_decisions d
+       INNER JOIN experiment_packages e ON e.id = d.experiment_id
+       INNER JOIN cases c ON c.id = e.case_id
+       INNER JOIN (
+         SELECT experiment_id, MAX(revision) AS revision
+         FROM experiment_decisions
+         GROUP BY experiment_id
+       ) latest
+         ON latest.experiment_id = d.experiment_id AND latest.revision = d.revision
+       WHERE ${overviewVisiblePredicate("e.case_id", "$1", "$2")}
+         AND d.payload->>'status' = 'proposed'
+         AND ($3::text IS NULL OR d.payload->>'authorId' = $3)
+         AND ($4::text IS NULL OR d.payload->>'authorId' <> $4)
+       ORDER BY d.created_at DESC, e.id ASC, d.id ASC
+       LIMIT $5`,
+      [
+        query.isAdmin,
+        query.actorId,
+        query.authorId ?? null,
+        query.excludeAuthorId ?? null,
+        cap,
+      ],
+    );
+    return (res.rows as {
+      case_id: string;
+      case_title: string;
+      experiment_id: string;
+      package_id: string;
+      payload: unknown;
+    }[]).map((row) => ({
+      caseId: row.case_id,
+      caseTitle: row.case_title,
+      experimentId: row.experiment_id,
+      packageId: row.package_id,
+      decision: parseExperimentDecision(row.payload),
+    }));
+  }
+
   async listObservations(experimentId: string): Promise<HelpfulnessObservationV1[]> {
     const res = await this.db.query(
       `SELECT payload FROM experiment_helpfulness WHERE experiment_id = $1 ORDER BY created_at, id`,
@@ -424,15 +547,17 @@ export class PgExperimentStore implements ExperimentStore {
     );
   }
 
-  async listDecisions(experimentId: string): Promise<ExperimentDecisionV1[]> {
+  async listDecisions(experimentId: string): Promise<NormalizedExperimentDecisionV1[]> {
     const res = await this.db.query(
       `SELECT payload FROM experiment_decisions WHERE experiment_id = $1 ORDER BY revision, id`,
       [experimentId],
     );
-    return res.rows.map((row: { payload: ExperimentDecisionV1 }) => row.payload);
+    return res.rows.map((row: { payload: ExperimentDecisionV1 }) =>
+      parseExperimentDecision(row.payload),
+    );
   }
 
-  async insertDecision(row: ExperimentDecisionV1): Promise<void> {
+  async insertDecision(row: NormalizedExperimentDecisionV1): Promise<void> {
     await this.db.query(
       `INSERT INTO experiment_decisions (id, experiment_id, revision, created_at, payload)
        VALUES ($1,$2,$3,$4,$5::jsonb)`,

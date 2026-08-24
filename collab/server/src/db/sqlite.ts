@@ -78,7 +78,9 @@ function restoreStore(store: object, state: unknown): void {
 }
 
 function storeState(store: object): JsonValue {
-  return Object.fromEntries(Object.entries(store)) as JsonValue;
+  return Object.fromEntries(
+    Object.entries(store).filter(([, value]) => typeof value !== "function"),
+  ) as JsonValue;
 }
 
 function methodNames(store: object): string[] {
@@ -137,12 +139,41 @@ export class SqliteState {
     ).run(key, JSON.stringify(encode(value)), new Date().toISOString());
   }
 
+  async transaction<T>(
+    stores: readonly { key: string; store: object }[],
+    operation: () => Promise<T>,
+    shouldPersist: (result: T) => boolean = () => true,
+  ): Promise<T> {
+    const snapshots = stores.map(({ store }) => decode(encode(storeState(store))));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = await operation();
+      if (shouldPersist(result)) {
+        for (const { key, store } of stores) this.write(key, storeState(store));
+      }
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } finally {
+        stores.forEach(({ store }, index) => restoreStore(store, snapshots[index]));
+      }
+      throw error;
+    }
+  }
+
   close(): void {
     this.db.close();
   }
 }
 
-function persistentMemoryStore<T extends object>(state: SqliteState, key: string, store: T): T {
+function persistentMemoryStore<T extends object>(
+  state: SqliteState,
+  key: string,
+  store: T,
+  mutatingMethods: ReadonlySet<string>,
+): T {
   const saved = state.read(key);
   if (saved !== null) restoreStore(store, saved);
   for (const name of methodNames(store)) {
@@ -150,7 +181,7 @@ function persistentMemoryStore<T extends object>(state: SqliteState, key: string
     if (typeof original !== "function") continue;
     Reflect.set(store, name, async (...args: unknown[]) => {
       const result = await Reflect.apply(original, store, args);
-      state.write(key, storeState(store));
+      if (mutatingMethods.has(name)) state.write(key, storeState(store));
       return result;
     });
   }
@@ -218,16 +249,77 @@ export function createSqliteRuntime(
   bootstrap: GroupRoleMapping = emptyMapping(),
 ): SqliteRuntime {
   const state = new SqliteState(path);
+  const rawAudit = new MemoryAuditStore();
+  const audit = persistentMemoryStore(state, "audit", rawAudit, new Set(["append"]));
+  const rawCases: MemoryCaseStore = new MemoryCaseStore((operation) =>
+    state.transaction(
+      [
+        { key: "audit", store: rawAudit },
+        { key: "cases", store: rawCases },
+      ],
+      operation,
+      (result) =>
+        typeof result === "object"
+        && result !== null
+        && "status" in result
+        && result.status === "updated",
+    ));
+  const cases = persistentMemoryStore(
+    state,
+    "cases",
+    rawCases,
+    new Set([
+      "insertCase",
+      "updateCaseMeta",
+      "addParticipant",
+      "appendTimeline",
+      "insertRevision",
+      "insertArtifact",
+      "insertSnapshot",
+    ]),
+  );
   return {
     state,
     databaseProbe: state,
-    audit: persistentMemoryStore(state, "audit", new MemoryAuditStore()),
-    sessions: persistentMemoryStore(state, "sessions", new MemorySessionStore()),
+    audit,
+    sessions: persistentMemoryStore(
+      state,
+      "sessions",
+      new MemorySessionStore(),
+      new Set(["create", "touch", "revoke"]),
+    ),
     roleStore: new SqliteGroupRoleStore(state, bootstrap),
-    catalog: persistentMemoryStore(state, "catalog", new MemoryCatalogStore()),
-    cases: persistentMemoryStore(state, "cases", new MemoryCaseStore()),
-    runs: persistentMemoryStore(state, "runs", new MemoryRunStore()),
-    experiments: persistentMemoryStore(state, "experiments", new MemoryExperimentStore()),
-    jobs: persistentMemoryStore(state, "jobs", new MemoryTriageJobStore()),
+    catalog: persistentMemoryStore(
+      state,
+      "catalog",
+      new MemoryCatalogStore(),
+      new Set(["insert", "updateMeta", "setLifecycle"]),
+    ),
+    cases,
+    runs: persistentMemoryStore(
+      state,
+      "runs",
+      new MemoryRunStore(),
+      new Set(["insert", "appendCorroboration"]),
+    ),
+    experiments: persistentMemoryStore(
+      state,
+      "experiments",
+      new MemoryExperimentStore(),
+      new Set([
+        "insert",
+        "insertObservation",
+        "insertDecision",
+        "insertGold",
+        "insertTrace",
+        "insertAnnotation",
+      ]),
+    ),
+    jobs: persistentMemoryStore(
+      state,
+      "jobs",
+      new MemoryTriageJobStore(),
+      new Set(["insert", "claimQueued", "renewLease", "recoverStale", "update"]),
+    ),
   };
 }

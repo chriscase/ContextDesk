@@ -27,6 +27,9 @@ export function ImportedRun(props: {
         : "Unverified imported run";
   return (
     <article
+      data-route-item={run.id}
+      data-route-kind="imported-run"
+      tabIndex={-1}
       className={
         run.corroborationState === "contradicted"
           ? "imported-run imported-run--contradicted"
@@ -47,23 +50,35 @@ export function ImportedRun(props: {
       <p className="timeline__meta">
         importer {run.importerUsername} · operator {run.operatorUsername} · visibility{" "}
         {run.evidenceVisibility}
-        {run.snapshotBinding ? ` · snapshot ${run.snapshotBinding}` : " · no package snapshot"}
+        {run.snapshotBinding ? " · bound to a frozen evidence snapshot" : " · no frozen snapshot recorded"}
       </p>
-      {/* Attribution shows only what was recorded: the exact source id, plus catalog
-          name/kind when that id matches a loaded source. A missing match stays explicit
-          ("catalog metadata unavailable") — never guessed. */}
+      {/* The primary line uses recognizable catalog metadata. Exact storage identities
+          remain available below for audit/debug work, never substituted or guessed. */}
       {run.sourceId ? (
         <p className="catalog__meta">
-          source <code>{run.sourceId}</code>
           {props.source ? (
             <>
-              {" "}
-              · {props.source.name} · kind {props.source.kind}
+              Source: {props.source.name} · {props.source.kind}
             </>
           ) : (
-            <> · catalog metadata unavailable</>
+            <>Recorded source metadata unavailable</>
           )}
         </p>
+      ) : null}
+      {run.sourceId || run.snapshotBinding ? (
+        <details className="triage-advanced imported-run__technical">
+          <summary>Technical details</summary>
+          {run.sourceId ? (
+            <p className="catalog__meta">
+              Recorded source ID: <code>{run.sourceId}</code>
+            </p>
+          ) : null}
+          {run.snapshotBinding ? (
+            <p className="catalog__meta">
+              Snapshot binding: <code>{run.snapshotBinding}</code>
+            </p>
+          ) : null}
+        </details>
       ) : null}
       {run.promptText === null ? (
         <p className="timeline__meta">Prompt unknown ({run.promptCompleteness})</p>

@@ -20,6 +20,7 @@ import {
   type MutableGroupRoleMap,
 } from "./modules/authz/index.js";
 import type { AuditStore } from "./modules/audit/index.js";
+import { registerAdminDirectoryRoutes } from "./modules/admin/index.js";
 import { registerCatalogRoutes, type CatalogService } from "./modules/catalog/index.js";
 import { registerCaseRoutes, type CaseService } from "./modules/cases/index.js";
 import { registerExportRoutes, type ExportService } from "./modules/export/index.js";
@@ -30,6 +31,12 @@ import {
   registerExperimentRoutes,
   type ExperimentService,
 } from "./modules/experiments/index.js";
+import { registerOverviewRoutes } from "./modules/overview/index.js";
+import {
+  registerPortableInvestigationRoutes,
+  type PortableInvestigationService,
+} from "./modules/portable-investigations/index.js";
+import { registerSetupRoutes, type SetupService } from "./modules/setup/index.js";
 
 export interface SecurityDeps {
   auth: AuthRouteDeps;
@@ -51,6 +58,8 @@ export interface AppDeps {
   presence?: PresenceService;
   experiments?: ExperimentService;
   exporter?: ExportService;
+  portable?: PortableInvestigationService;
+  setup?: SetupService;
   serveStatic?: boolean;
 }
 
@@ -71,7 +80,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     if (deps.pool) {
       try {
         await deps.pool.query(
-          "SELECT 1 FROM schema_migrations WHERE version = '011_triage_worker_leases'",
+          "SELECT 1 FROM schema_migrations WHERE version = '012_case_situation'",
         );
         database = "up";
       } catch {
@@ -104,11 +113,16 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     return body;
   });
 
+  if (deps.setup) {
+    await registerSetupRoutes(app, { setup: deps.setup });
+  }
+
   if (deps.security) {
     const security = deps.security;
     const roleStore = security.roleStore ?? new MemoryGroupRoleStore(security.roles);
     app.addHook("onRequest", async (request) => {
       if (!request.url.startsWith("/api/")) return;
+      if (request.url.startsWith("/api/setup/")) return;
       security.roles.replace(await roleStore.load());
     });
     await registerAuthRoutes(app, security.auth);
@@ -116,6 +130,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       auth: security.auth,
       roles: security.roles,
       roleStore,
+      audit: security.audit,
+    });
+    await registerAdminDirectoryRoutes(app, {
+      auth: security.auth,
+      roles: security.roles,
       audit: security.audit,
     });
     if (deps.domain) {
@@ -169,12 +188,30 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         ...(deps.triageRuns ? { triageRuns: deps.triageRuns } : {}),
       });
     }
+    if (deps.domain && deps.experiments && deps.triageRuns && deps.presence) {
+      await registerOverviewRoutes(app, {
+        auth: security.auth,
+        roles: security.roles,
+        cases: deps.domain,
+        experiments: deps.experiments,
+        triageRuns: deps.triageRuns,
+        presence: deps.presence,
+      });
+    }
     if (deps.exporter) {
       await registerExportRoutes(app, {
         auth: security.auth,
         roles: security.roles,
         audit: security.audit,
         exporter: deps.exporter,
+      });
+    }
+    if (deps.portable) {
+      await registerPortableInvestigationRoutes(app, {
+        auth: security.auth,
+        roles: security.roles,
+        audit: security.audit,
+        portable: deps.portable,
       });
     }
   }

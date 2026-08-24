@@ -6,7 +6,7 @@ use crate::providers::ProviderConfig;
 use crate::workspace::Workspace;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Stable keychain ref for Confluence personal access token (never the token itself).
 pub const CONFLUENCE_PAT_REF: &str = "confluence/default/pat";
@@ -602,15 +602,1136 @@ impl WorkspaceConfig {
 /// Resolve `~/<config_dir_name>/config.json`.
 pub fn config_path(branding: &Branding) -> CoreResult<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| CoreError::Config("no home dir".into()))?;
-    Ok(home.join(&branding.config_dir_name).join("config.json"))
+    Ok(branded_app_directory(&home, branding)?.join("config.json"))
 }
 
-/// Ensure config directory exists.
+/// Ensure the branded application config/data directory exists.
+///
+/// On Unix, every path component is opened relative to a retained directory
+/// handle with `O_NOFOLLOW`. Missing components are created with `mkdirat`
+/// then re-opened the same way. Newly created directories are owner-only
+/// (`0700`). Pre-existing ancestors are never chmodded. An existing leaf is
+/// tightened to owner-only only when it is already owned by the current user
+/// — never home or an unrelated pre-existing ancestor.
+///
+/// On macOS only, `/tmp/<child>` and `/var/folders/...` may begin through the
+/// corresponding root-owned system alias. The alias must resolve to the same
+/// device/inode as the separately no-follow-opened canonical directory; all
+/// later components retain the policy above.
+///
+/// On platforms where no-follow, owner-bound traversal cannot be guaranteed
+/// with current dependencies, this fails closed instead of calling
+/// `create_dir_all`.
 pub fn ensure_config_dir(branding: &Branding) -> CoreResult<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| CoreError::Config("no home dir".into()))?;
-    let dir = home.join(&branding.config_dir_name);
-    fs::create_dir_all(&dir)?;
+    ensure_config_dir_in(&home, branding)
+}
+
+fn ensure_config_dir_in(home: &Path, branding: &Branding) -> CoreResult<PathBuf> {
+    let dir = branded_app_directory(home, branding)?;
+    ensure_owner_only_app_directory(&dir)?;
     Ok(dir)
+}
+
+fn branded_app_directory(home: &Path, branding: &Branding) -> CoreResult<PathBuf> {
+    let name = branding.config_dir_name.as_str();
+    let path = Path::new(name);
+    let mut components = path.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) if !name.is_empty() && !path.is_absolute() => {
+            Ok(home.join(name))
+        }
+        _ => Err(CoreError::Config(
+            "branded application directory name must be a single relative component".into(),
+        )),
+    }
+}
+
+fn ensure_owner_only_app_directory(dir: &Path) -> CoreResult<()> {
+    if dir.as_os_str().is_empty() {
+        return Err(CoreError::Config(
+            "application directory path is empty".into(),
+        ));
+    }
+    if dirs::home_dir().as_deref() == Some(dir) {
+        return Err(CoreError::Config(
+            "refusing to modify the home directory".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` has no preconditions and retains no pointer.
+        let expected_uid = unsafe { libc::geteuid() };
+        ensure_owner_only_app_directory_unix(dir, expected_uid)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Err(CoreError::Config(DURABLE_CONFIG_DIR_UNSUPPORTED.into()))
+    }
+}
+
+#[cfg(unix)]
+fn ensure_owner_only_app_directory_unix(dir: &Path, expected_uid: u32) -> CoreResult<()> {
+    ensure_directory_chain_unix(dir, expected_uid, true).map(|_| ())
+}
+
+#[cfg(unix)]
+fn store_config_error(detail: &str) -> CoreError {
+    CoreError::Config(detail.into())
+}
+
+#[cfg(unix)]
+fn ensure_directory_chain_unix(
+    dir: &Path,
+    expected_uid: u32,
+    tighten_leaf: bool,
+) -> CoreResult<std::fs::File> {
+    if !dir.is_absolute() {
+        return Err(store_config_error(
+            "durable store path must be an absolute directory",
+        ));
+    }
+    if dir
+        .components()
+        .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(store_config_error(
+            "store path component is not a single normal name",
+        ));
+    }
+    let root = open_existing_directory_nofollow(Path::new("/"))?;
+    #[cfg(target_os = "macos")]
+    let (mut directory, skipped_components) = match macos_trusted_root_alias(dir) {
+        Some(alias) => (open_verified_macos_root_alias(&root, alias)?, 2),
+        None => (root, 0),
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (mut directory, skipped_components) = (root, 0);
+    let mut saw_segment = false;
+    for (index, component) in dir.components().enumerate() {
+        if index < skipped_components {
+            continue;
+        }
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                directory = open_or_create_directory_component(directory, name, expected_uid)?;
+                saw_segment = true;
+            }
+            _ => {
+                return Err(store_config_error(
+                    "store path component is not a single normal name",
+                ));
+            }
+        }
+    }
+    if !saw_segment {
+        return Err(store_config_error(
+            "filesystem root cannot be used as a durable store directory",
+        ));
+    }
+    if tighten_leaf {
+        fchmod_owner_only_directory(&directory, expected_uid)?;
+    }
+    Ok(directory)
+}
+
+/// macOS exposes two root-level, root-owned compatibility aliases used by
+/// ordinary temporary-directory APIs: `/tmp -> /private/tmp` and
+/// `/var -> /private/var`. Only paths with a user-controlled descendant are
+/// eligible. Everything after the verified alias is still traversed with the
+/// regular descriptor-relative `O_NOFOLLOW` policy.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacosTrustedRootAlias {
+    Tmp,
+    Var,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_trusted_root_alias(path: &Path) -> Option<MacosTrustedRootAlias> {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return None;
+    }
+    match components.next() {
+        Some(Component::Normal(alias)) if alias == std::ffi::OsStr::new("tmp") => {
+            matches!(components.next(), Some(Component::Normal(_)))
+                .then_some(MacosTrustedRootAlias::Tmp)
+        }
+        Some(Component::Normal(alias)) if alias == std::ffi::OsStr::new("var") => {
+            let has_folders = matches!(
+                components.next(),
+                Some(Component::Normal(folders)) if folders == std::ffi::OsStr::new("folders")
+            );
+            (has_folders && matches!(components.next(), Some(Component::Normal(_))))
+                .then_some(MacosTrustedRootAlias::Var)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_verified_macos_root_alias(
+    root: &std::fs::File,
+    alias: MacosTrustedRootAlias,
+) -> CoreResult<std::fs::File> {
+    open_verified_macos_root_alias_with_ops(root, alias, &mut MacosRootAliasHostOps)
+}
+
+/// Private operation boundary for the macOS root-alias verifier. Production
+/// always uses [`MacosRootAliasHostOps`]; tests inject a scripted implementation
+/// so every fail-closed branch and the single deliberate symlink-follow can be
+/// exercised through this exact verification sequence.
+#[cfg(target_os = "macos")]
+trait MacosRootAliasVerifierOps {
+    fn stat_alias_nofollow(
+        &mut self,
+        root: &std::fs::File,
+        alias_name: &std::ffi::CString,
+    ) -> CoreResult<Option<libc::stat>>;
+
+    fn open_directory_nofollow(
+        &mut self,
+        parent: &std::fs::File,
+        name: &std::ffi::CString,
+    ) -> Result<std::fs::File, OpenComponentError>;
+
+    fn open_alias_following(
+        &mut self,
+        root: &std::fs::File,
+        alias_name: &std::ffi::CString,
+    ) -> CoreResult<std::fs::File>;
+
+    fn metadata(
+        &mut self,
+        file: &std::fs::File,
+        subject: MacosAliasMetadataSubject,
+    ) -> std::io::Result<std::fs::Metadata>;
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum MacosAliasMetadataSubject {
+    FollowedAlias,
+    CanonicalTarget,
+}
+
+#[cfg(target_os = "macos")]
+struct MacosRootAliasHostOps;
+
+#[cfg(target_os = "macos")]
+impl MacosRootAliasVerifierOps for MacosRootAliasHostOps {
+    fn stat_alias_nofollow(
+        &mut self,
+        root: &std::fs::File,
+        alias_name: &std::ffi::CString,
+    ) -> CoreResult<Option<libc::stat>> {
+        fstatat_nofollow(root, alias_name)
+    }
+
+    fn open_directory_nofollow(
+        &mut self,
+        parent: &std::fs::File,
+        name: &std::ffi::CString,
+    ) -> Result<std::fs::File, OpenComponentError> {
+        try_openat_directory_nofollow(parent, name)
+    }
+
+    fn open_alias_following(
+        &mut self,
+        root: &std::fs::File,
+        alias_name: &std::ffi::CString,
+    ) -> CoreResult<std::fs::File> {
+        openat_directory_following_macos_root_alias(root, alias_name)
+    }
+
+    fn metadata(
+        &mut self,
+        file: &std::fs::File,
+        _subject: MacosAliasMetadataSubject,
+    ) -> std::io::Result<std::fs::Metadata> {
+        file.metadata()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_verified_macos_root_alias_with_ops<O: MacosRootAliasVerifierOps>(
+    root: &std::fs::File,
+    alias: MacosTrustedRootAlias,
+    ops: &mut O,
+) -> CoreResult<std::fs::File> {
+    let (alias_name, canonical_leaf) = match alias {
+        MacosTrustedRootAlias::Tmp => ("tmp", "tmp"),
+        MacosTrustedRootAlias::Var => ("var", "var"),
+    };
+    let alias_name = path_component_cstring(std::ffi::OsStr::new(alias_name))?;
+    let before = ops
+        .stat_alias_nofollow(root, &alias_name)?
+        .ok_or_else(|| store_config_error("trusted macOS root alias is missing"))?;
+    if !macos_root_alias_stat_is_trusted(&before) {
+        return Err(store_config_error(
+            "trusted macOS root alias is not a root-owned symlink",
+        ));
+    }
+
+    let private_name = path_component_cstring(std::ffi::OsStr::new("private"))?;
+    let private = ops
+        .open_directory_nofollow(root, &private_name)
+        .map_err(|_| {
+            store_config_error("canonical macOS private directory cannot be opened safely")
+        })?;
+    let canonical_leaf = path_component_cstring(std::ffi::OsStr::new(canonical_leaf))?;
+    let canonical = ops
+        .open_directory_nofollow(&private, &canonical_leaf)
+        .map_err(|_| store_config_error("canonical macOS alias target cannot be opened safely"))?;
+    let followed_alias = ops.open_alias_following(root, &alias_name)?;
+
+    let after = ops
+        .stat_alias_nofollow(root, &alias_name)?
+        .ok_or_else(|| store_config_error("trusted macOS root alias disappeared"))?;
+    if !same_named_inode(&before, &after) || !macos_root_alias_stat_is_trusted(&after) {
+        return Err(store_config_error(
+            "trusted macOS root alias identity changed during verification",
+        ));
+    }
+
+    let alias_target = ops
+        .metadata(&followed_alias, MacosAliasMetadataSubject::FollowedAlias)
+        .map_err(|_| store_config_error("cannot inspect trusted macOS alias target"))?;
+    let canonical_target = ops
+        .metadata(&canonical, MacosAliasMetadataSubject::CanonicalTarget)
+        .map_err(|_| store_config_error("cannot inspect canonical macOS alias target"))?;
+    if !macos_alias_target_matches_canonical(&alias_target, &canonical_target) {
+        return Err(store_config_error(
+            "trusted macOS root alias does not name its canonical target",
+        ));
+    }
+
+    Ok(canonical)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_root_alias_stat_is_trusted(stat: &libc::stat) -> bool {
+    stat.st_mode & libc::S_IFMT == libc::S_IFLNK && stat.st_uid == 0
+}
+
+#[cfg(target_os = "macos")]
+fn macos_alias_target_matches_canonical(
+    alias_target: &std::fs::Metadata,
+    canonical_target: &std::fs::Metadata,
+) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    alias_target.is_dir()
+        && canonical_target.is_dir()
+        && alias_target.dev() == canonical_target.dev()
+        && alias_target.ino() == canonical_target.ino()
+}
+
+#[cfg(target_os = "macos")]
+fn openat_directory_following_macos_root_alias(
+    root: &std::fs::File,
+    alias_name: &std::ffi::CString,
+) -> CoreResult<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    // SAFETY: `root` is the retained filesystem-root descriptor and
+    // `alias_name` is one of the two fixed names accepted above. This is the
+    // only traversal open that follows a symlink; its target is immediately
+    // matched by device/inode to a separately no-follow-opened canonical dir.
+    let descriptor = unsafe {
+        libc::openat(
+            root.as_raw_fd(),
+            alias_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        return Err(store_config_error(
+            "trusted macOS root alias cannot be opened for verification",
+        ));
+    }
+    // SAFETY: `openat` returned a new owned descriptor.
+    Ok(unsafe { std::fs::File::from_raw_fd(descriptor) })
+}
+
+#[cfg(unix)]
+fn open_existing_directory_nofollow(path: &Path) -> CoreResult<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| {
+            store_config_error("store path is a symlink, not a directory, or cannot be opened")
+        })
+}
+
+#[cfg(unix)]
+fn path_component_cstring(name: &std::ffi::OsStr) -> CoreResult<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    if name.is_empty() || name.as_bytes().contains(&b'/') || name == "." || name == ".." {
+        return Err(store_config_error(
+            "store path component is not a single normal name",
+        ));
+    }
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| store_config_error("store path component contains an interior NUL"))
+}
+
+#[cfg(unix)]
+enum OpenComponentError {
+    NotFound,
+    Unsafe,
+}
+
+#[cfg(unix)]
+fn try_openat_directory_nofollow(
+    parent: &std::fs::File,
+    name: &std::ffi::CString,
+) -> Result<std::fs::File, OpenComponentError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    // SAFETY: `parent` is a live directory descriptor and `name` is one
+    // NUL-terminated component. A successful descriptor is adopted once.
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY
+                | libc::O_DIRECTORY
+                | libc::O_NOFOLLOW
+                | libc::O_CLOEXEC
+                | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(match err.raw_os_error() {
+            Some(libc::ENOENT) => OpenComponentError::NotFound,
+            _ => OpenComponentError::Unsafe,
+        });
+    }
+    // SAFETY: `openat` returned a new owned descriptor.
+    Ok(unsafe { std::fs::File::from_raw_fd(descriptor) })
+}
+
+#[cfg(unix)]
+fn open_or_create_directory_component(
+    parent: std::fs::File,
+    name: &std::ffi::OsStr,
+    expected_uid: u32,
+) -> CoreResult<std::fs::File> {
+    let c_name = path_component_cstring(name)?;
+    match try_openat_directory_nofollow(&parent, &c_name) {
+        Ok(existing) => Ok(existing),
+        Err(OpenComponentError::NotFound) => {
+            create_directory_component_nofollow(parent, &c_name, expected_uid)
+        }
+        Err(OpenComponentError::Unsafe) => Err(store_config_error(
+            "store path contains a missing, symlinked, or unreadable component",
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn create_directory_component_nofollow(
+    parent: std::fs::File,
+    c_name: &std::ffi::CString,
+    expected_uid: u32,
+) -> CoreResult<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: `parent` is a live directory descriptor; `mkdirat` does not
+    // follow a final-component symlink.
+    let mkdir_rc = unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), 0o700) };
+    if mkdir_rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EEXIST) {
+            return Err(err.into());
+        }
+        // Lost the create race: reopen without following or chmodding.
+        return try_openat_directory_nofollow(&parent, c_name).map_err(|_| {
+            store_config_error("store path contains a missing, symlinked, or unreadable component")
+        });
+    }
+    let child = try_openat_directory_nofollow(&parent, c_name).map_err(|_| {
+        store_config_error("created store directory cannot be reopened without following a symlink")
+    })?;
+    let metadata = child
+        .metadata()
+        .map_err(|_| store_config_error("cannot inspect created store directory"))?;
+    if !metadata.is_dir() || metadata.uid() != expected_uid {
+        return Err(store_config_error(
+            "created store directory has unsafe identity",
+        ));
+    }
+    fchmod_owner_only_directory(&child, expected_uid)?;
+    Ok(child)
+}
+
+#[cfg(unix)]
+fn fchmod_owner_only_directory(directory: &std::fs::File, expected_uid: u32) -> CoreResult<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = directory
+        .metadata()
+        .map_err(|_| store_config_error("cannot inspect application directory"))?;
+    if !metadata.is_dir() || metadata.uid() != expected_uid {
+        return Err(store_config_error(
+            "application directory has unsafe ownership",
+        ));
+    }
+    // SAFETY: `directory` is an owned directory descriptor opened with
+    // `O_NOFOLLOW | O_DIRECTORY`, so this cannot chmod a symlink or ancestor.
+    let chmod_rc = unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) };
+    if chmod_rc != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let tightened = directory
+        .metadata()
+        .map_err(|_| store_config_error("cannot reinspect application directory"))?;
+    if tightened.uid() != expected_uid || tightened.permissions().mode() & 0o777 != 0o700 {
+        return Err(store_config_error(
+            "application directory is not owner-only after initialization",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::unnecessary_cast
+)]
+fn unix_stat_dev(stat: &libc::stat) -> u64 {
+    stat.st_dev as u64
+}
+
+#[cfg(unix)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::unnecessary_cast
+)]
+fn unix_stat_ino(stat: &libc::stat) -> u64 {
+    stat.st_ino as u64
+}
+
+#[cfg(unix)]
+fn unix_nlink_is_one(nlink: libc::nlink_t) -> bool {
+    nlink == 1
+}
+
+#[cfg(unix)]
+fn unix_parent_is_safe_rename_dir(
+    metadata: &std::fs::Metadata,
+    expected_uid: u32,
+) -> CoreResult<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if !metadata.is_dir() || metadata.uid() != expected_uid {
+        return Err(store_config_error("config parent has unsafe identity"));
+    }
+    if metadata.permissions().mode() & 0o022 != 0 {
+        return Err(store_config_error(
+            "config parent is group- or world-writable",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unix_destination_is_replaceable(stat: &libc::stat, expected_uid: u32) -> CoreResult<()> {
+    let file_type = stat.st_mode & libc::S_IFMT;
+    if file_type == libc::S_IFLNK {
+        return Err(store_config_error("config destination is a symlink"));
+    }
+    if file_type != libc::S_IFREG {
+        return Err(store_config_error(
+            "config destination exists and is not a regular file",
+        ));
+    }
+    if !unix_nlink_is_one(stat.st_nlink) {
+        return Err(store_config_error("config destination is hardlinked"));
+    }
+    if stat.st_uid != expected_uid {
+        return Err(store_config_error(
+            "config destination has unsafe ownership",
+        ));
+    }
+    if stat.st_mode & 0o077 != 0 {
+        return Err(store_config_error("config destination has unsafe mode"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unix_named_inode_matches_open_file(
+    named: &libc::stat,
+    opened: &std::fs::Metadata,
+    expected_uid: u32,
+) -> CoreResult<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if unix_stat_dev(named) != opened.dev() || unix_stat_ino(named) != opened.ino() {
+        return Err(store_config_error(
+            "config temporary pathname no longer resolves to the verified inode",
+        ));
+    }
+    let named_type = named.st_mode & libc::S_IFMT;
+    if named_type != libc::S_IFREG
+        || !unix_nlink_is_one(named.st_nlink)
+        || named.st_uid != expected_uid
+        || named.st_mode & 0o777 != 0o600
+    {
+        return Err(store_config_error(
+            "config temporary name has unsafe identity",
+        ));
+    }
+    if !opened.is_file()
+        || opened.nlink() != 1
+        || opened.uid() != expected_uid
+        || opened.permissions().mode() & 0o777 != 0o600
+    {
+        return Err(store_config_error(
+            "config temporary file has unsafe identity",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn fstatat_nofollow(
+    dir: &std::fs::File,
+    name: &std::ffi::CString,
+) -> CoreResult<Option<libc::stat>> {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: `stat` is a C struct written by `fstatat`; zero is a valid
+    // starting representation before the kernel fills it.
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: `dir` is a live directory descriptor and `name` is one
+    // NUL-terminated component. `AT_SYMLINK_NOFOLLOW` does not follow.
+    let rc = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc == 0 {
+        return Ok(Some(stat));
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ENOENT) {
+        Ok(None)
+    } else {
+        Err(store_config_error(
+            "cannot inspect config destination identity",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn store_file_name(path: &Path) -> CoreResult<std::ffi::CString> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| store_config_error("config path is missing a file name"))?;
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(segment)), None) => path_component_cstring(segment),
+        _ => Err(store_config_error(
+            "config path file name is not a single normal component",
+        )),
+    }
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static SAVE_ABORT_BEFORE_REPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SAVE_SWAP_TEMP_INODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SAVE_SWAP_TEMP_AFTER_VERIFY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SAVE_SWAP_DEST_AFTER_VERIFY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(unix)]
+struct UnlinkTempOnDrop {
+    dir_fd: std::os::fd::RawFd,
+    name: std::ffi::CString,
+    expected_dev: u64,
+    expected_ino: u64,
+    disarm: bool,
+}
+
+#[cfg(unix)]
+impl Drop for UnlinkTempOnDrop {
+    fn drop(&mut self) {
+        if !self.disarm {
+            // Cleanup is fail-closed: never unlink a pathname that no longer
+            // names the inode created by this transaction.
+            // SAFETY: `stat` is initialized before `fstatat` writes it;
+            // `dir_fd` remains live and `name` is one NUL-terminated component.
+            let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+            let stat_rc = unsafe {
+                libc::fstatat(
+                    self.dir_fd,
+                    self.name.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if stat_rc == 0
+                && unix_stat_dev(&stat) == self.expected_dev
+                && unix_stat_ino(&stat) == self.expected_ino
+            {
+                // SAFETY: the immediately preceding no-follow stat matched the
+                // transaction-owned inode under the retained parent handle.
+                unsafe {
+                    libc::unlinkat(self.dir_fd, self.name.as_ptr(), 0);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+struct DirectoryTransactionLock {
+    fd: std::os::fd::RawFd,
+}
+
+#[cfg(unix)]
+impl Drop for DirectoryTransactionLock {
+    fn drop(&mut self) {
+        // SAFETY: `fd` remains owned by the parent directory handle.
+        unsafe {
+            libc::flock(self.fd, libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn lock_config_parent(parent: &std::fs::File) -> CoreResult<DirectoryTransactionLock> {
+    use std::os::fd::AsRawFd;
+
+    // Non-blocking prevents an abandoned cooperating writer from turning save
+    // into an unbounded denial of service.
+    // SAFETY: the parent descriptor is live for the returned guard's lifetime.
+    let rc = unsafe { libc::flock(parent.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return Err(store_config_error(
+            "another configuration publication transaction is active",
+        ));
+    }
+    Ok(DirectoryTransactionLock {
+        fd: parent.as_raw_fd(),
+    })
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum AtomicRenameOperation {
+    NoReplace,
+    Exchange,
+}
+
+#[cfg(unix)]
+fn atomic_renameat(
+    parent: &std::fs::File,
+    from: &std::ffi::CString,
+    to: &std::ffi::CString,
+    operation: AtomicRenameOperation,
+) -> CoreResult<()> {
+    use std::os::fd::AsRawFd;
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let rc = unsafe {
+            libc::renameat2(
+                parent.as_raw_fd(),
+                from.as_ptr(),
+                parent.as_raw_fd(),
+                to.as_ptr(),
+                match operation {
+                    AtomicRenameOperation::NoReplace => libc::RENAME_NOREPLACE,
+                    AtomicRenameOperation::Exchange => libc::RENAME_EXCHANGE,
+                },
+            )
+        };
+
+        #[cfg(target_vendor = "apple")]
+        let rc = unsafe {
+            libc::renameatx_np(
+                parent.as_raw_fd(),
+                from.as_ptr(),
+                parent.as_raw_fd(),
+                to.as_ptr(),
+                match operation {
+                    AtomicRenameOperation::NoReplace => libc::RENAME_EXCL,
+                    AtomicRenameOperation::Exchange => libc::RENAME_SWAP,
+                },
+            )
+        };
+
+        if rc != 0 {
+            return Err(store_config_error(
+                "atomic config publication could not be completed",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    {
+        let _ = (parent, from, to, operation);
+        Err(store_config_error(
+            "atomic config publication is unavailable on this Unix platform",
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn same_named_inode(left: &libc::stat, right: &libc::stat) -> bool {
+    unix_stat_dev(left) == unix_stat_dev(right) && unix_stat_ino(left) == unix_stat_ino(right)
+}
+
+#[cfg(unix)]
+fn rollback_config_publication(
+    parent: &std::fs::File,
+    temp_name: &std::ffi::CString,
+    destination_name: &std::ffi::CString,
+    prior_destination_existed: bool,
+    displaced_destination: Option<&libc::stat>,
+) -> CoreResult<()> {
+    if prior_destination_existed {
+        atomic_renameat(
+            parent,
+            temp_name,
+            destination_name,
+            AtomicRenameOperation::Exchange,
+        )?;
+        let restored = fstatat_nofollow(parent, destination_name)?.ok_or_else(|| {
+            store_config_error("config rollback did not restore the prior destination")
+        })?;
+        if displaced_destination.is_some_and(|displaced| !same_named_inode(&restored, displaced)) {
+            return Err(store_config_error(
+                "config rollback restored a different destination inode",
+            ));
+        }
+    } else {
+        atomic_renameat(
+            parent,
+            destination_name,
+            temp_name,
+            AtomicRenameOperation::NoReplace,
+        )?;
+        if fstatat_nofollow(parent, destination_name)?.is_some() {
+            return Err(store_config_error(
+                "config rollback did not restore an absent destination",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unlink_named_inode_if_matches(
+    parent: &std::fs::File,
+    name: &std::ffi::CString,
+    expected: &libc::stat,
+) -> bool {
+    use std::os::fd::AsRawFd;
+
+    let Ok(Some(current)) = fstatat_nofollow(parent, name) else {
+        return false;
+    };
+    if !same_named_inode(&current, expected) {
+        return false;
+    }
+    // SAFETY: the no-follow identity check matched the transaction's displaced
+    // inode under the retained parent descriptor. A mismatch is left untouched.
+    unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) == 0 }
+}
+
+#[cfg(unix)]
+fn save_config_unix(path: &Path, raw: &[u8]) -> CoreResult<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if !path.is_absolute() {
+        return Err(store_config_error("durable config path must be absolute"));
+    }
+    let dest_name = store_file_name(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| store_config_error("config path has no parent directory"))?;
+    // SAFETY: `geteuid` has no preconditions and retains no pointer.
+    let expected_uid = unsafe { libc::geteuid() };
+    let parent_dir = ensure_directory_chain_unix(parent, expected_uid, false)?;
+    let parent_meta = parent_dir
+        .metadata()
+        .map_err(|_| store_config_error("cannot inspect config parent"))?;
+    unix_parent_is_safe_rename_dir(&parent_meta, expected_uid)?;
+    let _transaction_lock = lock_config_parent(&parent_dir)?;
+    if let Some(dest_stat) = fstatat_nofollow(&parent_dir, &dest_name)? {
+        unix_destination_is_replaceable(&dest_stat, expected_uid)?;
+    }
+
+    let mut tmp_file = None;
+    let mut tmp_guard = None;
+    let mut tmp_name = None;
+    for _ in 0..8 {
+        let candidate = format!(".cd-w-{}.tmp", uuid::Uuid::new_v4().simple());
+        let c_tmp = path_component_cstring(std::ffi::OsStr::new(&candidate))?;
+        // SAFETY: parent descriptor and single-segment name are valid; a
+        // successful descriptor is adopted exactly once.
+        let descriptor = unsafe {
+            libc::openat(
+                parent_dir.as_raw_fd(),
+                c_tmp.as_ptr(),
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_EXCL
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if descriptor < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EEXIST) {
+                continue;
+            }
+            return Err(store_config_error(
+                "cannot create a unique no-follow config temporary file",
+            ));
+        }
+        // SAFETY: `openat` returned a new owned descriptor.
+        let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        let opened = file
+            .metadata()
+            .map_err(|_| store_config_error("cannot inspect config temporary file"))?;
+        tmp_guard = Some(UnlinkTempOnDrop {
+            dir_fd: parent_dir.as_raw_fd(),
+            name: c_tmp.clone(),
+            expected_dev: opened.dev(),
+            expected_ino: opened.ino(),
+            disarm: false,
+        });
+        tmp_file = Some(file);
+        tmp_name = Some(c_tmp);
+        break;
+    }
+    let mut file = tmp_file
+        .ok_or_else(|| store_config_error("cannot allocate a unique config temporary name"))?;
+    let c_tmp = tmp_name
+        .ok_or_else(|| store_config_error("cannot allocate a unique config temporary name"))?;
+    let mut guard = tmp_guard
+        .ok_or_else(|| store_config_error("cannot allocate a unique config temporary name"))?;
+
+    // SAFETY: `file` is the exclusive regular inode we just created.
+    let chmod_rc = unsafe { libc::fchmod(file.as_raw_fd(), 0o600) };
+    if chmod_rc != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let created_meta = file
+        .metadata()
+        .map_err(|_| store_config_error("cannot inspect config temporary file"))?;
+    if !created_meta.is_file()
+        || created_meta.nlink() != 1
+        || created_meta.uid() != expected_uid
+        || created_meta.permissions().mode() & 0o777 != 0o600
+    {
+        return Err(store_config_error(
+            "config temporary file has unsafe identity",
+        ));
+    }
+
+    file.write_all(raw)
+        .map_err(|_| store_config_error("cannot write config temporary file"))?;
+    file.flush()
+        .map_err(|_| store_config_error("cannot flush config temporary file"))?;
+    file.sync_all()
+        .map_err(|_| store_config_error("cannot sync config temporary file"))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| store_config_error("cannot rewind config temporary file"))?;
+    let mut reread = Vec::new();
+    file.read_to_end(&mut reread)
+        .map_err(|_| store_config_error("cannot reread config temporary file"))?;
+    if reread != raw {
+        return Err(store_config_error(
+            "config temporary file bytes do not match the intended write",
+        ));
+    }
+    let parsed: AppConfig = serde_json::from_slice(&reread)?;
+    refuse_raw_secret_refs(&parsed)?;
+
+    #[cfg(test)]
+    if SAVE_ABORT_BEFORE_REPLACE.with(std::cell::Cell::get) {
+        SAVE_ABORT_BEFORE_REPLACE.with(|flag| flag.set(false));
+        return Err(store_config_error(
+            "synthetic interrupted write before replace",
+        ));
+    }
+
+    #[cfg(test)]
+    if SAVE_SWAP_TEMP_INODE.with(std::cell::Cell::get) {
+        SAVE_SWAP_TEMP_INODE.with(|flag| flag.set(false));
+        use std::os::unix::ffi::OsStrExt;
+        let tmp_os = std::ffi::OsStr::from_bytes(c_tmp.as_bytes());
+        let tmp_path = parent.join(tmp_os);
+        let planted = parent.join("planted-swap.bin");
+        std::fs::write(&planted, b"SWAP-INODE-BYTES")
+            .map_err(|_| store_config_error("cannot plant synthetic inode swap"))?;
+        std::fs::remove_file(&tmp_path)
+            .map_err(|_| store_config_error("cannot unlink temp for synthetic inode swap"))?;
+        std::os::unix::fs::symlink(&planted, &tmp_path)
+            .map_err(|_| store_config_error("cannot plant synthetic temp symlink"))?;
+    }
+
+    let parent_meta = parent_dir
+        .metadata()
+        .map_err(|_| store_config_error("cannot inspect config parent"))?;
+    unix_parent_is_safe_rename_dir(&parent_meta, expected_uid)?;
+    let opened_meta = file
+        .metadata()
+        .map_err(|_| store_config_error("cannot inspect config temporary file"))?;
+    let named_stat = fstatat_nofollow(&parent_dir, &c_tmp)?.ok_or_else(|| {
+        store_config_error("config temporary pathname no longer resolves to the verified inode")
+    })?;
+    unix_named_inode_matches_open_file(&named_stat, &opened_meta, expected_uid)?;
+    let prior_destination = fstatat_nofollow(&parent_dir, &dest_name)?;
+    if let Some(dest_stat) = prior_destination.as_ref() {
+        unix_destination_is_replaceable(dest_stat, expected_uid)?;
+    }
+
+    #[cfg(test)]
+    if SAVE_SWAP_TEMP_AFTER_VERIFY.with(std::cell::Cell::get) {
+        SAVE_SWAP_TEMP_AFTER_VERIFY.with(|flag| flag.set(false));
+        use std::os::unix::ffi::OsStrExt;
+        let tmp_path = parent.join(std::ffi::OsStr::from_bytes(c_tmp.as_bytes()));
+        let held = parent.join("held-verified-temp.bin");
+        let planted = parent.join("planted-after-verify.bin");
+        std::fs::rename(&tmp_path, &held)
+            .map_err(|_| store_config_error("cannot stage synthetic temp replacement"))?;
+        std::fs::write(&planted, b"SYNTHETIC-REPLACEMENT")
+            .map_err(|_| store_config_error("cannot write synthetic temp replacement"))?;
+        std::os::unix::fs::symlink(&planted, &tmp_path)
+            .map_err(|_| store_config_error("cannot install synthetic temp replacement"))?;
+    }
+
+    #[cfg(test)]
+    if SAVE_SWAP_DEST_AFTER_VERIFY.with(std::cell::Cell::get) {
+        SAVE_SWAP_DEST_AFTER_VERIFY.with(|flag| flag.set(false));
+        let held = parent.join("held-verified-destination.json");
+        std::fs::rename(path, &held)
+            .map_err(|_| store_config_error("cannot stage synthetic destination replacement"))?;
+        let replacement = serde_json::to_vec_pretty(&AppConfig::default())?;
+        std::fs::write(path, replacement)
+            .map_err(|_| store_config_error("cannot write synthetic destination replacement"))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| store_config_error("cannot secure synthetic destination replacement"))?;
+    }
+
+    atomic_renameat(
+        &parent_dir,
+        &c_tmp,
+        &dest_name,
+        if prior_destination.is_some() {
+            AtomicRenameOperation::Exchange
+        } else {
+            AtomicRenameOperation::NoReplace
+        },
+    )?;
+
+    let (published, displaced) = match (
+        fstatat_nofollow(&parent_dir, &dest_name),
+        fstatat_nofollow(&parent_dir, &c_tmp),
+    ) {
+        (Ok(published), Ok(displaced)) => (published, displaced),
+        _ => {
+            rollback_config_publication(
+                &parent_dir,
+                &c_tmp,
+                &dest_name,
+                prior_destination.is_some(),
+                prior_destination.as_ref(),
+            )?;
+            parent_dir
+                .sync_all()
+                .map_err(|_| store_config_error("cannot sync restored config parent directory"))?;
+            return Err(store_config_error(
+                "cannot verify config publication; prior destination was restored",
+            ));
+        }
+    };
+    let published_is_verified = published.as_ref().is_some_and(|stat| {
+        unix_named_inode_matches_open_file(stat, &opened_meta, expected_uid).is_ok()
+    });
+    let displaced_is_expected = match (prior_destination.as_ref(), displaced.as_ref()) {
+        (Some(expected), Some(actual)) => same_named_inode(expected, actual),
+        (None, None) => true,
+        _ => false,
+    };
+    if !published_is_verified || !displaced_is_expected {
+        rollback_config_publication(
+            &parent_dir,
+            &c_tmp,
+            &dest_name,
+            prior_destination.is_some(),
+            displaced.as_ref(),
+        )?;
+        return Err(store_config_error(
+            "config publication identity changed during the transaction",
+        ));
+    }
+
+    #[cfg(test)]
+    let injected_sync_failure = SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let injected_sync_failure = false;
+    #[cfg(test)]
+    SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH.with(|flag| flag.set(false));
+
+    if injected_sync_failure || parent_dir.sync_all().is_err() {
+        rollback_config_publication(
+            &parent_dir,
+            &c_tmp,
+            &dest_name,
+            prior_destination.is_some(),
+            displaced.as_ref(),
+        )?;
+        parent_dir
+            .sync_all()
+            .map_err(|_| store_config_error("cannot sync restored config parent directory"))?;
+        return Err(store_config_error(
+            "config parent sync failed; prior destination was restored",
+        ));
+    }
+
+    // The new destination mapping is now durable. From this point onward no
+    // cleanup failure is reported as a failed save. Cleanup touches the
+    // displaced pathname only while it still names the validated prior inode.
+    guard.disarm = true;
+    if let Some(displaced) = displaced.as_ref() {
+        if unlink_named_inode_if_matches(&parent_dir, &c_tmp, displaced) {
+            let _ = parent_dir.sync_all();
+        }
+    }
+    Ok(())
 }
 
 fn refuse_raw_secret_refs(cfg: &AppConfig) -> CoreResult<()> {
@@ -685,17 +1806,68 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
     Ok(cfg)
 }
 
-/// Atomic-ish write of config.
+/// Stable reason `save_config` returns on hosts that cannot prove a
+/// no-follow, owner-only, directory-relative replace.
+pub const DURABLE_CONFIG_SAVE_UNSUPPORTED: &str = "durable config save requires a no-follow owner-only temporary file and directory-relative replace, which this platform cannot guarantee with current dependencies";
+
+/// Stable reason `ensure_config_dir` returns on hosts that cannot prove
+/// handle-bound no-follow owner-checked directory creation.
+pub const DURABLE_CONFIG_DIR_UNSUPPORTED: &str = "durable configuration directory creation is unavailable on this platform; handle-bound no-follow owner-checked traversal cannot be guaranteed with current dependencies";
+
+/// Whether this build can persist `AppConfig` under the Unix durability
+/// contract (no-follow, owner-only, directory-relative replace).
+///
+/// Off Unix this is always false. Callers must fail closed rather than
+/// writing config through ordinary `create_dir_all` / `rename` APIs.
+#[must_use]
+pub const fn durable_config_persistence_supported() -> bool {
+    cfg!(unix)
+}
+
+/// True when `err` is the fail-closed platform-unsupported persistence
+/// reason from [`save_config`] or [`ensure_config_dir`].
+#[must_use]
+pub fn durable_config_persistence_unsupported(err: &CoreError) -> bool {
+    match err {
+        CoreError::Config(message) => {
+            message == DURABLE_CONFIG_SAVE_UNSUPPORTED || message == DURABLE_CONFIG_DIR_UNSUPPORTED
+        }
+        _ => false,
+    }
+}
+
+/// Handle-bound durable write of config.
+///
+/// On Unix this creates a unique regular temporary file with create-new /
+/// no-follow, owner-only `0600`, full write+flush+sync, exact reread/reparse,
+/// then proves the unique temp pathname still names that inode and that the
+/// destination is a safe owner-only regular file before `renameat` relative to
+/// the verified parent. Group- or world-writable parents, destination
+/// symlinks, hardlinks, and unsafe modes fail closed and leave any existing
+/// destination unchanged. Missing parents are created incrementally without
+/// following symlinks or chmodding pre-existing ancestors.
+/// macOS root aliases for `/tmp/<child>` and `/var/folders/...` are accepted
+/// only after root ownership and canonical target identity are verified; the
+/// complete requested path is never canonicalized.
+///
+/// On platforms where that no-follow, owner-only, directory-relative replace
+/// cannot be guaranteed with current dependencies, this fails closed instead
+/// of claiming durability. Tests that need a readable config file must plant
+/// fixture bytes themselves; they must not treat this function as a
+/// cross-platform writer.
 pub fn save_config(path: &Path, cfg: &AppConfig) -> CoreResult<()> {
     refuse_raw_secret_refs(cfg)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    #[cfg(unix)]
     let raw = serde_json::to_string_pretty(cfg)?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, raw)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    #[cfg(unix)]
+    {
+        save_config_unix(path, raw.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(CoreError::Config(DURABLE_CONFIG_SAVE_UNSUPPORTED.into()))
+    }
 }
 
 /// The one check applied to `default_timezone` before it is persisted — an
@@ -708,12 +1880,34 @@ pub fn is_valid_iana_timezone(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::providers::ProviderConfig;
-    use tempfile::tempdir;
+
+    fn store_tempdir() -> tempfile::TempDir {
+        #[cfg(unix)]
+        {
+            isolated_unix_tempdir()
+        }
+        #[cfg(not(unix))]
+        {
+            tempfile::tempdir().unwrap()
+        }
+    }
+
+    #[cfg(unix)]
+    fn isolated_unix_tempdir() -> tempfile::TempDir {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonicalize process temp dir");
+        tempfile::Builder::new()
+            .prefix("cd-store-")
+            .tempdir_in(root)
+            .expect("isolated store tempdir")
+    }
 
     /// #678: curation is only useful if it is still there next launch.
     #[test]
+    #[cfg(unix)]
     fn curation_survives_a_real_save_and_reload() {
-        let dir = tempdir().unwrap();
+        let dir = store_tempdir();
         let path = dir.path().join("config.json");
         let mut cfg = AppConfig {
             providers: ProviderConfig::with_local_ollama(),
@@ -750,7 +1944,7 @@ mod tests {
     /// A config written before #678 must load, not fail or lose settings.
     #[test]
     fn a_config_without_the_curation_field_still_loads() {
-        let dir = tempdir().unwrap();
+        let dir = store_tempdir();
         let path = dir.path().join("config.json");
         std::fs::write(
             &path,
@@ -779,8 +1973,9 @@ mod tests {
     /// Deleting a profile must not delete the user's curation for it: re-adding
     /// the same endpoint restores their choices.
     #[test]
+    #[cfg(unix)]
     fn removing_and_re_adding_a_profile_restores_its_curation() {
-        let dir = tempdir().unwrap();
+        let dir = store_tempdir();
         let path = dir.path().join("config.json");
         let mut cfg = AppConfig {
             providers: ProviderConfig::with_local_ollama(),
@@ -804,8 +1999,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn save_load_roundtrip() {
-        let dir = tempdir().unwrap();
+        let dir = store_tempdir();
         let path = dir.path().join("config.json");
         let cfg = AppConfig {
             providers: ProviderConfig::with_local_ollama(),
@@ -862,7 +2058,7 @@ mod tests {
         let cfg = AppConfig::default();
         assert!(!cfg.x.enabled);
         assert!(!cfg.x.is_configured());
-        let dir = tempdir().unwrap();
+        let dir = store_tempdir();
         let path = dir.path().join("config.json");
         std::fs::write(&path, r#"{"providers":{"profiles":[],"active_id":null}}"#).unwrap();
         let loaded = load_config(&path).unwrap();
@@ -874,7 +2070,7 @@ mod tests {
         let cfg = AppConfig::default();
         assert!(!cfg.web_research_enabled);
         // Missing field on disk → false
-        let dir = tempdir().unwrap();
+        let dir = store_tempdir();
         let path = dir.path().join("config.json");
         std::fs::write(&path, r#"{"providers":{"profiles":[],"active_id":null}}"#).unwrap();
         let loaded = load_config(&path).unwrap();
@@ -966,7 +2162,7 @@ mod tests {
 
     #[test]
     fn refuses_raw_secret_in_api_key_ref() {
-        let dir = tempdir().unwrap();
+        let dir = store_tempdir();
         let path = dir.path().join("config.json");
         let mut providers = ProviderConfig::with_local_ollama();
         providers.profiles[0].api_key_ref = Some("sk-proj-totally-a-secret".into());
@@ -977,12 +2173,21 @@ mod tests {
         assert!(save_config(&path, &cfg).is_err());
         // Path-shaped refs are OK
         cfg.providers.profiles[0].api_key_ref = Some("provider/openai-compatible/api_key".into());
+        #[cfg(unix)]
         assert!(save_config(&path, &cfg).is_ok());
+        #[cfg(not(unix))]
+        {
+            let err = save_config(&path, &cfg).expect_err("non-unix save is fail-closed");
+            let msg = err.to_string();
+            assert!(durable_config_persistence_unsupported(&err), "{msg}");
+            assert!(msg.contains(DURABLE_CONFIG_SAVE_UNSUPPORTED), "{msg}");
+        }
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_config_without_the_retrieval_section_still_loads() {
-        let dir = tempdir().unwrap();
+        let dir = store_tempdir();
         let path = dir.path().join("config.json");
         let mut cfg = AppConfig {
             providers: ProviderConfig::with_local_ollama(),
@@ -1018,8 +2223,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_config_without_the_multi_model_section_still_loads_as_single() {
-        let dir = tempdir().unwrap();
+        let dir = store_tempdir();
         let path = dir.path().join("config.json");
         let mut cfg = AppConfig {
             providers: ProviderConfig::with_local_ollama(),
@@ -1076,12 +2282,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_config_without_the_fast_triage_section_still_loads_as_disabled() {
         use crate::fast_triage::{
             FastTriageRouteRecord, FastTriageRouteVerdict, FastTriageWorkflowContract,
         };
 
-        let dir = tempdir().unwrap();
+        let dir = store_tempdir();
         let path = dir.path().join("config.json");
         let mut cfg = AppConfig {
             providers: ProviderConfig::with_local_ollama(),
@@ -1123,7 +2330,7 @@ mod tests {
 
     #[test]
     fn refuses_raw_secret_in_retrieval_api_key_ref() {
-        let dir = tempdir().unwrap();
+        let dir = store_tempdir();
         let path = dir.path().join("config.json");
         let mut cfg = AppConfig {
             providers: ProviderConfig::with_local_ollama(),
@@ -1142,11 +2349,1084 @@ mod tests {
         assert!(save_config(&path, &cfg).is_err());
         cfg.retrieval.embedding.as_mut().unwrap().api_key_ref =
             Some("provider/embedding/api_key".into());
-        assert!(save_config(&path, &cfg).is_ok());
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !written.contains("sk-proj"),
-            "raw secret never reaches disk"
+        #[cfg(unix)]
+        {
+            assert!(save_config(&path, &cfg).is_ok());
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                !written.contains("sk-proj"),
+                "raw secret never reaches disk"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let err = save_config(&path, &cfg).expect_err("non-unix save is fail-closed");
+            assert!(durable_config_persistence_unsupported(&err), "{err}");
+            assert!(
+                !path.exists(),
+                "fail-closed save must not create the destination"
+            );
+        }
+    }
+
+    fn branded_home(config_dir_name: &str) -> (tempfile::TempDir, Branding) {
+        let home = store_tempdir();
+        let branding = Branding {
+            config_dir_name: config_dir_name.into(),
+            ..Branding::default()
+        };
+        (home, branding)
+    }
+
+    #[cfg(unix)]
+    fn unix_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[cfg(unix)]
+    fn listed_names(dir: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_alias_spelling(canonical: &Path, canonical_root: &Path, alias_root: &Path) -> PathBuf {
+        alias_root.join(
+            canonical
+                .strip_prefix(canonical_root)
+                .expect("canonical path beneath expected macOS private root"),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    struct ScriptedMacosRootAliasVerifierOps {
+        before: libc::stat,
+        after: libc::stat,
+        stat_calls: usize,
+        nofollow_open_calls: usize,
+        canonical: std::fs::File,
+        followed: std::fs::File,
+        calls: Vec<&'static str>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl ScriptedMacosRootAliasVerifierOps {
+        fn new(before: libc::stat, after: libc::stat, canonical: &Path, followed: &Path) -> Self {
+            Self {
+                before,
+                after,
+                stat_calls: 0,
+                nofollow_open_calls: 0,
+                canonical: std::fs::File::open(canonical)
+                    .expect("open scripted canonical directory"),
+                followed: std::fs::File::open(followed).expect("open scripted followed directory"),
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl MacosRootAliasVerifierOps for ScriptedMacosRootAliasVerifierOps {
+        fn stat_alias_nofollow(
+            &mut self,
+            _root: &std::fs::File,
+            _alias_name: &std::ffi::CString,
+        ) -> CoreResult<Option<libc::stat>> {
+            let stat = if self.stat_calls == 0 {
+                self.calls.push("stat_alias_nofollow_before");
+                self.before
+            } else {
+                self.calls.push("stat_alias_nofollow_after");
+                self.after
+            };
+            self.stat_calls += 1;
+            Ok(Some(stat))
+        }
+
+        fn open_directory_nofollow(
+            &mut self,
+            _parent: &std::fs::File,
+            _name: &std::ffi::CString,
+        ) -> Result<std::fs::File, OpenComponentError> {
+            self.calls.push(if self.nofollow_open_calls == 0 {
+                "open_private_nofollow"
+            } else {
+                "open_canonical_target_nofollow"
+            });
+            self.nofollow_open_calls += 1;
+            self.canonical
+                .try_clone()
+                .map_err(|_| OpenComponentError::Unsafe)
+        }
+
+        fn open_alias_following(
+            &mut self,
+            _root: &std::fs::File,
+            _alias_name: &std::ffi::CString,
+        ) -> CoreResult<std::fs::File> {
+            self.calls.push("open_alias_following");
+            self.followed
+                .try_clone()
+                .map_err(|_| store_config_error("scripted alias target cannot be opened"))
+        }
+
+        fn metadata(
+            &mut self,
+            file: &std::fs::File,
+            subject: MacosAliasMetadataSubject,
+        ) -> std::io::Result<std::fs::Metadata> {
+            self.calls.push(match subject {
+                MacosAliasMetadataSubject::FollowedAlias => "metadata_followed_alias",
+                MacosAliasMetadataSubject::CanonicalTarget => "metadata_canonical_target",
+            });
+            file.metadata()
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn scripted_macos_alias_stat(mode: libc::mode_t, uid: libc::uid_t, inode: u64) -> libc::stat {
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        stat.st_mode = mode;
+        stat.st_uid = uid;
+        stat.st_dev = 41;
+        stat.st_ino = inode;
+        stat
+    }
+
+    #[cfg(target_os = "macos")]
+    fn trusted_scripted_macos_alias_stat(inode: u64) -> libc::stat {
+        scripted_macos_alias_stat(libc::S_IFLNK | 0o777, 0, inode)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owner_only_creation_uses_branded_directory_name() {
+        let (home, branding) = branded_home(".acme-desk");
+        let dir = ensure_config_dir_in(home.path(), &branding).expect("create branded app dir");
+        assert_eq!(dir, home.path().join(".acme-desk"));
+        assert!(dir.is_dir());
+        assert_eq!(branded_app_directory(home.path(), &branding).unwrap(), dir);
+        assert_eq!(unix_mode(&dir), 0o700);
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn ensure_config_dir_fails_closed_without_handle_bound_traversal() {
+        let (home, branding) = branded_home(".acme-desk");
+        let err = ensure_config_dir_in(home.path(), &branding).expect_err("fail closed");
+        assert!(durable_config_persistence_unsupported(&err), "{err}");
+        assert_eq!(
+            err.to_string(),
+            format!("config: {DURABLE_CONFIG_DIR_UNSUPPORTED}")
         );
+        assert!(!home.path().join(".acme-desk").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owner_only_creation_does_not_chmod_home_or_ancestors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (home, branding) = branded_home(".fixture-desk");
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ancestor_mode = unix_mode(home.path());
+        let dir = ensure_config_dir_in(home.path(), &branding).expect("create");
+        assert_eq!(unix_mode(&dir), 0o700);
+        assert_eq!(unix_mode(home.path()), ancestor_mode);
+
+        let real_home = dirs::home_dir().expect("home");
+        let before = unix_mode(&real_home);
+        assert!(ensure_owner_only_app_directory(&real_home).is_err());
+        assert_eq!(unix_mode(&real_home), before, "home mode must be unchanged");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_tightening_only_applies_to_existing_owned_app_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (home, branding) = branded_home(".fixture-desk");
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let app = home.path().join(".fixture-desk");
+        std::fs::create_dir(&app).unwrap();
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ancestor_mode = unix_mode(home.path());
+
+        let dir = ensure_config_dir_in(home.path(), &branding).expect("tighten");
+        assert_eq!(dir, app);
+        assert_eq!(unix_mode(&app), 0o700);
+        assert_eq!(unix_mode(home.path()), ancestor_mode);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unsafe_filesystem_cases_fail_closed() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let (home, branding) = branded_home(".fixture-desk");
+        let app = home.path().join(".fixture-desk");
+
+        std::fs::write(&app, b"not-a-directory").unwrap();
+        assert!(ensure_config_dir_in(home.path(), &branding).is_err());
+        std::fs::remove_file(&app).unwrap();
+
+        std::fs::create_dir(&app).unwrap();
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = home.path().join(".fixture-desk-link");
+        symlink(&app, &link).unwrap();
+        let linked_branding = Branding {
+            config_dir_name: ".fixture-desk-link".into(),
+            ..Branding::default()
+        };
+        assert!(ensure_config_dir_in(home.path(), &linked_branding).is_err());
+        assert_eq!(unix_mode(&app), 0o700);
+
+        assert!(ensure_owner_only_app_directory_unix(&app, u32::MAX).is_err());
+        assert_eq!(unix_mode(&app), 0o700);
+
+        let traversal = Branding {
+            config_dir_name: "../outside-leaf".into(),
+            ..Branding::default()
+        };
+        assert!(ensure_config_dir_in(home.path(), &traversal).is_err());
+        assert!(branded_app_directory(
+            home.path(),
+            &Branding {
+                config_dir_name: "/abs-root-name".into(),
+                ..Branding::default()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_creates_missing_parent_without_touching_existing_unrelated_parents() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = store_tempdir();
+        let nested = dir.path().join("app");
+        let path = nested.join("config.json");
+        let cfg = AppConfig::default();
+        save_config(&path, &cfg).expect("create missing parent");
+        assert!(nested.is_dir());
+        assert_eq!(unix_mode(&nested), 0o700);
+
+        let existing = dir.path().join("already");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let existing_cfg = existing.join("config.json");
+        save_config(&existing_cfg, &cfg).expect("existing parent");
+        assert_eq!(
+            unix_mode(&existing),
+            0o755,
+            "existing unrelated parent must not be tightened"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_creates_nested_missing_parents_without_following_or_chmodding_ancestors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = store_tempdir();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ancestor_mode = unix_mode(dir.path());
+        let nested = dir.path().join("alpha").join("beta").join("gamma");
+        let path = nested.join("config.json");
+        let cfg = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &cfg).expect("nested create");
+        assert_eq!(unix_mode(dir.path()), ancestor_mode);
+        assert_eq!(unix_mode(&dir.path().join("alpha")), 0o700);
+        assert_eq!(unix_mode(&dir.path().join("alpha").join("beta")), 0o700);
+        assert_eq!(unix_mode(&nested), 0o700);
+        assert_eq!(unix_mode(&path), 0o600);
+        let on_disk = std::fs::read(&path).expect("read");
+        let expected = serde_json::to_string_pretty(&cfg).unwrap().into_bytes();
+        assert_eq!(on_disk, expected);
+        let parsed: AppConfig = serde_json::from_slice(&on_disk).expect("reparse");
+        assert_eq!(parsed.theme, cfg.theme);
+        let loaded = load_config(&path).expect("reload");
+        assert_eq!(loaded.theme, cfg.theme);
+        assert!(!listed_names(&nested)
+            .iter()
+            .any(|name| name == "config.json.tmp"));
+        assert!(listed_names(&nested)
+            .iter()
+            .all(|name| !name.starts_with(".cd-w-")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_exact_bytes_roundtrip_and_file_mode() {
+        let dir = store_tempdir();
+        let path = dir.path().join("config.json");
+        let cfg = AppConfig {
+            theme: "light".into(),
+            default_chat_model: Some("qwen3".into()),
+            ..AppConfig::default()
+        };
+        save_config(&path, &cfg).expect("save");
+        assert_eq!(unix_mode(&path), 0o600);
+        let on_disk = std::fs::read(&path).expect("read");
+        let expected = serde_json::to_string_pretty(&cfg).unwrap().into_bytes();
+        assert_eq!(on_disk, expected);
+        let parsed: AppConfig = serde_json::from_slice(&on_disk).expect("reparse");
+        assert_eq!(parsed.theme, cfg.theme);
+        assert_eq!(parsed.default_chat_model, cfg.default_chat_model);
+        let loaded = load_config(&path).expect("load");
+        assert_eq!(loaded.theme, cfg.theme);
+        assert_eq!(loaded.default_chat_model, cfg.default_chat_model);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_ignores_fixed_json_tmp_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = store_tempdir();
+        let path = dir.path().join("config.json");
+        let canary = dir.path().join("canary-store.bin");
+        std::fs::write(&canary, b"ATTACK-BYTES").unwrap();
+        symlink(&canary, dir.path().join("config.json.tmp")).unwrap();
+
+        let cfg = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &cfg).expect("unique temp must ignore planted json.tmp");
+        assert_eq!(load_config(&path).expect("load").theme, cfg.theme);
+        assert_eq!(std::fs::read(&canary).unwrap(), b"ATTACK-BYTES");
+        assert!(dir
+            .path()
+            .join("config.json.tmp")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(path.symlink_metadata().unwrap().is_file());
+        assert_eq!(unix_mode(&path), 0o600);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_rejects_symlink_parent_and_preserves_destination() {
+        use std::os::unix::fs::symlink;
+
+        let dir = store_tempdir();
+        let real_parent = dir.path().join("real-parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        let dest = real_parent.join("config.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&dest, &original).expect("seed");
+
+        let link_parent = dir.path().join("link-parent");
+        symlink(&real_parent, &link_parent).unwrap();
+        let via_link = link_parent.join("config.json");
+        let attempted = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+        assert!(save_config(&via_link, &attempted).is_err());
+        assert_eq!(load_config(&dest).expect("preserved").theme, original.theme);
+        assert!(!std::fs::read_to_string(&dest).unwrap().contains("light"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_rejects_file_parent_identity() {
+        let dir = store_tempdir();
+        let parent = dir.path().join("not-a-dir");
+        std::fs::write(&parent, b"store").unwrap();
+        let err = save_config(&parent.join("config.json"), &AppConfig::default())
+            .expect_err("file parent");
+        assert!(!err.to_string().is_empty());
+        assert!(!parent.join("config.json").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_interrupted_write_preserves_existing_destination() {
+        let dir = store_tempdir();
+        let path = dir.path().join("config.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            default_chat_model: Some("qwen3".into()),
+            ..AppConfig::default()
+        };
+        save_config(&path, &original).expect("seed");
+        let before = std::fs::read(&path).unwrap();
+
+        SAVE_ABORT_BEFORE_REPLACE.with(|flag| flag.set(true));
+        let attempted = AppConfig {
+            theme: "light".into(),
+            default_chat_model: Some("gpt-oss".into()),
+            ..AppConfig::default()
+        };
+        let err = save_config(&path, &attempted).expect_err("interrupted");
+        assert!(err.to_string().contains("synthetic interrupted write"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(load_config(&path).expect("preserved").theme, original.theme);
+        assert_eq!(
+            load_config(&path).expect("preserved").default_chat_model,
+            original.default_chat_model
+        );
+        assert!(listed_names(dir.path())
+            .iter()
+            .all(|name| !name.starts_with(".cd-w-")));
+        assert!(!SAVE_ABORT_BEFORE_REPLACE.with(std::cell::Cell::get));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_rejects_intermediate_symlink_and_does_not_create_into_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = store_tempdir();
+        let decoy = dir.path().join("decoy-store");
+        std::fs::create_dir(&decoy).unwrap();
+        let canary = decoy.join("canary-leaf");
+        std::fs::create_dir(&canary).unwrap();
+        let mid = dir.path().join("mid-store");
+        symlink(&decoy, &mid).unwrap();
+
+        let attempted = mid.join("nested-leaf").join("config.json");
+        let err = save_config(&attempted, &AppConfig::default()).expect_err("symlink mid");
+        assert!(!err.to_string().is_empty());
+        assert!(!decoy.join("nested-leaf").exists());
+        assert!(canary.is_dir());
+        assert!(listed_names(&decoy)
+            .iter()
+            .all(|name| name != "nested-leaf"));
+        assert!(listed_names(&decoy)
+            .iter()
+            .all(|name| !name.starts_with(".cd-w-")));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn save_config_accepts_verified_macos_tmp_alias() {
+        let canonical_dir = tempfile::Builder::new()
+            .prefix("cd-macos-tmp-alias-")
+            .tempdir_in("/private/tmp")
+            .expect("create canonical macOS tmp fixture");
+        let alias_dir = macos_alias_spelling(
+            canonical_dir.path(),
+            Path::new("/private/tmp"),
+            Path::new("/tmp"),
+        );
+        let alias_path = alias_dir.join("config.json");
+        let canonical_path = canonical_dir.path().join("config.json");
+        let config = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+
+        save_config(&alias_path, &config).expect("save through verified /tmp alias");
+
+        assert_eq!(
+            load_config(&canonical_path).expect("canonical load").theme,
+            "light"
+        );
+        assert_eq!(
+            std::fs::read(&alias_path).unwrap(),
+            std::fs::read(&canonical_path).unwrap()
+        );
+        assert_eq!(unix_mode(&canonical_path), 0o600);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn save_config_accepts_verified_macos_var_folders_alias() {
+        let canonical_temp = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical process temp directory");
+        assert!(
+            canonical_temp.starts_with("/private/var/folders"),
+            "macOS process temp root must be beneath /private/var/folders: {}",
+            canonical_temp.display()
+        );
+        let canonical_dir = tempfile::Builder::new()
+            .prefix("cd-macos-var-alias-")
+            .tempdir_in(&canonical_temp)
+            .expect("create canonical macOS var fixture");
+        let alias_dir = macos_alias_spelling(
+            canonical_dir.path(),
+            Path::new("/private/var"),
+            Path::new("/var"),
+        );
+        let alias_path = alias_dir.join("config.json");
+        let canonical_path = canonical_dir.path().join("config.json");
+
+        save_config(&alias_path, &AppConfig::default())
+            .expect("save through verified /var/folders alias");
+
+        assert!(canonical_path.is_file());
+        assert_eq!(
+            std::fs::read(&alias_path).unwrap(),
+            std::fs::read(&canonical_path).unwrap()
+        );
+        assert_eq!(unix_mode(&canonical_path), 0o600);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_trusted_alias_still_rejects_later_intermediate_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let canonical_dir = tempfile::Builder::new()
+            .prefix("cd-macos-alias-symlink-")
+            .tempdir_in("/private/tmp")
+            .expect("create canonical macOS tmp fixture");
+        let alias_dir = macos_alias_spelling(
+            canonical_dir.path(),
+            Path::new("/private/tmp"),
+            Path::new("/tmp"),
+        );
+        let decoy = canonical_dir.path().join("decoy");
+        std::fs::create_dir(&decoy).unwrap();
+        let canary = decoy.join("canary");
+        std::fs::write(&canary, b"preserve").unwrap();
+        symlink(&decoy, canonical_dir.path().join("linked-home")).unwrap();
+
+        let attempted = alias_dir
+            .join("linked-home")
+            .join("nested")
+            .join("config.json");
+        let err = save_config(&attempted, &AppConfig::default())
+            .expect_err("later symlink must remain forbidden");
+
+        assert!(err.to_string().contains("symlinked") || err.to_string().contains("unreadable"));
+        assert_eq!(std::fs::read(&canary).unwrap(), b"preserve");
+        assert!(!decoy.join("nested").exists());
+        assert!(listed_names(&decoy)
+            .iter()
+            .all(|name| !name.starts_with(".cd-w-")));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_alias_classifier_and_identity_checks_fail_closed() {
+        assert_eq!(
+            macos_trusted_root_alias(Path::new("/tmp/fixture")),
+            Some(MacosTrustedRootAlias::Tmp)
+        );
+        assert_eq!(
+            macos_trusted_root_alias(Path::new("/var/folders/fixture")),
+            Some(MacosTrustedRootAlias::Var)
+        );
+        for wrong in [
+            "/tmp",
+            "/var",
+            "/var/tmp/fixture",
+            "/var/foldersx/fixture",
+            "/etc/fixture",
+            "/tmp/../fixture",
+            "/var/folders/../fixture",
+        ] {
+            assert_eq!(
+                macos_trusted_root_alias(Path::new(wrong)),
+                None,
+                "must not trust {wrong}"
+            );
+        }
+
+        let mut alias_stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        alias_stat.st_mode = libc::S_IFLNK | 0o777;
+        alias_stat.st_uid = 0;
+        assert!(macos_root_alias_stat_is_trusted(&alias_stat));
+        alias_stat.st_uid = 501;
+        assert!(!macos_root_alias_stat_is_trusted(&alias_stat));
+        alias_stat.st_uid = 0;
+        alias_stat.st_mode = libc::S_IFDIR | 0o755;
+        assert!(!macos_root_alias_stat_is_trusted(&alias_stat));
+
+        let first = store_tempdir();
+        let second = store_tempdir();
+        let first_meta = std::fs::metadata(first.path()).unwrap();
+        let second_meta = std::fs::metadata(second.path()).unwrap();
+        assert!(macos_alias_target_matches_canonical(
+            &first_meta,
+            &first_meta
+        ));
+        assert!(!macos_alias_target_matches_canonical(
+            &first_meta,
+            &second_meta
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_alias_verifier_rejects_actual_wrong_entry_type_and_owner_branches() {
+        let root = open_existing_directory_nofollow(Path::new("/")).expect("open root");
+        let fixture = store_tempdir();
+        let wrong_entries = [
+            (
+                "type",
+                scripted_macos_alias_stat(libc::S_IFDIR | 0o755, 0, 71),
+            ),
+            (
+                "owner",
+                scripted_macos_alias_stat(libc::S_IFLNK | 0o777, 501, 72),
+            ),
+        ];
+
+        for (case, before) in wrong_entries {
+            let mut ops = ScriptedMacosRootAliasVerifierOps::new(
+                before,
+                trusted_scripted_macos_alias_stat(72),
+                fixture.path(),
+                fixture.path(),
+            );
+            let error = open_verified_macos_root_alias_with_ops(
+                &root,
+                MacosTrustedRootAlias::Tmp,
+                &mut ops,
+            )
+            .expect_err("wrong alias entry must fail closed");
+
+            assert!(
+                error.to_string().contains("not a root-owned symlink"),
+                "{case}"
+            );
+            assert_eq!(ops.calls, ["stat_alias_nofollow_before"], "{case}");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_alias_verifier_rejects_identity_change_between_real_stat_steps() {
+        let root = open_existing_directory_nofollow(Path::new("/")).expect("open root");
+        let fixture = store_tempdir();
+        let mut ops = ScriptedMacosRootAliasVerifierOps::new(
+            trusted_scripted_macos_alias_stat(81),
+            trusted_scripted_macos_alias_stat(82),
+            fixture.path(),
+            fixture.path(),
+        );
+
+        let error =
+            open_verified_macos_root_alias_with_ops(&root, MacosTrustedRootAlias::Tmp, &mut ops)
+                .expect_err("replaced alias entry must fail closed");
+
+        assert!(error.to_string().contains("identity changed"));
+        assert_eq!(
+            ops.calls,
+            [
+                "stat_alias_nofollow_before",
+                "open_private_nofollow",
+                "open_canonical_target_nofollow",
+                "open_alias_following",
+                "stat_alias_nofollow_after",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_alias_verifier_rejects_followed_target_with_different_device_or_inode() {
+        let root = open_existing_directory_nofollow(Path::new("/")).expect("open root");
+        let canonical = store_tempdir();
+        let followed = store_tempdir();
+        let stable = trusted_scripted_macos_alias_stat(91);
+        let mut ops = ScriptedMacosRootAliasVerifierOps::new(
+            stable,
+            stable,
+            canonical.path(),
+            followed.path(),
+        );
+
+        let error =
+            open_verified_macos_root_alias_with_ops(&root, MacosTrustedRootAlias::Tmp, &mut ops)
+                .expect_err("wrong alias target must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains("does not name its canonical target"));
+        assert_eq!(
+            ops.calls,
+            [
+                "stat_alias_nofollow_before",
+                "open_private_nofollow",
+                "open_canonical_target_nofollow",
+                "open_alias_following",
+                "stat_alias_nofollow_after",
+                "metadata_followed_alias",
+                "metadata_canonical_target",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_alias_verifier_orders_the_only_follow_between_nofollow_open_and_restat() {
+        let root = open_existing_directory_nofollow(Path::new("/")).expect("open root");
+        let target = store_tempdir();
+        let stable = trusted_scripted_macos_alias_stat(101);
+        let mut ops =
+            ScriptedMacosRootAliasVerifierOps::new(stable, stable, target.path(), target.path());
+
+        open_verified_macos_root_alias_with_ops(&root, MacosTrustedRootAlias::Tmp, &mut ops)
+            .expect("stable alias to canonical target must pass");
+
+        assert_eq!(
+            ops.calls,
+            [
+                "stat_alias_nofollow_before",
+                "open_private_nofollow",
+                "open_canonical_target_nofollow",
+                "open_alias_following",
+                "stat_alias_nofollow_after",
+                "metadata_followed_alias",
+                "metadata_canonical_target",
+            ]
+        );
+        assert_eq!(
+            ops.calls
+                .iter()
+                .filter(|operation| **operation == "open_alias_following")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ensure_config_dir_rejects_symlinked_home_component() {
+        use std::os::unix::fs::symlink;
+
+        let dir = store_tempdir();
+        let real_home = dir.path().join("real-home");
+        std::fs::create_dir(&real_home).unwrap();
+        let linked_home = dir.path().join("link-home");
+        symlink(&real_home, &linked_home).unwrap();
+        let branding = Branding {
+            config_dir_name: ".fixture-desk".into(),
+            ..Branding::default()
+        };
+        assert!(ensure_config_dir_in(&linked_home, &branding).is_err());
+        assert!(!real_home.join(".fixture-desk").exists());
+        assert!(!linked_home.join(".fixture-desk").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_rejects_writable_parent_and_preserves_destination() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = store_tempdir();
+        let parent = dir.path().join("store-parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = parent.join("config.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &original).expect("seed");
+        let before = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        let attempted = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+        let err = save_config(&path, &attempted).expect_err("writable parent");
+        assert!(err.to_string().contains("world-writable") || err.to_string().contains("group-"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(load_config(&path).expect("preserved").theme, original.theme);
+        assert!(listed_names(&parent)
+            .iter()
+            .all(|name| !name.starts_with(".cd-w-")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_rejects_replacement_inode_and_preserves_destination() {
+        let dir = store_tempdir();
+        let path = dir.path().join("config.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            default_chat_model: Some("qwen3".into()),
+            ..AppConfig::default()
+        };
+        save_config(&path, &original).expect("seed");
+        let before = std::fs::read(&path).unwrap();
+
+        SAVE_SWAP_TEMP_INODE.with(|flag| flag.set(true));
+        let attempted = AppConfig {
+            theme: "light".into(),
+            default_chat_model: Some("gpt-oss".into()),
+            ..AppConfig::default()
+        };
+        let err = save_config(&path, &attempted).expect_err("inode swap");
+        assert!(
+            err.to_string().contains("verified inode")
+                || err.to_string().contains("unsafe identity")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(load_config(&path).expect("preserved").theme, original.theme);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("light"));
+        assert!(!SAVE_SWAP_TEMP_INODE.with(std::cell::Cell::get));
+        let replacement_names = listed_names(dir.path())
+            .into_iter()
+            .filter(|name| name.starts_with(".cd-w-"))
+            .collect::<Vec<_>>();
+        assert_eq!(replacement_names.len(), 1);
+        assert!(dir
+            .path()
+            .join(&replacement_names[0])
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_rolls_back_temp_replacement_after_final_verification() {
+        let dir = store_tempdir();
+        let path = dir.path().join("config.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &original).expect("seed");
+        let before = std::fs::read(&path).unwrap();
+
+        SAVE_SWAP_TEMP_AFTER_VERIFY.with(|flag| flag.set(true));
+        let attempted = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+        let err = save_config(&path, &attempted).expect_err("post-verify temp swap");
+        assert!(err.to_string().contains("identity changed"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(load_config(&path).expect("preserved").theme, "dark");
+        assert!(dir.path().join("held-verified-temp.bin").exists());
+        assert!(!SAVE_SWAP_TEMP_AFTER_VERIFY.with(std::cell::Cell::get));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_detects_destination_cas_change_and_preserves_concurrent_value() {
+        let dir = store_tempdir();
+        let path = dir.path().join("config.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &original).expect("seed");
+
+        SAVE_SWAP_DEST_AFTER_VERIFY.with(|flag| flag.set(true));
+        let attempted = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+        let err = save_config(&path, &attempted).expect_err("destination CAS change");
+        assert!(err.to_string().contains("identity changed"));
+        assert_eq!(
+            load_config(&path).expect("concurrent value").theme,
+            AppConfig::default().theme
+        );
+        assert!(dir.path().join("held-verified-destination.json").exists());
+        assert!(!SAVE_SWAP_DEST_AFTER_VERIFY.with(std::cell::Cell::get));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_sync_failure_rolls_back_existing_and_absent_destinations() {
+        let dir = store_tempdir();
+        let existing = dir.path().join("existing.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&existing, &original).expect("seed");
+        let before = std::fs::read(&existing).unwrap();
+
+        SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH.with(|flag| flag.set(true));
+        let attempted = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+        let err = save_config(&existing, &attempted).expect_err("synthetic directory sync");
+        assert!(err.to_string().contains("prior destination was restored"));
+        assert_eq!(std::fs::read(&existing).unwrap(), before);
+
+        let absent = dir.path().join("absent.json");
+        SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH.with(|flag| flag.set(true));
+        let err = save_config(&absent, &attempted).expect_err("synthetic absent sync");
+        assert!(err.to_string().contains("prior destination was restored"));
+        assert!(!absent.exists());
+        assert!(listed_names(dir.path())
+            .iter()
+            .all(|name| !name.starts_with(".cd-w-")));
+        assert!(!SAVE_FAIL_PARENT_SYNC_AFTER_PUBLISH.with(std::cell::Cell::get));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_lock_contention_fails_without_waiting_or_changing_destination() {
+        use std::os::fd::AsRawFd;
+
+        let dir = store_tempdir();
+        let path = dir.path().join("config.json");
+        let original = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        save_config(&path, &original).expect("seed");
+        let before = std::fs::read(&path).unwrap();
+
+        let parent = std::fs::File::open(dir.path()).expect("open synthetic parent");
+        // SAFETY: `parent` is live for the duration of the lock and unlock.
+        assert_eq!(
+            unsafe { libc::flock(parent.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let started = std::time::Instant::now();
+        let attempted = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+        let err = save_config(&path, &attempted).expect_err("contended publication lock");
+        let elapsed = started.elapsed();
+        // SAFETY: this releases only the lock acquired on `parent` above.
+        unsafe {
+            libc::flock(parent.as_raw_fd(), libc::LOCK_UN);
+        }
+
+        assert!(err.to_string().contains("transaction is active"));
+        assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(load_config(&path).expect("preserved").theme, "dark");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_config_rejects_destination_symlink_hardlink_and_unsafe_mode() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = store_tempdir();
+        let original = AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        };
+        let attempted = AppConfig {
+            theme: "light".into(),
+            ..AppConfig::default()
+        };
+
+        let symlink_dest = dir.path().join("symlink-dest.json");
+        let canary = dir.path().join("canary-store.bin");
+        std::fs::write(&canary, b"DEST-CANARY").unwrap();
+        symlink(&canary, &symlink_dest).unwrap();
+        assert!(save_config(&symlink_dest, &attempted).is_err());
+        assert!(symlink_dest
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&canary).unwrap(), b"DEST-CANARY");
+
+        let hard_dest = dir.path().join("hard-dest.json");
+        save_config(&hard_dest, &original).expect("seed hard");
+        let alias = dir.path().join("hard-alias.json");
+        std::fs::hard_link(&hard_dest, &alias).unwrap();
+        let before = std::fs::read(&hard_dest).unwrap();
+        assert!(save_config(&hard_dest, &attempted).is_err());
+        assert_eq!(std::fs::read(&hard_dest).unwrap(), before);
+        assert_eq!(
+            load_config(&hard_dest).expect("preserved").theme,
+            original.theme
+        );
+
+        let mode_dest = dir.path().join("mode-dest.json");
+        save_config(&mode_dest, &original).expect("seed mode");
+        std::fs::set_permissions(&mode_dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::read(&mode_dest).unwrap();
+        assert!(save_config(&mode_dest, &attempted).is_err());
+        assert_eq!(std::fs::read(&mode_dest).unwrap(), before);
+        assert_eq!(unix_mode(&mode_dest), 0o644);
+        assert_eq!(
+            load_config(&mode_dest).expect("preserved").theme,
+            original.theme
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn destination_and_parent_identity_helpers_reject_unsafe_shapes() {
+        let expected = 1000u32;
+        let mut regular = unsafe { std::mem::zeroed::<libc::stat>() };
+        regular.st_mode = libc::S_IFREG | 0o600;
+        regular.st_uid = expected;
+        regular.st_nlink = 1;
+        unix_destination_is_replaceable(&regular, expected).expect("safe dest");
+
+        let mut symlink_stat = regular;
+        symlink_stat.st_mode = libc::S_IFLNK | 0o777;
+        assert!(unix_destination_is_replaceable(&symlink_stat, expected).is_err());
+
+        let mut dir_stat = regular;
+        dir_stat.st_mode = libc::S_IFDIR | 0o700;
+        assert!(unix_destination_is_replaceable(&dir_stat, expected).is_err());
+
+        let mut hard = regular;
+        hard.st_nlink = 2;
+        assert!(unix_destination_is_replaceable(&hard, expected).is_err());
+
+        let mut other_owner = regular;
+        other_owner.st_uid = expected.wrapping_add(1);
+        assert!(unix_destination_is_replaceable(&other_owner, expected).is_err());
+
+        let mut world = regular;
+        world.st_mode = libc::S_IFREG | 0o644;
+        assert!(unix_destination_is_replaceable(&world, expected).is_err());
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn save_config_fails_closed_without_handle_bound_durability() {
+        let dir = store_tempdir();
+        let path = dir.path().join("config.json");
+        let err = save_config(&path, &AppConfig::default()).expect_err("fail closed");
+        assert!(durable_config_persistence_unsupported(&err), "{err}");
+        assert_eq!(
+            err.to_string(),
+            format!("config: {DURABLE_CONFIG_SAVE_UNSUPPORTED}")
+        );
+        assert!(!path.exists());
+        assert!(!dir.path().join("config.json.tmp").exists());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "fail-closed save must not leave temps or other files: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn durable_config_persistence_supported_matches_unix_cfg() {
+        assert_eq!(durable_config_persistence_supported(), cfg!(unix));
     }
 }

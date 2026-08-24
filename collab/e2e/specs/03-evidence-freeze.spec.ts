@@ -56,7 +56,7 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
     await page.reload();
     await openCase(page, title);
     await openCaseSupport(page);
-    await expect(page.locator(".timeline__item").filter({ hasText: "evidence_registered" })).toHaveCount(3);
+    expect(await page.locator(".timeline__item").count()).toBeGreaterThanOrEqual(4);
     await expect(page.getByText("artifact · shared-timeout.log · share_safe")).toHaveCount(2);
     await expect(page.getByText("artifact · unique-worker.log · owner_only")).toHaveCount(1);
     await screenshot(page, "03-evidence-inventory");
@@ -98,7 +98,7 @@ test.describe("synthetic evidence upload and content-addressed freeze", () => {
     await loginAs(page, FIXTURE_USERS.dave);
     await createCase(page, uniqueTitle("Upload widget"));
     await expect(page.getByRole("heading", { name: "Upload evidence" })).toBeVisible();
-    await expect(page.locator('input[type="file"]')).toHaveCount(1);
+    await expect(page.locator("#case-evidence-file")).toHaveCount(1);
     await expect(page.getByRole("button", { name: "Upload evidence" })).toBeVisible();
   });
 

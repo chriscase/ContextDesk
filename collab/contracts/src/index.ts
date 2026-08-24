@@ -43,6 +43,51 @@ export type {
 } from "./auth.js";
 
 export {
+  ADMIN_DIRECTORY_ERROR_SCHEMA_ID,
+  ADMIN_DIRECTORY_GROUPS_SCHEMA_ID,
+  ADMIN_DIRECTORY_IDENTITIES_SCHEMA_ID,
+  ADMIN_DIRECTORY_MAX_RESULTS,
+  ADMIN_DIRECTORY_MAX_TERM_LENGTH,
+  ADMIN_DIRECTORY_MIN_TERM_LENGTH,
+  ADMIN_DIRECTORY_SEARCH_REQUEST_SCHEMA_ID,
+  normalizeAdminDirectorySearchTerm,
+  parseAdminDirectoryError,
+  parseAdminDirectoryGroupSearchResponse,
+  parseAdminDirectoryIdentitySearchResponse,
+  parseAdminDirectorySearchRequest,
+} from "./admin-directory.js";
+export type {
+  AdminDirectoryErrorCode,
+  AdminDirectoryErrorV1,
+  AdminDirectoryGroupSearchResponseV1,
+  AdminDirectoryGroupV1,
+  AdminDirectoryIdentitySearchResponseV1,
+  AdminDirectoryIdentityV1,
+  AdminDirectorySearchRequestV1,
+  AdminDirectorySource,
+} from "./admin-directory.js";
+
+export {
+  ADMIN_ROLE_MAPPING_ERROR_SCHEMA_ID,
+  ADMIN_ROLE_MAPPING_LIST_SCHEMA_ID,
+  ADMIN_ROLE_MAPPING_MAX_GROUP_LENGTH,
+  ADMIN_ROLE_MAPPING_MAX_RESULTS,
+  normalizeAdminRoleGroup,
+  parseAdminRoleMappingError,
+  parseAdminRoleMappingList,
+  parseAdminRoleMappingRevokeRequest,
+  parseAdminRoleMappingUpdateRequest,
+} from "./admin-role-map.js";
+export type {
+  AdminRoleMappingErrorCode,
+  AdminRoleMappingErrorV1,
+  AdminRoleMappingListV1,
+  AdminRoleMappingRevokeRequestV1,
+  AdminRoleMappingUpdateRequestV1,
+  AdminRoleMappingV1,
+} from "./admin-role-map.js";
+
+export {
   CASE_LIST_SCHEMA_ID,
   CASE_SCHEMA_ID,
   CASE_SEVERITIES,
@@ -95,6 +140,42 @@ export type {
   PresenceMemberV1,
   PresenceSurface,
 } from "./presence.js";
+
+export {
+  OVERVIEW_ACTIVITY_CAP,
+  OVERVIEW_ATTENTION_CAP,
+  OVERVIEW_ATTENTION_PREDICATES,
+  OVERVIEW_NOTICES,
+  OVERVIEW_OPEN_CASE_CAP,
+  OVERVIEW_OPEN_STATUSES,
+  OVERVIEW_PRESENCE_CAP,
+  OVERVIEW_PRESENCE_REASONS,
+  OVERVIEW_RUNNING_JOB_CAP,
+  OVERVIEW_RUNNING_JOB_STATUSES,
+  OVERVIEW_SCHEMA_ID,
+  OVERVIEW_TERMINAL_JOB_CAP,
+  OVERVIEW_TERMINAL_JOB_STATUSES,
+  overviewPresenceForStaticSnapshot,
+  parseOverview,
+} from "./overview.js";
+export type {
+  OverviewActivityV1,
+  OverviewAttentionPredicate,
+  OverviewAttentionV1,
+  OverviewJobV1,
+  OverviewNoticeV1,
+  OverviewOpenCaseV1,
+  OverviewOpenStatus,
+  OverviewPresenceMemberV1,
+  OverviewPresenceReason,
+  OverviewPresenceV1,
+  OverviewRunningJobStatus,
+  OverviewSeverityCountsV1,
+  OverviewStatusCountsV1,
+  OverviewTerminalJobStatus,
+  OverviewV1,
+  OverviewViewerV1,
+} from "./overview.js";
 
 export {
   CONTRIBUTION_KINDS,
@@ -304,6 +385,7 @@ export type {
   ExperimentAgreementV1,
   ExperimentCandidateV1,
   ExperimentDecisionV1,
+  NormalizedExperimentDecisionV1,
   ExperimentPackageV1,
   ExperimentReviewExportV1,
   ExperimentReviewExportV2,
@@ -484,3 +566,6 @@ export type {
   LiveQualificationStatus,
   LiveQualificationVerdict,
 } from "./live-qualification.js";
+
+export * from "./investigation-portable.js";
+export * from "./investigation-portable-archive.js";

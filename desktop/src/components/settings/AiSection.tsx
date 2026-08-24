@@ -27,6 +27,7 @@ import {
   type WizardApplyPayload,
 } from "./AiSetupWizard";
 import { CapabilityQualificationPanel } from "./CapabilityQualificationPanel";
+import { InvestigationTeamReadinessPanel } from "./InvestigationTeamReadinessPanel";
 import { ModelRoleHintLine } from "./ModelRoleHintLine";
 import { ModelVisibilityPanel } from "./ModelVisibilityPanel";
 import { MultiModelReviewToggle } from "./MultiModelReviewToggle";
@@ -200,6 +201,7 @@ export function AiSection({
   return (
 <div>
   <MultiModelReviewToggle />
+  <InvestigationTeamReadinessPanel />
   <div className="ai-wizard__mode-row">
     <p className="section-lead" style={{ margin: 0, flex: 1 }}>
       Advanced AI settings. Paste a base URL (or pick Ollama / Grok Build)

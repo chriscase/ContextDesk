@@ -2,6 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ADMIN_ROLE_MAPPING_ERROR_SCHEMA_ID,
+  parseAdminRoleMappingList,
   parseAuthError,
   parseSessionResponse,
 } from "@cd-collab/contracts";
@@ -285,6 +287,121 @@ describe("auth flow", () => {
         ),
       ).toBe(true);
     });
+  });
+
+  it("lists current group-role mappings only to admins and audits the read", async () => {
+    await withApp(async ({ app, audit }) => {
+      const anonymous = await app.inject({
+        method: "GET",
+        url: "/api/authz/group-role-map",
+      });
+      expect(anonymous.statusCode).toBe(401);
+
+      const viewer = cookieFrom(
+        await app.inject({
+          method: "POST",
+          url: "/api/auth/login",
+          payload: { username: "carol", password: "fixture-carol-secret" },
+        }),
+      );
+      const denied = await app.inject({
+        method: "GET",
+        url: "/api/authz/group-role-map",
+        headers: { cookie: viewer },
+      });
+      expect(denied.statusCode).toBe(403);
+      expect(denied.body).not.toContain("cn=admins");
+
+      const admin = cookieFrom(
+        await app.inject({
+          method: "POST",
+          url: "/api/auth/login",
+          payload: { username: "dave", password: "fixture-dave-secret" },
+        }),
+      );
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/authz/group-role-map",
+        headers: { cookie: admin },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(parseAdminRoleMappingList(JSON.parse(response.body))).toMatchObject({
+        mappings: [
+          { group: "cn=admins,ou=groups,dc=example,dc=test", role: "admin" },
+          { group: "cn=contributors,ou=groups,dc=example,dc=test", role: "contributor" },
+          { group: "cn=viewers,ou=groups,dc=example,dc=test", role: "viewer" },
+        ],
+        truncated: false,
+      });
+
+      const reads = await audit.list({ action: "role_mapping_read" });
+      expect(reads.map((event) => event.outcome)).toEqual(["denied", "success"]);
+      expect(JSON.stringify(reads)).not.toContain("cn=admins");
+    });
+  });
+
+  it("fails mapping reads closed when their success audit cannot be recorded", async () => {
+    const inner = new MemoryAuditStore();
+    const audit: AuditStore = {
+      append: async (record) => {
+        if (record.action === "role_mapping_read" && record.outcome === "success") {
+          throw new Error("audit unavailable");
+        }
+        return inner.append(record);
+      },
+      list: (filter) => inner.list(filter),
+    };
+    await withApp(
+      async ({ app }) => {
+        const admin = cookieFrom(
+          await app.inject({
+            method: "POST",
+            url: "/api/auth/login",
+            payload: { username: "dave", password: "fixture-dave-secret" },
+          }),
+        );
+        const response = await app.inject({
+          method: "GET",
+          url: "/api/authz/group-role-map",
+          headers: { cookie: admin },
+        });
+        expect(response.statusCode).toBe(503);
+        expect(JSON.parse(response.body)).toEqual({
+          schemaId: ADMIN_ROLE_MAPPING_ERROR_SCHEMA_ID,
+          error: "unavailable",
+        });
+        expect(response.body).not.toContain("cn=admins");
+      },
+      { audit },
+    );
+  });
+
+  it("reports the mapping-list safety limit instead of implying a complete list", async () => {
+    const roles = new MutableGroupRoleMap(parseGroupRoleMap(defaultMap));
+    for (let index = 0; index < 505; index += 1) {
+      roles.set(`local:bounded-${String(index).padStart(3, "0")}`, "viewer");
+    }
+    const roleStore = new MemoryGroupRoleStore(roles);
+    await withApp(
+      async ({ app }) => {
+        const admin = cookieFrom(
+          await app.inject({
+            method: "POST",
+            url: "/api/auth/login",
+            payload: { username: "dave", password: "fixture-dave-secret" },
+          }),
+        );
+        const response = await app.inject({
+          method: "GET",
+          url: "/api/authz/group-role-map",
+          headers: { cookie: admin },
+        });
+        const body = parseAdminRoleMappingList(JSON.parse(response.body));
+        expect(body.mappings).toHaveLength(body.limit);
+        expect(body.truncated).toBe(true);
+      },
+      { roles, roleStore },
+    );
   });
 
   it("rate-limits failed logins without user-enumeration leakage", async () => {

@@ -46,7 +46,10 @@ const catalog: LiveQualificationCatalogV1 = {
   ],
 };
 
-async function fixture(executor: TriageBatchRunExecutor) {
+async function fixture(
+  executor: TriageBatchRunExecutor,
+  profileCatalog: LiveQualificationCatalogV1 = catalog,
+) {
   const root = await mkdtemp(join(tmpdir(), "cd-collab-live-runner-"));
   const audit = new MemoryAuditStore();
   const cases = new CaseService(
@@ -60,7 +63,7 @@ async function fixture(executor: TriageBatchRunExecutor) {
     audit,
     jobs: new MemoryTriageJobStore(),
     gatewayExecutor: executor,
-    profiles: catalog.profiles.map((profile) => ({
+    profiles: profileCatalog.profiles.map((profile) => ({
       id: profile.profileId,
       label: profile.label,
       provider: profile.provider,
@@ -172,7 +175,7 @@ describe("live qualification runner", () => {
           const completed = index === 0;
           return {
             ...candidate,
-            status: completed ? "completed" : "failed",
+            status: completed ? "completed" : "partial",
             benchmarkRunId: completed ? `durable-${candidate.candidateId}` : null,
             outputHash: completed ? "c".repeat(64) : null,
             summary: completed ? "synthetic result" : null,
@@ -180,7 +183,7 @@ describe("live qualification runner", () => {
             unknowns: completed ? ["usage", "cost"] : ["result"],
             usageStatus: "unknown",
             costStatus: "unknown",
-            errorCode: completed ? null : "provider_error",
+            errorCode: completed ? null : "root_cause_not_established",
             startedAt: "2026-08-20T00:00:00.000Z",
             finishedAt: "2026-08-20T00:00:01.000Z",
             privacyClass: "owner_only",
@@ -198,7 +201,72 @@ describe("live qualification runner", () => {
       });
       expect(report.verdict).toBe("partial");
       expect(report.lanes.every((lane) => lane.ran)).toBe(true);
-      expect(report.lanes.map((lane) => lane.status)).toEqual(["completed", "failed"]);
+      expect(report.lanes.map((lane) => lane.status)).toEqual(["completed", "partial"]);
+      expect(report.lanes[1]?.errorCode).toBe("root_cause_not_established");
+    } finally {
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps host lifecycle reasons honest across the live report remap", async () => {
+    const reasonCatalog: LiveQualificationCatalogV1 = {
+      ...catalog,
+      profiles: [
+        ...catalog.profiles,
+        {
+          alias: "vercel-compatible",
+          profileId: "employer-vercel-compatible",
+          modelId: "compatible-model",
+          provider: "employer-gateway",
+          label: "Compatible model",
+        },
+      ],
+    };
+    const hostReasons = [
+      "live_run_failed",
+      "live_run_stopped",
+      "cancel_requested",
+      "gateway_runner_error",
+    ];
+    const fx = await fixture({
+      executeBatch: async (context: TriageBatchExecutionContext): Promise<TriageCandidateRunV1[]> =>
+        context.request.candidates.map((candidate, index) => ({
+          ...candidate,
+          status: index === 2 ? "cancelled" : "failed",
+          benchmarkRunId: `durable-${candidate.candidateId}`,
+          outputHash: "d".repeat(64),
+          summary: null,
+          evidenceRefs: [],
+          unknowns: ["result"],
+          usageStatus: "unknown",
+          costStatus: "unknown",
+          errorCode: hostReasons[index]!,
+          startedAt: "2026-08-20T00:00:00.000Z",
+          finishedAt: "2026-08-20T00:00:01.000Z",
+          privacyClass: "owner_only",
+        })),
+    }, reasonCatalog);
+    try {
+      const report = await runLiveQualification({
+        ...fx,
+        catalog: reasonCatalog,
+        liveOptIn: true,
+        confirmed: true,
+        concurrency: 4,
+      });
+      expect(report.lanes.map((lane) => lane.errorCode)).toEqual([
+        "runner_error",
+        "gateway_runner_error",
+        "cancel_requested",
+        "gateway_runner_error",
+      ]);
+      expect(report.lanes.map((lane) => lane.status)).toEqual([
+        "failed",
+        "failed",
+        "cancelled",
+        "failed",
+      ]);
+      expect(report.verdict).toBe("failed");
     } finally {
       await rm(fx.root, { recursive: true, force: true });
     }

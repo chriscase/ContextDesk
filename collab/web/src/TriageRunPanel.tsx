@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { EvidenceSnapshotCockpit } from "./EvidenceSnapshotCockpit.js";
+import { protectedApiFetch } from "./protected-api.js";
+import type { WorkFocus } from "./app-location.js";
+import { useRouteFocus } from "./route-focus.js";
 
 // Metadata fields beyond `id`/`fingerprint`/`evidence`/`createdBy` are already
 // part of the snapshot API response (cd-collab.snapshot.v1) but stay optional
@@ -37,6 +40,9 @@ interface ExternalChatRunView {
 
 interface TriageProfileOption {
   id: string;
+  profileId?: string;
+  modelId?: string;
+  alias?: string;
   label: string;
   provider: string;
 }
@@ -110,7 +116,7 @@ const DEFAULT_GATEWAY_CONCURRENCY = 2;
 const GATEWAY_CONCURRENCY_OPTIONS = [1, 2, 3, 4] as const;
 const MAX_ERROR_LENGTH = 240;
 // Synthetic fixture labels; suggestions only — the operator may type any
-// non-DeepSeek model id their host profile actually serves.
+// non-DeepSeek model id their configured gateway connection actually serves.
 const SUGGESTED_MODEL_IDS = [
   "qwen-3.6-27b",
   "gpt-oss-120b",
@@ -203,6 +209,7 @@ export function TriageRunPanel(props: {
   caseId: string;
   canLead: boolean;
   readOnly: boolean;
+  routeFocus?: WorkFocus;
 }) {
   const [snapshots, setSnapshots] = useState<SnapshotView[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactView[]>([]);
@@ -241,18 +248,19 @@ export function TriageRunPanel(props: {
   const [benchImportExperimentId, setBenchImportExperimentId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loadRequestToken = useRef(0);
+  useRouteFocus(props.routeFocus, !loading);
 
   const load = useCallback(async () => {
     const requestToken = ++loadRequestToken.current;
     setError(null);
     try {
       const [snapshotResponse, evidenceResponse, jobsResponse, importsResponse, profilesResponse, capabilitiesResponse] = await Promise.all([
-        fetch(`/api/cases/${props.caseId}/snapshots`),
-        fetch(`/api/cases/${props.caseId}/evidence`),
-        fetch(`/api/cases/${props.caseId}/triage-runs`),
-        fetch(`/api/cases/${props.caseId}/imports`),
-        fetch("/api/triage-profiles"),
-        fetch("/api/triage-capabilities"),
+        protectedApiFetch(`/api/cases/${props.caseId}/snapshots`),
+        protectedApiFetch(`/api/cases/${props.caseId}/evidence`),
+        protectedApiFetch(`/api/cases/${props.caseId}/triage-runs`),
+        protectedApiFetch(`/api/cases/${props.caseId}/imports`),
+        protectedApiFetch("/api/triage-profiles"),
+        protectedApiFetch("/api/triage-capabilities"),
       ]);
       if (requestToken !== loadRequestToken.current) return;
       if (!snapshotResponse.ok) throw new Error(await errorText(snapshotResponse, "Snapshots could not be loaded."));
@@ -346,7 +354,7 @@ export function TriageRunPanel(props: {
     [candidateOptions, selectedCandidates],
   );
   const gatewayProfilesReady = mode !== "gateway"
-    || selectedGatewayCandidates.every((candidate) => Boolean((laneProfiles[candidate.candidateId] ?? candidate.profileId ?? "").trim()));
+    || selectedGatewayCandidates.every((candidate) => Boolean(profileFor(candidate)));
   const gatewayAvailable = triageCapabilities?.gatewayAvailable ?? true;
 
   useEffect(() => {
@@ -355,12 +363,45 @@ export function TriageRunPanel(props: {
     }
   }, [mode, triageCapabilities]);
 
-  function profileFor(candidate: CandidateOption): string {
-    return (laneProfiles[candidate.candidateId] ?? candidate.profileId ?? "").trim();
+  function selectedProfileFor(candidate: CandidateOption): TriageProfileOption | undefined {
+    const selected = (laneProfiles[candidate.candidateId] ?? candidate.profileId ?? "").trim();
+    const exactSelection = gatewayProfiles.find((profile) => profile.id === selected);
+    if (exactSelection) return exactSelection;
+
+    const hostProfileId = selected || candidate.profileId || "";
+    return gatewayProfiles.find((profile) =>
+      (profile.profileId ?? profile.id) === hostProfileId
+      && (profile.modelId === candidate.model || profile.alias === candidate.model),
+    ) ?? gatewayProfiles.find((profile) =>
+      profile.modelId === candidate.model || profile.alias === candidate.model,
+    );
   }
 
-  function providerForProfile(profileId: string, fallback: string): string {
-    return gatewayProfiles.find((profile) => profile.id === profileId)?.provider ?? fallback;
+  function profileFor(candidate: CandidateOption): string {
+    return selectedProfileFor(candidate)?.id
+      ?? (laneProfiles[candidate.candidateId] ?? candidate.profileId ?? "").trim();
+  }
+
+  function hostProfileFor(candidate: CandidateOption): string {
+    const profile = selectedProfileFor(candidate);
+    return (profile?.profileId ?? profile?.id ?? profileFor(candidate)).trim();
+  }
+
+  function providerFor(candidate: CandidateOption, fallback: string): string {
+    return selectedProfileFor(candidate)?.provider ?? fallback;
+  }
+
+  function modelFor(candidate: CandidateOption): string {
+    return selectedProfileFor(candidate)?.modelId ?? candidate.model;
+  }
+
+  function profileLabelFor(candidate: Pick<CandidateOption, "profileId" | "model">): string | null {
+    if (!candidate.profileId) return null;
+    const profile = gatewayProfiles.find((item) =>
+      (item.profileId ?? item.id) === candidate.profileId
+      && (!item.modelId || item.modelId === candidate.model || item.alias === candidate.model),
+    );
+    return profile?.label ?? candidate.profileId;
   }
 
   useEffect(() => {
@@ -376,13 +417,16 @@ export function TriageRunPanel(props: {
     const alias = String(data.get("laneAlias") ?? "").trim();
     const model = String(data.get("laneModel") ?? "").trim();
     const role = String(data.get("laneRole") ?? "").trim() || "single";
-    const profileId = String(data.get("laneProfile") ?? "").trim();
+    const profileSelectionId = String(data.get("laneProfile") ?? "").trim();
+    const selectedProfile = gatewayProfiles.find((profile) => profile.id === profileSelectionId);
+    const profileId = selectedProfile?.profileId ?? selectedProfile?.id ?? profileSelectionId;
+    const chosenModel = selectedProfile?.modelId ?? model;
     setLanePickerError(null);
     if (!alias || !model) {
       setLanePickerError("Lane alias and model id are required.");
       return;
     }
-    if ([alias, model, profileId].some((value) => DEEPSEEK_PATTERN.test(value))) {
+    if ([alias, chosenModel, profileId].some((value) => DEEPSEEK_PATTERN.test(value))) {
       setLanePickerError(DEEPSEEK_REJECTION);
       return;
     }
@@ -395,15 +439,15 @@ export function TriageRunPanel(props: {
       {
         candidateId: alias,
         role,
-        provider: mode === "gateway" ? providerForProfile(profileId, "openai-compatible") : "synthetic",
+        provider: mode === "gateway" ? selectedProfile?.provider ?? "openai-compatible" : "synthetic",
         profileId: profileId || null,
-        model,
+        model: chosenModel,
         version: null,
       },
     ]);
     setSelectedCandidates((current) => [...current, alias]);
-    if (profileId) {
-      setLaneProfiles((current) => ({ ...current, [alias]: profileId }));
+    if (profileSelectionId) {
+      setLaneProfiles((current) => ({ ...current, [alias]: profileSelectionId }));
     }
     form.reset();
   }
@@ -425,7 +469,7 @@ export function TriageRunPanel(props: {
       return;
     }
     try {
-      const response = await fetch(`/api/cases/${props.caseId}/triage-runs`, {
+      const response = await protectedApiFetch(`/api/cases/${props.caseId}/triage-runs`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -440,8 +484,9 @@ export function TriageRunPanel(props: {
           ...(parentJobId ? { parentJobId } : {}),
           candidates: candidates.map((candidate) => ({
             ...candidate,
-            provider: mode === "gateway" ? providerForProfile(profileFor(candidate), "openai-compatible") : candidate.provider,
-            profileId: mode === "gateway" ? profileFor(candidate) : null,
+            provider: mode === "gateway" ? providerFor(candidate, "openai-compatible") : candidate.provider,
+            profileId: mode === "gateway" ? hostProfileFor(candidate) : null,
+            model: mode === "gateway" ? modelFor(candidate) : candidate.model,
           })),
         }),
       });
@@ -456,7 +501,7 @@ export function TriageRunPanel(props: {
   }
 
   async function cancel(jobId: string) {
-    const response = await fetch(`/api/cases/${props.caseId}/triage-runs/${jobId}/cancel`, { method: "POST" });
+    const response = await protectedApiFetch(`/api/cases/${props.caseId}/triage-runs/${jobId}/cancel`, { method: "POST" });
     if (!response.ok) setError(await errorText(response, "Cancellation could not be requested."));
     await load();
   }
@@ -467,7 +512,7 @@ export function TriageRunPanel(props: {
     setHandoffExperimentId(null);
     setHandoffError(null);
     try {
-      const response = await fetch(
+      const response = await protectedApiFetch(
         `/api/cases/${props.caseId}/experiments/from-triage/${jobId}`,
         {
           method: "POST",
@@ -511,7 +556,7 @@ export function TriageRunPanel(props: {
       return;
     }
     try {
-      const response = await fetch(`/api/cases/${props.caseId}/experiments`, {
+      const response = await protectedApiFetch(`/api/cases/${props.caseId}/experiments`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
@@ -597,7 +642,7 @@ export function TriageRunPanel(props: {
                   <p className="case-memory__note">
                     {mode === "gateway"
                       ? gatewayAvailable
-                        ? "The host bridge owns provider calls and credentials; each lane sends only a profile id."
+                        ? "Your War Room host owns provider calls and credentials; choose the gateway model each lane should run."
                         : "Gateway execution is not configured on this deployment; synthetic mode remains available."
                       : "Synthetic runs are offline and make no provider calls."}
                   </p>
@@ -679,9 +724,9 @@ export function TriageRunPanel(props: {
                         {mode === "gateway" && selectedCandidates.includes(candidate.candidateId) ? (
                           gatewayProfiles.length > 0 ? (
                             <label className="triage-runs__lane-profile">
-                              Host profile
+                              Gateway model
                               <select
-                                aria-label={`${candidate.model} host connector profile`}
+                                aria-label={`${candidate.model} gateway model`}
                                 value={profileFor(candidate)}
                                 onChange={(event) => setLaneProfiles((current) => ({ ...current, [candidate.candidateId]: event.target.value }))}
                               >
@@ -695,9 +740,9 @@ export function TriageRunPanel(props: {
                             </label>
                           ) : (
                             <label className="triage-runs__lane-profile">
-                              Host profile id
+                              Gateway connection ID
                               <input
-                                aria-label={`${candidate.model} host connector profile`}
+                                aria-label={`${candidate.model} gateway connection ID`}
                                 value={profileFor(candidate)}
                                 onChange={(event) => setLaneProfiles((current) => ({ ...current, [candidate.candidateId]: event.target.value }))}
                                 placeholder="profile:employer-gateway"
@@ -709,7 +754,7 @@ export function TriageRunPanel(props: {
                     ))}
                     {mode === "gateway" ? (
                       <span className="case-memory__note">
-                        Each selected lane chooses its own host profile. Credentials and endpoints stay on the host.
+                        Each selected lane chooses its own gateway model. Credentials and endpoints stay on the War Room host.
                         {!gatewayAvailable ? " Configure COLLAB_TRIAGE_RUNNER to enable gateway execution." : ""}
                         {selectedCandidates.length < 2 ? " Gateway comparisons require at least two lanes." : ""}
                       </span>
@@ -719,7 +764,7 @@ export function TriageRunPanel(props: {
                       <form className="triage-runs__lane-picker-form" onSubmit={addLane}>
                         <p className="case-memory__note">
                           Identifiers only: lane alias, model id, and (for gateway runs) a host
-                          profile id. Endpoints, credentials, and raw provider traffic never enter
+                          gateway connection. Endpoints, credentials, and raw provider traffic never enter
                           the browser. DeepSeek lanes are rejected.
                         </p>
                         <label className="triage-runs__field">
@@ -759,8 +804,8 @@ export function TriageRunPanel(props: {
                         {mode === "gateway" ? (
                           gatewayProfiles.length > 0 ? (
                             <label className="triage-runs__field">
-                              Host profile
-                              <select name="laneProfile" aria-label="New lane host profile" defaultValue="">
+                              Gateway model
+                              <select name="laneProfile" aria-label="New lane gateway model" defaultValue="">
                                 <option value="" disabled>
                                   Select a profile
                                 </option>
@@ -773,10 +818,10 @@ export function TriageRunPanel(props: {
                             </label>
                           ) : (
                             <label className="triage-runs__field">
-                              Host profile id
+                              Gateway connection ID
                               <input
                                 name="laneProfile"
-                                aria-label="New lane host profile id"
+                                aria-label="New lane gateway connection ID"
                                 placeholder="profile:employer-gateway"
                               />
                             </label>
@@ -941,7 +986,13 @@ export function TriageRunPanel(props: {
               {cockpit}
               <div className="triage-runs__history" aria-live="polite">
               {jobs.map((job) => (
-                <article className="triage-runs__job" key={job.id}>
+                <article
+                  className="triage-runs__job"
+                  key={job.id}
+                  data-route-item={job.id}
+                  data-route-kind="triage-run"
+                  tabIndex={-1}
+                >
                   <div className="triage-runs__job-header">
                     <div>
                       <h4>{job.request.strategyId}</h4>
@@ -968,12 +1019,18 @@ export function TriageRunPanel(props: {
                   <p className="case-memory__note">Lanes settle independently; final same-snapshot proof waits for all lanes.</p>
                   <div className="triage-runs__results">
                     {job.candidates.map((candidate) => (
-                              <div className="triage-runs__candidate" key={candidate.candidateId}>
+                              <div
+                                className="triage-runs__candidate"
+                                key={candidate.candidateId}
+                                data-route-item={`${job.id}:${candidate.candidateId}`}
+                                data-route-kind="triage-candidate"
+                                tabIndex={-1}
+                              >
                                 <div className="triage-runs__candidate-heading">
                                   <strong>{candidate.model}</strong>
                                   <span>{candidate.role} · {candidateLifecycleText(candidate.status)}</span>
                                 </div>
-                                {candidate.profileId ? <p className="case-memory__note">Host profile {candidate.profileId}</p> : null}
+                                {candidate.profileId ? <p className="case-memory__note">Gateway model {profileLabelFor(candidate)}</p> : null}
                                 {candidate.summary ? <p>{candidate.summary}</p> : null}
                         {candidate.benchmarkRunId ? <p className="case-memory__note">Experiment Lab run {shortHash(candidate.benchmarkRunId)}</p> : null}
                         {candidate.evidenceRefs.length > 0 ? (

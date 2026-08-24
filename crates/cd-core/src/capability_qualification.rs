@@ -1446,6 +1446,15 @@ pub trait QualificationTransport {
         cancel: &AtomicBool,
     ) -> Result<SyntheticChatResponse, TransportError>;
 
+    /// Drain authoritative telemetry captured from the most recent chat
+    /// completion. Scripted and non-reporting transports keep the default
+    /// `None`; callers must never infer missing values from configuration.
+    fn take_last_chat_provider_telemetry(
+        &mut self,
+    ) -> Option<crate::provider_telemetry::ProviderTransportTelemetry> {
+        None
+    }
+
     /// Embedding vector for a synthetic text.
     fn embed(
         &mut self,

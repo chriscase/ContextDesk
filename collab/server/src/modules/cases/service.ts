@@ -3,6 +3,8 @@ import {
   ARTIFACT_SCHEMA_ID,
   CASE_SCHEMA_ID,
   CONTRIBUTION_SCHEMA_ID,
+  OVERVIEW_ACTIVITY_CAP,
+  OVERVIEW_OPEN_CASE_CAP,
   snapshotFairness,
   snapshotFingerprint,
   type ArtifactKind,
@@ -32,13 +34,157 @@ import {
   type Actor,
   type ArtifactRow,
   type CaseStore,
+  type OverviewActivityRow,
+  type OverviewCounts,
+  type OverviewOpenCaseRow,
+  type OverviewScope,
+  type OverviewVisibilityBoundary,
   type RevisionRow,
   type SnapshotRow,
   type TimelineInsert,
   type TimelineRow,
 } from "./store.js";
 
-export type { Actor, TimelineRow } from "./store.js";
+export type { Actor, CaseTimelineRow, OverviewActivityRow, OverviewCounts, OverviewOpenCaseRow, OverviewScope, OverviewVisibilityBoundary, TimelineRow } from "./store.js";
+
+const ACTIVITY_DETAIL_KEYS = new Set([
+  "kind",
+  "status",
+  "revision",
+  "candidateCount",
+  "evidenceCount",
+  "mode",
+  "dimension",
+  "verificationStatus",
+  "legalHold",
+]);
+
+function activityDetails(payload: string): Record<string, string | number | boolean | null> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const details: Record<string, string | number | boolean | null> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (
+      ACTIVITY_DETAIL_KEYS.has(key)
+      && (typeof value === "string"
+        || typeof value === "number"
+        || typeof value === "boolean"
+        || value === null)
+    ) {
+      details[key] = value;
+    }
+  }
+  return details;
+}
+
+export interface CaseActivityItem {
+  caseId: string;
+  caseTitle: string;
+  caseStatus: CaseStatus;
+  caseSeverity: CaseSeverity;
+  seq: number;
+  kind: string;
+  actorUsername: string;
+  targetId: string | null;
+  occurredAt: string;
+  details: Record<string, string | number | boolean | null>;
+}
+
+export interface CaseSituationInput {
+  problemStatement: string;
+  affectedParties: string;
+  impact: string;
+  scope: string;
+  openQuestions: string[];
+}
+
+export class SituationConflictError extends Error {
+  constructor(readonly currentVersion: number) {
+    super("situation conflict");
+  }
+}
+
+const SITUATION_TEXT_LIMIT = 12_000;
+const SITUATION_QUESTION_LIMIT = 2_000;
+const SITUATION_QUESTION_COUNT_LIMIT = 50;
+const RFC3339_TIMESTAMP =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function daysInMonth(year: number, month: number): number {
+  const days = [31, isLeapYear(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return days[month - 1] ?? 0;
+}
+
+function canonicalClientTime(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) return null;
+  const match = RFC3339_TIMESTAMP.exec(value);
+  if (!match) {
+    throw new Error("clientTime must be an RFC3339 timestamp");
+  }
+  const [, yearRaw, monthRaw, dayRaw, hourRaw, minuteRaw, secondRaw, offsetHourRaw,
+    offsetMinuteRaw] = match;
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  const validComponents = month >= 1
+    && month <= 12
+    && day >= 1
+    && day <= daysInMonth(year, month)
+    && Number(hourRaw) <= 23
+    && Number(minuteRaw) <= 59
+    && Number(secondRaw) <= 59
+    && (offsetHourRaw === undefined || Number(offsetHourRaw) <= 23)
+    && (offsetMinuteRaw === undefined || Number(offsetMinuteRaw) <= 59);
+  if (!validComponents) {
+    throw new Error("clientTime must be an RFC3339 timestamp");
+  }
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) {
+    throw new Error("clientTime must be an RFC3339 timestamp");
+  }
+  try {
+    return new Date(milliseconds).toISOString();
+  } catch {
+    throw new Error("clientTime must be an RFC3339 timestamp");
+  }
+}
+
+function cleanSituationText(value: string, field: string): string {
+  const cleaned = value.trim();
+  if (cleaned.length > SITUATION_TEXT_LIMIT) {
+    throw new Error(`${field} is too long`);
+  }
+  return cleaned;
+}
+
+function cleanSituation(input: CaseSituationInput): CaseSituationInput {
+  if (input.openQuestions.length > SITUATION_QUESTION_COUNT_LIMIT) {
+    throw new Error("too many open questions");
+  }
+  const openQuestions = input.openQuestions.map((question) => {
+    const cleaned = question.trim();
+    if (cleaned.length > SITUATION_QUESTION_LIMIT) {
+      throw new Error("open question is too long");
+    }
+    return cleaned;
+  }).filter(Boolean);
+  return {
+    problemStatement: cleanSituationText(input.problemStatement, "problem statement"),
+    affectedParties: cleanSituationText(input.affectedParties, "affected parties"),
+    impact: cleanSituationText(input.impact, "impact"),
+    scope: cleanSituationText(input.scope, "scope"),
+    openQuestions,
+  };
+}
 
 export class CaseService {
   constructor(
@@ -49,13 +195,77 @@ export class CaseService {
   ) {}
 
   async appendDomainTimeline(caseId: string, event: TimelineInsert): Promise<TimelineRow> {
+    const clientTime = canonicalClientTime(event.clientTime);
     await this.requireCase(caseId);
-    return this.store.appendTimeline(caseId, event);
+    return this.store.appendTimeline(caseId, { ...event, clientTime });
   }
 
   async listCases(actor: Actor, isAdmin: boolean): Promise<CaseV1[]> {
     const rows = await this.store.listCases();
     return rows.filter((c) => isAdmin || this.isMember(c, actor.id)).map((c) => this.toCase(c));
+  }
+
+  async listRecentActivity(
+    actor: Actor,
+    isAdmin: boolean,
+    requestedLimit = 30,
+  ): Promise<CaseActivityItem[]> {
+    const limit = Math.min(100, Math.max(1, Math.trunc(requestedLimit) || 30));
+    const cases = (await this.store.listCases()).filter(
+      (row) => isAdmin || this.isMember(row, actor.id),
+    );
+    const byId = new Map(cases.map((row) => [row.id, row]));
+    const events = await this.store.listRecentTimeline([...byId.keys()], limit);
+    return events.flatMap((event): CaseActivityItem[] => {
+      const row = byId.get(event.caseId);
+      if (!row) return [];
+      return [{
+        caseId: row.id,
+        caseTitle: row.title,
+        caseStatus: row.status,
+        caseSeverity: row.severity,
+        seq: event.seq,
+        kind: event.kind,
+        actorUsername: event.actorUsername,
+        targetId: event.targetId,
+        occurredAt: event.serverTime,
+        details: activityDetails(event.payload),
+      }];
+    });
+  }
+
+  async listOverviewCounts(scope: OverviewScope): Promise<OverviewCounts> {
+    return this.store.overviewCounts(scope);
+  }
+
+  async overviewVisibilityBoundary(
+    scope: OverviewScope,
+  ): Promise<OverviewVisibilityBoundary | null> {
+    return this.store.overviewVisibilityBoundary(scope);
+  }
+
+  async listOverviewOpenCases(
+    scope: OverviewScope,
+    requestedLimit = OVERVIEW_OPEN_CASE_CAP,
+  ): Promise<OverviewOpenCaseRow[]> {
+    const limit = Math.min(
+      OVERVIEW_OPEN_CASE_CAP,
+      Math.max(0, Math.trunc(requestedLimit) || OVERVIEW_OPEN_CASE_CAP),
+    );
+    if (limit === 0) return [];
+    return this.store.listOverviewOpenCases(scope, limit);
+  }
+
+  async listOverviewActivity(
+    scope: OverviewScope,
+    requestedLimit = OVERVIEW_ACTIVITY_CAP,
+  ): Promise<OverviewActivityRow[]> {
+    const limit = Math.min(
+      OVERVIEW_ACTIVITY_CAP,
+      Math.max(0, Math.trunc(requestedLimit) || OVERVIEW_ACTIVITY_CAP),
+    );
+    if (limit === 0) return [];
+    return this.store.listOverviewActivity(scope, limit);
   }
 
   async getCase(id: string, actor: Actor, isAdmin: boolean): Promise<CaseV1 | null> {
@@ -67,14 +277,33 @@ export class CaseService {
 
   async createCase(
     actor: Actor,
-    input: { title: string; severity?: CaseSeverity; clientTime?: string },
+    input: {
+      title: string;
+      severity?: CaseSeverity;
+      clientTime?: string;
+      problemStatement?: string;
+      affectedParties?: string;
+      impact?: string;
+      scope?: string;
+      openQuestions?: string[];
+    },
     origin: string,
   ): Promise<CaseV1> {
+    const clientTime = canonicalClientTime(input.clientTime);
     const id = randomUUID();
     const now = new Date().toISOString();
+    const situation = cleanSituation({
+      problemStatement: input.problemStatement ?? "",
+      affectedParties: input.affectedParties ?? "",
+      impact: input.impact ?? "",
+      scope: input.scope ?? "",
+      openQuestions: input.openQuestions ?? [],
+    });
     const row = {
       id,
       title: input.title,
+      ...situation,
+      situationVersion: 0,
       severity: input.severity ?? "medium",
       status: "open" as const,
       legalHold: false,
@@ -89,7 +318,7 @@ export class CaseService {
       kind: "case_created",
       actor,
       targetId: id,
-      clientTime: input.clientTime ?? null,
+      clientTime,
       payload: { title: row.title },
     });
     await this.audit.append({
@@ -102,6 +331,72 @@ export class CaseService {
     return this.toCase(row);
   }
 
+  async updateSituation(
+    caseId: string,
+    actor: Actor,
+    input: Partial<CaseSituationInput>,
+    expectedVersion: number,
+    origin: string,
+    clientTime?: string,
+  ): Promise<CaseV1> {
+    const canonicalTime = canonicalClientTime(clientTime);
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+      throw new Error("expectedVersion must be a non-negative safe integer");
+    }
+    const row = await this.requireCase(caseId);
+    const suppliedFields = Object.keys(input).filter((key) =>
+      ["problemStatement", "affectedParties", "impact", "scope", "openQuestions"].includes(key),
+    );
+    if (suppliedFields.length === 0) throw new Error("no situation fields supplied");
+    const situation = cleanSituation({
+      problemStatement: input.problemStatement ?? row.problemStatement ?? "",
+      affectedParties: input.affectedParties ?? row.affectedParties ?? "",
+      impact: input.impact ?? row.impact ?? "",
+      scope: input.scope ?? row.scope ?? "",
+      openQuestions: input.openQuestions ?? row.openQuestions ?? [],
+    });
+    const changedFields = suppliedFields.filter((field) => {
+      if (field === "openQuestions") {
+        return JSON.stringify(situation.openQuestions) !== JSON.stringify(row.openQuestions ?? []);
+      }
+      return situation[field as keyof Omit<CaseSituationInput, "openQuestions">]
+        !== (row[field as keyof Omit<CaseSituationInput, "openQuestions">] ?? "");
+    });
+    const result = await this.store.updateSituationAtomic(
+      {
+        id: row.id,
+        expectedVersion,
+        situation,
+        changedFields,
+        timeline: {
+          kind: "case_situation_updated",
+          actor,
+          targetId: caseId,
+          clientTime: canonicalTime,
+          payload: {
+            changedFields,
+            openQuestionCount: situation.openQuestions.length,
+            predecessorVersion: expectedVersion,
+            situationVersion: expectedVersion + 1,
+          },
+        },
+        audit: {
+          identity: actor.id,
+          action: "case_situation_update",
+          target: caseId,
+          origin,
+          outcome: "success",
+        },
+      },
+      this.audit,
+    );
+    if (result.status === "not_found") throw new Error("case not found");
+    if (result.status === "conflict") {
+      throw new SituationConflictError(result.currentVersion);
+    }
+    return this.toCase(result.row);
+  }
+
   async setStatus(
     caseId: string,
     actor: Actor,
@@ -109,6 +404,7 @@ export class CaseService {
     origin: string,
     clientTime?: string,
   ): Promise<CaseV1> {
+    const canonicalTime = canonicalClientTime(clientTime);
     const row = await this.requireCase(caseId);
     row.status = status;
     await this.store.updateCaseMeta(row);
@@ -116,7 +412,7 @@ export class CaseService {
       kind: "case_status",
       actor,
       targetId: caseId,
-      clientTime: clientTime ?? null,
+      clientTime: canonicalTime,
       payload: { status },
     });
     await this.audit.append({
@@ -217,6 +513,7 @@ export class CaseService {
     },
     origin: string,
   ): Promise<SnapshotV1> {
+    const clientTime = canonicalClientTime(input.clientTime);
     await this.requireCase(caseId);
     const evidenceIds = input.evidenceIds;
     if (new Set(evidenceIds).size !== evidenceIds.length) {
@@ -268,7 +565,7 @@ export class CaseService {
       kind: "snapshot_frozen",
       actor,
       targetId: row.id,
-      clientTime: input.clientTime ?? null,
+      clientTime,
       payload: {
         fingerprint,
         parentSnapshotId,
@@ -329,6 +626,7 @@ export class CaseService {
     },
     origin: string,
   ): Promise<ContributionV1> {
+    const clientTime = canonicalClientTime(input.clientTime);
     await this.requireCase(caseId);
     if (!isContributionKind(input.kind)) {
       throw new Error(`unknown contribution kind: ${input.kind}`);
@@ -364,7 +662,7 @@ export class CaseService {
       kind: "contribution_created",
       actor,
       targetId: id,
-      clientTime: input.clientTime ?? null,
+      clientTime,
       payload: { kind: input.kind, contentHash: hash, privacyClass: privacy, sourceId },
     });
     await this.audit.append({
@@ -385,6 +683,7 @@ export class CaseService {
     origin: string,
     clientTime?: string,
   ): Promise<ContributionV1> {
+    const canonicalTime = canonicalClientTime(clientTime);
     const latest = await this.requireLatest(caseId, contributionId);
     if (latest.tombstone) throw new Error("contribution not found");
     const next: RevisionRow = {
@@ -403,7 +702,7 @@ export class CaseService {
       kind: "contribution_revised",
       actor,
       targetId: contributionId,
-      clientTime: clientTime ?? null,
+      clientTime: canonicalTime,
       payload: {
         revision: next.revision,
         predecessor: latest.revision,
@@ -475,6 +774,7 @@ export class CaseService {
     origin: string,
     clientTime?: string,
   ): Promise<ContributionV1> {
+    const canonicalTime = canonicalClientTime(clientTime);
     assertSupportedLinks(status, links);
     const latest = await this.requireLatest(caseId, contributionId);
     if (latest.kind !== "hypothesis" || latest.tombstone) {
@@ -496,7 +796,7 @@ export class CaseService {
       kind: "hypothesis_status",
       actor,
       targetId: contributionId,
-      clientTime: clientTime ?? null,
+      clientTime: canonicalTime,
       payload: { status, links },
     });
     await this.audit.append({
@@ -526,6 +826,7 @@ export class CaseService {
     },
     origin: string,
   ): Promise<{ artifact: ArtifactV1; summary: ContributionV1 }> {
+    const clientTime = canonicalClientTime(input.clientTime);
     await this.requireCase(caseId);
     const privacy = defaultPrivacy(input.privacyClass);
     if (input.filename !== undefined) assertFilenameAllowed(input.filename);
@@ -574,7 +875,7 @@ export class CaseService {
       privacyClass: privacy,
       sourceId,
     };
-    if (input.clientTime !== undefined) summaryInput.clientTime = input.clientTime;
+    if (clientTime !== null) summaryInput.clientTime = clientTime;
     const summary = await this.addContribution(caseId, actor, summaryInput, origin);
 
     const row: ArtifactRow = {
@@ -600,7 +901,7 @@ export class CaseService {
       kind: "evidence_registered",
       actor,
       targetId: id,
-      clientTime: input.clientTime ?? null,
+      clientTime,
       payload: {
         artifactKind: input.kind,
         contentHash,
@@ -699,6 +1000,12 @@ export class CaseService {
   private toCase(row: {
     id: string;
     title: string;
+    problemStatement?: string;
+    affectedParties?: string;
+    impact?: string;
+    scope?: string;
+    openQuestions?: string[];
+    situationVersion?: number;
     severity: CaseSeverity;
     status: CaseStatus;
     legalHold: boolean;
@@ -711,6 +1018,12 @@ export class CaseService {
       schemaId: CASE_SCHEMA_ID,
       id: row.id,
       title: row.title,
+      problemStatement: row.problemStatement ?? "",
+      affectedParties: row.affectedParties ?? "",
+      impact: row.impact ?? "",
+      scope: row.scope ?? "",
+      openQuestions: row.openQuestions ? [...row.openQuestions] : [],
+      situationVersion: row.situationVersion ?? 0,
       severity: row.severity,
       status: row.status,
       legalHold: row.legalHold,

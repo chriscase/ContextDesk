@@ -190,6 +190,12 @@ describe("login form", () => {
     expect(alert.querySelector(".login__error-headline")?.textContent).toBe("Sign-in failed.");
   });
 
+  it("focuses the username field on mount", () => {
+    stubLogin(respond(200, {}));
+    render(<LoginForm onSuccess={vi.fn()} />);
+    expect(document.activeElement).toBe(screen.getByLabelText("Username"));
+  });
+
   it("keeps honouring seeded demo credentials", () => {
     stubLogin(respond(200, {}));
     render(

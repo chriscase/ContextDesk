@@ -20,6 +20,12 @@ export interface CaseV1 {
   schemaId: typeof CASE_SCHEMA_ID;
   id: string;
   title: string;
+  problemStatement: string;
+  affectedParties: string;
+  impact: string;
+  scope: string;
+  openQuestions: string[];
+  situationVersion: number;
   severity: CaseSeverity;
   status: CaseStatus;
   legalHold: boolean;
@@ -38,6 +44,12 @@ const caseShape: ObjectShape = {
   schemaId: f.req(f.en(CASE_SCHEMA_ID)),
   id: f.req(f.str),
   title: f.req(f.str),
+  problemStatement: f.opt(f.str),
+  affectedParties: f.opt(f.str),
+  impact: f.opt(f.str),
+  scope: f.opt(f.str),
+  openQuestions: f.opt(f.arr(f.str)),
+  situationVersion: f.opt(f.u64),
   severity: f.req(f.en(...CASE_SEVERITIES)),
   status: f.req(f.en(...CASE_STATUSES)),
   legalHold: f.req(f.bool),
@@ -49,7 +61,16 @@ const caseShape: ObjectShape = {
 
 export function parseCase(raw: unknown): CaseV1 {
   checkObject("$", caseShape, raw);
-  return raw as CaseV1;
+  const parsed = raw as CaseV1;
+  return {
+    ...parsed,
+    problemStatement: parsed.problemStatement ?? "",
+    affectedParties: parsed.affectedParties ?? "",
+    impact: parsed.impact ?? "",
+    scope: parsed.scope ?? "",
+    openQuestions: parsed.openQuestions ? [...parsed.openQuestions] : [],
+    situationVersion: parsed.situationVersion ?? 0,
+  };
 }
 
 export const CASE_LIST_SCHEMA_ID = "cd-collab.case_list.v1" as const;
@@ -66,5 +87,6 @@ const caseListShape: ObjectShape = {
 
 export function parseCaseList(raw: unknown): CaseListV1 {
   checkObject("$", caseListShape, raw);
-  return raw as CaseListV1;
+  const parsed = raw as CaseListV1;
+  return { ...parsed, cases: parsed.cases.map((row) => parseCase(row)) };
 }

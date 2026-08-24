@@ -18,10 +18,33 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(up.applied).toContain("009_triage_jobs");
       expect(up.applied).toContain("010_presence");
       expect(up.applied).toContain("011_triage_worker_leases");
+      expect(up.applied).toContain("012_case_situation");
       const tables = await client.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_events'`,
       );
       expect(tables.rows).toHaveLength(1);
+      const situationColumns = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cases'
+           AND column_name IN ('open_questions', 'situation_version')
+         ORDER BY column_name`,
+      );
+      expect(situationColumns.rows.map((row) => row.column_name)).toEqual([
+        "open_questions",
+        "situation_version",
+      ]);
+      const constraint = await client.query<{ definition: string }>(
+        `SELECT pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint WHERE conname = 'cases_open_questions_array_check'`,
+      );
+      expect(constraint.rows[0]?.definition).toContain("jsonb_path_exists");
+      expect((await migrateDown(client)).rolledBack).toBe("012_case_situation");
+      const rolledBackColumns = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cases'
+           AND column_name IN ('open_questions', 'situation_version')`,
+      );
+      expect(rolledBackColumns.rows).toHaveLength(0);
       expect((await migrateDown(client)).rolledBack).toBe("011_triage_worker_leases");
       expect((await migrateDown(client)).rolledBack).toBe("010_presence");
       expect((await migrateDown(client)).rolledBack).toBe("009_triage_jobs");
@@ -57,6 +80,7 @@ describe.skipIf(!adminUrl())("migrations", () => {
       expect(dry.pending).toContain("009_triage_jobs");
       expect(dry.pending).toContain("010_presence");
       expect(dry.pending).toContain("011_triage_worker_leases");
+      expect(dry.pending).toContain("012_case_situation");
       expect(dry.applied).toHaveLength(0);
       expect(dry.sql.some((s) => s.includes("evidence_file_references"))).toBe(
         true,

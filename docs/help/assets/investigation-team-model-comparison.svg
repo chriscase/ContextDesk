@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" role="img" aria-labelledby="title desc">
+  <title id="title">Fair Investigation Team model comparison</title>
+  <desc id="desc">Three exact evidence checks feed a comparability gate. Complete matching evidence permits a bounded trial; stale, partial, blocked, cancelled, or mismatched evidence requires attention instead of producing a winner.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0 9 4.5 0 9Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+  <rect x="20" y="20" width="960" height="480" rx="20" fill="#0f172a" stroke="#64748b" stroke-width="2"/>
+  <g font-family="system-ui, sans-serif" text-anchor="middle">
+    <rect x="55" y="65" width="250" height="120" rx="14" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
+    <text x="180" y="101" fill="#f8fafc" font-size="18" font-weight="700">Capability</text>
+    <text x="180" y="132" fill="#cbd5e1" font-size="14">Exact profile + model</text>
+    <text x="180" y="156" fill="#cbd5e1" font-size="14">required host contracts</text>
+
+    <rect x="375" y="65" width="250" height="120" rx="14" fill="#1e293b" stroke="#a78bfa" stroke-width="2"/>
+    <text x="500" y="101" fill="#f8fafc" font-size="18" font-weight="700">Measured team</text>
+    <text x="500" y="132" fill="#cbd5e1" font-size="14">Exact roles + deployment</text>
+    <text x="500" y="156" fill="#cbd5e1" font-size="14">four separate axes</text>
+
+    <rect x="695" y="65" width="250" height="120" rx="14" fill="#1e293b" stroke="#34d399" stroke-width="2"/>
+    <text x="820" y="101" fill="#f8fafc" font-size="18" font-weight="700">Known answer</text>
+    <text x="820" y="132" fill="#cbd5e1" font-size="14">Frozen suite + prompt set</text>
+    <text x="820" y="156" fill="#cbd5e1" font-size="14">complete scenario lifecycle</text>
+
+    <path d="M180 195V245H440" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+    <path d="M500 195V245" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+    <path d="M820 195V245H560" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+
+    <rect x="345" y="255" width="310" height="100" rx="16" fill="#082f49" stroke="#38bdf8" stroke-width="3"/>
+    <text x="500" y="291" fill="#f8fafc" font-size="19" font-weight="700">Comparability gate</text>
+    <text x="500" y="321" fill="#dbeafe" font-size="14">role · build · suite · prompt · policy</text>
+    <text x="500" y="343" fill="#dbeafe" font-size="14">subject · deployment · lifecycle</text>
+
+    <path d="M440 366L285 410" fill="none" stroke="#34d399" stroke-width="4" marker-end="url(#arrow)"/>
+    <path d="M560 366L715 410" fill="none" stroke="#f59e0b" stroke-width="4" marker-end="url(#arrow)"/>
+
+    <rect x="75" y="405" width="370" height="70" rx="14" fill="#064e3b" stroke="#34d399" stroke-width="2"/>
+    <text x="260" y="433" fill="#ecfdf5" font-size="17" font-weight="700">Complete + matching</text>
+    <text x="260" y="458" fill="#d1fae5" font-size="14">Ready for a bounded trial</text>
+
+    <rect x="555" y="405" width="370" height="70" rx="14" fill="#451a03" stroke="#f59e0b" stroke-width="2"/>
+    <text x="740" y="433" fill="#fffbeb" font-size="17" font-weight="700">Stale · partial · mismatched</text>
+    <text x="740" y="458" fill="#fef3c7" font-size="14">Refresh or review — no winner</text>
+  </g>
+</svg>

@@ -472,6 +472,37 @@
   gap: 0.2rem;
 }
 
+.triage-record__event-title {
+  margin: 0 0 0.2rem;
+  font-size: 0.9rem;
+}
+
+.triage-record__meaning {
+  margin: 0.45rem 0;
+  color: var(--muted);
+}
+
+.triage-record__audit {
+  margin-top: 0.45rem;
+  font-size: 0.75rem;
+}
+
+.triage-record__audit dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.25rem 0.6rem;
+}
+
+.triage-record__audit dt {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.triage-record__audit dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .triage-record__imports {
   margin-top: 0.75rem;
 }

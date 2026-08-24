@@ -1,4 +1,4 @@
-# ContextDesk comparison demo runbook
+# ContextDesk War Room demo runbook
 
 This runbook has two jobs: make the synthetic demonstration dependable, and keep any later employer-data rehearsal local and deliberately separate from the repository.
 
@@ -12,16 +12,50 @@ npm run demo
 
 Open `http://127.0.0.1:8787` and sign in with `demo` / `demo`. Set `COLLAB_DEMO_PORT` to another local port if 8787 is occupied. The launcher is a separate entry point: it does not change the production PostgreSQL or LDAP startup path, it binds only to loopback, and its temporary evidence is removed when it stops.
 
-Use the Presenter controls skin selector if you want the web surface to match a ContextDesk desktop skin (`Dark`, `Slate`, `Light`, `Sand`, `Forest`, or `GrokPtah`). The selected skin is a local browser preference.
+Use **Interface theme** if you want to change the presentation (`Command`,
+`Dark`, `Slate`, `Light`, `Sand`, or `Forest`). `Command` is the default. The
+selected theme is a local browser preference.
 
-Present the seeded case in this order:
+Present the seeded investigation in this order:
 
-1. Start with `pkg-synth-three-model-checkout-v1`. Point out the three candidates, shared evidence, candidate-specific clues, and a role conflict. Agreement is useful, but is not treated as proof.
-2. Show the three human helpfulness observations. They score evidence support, actionability, and uncertainty calibration independently of model agreement.
-3. Show the accepted human decision and gold v1. Explain that gold is a versioned human benchmark, not an infallible truth claim.
-4. Select `pkg-synth-strategy-paths-v1`. Compare the structured programmatic path with the pasted-chat path. They ask different questions but can still be compared by evidence discovery, unknowns, efficiency, helpfulness, and convergence on the benchmark.
-5. Export only the synthetic Experiment Lab review. The final privacy gate must stay enabled; never substitute an owner-only capture for a share-safe artifact.
-6. The export presents a readable share-safe summary first. Open `View raw export` only when demonstrating the optional technical JSON; it is deliberately hidden from the presenter surface by default.
+1. On **Overview**, point out the persistent navigation, signed-in identity,
+   recorded status counts, bounded **Latest activity** feed, and
+   **High-impact investigations**. Open one activity to demonstrate that it
+   routes to the exact investigation stage, then use **Investigations** for the
+   searchable inventory and **Start investigation**. Search for `checkout`,
+   then open **Checkout timeouts — model and strategy comparison**.
+2. Use the breadcrumbs and five stage controls to orient the audience. On
+   **Situation**, show the recorded status, severity, participants, activity,
+   and work areas. These are recorded facts, not an inferred verdict.
+3. On **Capture**, show the human-authored note and the external AI paste
+   labeled **imported · unverified**. Explain that imported output is not
+   silently treated as human-authored or corroborated evidence.
+4. Open **Discussion**. Explain that messages are durable case records while
+   presence is ephemeral; refresh is bounded polling, not realtime chat. Post
+   one clearly synthetic message if desired.
+5. On **Analyze**, show the uploaded logs/stack traces, evidence board,
+   snapshot lineage, run history, and the synthetic/offline launcher. Do not
+   switch to a live gateway during the five-minute story. Unknown usage and
+   cost must remain unknown.
+6. On **Compare**, choose the comparison labeled with the `qwen-3.6-27b`,
+   `gpt-oss-120b`, and `ministral-14b` lanes. Point out shared evidence,
+   candidate-specific clues, and the role conflict. Agreement is useful, but
+   the UI explicitly says it is not proof. Show human helpfulness observations
+   as separate evidence-support, actionability, and uncertainty-calibration
+   judgments.
+7. Choose the comparison whose visible labels contrast the structured
+   programmatic path with the pasted-chat path. They may ask different
+   questions; missing comparability stays visible instead of being invented.
+   Package IDs are audit metadata under **Technical artifact identity**, not
+   presenter controls.
+8. On **Decide**, show the accepted human decision and gold v1. Gold is a
+   versioned human benchmark, not infallible truth. Export only the synthetic
+   Experiment Lab review with the final privacy gate enabled. The readable
+   share-safe summary comes first; open **View raw export** only when the
+   audience needs the technical JSON.
+9. Reload once. The session remains signed in and returns to Overview.
+   Reopen the investigation to show that recorded artifacts persist while this
+   demo process remains running.
 
 The seeded model labels are synthetic fixtures: `qwen-3.6-27b`, `gpt-oss-120b`, and `ministral-14b`. There are no provider calls, credentials, private endpoints, or live employer outputs in this path.
 
@@ -51,7 +85,7 @@ unvalidated summaries to the web UI. If a gateway is not configured, use the
 synthetic path or the read-only fallback above; do not paste gateway secrets into
 the browser or repository.
 
-## Fast, read-only fallback
+## Limited read-only fallback
 
 If a local port, database, or directory service is unavailable:
 
@@ -59,7 +93,12 @@ If a local port, database, or directory service is unavailable:
 npm run demo:static
 ```
 
-Open `collab/.demo/contextdesk-synthetic-demo.html` in a normal browser. This single file contains the same synthetic, pre-adjudicated story and no server dependency. It is intentionally read-only; use the normal demo server to demonstrate edits.
+Open `collab/.demo/contextdesk-synthetic-demo.html` in a normal browser. This
+single file has no server dependency and is useful only for a limited,
+read-only comparison view. It does **not** reproduce the complete War Room
+journey: Discussion, evidence and snapshots, run history, routing, and durable
+edits require the normal loopback demo. Do not present the static fallback as
+equivalent to the primary demo.
 
 ## Preflight
 
