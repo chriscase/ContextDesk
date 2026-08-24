@@ -979,7 +979,11 @@ pub struct ProviderRoundTelemetry {
 ///   last round that authoritatively reported them (finish reason from the last
 ///   completed round).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(
+    rename_all = "camelCase",
+    from = "ProviderTurnTelemetryWire",
+    into = "ProviderTurnTelemetryWire"
+)]
 pub struct ProviderTurnTelemetry {
     /// Configured provider profile id (scrubbed / length-bounded).
     pub configured_profile_id: String,
@@ -988,6 +992,10 @@ pub struct ProviderTurnTelemetry {
     /// Model actually reported on the last response that included `model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_model: Option<String>,
+    /// Distinguishes an absent provider identity from a rejected one. Rejected
+    /// values never retain or serialize their raw bytes.
+    #[serde(default, skip_serializing_if = "model_identity_status_is_absent")]
+    pub model_identity_status: ModelIdentityStatus,
     /// Safe request id from the last round that reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,
@@ -1044,7 +1052,130 @@ pub struct ProviderTurnTelemetry {
     pub rounds: Vec<ProviderRoundTelemetry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderTurnTelemetryWire {
+    configured_profile_id: String,
+    configured_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_model: Option<String>,
+    #[serde(default, skip_serializing_if = "model_identity_status_is_absent")]
+    model_identity_status: ModelIdentityStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_request_id: Option<String>,
+    #[serde(default)]
+    observed_route: ObservedRoute,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_content_chars: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cached_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_budget: Option<crate::context_budgeting::ContextBudgetTelemetry>,
+    provider_round_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    application_retry_reasons: Vec<ApplicationRetryReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    final_turn_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finish_reason: Option<String>,
+    empty_visible_answer: bool,
+    truncated_by_length: bool,
+    tool_call_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latency_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rounds: Vec<ProviderRoundTelemetry>,
+}
+
+impl From<ProviderTurnTelemetryWire> for ProviderTurnTelemetry {
+    fn from(wire: ProviderTurnTelemetryWire) -> Self {
+        let identity = ResponseModelIdentity::from_status_and_value(
+            wire.model_identity_status,
+            wire.response_model,
+        );
+        let (model_identity_status, response_model) = identity.into_status_and_value();
+        Self {
+            configured_profile_id: wire.configured_profile_id,
+            configured_model: wire.configured_model,
+            response_model,
+            model_identity_status,
+            provider_request_id: wire.provider_request_id,
+            observed_route: wire.observed_route,
+            prompt_tokens: wire.prompt_tokens,
+            completion_tokens: wire.completion_tokens,
+            reasoning_tokens: wire.reasoning_tokens,
+            reasoning_content_chars: wire.reasoning_content_chars,
+            cached_tokens: wire.cached_tokens,
+            total_tokens: wire.total_tokens,
+            cost: wire.cost,
+            context_budget: wire.context_budget,
+            provider_round_count: wire.provider_round_count,
+            application_retry_reasons: wire.application_retry_reasons,
+            final_turn_outcome: wire.final_turn_outcome,
+            finish_reason: wire.finish_reason,
+            empty_visible_answer: wire.empty_visible_answer,
+            truncated_by_length: wire.truncated_by_length,
+            tool_call_count: wire.tool_call_count,
+            latency_ms: wire.latency_ms,
+            rounds: wire.rounds,
+        }
+    }
+}
+
+impl From<ProviderTurnTelemetry> for ProviderTurnTelemetryWire {
+    fn from(value: ProviderTurnTelemetry) -> Self {
+        let identity = ResponseModelIdentity::from_status_and_value(
+            value.model_identity_status,
+            value.response_model,
+        );
+        let (model_identity_status, response_model) = identity.into_status_and_value();
+        Self {
+            configured_profile_id: value.configured_profile_id,
+            configured_model: value.configured_model,
+            response_model,
+            model_identity_status,
+            provider_request_id: value.provider_request_id,
+            observed_route: value.observed_route,
+            prompt_tokens: value.prompt_tokens,
+            completion_tokens: value.completion_tokens,
+            reasoning_tokens: value.reasoning_tokens,
+            reasoning_content_chars: value.reasoning_content_chars,
+            cached_tokens: value.cached_tokens,
+            total_tokens: value.total_tokens,
+            cost: value.cost,
+            context_budget: value.context_budget,
+            provider_round_count: value.provider_round_count,
+            application_retry_reasons: value.application_retry_reasons,
+            final_turn_outcome: value.final_turn_outcome,
+            finish_reason: value.finish_reason,
+            empty_visible_answer: value.empty_visible_answer,
+            truncated_by_length: value.truncated_by_length,
+            tool_call_count: value.tool_call_count,
+            latency_ms: value.latency_ms,
+            rounds: value.rounds,
+        }
+    }
+}
+
 impl ProviderTurnTelemetry {
+    /// Closed identity for the turn-level projection.
+    pub fn response_model_identity(&self) -> ResponseModelIdentity {
+        ResponseModelIdentity::from_status_and_value(
+            self.model_identity_status,
+            self.response_model.clone(),
+        )
+    }
+
     /// JSON object for EventDto / CLI (camelCase).
     pub fn to_json(&self) -> Value {
         serde_json::to_value(self).unwrap_or_else(|_| Value::Object(Default::default()))
@@ -1545,6 +1676,49 @@ mod tests {
         assert_eq!(
             roundtrip.model_identity_status,
             ModelIdentityStatus::Rejected
+        );
+    }
+
+    #[test]
+    fn turn_identity_serde_is_fail_closed_and_accepts_reported_alias() {
+        let adversarial = "https://fixture.invalid/v1";
+        let rejected: ProviderTurnTelemetry = serde_json::from_value(json!({
+            "configuredProfileId": "profile-a",
+            "configuredModel": "configured-a",
+            "responseModel": adversarial,
+            "modelIdentityStatus": "rejected",
+            "observedRoute": {"status": "unknown"},
+            "providerRoundCount": 0,
+            "emptyVisibleAnswer": false,
+            "truncatedByLength": false,
+            "toolCallCount": 0
+        }))
+        .unwrap();
+        assert_eq!(rejected.response_model, None);
+        assert_eq!(
+            rejected.model_identity_status,
+            ModelIdentityStatus::Rejected
+        );
+        let dumped = serde_json::to_string(&rejected).unwrap();
+        assert!(!dumped.contains(adversarial));
+        assert!(!dumped.contains("fixture.invalid"));
+
+        let reported_alias: ProviderTurnTelemetry = serde_json::from_value(json!({
+            "configuredProfileId": "profile-a",
+            "configuredModel": "configured-a",
+            "responseModel": "qwen3",
+            "modelIdentityStatus": "reported",
+            "observedRoute": {"status": "unknown"},
+            "providerRoundCount": 0,
+            "emptyVisibleAnswer": false,
+            "truncatedByLength": false,
+            "toolCallCount": 0
+        }))
+        .unwrap();
+        assert_eq!(reported_alias.response_model.as_deref(), Some("qwen3"));
+        assert_eq!(
+            reported_alias.model_identity_status,
+            ModelIdentityStatus::Certified
         );
     }
 }

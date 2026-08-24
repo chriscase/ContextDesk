@@ -1129,7 +1129,7 @@ fn project_provider_telemetry(
     let (reported_model_id, model_identity_rejected) =
         match (telemetry.model_identity_status, telemetry.response_model) {
             (ModelIdentityStatus::Absent, None) => (None, false),
-            (ModelIdentityStatus::Reported, Some(model)) => (Some(model), false),
+            (ModelIdentityStatus::Certified, Some(model)) => (Some(model), false),
             (ModelIdentityStatus::Rejected, None) => (None, true),
             _ => {
                 return Err(store_error(
@@ -1616,7 +1616,7 @@ mod tests {
             self.calls += 1;
             self.last = Some(ProviderTransportTelemetry {
                 response_model: Some("reported/model-b".into()),
-                model_identity_status: ModelIdentityStatus::Reported,
+                model_identity_status: ModelIdentityStatus::Certified,
                 prompt_tokens: Some(100),
                 completion_tokens: Some(20),
                 reasoning_tokens: Some(5),
@@ -1891,7 +1891,7 @@ mod tests {
             self.calls += 1;
             self.last = Some(ProviderTransportTelemetry {
                 response_model: Some("reported/model-b".into()),
-                model_identity_status: ModelIdentityStatus::Reported,
+                model_identity_status: ModelIdentityStatus::Certified,
                 prompt_tokens: Some(100),
                 completion_tokens: Some(20),
                 reasoning_tokens: Some(5),

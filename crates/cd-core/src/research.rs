@@ -2265,6 +2265,7 @@ mod tests {
                     configured_profile_id: "p".into(),
                     configured_model: "m".into(),
                     response_model: None,
+                    model_identity_status: crate::provider_telemetry::ModelIdentityStatus::Absent,
                     provider_request_id: None,
                     observed_route: crate::provider_telemetry::ObservedRoute::Unknown,
                     prompt_tokens: None,

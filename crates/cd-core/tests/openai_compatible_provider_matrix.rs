@@ -1115,6 +1115,7 @@ async fn secrets_never_appear_in_traced_transport_dto() {
             configured_profile_id: "openai-compatible".into(),
             configured_model: "configured-model-id".into(),
             response_model: turn_transport.response_model.clone(),
+            model_identity_status: turn_transport.model_identity_status,
             provider_request_id: turn_transport.provider_request_id.clone(),
             observed_route: turn_transport.observed_route.clone(),
             prompt_tokens: turn_transport.prompt_tokens,
