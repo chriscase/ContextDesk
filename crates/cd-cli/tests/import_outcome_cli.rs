@@ -15,6 +15,9 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[path = "helpers/app_config.rs"]
+mod app_config;
+
 /// Every invocation gets its own library via `--data-dir`.
 ///
 /// `$HOME` alone is not isolation: `dirs::home_dir()` reads it on Unix but
@@ -392,7 +395,7 @@ fn post_publish_timezone_failure_does_not_claim_nothing_was_published() {
         default_timezone: Some("Not/A_Real_Zone".into()),
         ..cd_core::config::AppConfig::default()
     };
-    cd_core::config::save_config(&home.path().join("config.json"), &cfg).unwrap();
+    app_config::plant_app_config(&home.path().join("config.json"), &cfg);
 
     let import = cli(home.path())
         .args(["--json", "import", source.path().to_str().unwrap()])

@@ -21,7 +21,7 @@
 //!   auth.
 
 use assert_cmd::Command;
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -56,7 +56,12 @@ fn write_profile(data_dir: &Path, base_url: &str, chat_model: &str) {
         },
         ..AppConfig::default()
     };
-    save_config(&data_dir.join("config.json"), &config).expect("write synthetic profile");
+    std::fs::create_dir_all(data_dir).expect("create data dir");
+    std::fs::write(
+        data_dir.join("config.json"),
+        serde_json::to_string_pretty(&config).expect("serialize synthetic profile"),
+    )
+    .expect("write synthetic profile");
 }
 
 fn jsonl(stdout: &[u8]) -> Vec<Value> {
@@ -107,6 +112,19 @@ fn synthetic_sessions_left_behind(data_dir: &Path) -> usize {
         .filter_map(Result::ok)
         .filter(|e| e.path().is_file())
         .count()
+}
+
+#[cfg(unix)]
+fn wait_for_saved_session(data_dir: &Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while synthetic_sessions_left_behind(data_dir) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "turn one never saved a session under {}",
+            data_dir.join("sessions").display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Block until the child's stdout has produced `n` complete lines, returning
@@ -578,49 +596,23 @@ async fn an_interrupted_run_still_cleans_up_the_synthetic_corpus() {
 #[derive(Clone)]
 struct HangsOnSecondTurnProvider {
     call: Arc<AtomicUsize>,
+    second_turn_entered: Arc<AtomicBool>,
 }
 
 #[cfg(unix)]
 impl Respond for HangsOnSecondTurnProvider {
-    fn respond(&self, _request: &Request) -> ResponseTemplate {
-        match self.call.fetch_add(1, Ordering::SeqCst) {
-            0 => ResponseTemplate::new(200)
-                .insert_header("content-type", "application/json")
-                .set_body_json(json!({
-                    "choices": [{
-                        "finish_reason": "tool_calls",
-                        "message": {
-                            "role": "assistant",
-                            "content": null,
-                            "tool_calls": [{
-                                "type": "function",
-                                "function": {
-                                    "name": "search_logs",
-                                    "arguments": {"query": "SYNTH_DOCTOR_READINESS_CHECK", "semantic": false, "k": 5}
-                                }
-                            }]
-                        }
-                    }]
-                })),
-            1 => ResponseTemplate::new(200)
-                .insert_header("content-type", "application/json")
-                .set_body_json(json!({
-                    "choices": [{
-                        "finish_reason": "stop",
-                        "message": {
-                            "role": "assistant",
-                            "content": "The readiness probe fired with correlation doctor-1 (seq=1 source=\"synthetic/doctor-readiness-check.log\")."
-                        }
-                    }]
-                })),
-            // Turn two's own call(s) never arrive in time — this is the
-            // in-flight request Ctrl-C interrupts.
-            _ => ResponseTemplate::new(200)
-                .set_delay(Duration::from_secs(20))
-                .set_body_json(json!({
-                    "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "late"}}]
-                })),
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let call = self.call.fetch_add(1, Ordering::SeqCst);
+        if call >= 2 {
+            // Turn two's first provider call is the in-flight request Ctrl-C
+            // interrupts. Use the same streaming-aware bodies as the happy
+            // path so a `stream: true` client cannot skip the hang by
+            // failing the first two JSON responses and finishing as
+            // not-ready before the test signals.
+            self.second_turn_entered.store(true, Ordering::SeqCst);
+            return grounded_two_turn_response(call, request).set_delay(Duration::from_secs(20));
         }
+        grounded_two_turn_response(call, request)
     }
 }
 
@@ -628,10 +620,12 @@ impl Respond for HangsOnSecondTurnProvider {
 #[tokio::test]
 async fn an_interrupt_during_the_second_turn_still_removes_the_already_saved_session() {
     let server = MockServer::start().await;
+    let second_turn_entered = Arc::new(AtomicBool::new(false));
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(HangsOnSecondTurnProvider {
             call: Arc::new(AtomicUsize::new(0)),
+            second_turn_entered: second_turn_entered.clone(),
         })
         .mount(&server)
         .await;
@@ -653,16 +647,19 @@ async fn an_interrupt_during_the_second_turn_still_removes_the_already_saved_ses
         .spawn()
         .expect("spawn contextdesk doctor");
 
-    // Wait for the two fast local checks to print (see `wait_for_n_lines`
-    // — this removes process cold-start variance from the timing budget),
-    // then give turn one — a real, if local-mock, HTTP round trip plus a
-    // session save and second tool-host setup — a bounded window to finish
-    // and hand off to turn two. Turn two's own mock response is delayed
-    // 20s, so any reasonable margin here still lands SIGINT squarely inside
-    // turn two's wait, never inside turn one's.
+    // Wait for the two fast local checks, then for turn one to persist a
+    // session, then for turn two's provider request. A fixed 1800ms sleep
+    // after those two lines landed SIGINT in the inter-turn gap on hosted
+    // Ubuntu (no `ctrl_c` waiter armed yet), so the default disposition
+    // killed the process with `status.code() == None` instead of exit 130.
+    // A 250ms pause after the session file was still a guess: a streaming
+    // client that rejected the hang mock's non-SSE bodies finished as
+    // not-ready (exit 8) before the signal. The third HTTP request is the
+    // durable proof turn two is in flight.
     let stdout = child.stdout.take().expect("piped stdout");
     let (_observed, _stdout_drain) = wait_for_n_lines(stdout, 2);
-    tokio::time::sleep(Duration::from_millis(1800)).await;
+    wait_for_saved_session(data_dir.path());
+    wait_for_flag(&second_turn_entered, "second-turn provider request");
 
     let pid = child.id();
     let killed = std::process::Command::new("kill")

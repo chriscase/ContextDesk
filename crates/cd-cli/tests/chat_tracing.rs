@@ -8,17 +8,23 @@
 //! developer's real `~/.contextdesk`.
 
 use assert_cmd::Command;
-use cd_core::config::{save_config, AppConfig};
+use cd_core::config::AppConfig;
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use serde_json::Value;
 use std::path::Path;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "helpers/app_config.rs"]
+mod app_config;
+
 fn cli(home: &Path) -> Command {
     let mut cmd =
         Command::cargo_bin("contextdesk").expect("contextdesk binary built by this workspace");
     cmd.env("HOME", home);
+    // Isolated data-dir avoids ensure_config_dir on HOME. AppConfig is planted
+    // as pretty JSON; production save_config is Unix-only.
+    cmd.args(["--data-dir", home.to_str().unwrap()]);
     cmd
 }
 
@@ -42,7 +48,7 @@ fn write_mock_profile(home: &Path, server_uri: &str) -> std::path::PathBuf {
         },
         ..AppConfig::default()
     };
-    save_config(&app_config_path, &cfg).expect("write app config");
+    app_config::plant_app_config(&app_config_path, &cfg);
     app_config_path
 }
 
@@ -300,7 +306,7 @@ async fn dry_run_skips_the_ollama_pre_flight_health_check_too() {
         },
         ..AppConfig::default()
     };
-    save_config(&app_config_path, &cfg).expect("write app config");
+    app_config::plant_app_config(&app_config_path, &cfg);
 
     let output = cli(home.path())
         .args([
@@ -465,7 +471,7 @@ async fn trace_full_with_ack_proceeds_and_includes_tool_lines_when_a_tool_ran() 
         },
         ..AppConfig::default()
     };
-    save_config(&app_config_path, &cfg).expect("write app config");
+    app_config::plant_app_config(&app_config_path, &cfg);
 
     let output = cli(home.path())
         .args([

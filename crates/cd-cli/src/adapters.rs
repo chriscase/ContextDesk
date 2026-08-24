@@ -9,7 +9,10 @@ use crate::provider_credentials::{
     retrieval_role_identities, CredentialedIdentity,
 };
 use cd_core::branding::Branding;
-use cd_core::config::{config_path, ensure_config_dir, load_config, save_config, AppConfig};
+use cd_core::config::{
+    config_path, durable_config_persistence_unsupported, ensure_config_dir, load_config,
+    save_config, AppConfig,
+};
 use cd_core::error::CoreResult;
 use cd_core::index::KeywordIndex;
 use cd_core::keychain_store::{ReferencedSecretStore, SecretStore};
@@ -68,8 +71,13 @@ impl Paths {
             data_dir_override,
             app_config_override,
             || {
-                ensure_config_dir(&branding)
-                    .map_err(|e| CliError::internal(format!("resolve config dir: {e}")))
+                ensure_config_dir(&branding).map_err(|e| {
+                    if durable_config_persistence_unsupported(&e) {
+                        CliError::not_implemented(format!("resolve config dir: {e}"))
+                    } else {
+                        CliError::internal(format!("resolve config dir: {e}"))
+                    }
+                })
             },
             || config_path(&branding).ok(),
         )
@@ -178,6 +186,23 @@ mod path_tests {
         assert_eq!(paths.config_dir, shared_dir.path());
         assert_eq!(paths.app_config_path, shared_app_config);
     }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn save_app_config_is_not_implemented_and_does_not_write() {
+        let isolated_dir = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(Some(isolated_dir.path()), None).unwrap();
+        let err = save_app_config(&paths, &AppConfig::default())
+            .expect_err("non-unix durable save is unsupported");
+        assert_eq!(err.category, crate::envelope::ExitCategory::NotImplemented);
+        assert!(
+            err.message
+                .contains(cd_core::config::DURABLE_CONFIG_SAVE_UNSUPPORTED),
+            "{}",
+            err.message
+        );
+        assert!(!paths.app_config_path.exists());
+    }
 }
 
 /// Load the shared `AppConfig` (provider profiles, configured default
@@ -187,11 +212,18 @@ pub fn load_app_config(paths: &Paths) -> CliResult<AppConfig> {
     load_config(&paths.app_config_path).map_err(|e| CliError::internal(format!("load config: {e}")))
 }
 
-/// Save the shared `AppConfig`, atomically (temp-file + rename), to the
-/// exact path this process resolved — isolated or not.
+/// Save the shared `AppConfig` through the production durability path.
+///
+/// Off Unix this is `not_implemented` with a stable platform-unsupported
+/// reason — never a silent ordinary write and never a model/gateway failure.
 pub fn save_app_config(paths: &Paths, cfg: &AppConfig) -> CliResult<()> {
-    save_config(&paths.app_config_path, cfg)
-        .map_err(|e| CliError::internal(format!("save config: {e}")))
+    save_config(&paths.app_config_path, cfg).map_err(|e| {
+        if durable_config_persistence_unsupported(&e) {
+            CliError::not_implemented(format!("save config: {e}"))
+        } else {
+            CliError::internal(format!("save config: {e}"))
+        }
+    })
 }
 
 pub fn session_store(paths: &Paths) -> SessionStore {

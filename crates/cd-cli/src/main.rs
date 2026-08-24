@@ -43,12 +43,16 @@ async fn run(mut cli: Cli, invocation: InvocationMode) -> i32 {
     if let Some(code) = run_state_free(&mut cli).await {
         return code;
     }
+    // Global `--json` / `--jsonl` / `--format` are already parsed. Honor them
+    // for path-resolution failures so unsupported-platform `ensure_config_dir`
+    // is a JSON `not_implemented` envelope, not empty stdout plus stderr text.
+    let startup_format = global_output_format(&cli);
     let paths = match adapters::Paths::resolve(
         cli.global.data_dir.as_deref(),
         cli.global.app_config.as_deref(),
     ) {
         Ok(p) => p,
-        Err(e) => return emit_bare_error(&e),
+        Err(e) => return emit_error(startup_format, "startup", e),
     };
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -60,11 +64,11 @@ async fn run(mut cli: Cli, invocation: InvocationMode) -> i32 {
 
     let global_layer = match config::load_layer(&config::global_config_path(&paths.config_dir)) {
         Ok(l) => l,
-        Err(e) => return emit_bare_error(&e),
+        Err(e) => return emit_error(startup_format, "startup", e),
     };
     let project_layer = match config::load_layer(&project_path) {
         Ok(l) => l,
-        Err(e) => return emit_bare_error(&e),
+        Err(e) => return emit_error(startup_format, "startup", e),
     };
 
     let format_override = if cli.global.json {
@@ -121,13 +125,7 @@ async fn run(mut cli: Cli, invocation: InvocationMode) -> i32 {
 /// Commands in this lane are pure over explicit inputs and must not resolve,
 /// read, create, migrate, or save ContextDesk application/CLI state.
 async fn run_state_free(cli: &mut Cli) -> Option<i32> {
-    let format = if cli.global.json {
-        OutputFormat::Json
-    } else if cli.global.jsonl {
-        OutputFormat::Jsonl
-    } else {
-        cli.global.format.unwrap_or(OutputFormat::Text)
-    };
+    let format = global_output_format(cli);
     let color = if cli.global.no_color {
         config::ColorMode::Never
     } else {
@@ -745,12 +743,14 @@ fn emit_error(format: OutputFormat, command: &'static str, error: CliError) -> i
     error.category.code()
 }
 
-/// Startup failed before any output-format resolution was possible (e.g.
-/// the config directory itself could not be created) — fall back to plain
-/// stderr text since we cannot know whether the caller wanted JSON.
-fn emit_bare_error(error: &CliError) -> i32 {
-    eprintln!("error: {error}");
-    error.category.code()
+fn global_output_format(cli: &Cli) -> OutputFormat {
+    if cli.global.json {
+        OutputFormat::Json
+    } else if cli.global.jsonl {
+        OutputFormat::Jsonl
+    } else {
+        cli.global.format.unwrap_or(OutputFormat::Text)
+    }
 }
 
 #[cfg(test)]
@@ -785,5 +785,18 @@ mod verdict_tests {
             triage_run_verdict("unexpected"),
             Some(ExitCategory::Internal)
         );
+    }
+
+    #[test]
+    fn global_json_flag_is_known_before_config_directory_resolution() {
+        let cli = Cli::parse_from([
+            "contextdesk",
+            "--json",
+            "config",
+            "init",
+            "--non-interactive",
+            "--skip-provider",
+        ]);
+        assert_eq!(global_output_format(&cli), OutputFormat::Json);
     }
 }
